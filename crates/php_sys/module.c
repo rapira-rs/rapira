@@ -1,5 +1,7 @@
+#include "php.h"
 #include "rapira_classes.h"
 #include "wrapper.h"
+#include "zend_types.h"
 
 extern void rapira_rs_finish_response(void); // Rust: ctx.finish()
 
@@ -69,6 +71,11 @@ PHP_MINIT_FUNCTION(rapira) {
     return SUCCESS;
 }
 
+PHP_RSHUTDOWN_FUNCTION(rapira) {
+	rapira_dispatcher_release();
+	return SUCCESS;
+}
+
 zend_module_entry rapira_module_entry = {
     STANDARD_MODULE_HEADER,
     "rapira",
@@ -76,7 +83,7 @@ zend_module_entry rapira_module_entry = {
     PHP_MINIT(rapira),
     NULL,
     NULL,
-    NULL,
+    PHP_RSHUTDOWN(rapira),
     NULL, // MSHUTDOWN, RINIT, RSHUTDOWN, MINFO
     "0.1.0",
     STANDARD_MODULE_PROPERTIES};

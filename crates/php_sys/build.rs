@@ -46,6 +46,7 @@ fn main() -> anyhow::Result<()> {
     c.file("wrapper.c")
         .file("module.c")
         .file("rapira_classes.c")
+        .file("rapira_http.c")
         .file("rapira_dispatcher.c");
     for d in &php.includes {
         c.include(d);
@@ -82,6 +83,9 @@ fn main() -> anyhow::Result<()> {
         "wrapper.h",
         "module.c",
         "wrapper.c",
+        "rapira_http.c",
+        "rapira_http_arginfo.h",
+        "rapira_http.stub.php",
         "rapira_arginfo.h",
         "allowed_bindings.rs",
         "rapira_classes.c",

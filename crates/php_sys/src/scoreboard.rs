@@ -11,8 +11,6 @@ pub use rapira_scoreboard::SlotSnapshot;
 
 thread_local! {
     pub static SB: Cell<Option<&'static SharedSlot>> = const { Cell::new(None) };
-    // Sticky: once the worker decided to exit (quota/unhealthy), Idle maps to
-    // DRAINING so the master stops counting it as spare capacity.
     static DRAINING: Cell<bool> = const { Cell::new(false) };
 }
 

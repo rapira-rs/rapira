@@ -39,7 +39,10 @@ namespace Rapira {
         public function activeCount(): int;
     }
 
-    /** The plugin surface this worker's pool serves. Plugins narrow every method. */
+    /**
+     * The plugin surface this worker's pool serves. Plugins narrow receive(),
+     * tryReceive() and getInfo() to their own types.
+     */
     interface Dispatcher
     {
         public function name(): string;
@@ -59,6 +62,33 @@ namespace Rapira {
         public function receive(int $timeout = -1): Work;
 
         public function getInfo(): DispatcherInfo;
+    }
+
+    /**
+     * An IP endpoint. The other arm of the address union is UnixAddress.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final readonly class InetAddress
+    {
+        public string $ip;
+        public int $port;
+
+        public function __construct(string $ip, int $port) {}
+    }
+
+    /**
+     * A unix domain socket endpoint. $path is null for an unnamed peer.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final readonly class UnixAddress
+    {
+        public ?string $path;
+
+        public function __construct(?string $path) {}
     }
 
     /**

@@ -5,26 +5,25 @@
 # For day-to-day work, replace the Checks line with the curated set below.
 #
 # Curated set (tested against module.c/wrapper.c, Zend-macro noise excluded):
-# Checks: >
-#   bugprone-*,
-#   cert-*,
-#   clang-analyzer-*,
-#   concurrency-*,
-#   performance-*,
-#   portability-*,
-#   misc-*,
-#   readability-*,
-#   -bugprone-easily-swappable-parameters,
-#   -performance-no-int-to-ptr,
-#   -readability-function-cognitive-complexity,
-#   -readability-identifier-length,
-#   -readability-magic-numbers,
-#   -readability-isolate-declaration,
-#   -readability-math-missing-parentheses,
-#   -misc-header-include-cycle,
-#   -misc-include-cleaner,
-#   -misc-use-internal-linkage
-Checks: '*,-altera-*'
+Checks: >
+  bugprone-*,
+  cert-*,
+  clang-analyzer-*,
+  concurrency-*,
+  performance-*,
+  portability-*,
+  misc-*,
+  readability-*,
+  -bugprone-easily-swappable-parameters,
+  -performance-no-int-to-ptr,
+  -readability-function-cognitive-complexity,
+  -readability-identifier-length,
+  -readability-magic-numbers,
+  -readability-isolate-declaration,
+  -readability-math-missing-parentheses,
+  -misc-header-include-cycle,
+  -misc-include-cleaner,
+  -misc-use-internal-linkage
 WarningsAsErrors: 'bugprone-*,cert-*,clang-analyzer-*,concurrency-*'
 HeaderFilterRegex: 'crates/php_sys/.*\.h$'
 FormatStyle: file

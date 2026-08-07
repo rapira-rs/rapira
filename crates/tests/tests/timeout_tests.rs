@@ -26,7 +26,9 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
-    let r = Rapira::start(Mode::Worker(fixture("timeout_tests/timeout-worker.php")))?;
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
+        "timeout_tests/timeout-worker.php",
+    )))?;
     let h = r.handle()?;
 
     // Job 1: a fast request is untouched by the 1s cap.

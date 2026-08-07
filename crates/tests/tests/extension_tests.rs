@@ -74,7 +74,7 @@ fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
     // Worker mode: the resident script answers each exec with "ok:<from>". The two
     // join!ed execs serialize onto the single interpreter; this proves completion,
     // not parallelism.
-    let rapira = Rapira::start(Mode::Worker(fixture(
+    let rapira = Rapira::start(Mode::WorkerRequest(fixture(
         "extension_tests/ext-driver-worker.php",
     )))?;
     let mut host = ExtensionRuntime::new();
@@ -151,7 +151,7 @@ impl Extension for ErrorPathDriver {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Worker(fixture(
+    let rapira = Rapira::start(Mode::WorkerRequest(fixture(
         "shared/error-keeps-headers-worker.php",
     )))?;
     let mut host = ExtensionRuntime::new();
@@ -209,7 +209,9 @@ impl Extension for TruncatedDriver {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Worker(fixture("shared/output-then-throw-worker.php")))?;
+    let rapira = Rapira::start(Mode::WorkerRequest(fixture(
+        "shared/output-then-throw-worker.php",
+    )))?;
     let mut host = ExtensionRuntime::new();
     host.register::<TruncatedDriver>(())?;
     let outcomes = host
@@ -309,7 +311,7 @@ fn many_extensions_run() -> anyhow::Result<()> {
     const N: usize = 12;
     // The fan-out (12 drivers × 2 execs) serializes onto the single PHP interpreter.
     // This proves all N extensions complete, not a strict parallelism bound.
-    let rapira = Rapira::start(Mode::Worker(fixture(
+    let rapira = Rapira::start(Mode::WorkerRequest(fixture(
         "extension_tests/ext-driver-worker.php",
     )))?;
     let mut host = ExtensionRuntime::new();

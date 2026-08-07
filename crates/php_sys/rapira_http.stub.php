@@ -4,29 +4,6 @@
 
 namespace Rapira\Http {
     /**
-     * An IP endpoint. The other arm of the address union is UnixAddress.
-     *
-     * @strict-properties
-     * @not-serializable
-     */
-    final readonly class InetAddress
-    {
-        public string $ip;
-        public int $port;
-    }
-
-    /**
-     * A unix domain socket endpoint. $path is null for an unnamed peer.
-     *
-     * @strict-properties
-     * @not-serializable
-     */
-    final readonly class UnixAddress
-    {
-        public ?string $path;
-    }
-
-    /**
      * What the handshake settled. The cert fields describe the client's certificate and
      * are null unless one was presented.
      *
@@ -42,6 +19,16 @@ namespace Rapira\Http {
         public ?string $certSerial;
         public ?string $certOrganization;
         public ?string $certFingerprint;
+
+        public function __construct(
+            string $version,
+            string $cipher,
+            ?string $negotiatedProtocol,
+            ?string $requestedServerName,
+            ?string $certSerial,
+            ?string $certOrganization,
+            ?string $certFingerprint,
+        ) {}
     }
 
     /**
@@ -57,6 +44,8 @@ namespace Rapira\Http {
         public string $value;
         /** @var array<string, list<string>> */
         public array $headers;
+
+        public function __construct(string $name, string $value, array $headers) {}
     }
 
     /**
@@ -75,6 +64,15 @@ namespace Rapira\Http {
         public array $headers;
         public string $tmpPath;
         public int $size;
+
+        public function __construct(
+            string $name,
+            string $clientFilename,
+            ?string $clientMediaType,
+            array $headers,
+            string $tmpPath,
+            int $size,
+        ) {}
     }
 
     /**
@@ -89,6 +87,8 @@ namespace Rapira\Http {
         public array $fields;
         /** @var list<UploadedFile> */
         public array $files;
+
+        public function __construct(array $fields, array $files) {}
     }
 
     /**
@@ -107,10 +107,24 @@ namespace Rapira\Http {
         /** @var array<string, list<string>> */
         public array $headers;
         public string|Multipart $body;
-        public InetAddress|UnixAddress $remote;
-        public InetAddress|UnixAddress $server;
+        public \Rapira\InetAddress|\Rapira\UnixAddress $remote;
+        public \Rapira\InetAddress|\Rapira\UnixAddress $server;
         public ?Tls $tls;
         public float $receivedAt;
+
+        public function __construct(
+            string $method,
+            string $uri,
+            string $target,
+            ?string $authority,
+            string $protocol,
+            array $headers,
+            string|Multipart $body,
+            \Rapira\InetAddress|\Rapira\UnixAddress $remote,
+            \Rapira\InetAddress|\Rapira\UnixAddress $server,
+            ?Tls $tls,
+            float $receivedAt,
+        ) {}
     }
 
     /** The narrowing point where HTTP-specific counters land. */
@@ -206,6 +220,9 @@ namespace Rapira\Internal\Http {
      */
     final class Dispatcher implements \Rapira\Http\HttpDispatcher
     {
+        /** Host-created: obtain it from \Rapira\get_dispatcher(). */
+        private function __construct() {}
+
         public function name(): string {}
 
         public function tryReceive(): ?\Rapira\Http\Exchange {}
@@ -221,6 +238,9 @@ namespace Rapira\Internal\Http {
      */
     final class DispatcherInfo implements \Rapira\Http\HttpDispatcherInfo
     {
+        /** Host-created. */
+        private function __construct() {}
+
         public function pendingCount(): int {}
 
         public function activeCount(): int {}
@@ -232,6 +252,9 @@ namespace Rapira\Internal\Http {
      */
     final class Exchange implements \Rapira\Http\Exchange
     {
+        /** Host-created. */
+        private function __construct() {}
+
         public function isFinalized(): bool {}
 
         public function isCancelled(): bool {}

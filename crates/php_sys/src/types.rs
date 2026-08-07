@@ -9,7 +9,7 @@ use tokio::sync::mpsc::Sender;
 #[derive(Debug, Clone)]
 pub enum Mode {
     Classic,
-    Worker(PathBuf),
+    WorkerRequest(PathBuf),
 }
 
 #[repr(C)]
@@ -22,9 +22,6 @@ pub enum Outcome {
 }
 
 impl Outcome {
-    /// The C shims hand back a plain `int`. A value outside this enum's range can't be a valid
-    /// `#[repr(C)]` discriminant (constructing one would be UB), so map anything unexpected to
-    /// `Bailout` — the conservative outcome, forcing a worker recycle instead of trusting it.
     pub fn from_c(v: c_int) -> Self {
         match v {
             0 => Self::Ok,
@@ -36,19 +33,9 @@ impl Outcome {
     }
 }
 
-/// The complete response for one job, sealed and delivered as a single message
-/// by [`Context::finish`] — one consumer wakeup per response. A channel that
-/// closes without a frame means the worker died (panic / dropped job / pool
-/// shutdown).
 pub struct Frame {
-    /// `None`: PHP produced no response head (it bailed before any output and
-    /// the teardown flush emitted none).
     pub head: Option<ResponseHead>,
     pub body: Bytes,
-    /// PHP errored after body output had begun during the handler, so the
-    /// body may be incomplete. A response whose output is flushed whole at
-    /// teardown (buffered output) or synthesized as a head-only error is
-    /// complete, not truncated.
     pub truncated: bool,
 }
 
@@ -69,14 +56,8 @@ pub struct Request {
     pub script_name: String,
     pub document_root: String,
     pub script_filename: PathBuf,
-    /// At most one entry per field name, compared case-insensitively — a field's repeats are
-    /// combined before this point. A repeated name would register the CGI variable twice and
-    /// `php_register_variable_safe` keeps only the last, while the `Cookie` and `AUTH_TYPE`
-    /// readers below would each pick a different one.
     pub headers: Vec<(String, Vec<u8>)>, // values as bytes: latin1/binary-safe
     pub server_vars: Vec<(String, String)>,
-    /// Raw bytes like every other header value: php-src builds the multipart boundary
-    /// straight out of this, so it must match the body's bytes exactly.
     pub content_type: Option<Vec<u8>>,
     pub content_length: i64, // -1 if unknown
     pub body: Box<dyn Read + Send>,
@@ -87,9 +68,6 @@ pub struct ResponseHead {
     pub headers: Vec<(String, Vec<u8>)>,
 }
 
-/// The leading integer of a `Status:` value — `404`, or `404 Not Found` — when it is a
-/// plausible response status. Anything else leaves the status untouched; the field is
-/// dropped either way, since no client should be shown it.
 fn status_field_code(value: &[u8]) -> Option<u16> {
     let digits: &[u8] = value
         .split(|b| b.is_ascii_whitespace())
@@ -104,19 +82,13 @@ pub struct ReqC {
     pub uri: CString,
     pub script: CString,
     pub ctype: Option<CString>,
-    /// `None` when the request carried no `Cookie` header — `read_cookies`
-    /// then hands PHP a NULL, the SAPI convention for "no cookies".
     pub cookie: Option<CString>,
-    /// `None` when absent; `php_handle_auth_data` is NULL-safe (main.c guards).
     pub authorization: Option<CString>,
     pub env: HashMap<Box<[u8]>, CString>,
 }
 
 impl ReqC {
     pub fn build(r: &Request) -> Self {
-        // One entry per field name by the time a request gets here, and repeats of Cookie
-        // were already rejoined on "; ", so this reads the single entry. Folding here as
-        // well would leave $_COOKIE and $_SERVER['HTTP_COOKIE'] disagreeing.
         let cookie: Option<Vec<u8>> = r
             .headers
             .iter()
@@ -153,10 +125,6 @@ impl ReqC {
     }
 }
 
-/// How far the response has progressed. Monotonic
-/// (`NotSent` → `HeadSent` → `BodyStreamed`), which makes the illegal
-/// "body before head" state unrepresentable and replaces separate
-/// `headers_sent`/`body_started` flags with a single source of truth.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamState {
     /// Nothing recorded yet.
@@ -171,15 +139,9 @@ pub struct Context {
     pub req: Request,
     pub c: ReqC,
     pub sender: Option<Sender<Frame>>,
-    /// The head recorded by the first `send_headers`/`send_head` (first write
-    /// wins); delivered by [`Self::finish`].
     pub head: Option<ResponseHead>,
-    /// Body accumulated by `ub_write` until [`Self::finish`] seals the frame.
     pub body: Vec<u8>,
     pub stream: StreamState,
-    /// True once the handler has returned and the teardown flush is running, so a
-    /// buffered body pushed out by the teardown flush does not advance `stream` to
-    /// `BodyStreamed` — only body written *during* the handler counts as truncation.
     pub tearing_down: bool,
 }
 
@@ -197,25 +159,10 @@ impl Context {
         }
     }
 
-    /// The response body is truncated iff the request `errored` *after* body output
-    /// had begun during the handler. A buffered or head-only response — whose
-    /// head/body are flushed atomically at teardown — is complete, not truncated.
-    /// Order-independent: [`Self::tearing_down`] keeps `stream` from advancing to
-    /// `BodyStreamed` during the teardown flush, so this can be read at any point.
     pub fn is_truncated(&self, errored: bool) -> bool {
         errored && self.stream == StreamState::BodyStreamed
     }
 
-    /// Record the response head (first write wins is enforced by the callers' `stream` guards)
-    /// and advance `stream` to `HeadSent`.
-    ///
-    /// A `Status:` field is consumed here rather than forwarded. `sapi_header_op` gives it no
-    /// special handling — it screens only `HTTP/`, `Content-Type`, `Content-Length`, `Location`
-    /// and `WWW-Authenticate` — so the field arrives verbatim, and converting it is the origin
-    /// server's job (RFC 3875 §6.2.1: "The server MUST make any appropriate modifications to
-    /// the script's output to ensure that the response to the client complies with the response
-    /// protocol version", https://www.rfc-editor.org/rfc/rfc3875#section-6.2.1). Here the SAPI
-    /// and the origin server are one process. It must not reach the client under its own name.
     pub fn commit_head(&mut self, mut status: u16, mut headers: Vec<(String, Vec<u8>)>) {
         headers.retain(|(name, value)| {
             if !name.eq_ignore_ascii_case("status") {
@@ -237,9 +184,6 @@ impl Context {
         self.stream = StreamState::HeadSent;
     }
 
-    /// Seal the response: deliver the accumulated head/body as the single
-    /// [`Frame`], then drop the sender. Pass the truncation flag from
-    /// [`Self::is_truncated`] (see [`Frame`]).
     pub fn finish(&mut self, truncated: bool) {
         if let Some(tx) = self.sender.take() {
             let _ = tx.blocking_send(Frame {

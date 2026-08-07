@@ -1,6 +1,7 @@
 #include "rapira_classes.h"
 
 #include "ext/json/php_json.h"
+#include "wrapper.h"
 #include "zend.h"
 #include "zend_operators.h"
 #include "zend_portability.h"
@@ -16,6 +17,9 @@
 extern const char *rapira_rs_version(size_t *len);
 extern void rapira_rs_log(const char *msg, size_t msg_len, int level,
                           const char *ctx, size_t ctx_len);
+
+// rapira mode
+int rapira_mode = RAPIRA_MODE_CLASSIC;
 
 enum {
     RAPIRA_LOG_ERROR = 0,
@@ -62,6 +66,17 @@ static void throwable(zval *dst, zend_object *ex, int depth) {
     }
 }
 
+// thread local static macro
+// tls here is thread-local storage, not networking term
+ZEND_TLS zval rapira_dispatcher_instance;
+
+void rapira_dispatcher_release(void) {
+    if (!Z_ISUNDEF(rapira_dispatcher_instance)) {
+        zval_ptr_dtor(&rapira_dispatcher_instance);
+        ZVAL_UNDEF(&rapira_dispatcher_instance);
+    }
+}
+
 ZEND_FUNCTION(Rapira_get_version) {
     ZEND_PARSE_PARAMETERS_NONE();
 
@@ -72,10 +87,19 @@ ZEND_FUNCTION(Rapira_get_version) {
 
 ZEND_FUNCTION(Rapira_get_dispatcher) {
     ZEND_PARSE_PARAMETERS_NONE();
-    zend_throw_error(
-        rapira_ce_not_in_worker_mode_error,
-        "nothing dispatches work to this process outside worker mode");
-    RETURN_THROWS();
+    if (rapira_mode != RAPIRA_MODE_WORKER_REQUEST) {
+        zend_throw_error(
+            rapira_ce_not_in_worker_mode_error,
+            "nothing dispatches work to this process outside worker mode");
+        RETURN_THROWS();
+    }
+
+    if (Z_ISUNDEF(rapira_dispatcher_instance)) {
+        object_init_ex(&rapira_dispatcher_instance,
+                       rapira_ce_internal_http_dispatcher);
+    }
+
+    RETURN_COPY(&rapira_dispatcher_instance);
 }
 
 static int level_from_case(zend_object *level) {
@@ -142,4 +166,88 @@ ZEND_FUNCTION(Rapira_log) {
                   json.s ? ZSTR_VAL(json.s) : NULL,
                   json.s ? ZSTR_LEN(json.s) : 0);
     smart_str_free(&json);
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Dispatcher, name) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    // the plugin's root TOML section
+    RETURN_STRING("http");
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Dispatcher, __construct) {
+    zend_throw_error(NULL,
+                     "host-created; obtain it from \\Rapira\\get_dispatcher()");
+}
+
+ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, __construct) {
+    zend_throw_error(NULL, "host-created");
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Exchange, __construct) {
+    zend_throw_error(NULL, "host-created");
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Dispatcher, tryReceive) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Dispatcher, receive) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Dispatcher, getInfo) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
+}
+
+ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, pendingCount) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
+}
+
+ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, activeCount) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Exchange, isFinalized) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Exchange, isCancelled) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Exchange, writeHead) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Exchange, writeBody) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Exchange, sendFile) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Exchange, writeTrailers) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
+}
+
+ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
+    zend_throw_error(NULL, "not implemented");
+    RETURN_THROWS();
 }

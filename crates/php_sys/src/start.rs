@@ -11,18 +11,9 @@ use crate::scoreboard::{Event, ScoreboardSnapshot, sb_set, sb_update};
 use crate::{classic_worker::classic_worker, types::Mode, *};
 
 thread_local! {
-    // Owned by the single PHP worker thread; installed once by worker_main and
-    // reused across worker restarts on the same OS thread. One receiver per
-    // worker process in the fork-based pool.
     static JOB_RX: RefCell<Option<Receiver<Job>>> = const { RefCell::new(None) };
 }
 
-/// Proof that sapi_startup + php_module_startup (MINIT) succeeded in THIS
-/// process. Drop runs the module teardown, so exactly one place holds it:
-/// - fused path: inside `Rapira` (single-process semantics);
-/// - fork mode: the master, for its whole life (opcache SHM mmap'd at MINIT is
-///   shared by every fork). Forked workers NEVER drop it — they leave via
-///   process exit, which skips Drop; the master owns the single engine teardown.
 pub struct PhpModule {}
 
 impl Drop for PhpModule {
@@ -37,15 +28,11 @@ impl Drop for PhpModule {
 pub struct Rapira {
     pub(crate) intake: Option<Sender<Job>>,
     worker: Option<JoinHandle<()>>,
-    /// Some = fused/private board (tests, single-process); None = external slot.
     board: Option<rapira_scoreboard::Scoreboard>,
-    /// Some = this value owns module teardown (fused path); None = worker flavor.
     module: Option<PhpModule>,
 }
 
 impl Rapira {
-    /// Master-side boot: MINIT only, on the calling (still single-threaded)
-    /// thread. No worker thread, no channels. Once per process, pre-fork.
     pub fn boot_master() -> anyhow::Result<PhpModule> {
         let mut module: _sapi_module_struct = module::build_sapi_module();
         let started: bool = unsafe {
@@ -67,9 +54,7 @@ impl Rapira {
         Ok(PhpModule {})
     }
 
-    /// Worker-side (post-fork) start: job channel + the single PHP worker
-    /// thread, against the engine inherited from `boot_master` in the parent.
-    /// No module startup here; the returned value never tears the module down.
+    // worker side part
     pub fn start_worker(mode: Mode, hooks: WorkerHooks) -> anyhow::Result<Self> {
         let WorkerHooks {
             max_requests,
@@ -88,6 +73,14 @@ impl Rapira {
 
         let (intake, intake_rx) = mpsc::channel::<Job>(1024);
 
+        // SAFETY: safe, trust me, I'm a developer
+        unsafe {
+            crate::rapira_mode = match &mode {
+                Mode::Classic => RAPIRA_MODE_CLASSIC,
+                Mode::WorkerRequest(_) => RAPIRA_MODE_WORKER_REQUEST,
+            } as c_int;
+        };
+
         trace!(target: "rapira", "spawning worker thread");
         let worker: JoinHandle<()> = thread::spawn(move || {
             sb_set(slot);
@@ -103,8 +96,6 @@ impl Rapira {
         })
     }
 
-    /// Fused single-process boot — module + worker in one. The in-process
-    /// integration tests run through here.
     pub fn start(mode: Mode) -> anyhow::Result<Self> {
         info!(target: "rapira", "booting with mode: {mode:?}");
         let module = Self::boot_master()?;
@@ -130,16 +121,10 @@ impl Drop for Rapira {
         info!(target: "rapira", "shutting down, dropping");
         self.intake = None;
         let Some(worker) = self.worker.take() else {
-            // No thread to wait for; preserve "no teardown" exactly.
             std::mem::forget(self.module.take());
             return;
         };
 
-        // The worker may never come back: the Zend timer only fires when max_execution_time > 0
-        // (and only exists on Linux/FreeBSD), and a leaked RapiraHandle keeps the intake open,
-        // parking the worker in pull_job. Bound the wait and, if it is still running, skip
-        // the C teardown - php_module_shutdown on a live PHP thread is UB - and let process
-        // exit reclaim it.
         // https://www.php.net/manual/en/info.configuration.php#ini.max-execution-time
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline && !worker.is_finished() {
@@ -175,24 +160,15 @@ fn worker_main(mode: Mode, rx: Receiver<Job>) {
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker(script) => rapira_worker(script.clone()),
+            Mode::WorkerRequest(script) => rapira_worker(script.clone()),
         };
         if matches!(exit, WorkerExit::Closed) {
             break;
         }
-        // Restart: loop back on this same OS thread — JOB_RX stays installed and
-        // the worker re-bootstraps with a fresh request cycle.
     }
 }
 
-/// Block for the next job (shutdown-aware): `None` means the intake channel
-/// closed — every `Sender`/`RapiraHandle` was dropped, i.e. Rapira is shutting
-/// down. The single place the receiver is consumed; the classic loop,
-/// worker-mode `next_job`, and the boot-failure drain all go through here.
-/// Also the scoreboard idle/active hinge: parked here = spare capacity.
 pub(crate) fn pull_job() -> Option<Job> {
-    // Holding the RefCell borrow across the blocking recv is safe: the thread is
-    // parked inside it and pull_job is never re-entered on this thread.
     JOB_RX.with_borrow_mut(|rx| {
         let rx = rx.as_mut()?;
         sb_update(Event::Idle);

@@ -17,7 +17,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
     // thread only enforces a deadline so a regression fails loudly instead of
     // hanging the whole suite.
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
-        let r = Rapira::start(Mode::Worker(fixture(
+        let r = Rapira::start(Mode::WorkerRequest(fixture(
             "failboot_worker_tests/failboot-worker.php",
         )))?;
         let h = r.handle()?;
@@ -47,7 +47,7 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
     let (done_tx, done_rx) = mpsc::sync_channel::<(usize, Vec<u16>)>(1);
 
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
-        let r = Rapira::start(Mode::Worker(fixture(
+        let r = Rapira::start(Mode::WorkerRequest(fixture(
             "failboot_worker_tests/failboot-worker.php",
         )))?;
         let h = r.handle()?;

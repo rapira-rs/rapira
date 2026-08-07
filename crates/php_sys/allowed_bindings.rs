@@ -10,7 +10,7 @@ bind! {
     php_module_startup, php_module_shutdown, php_request_startup, php_request_shutdown,
     php_execute_script, zend_error, zend_stream_init_filename, zend_destroy_file_handle,
     php_register_variable_safe, php_output_activate, php_output_deactivate, php_output_end_all,
-    zend_activate_auto_globals,
+    zend_activate_auto_globals, rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER_REQUEST,
     zend_call_function, zend_fcall_info_init, zval_ptr_dtor, zend_hash_str_del,  // zval_ptr_dtor_nogc is inline-only -> use zval_ptr_dtor
     // zend_string_init is inline-only; the exported interner fn-pointer covers startup-time strings
     zend_hash_str_update, zend_string_init_interned,

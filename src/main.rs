@@ -137,7 +137,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let mode = if settings.pool.classic {
         Mode::Classic
     } else {
-        Mode::Worker(script.clone())
+        Mode::WorkerRequest(script.clone())
     };
 
     // PHP MINIT once, in the still-single-threaded master (opcache SHM created

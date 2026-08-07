@@ -81,7 +81,7 @@ fn post_superglobals_classic() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn post_superglobals_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture(
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
         "ported_tests/post-superglobals-worker.php",
     )))?;
     let h = r.handle()?;
@@ -145,7 +145,7 @@ fn request_merge_classic() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn request_merge_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture(
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
         "ported_tests/request-merge-worker.php",
     )))?;
     let h = r.handle()?;
@@ -175,7 +175,9 @@ fn request_merge_worker() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("ported_tests/jit-request-worker.php")))?;
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
+        "ported_tests/jit-request-worker.php",
+    )))?;
     let h = r.handle()?;
     for i in 1..=4 {
         let query = if i % 2 == 1 {
@@ -215,7 +217,9 @@ fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn cookies_refresh_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("ported_tests/cookies-worker.php")))?;
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
+        "ported_tests/cookies-worker.php",
+    )))?;
     let h = r.handle()?;
     for i in 0..3 {
         let mut request = req("/cookies-worker.php", "ported_tests/cookies-worker.php");
@@ -315,7 +319,7 @@ fn session_cookie_roundtrip_classic() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn session_cookie_roundtrip_worker() -> anyhow::Result<()> {
     session_roundtrip(
-        Mode::Worker(fixture("ported_tests/session-count-worker.php")),
+        Mode::WorkerRequest(fixture("ported_tests/session-count-worker.php")),
         "ported_tests/session-count-worker.php",
     )
 }
@@ -325,7 +329,7 @@ fn session_cookie_roundtrip_worker() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture(
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
         "ported_tests/session-handler-worker.php",
     )))?;
     let h = r.handle()?;
@@ -362,7 +366,7 @@ fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture(
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
         "ported_tests/preloop-session-handler-worker.php",
     )))?;
     let h = r.handle()?;
@@ -404,7 +408,9 @@ fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn response_header_edges_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("ported_tests/headers-worker.php")))?;
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
+        "ported_tests/headers-worker.php",
+    )))?;
     let h = r.handle()?;
     for i in [42, 43] {
         let resp = recv_all(h.handle_blocking(req(
@@ -483,7 +489,7 @@ fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture(
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
         "ported_tests/response-headers-worker.php",
     )))?;
     let h = r.handle()?;
@@ -505,7 +511,9 @@ fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("ported_tests/flush-worker.php")))?;
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
+        "ported_tests/flush-worker.php",
+    )))?;
     let h = r.handle()?;
     for i in [42, 43] {
         let mut rx = h.handle_blocking(req(
@@ -566,7 +574,7 @@ fn raw_status_line_204_classic() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn large_post_body_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture(
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
         "ported_tests/large-request-worker.php",
     )))?;
     let h = r.handle()?;
@@ -641,7 +649,9 @@ fn multipart_upload_classic() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn multipart_upload_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("ported_tests/upload-worker.php")))?;
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
+        "ported_tests/upload-worker.php",
+    )))?;
     let h = r.handle()?;
     for _ in 0..2 {
         let (status, body) = drain(h.handle_blocking(post(
@@ -661,7 +671,9 @@ fn multipart_upload_worker() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("ported_tests/upload-worker.php")))?;
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
+        "ported_tests/upload-worker.php",
+    )))?;
     let h = r.handle()?;
     // $_FILES is the one superglobal whose create callback does not self-heal, so
     // rapira_reset_super_global dtors TRACK_VARS_FILES each request; without it a
@@ -696,7 +708,9 @@ fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<(
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("shared/output-then-throw-worker.php")))?;
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
+        "shared/output-then-throw-worker.php",
+    )))?;
     let h = r.handle()?;
     for i in [1, 2] {
         let resp = recv_all(h.handle_blocking(req(
@@ -724,7 +738,9 @@ fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("ported_tests/file-stream-worker.php")))?;
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
+        "ported_tests/file-stream-worker.php",
+    )))?;
     let h = r.handle()?;
     for expected in ["word1", "word2", "word3"] {
         let (status, body) = drain(h.handle_blocking(req(
@@ -746,7 +762,7 @@ fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture(
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
         "shared/error-keeps-headers-worker.php",
     )))?;
     let h = r.handle()?;
@@ -835,7 +851,9 @@ fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("ported_tests/upload-worker.php")))?;
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
+        "ported_tests/upload-worker.php",
+    )))?;
     let h = r.handle()?;
     let boundary: &[u8] = b"RAP\xff\xfeIRA";
     let mut request = post(
@@ -861,7 +879,9 @@ fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
 #[ignore = "pending the dispatcher API (worker mode serves no requests)"]
 fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("ported_tests/bad-header-worker.php")))?;
+    let r = Rapira::start(Mode::WorkerRequest(fixture(
+        "ported_tests/bad-header-worker.php",
+    )))?;
     let h = r.handle()?;
     let resp = recv_all(h.handle_blocking(req(
         "/bad-header-worker.php",
