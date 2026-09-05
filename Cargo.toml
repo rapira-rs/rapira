@@ -3,7 +3,7 @@ edition = "2024"
 
 [package]
 name = "rapira_core"
-version = "0.8.0"
+version = "0.8.1"
 edition.workspace = true
 description = "PHP application server: embeds NTS PHP via the embed SAPI and serves HTTP directly"
 homepage = "https://rapira.rs"

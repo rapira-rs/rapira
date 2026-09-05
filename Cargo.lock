@@ -249,7 +249,7 @@ dependencies = [
 
 [[package]]
 name = "extension_api"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -639,7 +639,7 @@ checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
 name = "php_sys"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -692,7 +692,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rapira_config"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -701,7 +701,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_core"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -722,7 +722,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_http"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -740,7 +740,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_master"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -750,7 +750,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_runtime"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -766,7 +766,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_scoreboard"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -774,7 +774,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_static_files"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "bytes",
  "extension_api",
@@ -980,7 +980,7 @@ dependencies = [
 
 [[package]]
 name = "tests"
-version = "0.8.0"
+version = "0.8.1"
 dependencies = [
  "anyhow",
  "extension_api",

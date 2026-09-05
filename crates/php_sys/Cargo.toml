@@ -1,6 +1,6 @@
 [package]
 name = "php_sys"
-version = "0.8.0"
+version = "0.8.1"
 edition.workspace = true
 build = "build.rs"
 
