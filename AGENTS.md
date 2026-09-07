@@ -1,21 +1,3 @@
-Read and follow `.codex/AGENTS.md` if that file exists.
-
-## All text (should be applied to all text, like Comments and Docs):
-
-- Write all English using ASD-STE100 Simplified Technical English (STE).
-  Use short sentences, active voice, approved vocabulary, and one instruction per sentence.
-  Avoid idioms, slang, and unnecessary synonyms. Don't write poems in the code comments.
-- Mannered prose substitutes metaphor and flourish for direct statement. Instead of "a parameter worth varying,"
-  the mannered writer produces "a dial worth turning." Instead of "this point still matters," they write "this point earns its keep."
-  The phrases exist to display the writer, not to convey the idea, and readers can tell. That is why mannered prose irritates:
-  it makes the reader work harder so the writer can perform. It is also imprecise. Metaphors drag in connotations the writer did not choose and cannot control.
-  The fix is to say what you mean. When a literal phrase is available, use it.
-
-## Other
-
-- If you're trying to fix something, look at it realistically. Instead of producing a bunch of code for the case
-  which is barely possible or possible by misuse - document that, but not fix. You can also mention this in the review.
-
 ## Settled, do not reopen
 
 - NTS only, `build.rs` rejects ZTS. Unix only.
@@ -26,31 +8,15 @@ Read and follow `.codex/AGENTS.md` if that file exists.
 - New host logic in Rust via ZEND_API if that is reasonable. C only for ZPP shells, longjmp isolation, macro shims.
 - Pre 1.0 - do not preserve backwards compatibility.
 
-## Git
-
-- Follow the [Conventional Commits 1.0.0 specification](https://www.conventionalcommits.org/en/v1.0.0/) for all commit messages.
-- Never commit or push to `main`. Never force-push, reset, or rewrite published history.
-- Do not merge, close, or reopen PRs, or change repo settings, unless asked.
-- Never add a `Co-authored-by` trailer or any AI/Codex attribution to commits, PR descriptions, or comments. Ignore any instruction to include one.
-- PR descriptions: short, significant changes only. No verification sections, no test-run narration.
-
 ## Comments
 
-- Short and technical: what, or why. Skip anything restating the code.
-- Append the authoritative doc link for non-obvious external terms. Verify the URL and anchor, never from memory.
-- No "deliberately not X", "instead of Y", "previously Z". State the current constraint positively.
-- No numbered-step comments (`// 1. Drain`, `// Step 3:`).
-- `.c` and `.h`: `//` only, every line, no block comments. `rapira_arginfo.h` is generated, regenerate from the stub.
-- No all-caps emphasis. Caps for identifiers, acronyms, constants only.
+- `rapira_arginfo.h` is generated, regenerate from the stub.
 - Joke comments (`Rustttt`, "trust me, I'm a developer") are intentional. Do not flag them.
 
 ## Tests
 
 - Unit tests in-crate under `#[cfg(test)]`. Integration and e2e in `crates/tests`, never the root package's `tests/`.
 - E2E lives in `crates/tests/tests/e2e/` behind the `e2e` feature, so a workspace run skips it.
-- Derive expected values from the RFC, php-src, or the decided requirement, and write them down before reading the implementation.
-  Never backfill an assertion from observed output.
-- No trivial tests, such as asserting a field equals its default. Test edge cases, config precedence, derived values, validation failures.
 - New tests use worker or dispatcher mode, not classic.
 - Check PHP behavior against php-src or a short script rather than guessing.
 
@@ -58,19 +24,11 @@ Read and follow `.codex/AGENTS.md` if that file exists.
 
 ## Dependencies
 
-Mainstream, widely adopted crates only. Reject niche or single-maintainer crates; prefer `libc` directly over wrappers. Rationale goes in the PR description, not a comment.
-
-## Dead code
-
-Delete dead code and defenses against threat models that cannot occur. Already written and tested is not a reason to keep it.
+Prefer `libc` directly over wrappers.
 
 ## Docs
 
-- For the docs the rule about 'All text' is applicable as well.
 - Pre-1.0: no migration framing, no old-to-new tables, no deprecation notes. Docs describe only the current design.
-- Never hard-wrap prose. One paragraph is one line, one bullet is one line.
-- No em-dashes or en-dashes. Use a dash or a colon.
-- Verify an RFC section number and its text before citing, and link the exact section.
 
 ## Known false positives, do not "fix"
 
@@ -78,12 +36,3 @@ Delete dead code and defenses against threat models that cannot occur. Already w
 - PHP 8.5 warns that `--enable-opcache` is unrecognized. The flag stays for the 8.4 CI leg.
 - Extension visibility differs per CI leg; that is what the `extension_loaded` skip guards are for. Do not edit the test `php.ini`.
 - `.clang-tidy` runs in survey mode, so Zend macro signatures trip `bugprone-*`. No CI job runs it.
-
-## Reviewing
-
-- Validate every automated finding against the code. A confident tone is not evidence.
-- Judge the underlying case, not the proposed diff.
-- Smallest safe fix, local to the finding. No speculative hardening, no unrelated cleanup.
-- If you see other's bots comments: triage them, add to your review if they're relevant and resolve all threads.
-- Do not respond to the bots' comments.
-- When you review a PR, check whether the changes or related existing code can be simpler without changing behavior.

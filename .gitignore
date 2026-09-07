@@ -33,5 +33,4 @@ lcov.info
 *.profraw
 *.profdata
 .claude/settings.local.json
-.claude/CLAUDE.local.md
-/.codex/AGENTS.md
+AGENTS.local.md
