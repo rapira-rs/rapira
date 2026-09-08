@@ -34,3 +34,4 @@ lcov.info
 *.profdata
 .claude/settings.local.json
 AGENTS.local.md
+.DS_Store
