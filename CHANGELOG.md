@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.8.2](https://github.com/rapira-rs/rapira/compare/v0.8.1...v0.8.2) (2026-09-08)
+
+
+### Bug Fixes
+
+* **worker:** preserve retained SPL temporary streams ([2e28c19](https://github.com/rapira-rs/rapira/commit/2e28c19b7459fb65faf558ce44aea24f65a29462))
+* **worker:** preserve retained SPL temporary streams ([b0e4ff6](https://github.com/rapira-rs/rapira/commit/b0e4ff63e9053c3ae8ea4cf1777d0ffa685fc256))
+
 ## [0.8.1](https://github.com/rapira-rs/rapira/compare/v0.8.0...v0.8.1) (2026-09-05)
 
 ### 🎯 Core
