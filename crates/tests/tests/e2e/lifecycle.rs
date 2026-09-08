@@ -33,6 +33,48 @@ fn http_round_trip() {
 }
 
 #[test]
+fn retained_spl_tempfile_survives_next_request() {
+    let srv = spawn_with_config(
+        "lifecycle/retained-temp-worker.php",
+        1,
+        "mode = \"worker\"\n",
+    );
+    let timeout = Duration::from_secs(10);
+    let pid = wait_workers(&srv, timeout, "1 worker", |p| p.len() == 1)[0];
+
+    for (index, contents) in ["first export\n", "replacement export\n"]
+        .into_iter()
+        .enumerate()
+    {
+        let (code, body) = http_post(
+            srv.addr,
+            "/export",
+            b"text/plain",
+            contents.as_bytes(),
+            timeout,
+        )
+        .unwrap_or_else(|e| panic!("POST /export: {e}\n{}", diagnostics(&srv)));
+        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+        assert_eq!(
+            body,
+            format!("{pid}:{}:stored", index * 2 + 1).into_bytes(),
+            "\n{}",
+            diagnostics(&srv)
+        );
+
+        let (code, body) = http_get(srv.addr, "/export", timeout)
+            .unwrap_or_else(|e| panic!("GET /export: {e}\n{}", diagnostics(&srv)));
+        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+        assert_eq!(
+            body,
+            format!("{pid}:{}:{contents}", index * 2 + 2).into_bytes(),
+            "\n{}",
+            diagnostics(&srv)
+        );
+    }
+}
+
+#[test]
 fn killed_worker_respawns() {
     let srv = spawn_with_config("shared/echo-worker.php", 2, "");
     let pids0 = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);

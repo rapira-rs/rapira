@@ -459,6 +459,7 @@ void rapira_release_temporary_streams(void) {
         if (val->type == stream_type) {
             php_stream *stream = val->ptr;
             if (stream != NULL && stream->ops == &php_stream_temp_ops &&
+                !(stream->flags & PHP_STREAM_FLAG_NO_FCLOSE) &&
                 stream->__exposed == 0 && GC_REFCOUNT(val) == 1) {
                 zend_list_delete(val);
             }
