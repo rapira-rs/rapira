@@ -33,5 +33,5 @@ lcov.info
 *.profraw
 *.profdata
 .claude/settings.local.json
-AGENTS.local.md
+.claude/CLAUDE.local.md
 .DS_Store

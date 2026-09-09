@@ -1,7 +1,7 @@
 use std::convert::Infallible;
 use std::pin::Pin;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -24,6 +24,8 @@ pub(crate) struct Shared {
 
 pub(crate) struct InflightReqCount {
     counter: Arc<AtomicUsize>,
+    /// Connection flush count when the last response byte was handed to hyper.
+    pub(crate) end_flush: OnceLock<u64>,
 }
 
 impl InflightReqCount {
@@ -31,6 +33,7 @@ impl InflightReqCount {
         counter.fetch_add(1, Ordering::AcqRel);
         Self {
             counter: Arc::clone(counter),
+            end_flush: OnceLock::new(),
         }
     }
 }
@@ -48,25 +51,23 @@ struct ReqState {
     guard: Arc<InflightReqCount>,
 }
 
-pub(crate) enum RespBody {
+pub(crate) struct RespBody {
+    kind: BodyKind,
+    guard: Arc<InflightReqCount>,
+    transport: Option<(u64, tokio::sync::watch::Receiver<bridge::ConnectionState>)>,
+}
+
+enum BodyKind {
     Reply(bridge::ReplyBody),
-    /// The head of a bodiless reply. The guard keeps the drain window open
-    /// until hyper writes the head.
-    Empty {
-        _guard: Arc<InflightReqCount>,
-    },
-    /// A body that did not reach PHP: a front-authored refusal or a middleware answer.
-    /// The guard keeps the drain window open until hyper finishes the write.
-    Guarded {
-        body: extension_api::Body,
-        _req_count: Arc<InflightReqCount>,
-    },
+    Empty,
+    Boxed(extension_api::Body),
 }
 
 fn refused(status: http::StatusCode, req_count: Arc<InflightReqCount>) -> http::Response<RespBody> {
-    error_response(status).map(|body| RespBody::Guarded {
-        body,
-        _req_count: req_count,
+    error_response(status).map(|body| RespBody {
+        kind: BodyKind::Boxed(body),
+        guard: req_count,
+        transport: None,
     })
 }
 
@@ -78,26 +79,37 @@ impl Body for RespBody {
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<bytes::Bytes>, BoxError>>> {
-        match self.get_mut() {
-            RespBody::Reply(b) => Pin::new(b).poll_frame(cx),
-            RespBody::Empty { .. } => Poll::Ready(None),
-            RespBody::Guarded { body: b, .. } => Pin::new(b).poll_frame(cx),
+        let this = self.get_mut();
+        let poll = match &mut this.kind {
+            BodyKind::Reply(b) => Pin::new(b).poll_frame(cx),
+            BodyKind::Empty => Poll::Ready(None),
+            BodyKind::Boxed(b) => Pin::new(b).poll_frame(cx),
+        };
+        if let Some((remaining, closed)) = &mut this.transport
+            && let Poll::Ready(Some(Ok(frame))) = &poll
+            && let Some(data) = frame.data_ref()
+        {
+            *remaining = remaining.saturating_sub(data.len() as u64);
+            if *remaining == 0 {
+                this.guard.end_flush.get_or_init(|| closed.borrow().flushes);
+            }
         }
+        poll
     }
 
     fn is_end_stream(&self) -> bool {
-        match self {
-            RespBody::Reply(_) => false,
-            RespBody::Empty { .. } => true,
-            RespBody::Guarded { body: b, .. } => b.is_end_stream(),
+        match &self.kind {
+            BodyKind::Reply(_) => false,
+            BodyKind::Empty => true,
+            BodyKind::Boxed(b) => b.is_end_stream(),
         }
     }
 
     fn size_hint(&self) -> http_body::SizeHint {
-        match self {
-            RespBody::Reply(b) => b.size_hint(),
-            RespBody::Empty { .. } => http_body::SizeHint::with_exact(0),
-            RespBody::Guarded { body: b, .. } => b.size_hint(),
+        match &self.kind {
+            BodyKind::Reply(b) => b.size_hint(),
+            BodyKind::Empty => http_body::SizeHint::with_exact(0),
+            BodyKind::Boxed(b) => b.size_hint(),
         }
     }
 }
@@ -111,7 +123,7 @@ impl RapiraService {
         shared: Arc<Shared>,
         remote: Addr,
         server: Addr,
-        closed: tokio::sync::watch::Receiver<bool>,
+        closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
     ) -> Self {
         Self {
             handler: Arc::new(Conn {
@@ -131,7 +143,32 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for RapiraSer
 
     fn call(&self, req: http::Request<hyper::body::Incoming>) -> Self::Future {
         let handler = Arc::clone(&self.handler);
-        Box::pin(async move { Ok(handle(handler, req).await) })
+        let closed = handler.closed.clone();
+        Box::pin(async move {
+            let mut response = handle(handler, req).await;
+            let length = if response
+                .headers()
+                .contains_key(http::header::TRANSFER_ENCODING)
+            {
+                None
+            } else {
+                response
+                    .headers()
+                    .get(http::header::CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok()?.parse().ok())
+                    .or_else(|| response.body().size_hint().exact())
+            };
+            // Track the body sent to hyper after all middleware has returned.
+            if let Some(length) = length {
+                let body = response.body_mut();
+                if length == 0 {
+                    body.guard.end_flush.get_or_init(|| closed.borrow().flushes);
+                } else {
+                    body.transport = Some((length, closed));
+                }
+            }
+            Ok(response)
+        })
     }
 }
 
@@ -195,15 +232,16 @@ where
         .await;
     // The final response and the PHP reply share one guard; the drain window
     // stays open until the last holder drops.
-    res.map(|body| RespBody::Guarded {
-        body,
-        _req_count: reqs_counter,
+    res.map(|body| RespBody {
+        kind: BodyKind::Boxed(body),
+        guard: reqs_counter,
+        transport: None,
     })
 }
 
 struct Conn {
     shared: Arc<Shared>,
-    closed: tokio::sync::watch::Receiver<bool>,
+    closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
     remote: Addr,
     server: Addr,
 }
@@ -241,7 +279,7 @@ impl Conn {
 
 async fn serve_php<B>(
     shared: &Shared,
-    closed: &tokio::sync::watch::Receiver<bool>,
+    closed: &tokio::sync::watch::Receiver<bridge::ConnectionState>,
     authority: Option<Vec<u8>>,
     guard: Arc<InflightReqCount>,
     parts: &http::request::Parts,
@@ -345,9 +383,9 @@ where
 
     let declared_cl = content_length.filter(|_| !bodiless);
 
-    let body: RespBody = if bodiless {
+    let kind = if bodiless {
         bridge::spawn_drain(reply, closed.clone(), guard.clone());
-        RespBody::Empty { _guard: guard }
+        BodyKind::Empty
     } else {
         let staged = if declared_cl.is_some() {
             tokio::time::timeout(Duration::from_millis(10), reply.next())
@@ -357,10 +395,20 @@ where
         } else {
             None
         };
-        RespBody::Reply(bridge::ReplyBody::new(reply, declared_cl, guard, staged))
+        BodyKind::Reply(bridge::ReplyBody::new(
+            reply,
+            declared_cl,
+            Arc::clone(&guard),
+            staged,
+            closed.clone(),
+        ))
     };
 
-    let mut res = http::Response::new(body);
+    let mut res = http::Response::new(RespBody {
+        kind,
+        guard,
+        transport: None,
+    });
     *res.status_mut() = status;
     *res.headers_mut() = response_headers(headers, declared_cl);
     res
@@ -527,7 +575,7 @@ mod tests {
     ) -> (
         Arc<Conn>,
         Arc<AtomicUsize>,
-        tokio::sync::watch::Sender<bool>,
+        tokio::sync::watch::Sender<bridge::ConnectionState>,
     ) {
         let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Shared {
@@ -536,7 +584,7 @@ mod tests {
             chain: chain.into(),
             inflight: Arc::clone(&inflight),
         });
-        let (closed_tx, closed) = tokio::sync::watch::channel(false);
+        let (closed_tx, closed) = tokio::sync::watch::channel(bridge::ConnectionState::default());
         let handler = Arc::new(Conn {
             shared,
             closed,

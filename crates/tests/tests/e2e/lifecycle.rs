@@ -248,6 +248,46 @@ fn worker_survives_client_abandon() {
     assert_eq!(body, b"ok", "\n{}", diagnostics(&srv));
 }
 
+#[test]
+fn observed_cancellation_allows_next_receive() {
+    let srv = spawn_with_config(
+        "lifecycle/cancelled-receive-worker.php",
+        1,
+        "mode = \"dispatcher\"\n",
+    );
+    let pid = wait_workers(&srv, BOOT, "1 dispatcher worker", |p| p.len() == 1)[0];
+    let mut client = Conn::open(srv.addr, BOOT).expect("connect");
+    client
+        .send(b"GET /events HTTP/1.1\r\nHost: e2e\r\n\r\n")
+        .expect("send /events");
+    let (status, fields) = client
+        .read_head(BOOT)
+        .unwrap_or_else(|e| panic!("/events head: {e}\n{}", diagnostics(&srv)));
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    assert!(
+        fields
+            .iter()
+            .any(|(k, v)| k == "transfer-encoding" && v == "chunked")
+            && !fields.iter().any(|(k, _)| k == "content-length"),
+        "the response must remain chunked: {fields:?}\n{}",
+        diagnostics(&srv)
+    );
+    client
+        .read_body_until(b"data: connected\n\n", BOOT)
+        .unwrap_or_else(|e| panic!("/events body: {e}\n{}", diagnostics(&srv)));
+    client.abandon();
+
+    let (status, body) = http_get(srv.addr, "/next", BOOT)
+        .unwrap_or_else(|e| panic!("GET /next: {e}\n{}", diagnostics(&srv)));
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    assert_eq!(
+        body,
+        format!("{pid}:2").into_bytes(),
+        "the next request must preserve the worker and script cycle\n{}",
+        diagnostics(&srv)
+    );
+}
+
 /// A field php-src lets through but no front can represent must cost only that field, not the response.
 #[test]
 fn unrepresentable_header_still_serves_the_response() {
