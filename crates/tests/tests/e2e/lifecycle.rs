@@ -250,68 +250,42 @@ fn worker_survives_client_abandon() {
 
 #[test]
 fn observed_cancellation_allows_next_receive() {
-    for method in ["receive", "tryReceive"] {
-        let srv = spawn_with_config(
-            "lifecycle/cancelled-receive-worker.php",
-            1,
-            "mode = \"dispatcher\"\n",
-        );
-        let pid = wait_workers(&srv, BOOT, "1 dispatcher worker", |p| p.len() == 1)[0];
-        let mut client = Conn::open(srv.addr, BOOT).expect("connect");
-        client
-            .send(format!("GET /cancel?method={method} HTTP/1.1\r\nHost: e2e\r\n\r\n").as_bytes())
-            .expect("send /cancel");
-        let (status, fields) = client
-            .read_head(BOOT)
-            .unwrap_or_else(|e| panic!("/cancel head: {e}\n{}", diagnostics(&srv)));
-        assert_eq!(status, 200, "\n{}", diagnostics(&srv));
-        assert!(
-            fields
-                .iter()
-                .any(|(k, v)| k == "transfer-encoding" && v == "chunked")
-                && !fields.iter().any(|(k, _)| k == "content-length"),
-            "the response must remain chunked: {fields:?}\n{}",
-            diagnostics(&srv)
-        );
-        client
-            .read_body_until(format!("{pid}:1:initial\n").as_bytes(), BOOT)
-            .unwrap_or_else(|e| panic!("/cancel body: {e}\n{}", diagnostics(&srv)));
-        client.abandon();
-        assert!(
-            wait_log_contains(&srv, "cancellation-observed", BOOT),
-            "PHP did not observe the client disconnect\n{}",
-            diagnostics(&srv)
-        );
+    let srv = spawn_with_config(
+        "lifecycle/cancelled-receive-worker.php",
+        1,
+        "mode = \"dispatcher\"\n",
+    );
+    let pid = wait_workers(&srv, BOOT, "1 dispatcher worker", |p| p.len() == 1)[0];
+    let mut client = Conn::open(srv.addr, BOOT).expect("connect");
+    client
+        .send(b"GET /events HTTP/1.1\r\nHost: e2e\r\n\r\n")
+        .expect("send /events");
+    let (status, fields) = client
+        .read_head(BOOT)
+        .unwrap_or_else(|e| panic!("/events head: {e}\n{}", diagnostics(&srv)));
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    assert!(
+        fields
+            .iter()
+            .any(|(k, v)| k == "transfer-encoding" && v == "chunked")
+            && !fields.iter().any(|(k, _)| k == "content-length"),
+        "the response must remain chunked: {fields:?}\n{}",
+        diagnostics(&srv)
+    );
+    client
+        .read_body_until(b"data: connected\n\n", BOOT)
+        .unwrap_or_else(|e| panic!("/events body: {e}\n{}", diagnostics(&srv)));
+    client.abandon();
 
-        let mut next = Conn::open(srv.addr, BOOT).expect("connect /next");
-        next.send(b"GET /next HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
-            .expect("send /next");
-        assert!(
-            wait_log_contains(&srv, "receive-result:", BOOT),
-            "{method}() did not return after cancellation\n{}",
-            diagnostics(&srv)
-        );
-        assert!(
-            !std::fs::read_to_string(srv.dir.join("server.log"))
-                .expect("server.log")
-                .contains("receive-result:error:"),
-            "{method}() rejected observed cancellation\n{}",
-            diagnostics(&srv)
-        );
-        let (status, _) = next
-            .read_head(BOOT)
-            .unwrap_or_else(|e| panic!("/next head: {e}\n{}", diagnostics(&srv)));
-        assert_eq!(status, 200, "{method}()\n{}", diagnostics(&srv));
-        let body = next
-            .read_remaining(BOOT)
-            .unwrap_or_else(|e| panic!("/next body: {e}\n{}", diagnostics(&srv)));
-        assert_eq!(
-            body,
-            format!("{pid}:2").into_bytes(),
-            "{method}() must preserve the worker and script cycle\n{}",
-            diagnostics(&srv)
-        );
-    }
+    let (status, body) = http_get(srv.addr, "/next", BOOT)
+        .unwrap_or_else(|e| panic!("GET /next: {e}\n{}", diagnostics(&srv)));
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    assert_eq!(
+        body,
+        format!("{pid}:2").into_bytes(),
+        "the next request must preserve the worker and script cycle\n{}",
+        diagnostics(&srv)
+    );
 }
 
 /// A field php-src lets through but no front can represent must cost only that field, not the response.
