@@ -984,8 +984,10 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "extension_api",
+ "http-body-util",
  "libc",
  "php_sys",
+ "rapira_http",
  "rapira_runtime",
  "serde_json",
  "tokio",

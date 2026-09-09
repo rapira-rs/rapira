@@ -18,6 +18,8 @@ tracing-log = "0.2"
 
 [dev-dependencies]
 extension_api = { workspace = true }
+http-body-util = { workspace = true }
+rapira_http = { workspace = true }
 rapira_runtime = { path = "../runtime" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 # E2E harness (tests/e2e): process control for the spawned rapira binary.
