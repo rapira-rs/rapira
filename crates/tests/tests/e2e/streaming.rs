@@ -1,6 +1,9 @@
 use std::time::{Duration, Instant};
 
-use crate::harness::{Conn, decode_chunked, http_get_raw, spawn_with_config, wait_log_contains};
+use crate::harness::{
+    Conn, decode_chunked, diagnostics, http_get_raw, spawn_with_config, wait_log_contains,
+    wait_workers,
+};
 
 const T: Duration = Duration::from_secs(10);
 
@@ -114,6 +117,68 @@ fn declared_length_head_beats_a_slow_body() {
         "the declared length still frames the response: {fields:?}"
     );
     c.read_body_until(b"01234", T).expect("body");
+}
+
+#[test]
+fn fixed_length_completion_does_not_cancel_php() {
+    assert_completed_response_finalizes("/body", b"01234");
+}
+
+#[test]
+fn empty_fixed_length_completion_does_not_cancel_php() {
+    assert_completed_response_finalizes("/empty", b"");
+}
+
+#[test]
+fn file_completion_does_not_cancel_php() {
+    assert_completed_response_finalizes("/file", &vec![b'f'; 100_000]);
+}
+
+fn assert_completed_response_finalizes(path: &str, contents: &[u8]) {
+    for close in [false, true] {
+        let srv = spawn_with_config(
+            "lifecycle/completed-response-worker.php",
+            1,
+            "mode = \"dispatcher\"\n",
+        );
+        let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+        if path == "/file" {
+            std::fs::write(srv.dir.join("payload.bin"), contents).expect("write payload");
+        }
+        let mut c = Conn::open(srv.addr, T).expect("connect");
+        let connection = if close { "Connection: close\r\n" } else { "" };
+        c.send(format!("GET {path} HTTP/1.1\r\nHost: e2e\r\n{connection}\r\n").as_bytes())
+            .expect("send");
+        let (status, fields) = c.read_head(T).expect("head");
+        assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+        assert!(
+            fields
+                .iter()
+                .any(|(k, v)| k == "content-length" && v == &contents.len().to_string()),
+            "{path}, close={close}: {fields:?}"
+        );
+        assert_eq!(
+            c.read_n(contents.len(), T).expect("complete body"),
+            contents
+        );
+        if close {
+            assert!(c.read_remaining(T).expect("response closed").is_empty());
+            c = Conn::open(srv.addr, T).expect("next connection");
+        }
+
+        // Let PHP finalize only after the client receives the complete response.
+        std::fs::write(srv.dir.join("client-read"), b"read").expect("release PHP");
+        c.send(b"GET /state HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
+            .expect("next request");
+        let (status, _) = c.read_head(T).expect("next head");
+        assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+        assert_eq!(
+            c.read_remaining(T).expect("finalization result"),
+            format!("{pid}:2:[false,true,false]").as_bytes(),
+            "{path}, close={close}: complete delivery must preserve PHP finalization\n{}",
+            diagnostics(&srv)
+        );
+    }
 }
 
 /// An over-long body is cut to the declared content-length, keeping framing keepalive-safe.

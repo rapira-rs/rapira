@@ -185,6 +185,26 @@ impl http_body::Body for ReplyBody {
     }
 }
 
+impl Drop for ReplyBody {
+    fn drop(&mut self) {
+        // A length-delimited HTTP body can finish before PHP sends End: https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3
+        if self.declared_cl == Some(self.sent)
+            && !matches!(self.staged, Some(ReplyEvent::End { .. }))
+            && let Some(mut reply) = self.reply.take()
+        {
+            let guard = Arc::clone(&self._guard);
+            tokio::spawn(async move {
+                while let Some(event) = reply.next().await {
+                    if matches!(event, ReplyEvent::End { .. }) {
+                        break;
+                    }
+                }
+                drop(guard);
+            });
+        }
+    }
+}
+
 pub(crate) fn spawn_drain(
     mut reply: Reply,
     mut closed: tokio::sync::watch::Receiver<bool>,
