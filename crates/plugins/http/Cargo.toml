@@ -1,6 +1,6 @@
 [package]
 name = "rapira_http"
-version = "0.8.1"
+version = "0.8.2"
 edition.workspace = true
 publish = false
 license = "MIT"
