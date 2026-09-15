@@ -25,6 +25,7 @@ pub(crate) struct Shared {
 pub(crate) struct InflightReqCount {
     counter: Arc<AtomicUsize>,
     /// Connection flush count when the last response byte was handed to hyper.
+    /// It lives on the shared guard: the body records it and the drain task reads it.
     pub(crate) end_flush: OnceLock<u64>,
 }
 
@@ -54,6 +55,8 @@ struct ReqState {
 pub(crate) struct RespBody {
     kind: BodyKind,
     guard: Arc<InflightReqCount>,
+    /// Declared body bytes still to pass through, with the connection state that holds the flush count.
+    /// Armed by `call` once every middleware has returned.
     transport: Option<(u64, tokio::sync::watch::Receiver<bridge::ConnectionState>)>,
 }
 
@@ -146,20 +149,8 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for RapiraSer
         let closed = handler.closed.clone();
         Box::pin(async move {
             let mut response = handle(handler, req).await;
-            let length = if response
-                .headers()
-                .contains_key(http::header::TRANSFER_ENCODING)
-            {
-                None
-            } else {
-                response
-                    .headers()
-                    .get(http::header::CONTENT_LENGTH)
-                    .and_then(|v| v.to_str().ok()?.parse().ok())
-                    .or_else(|| response.body().size_hint().exact())
-            };
             // Track the body sent to hyper after all middleware has returned.
-            if let Some(length) = length {
+            if let Some(length) = framed_length(&response) {
                 let body = response.body_mut();
                 if length == 0 {
                     body.guard.end_flush.get_or_init(|| closed.borrow().flushes);
@@ -170,6 +161,19 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for RapiraSer
             Ok(response)
         })
     }
+}
+
+/// The body length hyper will frame, in the order hyper's h1 encoder (`proto/h1/role.rs`, `Server::encode`) decides it:
+/// the content-length header, else zero for an ended stream, else the exact size hint.
+/// `None` means chunked, which needs no watermark: a chunked PHP reply ends only after PHP sends End.
+/// The ended-stream check also survives body combinators that drop the size hint.
+fn framed_length(response: &http::Response<RespBody>) -> Option<u64> {
+    response
+        .headers()
+        .get(http::header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse().ok())
+        .or_else(|| response.body().is_end_stream().then_some(0))
+        .or_else(|| response.body().size_hint().exact())
 }
 
 async fn handle<B>(handler: Arc<Conn>, req: http::Request<B>) -> http::Response<RespBody>
@@ -434,17 +438,42 @@ mod tests {
         }
     }
 
+    /// Parks a source after its scripted events until released.
+    #[derive(Default)]
+    struct Gate {
+        released: AtomicBool,
+        waker: Mutex<Option<std::task::Waker>>,
+    }
+
+    impl Gate {
+        fn release(&self) {
+            self.released.store(true, Ordering::Release);
+            if let Some(w) = self.waker.lock().unwrap().take() {
+                w.wake();
+            }
+        }
+    }
+
     struct TestSource {
         events: Vec<ReplyEvent>,
         dropped: Option<Arc<AtomicBool>>,
+        gate: Option<Arc<Gate>>,
     }
 
     impl ReplySource for TestSource {
-        fn poll_next(&mut self, _cx: &mut Context<'_>) -> Poll<Option<ReplyEvent>> {
-            match self.events.is_empty() {
-                true => Poll::Ready(None),
-                false => Poll::Ready(Some(self.events.remove(0))),
+        fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<ReplyEvent>> {
+            if !self.events.is_empty() {
+                return Poll::Ready(Some(self.events.remove(0)));
             }
+            let Some(gate) = &self.gate else {
+                return Poll::Ready(None);
+            };
+            // The waker is stored before the flag is read, so a release between the two still wakes.
+            *gate.waker.lock().unwrap() = Some(cx.waker().clone());
+            if gate.released.load(Ordering::Acquire) {
+                return Poll::Ready(None);
+            }
+            Poll::Pending
         }
     }
 
@@ -460,6 +489,7 @@ mod tests {
         scripts: Mutex<VecDeque<Vec<ReplyEvent>>>,
         seen_authorities: Mutex<Vec<Option<Vec<u8>>>>,
         dropped: Option<Arc<AtomicBool>>,
+        gate: Option<Arc<Gate>>,
     }
 
     impl Scripted {
@@ -468,6 +498,17 @@ mod tests {
                 scripts: Mutex::new(VecDeque::from([events])),
                 seen_authorities: Mutex::new(Vec::new()),
                 dropped,
+                gate: None,
+            }
+        }
+
+        /// One script whose source parks after its events until `gate` is released.
+        fn parked(events: Vec<ReplyEvent>, gate: &Arc<Gate>) -> Self {
+            Self {
+                scripts: Mutex::new(VecDeque::from([events])),
+                seen_authorities: Mutex::new(Vec::new()),
+                dropped: None,
+                gate: Some(Arc::clone(gate)),
             }
         }
     }
@@ -485,7 +526,14 @@ mod tests {
                 .pop_front()
                 .expect("a script per exec");
             let dropped = self.dropped.clone();
-            Box::pin(async move { Ok(Reply::new(Box::new(TestSource { events, dropped }))) })
+            let gate = self.gate.clone();
+            Box::pin(async move {
+                Ok(Reply::new(Box::new(TestSource {
+                    events,
+                    dropped,
+                    gate,
+                })))
+            })
         }
     }
 
@@ -497,6 +545,20 @@ mod tests {
             bodiless,
             body_coded: false,
         }
+    }
+
+    fn head_cl(content_length: u64) -> ReplyEvent {
+        ReplyEvent::Head {
+            status: 200,
+            headers: Vec::new(),
+            content_length: Some(content_length),
+            bodiless: false,
+            body_coded: false,
+        }
+    }
+
+    fn chunk(s: &str) -> ReplyEvent {
+        ReplyEvent::Chunk(bytes::Bytes::copy_from_slice(s.as_bytes()))
     }
 
     fn end() -> ReplyEvent {
@@ -533,39 +595,51 @@ mod tests {
         }
     }
 
-    /// Sends a bodiless head, then parks until released, so the drain outlives the response.
-    struct ParkedSource {
-        events: Vec<ReplyEvent>,
-        released: Arc<AtomicBool>,
-    }
+    /// Re-boxes the body through `map_frame`, which keeps `is_end_stream` but drops the size hint.
+    struct MapBody;
 
-    impl ReplySource for ParkedSource {
-        fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<ReplyEvent>> {
-            if !self.events.is_empty() {
-                return Poll::Ready(Some(self.events.remove(0)));
-            }
-            if self.released.load(Ordering::Acquire) {
-                return Poll::Ready(None);
-            }
-            cx.waker().wake_by_ref();
-            Poll::Pending
+    impl Middleware for MapBody {
+        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
+            Box::pin(async move {
+                next.run(req)
+                    .await
+                    .map(|body| body.map_frame(|frame| frame).boxed_unsync())
+            })
         }
     }
 
-    struct Parked {
-        released: Arc<AtomicBool>,
+    /// Serves one request through hyper over an in-memory pipe; returns the raw response once the connection has closed.
+    async fn serve_raw(
+        handler: Arc<Conn>,
+        closed_tx: tokio::sync::watch::Sender<bridge::ConnectionState>,
+        request: &[u8],
+    ) -> Vec<u8> {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let (mut client, server) = tokio::io::duplex(64 * 1024);
+        let io = bridge::TimedIo::new(
+            hyper_util::rt::TokioIo::new(server),
+            Duration::from_secs(5),
+            closed_tx.clone(),
+        );
+        let conn = hyper::server::conn::http1::Builder::new()
+            .timer(hyper_util::rt::TokioTimer::new())
+            .serve_connection(io, RapiraService { handler });
+        let mut closed = closed_tx.subscribe();
+        tokio::spawn(async move {
+            let _ = conn.await;
+            closed_tx.send_modify(|s| s.closed = true);
+        });
+        client.write_all(request).await.unwrap();
+        let mut response = Vec::new();
+        client.read_to_end(&mut response).await.unwrap();
+        closed.wait_for(|s| s.closed).await.unwrap();
+        response
     }
 
-    impl Backend for Parked {
-        fn exec(
-            &self,
-            _req: Request,
-        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Reply>> + Send + '_>> {
-            let source = ParkedSource {
-                events: vec![head(true)],
-                released: Arc::clone(&self.released),
-            };
-            Box::pin(async move { Ok(Reply::new(Box::new(source))) })
+    /// Polls on a timer, so a paused clock advances while the drain task runs.
+    async fn until_inflight(inflight: &AtomicUsize, want: usize) {
+        while inflight.load(Ordering::Acquire) != want {
+            tokio::time::sleep(Duration::from_millis(1)).await;
         }
     }
 
@@ -690,6 +764,7 @@ mod tests {
             ])),
             seen_authorities: Mutex::new(Vec::new()),
             dropped: None,
+            gate: None,
         });
         let (handler, inflight, _closed_tx) = setup(
             Arc::clone(&backend) as Arc<dyn Backend>,
@@ -713,10 +788,8 @@ mod tests {
     /// counted after the response is gone, until the reply stream ends.
     #[tokio::test]
     async fn a_parked_drain_keeps_the_request_counted_through_the_chain() {
-        let released = Arc::new(AtomicBool::new(false));
-        let backend = Arc::new(Parked {
-            released: Arc::clone(&released),
-        });
+        let gate = Arc::new(Gate::default());
+        let backend = Arc::new(Scripted::parked(vec![head(true)], &gate));
         let (handler, inflight, _closed_tx) =
             setup(backend, vec![Arc::new(Pass) as Arc<dyn Middleware>]);
         let res = handle(handler, get_request()).await;
@@ -727,13 +800,69 @@ mod tests {
             1,
             "the drain task must keep the request counted"
         );
-        released.store(true, Ordering::Release);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while inflight.load(Ordering::Acquire) != 0 {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("drain must release the count at the stream end");
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
+            .await
+            .expect("drain must release the count at the stream end");
+    }
+
+    /// `map_frame` drops the size hint, so the bodiless watermark must come from `is_end_stream`.
+    #[tokio::test(start_paused = true)]
+    async fn delivered_head_behind_body_mapping_middleware_keeps_php_alive() {
+        let gate = Arc::new(Gate::default());
+        let backend = Arc::new(Scripted::parked(vec![head(true)], &gate));
+        let (handler, inflight, closed_tx) =
+            setup(backend, vec![Arc::new(MapBody) as Arc<dyn Middleware>]);
+        let response = serve_raw(
+            handler,
+            closed_tx,
+            b"HEAD / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            response.starts_with(b"HTTP/1.1 200"),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
+        // The paused clock auto-advances once every task is idle, so the timeout proves the drain kept the reply.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), until_inflight(&inflight, 0))
+                .await
+                .is_err(),
+            "a close after the flushed head must not cancel PHP"
+        );
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
+            .await
+            .expect("End releases the count");
+    }
+
+    /// hyper drops a length-delimited body once the last byte is buffered; the flush after it must keep PHP alive past the close.
+    #[tokio::test(start_paused = true)]
+    async fn delivered_fixed_length_body_keeps_php_alive_past_the_close() {
+        let gate = Arc::new(Gate::default());
+        let backend = Arc::new(Scripted::parked(vec![head_cl(5), chunk("01234")], &gate));
+        let (handler, inflight, closed_tx) = setup(backend, Vec::new());
+        let response = serve_raw(
+            handler,
+            closed_tx,
+            b"GET / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        let text = String::from_utf8_lossy(&response).to_ascii_lowercase();
+        assert!(
+            text.contains("content-length: 5") && text.ends_with("\r\n\r\n01234"),
+            "{text}"
+        );
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), until_inflight(&inflight, 0))
+                .await
+                .is_err(),
+            "a close after the flushed body must not cancel PHP"
+        );
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
+            .await
+            .expect("End releases the count");
     }
 }

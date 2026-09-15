@@ -197,7 +197,7 @@ impl http_body::Body for ReplyBody {
 
 impl Drop for ReplyBody {
     fn drop(&mut self) {
-        // A length-delimited HTTP body can finish before PHP sends End: https://www.rfc-editor.org/rfc/rfc9112.html#section-6.3
+        // A length-delimited HTTP body can finish before PHP sends End: https://www.rfc-editor.org/rfc/rfc9112#section-6.3
         if self.declared_cl == Some(self.sent)
             && !matches!(self.staged, Some(ReplyEvent::End { .. }))
             && self.guard.end_flush.get().is_some()
@@ -208,7 +208,8 @@ impl Drop for ReplyBody {
     }
 }
 
-/// Consumes the reply to End. A connection close cancels the reply until a flush past the guard's watermark proves delivery.
+/// Consumes the reply to End. A connection close cancels the reply unless a flush past the guard's watermark has written the last response byte to the socket.
+/// After that flush the drain holds the reply until PHP sends End, so a delivered response never reports cancellation to PHP.
 pub(crate) fn spawn_drain(
     mut reply: Reply,
     mut closed: watch::Receiver<ConnectionState>,
@@ -629,7 +630,7 @@ mod tests {
         assert_eq!(d.inflight.load(Ordering::Acquire), 0);
     }
 
-    /// A flush past the watermark proves delivery: a later close must not cancel the reply.
+    /// A flush past the watermark wrote the last byte to the socket: a later close must not cancel the reply.
     #[tokio::test(start_paused = true)]
     async fn flushed_drain_survives_a_later_close() {
         let d = parked_drain().await;
@@ -664,7 +665,7 @@ mod tests {
         assert_eq!(d.inflight.load(Ordering::Acquire), 0);
     }
 
-    /// One chunk, then parked like an unfinalized PHP exchange; `dropped` turns true when the reply is dropped.
+    /// One chunk and no End, the shape of an unfinalized PHP exchange; `dropped` turns true when the reply is dropped.
     fn parked_source(dropped: &Arc<AtomicBool>) -> Reply {
         Reply::new(Box::new(Script {
             events: vec![chunk("abc")].into(),
