@@ -248,6 +248,52 @@ fn worker_survives_client_abandon() {
     assert_eq!(body, b"ok", "\n{}", diagnostics(&srv));
 }
 
+/// An unfinalized exchange whose client left is discarded by the next `receive()`, and the discard is logged.
+#[test]
+fn abandoned_exchange_is_discarded_by_next_receive() {
+    let srv = spawn_without_rust_log(
+        "lifecycle/cancelled-receive-worker.php",
+        1,
+        "mode = \"dispatcher\"\n[log]\nlevel = \"debug\"\n",
+    );
+    let pid = wait_workers(&srv, BOOT, "1 dispatcher worker", |p| p.len() == 1)[0];
+    let mut client = Conn::open(srv.addr, BOOT).expect("connect");
+    client
+        .send(b"GET /events HTTP/1.1\r\nHost: e2e\r\n\r\n")
+        .expect("send /events");
+    let (status, fields) = client
+        .read_head(BOOT)
+        .unwrap_or_else(|e| panic!("/events head: {e}\n{}", diagnostics(&srv)));
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    assert!(
+        fields
+            .iter()
+            .any(|(k, v)| k == "transfer-encoding" && v == "chunked")
+            && !fields.iter().any(|(k, _)| k == "content-length"),
+        "the response must remain chunked: {fields:?}\n{}",
+        diagnostics(&srv)
+    );
+    client
+        .read_body_until(b"data: connected\n\n", BOOT)
+        .unwrap_or_else(|e| panic!("/events body: {e}\n{}", diagnostics(&srv)));
+    client.abandon();
+
+    let (status, body) = http_get(srv.addr, "/next", BOOT)
+        .unwrap_or_else(|e| panic!("GET /next: {e}\n{}", diagnostics(&srv)));
+    assert_eq!(status, 200, "\n{}", diagnostics(&srv));
+    assert_eq!(
+        body,
+        format!("{pid}:2:cancelled").into_bytes(),
+        "the next request must preserve the worker and script cycle\n{}",
+        diagnostics(&srv)
+    );
+    assert!(
+        wait_log_contains(&srv, "discarded an unfinalized exchange", BOOT),
+        "the discard must be logged\n{}",
+        diagnostics(&srv)
+    );
+}
+
 /// A field php-src lets through but no front can represent must cost only that field, not the response.
 #[test]
 fn unrepresentable_header_still_serves_the_response() {

@@ -190,16 +190,20 @@ fn spawn_conn<S>(
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
-    let (closed_tx, closed_rx) = channel(false);
+    let (closed_tx, closed_rx) = channel(crate::bridge::ConnectionState::default());
     let svc = RapiraService::new(Arc::clone(shared), remote, server, closed_rx);
-    let io = crate::bridge::TimedIo::new(TokioIo::new(stream), shared.cfg.write_timeout);
+    let io = crate::bridge::TimedIo::new(
+        TokioIo::new(stream),
+        shared.cfg.write_timeout,
+        closed_tx.clone(),
+    );
     let connection = builder.serve_connection(io, svc);
     let watched = graceful.watch(connection);
     tokio::spawn(async move {
         if let Err(e) = watched.await {
             tracing::debug!(target: "http", "connection ended with error: {e}");
         }
-        let _ = closed_tx.send(true);
+        closed_tx.send_modify(|s| s.closed = true);
     });
 }
 

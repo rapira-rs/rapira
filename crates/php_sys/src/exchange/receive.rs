@@ -10,6 +10,12 @@ enum RecvMode {
 /// `return_value` writable; engine active on this thread.
 unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
+        if let Unit::Handling(ptr) = CYCLE.get().unit
+            && (*ptr).host_closed()
+        {
+            tracing::debug!(target: "rapira", "receive() discarded an unfinalized exchange whose client left");
+            super::respond::discard_unit(&mut *ptr);
+        }
         if matches!(CYCLE.get().unit, Unit::Handling(_)) {
             zend::throw_error(
                 c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first",
