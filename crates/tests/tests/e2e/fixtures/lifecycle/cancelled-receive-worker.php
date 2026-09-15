@@ -17,7 +17,12 @@ try {
             while (!$ex->isCancelled() && microtime(true) < $deadline) {
                 usleep(1_000);
             }
-            $result = $ex->isCancelled() ? 'cancelled' : 'timeout';
+            if ($ex->isCancelled()) {
+                $result = 'cancelled';
+            } else {
+                $result = 'timeout';
+                $ex->writeBody('', eos: true);
+            }
             continue;
         }
         $ex->writeBody(getmypid() . ":{$sequence}:{$result}");
