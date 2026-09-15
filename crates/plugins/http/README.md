@@ -42,7 +42,7 @@ On the stop signal the accept loop ends immediately, idle keepalive connections 
 
 ## Configuration
 
-`Extension::init(config)` receives everything; `rapira serve` resolves `rapira.toml` and defaults into this struct and registers the extension.
+`Extension::init(config)` receives everything; `rapira serve` resolves `rapira.toml` and defaults into this struct. It then registers the extension.
 
 | Field                | Meaning                                                                    |
 | -------------------- | -------------------------------------------------------------------------- |

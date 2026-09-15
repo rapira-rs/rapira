@@ -49,13 +49,13 @@ pub(crate) fn dynamic_start_count(
 
 /// Arming with an idle worker parked in accept, or a fork in flight, busy-spins level-triggered poll until the child accepts.
 pub(crate) fn ondemand_armed(
-    is_normal: bool,
+    normal: bool,
     running: usize,
     max_children: usize,
     idle: usize,
     starting: usize,
 ) -> bool {
-    is_normal && running < max_children && idle == 0 && starting == 0
+    normal && running < max_children && idle == 0 && starting == 0
 }
 
 #[cfg(test)]

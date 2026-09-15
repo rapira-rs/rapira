@@ -277,7 +277,7 @@ impl Pool {
     }
 
     /// In the Await gate: re-probe the replacement and force past a stuck one at the safety cap. In Drain: QUIT to TERM to KILL against the draining worker.
-    pub(crate) fn on_reload_deadline(&mut self, now: Instant) {
+    fn on_reload_deadline(&mut self, now: Instant) {
         let Some(reload) = self.reload else {
             return;
         };

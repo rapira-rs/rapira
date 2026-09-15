@@ -1,3 +1,5 @@
+#[cfg(test)]
+use std::os::fd::FromRawFd;
 use std::os::fd::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
@@ -297,7 +299,6 @@ impl FakeSpawner {
         // SAFETY: socketpair fills a 2-element array with two owned fds.
         let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
         assert_eq!(rc, 0, "socketpair");
-        use std::os::fd::FromRawFd;
         FakeSpawner {
             pipe: SelfPipe {
                 // SAFETY: fds holds two fresh fds we take sole ownership of.

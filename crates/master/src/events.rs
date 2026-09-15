@@ -305,6 +305,9 @@ mod tests {
     const P_A: libc::pid_t = 2_000_000_001;
     const P_B: libc::pid_t = 2_000_000_002;
 
+    // Indexed by spec position; a third spec panics.
+    const POOL_NAMES: [&str; 2] = ["http", "grpc"];
+
     /// Two pools: "http" of `specs[0]` and "grpc" of `specs[1]`. The returned board is the whole mapping the pools slice.
     fn test_master(specs: &[(usize, Scaling)]) -> (Master<FakeSpawner>, Scoreboard) {
         let slots: usize = specs.iter().map(|(n, _)| n * 2).sum();
@@ -313,7 +316,7 @@ mod tests {
             .iter()
             .enumerate()
             .map(|(i, &(processes, scaling))| PoolConfig {
-                name: if i == 0 { "http" } else { "grpc" },
+                name: POOL_NAMES[i],
                 processes,
                 scaling,
                 process_idle_timeout: Duration::from_secs(10),

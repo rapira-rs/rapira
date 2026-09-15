@@ -95,7 +95,7 @@ pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> S
     spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), None)
 }
 
-/// [`spawn_with_config`]: `http_extra` follows `listen` inside `[http]` and may open `[http.static]` or `[http.uploads]`.
+/// [`spawn_with_config`] for keys inside `[http]`: `http_extra` follows `listen` and may open `[http.static]` or `[http.uploads]`.
 pub fn spawn_with_http_extra(fixture: &str, processes: usize, http_extra: &str) -> Server {
     spawn_with_extras(fixture, processes, http_extra, "", Some("info"), None)
 }
