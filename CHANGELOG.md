@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.8.2](https://github.com/rapira-rs/rapira/compare/v0.8.1...v0.8.2) (2026-09-15)
+
+
+### Bug Fixes
+
+* **dispatcher:** allow receive after observed cancellation ([521d97b](https://github.com/rapira-rs/rapira/commit/521d97b85401a0f03329914fcc8498e86c9dd01e))
+* **dispatcher:** log the discard of an abandoned exchange ([53a3615](https://github.com/rapira-rs/rapira/commit/53a3615aa8f507de238b42c97a571dcbda333804))
+* **http:** arm the delivery watermark behind body-mapping middleware ([fef1338](https://github.com/rapira-rs/rapira/commit/fef133863b6d1144328a6402652b7c93a5ee3318))
+* **http:** cancel PHP only when a completed response was never flushed ([1ffb8f5](https://github.com/rapira-rs/rapira/commit/1ffb8f51578ebd7da8fe555522363eeb10cf71c5))
+* **http:** correct exchange completion and cancellation ([b84aa72](https://github.com/rapira-rs/rapira/commit/b84aa72d89c8ac4ed7d011cde269912bb3e789ce))
+* **http:** frame no-body responses as empty for the delivery watermark ([a52cb77](https://github.com/rapira-rs/rapira/commit/a52cb775a477ea8a550183aee9618077284bd885))
+* **http:** preserve exchanges after content-length completion ([4ff03e5](https://github.com/rapira-rs/rapira/commit/4ff03e5762eb1f3d9532294877b3064ec377a736))
+* **worker:** preserve retained SPL temporary streams ([2e28c19](https://github.com/rapira-rs/rapira/commit/2e28c19b7459fb65faf558ce44aea24f65a29462))
+* **worker:** preserve retained SPL temporary streams ([b0e4ff6](https://github.com/rapira-rs/rapira/commit/b0e4ff63e9053c3ae8ea4cf1777d0ffa685fc256))
+
 ## [0.8.1](https://github.com/rapira-rs/rapira/compare/v0.8.0...v0.8.1) (2026-09-05)
 
 ### 🎯 Core
