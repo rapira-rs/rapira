@@ -92,6 +92,7 @@ pub enum StopReason {
 }
 
 /// Returns in the parent on a clean or forced stop; in a forked child it never returns: the worker closure runs and the child `_exit`s.
+/// `scoreboard` must have `cfg.scoreboard_slots()` slots: `Master::new` slices it with the same arithmetic and panics on a smaller board.
 pub fn run(
     cfg: MasterConfig,
     scoreboard: Scoreboard,

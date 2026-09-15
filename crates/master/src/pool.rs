@@ -422,18 +422,21 @@ impl Pool {
         }
     }
 
-    /// Scaling and the watchdog pause while this pool drains a reload chain: a refill would race the chain for the slot it just freed.
+    /// Scaling pauses while this pool drains a reload chain: a refill would race the chain for the slot it just freed. The served latch and the request watchdog keep running.
     pub(crate) fn maintenance_tick(
         &mut self,
         now: Instant,
         stopping: bool,
         spawner: &mut dyn Spawner,
     ) {
-        if stopping || self.reload.is_some() {
+        if stopping {
             return;
         }
         self.latch_served();
         self.watchdog_tick();
+        if self.reload.is_some() {
+            return;
+        }
         match self.cfg.scaling {
             Scaling::Static => self.static_refill(now, spawner),
             Scaling::Dynamic {
@@ -1224,6 +1227,38 @@ mod tests {
 
         p.maintenance_tick(t0, false, &mut sp);
         assert_eq!(sp.calls.len(), 3, "the pool refills once it is idle again");
+    }
+
+    /// The request bound is independent of the reload chain: an overdue worker is terminated while this pool reloads.
+    #[test]
+    fn watchdog_runs_while_this_pool_reloads() {
+        let (mut p, mut sp) = test_pool(1, Scaling::Static);
+        p.cfg.request_terminate_timeout = Duration::from_secs(2);
+        let t0 = Instant::now();
+        p.push_proc(P_OLD0, 0, 1, t0);
+        p.set_slot(0, SLOT_ACTIVE);
+        p.board
+            .slot(0)
+            .last_activity_ms
+            .store(now_millis().saturating_sub(5_000), Relaxed);
+        p.reload = Some(Reload {
+            phase: ReloadPhase::Await {
+                slot: 1,
+                until: t0 + Duration::from_secs(30),
+            },
+            deadline: t0 + RELOAD_GATE_POLL,
+        });
+
+        p.maintenance_tick(t0, false, &mut sp);
+        assert_eq!(
+            p.table.procs[0].kill_intent,
+            Some(KillIntent::Timeout),
+            "the overdue active worker must have timeout intent"
+        );
+        assert!(
+            sp.calls.is_empty(),
+            "scaling stays paused during the reload"
+        );
     }
 
     #[test]
