@@ -147,10 +147,11 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for RapiraSer
     fn call(&self, req: http::Request<hyper::body::Incoming>) -> Self::Future {
         let handler = Arc::clone(&self.handler);
         let closed = handler.closed.clone();
+        let method = req.method().clone();
         Box::pin(async move {
             let mut response = handle(handler, req).await;
             // Track the body sent to hyper after all middleware has returned.
-            if let Some(length) = framed_length(&response) {
+            if let Some(length) = framed_length(&method, &response) {
                 let body = response.body_mut();
                 if length == 0 {
                     body.guard.end_flush.get_or_init(|| closed.borrow().flushes);
@@ -164,10 +165,21 @@ impl hyper::service::Service<http::Request<hyper::body::Incoming>> for RapiraSer
 }
 
 /// The body length hyper will frame, in the order hyper's h1 encoder (`proto/h1/role.rs`, `Server::encode`) decides it:
-/// the content-length header, else zero for an ended stream, else the exact size hint.
+/// zero when the method or status forbids a body, else the content-length header, else zero for an ended stream, else the exact size hint.
 /// `None` means chunked, which needs no watermark: a chunked PHP reply ends only after PHP sends End.
 /// The ended-stream check also survives body combinators that drop the size hint.
-fn framed_length(response: &http::Response<RespBody>) -> Option<u64> {
+fn framed_length(method: &http::Method, response: &http::Response<RespBody>) -> Option<u64> {
+    let status = response.status();
+    // hyper never polls the body here, whatever the headers say (`Server::can_have_body`).
+    if *method == http::Method::HEAD
+        || status.is_informational()
+        || matches!(
+            status,
+            http::StatusCode::NO_CONTENT | http::StatusCode::NOT_MODIFIED
+        )
+    {
+        return Some(0);
+    }
     response
         .headers()
         .get(http::header::CONTENT_LENGTH)
@@ -608,6 +620,22 @@ mod tests {
         }
     }
 
+    /// Adds a positive content-length to the response, as a middleware serving cached GET headers on HEAD would.
+    struct HeadLength;
+
+    impl Middleware for HeadLength {
+        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
+            Box::pin(async move {
+                let mut res = next.run(req).await;
+                res.headers_mut().insert(
+                    http::header::CONTENT_LENGTH,
+                    http::HeaderValue::from_static("5"),
+                );
+                res
+            })
+        }
+    }
+
     /// Serves one request through hyper over an in-memory pipe; returns the raw response once the connection has closed.
     async fn serve_raw(
         handler: Arc<Conn>,
@@ -825,6 +853,36 @@ mod tests {
             String::from_utf8_lossy(&response)
         );
         // The paused clock auto-advances once every task is idle, so the timeout proves the drain kept the reply.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), until_inflight(&inflight, 0))
+                .await
+                .is_err(),
+            "a close after the flushed head must not cancel PHP"
+        );
+        gate.release();
+        tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
+            .await
+            .expect("End releases the count");
+    }
+
+    /// hyper writes no body for HEAD whatever content-length says, so the head alone completes the response.
+    #[tokio::test(start_paused = true)]
+    async fn head_with_a_positive_content_length_completes_at_the_head() {
+        let gate = Arc::new(Gate::default());
+        let backend = Arc::new(Scripted::parked(vec![head(true)], &gate));
+        let (handler, inflight, closed_tx) =
+            setup(backend, vec![Arc::new(HeadLength) as Arc<dyn Middleware>]);
+        let response = serve_raw(
+            handler,
+            closed_tx,
+            b"HEAD / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+        )
+        .await;
+        assert!(
+            response.starts_with(b"HTTP/1.1 200") && response.ends_with(b"\r\n\r\n"),
+            "{}",
+            String::from_utf8_lossy(&response)
+        );
         assert!(
             tokio::time::timeout(Duration::from_secs(1), until_inflight(&inflight, 0))
                 .await
