@@ -21,7 +21,7 @@ namespace Rapira {
         case Trace;
     }
 
-    /** The mode the host launched this process in: the `[pool] mode` of rapira.toml. */
+    /** The mode the host launched this process in: the `[http.pool] mode` of rapira.toml. */
     enum Mode
     {
         case Classic;

@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use crate::config_relative;
 use crate::listen::Listen;
+use crate::pool::{PoolSection, PoolSettings};
 
 #[derive(Debug)]
 pub struct HttpSettings {
@@ -15,9 +16,11 @@ pub struct HttpSettings {
     pub keepalive_timeout: std::time::Duration,
     pub unsafe_field_names: UnsafeFieldNames,
     pub uploads: UploadSettings,
-    pub sendfile_root: Option<PathBuf>,
+    /// sendFile() containment root; falls back to the entrypoint directory.
+    pub sendfile_root: PathBuf,
     // [http].middleware list order
     pub middleware: Vec<MiddlewareSettings>,
+    pub pool: PoolSettings,
 }
 
 #[derive(Debug)]
@@ -62,6 +65,8 @@ pub(crate) struct HttpSection {
     pub(crate) sendfile: SendfileSection,
     pub(crate) middleware: Option<Vec<String>>,
     pub(crate) r#static: Option<StaticSection>,
+    #[serde(default)]
+    pub(crate) pool: PoolSection,
 }
 
 // ------------ middleware stuff ---------------

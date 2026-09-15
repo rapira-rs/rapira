@@ -2,12 +2,13 @@ use std::os::fd::{OwnedFd, RawFd};
 use std::path::PathBuf;
 use std::time::Duration;
 
-use rapira_scoreboard::{Scoreboard, SharedSlot};
+use rapira_scoreboard::{SB_MAX_SLOTS, Scoreboard, SharedSlot};
 
 mod events;
 mod lifeline;
 mod pctl;
 mod pidfile;
+mod pool;
 mod process;
 mod scaling;
 mod signals;
@@ -31,23 +32,52 @@ pub enum Scaling {
     Ondemand,
 }
 
-pub struct MasterConfig {
+/// One plugin's worker set. The master supervises every pool independently.
+pub struct PoolConfig {
+    /// Config table the pool came from ("http"): prefixes its log lines as `{name}.pool.*`.
+    pub name: &'static str,
     /// Static worker count, or the max-children ceiling under dynamic/ondemand.
     pub processes: usize,
     pub scaling: Scaling,
     /// Ondemand only: idle worker lifetime before a QUIT.
     pub process_idle_timeout: Duration,
-    /// Stop/reload QUIT to TERM escalation grace.
-    pub process_control_timeout: Duration,
     /// Wall-clock bound on one request: the worker is TERM-killed, then KILLed, and replaced. Zero disables.
     pub request_terminate_timeout: Duration,
-    pub pidfile: Option<PathBuf>,
-    /// Bound listener fds, watched by the poll loop only under `Ondemand`; the master never accepts on them.
+    /// This pool's bound listener fds, polled only under `Ondemand`; the master never accepts on them.
     pub listeners: Vec<RawFd>,
+}
+
+pub struct MasterConfig {
+    pub pools: Vec<PoolConfig>,
+    /// Stop/reload QUIT to TERM escalation grace.
+    pub process_control_timeout: Duration,
+    pub pidfile: Option<PathBuf>,
+}
+
+impl MasterConfig {
+    /// Two slots per worker, pools contiguous in order. Names the pool that pushes the total past the cap.
+    pub fn scoreboard_slots(&self) -> anyhow::Result<usize> {
+        let max_workers: usize = SB_MAX_SLOTS / 2;
+        let mut workers: usize = 0;
+        for p in &self.pools {
+            workers = workers.saturating_add(p.processes);
+            anyhow::ensure!(
+                workers <= max_workers,
+                "{}.pool.processes ({}) raises the worker total to {}, above the supported maximum ({})",
+                p.name,
+                p.processes,
+                workers,
+                max_workers
+            );
+        }
+        Ok(workers * 2)
+    }
 }
 
 /// Handed to the worker closure in the child, after post-fork hygiene.
 pub struct WorkerEnv {
+    /// Index of the pool this worker belongs to, into `MasterConfig::pools`.
+    pub pool: usize,
     /// Read end of the master lifeline: EOF means the master died, so drain.
     pub lifeline: OwnedFd,
     pub slot_view: &'static SharedSlot,
@@ -62,6 +92,7 @@ pub enum StopReason {
 }
 
 /// Returns in the parent on a clean or forced stop; in a forked child it never returns: the worker closure runs and the child `_exit`s.
+/// `scoreboard` must have `cfg.scoreboard_slots()` slots: `Master::new` slices it with the same arithmetic and panics on a smaller board.
 pub fn run(
     cfg: MasterConfig,
     scoreboard: Scoreboard,
@@ -74,6 +105,69 @@ pub fn run(
         None => None,
     };
 
-    let mut master = events::Master::new(cfg, scoreboard, self_pipe, lifeline, worker);
+    let forker = process::Forker {
+        self_pipe,
+        lifeline,
+        worker,
+    };
+    let mut master = events::Master::new(cfg, scoreboard, forker);
     master.run_loop()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn pool(name: &'static str, processes: usize) -> PoolConfig {
+        PoolConfig {
+            name,
+            processes,
+            scaling: Scaling::Static,
+            process_idle_timeout: Duration::from_secs(10),
+            request_terminate_timeout: Duration::ZERO,
+            listeners: Vec::new(),
+        }
+    }
+
+    fn cfg(pools: Vec<PoolConfig>) -> MasterConfig {
+        MasterConfig {
+            pools,
+            process_control_timeout: Duration::from_secs(30),
+            pidfile: None,
+        }
+    }
+
+    #[test]
+    fn scoreboard_slots_sums_two_per_worker_over_pools() {
+        assert_eq!(
+            cfg(vec![pool("http", 3), pool("grpc", 2)])
+                .scoreboard_slots()
+                .unwrap(),
+            10
+        );
+        assert_eq!(
+            cfg(vec![pool("http", SB_MAX_SLOTS / 2)])
+                .scoreboard_slots()
+                .unwrap(),
+            SB_MAX_SLOTS
+        );
+    }
+
+    #[test]
+    fn scoreboard_slots_names_the_pool_that_crosses_the_cap() {
+        let e = cfg(vec![pool("http", SB_MAX_SLOTS / 2), pool("grpc", 1)])
+            .scoreboard_slots()
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("grpc.pool.processes (1)"), "{e}");
+        assert!(!e.contains("http.pool"), "{e}");
+        assert!(
+            e.contains(&format!(
+                "raises the worker total to {}, above the supported maximum ({})",
+                SB_MAX_SLOTS / 2 + 1,
+                SB_MAX_SLOTS / 2
+            )),
+            "{e}"
+        );
+    }
 }

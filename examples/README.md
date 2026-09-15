@@ -2,29 +2,18 @@
 
 One file per run mode - two for the dispatcher. Use an installed `rapira`, or build one with `make test_nts` and take `target/nts/debug/rapira`.
 
-Classic - one script execution per request:
+Set `http.pool.entrypoint` and `http.pool.mode` in `examples/rapira.toml` to pick a run mode:
 
 ```sh
-rapira serve --mode classic examples/classic.php
+rapira serve examples/rapira.toml
 ```
 
-Worker - resident script, a handler closure runs per request:
-
-```sh
-rapira serve --mode worker examples/worker.php
-```
-
-Dispatcher (the default mode) - resident script pulling units from the host, in two flavours. Synchronous, one request at a time on a blocking `receive()`:
-
-```sh
-rapira serve examples/dispatcher-sync.php
-```
-
-Asynchronous, a fiber per request - `tryReceive()` between resumes while requests are in flight, a blocking `receive()` once none are left:
-
-```sh
-rapira serve examples/dispatcher-async.php
-```
+| Entrypoint             | Mode         | What it shows                                                            |
+| ---------------------- | ------------ | ------------------------------------------------------------------------ |
+| `classic.php`          | `classic`    | one script execution per request                                         |
+| `worker.php`           | `worker`     | resident script, a handler closure runs per request                      |
+| `dispatcher-sync.php`  | `dispatcher` | resident script, one request at a time on a blocking `receive()`         |
+| `dispatcher-async.php` | `dispatcher` | resident script, a fiber per request with `tryReceive()` between resumes |
 
 All of them listen on 127.0.0.1:8000 by default. Classic and worker answer any path; the dispatcher examples route:
 

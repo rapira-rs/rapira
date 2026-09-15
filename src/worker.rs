@@ -42,18 +42,31 @@ fn effective_quota(max_requests: u64) -> u64 {
     max_requests.saturating_add(1 + (h.finish() % grace))
 }
 
+/// Everything a pool's worker needs besides the fork-time env; cloned into each child.
+#[derive(Clone)]
+pub struct PoolArgs {
+    pub mode: Mode,
+    pub entrypoint: PathBuf,
+    pub max_requests: u64,
+    pub uploads: rapira_runtime::multipart::Limits,
+    /// sendFile() containment root, canonicalized per worker.
+    pub sendfile_root: PathBuf,
+    pub grace: Duration,
+}
+
 /// Returns the process exit code for the master's fork bracket; never runs PHP module teardown, MSHUTDOWN stays with the master.
-pub fn worker_body(
-    env: WorkerEnv,
-    host: ExtensionRuntime,
-    mode: Mode,
-    script: PathBuf,
-    max_requests: u64,
-    mut uploads: rapira_runtime::multipart::Limits,
-    grace: Duration,
-) -> i32 {
+pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i32 {
+    let PoolArgs {
+        mode,
+        entrypoint,
+        max_requests,
+        mut uploads,
+        sendfile_root,
+        grace,
+    } = args;
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { php_sys::rapira_child_init() };
+    php_sys::set_sendfile_root(sendfile_root);
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
     let hooks: WorkerHooks = WorkerHooks {
         max_requests: effective_quota(max_requests),
@@ -101,7 +114,7 @@ pub fn worker_body(
     };
     let running: rapira_runtime::Running = host.run_with_options(
         handle,
-        script,
+        entrypoint,
         rapira_runtime::RuntimeOptions {
             uploads: Arc::new(uploads),
             grace,
