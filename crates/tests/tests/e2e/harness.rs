@@ -90,12 +90,12 @@ fn rapira_bin() -> PathBuf {
     bin
 }
 
-/// `extra_toml` is appended inside `[pool]`, so any other section needs its own header and must come after all bare pool keys.
+/// `extra_toml` is appended inside `[http.pool]`, bare keys first; a `[log]` or `[supervisor]` header may follow, and it must not open `[http]` or `[http.*]`.
 pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> Server {
     spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), None)
 }
 
-/// [`spawn_with_config`] for keys inside the `[http]` table, which the trailing `extra_toml` cannot reach.
+/// [`spawn_with_config`]: `http_extra` follows `listen` inside `[http]` and may open `[http.static]` or `[http.uploads]`.
 pub fn spawn_with_http_extra(fixture: &str, processes: usize, http_extra: &str) -> Server {
     spawn_with_extras(fixture, processes, http_extra, "", Some("info"), None)
 }
@@ -120,7 +120,7 @@ pub fn spawn_in_cwd(fixture: &str, processes: usize, php_ini: &str) -> Server {
     spawn_with_extras(fixture, processes, "", "", Some("info"), Some(ini))
 }
 
-/// [`spawn_in_cwd`] with PHPRC pointing at the same directory; `extra_toml` is appended inside `[pool]`, so any other section needs its own header and must come last.
+/// [`spawn_in_cwd`] with PHPRC pointing at the same directory; `extra_toml` is appended inside `[http.pool]`, bare keys first; a `[log]` or `[supervisor]` header may follow, and it must not open `[http]` or `[http.*]`.
 pub fn spawn_with_phprc_and_config(
     fixture: &str,
     processes: usize,
@@ -199,7 +199,7 @@ fn spawn_attempt(
     .expect("write config");
     let log = File::create(dir.join("server.log")).expect("create server.log");
     let mut cmd = Command::new(rapira_bin());
-    cmd.args(["serve", "--config"]).arg(dir.join("rapira.toml"));
+    cmd.arg("serve").arg(dir.join("rapira.toml"));
     cmd.env_remove("PHPRC");
     if let Some(ini) = cwd_ini {
         cmd.current_dir(dir);
@@ -233,6 +233,9 @@ pub fn spawn_boot_failure(fixture: &str, http_extra: &str) -> (ExitStatus, Strin
     (status, log)
 }
 
+/// Renders `[http.pool]` before `[http]`.
+/// TOML accepts an explicit super-table header after its sub-table.
+/// `http_extra` renders last, so a header it opens ends the file.
 fn render_config(
     port: u16,
     processes: usize,
@@ -241,9 +244,7 @@ fn render_config(
     extra: &str,
 ) -> String {
     format!(
-        "[http]\nlisten = \"127.0.0.1:{port}\"\n{http_extra}\n\
-         [pool]\nprocesses = {processes}\nentrypoint = \"{fixture}\"\n\n\
-         {extra}"
+        "[http.pool]\nprocesses = {processes}\nentrypoint = \"{fixture}\"\n{extra}\n[http]\nlisten = \"127.0.0.1:{port}\"\n{http_extra}"
     )
 }
 

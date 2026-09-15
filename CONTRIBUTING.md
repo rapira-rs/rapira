@@ -57,7 +57,7 @@ C sources (`crates/php_sys/*.c`, `*.h`) follow `.clang-format`.
 | `crates/php_sys`       | the SAPI: C glue, bindgen bindings, worker/classic request loops, `rapira.stub.php` |
 | `crates/runtime`       | the extension runtime that drives PHP                                               |
 | `crates/master`        | the pre-fork supervisor: forking, reaping, scaling, signals, reload                 |
-| `crates/config`        | `rapira.toml` and CLI configuration                                                 |
+| `crates/config`        | `rapira.toml` configuration                                                        |
 | `crates/api`           | the native extension contract                                                       |
 | `crates/scoreboard`    | shared per-worker counters                                                          |
 | `crates/plugins/http`  | the HTTP front                                                                      |

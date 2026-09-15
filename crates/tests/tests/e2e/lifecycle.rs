@@ -192,6 +192,15 @@ fn request_timeout_kills_and_replaces_worker() {
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 }
 
+/// A top-level `[pool]` table is a parse error: the pool belongs under `[http.pool]`.
+#[test]
+fn a_top_level_pool_table_refuses_to_boot() {
+    let (status, log) = spawn_boot_failure("shared/echo-worker.php", "[pool]\nprocesses = 1\n");
+    assert_eq!(status.code(), Some(1), "\n{log}");
+    assert!(log.contains("parsing config file"), "\n{log}");
+    assert!(log.contains("unknown field `pool`"), "\n{log}");
+}
+
 #[test]
 fn master_failboot_exits_70() {
     let mut srv = spawn_with_config("lifecycle/fatal-worker.php", 1, "");
