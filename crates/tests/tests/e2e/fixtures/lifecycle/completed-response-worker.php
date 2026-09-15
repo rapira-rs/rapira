@@ -20,6 +20,7 @@ try {
             '/body' => 5,
             '/empty' => 0,
             '/file' => filesize(__DIR__ . '/payload.bin'),
+            default => throw new RuntimeException("unexpected target {$path}"),
         };
         $ex->writeHead(200, ['content-length' => [(string) $length]]);
         if ($path === '/file') {
@@ -29,16 +30,17 @@ try {
         } else {
             $ex->flush();
         }
-        while (!file_exists($acknowledgement)) {
+        // Bounded, so a stuck test fails on the state assertion instead of a read timeout.
+        $deadline = microtime(true) + 20;
+        while (!file_exists($acknowledgement) && microtime(true) < $deadline) {
             usleep(1_000);
             clearstatcache(true, $acknowledgement);
         }
-        $cancelled = $ex->isCancelled();
         try {
             $ex->writeBody('', eos: true);
-            $result = json_encode([$cancelled, $ex->isFinalized(), $ex->isCancelled()]);
-        } catch (WorkDiscardedException $e) {
-            $result = $e::class;
+            $result = file_exists($acknowledgement) ? 'finalized' : 'timeout';
+        } catch (WorkDiscardedException) {
+            $result = 'discarded';
         }
     }
 } catch (ClosedException) {

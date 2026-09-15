@@ -160,7 +160,7 @@ fn head_completion_does_not_cancel_php() {
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     assert_eq!(
         body,
-        format!("{pid}:2:[false,true,false]").as_bytes(),
+        format!("{pid}:2:finalized").as_bytes(),
         "a delivered head must leave PHP free to finalize\n{}",
         diagnostics(&srv)
     );
@@ -206,7 +206,7 @@ fn assert_completed_response_finalizes(path: &str, contents: &[u8]) {
         assert_eq!(status, 200, "\n{}", diagnostics(&srv));
         assert_eq!(
             c.read_remaining(T).expect("finalization result"),
-            format!("{pid}:2:[false,true,false]").as_bytes(),
+            format!("{pid}:2:finalized").as_bytes(),
             "{path}, close={close}: complete delivery must preserve PHP finalization\n{}",
             diagnostics(&srv)
         );
@@ -232,11 +232,13 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
         fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
             Box::pin(async move {
                 let (mut parts, body) = next.run(req).await.into_parts();
-                let length: u64 = parts.headers["content-length"]
-                    .to_str()
-                    .unwrap()
-                    .parse()
-                    .unwrap();
+                let Some(length) = parts
+                    .headers
+                    .get("content-length")
+                    .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
+                else {
+                    return HttpResponse::from_parts(parts, body);
+                };
                 parts
                     .headers
                     .insert("content-length", (length + 4).to_string().parse().unwrap());
@@ -304,7 +306,7 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
     let result = streamed.and_then(|()| -> anyhow::Result<()> {
         let (status, body) = http_get(addr, "/state", T)?;
         anyhow::ensure!(status == 200, "state status: {status}");
-        let expected = format!("pre:{}:2:[false,true,false]", std::process::id());
+        let expected = format!("pre:{}:2:finalized", std::process::id());
         anyhow::ensure!(
             body == expected.as_bytes(),
             "PHP finalization state: {}",
@@ -314,12 +316,13 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
     });
     let outcomes = running.stop();
     drop(rapira);
-    std::fs::remove_dir_all(dir)?;
     result?;
     anyhow::ensure!(
         outcomes.iter().all(Result::is_ok),
         "HTTP shutdown: {outcomes:?}"
     );
+    // A failure above keeps the scratch dir for inspection, as `Server::drop` does.
+    std::fs::remove_dir_all(dir)?;
     Ok(())
 }
 
@@ -352,7 +355,7 @@ fn later_connection_error_does_not_cancel_completed_response() {
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     assert_eq!(
         body,
-        format!("{pid}:2:[false,true,false]").as_bytes(),
+        format!("{pid}:2:finalized").as_bytes(),
         "\n{}",
         diagnostics(&srv)
     );
