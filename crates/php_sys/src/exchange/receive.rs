@@ -13,6 +13,7 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
         if let Unit::Handling(ptr) = CYCLE.get().unit
             && (*ptr).host_closed()
         {
+            tracing::debug!(target: "rapira", "receive() discarded an unfinalized exchange whose client left");
             super::respond::discard_unit(&mut *ptr);
         }
         if matches!(CYCLE.get().unit, Unit::Handling(_)) {

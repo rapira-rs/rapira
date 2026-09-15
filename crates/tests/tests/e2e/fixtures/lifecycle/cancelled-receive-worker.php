@@ -4,6 +4,7 @@ use Rapira\Exception\ClosedException;
 
 $d = \Rapira\get_dispatcher();
 $sequence = 0;
+$result = null;
 try {
     while (true) {
         $ex = $d->receive();
@@ -11,12 +12,15 @@ try {
         if ($ex->getRequest()->target === '/events') {
             $ex->writeHead(200, ['content-type' => ['text/event-stream']]);
             $ex->writeBody("data: connected\n\n", eos: false);
-            while (!$ex->isCancelled()) {
+            // Bounded, so a stuck test fails on the state assertion instead of a read timeout.
+            $deadline = microtime(true) + 20;
+            while (!$ex->isCancelled() && microtime(true) < $deadline) {
                 usleep(1_000);
             }
+            $result = $ex->isCancelled() ? 'cancelled' : 'timeout';
             continue;
         }
-        $ex->writeBody(getmypid() . ":{$sequence}");
+        $ex->writeBody(getmypid() . ":{$sequence}:{$result}");
     }
 } catch (ClosedException) {
 }
