@@ -170,6 +170,16 @@ fn http_pool(
     }
     //----------------------------------------------------------------
 
+    // sendFile() root: a boot-time diagnostic so a bad path is caught before the first request,
+    // even under ondemand scaling where no worker forks at boot.
+    if let Err(e) = std::fs::metadata(&http.sendfile_root) {
+        tracing::warn!(
+            target: "rapira",
+            "http.sendfile.root {} is not accessible: {e}; sendFile() will reject every path",
+            http.sendfile_root.display()
+        );
+    }
+
     // parse HTTP configuration -------------------------------------
     let http_cfg: HttpConfig = HttpConfig {
         listen: match http.listen {
