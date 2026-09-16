@@ -34,7 +34,7 @@ pub enum Scaling {
 
 /// One plugin's worker set. The master supervises every pool independently.
 pub struct PoolConfig {
-    /// Config table the pool came from ("http"): prefixes its log lines as `{name}.pool.*`.
+    /// Config table the pool came from ("http"). Log lines carry it as `{name} pool:`; messages that quote a key use `{name}.pool.<key>`.
     pub name: &'static str,
     /// Static worker count, or the max-children ceiling under dynamic/ondemand.
     pub processes: usize,
@@ -56,6 +56,7 @@ pub struct MasterConfig {
 
 impl MasterConfig {
     /// Two slots per worker, pools contiguous in order. Names the pool that pushes the total past the cap.
+    /// Every `processes` is at least 1; the config layer enforces the floor.
     pub fn scoreboard_slots(&self) -> anyhow::Result<usize> {
         let max_workers: usize = SB_MAX_SLOTS / 2;
         let mut workers: usize = 0;

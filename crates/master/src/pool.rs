@@ -185,7 +185,7 @@ impl Pool {
             return false;
         }
         ondemand_armed(
-            !stopping && self.reload.is_none(),
+            !stopping,
             self.table.running(),
             self.cfg.processes,
             self.idle_count(),
@@ -422,7 +422,7 @@ impl Pool {
         }
     }
 
-    /// Scaling pauses while this pool drains a reload chain: a refill would race the chain for the slot it just freed. The served latch and the request watchdog keep running.
+    /// Nothing runs while the master stops; the stop escalation bounds every worker. Scaling pauses while this pool drains a reload chain: a refill would race the chain for the slot it just freed. The served latch and the request watchdog keep running during the reload.
     pub(crate) fn maintenance_tick(
         &mut self,
         now: Instant,
@@ -1281,17 +1281,18 @@ mod tests {
     }
 
     #[test]
-    fn ondemand_disarms_while_this_pool_reloads() {
+    fn ondemand_stays_armed_while_this_pool_reloads() {
         let (mut p, _sp) = test_pool(1, Scaling::Ondemand);
-        assert!(p.armed(false));
+        let t0 = Instant::now();
         p.reload = Some(Reload {
             phase: ReloadPhase::Drain {
                 draining: P_OLD0,
                 phase: KillPhase::Quit,
             },
-            deadline: Instant::now(),
+            deadline: t0 + Duration::from_secs(1),
         });
-        assert!(!p.armed(false));
+        assert!(p.armed(false));
+        assert!(!p.armed(true));
     }
 
     /// Static and dynamic workers accept in the children; the master watches only its self-pipe.
