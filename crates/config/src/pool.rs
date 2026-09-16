@@ -3,7 +3,7 @@ use serde::Deserialize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::{Overrides, capped_timeout, config_relative};
+use crate::{capped_timeout, config_relative};
 
 #[derive(Debug)]
 pub struct PoolSettings {
@@ -44,21 +44,6 @@ impl RunMode {
     }
 }
 
-impl std::str::FromStr for RunMode {
-    type Err = String;
-
-    fn from_str(s: &str) -> Result<Self, Self::Err> {
-        match s {
-            "classic" => Ok(RunMode::Classic),
-            "worker" => Ok(RunMode::Worker),
-            "dispatcher" => Ok(RunMode::Dispatcher),
-            other => Err(format!(
-                "unknown mode `{other}` (expected classic, worker, or dispatcher)"
-            )),
-        }
-    }
-}
-
 /// Embedded by name: serde does not support `#[serde(flatten)]` alongside `deny_unknown_fields`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -88,37 +73,34 @@ fn default_processes() -> usize {
         .unwrap_or(1)
 }
 
+/// `table` is the qualified table of the calling plugin, such as `http.pool`. Every message carries it.
 pub(crate) fn resolve_pool(
     section: PoolSection,
-    cli: &Overrides,
+    table: &str,
     config_dir: Option<&Path>,
 ) -> anyhow::Result<PoolSettings> {
-    let processes = cli
-        .processes
-        .or(section.processes)
-        .unwrap_or_else(default_processes);
+    let processes = section.processes.unwrap_or_else(default_processes);
     if processes == 0 {
-        bail!("pool.processes must be at least 1");
+        bail!("{table}.processes must be at least 1");
     }
 
-    let mode = cli.mode.or(section.mode).unwrap_or_default();
+    let mode = section.mode.unwrap_or_default();
 
-    let entrypoint = if let Some(script) = &cli.entrypoint {
-        std::path::absolute(script)?
-    } else if let Some(ep) = section.entrypoint.as_deref().filter(|s| !s.is_empty()) {
-        config_relative(config_dir, ep)?
-    } else {
-        bail!("no entrypoint: pass a SCRIPT argument or set pool.entrypoint in the config file");
+    let Some(ep) = section.entrypoint.as_deref().filter(|s| !s.is_empty()) else {
+        bail!("{table}.entrypoint is required");
     };
+    let entrypoint = config_relative(config_dir, ep)?;
 
     let scaling = match section.scaling.unwrap_or(ScalingKey::Static) {
         ScalingKey::Dynamic => {
             let (Some(min_spare), Some(max_spare)) = (section.min_spare, section.max_spare) else {
-                bail!("pool.scaling = \"dynamic\" requires pool.min_spare and pool.max_spare");
+                bail!(
+                    "{table}.scaling = \"dynamic\" requires {table}.min_spare and {table}.max_spare"
+                );
             };
             if !(1..=max_spare).contains(&min_spare) || max_spare > processes {
                 bail!(
-                    "pool spares must satisfy 1 <= min_spare ({min_spare}) <= max_spare ({max_spare}) <= pool.processes ({processes})"
+                    "{table} spares must satisfy 1 <= min_spare ({min_spare}) <= max_spare ({max_spare}) <= {table}.processes ({processes})"
                 );
             }
             Scaling::Dynamic {
@@ -129,7 +111,7 @@ pub(crate) fn resolve_pool(
         other => {
             if section.min_spare.is_some() || section.max_spare.is_some() {
                 bail!(
-                    "pool.min_spare/pool.max_spare are only valid with pool.scaling = \"dynamic\""
+                    "{table}.min_spare/{table}.max_spare are only valid with {table}.scaling = \"dynamic\""
                 );
             }
             if other == ScalingKey::Static {
@@ -147,14 +129,28 @@ pub(crate) fn resolve_pool(
         scaling,
         max_requests: section.max_requests.unwrap_or(0),
         process_idle_timeout: capped_timeout(
-            "pool",
+            table,
             "process_idle_timeout_secs",
             section.process_idle_timeout_secs.unwrap_or(10),
         )?,
         request_terminate_timeout: capped_timeout(
-            "pool",
+            table,
             "request_terminate_timeout_secs",
             section.request_terminate_timeout_secs.unwrap_or(0),
         )?,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every message carries the caller's table, so a second pool reports its own keys.
+    #[test]
+    fn resolve_pool_prefixes_errors_with_the_table() {
+        let err = resolve_pool(PoolSection::default(), "grpc.pool", None)
+            .unwrap_err()
+            .to_string();
+        assert_eq!(err, "grpc.pool.entrypoint is required");
+    }
 }

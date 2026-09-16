@@ -1,3 +1,4 @@
+use std::ops::Range;
 use std::sync::atomic::{
     AtomicU32, AtomicU64,
     Ordering::{Relaxed, Release},
@@ -84,6 +85,13 @@ impl Scoreboard {
             );
             let slots = std::slice::from_raw_parts(ptr.cast::<SharedSlot>(), nslots);
             Ok(Scoreboard { slots })
+        }
+    }
+
+    /// View over `range` of this board: indices inside the view are local to it, the memory is shared.
+    pub fn slice(&self, range: Range<usize>) -> Scoreboard {
+        Scoreboard {
+            slots: &self.slots[range],
         }
     }
 
@@ -180,5 +188,19 @@ mod tests {
     fn slots_out_of_range_rejected() {
         assert!(Scoreboard::create(0).is_err());
         assert!(Scoreboard::create(SB_MAX_SLOTS + 1).is_err());
+    }
+
+    #[test]
+    fn slice_shares_memory_with_local_indices() {
+        let board = Scoreboard::create(6).unwrap();
+        let view = board.slice(2..4);
+        assert_eq!(view.nslots(), 2);
+        assert!(std::ptr::eq(view.slot(1), board.slot(3)));
+
+        view.set_starting(0);
+        assert_eq!(board.slot(2).state.load(Relaxed), SLOT_STARTING);
+        assert_eq!(board.slot(1).state.load(Relaxed), SLOT_FREE);
+
+        assert_eq!(view.snapshot_slots()[0].id, 0);
     }
 }

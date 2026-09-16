@@ -1,0 +1,7 @@
+[http]
+listen = "127.0.0.1:8000"
+
+[http.pool]
+entrypoint = "../examples/worker.php"
+mode = "worker"
+processes = 1

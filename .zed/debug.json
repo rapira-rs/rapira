@@ -1,6 +1,6 @@
 [
 	{
-		"label": "rapira: serve worker - examples/worker.php",
+		"label": "rapira: serve .zed/rapira.toml",
 		"adapter": "CodeLLDB",
 		"request": "launch",
 		"program": "$ZED_WORKTREE_ROOT/target/debug/rapira",
@@ -8,14 +8,7 @@
 			"command": "cargo",
 			"args": ["build", "--bin=rapira", "--package=rapira_core"]
 		},
-		"args": [
-			"serve",
-			"--mode",
-			"worker",
-			"--processes",
-			"1",
-			"examples/worker.php"
-		],
+		"args": ["serve", ".zed/rapira.toml"],
 		"cwd": "$ZED_WORKTREE_ROOT",
 		"env": {
 			"DYLD_LIBRARY_PATH": "target/phplib",
@@ -25,7 +18,7 @@
 		"sourceLanguages": ["rust"]
 	},
 	{
-		"label": "rapira: serve worker - follow fork child",
+		"label": "rapira: serve .zed/rapira.toml - follow fork child",
 		"adapter": "CodeLLDB",
 		"request": "launch",
 		"program": "$ZED_WORKTREE_ROOT/target/debug/rapira",
@@ -33,14 +26,7 @@
 			"command": "cargo",
 			"args": ["build", "--bin=rapira", "--package=rapira_core"]
 		},
-		"args": [
-			"serve",
-			"--mode",
-			"worker",
-			"--processes",
-			"1",
-			"examples/worker.php"
-		],
+		"args": ["serve", ".zed/rapira.toml"],
 		"cwd": "$ZED_WORKTREE_ROOT",
 		"env": {
 			"DYLD_LIBRARY_PATH": "target/phplib",

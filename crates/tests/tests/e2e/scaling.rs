@@ -1,7 +1,7 @@
 use crate::harness::*;
 use std::time::{Duration, Instant};
 
-/// pool.processes is the ceiling; dynamic must keep only min_spare..max_spare idle once the storm stops.
+/// http.pool.processes is the ceiling; dynamic must keep only min_spare..max_spare idle once the storm stops.
 #[test]
 fn dynamic_scales_up_down() {
     let srv = spawn_with_config(

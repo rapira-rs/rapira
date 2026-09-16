@@ -19,14 +19,25 @@ Copy Rapira and its PHP library into your application image:
 FROM php:8.5-cli-trixie
 COPY --from=ghcr.io/rapira-rs/rapira:php8.5 / /
 COPY . /app
-CMD ["rapira", "serve", "--listen", ":8000", "--mode", "classic", "/app/public/index.php"]
+CMD ["rapira", "serve", "/app/rapira.toml"]
+```
+
+The app directory holds a `rapira.toml`:
+
+```toml
+[http]
+listen = ":8000"
+
+[http.pool]
+entrypoint = "/app/public/index.php"
+mode = "classic"
 ```
 
 See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
 
 ## Usage
 
-Each example listens on `127.0.0.1:8000`. After it starts, run `curl http://127.0.0.1:8000/` in another terminal.
+Each example listens on `127.0.0.1:8000`. After it starts, run `curl http://127.0.0.1:8000/` in another terminal. Relative paths in `rapira.toml` resolve against its directory; the classic example's `entrypoint` is `public/index.php`, one directory below the file.
 
 ### Classic
 
@@ -38,8 +49,19 @@ header('Content-Type: text/plain');
 echo "Hello, {$_SERVER['REQUEST_URI']}\n";
 ```
 
+Save this as `rapira.toml`:
+
+```toml
+[http]
+listen = "127.0.0.1:8000"
+
+[http.pool]
+entrypoint = "public/index.php"
+mode = "classic"
+```
+
 ```sh
-rapira serve --mode classic public/index.php
+rapira serve rapira.toml
 ```
 
 ### Worker
@@ -57,8 +79,19 @@ while (\Rapira\handle_request($handler)) {
 }
 ```
 
+Save this as `rapira.toml`:
+
+```toml
+[http]
+listen = "127.0.0.1:8000"
+
+[http.pool]
+entrypoint = "worker.php"
+mode = "worker"
+```
+
 ```sh
-rapira serve --mode worker worker.php
+rapira serve rapira.toml
 ```
 
 ### Dispatcher (default)
@@ -87,8 +120,19 @@ try {
 }
 ```
 
+Save this as `rapira.toml`:
+
+```toml
+[http]
+listen = "127.0.0.1:8000"
+
+[http.pool]
+entrypoint = "dispatcher.php"
+mode = "dispatcher"
+```
+
 ```sh
-rapira serve --mode dispatcher dispatcher.php
+rapira serve rapira.toml
 ```
 
 See [examples](examples/) for routing, streaming, and asynchronous dispatch.
