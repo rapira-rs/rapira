@@ -2,7 +2,7 @@
 
 One file per run mode - two for the dispatcher. Use an installed `rapira`, or build one with `make test_nts` and take `target/nts/debug/rapira`.
 
-Set `http.pool.entrypoint` and `http.pool.mode` in `examples/rapira.toml` to pick a run mode:
+The shipped file runs `dispatcher-sync.php`. To run another example, set `http.pool.entrypoint` and `http.pool.mode` in `examples/rapira.toml` or in a copy of it:
 
 ```sh
 rapira serve examples/rapira.toml
