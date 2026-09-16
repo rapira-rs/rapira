@@ -260,10 +260,13 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // One context for every pool, kept alive past `run` so the master keeps its listener dups.
     let mut prepare: PrepareCtx = PrepareCtx::new();
-    let (http_run, http_cfg) = http_pool(settings.http, &settings.supervisor, &mut prepare)?;
-    // The two lists share one index: `pools[i]` runs the workers of `cfg.pools[i]`, and that index is `WorkerEnv::pool`.
-    let mut pools: Vec<PoolRun> = vec![http_run];
-    let pool_cfgs: Vec<PoolConfig> = vec![http_cfg];
+    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = [http_pool(
+        settings.http,
+        &settings.supervisor,
+        &mut prepare,
+    )?]
+    .into_iter()
+    .unzip();
 
     // MINIT once, after every pool bound its listeners.
     let module: php_sys::PhpModule = Rapira::boot_master()?;

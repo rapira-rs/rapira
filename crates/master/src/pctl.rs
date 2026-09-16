@@ -24,12 +24,11 @@ impl KillPhase {
     }
 }
 
-/// Master-wide control state. Each pool drives its own reload chain while this stays `Reloading`.
+/// Master-wide control state. Each pool owns its reload chain.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum PctlState {
     Normal,
     Stopping { phase: KillPhase },
-    Reloading,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -59,11 +58,7 @@ impl Pctl {
         matches!(self.state, PctlState::Stopping { .. })
     }
 
-    pub fn is_reloading(&self) -> bool {
-        matches!(self.state, PctlState::Reloading)
-    }
-
-    /// Override precedence: normal < reloading < stopping; only TERM/INT overrides stopping (forced), while a retried QUIT stays graceful.
+    /// Override precedence: normal < stopping; only TERM/INT overrides stopping (forced), while a retried QUIT stays graceful.
     pub fn on_signal(&mut self, byte: u8) -> SignalAction {
         use crate::signals::{SIG_HUP, SIG_INT, SIG_QUIT, SIG_TERM, SIG_USR1, SIG_USR2};
         match byte {
@@ -78,11 +73,8 @@ impl Pctl {
                 }
             },
             SIG_USR2 | SIG_HUP => match self.state {
-                PctlState::Normal => {
-                    self.state = PctlState::Reloading;
-                    SignalAction::Reload
-                }
-                _ => SignalAction::Ignore,
+                PctlState::Normal => SignalAction::Reload,
+                PctlState::Stopping { .. } => SignalAction::Ignore,
             },
             SIG_USR1 => SignalAction::Status,
             _ => SignalAction::Ignore,
@@ -92,13 +84,9 @@ impl Pctl {
     /// Next signal for every worker of every pool. A reload escalates per pool, against the one worker that drains.
     pub fn escalate(&mut self) -> Option<c_int> {
         match &mut self.state {
-            PctlState::Normal | PctlState::Reloading => None,
+            PctlState::Normal => None,
             PctlState::Stopping { phase } => Some(phase.advance()),
         }
-    }
-
-    pub fn finish_reload(&mut self) {
-        self.state = PctlState::Normal;
     }
 }
 
@@ -143,29 +131,15 @@ mod tests {
         for b in [SIG_USR2, SIG_HUP] {
             let mut p = Pctl::default();
             assert_eq!(p.on_signal(b), SignalAction::Reload);
-            assert_eq!(p.state, PctlState::Reloading);
+            assert_eq!(p.state, PctlState::Normal);
         }
     }
 
     #[test]
-    fn reload_ignored_while_stopping_or_reloading() {
-        let mut p = Pctl::default();
-        p.on_signal(SIG_USR2);
-        assert_eq!(p.on_signal(SIG_USR2), SignalAction::Ignore);
-        assert_eq!(p.on_signal(SIG_HUP), SignalAction::Ignore);
-
+    fn reload_ignored_while_stopping() {
         let mut p = Pctl::default();
         p.on_signal(SIG_TERM);
         assert_eq!(p.on_signal(SIG_USR2), SignalAction::Ignore);
-        assert!(p.is_stopping());
-    }
-
-    #[test]
-    fn stop_overrides_reload() {
-        let mut p = Pctl::default();
-        p.on_signal(SIG_USR2);
-        assert!(p.is_reloading());
-        assert_eq!(p.on_signal(SIG_TERM), SignalAction::Stop);
         assert!(p.is_stopping());
     }
 
@@ -192,22 +166,5 @@ mod tests {
     fn normal_has_no_escalation() {
         let mut p = Pctl::default();
         assert_eq!(p.escalate(), None);
-    }
-
-    /// Escalation against a draining worker belongs to its pool; the global machine sends nothing.
-    #[test]
-    fn reloading_has_no_global_escalation() {
-        let mut p = Pctl::default();
-        p.on_signal(SIG_USR2);
-        assert_eq!(p.escalate(), None);
-        assert!(p.is_reloading());
-    }
-
-    #[test]
-    fn finish_reload_returns_to_normal() {
-        let mut p = Pctl::default();
-        p.on_signal(SIG_USR2);
-        p.finish_reload();
-        assert_eq!(p.state, PctlState::Normal);
     }
 }

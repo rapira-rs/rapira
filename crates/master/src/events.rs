@@ -60,7 +60,7 @@ impl<S: Spawner> Master<S> {
             .into_iter()
             .enumerate()
             .map(|(i, p)| {
-                let len = p.processes * 2;
+                let len = p.slots();
                 let board = scoreboard.slice(base..base + len);
                 base += len;
                 Pool::new(i, p, board, control_timeout)
@@ -85,7 +85,10 @@ impl<S: Spawner> Master<S> {
                 Some(StopReason::Forced)
             }
             SignalAction::Reload => {
-                self.begin_reload(now);
+                // A pool that still drains its chain swallows the signal.
+                if self.pools.iter().all(|p| p.reload.is_none()) {
+                    self.begin_reload(now);
+                }
                 None
             }
             SignalAction::Status => {
@@ -130,14 +133,6 @@ impl<S: Spawner> Master<S> {
         for p in &mut self.pools {
             p.begin_reload(now, &mut self.spawner);
         }
-        self.settle_reload();
-    }
-
-    /// The master leaves Reloading when every pool finished its own chain.
-    fn settle_reload(&mut self) {
-        if self.pctl.is_reloading() && self.pools.iter().all(|p| p.reload.is_none()) {
-            self.pctl.finish_reload();
-        }
     }
 
     fn route_exit(
@@ -149,7 +144,6 @@ impl<S: Spawner> Master<S> {
     ) -> anyhow::Result<()> {
         let stopping = self.pctl.is_stopping();
         self.pools[pool].on_child_exit(w, verdict, now, stopping, &mut self.spawner)?;
-        self.settle_reload();
         Ok(())
     }
 
@@ -174,7 +168,6 @@ impl<S: Spawner> Master<S> {
         for p in &mut self.pools {
             p.fire_due(now, &mut self.spawner);
         }
-        self.settle_reload();
         if now >= self.next_tick {
             self.next_tick = now + Duration::from_secs(1);
             let stopping = self.pctl.is_stopping();
@@ -291,7 +284,6 @@ impl<S: Spawner> Master<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::pctl::PctlState;
     use crate::pool::{Reload, ReloadPhase, WarnCounter};
     use crate::process::{FakeSpawner, KillIntent, TestChild, dead_worker, wait_signal};
     use crate::signals::{SIG_TERM, SIG_USR2};
@@ -330,6 +322,11 @@ mod tests {
             pidfile: None,
         };
         (Master::new(cfg, sb, FakeSpawner::new()), sb)
+    }
+
+    /// Worker generation of the http pool and the grpc pool.
+    fn generations(m: &Master<FakeSpawner>) -> (u32, u32) {
+        (m.pools[0].table.generation, m.pools[1].table.generation)
     }
 
     /// A live fd for the poll set. These tests read the owner map, never the fd.
@@ -415,7 +412,7 @@ mod tests {
     }
 
     #[test]
-    fn reload_finishes_only_when_every_pool_is_done() {
+    fn second_reload_is_ignored_until_every_pool_finished() {
         let (mut m, _sb) = test_master(&[(2, Scaling::Static), (1, Scaling::Static)]);
         let t0 = Instant::now();
         for (i, &pid) in [P_A, P_B].iter().enumerate() {
@@ -424,26 +421,30 @@ mod tests {
         }
 
         assert_eq!(m.handle_signal(SIG_USR2, t0), None);
-        assert!(m.pctl.is_reloading());
         assert!(m.pools.iter().all(|p| p.reload.is_some()));
+        assert_eq!(generations(&m), (1, 1));
 
         for p in &mut m.pools {
             p.set_slot(1, SLOT_IDLE);
         }
         m.fire_due_deadlines(t0 + Duration::from_millis(60));
-        assert!(
-            m.pctl.is_reloading(),
-            "both pools still drain an old worker"
-        );
+
+        assert_eq!(m.handle_signal(SIG_USR2, t0), None);
+        assert_eq!(generations(&m), (1, 1), "both pools still drain");
 
         let w = m.pools[0].take_proc(P_A);
         m.route_exit(0, w, ExitVerdict::Drain, t0).unwrap();
         assert!(m.pools[0].reload.is_none());
-        assert!(m.pctl.is_reloading(), "the grpc pool has not finished");
+
+        assert_eq!(m.handle_signal(SIG_USR2, t0), None);
+        assert_eq!(generations(&m), (1, 1), "the grpc pool still drains");
 
         let w = m.pools[1].take_proc(P_B);
         m.route_exit(1, w, ExitVerdict::Drain, t0).unwrap();
-        assert_eq!(m.pctl.state, PctlState::Normal);
+        assert!(m.pools.iter().all(|p| p.reload.is_none()));
+
+        assert_eq!(m.handle_signal(SIG_USR2, t0), None);
+        assert_eq!(generations(&m), (2, 2));
     }
 
     #[test]
@@ -460,14 +461,12 @@ mod tests {
         assert_eq!(m.pools[1].table.generation, 1, "the generation still moves");
         assert_eq!(m.spawner.calls.len(), 1);
         assert_eq!(m.spawner.calls[0].0, 0);
-        assert!(m.pctl.is_reloading());
     }
 
     #[test]
     fn maintenance_continues_in_pools_that_are_not_reloading() {
         let (mut m, _sb) = test_master(&[(2, Scaling::Static), (1, Scaling::Static)]);
         let t0 = Instant::now() + Duration::from_secs(2);
-        m.pctl.on_signal(SIG_USR2);
         m.pools[0].reload = Some(Reload {
             phase: ReloadPhase::Await {
                 slot: 0,

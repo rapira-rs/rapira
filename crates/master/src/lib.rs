@@ -47,6 +47,13 @@ pub struct PoolConfig {
     pub listeners: Vec<RawFd>,
 }
 
+impl PoolConfig {
+    /// Two slots per worker so a reload replacement fits next to the worker it replaces.
+    pub fn slots(&self) -> usize {
+        self.processes * 2
+    }
+}
+
 pub struct MasterConfig {
     pub pools: Vec<PoolConfig>,
     /// Stop/reload QUIT to TERM escalation grace.
@@ -58,20 +65,19 @@ impl MasterConfig {
     /// Two slots per worker, pools contiguous in order. Names the pool that pushes the total past the cap.
     /// Every `processes` is at least 1; the config layer enforces the floor.
     pub fn scoreboard_slots(&self) -> anyhow::Result<usize> {
-        let max_workers: usize = SB_MAX_SLOTS / 2;
-        let mut workers: usize = 0;
+        let mut slots: usize = 0;
         for p in &self.pools {
-            workers = workers.saturating_add(p.processes);
+            slots = slots.saturating_add(p.slots());
             anyhow::ensure!(
-                workers <= max_workers,
+                slots <= SB_MAX_SLOTS,
                 "{}.pool.processes ({}) raises the worker total to {}, above the supported maximum ({})",
                 p.name,
                 p.processes,
-                workers,
-                max_workers
+                slots / 2,
+                SB_MAX_SLOTS / 2
             );
         }
-        Ok(workers * 2)
+        Ok(slots)
     }
 }
 
