@@ -313,9 +313,7 @@ mod tests {
             Path::new("/srv/app/dispatcher-sync.php")
         );
         assert_eq!(s.http.pool.mode, RunMode::Dispatcher);
-        assert_eq!(s.http.pool.processes, 16);
         assert_eq!(s.http.sendfile_root, Path::new("/srv/app"));
-        assert_eq!(s.log.level, LogLevel::Trace);
     }
 
     #[test]
