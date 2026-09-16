@@ -1,5 +1,5 @@
 pub(crate) use std::{
-    cell::Cell,
+    cell::{Cell, RefCell},
     ffi::{CStr, CString, c_char, c_int, c_void},
     io::Read,
     path::Path,
@@ -49,13 +49,13 @@ enum Unit {
     Sealed(*mut ExchangeState),
 }
 
-#[derive(Clone, Copy)]
 struct CycleState {
     unit: Unit,
     closed_seen: bool,
     served: bool,
     /// A unit was handed out this cycle: a fatal after that is an app failure, not a boot failure.
     received: bool,
+    scope: Option<tracing::span::EnteredSpan>,
 }
 
 const CYCLE_IDLE: CycleState = CycleState {
@@ -63,26 +63,62 @@ const CYCLE_IDLE: CycleState = CycleState {
     closed_seen: false,
     served: false,
     received: false,
+    scope: None,
 };
 
 thread_local! {
-    static CYCLE: Cell<CycleState> = const { Cell::new(CYCLE_IDLE) };
+    static CYCLE: RefCell<CycleState> = const { RefCell::new(CYCLE_IDLE) };
 }
 
 fn update(f: impl FnOnce(&mut CycleState)) {
-    let mut c = CYCLE.get();
-    f(&mut c);
-    CYCLE.set(c);
+    CYCLE.with_borrow_mut(f);
+}
+
+fn current_unit() -> Unit {
+    CYCLE.with_borrow(|c| c.unit)
+}
+
+/// # Safety
+/// The returned context is owned by the active exchange on this PHP thread.
+pub(crate) unsafe fn active_context<'a>() -> Option<&'a crate::types::Context> {
+    let unit = CYCLE.with_borrow(|c| c.scope.as_ref().map(|_| c.unit));
+    match unit {
+        Some(Unit::Handling(ptr)) => Some(unsafe { &(*ptr).job.ctx }),
+        _ => None,
+    }
+}
+
+fn finish_execution(st: &mut ExchangeState, errored: bool) {
+    let ptr = std::ptr::from_mut(st);
+    update(|c| {
+        if matches!(c.unit, Unit::Handling(p) | Unit::Sealed(p) if p == ptr) {
+            c.scope = None;
+        }
+    });
+    // A fatal can leave the exchange open for a shutdown response.
+    let errored = errored || unsafe { (*crate::rapira_cg()).unclean_shutdown };
+    st.job.ctx.finish_execution(errored);
+}
+
+/// A cycle that returned with an active exchange failed to complete that request.
+pub(crate) fn finish_current() {
+    if let Unit::Handling(ptr) = current_unit() {
+        // SAFETY: the active unit remains owned until exchange_drop or reclaim_current.
+        finish_execution(unsafe { &mut *ptr }, true);
+    }
 }
 
 pub(crate) fn cycle_reset() {
     reclaim_current();
-    CYCLE.set(CYCLE_IDLE);
+    update(|c| *c = CYCLE_IDLE);
 }
 
 /// Reclaim a unit free_obj never saw (shutdown bailout / allocation bailout).
 pub(crate) fn reclaim_current() {
-    if let Unit::Handling(ptr) | Unit::Sealed(ptr) = CYCLE.get().unit {
+    if let Unit::Handling(ptr) | Unit::Sealed(ptr) = current_unit() {
+        // SAFETY: the active unit remains owned until exchange_drop or this function.
+        let st = unsafe { &mut *ptr };
+        finish_execution(st, st.stage != Stage::Finalized);
         update(|c| c.unit = Unit::Idle);
         // SAFETY: the pointer came from Box::into_raw in finish_pull, and exchange_drop untracks before reclaiming.
         let st = unsafe { Box::from_raw(ptr) };
@@ -94,7 +130,7 @@ pub(crate) fn reclaim_current() {
 }
 
 pub(crate) fn closed_seen() -> bool {
-    CYCLE.get().closed_seen
+    CYCLE.with_borrow(|c| c.closed_seen)
 }
 
 pub(crate) fn note_closed() {
@@ -110,11 +146,11 @@ pub(crate) fn note_served() {
 }
 
 pub(crate) fn served_any() -> bool {
-    CYCLE.get().served
+    CYCLE.with_borrow(|c| c.served)
 }
 
 pub(crate) fn received_any() -> bool {
-    CYCLE.get().received
+    CYCLE.with_borrow(|c| c.received)
 }
 
 /// The head locks on the first head or body write: a body chunk commits an implicit 200 first.

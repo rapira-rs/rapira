@@ -7,6 +7,7 @@ use std::time::Duration;
 use bytes::Bytes;
 use extension_api::{BoxError, Reply, ReplyEvent};
 use tokio::sync::watch;
+use tracing::Instrument;
 
 use crate::handler::InflightReqCount;
 
@@ -37,7 +38,9 @@ struct FilePump {
 }
 
 fn read_slice(file: std::fs::File, off: u64, want: usize) -> FileRead {
+    let span = tracing::trace_span!("http.sendfile.read", offset = off, bytes = want);
     tokio::task::spawn_blocking(move || {
+        let _entered = span.entered();
         use std::os::unix::fs::FileExt;
         let mut buf = vec![0u8; want];
         let res = file.read_at(&mut buf, off).map(|n| {
@@ -72,6 +75,7 @@ impl ReplyBody {
         &mut self,
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Bytes>, BoxError>>> {
+        self.guard.span.record("otel.status_code", "ERROR");
         self.reply = None;
         self.file = None;
         self.err_armed = true;
@@ -215,19 +219,24 @@ pub(crate) fn spawn_drain(
     mut closed: watch::Receiver<ConnectionState>,
     guard: Arc<InflightReqCount>,
 ) {
-    tokio::spawn(async move {
-        let flushed = |s: &ConnectionState| guard.end_flush.get().is_some_and(|&f| s.flushes > f);
-        tokio::select! {
-            biased;
-            state = closed.wait_for(|s| s.closed || flushed(s)) => {
-                if !state.is_ok_and(|s| flushed(&s)) {
-                    return;
+    let span = tracing::trace_span!(parent: &guard.span, "http.response.drain");
+    tokio::spawn(
+        async move {
+            let flushed =
+                |s: &ConnectionState| guard.end_flush.get().is_some_and(|&f| s.flushes > f);
+            tokio::select! {
+                biased;
+                state = closed.wait_for(|s| s.closed || flushed(s)) => {
+                    if !state.is_ok_and(|s| flushed(&s)) {
+                        return;
+                    }
                 }
+                () = drain(&mut reply) => return,
             }
-            () = drain(&mut reply) => return,
+            drain(&mut reply).await;
         }
-        drain(&mut reply).await;
-    });
+        .instrument(span),
+    );
 }
 
 async fn drain(reply: &mut Reply) {

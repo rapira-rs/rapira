@@ -26,12 +26,15 @@ tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
 libc = "0.2"
 # E2E log-format assertions (tests/e2e/logging.rs).
 serde_json = "1"
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace", "logs", "metrics"] }
+prost = "0.14"
 
 # The spawn-the-binary E2E suite forks worker processes and runs request storms;
 # gated behind a feature so `cargo test --workspace` skips it. Run it isolated
 # (build the rapira bin first): cargo test -p tests --test e2e --features e2e
 [features]
 e2e = []
+otel = []
 
 [[test]]
 name = "e2e"

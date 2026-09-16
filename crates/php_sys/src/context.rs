@@ -24,6 +24,17 @@ pub(crate) fn bind_server_context(ctx: &mut Context) {
     }
 }
 
+/// # Safety
+/// The worker context is bound. The C caller catches PHP allocation bailouts.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_populate_request_context() {
+    unsafe {
+        if let Some(ctx) = ctx() {
+            populate_request_context(ctx);
+        }
+    }
+}
+
 /// Also clears the `SG(request_info)` pointers into `job.ctx`, which a panic can recycle before `rapira_request_teardown` runs.
 pub(crate) fn unbind_server_context() {
     unsafe {

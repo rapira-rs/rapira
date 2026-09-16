@@ -14,6 +14,7 @@ extern bool rapira_rs_receive(int64_t timeout_us, zval *return_value);
 extern bool rapira_rs_try_receive(zval *return_value);
 extern bool rapira_rs_dispatcher_info(zval *return_value);
 extern bool rapira_rs_get_dispatcher(zval *return_value);
+extern bool rapira_rs_trace_context(zval *return_value);
 extern int rapira_rs_handle_request(zend_fcall_info *fci,
                                     zend_fcall_info_cache *fcc);
 
@@ -25,6 +26,14 @@ ZEND_FUNCTION(Rapira_get_version) {
     size_t len = 0;
     const char *version = rapira_rs_version(&len);
     RETURN_STRINGL(version, len);
+}
+
+ZEND_FUNCTION(Rapira_trace_context) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    if (!rapira_rs_trace_context(return_value)) {
+        rapira_throw_or_backstop("trace_context");
+        RETURN_THROWS();
+    }
 }
 
 // rapira_mode is set once before the PHP thread starts (start.rs), so the case is stable for the process

@@ -56,6 +56,7 @@ pub struct PoolArgs {
 
 /// Returns the process exit code for the master's fork bracket; never runs PHP module teardown, MSHUTDOWN stays with the master.
 pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i32 {
+    let boot = tracing::trace_span!(parent: None, "worker.boot").entered();
     let PoolArgs {
         mode,
         entrypoint,
@@ -124,8 +125,10 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
     if WORKER_EXIT.load(SeqCst) != -1 {
         stopper.get().expect("just set").stop();
     }
+    drop(boot);
 
     let outcomes: Vec<Result<(), String>> = running.serve_worker();
+    let _shutdown = tracing::trace_span!(parent: None, "worker.shutdown").entered();
     drop(rapira);
     if let Some(dir) = &spool_dir
         && let Err(e) = std::fs::remove_dir_all(dir)

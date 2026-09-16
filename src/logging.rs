@@ -8,15 +8,20 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
-pub fn init(log: &LogSettings) -> anyhow::Result<()> {
+pub fn init(
+    log: &LogSettings,
+    #[cfg(feature = "otel")] telemetry: Option<(&rapira_config::OtelSettings, otel::ipc::Sender)>,
+) -> anyhow::Result<()> {
     let filter = build_filter(std::env::var("RUST_LOG").ok().as_deref(), log)?;
     let ansi = ansi_enabled(
         io::stderr().is_terminal(),
         std::env::var_os("NO_COLOR").as_deref(),
     );
-    tracing_subscriber::registry()
-        .with(filter)
-        .with(make_layer(log.format, ansi, io::stderr))
+    let registry = tracing_subscriber::registry();
+    #[cfg(feature = "otel")]
+    let registry = registry.with(telemetry.map(|(settings, sender)| otel::layer(settings, sender)));
+    registry
+        .with(make_layer(log.format, ansi, io::stderr).with_filter(filter))
         .init();
     Ok(())
 }

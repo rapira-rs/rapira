@@ -2,6 +2,51 @@ use php_sys::{Frame, Mode, Rapira};
 use std::io::Cursor;
 use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
+#[test]
+fn request_trace_context_is_empty_without_a_native_sdk() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        uri: &'static str,
+        expected: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "first exchange defers getRequest",
+            uri: "/first",
+            expected: r#"{"outside":[],"active":[],"request":null,"cached":null,"previousLazy":null,"previous":null}"#,
+        },
+        Case {
+            name: "lazy request from the previous exchange",
+            uri: "/second",
+            expected: r#"{"outside":[],"active":[],"request":[],"cached":true,"previousLazy":[],"previous":null}"#,
+        },
+        Case {
+            name: "retained request snapshot",
+            uri: "/third",
+            expected: r#"{"outside":[],"active":[],"request":[],"cached":true,"previousLazy":[],"previous":[]}"#,
+        },
+    ];
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear();
+    let script = "dispatcher/trace-context-worker.php";
+    let r = Rapira::start(Mode::Dispatcher(fixture(script)))?;
+    let h = r.handle();
+    for case in cases {
+        let response = drain_resp(h.handle_blocking(req(case.uri, script))?);
+        assert_eq!(response.status(), 200, "{}", case.name);
+        assert_eq!(response.body_string(), case.expected, "{}", case.name);
+    }
+    drop(h);
+    r.shutdown();
+    assert!(
+        captured().iter().any(
+            |record| record.message == "trace-outside" && record.context == r#"{"carrier":[]}"#
+        )
+    );
+    Ok(())
+}
+
 fn verbs_probe(query: &str) -> anyhow::Result<(u16, String)> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;

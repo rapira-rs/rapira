@@ -155,6 +155,7 @@ pub unsafe extern "C" fn rapira_rs_ctor_request(
     server: *mut zval,
     tls: *mut zval,
     received_at: c_double,
+    trace_context: *mut zval,
 ) -> bool {
     guard(false, || unsafe {
         if !address_arg(remote, 8) || !address_arg(server, 9) {
@@ -176,6 +177,7 @@ pub unsafe extern "C" fn rapira_rs_ctor_request(
             zend::prop_zval(ce, obj, c"tls", tls);
         }
         zend::prop_double(ce, obj, c"receivedAt", received_at);
+        zend::prop_zval(ce, obj, c"traceContext", trace_context);
         !zend::exception_pending()
     })
 }

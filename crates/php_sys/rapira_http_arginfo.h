@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 23315c4f2e41581ec36229ca4cccb0dc2f114b23 */
+ * Stub hash: e81b1940e17f4a424a8ea4134e0a06221c1b5fa4 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_Tls___construct, 0, 0, 7)
 	ZEND_ARG_TYPE_INFO(0, version, IS_STRING, 0)
@@ -31,7 +31,7 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_Multipart___construct, 0, 0, 2)
 	ZEND_ARG_TYPE_INFO(0, files, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
 
-ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_Request___construct, 0, 0, 11)
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_Request___construct, 0, 0, 12)
 	ZEND_ARG_TYPE_INFO(0, method, IS_STRING, 0)
 	ZEND_ARG_TYPE_INFO(0, uri, IS_STRING, 0)
 	ZEND_ARG_TYPE_INFO(0, target, IS_STRING, 0)
@@ -43,6 +43,7 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_Request___construct, 0, 0, 11)
 	ZEND_ARG_OBJ_TYPE_MASK(0, server, Rapira\\InetAddress|Rapira\\\125nixAddress, 0, NULL)
 	ZEND_ARG_OBJ_INFO(0, tls, Rapira\\Http\\Tls, 1)
 	ZEND_ARG_TYPE_INFO(0, receivedAt, IS_DOUBLE, 0)
+	ZEND_ARG_TYPE_INFO(0, traceContext, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_class_Rapira_Http_Exchange_getRequest, 0, 0, Rapira\\Http\\Request, 0)
@@ -448,6 +449,12 @@ static zend_class_entry *register_class_Rapira_Http_Request(void)
 	zend_string *property_receivedAt_name = zend_string_init("receivedAt", sizeof("receivedAt") - 1, 1);
 	zend_declare_typed_property(class_entry, property_receivedAt_name, &property_receivedAt_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_DOUBLE));
 	zend_string_release(property_receivedAt_name);
+
+	zval property_traceContext_default_value;
+	ZVAL_UNDEF(&property_traceContext_default_value);
+	zend_string *property_traceContext_name = zend_string_init("traceContext", sizeof("traceContext") - 1, 1);
+	zend_declare_typed_property(class_entry, property_traceContext_name, &property_traceContext_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_ARRAY));
+	zend_string_release(property_traceContext_name);
 
 	return class_entry;
 }

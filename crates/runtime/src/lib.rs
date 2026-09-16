@@ -232,16 +232,20 @@ impl RapiraBackend {
             let boundary = multipart::boundary(ct).map_err(parse_err)?;
             let bytes = std::mem::take(&mut req.body);
             let limits = Arc::clone(&self.uploads);
-            let parsed =
-                tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
-                    .await
-                    .map_err(|e| anyhow::anyhow!("multipart parse task failed: {e}"))?;
+            let span = tracing::trace_span!(parent: &req.span, "http.multipart");
+            let parsed = tokio::task::spawn_blocking(move || {
+                let _entered = span.entered();
+                multipart::parse(&bytes, &boundary, &limits)
+            })
+            .await
+            .map_err(|e| anyhow::anyhow!("multipart parse task failed: {e}"))?;
             php_sys::types::Body::Multipart(parsed.map_err(parse_err)?)
         } else {
             php_sys::types::Body::Raw(Box::new(Cursor::new(std::mem::take(&mut req.body))))
         };
 
         Ok(php_sys::Request {
+            span: req.span,
             method: req.method,
             https: req.https,
             query,

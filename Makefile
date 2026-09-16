@@ -41,7 +41,7 @@ test_e2e:
 	LD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
 	DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
 	RUSTFLAGS="-L native=$$PHPLIB" \
-	cargo test -p tests --test e2e --features e2e -- --test-threads=1
+	cargo test -p tests --test e2e --features e2e,otel -- --test-threads=1
 
 PHP_SRC ?= ../../third-party/php-src
 PHP_PREFIX ?= $(HOME)/.local/share/php-nts

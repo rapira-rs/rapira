@@ -15,6 +15,7 @@ pub(crate) fn build(
         v => format!("{v:?}"),
     };
     Request {
+        span: tracing::Span::current(),
         method: parts.method.as_str().to_owned(),
         // Origin-form view for every target form. Display restores the leading slash
         // that an authority-only absolute-form omits ("http://h?q" -> "/?q"). It keeps

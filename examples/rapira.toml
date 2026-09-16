@@ -30,7 +30,7 @@ listen = "127.0.0.1:8000"    # host:port, ":port" (all interfaces), or "unix:/pa
 # root = "public"            # required; the directory must exist; relative paths resolve against this file's directory
 # forbid = [".php"]          # file-name suffixes the server never serves; an explicit list replaces this default
 
-# The worker pool behind the http listener. Each plugin owns its pool under [<plugin>.pool].
+# The PHP worker pool behind the http listener.
 [http.pool]
 entrypoint = "dispatcher-sync.php" # relative paths resolve against this file's directory
 mode = "dispatcher"           # "classic" | "worker" | "dispatcher" (the default)
@@ -51,3 +51,18 @@ level = "trace"                # error | warn | info | debug | trace (default: e
 # format = "plain"            # or "json"
 # [log.targets]               # per-target overrides; RUST_LOG replaces the whole filter
 # php = "warn"                # surfaces PHP diagnostics even under a quieter level
+
+# Native telemetry uses one exporter process. PHP configures its own SDK and exporter.
+# [otel]
+# enabled = false
+# endpoint = "http://localhost:4318"
+# service_name = "rapira"
+# sample_ratio = 1.0
+# traces = true
+# logs = true
+# metrics = true
+# batch_size = 512
+# queue_size = 2048
+# flush_interval_ms = 1000
+# export_timeout_secs = 5
+# [otel.headers]

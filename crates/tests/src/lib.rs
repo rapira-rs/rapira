@@ -70,6 +70,7 @@ pub fn assert_skip_allowed(fixture: &str) {
 pub fn req(uri: &str, fixture_name: &str) -> Request {
     let query = uri.split_once('?').map(|x: (&str, &str)| x.1);
     Request {
+        span: tracing::Span::none(),
         document_root: String::new(),
         https: false,
         method: "GET".into(),

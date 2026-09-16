@@ -40,6 +40,7 @@ fn drain_pipe(fd: RawFd, buf: &mut [u8]) -> Vec<u8> {
 
 /// The global half: signals, the stop escalation, and routing to the pools. Every per-pool decision lives in [`Pool`].
 pub(crate) struct Master<S: Spawner> {
+    pub(crate) service: Box<dyn crate::Service>,
     pools: Vec<Pool>,
     spawner: S,
     pctl: Pctl,
@@ -67,6 +68,7 @@ impl<S: Spawner> Master<S> {
             })
             .collect();
         Master {
+            service: Box::new(()),
             pools,
             spawner,
             pctl: Pctl::default(),
@@ -151,9 +153,23 @@ impl<S: Spawner> Master<S> {
         let buried = {
             let mut tables: Vec<&mut ProcTable> =
                 self.pools.iter_mut().map(|p| &mut p.table).collect();
-            reap_all(&mut tables)
+            reap_all(&mut tables, &mut *self.service)
         };
-        for (pool, w, verdict) in buried {
+        for (pool, w, verdict, status) in buried {
+            let exit_code = libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status));
+            let signal = libc::WIFSIGNALED(status).then(|| libc::WTERMSIG(status));
+            if !self.pctl.is_stopping()
+                && matches!(
+                    verdict,
+                    ExitVerdict::Crash | ExitVerdict::TimeoutKill | ExitVerdict::Unhealthy
+                )
+            {
+                tracing::error!(target: "master", pool = self.pools[pool].cfg.name,
+                    worker_pid = w.pid, exit_code, signal, reason = ?verdict, "worker failed");
+            } else {
+                tracing::info!(target: "master", pool = self.pools[pool].cfg.name,
+                    worker_pid = w.pid, exit_code, signal, reason = ?verdict, "worker exited");
+            }
             self.route_exit(pool, w, verdict, now)?;
         }
         Ok(())
@@ -170,6 +186,7 @@ impl<S: Spawner> Master<S> {
         }
         if now >= self.next_tick {
             self.next_tick = now + Duration::from_secs(1);
+            self.service.tick();
             let stopping = self.pctl.is_stopping();
             for p in &mut self.pools {
                 p.maintenance_tick(now, stopping, &mut self.spawner);
@@ -229,6 +246,7 @@ impl<S: Spawner> Master<S> {
     }
 
     pub(crate) fn run_loop(&mut self) -> anyhow::Result<StopReason> {
+        self.service.tick();
         let start = Instant::now();
         for p in &mut self.pools {
             p.fork_initial(start, &mut self.spawner);

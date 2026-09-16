@@ -1,6 +1,62 @@
 use php_sys::{Mode, Rapira};
 use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
+#[test]
+fn trace_context_is_empty_without_a_native_sdk() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        uri: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "first callback",
+            uri: "/",
+        },
+        Case {
+            name: "caught exit",
+            uri: "/?exit=1",
+        },
+        Case {
+            name: "callback after exit",
+            uri: "/",
+        },
+    ];
+    let _guard = php_lock();
+    init_log_capture();
+    captured().clear();
+    let script = "worker/trace-context-worker.php";
+    let r = Rapira::start(Mode::Worker(fixture(script)))?;
+    let h = r.handle();
+    for case in cases {
+        let response = drain_resp(h.handle_blocking(req(case.uri, script))?);
+        assert_eq!(response.status(), 200, "{}", case.name);
+        assert_eq!(
+            response.body_string(),
+            r#"{"outside":[],"active":[],"previous":[]}"#,
+            "{}",
+            case.name
+        );
+    }
+    drop(h);
+    r.shutdown();
+    let records = captured();
+    assert_eq!(
+        records
+            .iter()
+            .filter(
+                |record| record.message == "trace-shutdown" && record.context == r#"{"same":true}"#
+            )
+            .count(),
+        3
+    );
+    assert!(
+        records.iter().any(
+            |record| record.message == "trace-outside" && record.context == r#"{"carrier":[]}"#
+        )
+    );
+    Ok(())
+}
+
 /// Superglobals are rebuilt per job over the resident loop: query state must not leak.
 #[test]
 fn worker_serves_with_per_job_superglobals() -> anyhow::Result<()> {

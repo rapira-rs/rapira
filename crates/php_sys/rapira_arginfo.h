@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: d8f6bcd7a56dbe3365e75162725551f758ede0d5 */
+ * Stub hash: 0c5100572e99e35a715bcc62b96f4291bd8cf8ed */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_rapira_finish_request, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
@@ -15,6 +15,9 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_Rapira_handle_request, 0, 1, _IS
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_Rapira_get_version, 0, 0, IS_STRING, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_Rapira_trace_context, 0, 0, IS_ARRAY, 0)
 ZEND_END_ARG_INFO()
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_Rapira_log, 0, 1, IS_VOID, 0)
@@ -61,6 +64,7 @@ ZEND_FUNCTION(Rapira_get_mode);
 ZEND_FUNCTION(Rapira_get_dispatcher);
 ZEND_FUNCTION(Rapira_handle_request);
 ZEND_FUNCTION(Rapira_get_version);
+ZEND_FUNCTION(Rapira_trace_context);
 ZEND_FUNCTION(Rapira_log);
 ZEND_METHOD(Rapira_InetAddress, __construct);
 ZEND_METHOD(Rapira_UnixAddress, __construct);
@@ -71,6 +75,7 @@ static const zend_function_entry ext_functions[] = {
 	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "get_dispatcher"), zif_Rapira_get_dispatcher, arginfo_Rapira_get_dispatcher, 0, NULL, NULL)
 	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "handle_request"), zif_Rapira_handle_request, arginfo_Rapira_handle_request, 0, NULL, NULL)
 	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "get_version"), zif_Rapira_get_version, arginfo_Rapira_get_version, 0, NULL, NULL)
+	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "trace_context"), zif_Rapira_trace_context, arginfo_Rapira_trace_context, 0, NULL, NULL)
 	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "log"), zif_Rapira_log, arginfo_Rapira_log, 0, NULL, NULL)
 	ZEND_FE_END
 };

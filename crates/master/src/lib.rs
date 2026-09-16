@@ -98,12 +98,34 @@ pub enum StopReason {
     Forced,
 }
 
+/// An auxiliary process supervised by the master's normal event loop.
+pub trait Service {
+    fn tick(&mut self);
+    fn on_exit(&mut self, pid: libc::pid_t, status: libc::c_int) -> bool;
+}
+
+impl Service for () {
+    fn tick(&mut self) {}
+    fn on_exit(&mut self, _pid: libc::pid_t, _status: libc::c_int) -> bool {
+        false
+    }
+}
+
 /// Returns in the parent on a clean or forced stop; in a forked child it never returns: the worker closure runs and the child `_exit`s.
 /// `scoreboard` must have `cfg.scoreboard_slots()` slots: `Master::new` slices it with the same arithmetic and panics on a smaller board.
 pub fn run(
     cfg: MasterConfig,
     scoreboard: Scoreboard,
     worker: impl FnMut(WorkerEnv) -> i32,
+) -> anyhow::Result<StopReason> {
+    run_with_service(cfg, scoreboard, worker, Box::new(()))
+}
+
+pub fn run_with_service(
+    cfg: MasterConfig,
+    scoreboard: Scoreboard,
+    worker: impl FnMut(WorkerEnv) -> i32,
+    service: Box<dyn Service>,
 ) -> anyhow::Result<StopReason> {
     let self_pipe: signals::SelfPipe = signals::install_master_signals()?;
     let lifeline: Lifeline = Lifeline::create()?;
@@ -118,6 +140,7 @@ pub fn run(
         worker,
     };
     let mut master = events::Master::new(cfg, scoreboard, forker);
+    master.service = service;
     master.run_loop()
 }
 

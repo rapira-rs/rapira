@@ -201,6 +201,7 @@ impl std::error::Error for Rejected {}
 
 /// An extension with no wire form for a fidelity fact passes None, never a fabricated default.
 pub struct Request {
+    pub span: tracing::Span,
     pub method: String,
     pub uri: String,
     pub target: Option<Vec<u8>>,

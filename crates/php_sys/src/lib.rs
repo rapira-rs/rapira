@@ -14,6 +14,7 @@ pub mod quota;
 pub mod rapira_worker;
 pub mod scoreboard;
 pub mod start;
+mod telemetry;
 pub mod types;
 pub mod values;
 pub(crate) mod zend;
@@ -50,6 +51,7 @@ unsafe extern "C" {
     // Holds boot-registered shutdown functions until cycle end (module.c).
     pub fn rapira_stash_boot_shutdown_functions();
     pub fn rapira_request_activate() -> c_int;
+    pub fn rapira_request_prepare() -> c_int;
     pub fn rapira_request_shutdown() -> c_int;
     // Wall timer is disarmed while parked in receive() and re-armed with the captured per-cycle budget on unit handout (module.c).
     pub fn rapira_receive_untimed();

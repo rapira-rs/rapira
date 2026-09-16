@@ -91,6 +91,44 @@ fn killed_worker_respawns() {
     }
 }
 
+#[test]
+fn worker_failure_logs_identify_the_process_and_signal() {
+    struct Case {
+        name: &'static str,
+        signal: i32,
+    }
+    let cases = [
+        Case {
+            name: "killed worker",
+            signal: libc::SIGKILL,
+        },
+        Case {
+            name: "terminated worker",
+            signal: libc::SIGTERM,
+        },
+    ];
+    for case in cases {
+        let srv = spawn_without_rust_log(
+            "shared/echo-worker.php",
+            1,
+            "mode = \"dispatcher\"\n[log]\nformat = \"json\"\nlevel = \"error\"\n",
+        );
+        let timeout = Duration::from_secs(20);
+        let pid = wait_workers(&srv, timeout, case.name, |p| p.len() == 1)[0];
+        assert_eq!(http_get(srv.addr, "/", timeout).unwrap().0, 200);
+        signal(pid, case.signal);
+        wait_workers(&srv, timeout, case.name, |p| p.len() == 1 && p[0] != pid);
+        let log = std::fs::read_to_string(srv.dir.join("server.log")).unwrap();
+        let failure = log
+            .lines()
+            .filter_map(|line| serde_json::from_str::<serde_json::Value>(line).ok())
+            .find(|event| event["fields"]["worker_pid"] == pid && event["level"] == "ERROR")
+            .unwrap_or_else(|| panic!("{}: missing worker failure: {log}", case.name));
+        assert_eq!(failure["fields"]["pool"], "http", "{}", case.name);
+        assert_eq!(failure["fields"]["signal"], case.signal, "{}", case.name);
+    }
+}
+
 // After the master exits its workers reparent away and `worker_pids` cannot see them, so poll the captured pids directly.
 fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
     let end = Instant::now() + timeout;

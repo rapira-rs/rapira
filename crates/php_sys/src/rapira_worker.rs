@@ -13,7 +13,7 @@ use std::{
 
 use crate::{
     callbacks::guard,
-    context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
+    context::{bind_server_context, ctx, unbind_server_context},
     executor::run_script,
     php_request_startup, rapira_eg, rapira_pg, rapira_run_handler,
     types::Job,
@@ -85,7 +85,9 @@ fn run_cycle(script: &Path) -> Cycle {
     }
 
     log_and_clear_last_error();
-    if Outcome::from_c(unsafe { rapira_request_shutdown() }) == Outcome::Bailout {
+    let shutdown = Outcome::from_c(unsafe { rapira_request_shutdown() });
+    crate::exchange::finish_current();
+    if shutdown == Outcome::Bailout {
         error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
         sb_update(scoreboard::Event::Restart);
         return Cycle::Restart;
@@ -179,12 +181,13 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     };
 
     bind_server_context(&mut job.ctx);
-    unsafe {
-        populate_request_context(&mut job.ctx);
-        rapira_release_temporary_streams();
-    }
+    // Each PHP call below has a C bailout boundary, so this scope also covers teardown.
+    let scope = job.ctx.start_execution().entered();
 
-    let mut outcome = Outcome::from_c(unsafe { rapira_request_activate() });
+    let mut outcome = Outcome::from_c(unsafe { rapira_request_prepare() });
+    if outcome != Outcome::Bailout {
+        outcome = Outcome::from_c(unsafe { rapira_request_activate() });
+    }
     if outcome != Outcome::Bailout {
         unsafe {
             crate::context::apply_proto_num(&job.ctx);
@@ -209,6 +212,8 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     if recycle {
         set_worker_recycle();
     }
+    drop(scope);
+    job.ctx.finish_execution(errored);
     job.ctx.finish(truncated);
     crate::exchange::note_served();
     if recycle {

@@ -1,9 +1,10 @@
 use std::convert::Infallible;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU16, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
-use std::time::Duration;
+use std::time::{Duration, Instant};
+use tracing::Instrument;
 
 use extension_api::{
     Addr, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer, Php,
@@ -23,6 +24,9 @@ pub(crate) struct Shared {
 }
 
 pub(crate) struct InflightReqCount {
+    pub(crate) span: tracing::Span,
+    telemetry: Option<(String, Instant)>,
+    status: AtomicU16,
     counter: Arc<AtomicUsize>,
     /// Connection flush count when the last response byte was handed to hyper.
     /// It lives on the shared guard: the body records it and the drain task reads it.
@@ -33,6 +37,9 @@ impl InflightReqCount {
     pub(crate) fn init(counter: &Arc<AtomicUsize>) -> Self {
         counter.fetch_add(1, Ordering::AcqRel);
         Self {
+            span: tracing::Span::none(),
+            telemetry: None,
+            status: AtomicU16::new(200),
             counter: Arc::clone(counter),
             end_flush: OnceLock::new(),
         }
@@ -41,6 +48,11 @@ impl InflightReqCount {
 
 impl Drop for InflightReqCount {
     fn drop(&mut self) {
+        if let Some((method, start)) = &self.telemetry {
+            self.span.in_scope(|| {
+                otel::request_finished(method, self.status.load(Ordering::Relaxed), start.elapsed())
+            });
+        }
         self.counter.fetch_sub(1, Ordering::AcqRel);
     }
 }
@@ -55,6 +67,7 @@ struct ReqState {
 pub(crate) struct RespBody {
     kind: BodyKind,
     guard: Arc<InflightReqCount>,
+    span: tracing::Span,
     /// Declared body bytes still to pass through, with the connection state that holds the flush count.
     /// Armed by `call` once every middleware has returned.
     transport: Option<(u64, tokio::sync::watch::Receiver<bridge::ConnectionState>)>,
@@ -67,9 +80,11 @@ enum BodyKind {
 }
 
 fn refused(status: http::StatusCode, req_count: Arc<InflightReqCount>) -> http::Response<RespBody> {
+    req_count.status.store(status.as_u16(), Ordering::Relaxed);
     error_response(status).map(|body| RespBody {
         kind: BodyKind::Boxed(body),
         guard: req_count,
+        span: tracing::Span::none(),
         transport: None,
     })
 }
@@ -83,6 +98,7 @@ impl Body for RespBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<bytes::Bytes>, BoxError>>> {
         let this = self.get_mut();
+        let _entered = this.span.clone().entered();
         let poll = match &mut this.kind {
             BodyKind::Reply(b) => Pin::new(b).poll_frame(cx),
             BodyKind::Empty => Poll::Ready(None),
@@ -193,20 +209,51 @@ where
     B: Body<Data = bytes::Bytes> + Unpin + Send + 'static,
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let reqs_counter: Arc<InflightReqCount> =
-        Arc::new(InflightReqCount::init(&handler.shared.inflight));
+    let span = otel::server_span(req.headers(), req.method().as_str());
+    let mut guard = InflightReqCount::init(&handler.shared.inflight);
+    guard.span = span.clone();
+    if !span.is_disabled() {
+        guard.telemetry = Some((req.method().to_string(), Instant::now()));
+    }
+    let mut response = handle_inner(handler, req, Arc::new(guard))
+        .instrument(span.clone())
+        .await;
+    response
+        .body()
+        .guard
+        .status
+        .store(response.status().as_u16(), Ordering::Relaxed);
+    response.body_mut().span = tracing::trace_span!(parent: &span, "http.response");
+    span.record("http.response.status_code", response.status().as_u16());
+    if response.status().is_server_error() {
+        span.record("otel.status_code", "ERROR");
+    }
+    response
+}
+
+async fn handle_inner<B>(
+    handler: Arc<Conn>,
+    req: http::Request<B>,
+    reqs_counter: Arc<InflightReqCount>,
+) -> http::Response<RespBody>
+where
+    B: Body<Data = bytes::Bytes> + Unpin + Send + 'static,
+    B::Error: std::error::Error + Send + Sync + 'static,
+{
     let received_at: f64 = std::time::UNIX_EPOCH
         .elapsed()
         .map(|d| d.as_secs_f64())
         .unwrap_or(0.0);
     let (mut parts, incoming) = req.into_parts();
 
-    let authority = match check::check_request(
-        &mut parts,
-        handler.shared.cfg.unsafe_field_names,
-        handler.shared.cfg.superglobals,
-        handler.shared.cfg.max_body_size,
-    ) {
+    let authority = match tracing::trace_span!("http.admission").in_scope(|| {
+        check::check_request(
+            &mut parts,
+            handler.shared.cfg.unsafe_field_names,
+            handler.shared.cfg.superglobals,
+            handler.shared.cfg.max_body_size,
+        )
+    }) {
         Ok(authority) => authority,
         Err(rej) => {
             tracing::warn!(target: "http", "rejected: {}", rej.reason);
@@ -251,6 +298,7 @@ where
     res.map(|body| RespBody {
         kind: BodyKind::Boxed(body),
         guard: reqs_counter,
+        span: tracing::Span::none(),
         transport: None,
     })
 }
@@ -293,6 +341,7 @@ impl Conn {
     }
 }
 
+#[tracing::instrument(level = "trace", skip_all, name = "http.dispatch")]
 async fn serve_php<B>(
     shared: &Shared,
     closed: &tokio::sync::watch::Receiver<bridge::ConnectionState>,
@@ -307,36 +356,10 @@ where
     B::Error: std::fmt::Display,
 {
     let cfg = &shared.cfg;
-    let mut body = body;
-    let mut collected: Vec<u8> = Vec::new();
-    loop {
-        // hyper only times the head read, so each body frame gets its own progress bound here.
-        let frame = match tokio::time::timeout(cfg.keepalive_timeout, body.frame()).await {
-            Ok(frame) => frame,
-            Err(_) => {
-                tracing::debug!(target: "http", "request body stalled past keepalive_timeout");
-                return refused(http::StatusCode::REQUEST_TIMEOUT, guard);
-            }
-        };
-        match frame {
-            None => break,
-            Some(Ok(frame)) => {
-                // Non-data frames (request trailers) are dropped: PHP has no surface for them.
-                let Ok(data) = frame.into_data() else {
-                    continue;
-                };
-                if collected.len() + data.len() > cfg.max_body_size {
-                    tracing::warn!(target: "http", "request body exceeds max_body_size");
-                    return refused(http::StatusCode::PAYLOAD_TOO_LARGE, guard);
-                }
-                collected.extend_from_slice(&data);
-            }
-            Some(Err(e)) => {
-                tracing::debug!(target: "http", "request body read failed: {e}");
-                return refused(http::StatusCode::BAD_REQUEST, guard);
-            }
-        }
-    }
+    let collected = match collect_body(body, cfg).await {
+        Ok(body) => body,
+        Err(status) => return refused(status, guard),
+    };
 
     let request = request::build(parts, authority, collected, peer, cfg);
     let mut reply = match shared.php.exec(request).await {
@@ -423,11 +446,52 @@ where
     let mut res = http::Response::new(RespBody {
         kind,
         guard,
+        span: tracing::Span::none(),
         transport: None,
     });
     *res.status_mut() = status;
     *res.headers_mut() = response_headers(headers, declared_cl);
     res
+}
+
+#[tracing::instrument(level = "trace", skip_all, name = "http.request.body")]
+async fn collect_body<B>(body: B, cfg: &Config) -> Result<Vec<u8>, http::StatusCode>
+where
+    B: Body<Data = bytes::Bytes> + Unpin,
+    B::Error: std::fmt::Display,
+{
+    let mut body = body;
+    let mut collected: Vec<u8> = Vec::new();
+    loop {
+        // hyper only times the head read, so each body frame gets its own progress bound here.
+        let frame = match tokio::time::timeout(cfg.keepalive_timeout, body.frame()).await {
+            Ok(frame) => frame,
+            Err(_) => {
+                tracing::debug!(target: "http", "request body stalled past keepalive_timeout");
+                return Err(http::StatusCode::REQUEST_TIMEOUT);
+            }
+        };
+        match frame {
+            None => break,
+            Some(Ok(frame)) => {
+                // Non-data frames (request trailers) are dropped: PHP has no surface for them.
+                let Ok(data) = frame.into_data() else {
+                    continue;
+                };
+                if collected.len() + data.len() > cfg.max_body_size {
+                    tracing::warn!(target: "http", "request body exceeds max_body_size");
+                    return Err(http::StatusCode::PAYLOAD_TOO_LARGE);
+                }
+                collected.extend_from_slice(&data);
+            }
+            Some(Err(e)) => {
+                tracing::debug!(target: "http", "request body read failed: {e}");
+                return Err(http::StatusCode::BAD_REQUEST);
+            }
+        }
+    }
+
+    Ok(collected)
 }
 
 #[cfg(test)]

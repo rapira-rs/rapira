@@ -45,7 +45,7 @@ jobs:
               with:
                   cache-on-failure: true
             - run: cargo clippy --workspace --all-targets -- -D warnings
-            - run: cargo clippy -p tests --features e2e --tests -- -D warnings
+            - run: cargo clippy -p tests --features e2e,otel --tests -- -D warnings
 
             - name: Master stays tokio-free
               run: |
