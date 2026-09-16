@@ -196,6 +196,36 @@ fn filter_exception() -> anyhow::Result<()> {
     exception("php_ext/filter-worker.php", "filter:a@b.com")
 }
 
+#[test]
+fn bcmath_success() -> anyhow::Result<()> {
+    success("php_ext/bcmath-worker.php", "bcmath:0.30")
+}
+
+#[test]
+fn intl_success() -> anyhow::Result<()> {
+    success("php_ext/intl-worker.php", "intl:café")
+}
+
+#[test]
+fn pdo_pgsql_success() -> anyhow::Result<()> {
+    success("php_ext/pdo_pgsql-worker.php", "pdo_pgsql:ok")
+}
+
+#[test]
+fn pgsql_success() -> anyhow::Result<()> {
+    success("php_ext/pgsql-worker.php", "pgsql:0001ff")
+}
+
+#[test]
+fn igbinary_success() -> anyhow::Result<()> {
+    success("php_ext/igbinary-worker.php", "igbinary:ok")
+}
+
+#[test]
+fn redis_success() -> anyhow::Result<()> {
+    success("php_ext/redis-worker.php", "redis:ok")
+}
+
 /// Pins that OPcache started under our SAPI name, which PHP <= 8.4 gates on an allowlist (see build_sapi_module).
 #[test]
 fn opcache_success() -> anyhow::Result<()> {
