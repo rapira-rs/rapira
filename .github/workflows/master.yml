@@ -106,9 +106,10 @@ jobs:
             - name: Verify built extension set
               run: |
                   mods=$("${PHP_PREFIX}/bin/php" -m); echo "$mods"
-                  for ext in calendar ctype curl dom exif ffi fileinfo filter ftp gettext iconv \
-                             mbstring openssl pdo_sqlite phar session shmop simplexml sockets sqlite3 \
-                             sysvmsg sysvsem sysvshm tokenizer xml xmlreader xmlwriter zlib; do
+                  for ext in bcmath calendar ctype curl dom exif ffi fileinfo filter ftp gettext iconv \
+                             igbinary intl mbstring openssl pdo_pgsql pdo_sqlite pgsql phar redis session \
+                             shmop simplexml sockets sqlite3 sysvmsg sysvsem sysvshm tokenizer xml \
+                             xmlreader xmlwriter zlib; do
                     grep -qix "$ext" <<<"$mods" || { echo "missing extension: $ext"; exit 1; }
                   done
 
