@@ -5,7 +5,26 @@ ARG RUST_BASE=rust:1-trixie@sha256:b1b3c9c0d921d7fa0a6d1f9ec7e4eab87f8c8ec97644c
 
 FROM ${RUST_BASE} AS rust
 
-FROM ${PHP_BASE} AS builder
+FROM ${PHP_BASE} AS php-extensions
+
+RUN set -eux; \
+    apt-get update; \
+    apt-get install -y --no-install-recommends libicu-dev libpq-dev; \
+    docker-php-source extract; \
+    curl -fsSL --retry 3 https://pecl.php.net/get/igbinary-3.2.17RC1.tgz -o /tmp/igbinary.tgz; \
+    curl -fsSL --retry 3 https://pecl.php.net/get/redis-6.3.0.tgz -o /tmp/redis.tgz; \
+    echo '91da821443db125282a6aea039f24588dd28ff5d71e8187f6ecc41165bceafbc  /tmp/igbinary.tgz' | sha256sum -c -; \
+    echo '0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5  /tmp/redis.tgz' | sha256sum -c -; \
+    mkdir -p /usr/src/php/ext/igbinary /usr/src/php/ext/redis; \
+    tar -xzf /tmp/igbinary.tgz -C /usr/src/php/ext/igbinary --strip-components=1; \
+    tar -xzf /tmp/redis.tgz -C /usr/src/php/ext/redis --strip-components=1; \
+    docker-php-ext-install -j"$(nproc)" bcmath intl pdo_pgsql pgsql igbinary; \
+    docker-php-ext-configure redis --enable-redis-igbinary; \
+    docker-php-ext-install -j"$(nproc)" redis; \
+    docker-php-source delete; \
+    rm -rf /var/lib/apt/lists/* /tmp/igbinary.tgz /tmp/redis.tgz
+
+FROM php-extensions AS builder
 ARG PHP_BASE
 
 COPY --from=rust /usr/local/rustup /usr/local/rustup
@@ -33,7 +52,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cp target/release/rapira /usr/local/bin/rapira; \
     ldd /usr/local/bin/rapira | grep -q '/usr/local/lib/libphp.so'
 
-FROM ${PHP_BASE} AS payload
+FROM php-extensions AS payload
 
 COPY --from=builder /usr/local/bin/rapira /out/usr/local/bin/rapira
 COPY --from=builder /usr/local/lib/libphp.so /out/usr/local/lib/libphp.so
@@ -41,6 +60,11 @@ COPY --from=builder /usr/local/lib/libphp.so /out/usr/local/lib/libphp.so
 # PHP 8.4 builds opcache as a shared module and 8.5 links it into libphp, so the copy is conditional.
 RUN set -eux; \
     ext_dir="$(php-config --extension-dir)"; \
+    for ext in bcmath intl pdo_pgsql pgsql igbinary redis; do \
+        install -D "$ext_dir/$ext.so" "/out$ext_dir/$ext.so"; \
+        install -D -m 0644 "$PHP_INI_DIR/conf.d/docker-php-ext-$ext.ini" \
+                           "/out$PHP_INI_DIR/conf.d/docker-php-ext-$ext.ini"; \
+    done; \
     if [ -f "$ext_dir/opcache.so" ]; then \
         install -D "$ext_dir/opcache.so" "/out$ext_dir/opcache.so"; \
         install -D -m 0644 "$PHP_INI_DIR/conf.d/docker-php-ext-opcache.ini" \

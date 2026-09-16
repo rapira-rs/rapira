@@ -11,6 +11,8 @@ Rapira is a PHP application server written in Rust. It embeds the PHP interprete
 
 Rapira supports Linux and macOS. Download a build for PHP 8.4 or PHP 8.5 from [GitHub Releases](https://github.com/rapira-rs/rapira/releases). Each build includes its PHP interpreter library. See the [installation guide](https://rapira.rs/docs/intro/installation) for packages, tar archives, and checksums.
 
+PHP 8.4 tarballs and packages include `opcache.so` beside `libphp`. Set `zend_extension` to its absolute path in the PHP configuration selected by `PHPRC`. Linux packages use `zend_extension=/usr/lib/rapira/opcache.so`. PHP 8.5 includes OPcache in `libphp`.
+
 ### Docker
 
 Copy Rapira and its PHP library into your application image:
@@ -18,6 +20,9 @@ Copy Rapira and its PHP library into your application image:
 ```dockerfile
 FROM php:8.5-cli-trixie
 COPY --from=ghcr.io/rapira-rs/rapira:php8.5 / /
+RUN apt-get update \
+    && xargs -r apt-get install -y --no-install-recommends < /usr/local/share/rapira/debian-packages.txt \
+    && rm -rf /var/lib/apt/lists/*
 COPY . /app
 CMD ["rapira", "serve", "/app/rapira.toml"]
 ```
@@ -33,7 +38,7 @@ entrypoint = "/app/public/index.php"
 mode = "classic"
 ```
 
-See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
+The payload includes `bcmath`, `intl`, `pdo_pgsql`, `pgsql`, `igbinary`, and `redis` with igbinary serialization support. The package manifest lists their runtime libraries. See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
 
 ## Usage
 

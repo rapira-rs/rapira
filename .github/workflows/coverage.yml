@@ -23,7 +23,7 @@ jobs:
         with:
           php-version: ${{ env.PHP_VERSION }}
           coverage: none
-          extensions: ctype, curl, dom, fileinfo, filter, iconv, imap, mbstring, opcache, openssl, pdo_sqlite, phar, posix, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
+          extensions: bcmath, ctype, curl, dom, fileinfo, filter, iconv, igbinary, imap, intl, mbstring, opcache, openssl, pdo_pgsql, pdo_sqlite, pgsql, phar, posix, redis, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
         env:
           phpts: nts
           fail-fast: true # a missing extension fails the job instead of warning

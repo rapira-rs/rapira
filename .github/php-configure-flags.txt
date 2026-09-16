@@ -24,6 +24,8 @@
 --enable-xmlwriter
 --enable-pdo
 --with-pdo-sqlite
+--with-pdo-pgsql
+--with-pgsql
 --with-sqlite3
 --with-iconv
 --enable-calendar
@@ -36,3 +38,5 @@
 --enable-sysvshm
 --with-ffi
 --with-gettext
+--enable-bcmath
+--enable-intl

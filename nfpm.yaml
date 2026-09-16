@@ -32,8 +32,8 @@ contents:
   - src: "./dist/pkgroot-current/usr/bin/rapira"
     dst: "/usr/bin/rapira"
     file_info: { mode: 0755 }
-  - src: "./dist/pkgroot-current/usr/lib/rapira/libphp.so"
-    dst: "/usr/lib/rapira/libphp.so"
+  - src: "./dist/pkgroot-current/usr/lib/rapira/*.so*"
+    dst: "/usr/lib/rapira/"
     file_info: { mode: 0644 }
   - src: "./LICENSE"
     dst: "/usr/share/doc/rapira/LICENSE"
@@ -49,6 +49,8 @@ overrides:
       # alternatives keep the package installable across the 24.04 t64 rename.
       - "libc6 (>= 2.34)"
       - "libgcc-s1"
+      - "libstdc++6"
+      - "libpq5"
       - "libssl3 | libssl3t64"
       - "libcurl4 | libcurl4t64"
       - "libxml2 | libxml2t64"
@@ -59,6 +61,8 @@ overrides:
     depends:
       - "glibc >= 2.34"
       - "libgcc"
+      - "libstdc++"
+      - "libpq"
       - "openssl-libs"
       - "libcurl"
       - "libxml2"
