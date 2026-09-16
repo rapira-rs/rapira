@@ -258,6 +258,10 @@ jobs:
                   cp target/release/rapira "$ROOT/bin/rapira"
                   cp README.md LICENSE "$ROOT/"
                   echo "$PHP_FULL" > "$ROOT/share/php/PHP_VERSION.txt"
+                  if [ "${PHP_FULL%.*}" = "8.4" ]; then
+                    EXT_DIR=$("$PHP_PREFIX/bin/php-config" --extension-dir)
+                    cp "$EXT_DIR/opcache.so" "$ROOT/lib/rapira/"
+                  fi
                   if [ "$RUNNER_OS" = "Linux" ]; then
                     LP=$(find "$PHP_PREFIX" -name 'libphp*.so' | head -1)
                     cp "$LP" "$ROOT/lib/rapira/libphp.so"
@@ -286,10 +290,10 @@ jobs:
                       done
                     }
                     install_name_tool -id @rpath/libphp.dylib "$LIB/libphp.dylib"
-                    bundle "$LIB/libphp.dylib"
+                    for f in "$LIB"/*; do bundle "$f"; done
                     bundle "$BIN"
-                    for f in "$LIB"/*.dylib; do install_name_tool -add_rpath @loader_path "$f" 2>/dev/null || true; done
-                    codesign --force -s - "$LIB"/*.dylib
+                    for f in "$LIB"/*; do install_name_tool -add_rpath @loader_path "$f" 2>/dev/null || true; done
+                    codesign --force -s - "$LIB"/*
                     codesign --force -s - "$BIN"
                     codesign -v "$BIN"
                   fi

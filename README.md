@@ -11,6 +11,8 @@ Rapira is a PHP application server written in Rust. It embeds the PHP interprete
 
 Rapira supports Linux and macOS. Download a build for PHP 8.4 or PHP 8.5 from [GitHub Releases](https://github.com/rapira-rs/rapira/releases). Each build includes its PHP interpreter library. See the [installation guide](https://rapira.rs/docs/intro/installation) for packages, tar archives, and checksums.
 
+PHP 8.4 tarballs and packages include `opcache.so` beside `libphp`. Set `zend_extension` to its absolute path in the PHP configuration selected by `PHPRC`. Linux packages use `zend_extension=/usr/lib/rapira/opcache.so`. PHP 8.5 includes OPcache in `libphp`.
+
 ### Docker
 
 Copy Rapira and its PHP library into your application image:
