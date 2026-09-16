@@ -175,14 +175,15 @@ jobs:
               run: |
                   dnf -y install dnf-plugins-core
                   dnf config-manager --set-enabled crb
+                  dnf -y install epel-release
                   dnf -y install \
-                    gcc gcc-c++ make git tar gzip xz findutils \
+                    gcc gcc-c++ make git tar gzip xz findutils autoconf patchelf \
                     pkgconf-pkg-config clang-devel llvm-devel \
-                    openssl-devel libcurl-devel libxml2-devel oniguruma-devel zlib-devel sqlite-devel libffi-devel gettext-devel
+                    openssl-devel libcurl-devel libxml2-devel oniguruma-devel zlib-devel sqlite-devel libffi-devel gettext-devel libicu-devel libpq-devel
 
             - name: Install build deps (macOS)
               if: runner.os == 'macOS'
-              run: brew install pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext
+              run: brew install autoconf pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq
 
             # Split restore/save (as master.yml): the PHP build survives later failures.
             - name: Restore PHP embed runtime
@@ -190,7 +191,7 @@ jobs:
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt') }}-v2
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/build-binaries.yml') }}-v2
 
             - name: Build PHP embed from release tarball (Unix)
               if: steps.phpcache.outputs.cache-hit != 'true'
@@ -201,11 +202,22 @@ jobs:
                   tar xf php.tar.gz && cd "php-${PHP_FULL}"
                   export CFLAGS="-O2"
                   EXTRA=""
+                  SHA256=(sha256sum)
                   if [ "$RUNNER_OS" = "macOS" ]; then
-                    export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix libffi)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+                    export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix libffi)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig:$(brew --prefix libpq)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
                     EXTRA="--with-iconv=$(xcrun --show-sdk-path)/usr --with-gettext=$(brew --prefix gettext)"
+                    SHA256=(shasum -a 256)
                   fi
-                  ./configure --prefix="$PHP_PREFIX" $(tr '\n' ' ' < "$GITHUB_WORKSPACE/.github/php-configure-flags.txt") $EXTRA
+                  curl -fsSL --retry 3 https://pecl.php.net/get/igbinary-3.2.17RC1.tgz -o igbinary.tgz
+                  curl -fsSL --retry 3 https://pecl.php.net/get/redis-6.3.0.tgz -o redis.tgz
+                  echo '91da821443db125282a6aea039f24588dd28ff5d71e8187f6ecc41165bceafbc  igbinary.tgz' | "${SHA256[@]}" -c -
+                  echo '0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5  redis.tgz' | "${SHA256[@]}" -c -
+                  mkdir -p ext/igbinary ext/redis
+                  tar -xzf igbinary.tgz -C ext/igbinary --strip-components=1
+                  tar -xzf redis.tgz -C ext/redis --strip-components=1
+                  ./buildconf --force
+                  ./configure --prefix="$PHP_PREFIX" $(tr '\n' ' ' < "$GITHUB_WORKSPACE/.github/php-configure-flags.txt") \
+                    --enable-igbinary --enable-redis --enable-redis-igbinary $EXTRA
                   make -j"$(getconf _NPROCESSORS_ONLN)"
                   make install
 
@@ -214,7 +226,7 @@ jobs:
               uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt') }}-v2
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/build-binaries.yml') }}-v2
 
             - name: Expose PHP + rpath (Linux)
               if: runner.os == 'Linux'
@@ -249,6 +261,15 @@ jobs:
                   if [ "$RUNNER_OS" = "Linux" ]; then
                     LP=$(find "$PHP_PREFIX" -name 'libphp*.so' | head -1)
                     cp "$LP" "$ROOT/lib/rapira/libphp.so"
+                    # ICU uses versioned library names: https://unicode-org.github.io/icu/userguide/icu4c/packaging.html#posix-library-names
+                    mapfile -t ICU_LIBS < <(ldd "$LP" | awk '$1 ~ /^libicu/ {print $3}')
+                    test "${#ICU_LIBS[@]}" -gt 0
+                    for lib in "${ICU_LIBS[@]}"; do
+                      cp "$lib" "$ROOT/lib/rapira/"
+                    done
+                    for lib in "$ROOT/lib/rapira/"*.so*; do
+                      patchelf --set-rpath "\$ORIGIN" "$lib"
+                    done
                   else
                     BIN="$ROOT/bin/rapira"; LIB="$ROOT/lib/rapira"
                     cp "$PHP_PREFIX/lib/libphp.dylib" "$LIB/"
@@ -288,7 +309,7 @@ jobs:
                   PR="dist/pkgroot-${{ matrix.nfpm_arch }}-php${{ matrix.php_branch }}"
                   mkdir -p "$PR/usr/bin" "$PR/usr/lib/rapira"
                   cp "dist/$STEM/bin/rapira"           "$PR/usr/bin/rapira"
-                  cp "dist/$STEM/lib/rapira/libphp.so" "$PR/usr/lib/rapira/libphp.so"
+                  cp "dist/$STEM/lib/rapira/"*.so*     "$PR/usr/lib/rapira/"
 
             - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
               with:

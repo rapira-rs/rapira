@@ -18,6 +18,9 @@ Copy Rapira and its PHP library into your application image:
 ```dockerfile
 FROM php:8.5-cli-trixie
 COPY --from=ghcr.io/rapira-rs/rapira:php8.5 / /
+RUN apt-get update \
+    && xargs -r apt-get install -y --no-install-recommends < /usr/local/share/rapira/debian-packages.txt \
+    && rm -rf /var/lib/apt/lists/*
 COPY . /app
 CMD ["rapira", "serve", "/app/rapira.toml"]
 ```
@@ -33,7 +36,7 @@ entrypoint = "/app/public/index.php"
 mode = "classic"
 ```
 
-See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
+The payload includes `bcmath`, `intl`, `pdo_pgsql`, `pgsql`, `igbinary`, and `redis` with igbinary serialization support. The package manifest lists their runtime libraries. See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
 
 ## Usage
 
