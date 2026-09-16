@@ -64,11 +64,15 @@ impl Sender {
         if payload.len() >= MAX_RECORD_BYTES {
             return Err(io::ErrorKind::InvalidInput.into());
         }
+        let mut frame = Vec::with_capacity(payload.len() + 5);
+        frame.extend_from_slice(&((payload.len() + 1) as u32).to_be_bytes());
+        frame.push(signal as u8);
+        frame.extend_from_slice(payload);
         let mut connection = self
             .0
             .connection
-            .try_lock()
-            .map_err(|_| io::Error::from(io::ErrorKind::WouldBlock))?;
+            .lock()
+            .map_err(|_| io::Error::other("otel connection lock poisoned"))?;
         let pid = std::process::id();
         if connection.pid != pid {
             connection.stream = None;
@@ -78,10 +82,6 @@ impl Sender {
         if connection.stream.is_none() {
             connection.stream = Some(connect(&self.0.path)?);
         }
-        let mut frame = Vec::with_capacity(payload.len() + 5);
-        frame.extend_from_slice(&((payload.len() + 1) as u32).to_be_bytes());
-        frame.push(signal as u8);
-        frame.extend_from_slice(payload);
         let result = connection
             .stream
             .as_mut()
@@ -146,6 +146,69 @@ mod tests {
     use super::*;
     use std::io::Read;
     use std::os::unix::net::UnixListener;
+    use std::sync::Barrier;
+
+    #[test]
+    fn concurrent_producers_preserve_small_records() {
+        struct Case {
+            name: &'static str,
+            connected: bool,
+            records: usize,
+        }
+        let cases = [
+            Case {
+                name: "concurrent first submissions",
+                connected: false,
+                records: 8,
+            },
+            Case {
+                name: "concurrent submissions on an open connection",
+                connected: true,
+                records: 9,
+            },
+        ];
+        for case in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("otel.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            let sender = Sender::new(path);
+            if case.connected {
+                assert!(sender.send(Signal::Traces, b"completed"));
+            }
+            let receiver = std::thread::spawn(move || {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream
+                    .set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut bytes = Vec::new();
+                stream.read_to_end(&mut bytes).unwrap();
+                bytes
+            });
+            let start = Barrier::new(8);
+            let submitted = std::thread::scope(|scope| {
+                let producers: Vec<_> = (0..8)
+                    .map(|_| {
+                        scope.spawn(|| {
+                            start.wait();
+                            sender.send(Signal::Traces, b"completed")
+                        })
+                    })
+                    .collect();
+                producers
+                    .into_iter()
+                    .map(|producer| usize::from(producer.join().unwrap()))
+                    .sum::<usize>()
+            });
+            assert_eq!(submitted, 8, "{}", case.name);
+            assert_eq!(sender.dropped_records(), 0, "{}", case.name);
+            drop(sender);
+            let bytes = receiver.join().unwrap();
+            assert_eq!(bytes.len(), case.records * 14, "{}", case.name);
+            for frame in bytes.as_chunks::<14>().0 {
+                assert_eq!(frame, b"\0\0\0\x0a\x01completed", "{}", case.name);
+            }
+        }
+    }
 
     #[test]
     fn backpressure_drops_new_records_and_preserves_complete_frames() {

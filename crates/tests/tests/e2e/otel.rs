@@ -127,7 +127,7 @@ impl Collector {
                     {
                         break;
                     }
-                    match rx.recv_timeout(TIMEOUT) {
+                    match rx.recv() {
                         Ok(status) => status,
                         Err(_) => break,
                     }

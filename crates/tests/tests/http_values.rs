@@ -192,6 +192,7 @@ fn native_execution_spans_end_at_request_boundaries() -> anyhow::Result<()> {
     let _guard = php_lock();
     native_trace::init();
     for case in cases {
+        *native_trace::records() = Default::default();
         let script = if case.dispatcher {
             "dispatcher/native-trace-worker.php"
         } else {

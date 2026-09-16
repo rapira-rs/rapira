@@ -62,7 +62,7 @@ impl Drop for RejectingCollector {
     fn drop(&mut self) {
         self.stop.store(true, Ordering::Release);
         let _ = TcpStream::connect(self.addr);
-        self.thread.take().unwrap().join().unwrap();
+        let _ = self.thread.take().unwrap().join();
     }
 }
 
