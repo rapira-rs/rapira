@@ -6,4 +6,6 @@ export PATH="$HOME/.cargo/bin:$PATH"
 
 command -v php-config >/dev/null || { echo "php-config missing; rerun .agents/setup" >&2; exit 1; }
 command -v cargo >/dev/null || { echo "cargo missing; rerun .agents/setup" >&2; exit 1; }
-echo "php $(php -r 'echo PHP_VERSION;') / $(rustc --version)"
+php_version=$(php -r 'echo PHP_VERSION;')
+rust_version=$(rustc --version)
+echo "php $php_version / $rust_version"

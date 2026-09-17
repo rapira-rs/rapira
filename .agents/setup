@@ -56,9 +56,19 @@ else
 	echo "all apt packages present"
 fi
 
-php -v | head -1
-php -r 'exit(PHP_ZTS ? 1 : 0);' || { echo "PHP is ZTS; rapira needs NTS" >&2; exit 1; }
-test -e "$(php-config --prefix)/lib/libphp.so" || { echo "no libphp.so from php-config prefix" >&2; exit 1; }
+# Keep subsequent shells on the selected leg too, even when both are installed.
+for tool in php php-config phpize; do
+	sudo update-alternatives --set "$tool" "/usr/bin/${tool}${PHP_VERSION}"
+done
+export PHP_CONFIG="php-config${PHP_VERSION}"
+php_bin=$("$PHP_CONFIG" --php-binary)
+php_prefix=$("$PHP_CONFIG" --prefix)
+libphp="$php_prefix/lib/libphp${PHP_VERSION}.so"
+test -e "$libphp" || { echo "missing PHP embed library: $libphp" >&2; exit 1; }
+sudo ln -sfn "$libphp" "$php_prefix/lib/libphp.so"
+
+"$php_bin" -v | head -1
+"$php_bin" -r 'exit(PHP_ZTS ? 1 : 0);' || { echo "PHP is ZTS; rapira needs NTS" >&2; exit 1; }
 
 # ---------------------------------------------------------------------------
 step "rust toolchain (rustup, channel and components from rust-toolchain.toml)"
@@ -88,11 +98,8 @@ done
 step "warm the cargo caches that make test_nts / make test_e2e use"
 # Mirrors LOCATE_PHP in the Makefile: the same CARGO_TARGET_DIR and RUSTFLAGS, so the
 # make targets reuse these artifacts instead of recompiling the workspace.
-php_prefix=$(php-config --prefix)
-libphp=$(find "$php_prefix/lib64" "$php_prefix/lib" "$php_prefix"/lib/php* -maxdepth 1 -name 'libphp*.so' 2>/dev/null | head -1)
-test -n "$libphp" || { echo "no libphp*.so under $php_prefix" >&2; exit 1; }
 mkdir -p target/phplib
-ln -sfn "$libphp" target/phplib/libphp.so
+ln -sfn "$php_prefix/lib/libphp.so" target/phplib/libphp.so
 export CARGO_TARGET_DIR="$repo_root/target/nts"
 export RUSTFLAGS="-L native=$repo_root/target/phplib"
 cargo test --workspace --no-run --quiet
@@ -113,6 +120,8 @@ $notes_marker
 - \`.agents/setup\` pre-built \`target/nts\` (unit, integration and e2e test binaries), so \`make test_nts\` and \`make test_e2e\` start warm. Plain \`cargo\` commands use \`target/\` and compile from scratch the first time.
 - \`make coverage\` needs \`cargo install cargo-llvm-cov\` and \`rustup component add llvm-tools-preview\`; neither is preinstalled.
 EOF
+else
+	sed -i "/^# rapira orb notes\$/,\$ s/^- PHP [0-9.]* NTS /- PHP ${PHP_VERSION} NTS /" "$notes"
 fi
 
 step "done"
