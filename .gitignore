@@ -36,3 +36,6 @@ lcov.info
 .claude/CLAUDE.local.md
 .DS_Store
 
+# Amp orb portal registrations
+.amp/portals/*
+

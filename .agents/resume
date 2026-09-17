@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+# Orb resume: nothing to authenticate or reconnect; just confirm the snapshot still has the toolchain.
+set -euo pipefail
+
+export PATH="$HOME/.cargo/bin:$PATH"
+
+command -v php-config >/dev/null || { echo "php-config missing; rerun .agents/setup" >&2; exit 1; }
+command -v cargo >/dev/null || { echo "cargo missing; rerun .agents/setup" >&2; exit 1; }
+echo "php $(php -r 'echo PHP_VERSION;') / $(rustc --version)"
