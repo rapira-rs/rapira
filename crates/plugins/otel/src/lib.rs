@@ -15,7 +15,7 @@ mod sdk;
 
 pub use context::{server_span, trace_context};
 #[cfg(feature = "sdk")]
-pub use metrics::{record_duration, request_finished};
+pub use metrics::{flush_metrics, metrics_interval, record_duration, request_finished};
 #[cfg(feature = "sdk")]
 pub use sdk::{after_fork, layer};
 
@@ -27,6 +27,14 @@ pub fn request_finished(_method: &str, _status: u16, _elapsed: std::time::Durati
 
 #[cfg(not(feature = "sdk"))]
 pub fn record_duration(_operation: &'static str, _elapsed: std::time::Duration) {}
+
+#[cfg(not(feature = "sdk"))]
+pub fn metrics_interval() -> Option<std::time::Duration> {
+    None
+}
+
+#[cfg(not(feature = "sdk"))]
+pub fn flush_metrics() {}
 
 #[cfg(all(test, feature = "sdk"))]
 mod tests {

@@ -98,7 +98,7 @@ impl Body for RespBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<bytes::Bytes>, BoxError>>> {
         let this = self.get_mut();
-        let _entered = this.span.clone().entered();
+        let _entered = this.span.enter();
         let poll = match &mut this.kind {
             BodyKind::Reply(b) => Pin::new(b).poll_frame(cx),
             BodyKind::Empty => Poll::Ready(None),

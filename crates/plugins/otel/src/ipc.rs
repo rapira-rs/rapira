@@ -107,6 +107,20 @@ fn connect(path: &Path) -> io::Result<UnixStream> {
     if unsafe { libc::fcntl(fd.as_raw_fd(), libc::F_SETFD, libc::FD_CLOEXEC) } < 0 {
         return Err(io::Error::last_os_error());
     }
+    let capacity = (MAX_RECORD_BYTES + 4) as libc::c_int;
+    // SAFETY: fd is live and capacity is a readable socket-option value.
+    if unsafe {
+        libc::setsockopt(
+            fd.as_raw_fd(),
+            libc::SOL_SOCKET,
+            libc::SO_SNDBUF,
+            (&capacity as *const libc::c_int).cast(),
+            std::mem::size_of_val(&capacity) as _,
+        )
+    } < 0
+    {
+        return Err(io::Error::last_os_error());
+    }
     let stream = UnixStream::from(fd);
     stream.set_nonblocking(true)?;
     // SAFETY: an all-zero sockaddr_un is valid for initialization.
@@ -147,6 +161,40 @@ mod tests {
     use std::io::Read;
     use std::os::unix::net::UnixListener;
     use std::sync::Barrier;
+
+    #[test]
+    fn large_records_fit_an_idle_connection() {
+        struct Case {
+            name: &'static str,
+            bytes: usize,
+        }
+        let cases = [
+            Case {
+                name: "metric snapshot above the default macOS socket buffer",
+                bytes: 16 * 1024,
+            },
+            Case {
+                name: "large log record",
+                bytes: 128 * 1024,
+            },
+        ];
+        for case in cases {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("otel.sock");
+            let listener = UnixListener::bind(&path).unwrap();
+            let sender = Sender::new(path);
+            let payload = vec![b'x'; case.bytes];
+            let accepted = sender.send(Signal::Metrics, &payload);
+            drop(sender);
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut bytes = Vec::new();
+            stream.read_to_end(&mut bytes).unwrap();
+            assert!(accepted, "{}: idle socket dropped the record", case.name);
+            assert_eq!(bytes.len(), case.bytes + 5, "{}", case.name);
+            assert_eq!(bytes[4], Signal::Metrics as u8, "{}", case.name);
+            assert_eq!(&bytes[5..], payload, "{}", case.name);
+        }
+    }
 
     #[test]
     fn concurrent_producers_preserve_small_records() {

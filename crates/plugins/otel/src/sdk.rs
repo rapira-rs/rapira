@@ -85,7 +85,11 @@ where
         );
     }
     if settings.metrics {
-        crate::metrics::init(resource, sender);
+        crate::metrics::init(
+            resource,
+            sender,
+            Duration::from_millis(settings.flush_interval_ms),
+        );
     }
     layers
 }

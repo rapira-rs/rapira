@@ -32,13 +32,13 @@ type FileRead = tokio::task::JoinHandle<(std::fs::File, std::io::Result<Vec<u8>>
 
 struct FilePump {
     join: FileRead,
+    span: tracing::Span,
     offset: u64,
     len: u64,
     done: u64,
 }
 
-fn read_slice(file: std::fs::File, off: u64, want: usize) -> FileRead {
-    let span = tracing::trace_span!("http.sendfile.read", offset = off, bytes = want);
+fn read_slice(file: std::fs::File, off: u64, want: usize, span: tracing::Span) -> FileRead {
     tokio::task::spawn_blocking(move || {
         let _entered = span.entered();
         use std::os::unix::fs::FileExt;
@@ -76,6 +76,9 @@ impl ReplyBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<http_body::Frame<Bytes>, BoxError>>> {
         self.guard.span.record("otel.status_code", "ERROR");
+        if let Some(file) = &self.file {
+            file.span.record("otel.status_code", "ERROR");
+        }
         self.reply = None;
         self.file = None;
         self.err_armed = true;
@@ -132,7 +135,7 @@ impl http_body::Body for ReplyBody {
                 this.sent += buf.len() as u64;
                 if fp.done < fp.len {
                     let want = std::cmp::min(64 * 1024, fp.len - fp.done) as usize;
-                    fp.join = read_slice(file, fp.offset + fp.done, want);
+                    fp.join = read_slice(file, fp.offset + fp.done, want, fp.span.clone());
                 } else {
                     this.file = None;
                 }
@@ -161,8 +164,15 @@ impl http_body::Body for ReplyBody {
                 }
                 Some(ReplyEvent::File { file, offset, len }) => {
                     let want = std::cmp::min(64 * 1024, len) as usize;
+                    let span = tracing::trace_span!(
+                        "http.sendfile",
+                        offset = offset as i64,
+                        bytes = len as i64,
+                        otel.status_code = tracing::field::Empty,
+                    );
                     this.file = Some(FilePump {
-                        join: read_slice(file, offset, want),
+                        join: read_slice(file, offset, want, span.clone()),
+                        span,
                         offset,
                         len,
                         done: 0,

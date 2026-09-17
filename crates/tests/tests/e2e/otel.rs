@@ -625,6 +625,81 @@ fn php_context_scopes_are_per_request() {
 }
 
 #[test]
+fn sendfile_uses_one_span_per_transfer() {
+    struct Case {
+        name: &'static str,
+        bytes: usize,
+    }
+    let cases = [
+        Case {
+            name: "four reads",
+            bytes: 256 * 1024,
+        },
+        Case {
+            name: "one read",
+            bytes: 1024,
+        },
+    ];
+    for case in cases {
+        let collector = Collector::start();
+        let mut srv = spawn_without_rust_log(
+            "lifecycle/stream-worker.php",
+            1,
+            &format!(
+                "mode = \"dispatcher\"\n[otel]\nenabled = true\nlogs = false\nmetrics = false\nendpoint = \"http://{}\"\nflush_interval_ms = 100\n",
+                collector.addr
+            ),
+        );
+        let path = srv.dir.join("payload.bin");
+        let payload = vec![b'x'; case.bytes];
+        std::fs::write(&path, &payload).unwrap();
+        let (status, body) = http_get_with_headers(
+            srv.addr,
+            "/?probe=sendfile",
+            &[("traceparent", PARENT), ("x-path", path.to_str().unwrap())],
+            TIMEOUT,
+        )
+        .unwrap();
+        assert_eq!(status, 200, "{}: {}", case.name, diagnostics(&srv));
+        assert_eq!(body, payload, "{}", case.name);
+        signal(srv.pid(), libc::SIGQUIT);
+        assert_eq!(
+            srv.wait_exit(TIMEOUT).unwrap().code(),
+            Some(0),
+            "{}",
+            case.name
+        );
+        let spans: Vec<_> = collector
+            .records
+            .as_ref()
+            .unwrap()
+            .try_iter()
+            .flat_map(|record| record.spans(&trace_bytes()))
+            .filter(|span| span.name.starts_with("http.sendfile"))
+            .collect();
+        assert_eq!(
+            spans.len(),
+            1,
+            "{}: one span covers the transfer",
+            case.name
+        );
+        assert_eq!(spans[0].name, "http.sendfile", "{}", case.name);
+        assert!(
+            spans[0].attributes.iter().any(|attribute| {
+                attribute.key == "bytes"
+                    && attribute
+                        .value
+                        .as_ref()
+                        .and_then(|value| value.value.as_ref())
+                        == Some(&Value::IntValue(case.bytes as i64))
+            }),
+            "{}: transfer byte count",
+            case.name
+        );
+    }
+}
+
+#[test]
 fn disabled_telemetry_keeps_an_empty_php_carrier() {
     let srv = spawn_without_rust_log(
         "otel/dispatcher.php",

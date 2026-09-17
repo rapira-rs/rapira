@@ -130,6 +130,7 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
     let outcomes: Vec<Result<(), String>> = running.serve_worker();
     let _shutdown = tracing::trace_span!(parent: None, "worker.shutdown").entered();
     drop(rapira);
+    otel::flush_metrics();
     if let Some(dir) = &spool_dir
         && let Err(e) = std::fs::remove_dir_all(dir)
     {

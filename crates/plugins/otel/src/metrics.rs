@@ -23,8 +23,8 @@ const SECOND_BUCKETS: &[f64] = &[
     0.005, 0.01, 0.025, 0.05, 0.075, 0.1, 0.25, 0.5, 0.75, 1.0, 2.5, 5.0, 7.5, 10.0,
 ];
 
-pub(crate) fn init(resource: Resource, sender: Sender) {
-    *METRICS.lock().unwrap() = Some(Metrics::new(resource, sender));
+pub(crate) fn init(resource: Resource, sender: Sender, interval: Duration) {
+    *METRICS.lock().unwrap() = Some(Metrics::new(resource, sender, interval));
 }
 
 pub(crate) fn after_fork() {
@@ -33,6 +33,7 @@ pub(crate) fn after_fork() {
         *metrics = Some(Metrics::new(
             previous.resource.clone(),
             previous.sender.clone(),
+            previous.interval,
         ));
     }
 }
@@ -46,7 +47,7 @@ pub fn request_finished(method: &str, status: u16, elapsed: Duration) {
                 KeyValue::new("http.response.status_code", i64::from(status)),
             ],
         );
-        metrics.collect();
+        metrics.pending = true;
     }
 }
 
@@ -56,6 +57,20 @@ pub fn record_duration(operation: &'static str, elapsed: Duration) {
             elapsed.as_secs_f64(),
             &[KeyValue::new("rapira.operation", operation)],
         );
+        metrics.pending = true;
+    }
+}
+
+pub fn metrics_interval() -> Option<Duration> {
+    METRICS
+        .lock()
+        .unwrap()
+        .as_ref()
+        .map(|metrics| metrics.interval)
+}
+
+pub fn flush_metrics() {
+    if let Some(metrics) = METRICS.lock().unwrap().as_mut() {
         metrics.collect();
     }
 }
@@ -69,10 +84,13 @@ struct Metrics {
     operation_duration: Histogram<f64>,
     dropped: Counter<u64>,
     last_dropped: u64,
+    interval: Duration,
+    pending: bool,
+    snapshot: ResourceMetrics,
 }
 
 impl Metrics {
-    fn new(resource: Resource, sender: Sender) -> Self {
+    fn new(resource: Resource, sender: Sender, interval: Duration) -> Self {
         let reader = Reader(Arc::new(
             ManualReader::builder()
                 .with_temporality(Temporality::Cumulative)
@@ -106,17 +124,23 @@ impl Metrics {
             operation_duration,
             dropped,
             last_dropped: 0,
+            interval,
+            pending: false,
+            snapshot: ResourceMetrics::default(),
         }
     }
 
     fn collect(&mut self) {
         let dropped = sdk::dropped_records();
+        if !self.pending && dropped == self.last_dropped {
+            return;
+        }
         self.dropped
             .add(dropped.saturating_sub(self.last_dropped), &[]);
         self.last_dropped = dropped;
-        let mut snapshot = ResourceMetrics::default();
-        if self.reader.collect(&mut snapshot).is_ok() {
-            let mut request = ExportMetricsServiceRequest::from(&snapshot);
+        if self.reader.collect(&mut self.snapshot).is_ok() {
+            self.pending = false;
+            let mut request = ExportMetricsServiceRequest::from(&self.snapshot);
             for resource_metrics in &mut request.resource_metrics {
                 if let Some(resource) = &mut resource_metrics.resource {
                     resource.attributes = sdk::process_resource(&self.resource).attributes.0;
@@ -164,13 +188,61 @@ mod tests {
     use crate::tests::{Wire, attribute, settings};
 
     #[test]
-    fn operation_completion_submits_without_another_request() {
+    fn completions_coalesce_until_collection() {
+        const CHILD: &str = "RAPIRA_OTEL_METRIC_COALESCING_TEST";
+        if std::env::var_os(CHILD).is_none() {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "metrics::tests::completions_coalesce_until_collection",
+                    "--test-threads=1",
+                    "--nocapture",
+                ])
+                .env(CHILD, "1")
+                .status()
+                .unwrap();
+            assert!(status.success());
+            return;
+        }
+        let wire = Wire::new();
+        init(
+            Resource::builder_empty().build(),
+            wire.sender.clone(),
+            Duration::from_secs(1),
+        );
+        record_duration("queue.wait", Duration::from_millis(125));
+        record_duration("php.execute", Duration::from_millis(250));
+        request_finished("GET", 200, Duration::from_millis(500));
+        request_finished("GET", 200, Duration::from_millis(750));
+        assert!(
+            wire.records().is_empty(),
+            "completion must only record samples"
+        );
+        flush_metrics();
+        flush_metrics();
+        let records = wire.records();
+        assert_eq!(records.len(), 1, "one cumulative snapshot per collection");
+        let request = ExportMetricsServiceRequest::decode(records[0].1.as_slice()).unwrap();
+        let histogram = request.resource_metrics[0].scope_metrics[0]
+            .metrics
+            .iter()
+            .find(|metric| metric.name == "http.server.request.duration")
+            .unwrap();
+        let Some(Data::Histogram(histogram)) = &histogram.data else {
+            panic!("request histogram missing");
+        };
+        assert_eq!(histogram.data_points[0].count, 2);
+        assert_eq!(histogram.data_points[0].sum, Some(1.25));
+    }
+
+    #[test]
+    fn collection_includes_operations_after_an_early_response() {
         const CHILD: &str = "RAPIRA_OTEL_OPERATION_METRICS_TEST";
         if std::env::var_os(CHILD).is_none() {
             let status = std::process::Command::new(std::env::current_exe().unwrap())
                 .args([
                     "--exact",
-                    "metrics::tests::operation_completion_submits_without_another_request",
+                    "metrics::tests::collection_includes_operations_after_an_early_response",
                     "--test-threads=1",
                     "--nocapture",
                 ])
@@ -205,11 +277,17 @@ mod tests {
         ];
         for case in cases {
             let wire = Wire::new();
-            init(Resource::builder_empty().build(), wire.sender.clone());
+            init(
+                Resource::builder_empty().build(),
+                wire.sender.clone(),
+                Duration::from_secs(1),
+            );
             if case.response_finished {
                 request_finished("GET", 200, Duration::from_secs(1));
+                flush_metrics();
             }
             record_duration(case.operation, case.elapsed);
+            flush_metrics();
             let operation = wire
                 .records()
                 .into_iter()
@@ -273,8 +351,10 @@ mod tests {
             tracing::info!(message = "x".repeat(crate::ipc::MAX_RECORD_BYTES + 1));
             record_duration("php.execute", Duration::from_millis(250));
             request_finished("CUSTOM", 503, Duration::from_secs(2));
+            flush_metrics();
             record_duration("php.execute", Duration::from_millis(750));
             request_finished("CUSTOM", 503, Duration::from_secs(3));
+            flush_metrics();
         });
         let snapshots: Vec<_> = wire
             .records()
@@ -284,8 +364,8 @@ mod tests {
             .collect();
         assert_eq!(
             snapshots.len(),
-            5,
-            "one snapshot per completed operation or request"
+            2,
+            "one snapshot per flush; inherited measurements are discarded"
         );
         struct Case {
             name: &'static str,
@@ -297,14 +377,14 @@ mod tests {
         let cases = [
             Case {
                 name: "first request",
-                index: 2,
+                index: 0,
                 count: 1,
                 request_sum: 2.0,
                 operation_sum: 0.25,
             },
             Case {
                 name: "cumulative second request",
-                index: 4,
+                index: 1,
                 count: 2,
                 request_sum: 5.0,
                 operation_sum: 1.0,

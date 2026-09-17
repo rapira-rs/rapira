@@ -99,6 +99,17 @@ impl ExtensionRuntime {
             .build()
             .expect("build extension runtime");
 
+        if let Some(interval) = otel::metrics_interval() {
+            rt.spawn(async move {
+                let mut timer = tokio::time::interval(interval);
+                timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+                loop {
+                    timer.tick().await;
+                    otel::flush_metrics();
+                }
+            });
+        }
+
         let mut tasks: JoinSet<Result<(), String>> = JoinSet::new();
         for Registered { name, ext } in self.exts {
             let (php, stop) = (php.clone(), stop_rx.clone());
