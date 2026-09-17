@@ -24,7 +24,8 @@ extern bool rapira_rs_ctor_request(zend_object *obj, zend_string *method,
                                    zend_string *authority,
                                    zend_string *protocol, zval *headers,
                                    zval *body, zval *remote, zval *server,
-                                   zval *tls, double received_at);
+                                   zval *tls, double received_at,
+                                   zval *trace_context);
 
 ZEND_METHOD(Rapira_InetAddress, __construct) {
     zend_string *ip;
@@ -124,9 +125,9 @@ ZEND_METHOD(Rapira_Http_Multipart, __construct) {
 ZEND_METHOD(Rapira_Http_Request, __construct) {
     zend_string *method, *uri, *target, *authority, *protocol, *body_str;
     zend_object *body_obj;
-    zval *headers, *remote, *server, *tls;
+    zval *headers, *remote, *server, *tls, *trace_context;
     double received_at;
-    ZEND_PARSE_PARAMETERS_START(11, 11)
+    ZEND_PARSE_PARAMETERS_START(12, 12)
     Z_PARAM_STR(method)
     Z_PARAM_STR(uri)
     Z_PARAM_STR(target)
@@ -138,6 +139,7 @@ ZEND_METHOD(Rapira_Http_Request, __construct) {
     Z_PARAM_ZVAL(server)
     Z_PARAM_OBJECT_OF_CLASS_OR_NULL(tls, rapira_ce_http_tls)
     Z_PARAM_DOUBLE(received_at)
+    Z_PARAM_ARRAY(trace_context)
     ZEND_PARSE_PARAMETERS_END();
 
     // borrowed body zval: ownership stays with ZPP, no refcount taken
@@ -150,7 +152,7 @@ ZEND_METHOD(Rapira_Http_Request, __construct) {
 
     if (!rapira_rs_ctor_request(Z_OBJ_P(ZEND_THIS), method, uri, target,
                                 authority, protocol, headers, &body, remote,
-                                server, tls, received_at)) {
+                                server, tls, received_at, trace_context)) {
         rapira_throw_or_backstop("Request construction");
         RETURN_THROWS();
     }

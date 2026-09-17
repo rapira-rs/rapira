@@ -28,6 +28,7 @@ members = [
     "crates/php_sys",
     "crates/scoreboard",
     "crates/plugins/http",
+    "crates/plugins/otel",
 ]
 
 [workspace.dependencies]
@@ -41,6 +42,7 @@ rapira_static_files = { path = "crates/middleware/static_files" }
 rapira_http = { path = "crates/plugins/http" }
 rapira_master = { path = "crates/master" }
 rapira_scoreboard = { path = "crates/scoreboard" }
+otel = { path = "crates/plugins/otel", default-features = false }
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 http = "1"
@@ -53,6 +55,10 @@ all = "warn"
 [profile.release]
 lto = "thin"
 codegen-units = 1
+
+[features]
+default = ["otel"]
+otel = ["otel/exporter"]
 
 [dependencies]
 anyhow = { workspace = true }
@@ -68,6 +74,7 @@ rapira_http = { workspace = true }
 libc = "0.2"
 mimalloc = "0.1"
 tracing.workspace = true
+otel.workspace = true
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono", "json"] }
 
 [dev-dependencies]

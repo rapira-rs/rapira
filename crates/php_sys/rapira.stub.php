@@ -129,6 +129,9 @@ namespace Rapira {
 
     function get_version(): string {}
 
+    /** @return array<string, string> The active native request carrier. Empty outside a request. */
+    function trace_context(): array {}
+
     /**
      * Queued to the host under the `app` target. Never blocks, never throws.
      * A \Throwable under any key of $context is serialized structurally: json_encode()

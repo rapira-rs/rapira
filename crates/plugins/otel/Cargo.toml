@@ -1,0 +1,36 @@
+[package]
+name = "otel"
+version = "0.8.1"
+edition.workspace = true
+publish = false
+
+[lints]
+workspace = true
+
+[features]
+default = []
+sdk = ["dep:opentelemetry", "dep:opentelemetry_sdk", "dep:opentelemetry-proto", "dep:opentelemetry-appender-tracing", "dep:tracing-opentelemetry", "dep:tracing-subscriber", "dep:prost", "dep:rand"]
+exporter = ["sdk", "dep:tokio", "dep:reqwest", "dep:serde_json", "dep:tempfile"]
+
+[dependencies]
+anyhow.workspace = true
+http.workspace = true
+libc.workspace = true
+tracing.workspace = true
+rapira_config.workspace = true
+opentelemetry = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs"], optional = true }
+opentelemetry_sdk = { version = "0.32", default-features = false, features = ["trace", "metrics", "logs", "experimental_metrics_custom_reader"], optional = true }
+opentelemetry-proto = { version = "0.32", default-features = false, features = ["gen-tonic-messages", "trace", "metrics", "logs"], optional = true }
+opentelemetry-appender-tracing = { version = "0.32", optional = true }
+tracing-opentelemetry = { version = "0.33", default-features = false, optional = true }
+tracing-subscriber = { version = "0.3", features = ["registry"], optional = true }
+prost = { version = "0.14", optional = true }
+rand = { version = "0.9", optional = true }
+tokio = { version = "1", features = ["rt", "net", "io-util", "time", "signal", "macros", "sync"], optional = true }
+reqwest = { version = "0.12", default-features = false, features = ["rustls-tls"], optional = true }
+serde_json = { version = "1", optional = true }
+tempfile = { version = "3", optional = true }
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { version = "1", features = ["test-util"] }

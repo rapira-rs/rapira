@@ -10,6 +10,7 @@ description = "HTTP front for rapira - terminates HTTP and answers every request
 workspace = true
 
 [dependencies]
+otel.workspace = true
 extension_api = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

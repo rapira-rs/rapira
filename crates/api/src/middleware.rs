@@ -3,6 +3,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
+use tracing::Instrument;
 
 use crate::Addr;
 
@@ -68,12 +69,13 @@ impl Next {
     pub async fn run(self, req: HttpRequest) -> HttpResponse {
         match self.chain.get(self.index) {
             Some(mw) => {
+                let span = tracing::trace_span!("http.middleware", index = self.index);
                 let mw = Arc::clone(mw);
                 let next = Self {
                     index: self.index + 1,
                     ..self
                 };
-                mw.handle(req, next).await
+                mw.handle(req, next).instrument(span).await
             }
             None => self.handler.call(req).await,
         }

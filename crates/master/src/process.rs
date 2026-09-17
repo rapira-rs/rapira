@@ -135,18 +135,21 @@ pub(crate) fn bury(
     tables: &mut [&mut ProcTable],
     pid: libc::pid_t,
     status: c_int,
-) -> Option<(usize, WorkerProc, ExitVerdict)> {
+) -> Option<(usize, WorkerProc, ExitVerdict, c_int)> {
     for (pool, table) in tables.iter_mut().enumerate() {
         if let Some(w) = table.remove(pid) {
             let verdict = classify(status, w.kill_intent);
-            return Some((pool, w, verdict));
+            return Some((pool, w, verdict, status));
         }
     }
     None
 }
 
 /// Drains `waitpid` fully so every child ready at this point is buried in one pass.
-pub(crate) fn reap_all(tables: &mut [&mut ProcTable]) -> Vec<(usize, WorkerProc, ExitVerdict)> {
+pub(crate) fn reap_all(
+    tables: &mut [&mut ProcTable],
+    service: &mut dyn crate::Service,
+) -> Vec<(usize, WorkerProc, ExitVerdict, c_int)> {
     let mut buried = Vec::new();
     loop {
         let mut status: c_int = 0;
@@ -157,6 +160,7 @@ pub(crate) fn reap_all(tables: &mut [&mut ProcTable]) -> Vec<(usize, WorkerProc,
         }
         match bury(tables, pid, status) {
             Some(entry) => buried.push(entry),
+            None if service.on_exit(pid, status) => {}
             None => tracing::warn!(target: "master", "reaped unknown child {pid}"),
         }
     }
@@ -486,7 +490,7 @@ mod tests {
             kill_intent: None,
         });
 
-        let (pool, w, verdict) = {
+        let (pool, w, verdict, status) = {
             let mut tables: Vec<&mut ProcTable> = vec![&mut http, &mut grpc];
             assert!(bury(&mut tables, 2_000_000_009, exited(0)).is_none());
             bury(&mut tables, 2_000_000_002, exited(89)).expect("the second table owns the pid")
@@ -495,6 +499,7 @@ mod tests {
         assert_eq!(pool, 1);
         assert_eq!((w.slot, w.generation), (1, 3));
         assert_eq!(verdict, ExitVerdict::Unhealthy);
+        assert_eq!(libc::WEXITSTATUS(status), WORKER_EXIT_UNHEALTHY);
         assert_eq!(http.procs.len(), 1, "the other table is untouched");
         assert_eq!(grpc.procs.len(), 0);
     }

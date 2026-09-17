@@ -238,8 +238,9 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
         };
         sb_update(Event::Active);
         match got {
-            Ok(job) => {
+            Ok(mut job) => {
                 job_r.pending.fetch_sub(1, Ordering::Relaxed);
+                job.ctx.telemetry.dequeued();
                 Pulled::Job(Box::new(job))
             }
             Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
@@ -258,8 +259,9 @@ pub(crate) fn pull_job_try() -> Pulled {
         let got = job_r.rx.try_recv();
         sb_update(Event::Active);
         match got {
-            Ok(job) => {
+            Ok(mut job) => {
                 job_r.pending.fetch_sub(1, Ordering::Relaxed);
+                job.ctx.telemetry.dequeued();
                 Pulled::Job(Box::new(job))
             }
             Err(TryRecvError::Empty) => Pulled::Empty,

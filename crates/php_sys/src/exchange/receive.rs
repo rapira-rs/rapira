@@ -10,13 +10,13 @@ enum RecvMode {
 /// `return_value` writable; engine active on this thread.
 unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
-        if let Unit::Handling(ptr) = CYCLE.get().unit
+        if let Unit::Handling(ptr) = current_unit()
             && (*ptr).host_closed()
         {
             tracing::debug!(target: "rapira", "receive() discarded an unfinalized exchange whose client left");
             super::respond::discard_unit(&mut *ptr);
         }
-        if matches!(CYCLE.get().unit, Unit::Handling(_)) {
+        if matches!(current_unit(), Unit::Handling(_)) {
             zend::throw_error(
                 c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first",
             );
@@ -50,6 +50,8 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                     update(|c| {
                         c.unit = Unit::Handling(ptr);
                         c.received = true;
+                        // The cycle owns this guard across PHP calls and allocation bailouts.
+                        c.scope = Some((*ptr).job.ctx.start_execution().entered());
                     });
                     (*exchange_from(obj.value.obj)).job = ptr.cast();
                     // SAFETY: plain zend timer bookkeeping; no bailout path.
@@ -115,7 +117,7 @@ pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> b
         let _ = object_init_ex(return_value, rapira_ce_internal_http_dispatcher_info);
         let info = info_from((*return_value).value.obj);
         (*info).pending = pending_depth() as i64;
-        (*info).active = i64::from(matches!(CYCLE.get().unit, Unit::Handling(_)));
+        (*info).active = i64::from(matches!(current_unit(), Unit::Handling(_)));
         true
     })
 }

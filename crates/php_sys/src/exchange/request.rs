@@ -234,6 +234,10 @@ unsafe fn build_request_impl(ex: *mut rapira_exchange_obj, return_value: *mut zv
         }
         zval_ptr_dtor(&mut tls);
         zend::prop_double(ce, o, c"receivedAt", req.received_at.unwrap_or(0.0));
+        let mut trace_context: zval = std::mem::zeroed();
+        crate::telemetry::emit_carrier(&mut trace_context, &st.job.ctx.telemetry.carrier);
+        zend::prop_zval(ce, o, c"traceContext", &mut trace_context);
+        zval_ptr_dtor(&mut trace_context);
 
         if zend::exception_pending() {
             zval_ptr_dtor(&mut reqz);

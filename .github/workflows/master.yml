@@ -124,4 +124,4 @@ jobs:
             - run: cargo clippy --workspace --all-targets -- -D warnings
             - run: cargo build --workspace
             - run: cargo test --workspace
-            - run: cargo build -p rapira_core --bin rapira && cargo test -p tests --test e2e --features e2e -- --test-threads=1
+            - run: cargo build -p rapira_core --bin rapira && cargo test -p tests --test e2e --features e2e,otel -- --test-threads=1

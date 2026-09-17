@@ -27,6 +27,7 @@ $req = new Request(
     $server,
     $tls,
     1722700000.25,
+    ['traceparent' => '00-4bf92f3577b34da6a3ce929d0e0e4736-00f067aa0ba902b7-01', 'tracestate' => 'vendor=a'],
 );
 
 echo $req->method, ' ', $req->target, ' ', $req->protocol, "\n";
@@ -36,9 +37,24 @@ echo $req->body->fields[0]->name, '=', $req->body->fields[0]->value, "\n";
 echo $req->body->files[0]->clientFilename, ' ', $req->body->files[0]->size, "\n";
 echo $req->tls->negotiatedProtocol, ' ', var_export($req->tls->certSerial, true), "\n";
 echo $req->authority, ' ', $req->receivedAt, "\n";
+echo 'traceparent: ', $req->traceContext['traceparent'], "\n";
+echo 'tracestate: ', $req->traceContext['tracestate'], "\n";
+try {
+    $req->traceContext['traceparent'] = 'changed';
+    echo "trace carrier changed\n";
+} catch (\Error) {
+    echo "trace-readonly: enforced\n";
+}
+
+try {
+    new Request('GET', '/', '/', null, 'HTTP/1.1', [], '', $remote, $server, null, 0.0, 'invalid');
+    echo "trace string accepted\n";
+} catch (\TypeError) {
+    echo "trace-type: enforced\n";
+}
 
 // tls: null is a legal Request (plain-HTTP listener) - must construct, not crash.
-$plain = new Request('GET', '/', '/', null, 'HTTP/1.1', [], '', $remote, $server, null, 1.0);
+$plain = new Request('GET', '/', '/', null, 'HTTP/1.1', [], '', $remote, $server, null, 1.0, []);
 echo 'tls-null: ', var_export($plain->tls, true), "\n";
 
 try {
@@ -57,7 +73,7 @@ try {
 }
 
 try {
-    new Request('GET', '/', '/', null, 'HTTP/1.1', [], '', 'nope', $server, null, 0.0);
+    new Request('GET', '/', '/', null, 'HTTP/1.1', [], '', 'nope', $server, null, 0.0, []);
     echo "union accepted\n";
 } catch (\TypeError) {
     echo "union: enforced\n";

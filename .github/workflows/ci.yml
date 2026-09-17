@@ -189,6 +189,6 @@ jobs:
             - run: cargo test --workspace
               env:
                   RAPIRA_REQUIRE_EXTS: ${{ runner.os == 'Linux' && 'imap,newrelic,ddtrace,openssl' || '' }}
-            - run: cargo build -p rapira_core --bin rapira && cargo test -p tests --test e2e --features e2e -- --test-threads=1
+            - run: cargo build -p rapira_core --bin rapira && cargo test -p tests --test e2e --features e2e,otel -- --test-threads=1
               env:
                   RAPIRA_REQUIRE_EXTS: ${{ runner.os == 'Linux' && 'imap,newrelic,ddtrace,openssl' || '' }}

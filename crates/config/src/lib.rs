@@ -7,6 +7,7 @@ use std::time::Duration;
 mod http;
 mod listen;
 mod log;
+mod otel;
 mod pool;
 mod supervisor;
 
@@ -15,11 +16,13 @@ pub use http::{
 };
 pub use listen::{Listen, ListenParseError};
 pub use log::{LogFormat, LogLevel, LogSettings};
+pub use otel::OtelSettings;
 pub use pool::{PoolSettings, RunMode, Scaling};
 pub use supervisor::SupervisorSettings;
 
 use http::{HttpSection, resolve_middleware, resolve_static, resolve_uploads};
 use log::{LogSection, resolve_log};
+use otel::{OtelSection, resolve_otel};
 use pool::resolve_pool;
 use supervisor::{SupervisorSection, resolve_supervisor};
 
@@ -28,6 +31,7 @@ pub struct Settings {
     pub http: HttpSettings,
     pub supervisor: SupervisorSettings,
     pub log: LogSettings,
+    pub otel: OtelSettings,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -39,6 +43,8 @@ struct FileConfig {
     supervisor: SupervisorSection,
     #[serde(default)]
     log: LogSection,
+    #[serde(default)]
+    otel: OtelSection,
 }
 
 fn default_listen() -> Listen {
@@ -120,6 +126,7 @@ fn merge(file: FileConfig, config_dir: Option<&Path>) -> anyhow::Result<Settings
     let middleware = resolve_middleware(file.http.middleware, static_files)?;
     let supervisor = resolve_supervisor(file.supervisor, config_dir)?;
     let log = resolve_log(file.log)?;
+    let otel = resolve_otel(file.otel)?;
 
     Ok(Settings {
         http: HttpSettings {
@@ -140,6 +147,7 @@ fn merge(file: FileConfig, config_dir: Option<&Path>) -> anyhow::Result<Settings
         },
         supervisor,
         log,
+        otel,
     })
 }
 

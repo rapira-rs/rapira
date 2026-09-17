@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 tracing = { workspace = true }
+otel = { workspace = true }
 tokio = { workspace = true, features = ["sync", "rt", "time"] }
 rapira_scoreboard = { workspace = true }
 bytes = { workspace = true }
@@ -18,4 +19,3 @@ bytes = { workspace = true }
 anyhow = { workspace = true }
 bindgen = "0"
 cc = "1.2"
-

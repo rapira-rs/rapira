@@ -111,7 +111,10 @@ namespace Rapira\Http {
         public \Rapira\InetAddress|\Rapira\UnixAddress $server;
         public ?Tls $tls;
         public float $receivedAt;
+        /** @var array<string, string> */
+        public array $traceContext;
 
+        /** @param array<string, string> $traceContext */
         public function __construct(
             string $method,
             string $uri,
@@ -124,6 +127,7 @@ namespace Rapira\Http {
             \Rapira\InetAddress|\Rapira\UnixAddress $server,
             ?Tls $tls,
             float $receivedAt,
+            array $traceContext,
         ) {}
     }
 

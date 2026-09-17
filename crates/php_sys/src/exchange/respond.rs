@@ -158,6 +158,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
             c.unit = Unit::Sealed(p);
         }
     });
+    finish_execution(st, true);
     sb_update(Event::Handled(true));
     if let Some(tx) = st.job.ctx.sender.take() {
         let _ = tx.try_send(Frame::End {
@@ -408,6 +409,7 @@ pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: Fie
         }
         c.served = true;
     });
+    finish_execution(st, truncated);
     sb_update(Event::Handled(truncated));
     let _ = unsafe {
         send_frame(
@@ -481,6 +483,9 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
             return;
         }
         let ptr: *mut ExchangeState = job.cast();
+        // SAFETY: the pointer remains owned by this free_obj call.
+        let st = unsafe { &mut *ptr };
+        finish_execution(st, st.stage != Stage::Finalized);
         update(|c| {
             if matches!(c.unit, Unit::Handling(p) | Unit::Sealed(p) if p == ptr) {
                 c.unit = Unit::Idle;

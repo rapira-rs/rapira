@@ -9,6 +9,7 @@
 #endif
 
 extern void rapira_rs_finish_response(void);
+extern void rapira_rs_populate_request_context(void);
 
 // php_handle_aborted_connection (main.c:2722) longjmps past Rust's catch_unwind
 extern size_t rapira_rs_ub_write(const char *str, size_t len, bool *aborted);
@@ -350,6 +351,16 @@ int rapira_request_activate(void) {
     }
 
     return outcome;
+}
+
+int rapira_request_prepare(void) {
+    zend_try {
+        rapira_rs_populate_request_context();
+        rapira_release_temporary_streams();
+    }
+    zend_catch { return BAILOUT; }
+    zend_end_try();
+    return OK;
 }
 
 // sapi_activate resets the slot without releasing (SAPI.c), so it leaks per job

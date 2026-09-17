@@ -38,6 +38,9 @@ struct Cli {
 enum Commands {
     /// Boot the server: start PHP, register extensions, and serve requests.
     Serve(ServeArgs),
+    #[cfg(feature = "otel")]
+    #[command(hide = true)]
+    Otel,
 }
 
 #[derive(Args)]
@@ -60,6 +63,12 @@ fn main() -> anyhow::Result<()> {
 
     match Cli::parse().command {
         Some(Commands::Serve(args)) => serve(args),
+        #[cfg(feature = "otel")]
+        Some(Commands::Otel) => {
+            let config = otel::process::Config::from_env()?;
+            logging::init(&config.log, None)?;
+            otel::exporter::run_process(config.otel, config.max_connections)
+        }
         None => {
             Cli::command().print_help()?;
             println!();
@@ -255,21 +264,59 @@ fn http_pool(
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let settings: Settings = rapira_config::resolve(&args.config)?;
 
-    logging::init(&settings.log)?;
+    #[cfg(not(feature = "otel"))]
+    anyhow::ensure!(
+        !settings.otel.enabled,
+        "otel.enabled requires a build with the otel feature"
+    );
+    #[cfg(feature = "otel")]
+    let exporter = settings
+        .otel
+        .enabled
+        .then(|| {
+            otel::process::Process::prepare(otel::process::Config {
+                otel: settings.otel.clone(),
+                log: settings.log.clone(),
+                max_connections: settings
+                    .http
+                    .pool
+                    .processes
+                    .saturating_mul(2)
+                    .saturating_add(1),
+            })
+        })
+        .transpose()?;
+    logging::init(
+        &settings.log,
+        #[cfg(feature = "otel")]
+        exporter
+            .as_ref()
+            .map(|process| (&settings.otel, process.sender())),
+    )?;
+    #[cfg(feature = "otel")]
+    let parent_fds = exporter
+        .as_ref()
+        .map_or_else(Vec::new, |process| process.parent_fds());
+    #[cfg(feature = "otel")]
+    let service: Box<dyn rapira_master::Service> = match exporter {
+        Some(process) => Box::new(OtelService(process)),
+        None => Box::new(()),
+    };
+    #[cfg(not(feature = "otel"))]
+    let service: Box<dyn rapira_master::Service> = Box::new(());
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
     // One context for every pool, kept alive past `run` so the master keeps its listener dups.
     let mut prepare: PrepareCtx = PrepareCtx::new();
-    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = [http_pool(
-        settings.http,
-        &settings.supervisor,
-        &mut prepare,
-    )?]
-    .into_iter()
-    .unzip();
+    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) =
+        [tracing::trace_span!("http.prepare")
+            .in_scope(|| http_pool(settings.http, &settings.supervisor, &mut prepare))?]
+        .into_iter()
+        .unzip();
 
     // MINIT once, after every pool bound its listeners.
-    let module: php_sys::PhpModule = Rapira::boot_master()?;
+    let module: php_sys::PhpModule =
+        tracing::trace_span!("php.module.init").in_scope(Rapira::boot_master)?;
 
     // forks ------------------------------------------------------------------
     let cfg: rapira_master::MasterConfig = rapira_master::MasterConfig {
@@ -278,13 +325,26 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         pidfile: settings.supervisor.pidfile,
     };
     let scoreboard: Scoreboard = Scoreboard::create(cfg.scoreboard_slots()?)?;
+    let pool_names: Vec<_> = cfg.pools.iter().map(|pool| pool.name).collect();
 
-    let stop: Result<rapira_master::StopReason, anyhow::Error> =
-        rapira_master::run(cfg, scoreboard, move |env: rapira_master::WorkerEnv| {
+    let stop: Result<rapira_master::StopReason, anyhow::Error> = rapira_master::run_with_service(
+        cfg,
+        scoreboard,
+        move |env: rapira_master::WorkerEnv| {
+            #[cfg(feature = "otel")]
+            for &fd in &parent_fds {
+                // SAFETY: the child releases its copies of master-only service descriptors.
+                unsafe {
+                    libc::close(fd);
+                }
+            }
+            otel::after_fork(pool_names[env.pool]);
             let pool: &mut PoolRun = &mut pools[env.pool];
             let host: ExtensionRuntime = pool.host.take().expect("fresh child owns the host copy");
             worker::worker_body(env, host, pool.args.clone())
-        });
+        },
+        service,
+    );
 
     match stop {
         Ok(rapira_master::StopReason::Drained) => {
@@ -296,6 +356,19 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
             tracing::error!(target: "rapira", "master failed: {e:#}");
             std::process::exit(rapira_master::MASTER_EXIT_FAILBOOT);
         }
+    }
+}
+
+#[cfg(feature = "otel")]
+struct OtelService(otel::process::Process);
+
+#[cfg(feature = "otel")]
+impl rapira_master::Service for OtelService {
+    fn tick(&mut self) {
+        self.0.tick();
+    }
+    fn on_exit(&mut self, pid: libc::pid_t, status: libc::c_int) -> bool {
+        self.0.on_exit(pid, status)
     }
 }
 

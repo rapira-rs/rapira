@@ -7,6 +7,7 @@ use std::path::PathBuf;
 
 fn base_req() -> Request {
     Request {
+        span: tracing::Span::none(),
         method: String::new(),
         uri: "/".into(),
         target: None,

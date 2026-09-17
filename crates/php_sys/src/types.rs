@@ -140,6 +140,7 @@ pub enum Body {
 }
 
 pub struct Request {
+    pub span: tracing::Span,
     pub method: String,
     pub uri: String,
     /// Request-target bytes; a front can reconstruct them from its parsed URI. None falls back to `uri`'s bytes.
@@ -280,6 +281,7 @@ pub enum StreamState {
 
 pub struct Context {
     pub req: Request,
+    pub(crate) telemetry: crate::telemetry::Telemetry,
     /// None on the dispatcher path, which binds no server context and runs no CGI callbacks.
     pub c: Option<ReqC>,
     pub sender: Option<Sender<Frame>>,
@@ -292,8 +294,10 @@ pub struct Context {
 impl Context {
     pub fn new(req: Request, sender: Sender<Frame>, superglobals: bool) -> Self {
         let c = superglobals.then(|| ReqC::build(&req));
+        let telemetry = crate::telemetry::Telemetry::queued(&req.span);
         Self {
             req,
+            telemetry,
             c,
             sender: Some(sender),
             head: None,
@@ -301,6 +305,15 @@ impl Context {
             stream: StreamState::NotSent,
             tearing_down: false,
         }
+    }
+
+    pub(crate) fn start_execution(&mut self) -> tracing::Span {
+        self.telemetry.execute(&self.req.span)
+    }
+
+    pub(crate) fn finish_execution(&mut self, errored: bool) {
+        self.telemetry.finish(errored);
+        self.req.span = tracing::Span::none();
     }
 
     pub fn is_truncated(&self, errored: bool) -> bool {
@@ -382,6 +395,7 @@ mod tests {
     fn head_of(status: u16, headers: &[(&str, &str)]) -> ResponseHead {
         let mut ctx = Context {
             req: Request {
+                span: tracing::Span::none(),
                 method: String::new(),
                 uri: String::new(),
                 target: None,
@@ -405,6 +419,7 @@ mod tests {
                 tls: None,
             },
             c: None,
+            telemetry: crate::telemetry::Telemetry::default(),
             sender: None,
             head: None,
             body: Vec::new(),

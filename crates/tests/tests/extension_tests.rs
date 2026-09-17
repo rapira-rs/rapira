@@ -14,6 +14,7 @@ async fn exec_full(php: &Php, req: Request) -> Result<Response> {
 
 fn get_request(uri: &str) -> Request {
     Request {
+        span: tracing::Span::none(),
         method: "GET".into(),
         uri: uri.into(),
         target: None,

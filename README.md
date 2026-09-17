@@ -142,6 +142,24 @@ rapira serve rapira.toml
 
 See [examples](examples/) for routing, streaming, and asynchronous dispatch.
 
+## OpenTelemetry
+
+Enable the `otel` plugin in `rapira.toml`:
+
+```toml
+[otel]
+enabled = true
+endpoint = "http://localhost:4318"
+service_name = "rapira"
+sample_ratio = 1.0
+```
+
+Rapira continues incoming W3C traces through HTTP handling and PHP execution. One exporter process sends native traces, logs, and metrics through OTLP HTTP/protobuf. Workers send records directly to that process. Completed records accepted by the exporter survive a worker crash.
+
+PHP applications use their own OpenTelemetry SDK and exporter. Dispatcher requests expose `Rapira\Http\Request::$traceContext`. Worker callbacks use `Rapira\trace_context()`. Extract this carrier as the parent of each PHP application span.
+
+The default build includes the `otel` Cargo feature. Use `--no-default-features` to exclude it. Telemetry stays disabled until `[otel].enabled` is `true`. See the [OpenTelemetry guide](https://rapira.rs/docs/otel) for sampling, configuration, and PHP integration.
+
 ## Contributing
 
 See [CONTRIBUTING.md](CONTRIBUTING.md) for build and test instructions. The documentation source is in [rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io).

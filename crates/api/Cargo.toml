@@ -14,6 +14,7 @@ anyhow = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
+tracing.workspace = true
 # Master-side pre-fork socket binding (sync syscalls; keeps this crate tokio-free).
 socket2 = "0.6"
 
