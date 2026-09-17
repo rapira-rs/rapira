@@ -3,8 +3,8 @@
 # Idempotent; a warm rerun on a stale snapshot only re-verifies and rebuilds what changed.
 set -euo pipefail
 
-# Which PHP leg to develop against. Both CI legs are on deb.sury.org; 8.5 works too.
-PHP_VERSION="${RAPIRA_PHP_VERSION:-8.4}"
+# Which PHP leg to develop against. Both CI legs are on deb.sury.org; default to 8.5.
+PHP_VERSION="${RAPIRA_PHP_VERSION:-8.5}"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
@@ -24,11 +24,15 @@ step "system packages (libclang for bindgen, PHP ${PHP_VERSION} NTS + embed SAPI
 apt_packages=(
 	ca-certificates curl libclang-dev
 	"php${PHP_VERSION}-cli" "php${PHP_VERSION}-dev" "libphp${PHP_VERSION}-embed"
-	"php${PHP_VERSION}-opcache" "php${PHP_VERSION}-mbstring" "php${PHP_VERSION}-xml"
+	"php${PHP_VERSION}-mbstring" "php${PHP_VERSION}-xml"
 	"php${PHP_VERSION}-curl" "php${PHP_VERSION}-intl" "php${PHP_VERSION}-bcmath"
 	"php${PHP_VERSION}-sqlite3" "php${PHP_VERSION}-pgsql" "php${PHP_VERSION}-igbinary"
 	"php${PHP_VERSION}-redis" "php${PHP_VERSION}-imap"
 )
+# OPcache is built into PHP 8.5; only the 8.4 leg has a separate package.
+if [[ "$PHP_VERSION" == 8.4 ]]; then
+	apt_packages+=(php8.4-opcache)
+fi
 missing=()
 for pkg in "${apt_packages[@]}"; do
 	dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")
