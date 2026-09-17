@@ -1,0 +1,118 @@
+#!/usr/bin/env bash
+# Orb setup: everything a fresh Debian 12 sandbox needs to build and test rapira.
+# Idempotent; a warm rerun on a stale snapshot only re-verifies and rebuilds what changed.
+set -euo pipefail
+
+# Which PHP leg to develop against. Both CI legs are on deb.sury.org; default to 8.5.
+PHP_VERSION="${RAPIRA_PHP_VERSION:-8.5}"
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+export DEBIAN_FRONTEND=noninteractive
+
+step_started=$SECONDS
+step() {
+	printf '\n==> [%3ds] %s\n' "$((SECONDS - step_started))" "$*"
+	step_started=$SECONDS
+}
+
+# ---------------------------------------------------------------------------
+step "system packages (libclang for bindgen, PHP ${PHP_VERSION} NTS + embed SAPI from deb.sury.org)"
+# php${V}-common covers the built-in extensions the tests gate on (ctype, fileinfo,
+# filter, iconv, phar, tokenizer, zlib, openssl, ...); the rest are separate packages.
+apt_packages=(
+	ca-certificates curl libclang-dev
+	"php${PHP_VERSION}-cli" "php${PHP_VERSION}-dev" "libphp${PHP_VERSION}-embed"
+	"php${PHP_VERSION}-mbstring" "php${PHP_VERSION}-xml"
+	"php${PHP_VERSION}-curl" "php${PHP_VERSION}-intl" "php${PHP_VERSION}-bcmath"
+	"php${PHP_VERSION}-sqlite3" "php${PHP_VERSION}-pgsql" "php${PHP_VERSION}-igbinary"
+	"php${PHP_VERSION}-redis" "php${PHP_VERSION}-imap"
+)
+# OPcache is built into PHP 8.5; only the 8.4 leg has a separate package.
+if [[ "$PHP_VERSION" == 8.4 ]]; then
+	apt_packages+=(php8.4-opcache)
+fi
+missing=()
+for pkg in "${apt_packages[@]}"; do
+	dpkg-query -W -f='${Status}' "$pkg" 2>/dev/null | grep -q 'install ok installed' || missing+=("$pkg")
+done
+if ((${#missing[@]})); then
+	sury_list=/etc/apt/sources.list.d/php.list
+	if [ ! -f "$sury_list" ]; then
+		echo "adding deb.sury.org PHP repository"
+		keyring=$(mktemp)
+		curl -fsSL --retry 3 -o "$keyring" https://packages.sury.org/debsuryorg-archive-keyring.deb
+		sudo dpkg -i "$keyring" >/dev/null
+		rm -f "$keyring"
+		codename=$(. /etc/os-release && echo "$VERSION_CODENAME")
+		echo "deb [signed-by=/usr/share/keyrings/deb.sury.org-php.gpg] https://packages.sury.org/php/ ${codename} main" |
+			sudo tee "$sury_list" >/dev/null
+	fi
+	echo "installing: ${missing[*]}"
+	sudo apt-get update -qq
+	sudo apt-get install -y -qq --no-install-recommends "${missing[@]}"
+else
+	echo "all apt packages present"
+fi
+
+php -v | head -1
+php -r 'exit(PHP_ZTS ? 1 : 0);' || { echo "PHP is ZTS; rapira needs NTS" >&2; exit 1; }
+test -e "$(php-config --prefix)/lib/libphp.so" || { echo "no libphp.so from php-config prefix" >&2; exit 1; }
+
+# ---------------------------------------------------------------------------
+step "rust toolchain (rustup, channel and components from rust-toolchain.toml)"
+export CARGO_HOME="${CARGO_HOME:-$HOME/.cargo}"
+export RUSTUP_HOME="${RUSTUP_HOME:-$HOME/.rustup}"
+if [ ! -x "$CARGO_HOME/bin/rustup" ]; then
+	curl -fsSL --retry 3 https://sh.rustup.rs |
+		sh -s -- -y --no-modify-path --profile minimal --default-toolchain none
+fi
+# The installer cannot update this running script's environment.
+# shellcheck disable=SC1091
+. "$CARGO_HOME/env"
+# Reads rust-toolchain.toml from the cwd; a no-op when the toolchain is already installed.
+rustup toolchain install --no-self-update >/dev/null
+rustc --version
+cargo clippy --version
+cargo fmt --version
+
+profile_marker="# rapira orb: rustup toolchain"
+for rc in "$HOME/.bash_profile" "$HOME/.bashrc"; do
+	if ! grep -Fqx "$profile_marker" "$rc" 2>/dev/null; then
+		printf '\n%s\n[ -f "$HOME/.cargo/env" ] && . "$HOME/.cargo/env"\n' "$profile_marker" >>"$rc"
+	fi
+done
+
+# ---------------------------------------------------------------------------
+step "warm the cargo caches that make test_nts / make test_e2e use"
+# Mirrors LOCATE_PHP in the Makefile: the same CARGO_TARGET_DIR and RUSTFLAGS, so the
+# make targets reuse these artifacts instead of recompiling the workspace.
+php_prefix=$(php-config --prefix)
+libphp=$(find "$php_prefix/lib64" "$php_prefix/lib" "$php_prefix"/lib/php* -maxdepth 1 -name 'libphp*.so' 2>/dev/null | head -1)
+test -n "$libphp" || { echo "no libphp*.so under $php_prefix" >&2; exit 1; }
+mkdir -p target/phplib
+ln -sfn "$libphp" target/phplib/libphp.so
+export CARGO_TARGET_DIR="$repo_root/target/nts"
+export RUSTFLAGS="-L native=$repo_root/target/phplib"
+cargo test --workspace --no-run --quiet
+cargo build -p rapira_core --bin rapira --quiet
+cargo test -p tests --test e2e --features e2e --no-run --quiet
+
+# ---------------------------------------------------------------------------
+step "orb notes for agents (~/.config/amp/AGENTS.md)"
+notes="$HOME/.config/amp/AGENTS.md"
+notes_marker="# rapira orb notes"
+mkdir -p "$(dirname "$notes")"
+if ! grep -Fqx "$notes_marker" "$notes" 2>/dev/null; then
+	cat >>"$notes" <<EOF
+
+$notes_marker
+
+- PHP ${PHP_VERSION} NTS with the embed SAPI is installed from deb.sury.org under /usr; \`php\`, \`php-config\` and \`/usr/lib/libphp.so\` are on the default paths, so a plain \`cargo build\` links without extra flags.
+- \`.agents/setup\` pre-built \`target/nts\` (unit, integration and e2e test binaries), so \`make test_nts\` and \`make test_e2e\` start warm. Plain \`cargo\` commands use \`target/\` and compile from scratch the first time.
+- \`make coverage\` needs \`cargo install cargo-llvm-cov\` and \`rustup component add llvm-tools-preview\`; neither is preinstalled.
+EOF
+fi
+
+step "done"

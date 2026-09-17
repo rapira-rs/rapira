@@ -8,6 +8,12 @@
 - New host logic in Rust via ZEND_API if that is reasonable. C only for ZPP shells, longjmp isolation, macro shims.
 - Pre 1.0 - do not preserve backwards compatibility.
 
+## Commit identity
+
+- Use `Valery Piashchynski <piashchynski.valery@gmail.com>` as both the author and committer. Configure this identity locally in the repository before committing.
+- Sign off commits with that same identity (`git commit -s`). Do not add Amp or other AI authorship, co-author trailers, generated-by footers, or `Amp-Thread-ID` trailers to commits or pull requests.
+- Check the final commit metadata and message before pushing; automatic attribution hooks must not override this identity or add a different email.
+
 ## Comments
 
 - `rapira_arginfo.h` is generated, regenerate from the stub.
