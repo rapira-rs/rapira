@@ -165,6 +165,27 @@ fn map_tls(t: extension_api::Tls) -> php_sys::types::TlsView {
     }
 }
 
+/// Builds the native unary service list before the PHP entrypoint runs.
+pub fn grpc_services(
+    services: &[extension_api::grpc::ServiceInfo],
+) -> Vec<php_sys::grpc::ServiceInfo> {
+    services
+        .iter()
+        .map(|service| php_sys::grpc::ServiceInfo {
+            name: service.name.clone(),
+            methods: service
+                .methods
+                .iter()
+                .map(|method| php_sys::grpc::MethodInfo {
+                    name: method.name.clone(),
+                    input_type: method.input_type.clone(),
+                    output_type: method.output_type.clone(),
+                })
+                .collect(),
+        })
+        .collect()
+}
+
 fn parse_err(e: multipart::ParseError) -> anyhow::Error {
     match e {
         multipart::ParseError::Rejected(r) => anyhow::Error::new(r),
@@ -268,6 +289,47 @@ impl RapiraBackend {
 }
 
 impl extension_api::Backend for RapiraBackend {
+    fn exec_grpc(
+        &self,
+        req: extension_api::grpc::Request,
+    ) -> Pin<Box<dyn Future<Output = extension_api::Result<extension_api::grpc::Reply>> + Send + '_>>
+    {
+        Box::pin(async move {
+            let request = php_sys::grpc::Request {
+                method: req.method,
+                message: req.message,
+                metadata: req.metadata,
+                remote: map_addr(req.remote),
+                tls: req.tls.map(map_tls),
+                received_at: req.received_at,
+                deadline: req.deadline,
+                expires_at: req.expires_at,
+            };
+            let reply = self.rapira.handle_grpc(request).await.map_err(|error| {
+                anyhow::Error::new(extension_api::Rejected {
+                    status: 503,
+                    reason: error.to_string(),
+                })
+            })?;
+            Ok(extension_api::grpc::Reply {
+                headers: reply.headers,
+                trailers: reply.trailers,
+                result: reply.result.map_err(|status| extension_api::grpc::Status {
+                    code: status.code,
+                    message: status.message,
+                    details: status
+                        .details
+                        .into_iter()
+                        .map(|detail| extension_api::grpc::ErrorDetail {
+                            type_url: detail.type_url,
+                            value: detail.value,
+                        })
+                        .collect(),
+                }),
+            })
+        })
+    }
+
     /// The Reply wraps the frame receiver directly, so dropping it is the client-gone signal the exchange layer observes.
     fn exec(
         &self,

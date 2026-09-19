@@ -13,6 +13,10 @@ pub enum Mode {
     Classic,
     Worker(PathBuf),
     Dispatcher(PathBuf),
+    GrpcDispatcher {
+        entrypoint: PathBuf,
+        services: Vec<crate::grpc::ServiceInfo>,
+    },
 }
 
 #[repr(C)]

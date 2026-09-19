@@ -19,7 +19,11 @@ fn status_for_open_error(kind: ErrorKind) -> u16 {
 }
 
 pub(crate) fn classic_worker() {
-    while let Some(mut job) = pull_job() {
+    while let Some(job) = pull_job() {
+        let crate::work::Work::Http(mut job) = job else {
+            job.unavailable();
+            continue;
+        };
         let (event, truncated) = classic_executor(&mut job);
         sb_update(event);
         job.ctx.finish(truncated);

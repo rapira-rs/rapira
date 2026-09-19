@@ -32,14 +32,14 @@ jobs:
                   sudo apt-get update
                   sudo apt-get install -y --no-install-recommends \
                     build-essential pkg-config curl git autoconf bison re2c \
-                    libclang-dev llvm-dev \
+                    libclang-dev llvm-dev protobuf-compiler \
                     libssl-dev libcurl4-openssl-dev libxml2-dev libonig-dev \
                     libsqlite3-dev zlib1g-dev libffi-dev libicu-dev libpq-dev
 
             - name: Install build deps (macOS)
               if: runner.os == 'macOS'
               run: |
-                  brew install autoconf bison re2c pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq
+                  brew install autoconf bison re2c pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq protobuf
                   echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
 
             - name: Resolve php-src master commit
@@ -70,18 +70,22 @@ jobs:
                   fi
                   curl -fsSL --retry 3 https://codeload.github.com/igbinary/igbinary/tar.gz/2b1f5d62e3037b07c2a46499ac32091cdb41fb40 -o igbinary.tgz
                   curl -fsSL --retry 3 https://codeload.github.com/phpredis/phpredis/tar.gz/753a2d6d6752edf741ad97e885e23320c1be0e96 -o redis.tgz
+                  curl -fsSL --retry 3 https://pecl.php.net/get/protobuf-5.36.2.tgz -o protobuf.tgz
                   echo '1664c973d836ae7f0dfa92dbbc04504d506f8caf7c14db27e245646aaaceeab8  igbinary.tgz' | "${SHA256[@]}" -c -
                   echo '258d7b5cfda4e74a24a45d3505a7bc0d15b629fbe66a1e21224b3cc93f768d12  redis.tgz' | "${SHA256[@]}" -c -
-                  mkdir -p ext/igbinary ext/redis
+                  echo 'f0a17c67de29df0fb0e5215a381df9b155125e1ace6252dd617bf16b4194dd5b  protobuf.tgz' | "${SHA256[@]}" -c -
+                  mkdir -p ext/igbinary ext/redis ext/protobuf
                   tar -xzf igbinary.tgz -C ext/igbinary --strip-components=1
                   tar -xzf redis.tgz -C ext/redis --strip-components=1
+                  tar -xzf protobuf.tgz -C ext/protobuf --strip-components=1
+                  perl -pi -e 's/\bzval_dtor\b/zval_ptr_dtor_nogc/g' ext/protobuf/*.c
                   ./buildconf --force
                   ./configure \
                     --prefix="${PHP_PREFIX}" \
                     --enable-debug-assertions \
                     --enable-zend-test \
                     --enable-debug \
-                    --enable-igbinary --enable-redis --enable-redis-igbinary \
+                    --enable-igbinary --enable-redis --enable-redis-igbinary --enable-protobuf \
                     $(tr '\n' ' ' < "$GITHUB_WORKSPACE/core/.github/php-configure-flags.txt") $EXTRA
                   make -j"$(getconf _NPROCESSORS_ONLN)"
                   make install
@@ -107,7 +111,7 @@ jobs:
               run: |
                   mods=$("${PHP_PREFIX}/bin/php" -m); echo "$mods"
                   for ext in bcmath calendar ctype curl dom exif ffi fileinfo filter ftp gettext iconv \
-                             igbinary intl mbstring openssl pdo_pgsql pdo_sqlite pgsql phar redis session \
+                             igbinary intl mbstring openssl pdo_pgsql pdo_sqlite pgsql phar protobuf redis session \
                              shmop simplexml sockets sqlite3 sysvmsg sysvsem sysvshm tokenizer xml \
                              xmlreader xmlwriter zlib; do
                     grep -qix "$ext" <<<"$mods" || { echo "missing extension: $ext"; exit 1; }

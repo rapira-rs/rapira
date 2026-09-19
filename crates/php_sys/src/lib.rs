@@ -8,6 +8,7 @@ pub mod dispatcher;
 pub mod exchange;
 pub mod executor;
 pub(crate) mod fold;
+pub mod grpc;
 pub mod handler;
 pub mod module;
 pub mod quota;
@@ -16,6 +17,7 @@ pub mod scoreboard;
 pub mod start;
 pub mod types;
 pub mod values;
+pub(crate) mod work;
 pub(crate) mod zend;
 
 use std::ffi::c_int;
@@ -51,7 +53,7 @@ unsafe extern "C" {
     pub fn rapira_stash_boot_shutdown_functions();
     pub fn rapira_request_activate() -> c_int;
     pub fn rapira_request_shutdown() -> c_int;
-    // Wall timer is disarmed while parked in receive() and re-armed with the captured per-cycle budget on unit handout (module.c).
+    // The execution timer is disarmed during receive waits and re-armed with the captured per-cycle budget when each wait ends (module.c).
     pub fn rapira_receive_untimed();
     pub fn rapira_receive_timed();
     // C shim (module.c) over rapira_rs_ub_write: raises the client-abort bailout from C so the longjmp does not cross the Rust catch_unwind frame.

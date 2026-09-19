@@ -1,0 +1,11 @@
+order_id: "order-43"
+customer_name: "Grace"
+customer_city: "New York"
+skus: "pencil"
+total_quantity: 7
+priority: "standard"
+placed_at { seconds: 1 nanos: 1 }
+note: "Call first"
+gift: false
+delivery: "pickup_point:locker-7"
+token: "\377\000pickup"

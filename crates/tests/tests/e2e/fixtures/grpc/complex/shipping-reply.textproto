@@ -1,0 +1,12 @@
+order_id: "order-42"
+customer_name: "Ada"
+customer_city: "London"
+skus: "book"
+skus: "pen"
+total_quantity: 5
+priority: "express"
+placed_at { seconds: 1720000000 nanos: 123456789 }
+note: "Keep dry"
+gift: true
+delivery: "ship_to:Oslo"
+token: "\000\377shipping"

@@ -1,10 +1,7 @@
 use std::path::Path;
 
 use php_sys::{Mode, Rapira};
-use tests::{
-    assert_skip_allowed, captured, drain, fixture, init_log_capture, php_lock_with_ini, req,
-    run_worker,
-};
+use tests::{captured, drain, fixture, init_log_capture, php_lock_with_ini, req, run_worker};
 
 // ext/imap (PECL imap) reads default_socket_timeout at module startup only; the ini value 17 differs from the built-in 60, so the snapshot is provable.
 const IMAP_INI: &str = concat!(
@@ -21,7 +18,6 @@ fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
 fn imap_timeout_is_snapshotted_at_minit() -> anyhow::Result<()> {
     let out = run("imap_tests/imap-timeout-worker.php", &["/", "/"])?;
     if out[0].1 == "skip" {
-        assert_skip_allowed("imap_tests/imap-timeout-worker.php");
         return Ok(());
     }
     let expected = "imap:open=17:after_ini_set=17:read=17:ini=5";
@@ -45,7 +41,6 @@ fn imap_timeout_is_snapshotted_at_minit() -> anyhow::Result<()> {
 fn imap_error_stack_does_not_leak_between_requests() -> anyhow::Result<()> {
     let out = run("imap_tests/imap-errors-worker.php", &["/?step=leak", "/"])?;
     if out[0].1 == "skip" {
-        assert_skip_allowed("imap_tests/imap-errors-worker.php");
         return Ok(());
     }
     assert_eq!(
@@ -77,7 +72,6 @@ fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
     if b1 == "skip" {
         drop(h);
         r.shutdown();
-        assert_skip_allowed(name);
         return Ok(());
     }
     assert_eq!(

@@ -1,0 +1,26 @@
+syntax = "proto3";
+
+package e2e.model.v1;
+
+option php_namespace = "E2e\\Grpc\\Model";
+
+import "common/customer.proto";
+import "google/protobuf/timestamp.proto";
+
+message Order {
+  message Item {
+    string sku = 1;
+    uint32 quantity = 2;
+  }
+
+  string id = 1;
+  e2e.common.v1.Customer customer = 2;
+  repeated Item items = 3;
+  map<string, string> labels = 4;
+  google.protobuf.Timestamp placed_at = 5;
+  oneof delivery {
+    string pickup_point = 6;
+    e2e.common.v1.Address ship_to = 7;
+  }
+  bytes token = 8;
+}

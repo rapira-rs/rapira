@@ -153,9 +153,9 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
             p.upload.file.unlink();
         }
     }
-    update(|c| {
-        if let Unit::Handling(p) = c.unit {
-            c.unit = Unit::Sealed(p);
+    update(|unit| {
+        if let Unit::Handling(p) = *unit {
+            *unit = Unit::Sealed(p);
         }
     });
     sb_update(Event::Handled(true));
@@ -402,12 +402,12 @@ pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: Fie
         }
     }
     st.stage = Stage::Finalized;
-    update(|c| {
-        if let Unit::Handling(p) = c.unit {
-            c.unit = Unit::Sealed(p);
+    update(|unit| {
+        if let Unit::Handling(p) = *unit {
+            *unit = Unit::Sealed(p);
         }
-        c.served = true;
     });
+    work::note_served();
     sb_update(Event::Handled(truncated));
     let _ = unsafe {
         send_frame(
@@ -481,9 +481,9 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
             return;
         }
         let ptr: *mut ExchangeState = job.cast();
-        update(|c| {
-            if matches!(c.unit, Unit::Handling(p) | Unit::Sealed(p) if p == ptr) {
-                c.unit = Unit::Idle;
+        update(|unit| {
+            if matches!(*unit, Unit::Handling(p) | Unit::Sealed(p) if p == ptr) {
+                *unit = Unit::Idle;
             }
         });
         let mut st = unsafe { Box::from_raw(ptr) };

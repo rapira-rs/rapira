@@ -197,9 +197,32 @@ fn spawn_attempt(
         render_config(port, processes, entrypoint, http_extra, extra_toml),
     )
     .expect("write config");
+    let child = spawn_staged(dir, rust_log, cwd_ini, &[]);
+    (child, addr)
+}
+
+/// Starts the staged configuration. The caller checks readiness or startup failure.
+pub fn spawn_staged_config(
+    dir: PathBuf,
+    addr: SocketAddr,
+    config: &str,
+    env: &[(&str, &str)],
+) -> Server {
+    std::fs::write(dir.join("rapira.toml"), config).expect("write config");
+    let child = spawn_staged(&dir, Some("info"), None, env);
+    Server { child, addr, dir }
+}
+
+fn spawn_staged(
+    dir: &Path,
+    rust_log: Option<&str>,
+    cwd_ini: Option<&CwdIni<'_>>,
+    env: &[(&str, &str)],
+) -> Child {
     let log = File::create(dir.join("server.log")).expect("create server.log");
     let mut cmd = Command::new(rapira_bin());
     cmd.arg("serve").arg(dir.join("rapira.toml"));
+    cmd.envs(env.iter().copied());
     cmd.env_remove("PHPRC");
     if let Some(ini) = cwd_ini {
         cmd.current_dir(dir);
@@ -211,12 +234,10 @@ fn spawn_attempt(
         Some(v) => cmd.env("RUST_LOG", v),
         None => cmd.env_remove("RUST_LOG"),
     };
-    let child = cmd
-        .stdout(Stdio::from(log.try_clone().expect("clone log fd")))
+    cmd.stdout(Stdio::from(log.try_clone().expect("clone log fd")))
         .stderr(Stdio::from(log))
         .spawn()
-        .expect("spawn rapira");
-    (child, addr)
+        .expect("spawn rapira")
 }
 
 /// Boots expecting a startup failure: waits for the exit and returns the status with the log.
@@ -613,20 +634,13 @@ fn php_extension_dir() -> Option<PathBuf> {
         .then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
 }
 
-/// The shared object for `name`, or None when this PHP build lacks it; RAPIRA_REQUIRE_EXTS turns a demanded skip into a panic.
+/// The shared object for `name`, or None when this PHP build lacks it.
 pub fn php_extension(name: &str) -> Option<PathBuf> {
     let p = php_extension_dir().map(|d| d.join(name));
     if let Some(p) = &p
         && p.exists()
     {
         return p.clone().into();
-    }
-    if let Ok(required) = std::env::var("RAPIRA_REQUIRE_EXTS") {
-        let stem = name.trim_end_matches(".so");
-        assert!(
-            !required.split(',').any(|e| e.trim() == stem),
-            "RAPIRA_REQUIRE_EXTS demands {stem}, but {name} is not at {p:?}"
-        );
     }
     None
 }

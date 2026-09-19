@@ -52,7 +52,7 @@ ZEND_METHOD(Rapira_UnixAddress, __construct) {
     }
 }
 
-ZEND_METHOD(Rapira_Http_Tls, __construct) {
+ZEND_METHOD(Rapira_Tls, __construct) {
     zend_string *version, *cipher, *negotiated, *server_name, *serial, *org,
         *fingerprint;
     ZEND_PARSE_PARAMETERS_START(7, 7)
@@ -136,7 +136,7 @@ ZEND_METHOD(Rapira_Http_Request, __construct) {
     Z_PARAM_OBJ_OF_CLASS_OR_STR(body_obj, rapira_ce_http_multipart, body_str)
     Z_PARAM_ZVAL(remote)
     Z_PARAM_ZVAL(server)
-    Z_PARAM_OBJECT_OF_CLASS_OR_NULL(tls, rapira_ce_http_tls)
+    Z_PARAM_OBJECT_OF_CLASS_OR_NULL(tls, rapira_ce_tls)
     Z_PARAM_DOUBLE(received_at)
     ZEND_PARSE_PARAMETERS_END();
 

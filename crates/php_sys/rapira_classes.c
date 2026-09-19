@@ -2,6 +2,7 @@
 #include "ext/spl/spl_exceptions.h"
 #include "rapira_arginfo.h"
 #include "rapira_exception_arginfo.h"
+#include "rapira_grpc_arginfo.h"
 #include "rapira_http_arginfo.h"
 #include "zend_API.h"
 #include "zend_exceptions.h"
@@ -27,7 +28,7 @@ zend_class_entry *rapira_ce_already_finalized_error;
 
 zend_class_entry *rapira_ce_inet_address;
 zend_class_entry *rapira_ce_unix_address;
-zend_class_entry *rapira_ce_http_tls;
+zend_class_entry *rapira_ce_tls;
 zend_class_entry *rapira_ce_http_multipart;
 zend_class_entry *rapira_ce_internal_http_dispatcher;
 zend_class_entry *rapira_ce_http_form_field;
@@ -39,6 +40,20 @@ zend_class_entry *rapira_ce_http_head_already_written_error;
 zend_class_entry *rapira_ce_http_head_not_written_error;
 zend_class_entry *rapira_ce_http_content_length_exceeded_error;
 zend_class_entry *rapira_ce_http_file_not_sendable_exception;
+zend_class_entry *rapira_ce_grpc_status_code;
+zend_class_entry *rapira_ce_grpc_method_kind;
+zend_class_entry *rapira_ce_grpc_error_detail;
+zend_class_entry *rapira_ce_grpc_status;
+zend_class_entry *rapira_ce_grpc_method_info;
+zend_class_entry *rapira_ce_grpc_service_info;
+zend_class_entry *rapira_ce_grpc_exception;
+zend_class_entry *rapira_ce_grpc_metadata;
+zend_class_entry *rapira_ce_grpc_context;
+zend_class_entry *rapira_ce_grpc_protocol;
+zend_class_entry *rapira_ce_internal_grpc_dispatcher;
+zend_class_entry *rapira_ce_internal_grpc_dispatcher_info;
+zend_class_entry *rapira_ce_internal_grpc_call;
+zend_class_entry *rapira_ce_internal_grpc_metadata;
 
 const zend_function_entry *rapira_php_functions(void) { return ext_functions; }
 
@@ -46,6 +61,57 @@ const zend_function_entry *rapira_php_functions(void) { return ext_functions; }
 static zend_object_handlers rapira_host_handlers;
 static zend_object_handlers rapira_exchange_handlers;
 static zend_object_handlers rapira_info_handlers;
+static zend_object_handlers rapira_grpc_call_handlers;
+static zend_object_handlers rapira_grpc_metadata_handlers;
+
+static zend_object *rapira_host_create(zend_class_entry *ce) {
+    zend_object *obj = zend_objects_new(ce);
+    object_properties_init(obj, ce);
+    return obj;
+}
+
+static zend_object *rapira_grpc_call_create(zend_class_entry *ce) {
+    rapira_grpc_call_obj *obj = zend_object_alloc(sizeof(*obj), ce);
+    obj->state = NULL;
+    ZVAL_UNDEF(&obj->context);
+    ZVAL_UNDEF(&obj->metadata);
+    zend_object_std_init(&obj->std, ce);
+    object_properties_init(&obj->std, ce);
+    return &obj->std;
+}
+
+static void rapira_grpc_call_free(zend_object *std) {
+    rapira_grpc_call_obj *obj = rapira_grpc_call_from(std);
+    void *state = obj->state;
+    obj->state = NULL;
+    rapira_rs_grpc_release(state, true);
+    zval_ptr_dtor(&obj->context);
+    zval_ptr_dtor(&obj->metadata);
+    zend_object_std_dtor(std);
+}
+
+static HashTable *rapira_grpc_call_gc(zend_object *std, zval **table, int *n) {
+    rapira_grpc_call_obj *obj = rapira_grpc_call_from(std);
+    *table = &obj->context;
+    *n = 2;
+    return zend_std_get_properties(std);
+}
+
+static zend_object *rapira_grpc_metadata_create(zend_class_entry *ce) {
+    rapira_grpc_metadata_obj *obj = zend_object_alloc(sizeof(*obj), ce);
+    obj->state = NULL;
+    zend_object_std_init(&obj->std, ce);
+    object_properties_init(&obj->std, ce);
+    return &obj->std;
+}
+
+static void rapira_grpc_metadata_free(zend_object *std) {
+    rapira_grpc_metadata_obj *obj = rapira_grpc_metadata_from(std);
+    void *state = obj->state;
+    obj->state = NULL;
+    rapira_rs_grpc_release(state, false);
+    zend_object_std_dtor(std);
+}
 
 static zend_object *rapira_exchange_create(zend_class_entry *ce) {
     rapira_exchange_obj *obj = zend_object_alloc(sizeof(*obj), ce);
@@ -109,7 +175,7 @@ void rapira_register_classes(void) {
 
     rapira_ce_inet_address = register_class_Rapira_InetAddress();
     rapira_ce_unix_address = register_class_Rapira_UnixAddress();
-    rapira_ce_http_tls = register_class_Rapira_Http_Tls();
+    rapira_ce_tls = register_class_Rapira_Tls();
     rapira_ce_http_form_field = register_class_Rapira_Http_FormField();
     rapira_ce_http_uploaded_file = register_class_Rapira_Http_UploadedFile();
     rapira_ce_http_multipart = register_class_Rapira_Http_Multipart();
@@ -146,6 +212,7 @@ void rapira_register_classes(void) {
     memcpy(&rapira_host_handlers, &std_object_handlers,
            sizeof(rapira_host_handlers));
     rapira_host_handlers.clone_obj = NULL;
+    rapira_ce_internal_http_dispatcher->create_object = rapira_host_create;
     rapira_ce_internal_http_dispatcher->default_object_handlers =
         &rapira_host_handlers;
 
@@ -158,6 +225,69 @@ void rapira_register_classes(void) {
     rapira_ce_internal_http_exchange->default_object_handlers =
         &rapira_exchange_handlers;
 
+    rapira_ce_grpc_status_code = register_class_Rapira_Grpc_StatusCode();
+    rapira_ce_grpc_metadata = register_class_Rapira_Grpc_Metadata(
+        zend_ce_countable, zend_ce_aggregate);
+    rapira_ce_grpc_method_kind = register_class_Rapira_Grpc_MethodKind();
+    rapira_ce_grpc_error_detail = register_class_Rapira_Grpc_ErrorDetail();
+    rapira_ce_grpc_status = register_class_Rapira_Grpc_Status();
+    rapira_ce_grpc_method_info = register_class_Rapira_Grpc_MethodInfo();
+    rapira_ce_grpc_service_info = register_class_Rapira_Grpc_ServiceInfo();
+    rapira_ce_grpc_exception =
+        register_class_Rapira_Grpc_Exception_GrpcException(
+            spl_ce_RuntimeException, throwable);
+
+    rapira_ce_grpc_protocol = register_class_Rapira_Grpc_Call_Protocol();
+    rapira_ce_grpc_context = register_class_Rapira_Grpc_Call_Context();
+    zend_class_entry *grpc_info = register_class_Rapira_Grpc_GrpcDispatcherInfo(
+        rapira_ce_dispatcher_info);
+    zend_class_entry *grpc_call =
+        register_class_Rapira_Grpc_Call(rapira_ce_work);
+    zend_class_entry *grpc_responder =
+        register_class_Rapira_Grpc_Responder(rapira_ce_work);
+    zend_class_entry *unary_request =
+        register_class_Rapira_Grpc_UnaryRequest(grpc_call);
+    zend_class_entry *unary_responder =
+        register_class_Rapira_Grpc_UnaryResponder(grpc_responder);
+    zend_class_entry *unary_call =
+        register_class_Rapira_Grpc_UnaryCall(unary_request, unary_responder);
+    zend_class_entry *grpc_dispatcher =
+        register_class_Rapira_Grpc_GrpcDispatcher(rapira_ce_dispatcher);
+    zend_class_entry *response_metadata =
+        register_class_Rapira_Grpc_Responder_ResponseMetadata();
+    rapira_ce_internal_grpc_dispatcher =
+        register_class_Rapira_Internal_Grpc_Dispatcher(grpc_dispatcher);
+    rapira_ce_internal_grpc_dispatcher_info =
+        register_class_Rapira_Internal_Grpc_DispatcherInfo(grpc_info);
+    rapira_ce_internal_grpc_call =
+        register_class_Rapira_Internal_Grpc_UnaryCall(unary_call);
+    rapira_ce_internal_grpc_metadata =
+        register_class_Rapira_Internal_Grpc_ResponseMetadata(response_metadata);
+    rapira_ce_internal_grpc_dispatcher->create_object = rapira_host_create;
+    rapira_ce_internal_grpc_dispatcher->default_object_handlers =
+        &rapira_host_handlers;
+
+    memcpy(&rapira_grpc_call_handlers, &std_object_handlers,
+           sizeof(rapira_grpc_call_handlers));
+    rapira_grpc_call_handlers.clone_obj = NULL;
+    rapira_grpc_call_handlers.offset = RAPIRA_STD_OFFSET(rapira_grpc_call_obj);
+    rapira_grpc_call_handlers.free_obj = rapira_grpc_call_free;
+    rapira_grpc_call_handlers.get_gc = rapira_grpc_call_gc;
+    rapira_ce_internal_grpc_call->create_object = rapira_grpc_call_create;
+    rapira_ce_internal_grpc_call->default_object_handlers =
+        &rapira_grpc_call_handlers;
+
+    memcpy(&rapira_grpc_metadata_handlers, &std_object_handlers,
+           sizeof(rapira_grpc_metadata_handlers));
+    rapira_grpc_metadata_handlers.clone_obj = NULL;
+    rapira_grpc_metadata_handlers.offset =
+        RAPIRA_STD_OFFSET(rapira_grpc_metadata_obj);
+    rapira_grpc_metadata_handlers.free_obj = rapira_grpc_metadata_free;
+    rapira_ce_internal_grpc_metadata->create_object =
+        rapira_grpc_metadata_create;
+    rapira_ce_internal_grpc_metadata->default_object_handlers =
+        &rapira_grpc_metadata_handlers;
+
     memcpy(&rapira_info_handlers, &std_object_handlers,
            sizeof(rapira_info_handlers));
     rapira_info_handlers.clone_obj = NULL;
@@ -165,5 +295,9 @@ void rapira_register_classes(void) {
     rapira_ce_internal_http_dispatcher_info->create_object =
         rapira_dispatcher_info_create;
     rapira_ce_internal_http_dispatcher_info->default_object_handlers =
+        &rapira_info_handlers;
+    rapira_ce_internal_grpc_dispatcher_info->create_object =
+        rapira_dispatcher_info_create;
+    rapira_ce_internal_grpc_dispatcher_info->default_object_handlers =
         &rapira_info_handlers;
 }

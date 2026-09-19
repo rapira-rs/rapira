@@ -8,6 +8,8 @@ This repository contains the server: the SAPI core (`crates/php_sys`), the exten
 - A C compiler and `pkg-config` (the build compiles `wrapper.c`/`module.c` against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
 - PHP 8.4 or 8.5, **NTS**, built with the embed SAPI (`--enable-embed=shared`). ZTS builds are rejected at compile time.
+- `protoc` for the gRPC e2e client's reflection-based message encoding, decoding, and PHP class generation. Install `protobuf-compiler` on Debian/Ubuntu or Fedora, or `protobuf` with Homebrew. The server parses schemas in Rust.
+- The PHP `protobuf` extension for the complex gRPC e2e test. All CI test builds install it.
 
 ```sh
 sudo apt install php8.4-dev libphp8.4-embed   # Debian/Ubuntu (deb.sury.org / ppa:ondrej)
@@ -33,7 +35,7 @@ make test   # runs test_nts, then test_e2e - sequentially on purpose
 ```
 
 - `make test_nts` - the in-process unit and integration suites (`cargo test --workspace`; the e2e suite is feature-gated off here).
-- `make test_e2e` - the spawn-the-binary end-to-end suite (`crates/tests`, `--features e2e`): forks workers, binds ports, drives real HTTP, asserts signal/reload/scaling behavior. Single-threaded on purpose; never run it concurrently with `test_nts`.
+- `make test_e2e` - the end-to-end suite (`crates/tests`, `--features e2e`) starts the binary, forks workers, and tests HTTP, gRPC, signals, reload, and scaling. Run it sequentially with `test_nts`.
 - `make coverage` - needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
 - `make stubs` - maintainers only: regenerates `crates/php_sys/rapira_arginfo.h` from `rapira.stub.php` with PHP's `gen_stub.php`. Never edit the generated header by hand.
 
@@ -61,7 +63,9 @@ C sources (`crates/php_sys/*.c`, `*.h`) follow `.clang-format`.
 | `crates/api`           | the native extension contract                                                       |
 | `crates/scoreboard`    | shared per-worker counters                                                          |
 | `crates/plugins/http`  | the HTTP front                                                                      |
-| `crates/middleware`    | built-in HTTP middleware, one crate per middleware                                  |
+| `crates/plugins/grpc`  | unary gRPC transport, schema discovery, and reflection                               |
+| `crates/net`           | shared inherited TCP and Unix listeners                                               |
+| `crates/middleware`    | shared middleware components                                                         |
 | `crates/tests`         | integration and e2e suites                                                          |
 
 ## Pull requests

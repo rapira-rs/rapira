@@ -107,6 +107,33 @@ namespace Rapira {
         public function __construct(?string $path) {}
     }
 
+    /**
+     * TLS handshake information. Certificate fields are null when the client supplies no certificate.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final readonly class Tls
+    {
+        public string $version;
+        public string $cipher;
+        public ?string $negotiatedProtocol;
+        public ?string $requestedServerName;
+        public ?string $certSerial;
+        public ?string $certOrganization;
+        public ?string $certFingerprint;
+
+        public function __construct(
+            string $version,
+            string $cipher,
+            ?string $negotiatedProtocol,
+            ?string $requestedServerName,
+            ?string $certSerial,
+            ?string $certOrganization,
+            ?string $certFingerprint,
+        ) {}
+    }
+
     /** The mode of this process. The same case for the life of the process. */
     function get_mode(): Mode {}
 

@@ -1,0 +1,38 @@
+syntax = "proto3";
+
+package e2e.orders.v1;
+
+option php_namespace = "E2e\\Grpc";
+
+import "model/order.proto";
+import "google/protobuf/any.proto";
+import "google/protobuf/struct.proto";
+import "google/protobuf/timestamp.proto";
+
+service Orders {
+  rpc Inspect(InspectRequest) returns (InspectReply);
+}
+
+message InspectRequest {
+  e2e.model.v1.Order order = 1;
+  google.protobuf.Any note = 2;
+  google.protobuf.Struct options = 3;
+}
+
+message Note {
+  string text = 1;
+}
+
+message InspectReply {
+  string order_id = 1;
+  string customer_name = 2;
+  string customer_city = 3;
+  repeated string skus = 4;
+  uint32 total_quantity = 5;
+  string priority = 6;
+  google.protobuf.Timestamp placed_at = 7;
+  string note = 8;
+  bool gift = 9;
+  string delivery = 10;
+  bytes token = 11;
+}

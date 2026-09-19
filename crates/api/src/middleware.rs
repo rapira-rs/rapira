@@ -32,6 +32,27 @@ pub enum Protocol {
     Grpc,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Rejection {
+    AuthenticationRequired,
+    AccessDenied,
+    RateLimited,
+}
+
+impl Rejection {
+    /// The response carries an HTTP status and the rejection for other protocol encoders.
+    pub fn into_response(self) -> HttpResponse {
+        let mut response = HttpResponse::new(empty_body());
+        *response.status_mut() = match self {
+            Self::AuthenticationRequired => http::StatusCode::UNAUTHORIZED,
+            Self::AccessDenied => http::StatusCode::FORBIDDEN,
+            Self::RateLimited => http::StatusCode::TOO_MANY_REQUESTS,
+        };
+        response.extensions_mut().insert(self);
+        response
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Peer {
     pub remote: Addr,
@@ -83,6 +104,42 @@ impl Next {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shared_rejections_keep_http_status_and_protocol_intent() {
+        struct Case {
+            name: &'static str,
+            rejection: Rejection,
+            status: u16,
+        }
+        let cases = [
+            Case {
+                name: "authentication_required",
+                rejection: Rejection::AuthenticationRequired,
+                status: 401,
+            },
+            Case {
+                name: "access_denied",
+                rejection: Rejection::AccessDenied,
+                status: 403,
+            },
+            Case {
+                name: "rate_limited",
+                rejection: Rejection::RateLimited,
+                status: 429,
+            },
+        ];
+        for case in cases {
+            let response = case.rejection.into_response();
+            assert_eq!(response.status().as_u16(), case.status, "{}", case.name);
+            assert_eq!(
+                response.extensions().get::<Rejection>(),
+                Some(&case.rejection),
+                "{}",
+                case.name
+            );
+        }
+    }
 
     struct Tag(&'static str);
 

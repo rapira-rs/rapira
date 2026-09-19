@@ -20,8 +20,8 @@
 #ifdef HAVE_PHP_SESSION
 #include <ext/session/php_session.h>
 #endif
-#include <ext/json/php_json.h>
 #include <Zend/zend_observer.h>
+#include <ext/json/php_json.h>
 #include <ext/spl/spl_exceptions.h>
 #include <ext/standard/head.h>
 #include <main/php_memory_streams.h>
@@ -57,9 +57,11 @@ enum {
     RAPIRA_HANDLE_RECYCLE = 2,
 };
 
-// C data sits before zend_object std; declared here so bindgen gives Rust named fields instead of a hardcoded offset: https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
+// C data sits before zend_object std; declared here so bindgen gives Rust named
+// fields instead of a hardcoded offset:
+// https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
 typedef struct {
-    void *job; // Box<ExchangeState> -> owned by Rust, NULLing when released
+    void *job;    // Box<ExchangeState> -> owned by Rust, NULLing when released
     zval request; // cached Rapira\Http\Request; IS_UNDEF until getRequest()
     zend_object std;
 } rapira_exchange_obj;
@@ -70,7 +72,21 @@ typedef struct {
     zend_object std;
 } rapira_dispatcher_info_obj;
 
-// Class entries for rapira.stub.php, bound in Rust as static muts; rapira_register_classes assigns them in MINIT, before any object of these classes can exist.
+typedef struct {
+    void *state;
+    zval context;
+    zval metadata;
+    zend_object std;
+} rapira_grpc_call_obj;
+
+typedef struct {
+    void *state;
+    zend_object std;
+} rapira_grpc_metadata_obj;
+
+// Class entries for rapira.stub.php, bound in Rust as static muts;
+// rapira_register_classes assigns them in MINIT, before any object of these
+// classes can exist.
 extern zend_class_entry *rapira_ce_log_level;
 extern zend_class_entry *rapira_ce_mode;
 extern zend_class_entry *rapira_ce_closed_exception;
@@ -79,7 +95,7 @@ extern zend_class_entry *rapira_ce_work_discarded_exception;
 extern zend_class_entry *rapira_ce_no_dispatcher_error;
 extern zend_class_entry *rapira_ce_not_in_worker_mode_error;
 extern zend_class_entry *rapira_ce_already_finalized_error;
-extern zend_class_entry *rapira_ce_http_tls;
+extern zend_class_entry *rapira_ce_tls;
 extern zend_class_entry *rapira_ce_http_multipart;
 extern zend_class_entry *rapira_ce_internal_http_dispatcher;
 extern zend_class_entry *rapira_ce_inet_address;
@@ -93,8 +109,30 @@ extern zend_class_entry *rapira_ce_http_file_not_sendable_exception;
 extern zend_class_entry *rapira_ce_http_form_field;
 extern zend_class_entry *rapira_ce_http_uploaded_file;
 extern zend_class_entry *rapira_ce_http_request;
+extern zend_class_entry *rapira_ce_grpc_status_code;
+extern zend_class_entry *rapira_ce_grpc_method_kind;
+extern zend_class_entry *rapira_ce_grpc_error_detail;
+extern zend_class_entry *rapira_ce_grpc_status;
+extern zend_class_entry *rapira_ce_grpc_method_info;
+extern zend_class_entry *rapira_ce_grpc_service_info;
+extern zend_class_entry *rapira_ce_grpc_exception;
+extern zend_class_entry *rapira_ce_grpc_metadata;
+void rapira_array_iterator(zval *out, zval *entries);
+extern zend_class_entry *rapira_ce_grpc_context;
+extern zend_class_entry *rapira_ce_grpc_protocol;
+extern zend_class_entry *rapira_ce_internal_grpc_dispatcher;
+extern zend_class_entry *rapira_ce_internal_grpc_dispatcher_info;
+extern zend_class_entry *rapira_ce_internal_grpc_call;
+extern zend_class_entry *rapira_ce_internal_grpc_metadata;
+bool rapira_grpc_build(void (*build)(const void *, zval *), const void *data,
+                       zval *out);
+zend_string *rapira_grpc_message_alloc(size_t len);
+zend_string *rapira_grpc_message_share(zend_string *string, size_t len);
+void rapira_grpc_message_release(zend_string *string);
+void rapira_enum_case(zend_class_entry *ce, const char *name, zval *out);
 
-// PHP_VERSION_ID from the headers this binary compiled against; differs from the linked libphp's php_version_id() when the library was swapped out.
+// PHP_VERSION_ID from the headers this binary compiled against; differs from
+// the linked libphp's php_version_id() when the library was swapped out.
 unsigned int rapira_headers_php_version_id(void);
 
 void rapira_receive_untimed(void);

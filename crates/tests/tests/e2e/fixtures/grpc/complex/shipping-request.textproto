@@ -1,0 +1,28 @@
+order {
+  id: "order-42"
+  customer {
+    name: "Ada"
+    address { city: "London" country: "GB" }
+  }
+  items { sku: "book" quantity: 2 }
+  items { sku: "pen" quantity: 3 }
+  labels { key: "priority" value: "express" }
+  labels { key: "source" value: "web" }
+  placed_at { seconds: 1720000000 nanos: 123456789 }
+  ship_to { city: "Oslo" country: "NO" }
+  token: "\000\377shipping"
+}
+note {
+  [type.googleapis.com/e2e.orders.v1.Note] { text: "Keep dry" }
+}
+options {
+  fields { key: "gift" value { bool_value: true } }
+  fields {
+    key: "tracking"
+    value {
+      struct_value {
+        fields { key: "carrier" value { string_value: "post" } }
+      }
+    }
+  }
+}

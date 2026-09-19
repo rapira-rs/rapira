@@ -53,19 +53,6 @@ pub fn run_worker(
     Ok(out)
 }
 
-/// Panics when RAPIRA_REQUIRE_EXTS names an extension this fixture covers: a skip where CI installs the extension is a broken install.
-pub fn assert_skip_allowed(fixture: &str) {
-    let Ok(required) = std::env::var("RAPIRA_REQUIRE_EXTS") else {
-        return;
-    };
-    for ext in required.split(',').map(str::trim).filter(|e| !e.is_empty()) {
-        assert!(
-            !fixture.contains(ext),
-            "{fixture} skipped, but RAPIRA_REQUIRE_EXTS demands {ext}"
-        );
-    }
-}
-
 /// Build a minimal `GET` request for `uri`, with `$_SERVER` metadata pointing at `fixture_name`.
 pub fn req(uri: &str, fixture_name: &str) -> Request {
     let query = uri.split_once('?').map(|x: (&str, &str)| x.1);

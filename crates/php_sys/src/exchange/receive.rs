@@ -10,13 +10,13 @@ enum RecvMode {
 /// `return_value` writable; engine active on this thread.
 unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
-        if let Unit::Handling(ptr) = CYCLE.get().unit
+        if let Unit::Handling(ptr) = CURRENT.get()
             && (*ptr).host_closed()
         {
             tracing::debug!(target: "rapira", "receive() discarded an unfinalized exchange whose client left");
             super::respond::discard_unit(&mut *ptr);
         }
-        if matches!(CYCLE.get().unit, Unit::Handling(_)) {
+        if matches!(CURRENT.get(), Unit::Handling(_)) {
             zend::throw_error(
                 c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first",
             );
@@ -24,16 +24,21 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
         }
         let mut obj: zval = std::mem::zeroed();
         let _ = object_init_ex(&mut obj, rapira_ce_internal_http_exchange);
-        // SAFETY: plain zend timer bookkeeping on this thread; no bailout path.
-        rapira_receive_untimed();
+        let wait = ReceiveWait::new(match mode {
+            RecvMode::Try => 0,
+            RecvMode::Wait(t) => t,
+        });
         loop {
-            let pulled = match mode {
-                RecvMode::Try | RecvMode::Wait(0) => pull_job_try(),
-                RecvMode::Wait(-1) => pull_job_wait(None),
-                RecvMode::Wait(t) => pull_job_wait(Some(Duration::from_micros(t as u64))),
-            };
+            // SAFETY: plain Zend timer bookkeeping on this thread; no bailout path.
+            rapira_receive_untimed();
+            let pulled = wait.pull();
+            rapira_receive_timed();
             match pulled {
                 Pulled::Job(job) => {
+                    let Work::Http(job) = job else {
+                        job.unavailable();
+                        continue;
+                    };
                     let st = match ExchangeState::new(job) {
                         Ok(st) => st,
                         Err(mut job) => {
@@ -47,19 +52,15 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                         continue;
                     }
                     let ptr = Box::into_raw(Box::new(st));
-                    update(|c| {
-                        c.unit = Unit::Handling(ptr);
-                        c.received = true;
-                    });
+                    CURRENT.set(Unit::Handling(ptr));
+                    work::note_received();
                     (*exchange_from(obj.value.obj)).job = ptr.cast();
-                    // SAFETY: plain zend timer bookkeeping; no bailout path.
-                    rapira_receive_timed();
                     (*ptr).armed_at = Instant::now();
                     *return_value = obj;
                     return true;
                 }
                 Pulled::Closed => {
-                    update(|c| c.closed_seen = true);
+                    work::note_closed();
                     zval_ptr_dtor(&mut obj);
                     zend::throw_exception(
                         rapira_ce_closed_exception,
@@ -115,7 +116,7 @@ pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> b
         let _ = object_init_ex(return_value, rapira_ce_internal_http_dispatcher_info);
         let info = info_from((*return_value).value.obj);
         (*info).pending = pending_depth() as i64;
-        (*info).active = i64::from(matches!(CYCLE.get().unit, Unit::Handling(_)));
+        (*info).active = i64::from(matches!(CURRENT.get(), Unit::Handling(_)));
         true
     })
 }
@@ -140,7 +141,12 @@ pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bo
             Some(zv) => zv,
             None => {
                 let mut zv: zval = std::mem::zeroed();
-                let _ = object_init_ex(&mut zv, rapira_ce_internal_http_dispatcher);
+                let class = if crate::grpc::installed() {
+                    crate::rapira_ce_internal_grpc_dispatcher
+                } else {
+                    rapira_ce_internal_http_dispatcher
+                };
+                let _ = object_init_ex(&mut zv, class);
                 d.set(Some(zv));
                 zv
             }

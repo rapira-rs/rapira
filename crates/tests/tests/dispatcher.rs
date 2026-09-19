@@ -75,3 +75,32 @@ fn host_created_only() -> anyhow::Result<()> {
     );
     Ok(())
 }
+
+#[test]
+fn reflection_cannot_construct_host_objects() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let r = Rapira::start(Mode::Dispatcher(fixture(
+        "dispatcher/reflection-construction.php",
+    )))?;
+    let h = r.handle();
+    let (status, body) =
+        drain(h.handle_blocking(req("/", "dispatcher/reflection-construction.php"))?);
+    drop(h);
+    r.shutdown();
+
+    assert_eq!(status, 200);
+    let result: serde_json::Value = serde_json::from_str(&body)?;
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "http_dispatcher": "ReflectionException",
+            "http_info": "ReflectionException",
+            "http_exchange": "ReflectionException",
+            "grpc_dispatcher": "ReflectionException",
+            "grpc_info": "ReflectionException",
+            "grpc_call": "ReflectionException",
+            "grpc_metadata": "ReflectionException",
+        })
+    );
+    Ok(())
+}
