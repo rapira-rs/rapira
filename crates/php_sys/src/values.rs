@@ -1,12 +1,12 @@
 use std::ffi::c_double;
 
 use crate::{
-    IS_OBJECT, callbacks::guard, rapira_ce_http_tls, rapira_ce_inet_address,
-    rapira_ce_unix_address, zend, zend_object, zend_string, zend_zval_value_name, zval,
+    IS_OBJECT, callbacks::guard, rapira_ce_inet_address, rapira_ce_tls, rapira_ce_unix_address,
+    zend, zend_object, zend_string, zend_zval_value_name, zval,
 };
 
 /// Checks the `Rapira\InetAddress|Rapira\UnixAddress` union that arginfo cannot enforce (internal arg types are debug-only).
-unsafe fn address_arg(zv: *mut zval, num: u32) -> bool {
+pub(crate) unsafe fn address_arg(zv: *mut zval, num: u32) -> bool {
     unsafe {
         if zend::zval_type(zv) == IS_OBJECT {
             let ce = (*(*zv).value.obj).ce;
@@ -68,7 +68,7 @@ pub unsafe extern "C" fn rapira_rs_ctor_tls(
     fingerprint: *mut zend_string,
 ) -> bool {
     guard(false, || unsafe {
-        let ce = rapira_ce_http_tls;
+        let ce = rapira_ce_tls;
         zend::prop_zstr(ce, obj, c"version", version);
         zend::prop_zstr(ce, obj, c"cipher", cipher);
         zend::prop_zstr_or_null(ce, obj, c"negotiatedProtocol", negotiated);

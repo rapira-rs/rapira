@@ -15,7 +15,7 @@ unsafe fn emit_headers(dst: *mut zval, g: &Grouped) {
     }
 }
 
-unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
+pub(crate) unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
     unsafe {
         match addr {
             AddrOwned::Inet { ip, port } => {
@@ -34,9 +34,9 @@ unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
     }
 }
 
-unsafe fn build_tls(dst: *mut zval, t: &TlsView) {
+pub(crate) unsafe fn build_tls(dst: *mut zval, t: &TlsView) {
     unsafe {
-        let ce = rapira_ce_http_tls;
+        let ce = rapira_ce_tls;
         let _ = object_init_ex(dst, ce);
         let o = (*dst).value.obj;
         zend::prop_stringl(ce, o, c"version", t.version.as_bytes());

@@ -9,6 +9,7 @@
 #endif
 
 extern void rapira_rs_finish_response(void);
+extern void rapira_rs_grpc_message_shutdown(void);
 
 // php_handle_aborted_connection (main.c:2722) longjmps past Rust's catch_unwind
 extern size_t rapira_rs_ub_write(const char *str, size_t len, bool *aborted);
@@ -83,6 +84,7 @@ PHP_MINIT_FUNCTION(rapira) {
 PHP_RSHUTDOWN_FUNCTION(rapira) {
     (void)type;
     (void)module_number;
+    rapira_rs_grpc_message_shutdown();
     rapira_rs_dispatcher_release();
     return SUCCESS;
 }

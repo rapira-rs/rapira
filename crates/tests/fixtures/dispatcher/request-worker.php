@@ -42,6 +42,7 @@ try {
             'server-detail=' . ($req->server instanceof \Rapira\InetAddress
                 ? $req->server->ip . ':' . $req->server->port
                 : var_export($req->server->path, true)),
+            'tls-type=' . ($req->tls === null ? 'NULL' : $req->tls::class),
             'tls=' . ($req->tls === null ? 'NULL' : implode('|', [
                 $req->tls->version,
                 $req->tls->cipher,

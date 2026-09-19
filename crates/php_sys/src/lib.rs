@@ -8,6 +8,7 @@ pub mod dispatcher;
 pub mod exchange;
 pub mod executor;
 pub(crate) mod fold;
+pub mod grpc;
 pub mod handler;
 pub mod module;
 pub mod quota;
@@ -16,6 +17,7 @@ pub mod scoreboard;
 pub mod start;
 pub mod types;
 pub mod values;
+pub(crate) mod work;
 pub(crate) mod zend;
 
 use std::ffi::c_int;

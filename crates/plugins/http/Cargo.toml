@@ -11,6 +11,7 @@ workspace = true
 
 [dependencies]
 extension_api = { workspace = true }
+rapira_net = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }

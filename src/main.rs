@@ -2,9 +2,10 @@ use clap::{Args, CommandFactory, Parser, Subcommand};
 use extension_api::{ListenAddr, Middleware, PrepareCtx};
 use php_sys::{Mode, Rapira};
 use rapira_config::{
-    HttpSettings, Listen, MiddlewareSettings, RunMode, Scaling, Settings, SupervisorSettings,
-    UnsafeFieldNames,
+    GrpcSettings, HttpSettings, Listen, MiddlewareSettings, PoolSettings, RunMode, Scaling,
+    Settings, SupervisorSettings, UnsafeFieldNames,
 };
+use rapira_grpc::{Config as GrpcConfig, Registry, Server as GrpcServer};
 use rapira_http::{
     Config as HttpConfig, Server as HttpServer, UnsafeFieldNames as HttpUnsafeFieldNames,
 };
@@ -129,7 +130,7 @@ fn http_pool(
     supervisor: &SupervisorSettings,
     prepare: &mut PrepareCtx,
 ) -> anyhow::Result<(PoolRun, PoolConfig)> {
-    let entrypoint: PathBuf = http.pool.entrypoint;
+    let entrypoint: PathBuf = http.pool.entrypoint.clone();
     let mode: Mode = match http.pool.mode {
         RunMode::Classic => Mode::Classic,
         RunMode::Worker => Mode::Worker(entrypoint.clone()),
@@ -226,30 +227,78 @@ fn http_pool(
                 mode,
                 entrypoint,
                 max_requests: http.pool.max_requests,
-                uploads,
-                sendfile_root: http.sendfile_root,
+                http: Some(worker::HttpResources {
+                    uploads,
+                    sendfile_root: http.sendfile_root,
+                }),
                 grace: supervisor.process_control_timeout,
             },
         },
-        PoolConfig {
-            name: "http",
-            processes: http.pool.processes,
-            scaling: match http.pool.scaling {
-                Scaling::Static => rapira_master::Scaling::Static,
-                Scaling::Dynamic {
-                    min_spare,
-                    max_spare,
-                } => rapira_master::Scaling::Dynamic {
-                    min_spare,
-                    max_spare,
-                },
-                Scaling::Ondemand => rapira_master::Scaling::Ondemand,
-            },
-            process_idle_timeout: http.pool.process_idle_timeout,
-            request_terminate_timeout: http.pool.request_terminate_timeout,
-            listeners,
-        },
+        pool_config("http", &http.pool, listeners),
     ))
+}
+
+fn grpc_pool(
+    grpc: GrpcSettings,
+    supervisor: &SupervisorSettings,
+    prepare: &mut PrepareCtx,
+) -> anyhow::Result<(PoolRun, PoolConfig)> {
+    let registry = Arc::new(Registry::load(&grpc.protos, &grpc.import_paths)?);
+    let services = rapira_runtime::grpc_services(registry.services());
+    let mut host = ExtensionRuntime::new();
+    host.register::<GrpcServer>(GrpcConfig {
+        listen: match grpc.listen {
+            Listen::Tcp(addr) => ListenAddr::Tcp(addr),
+            Listen::Unix(path) => ListenAddr::Unix(path),
+        },
+        registry,
+        reflection: grpc.reflection,
+        interceptors: Vec::new(),
+        gzip_responses: grpc.gzip_responses,
+        max_request_message_size: grpc.max_request_message_size,
+        max_response_message_size: grpc.max_response_message_size,
+        drain_grace: supervisor.drain_grace(),
+    })?;
+    let listeners = prepare_pool(&mut host, prepare)?;
+    let pool_config = pool_config("grpc", &grpc.pool, listeners);
+    let entrypoint = grpc.pool.entrypoint;
+    Ok((
+        PoolRun {
+            host: Some(host),
+            args: worker::PoolArgs {
+                mode: Mode::GrpcDispatcher {
+                    entrypoint: entrypoint.clone(),
+                    services,
+                },
+                entrypoint,
+                max_requests: grpc.pool.max_requests,
+                http: None,
+                grace: supervisor.process_control_timeout,
+            },
+        },
+        pool_config,
+    ))
+}
+
+fn pool_config(name: &'static str, pool: &PoolSettings, listeners: Vec<RawFd>) -> PoolConfig {
+    PoolConfig {
+        name,
+        processes: pool.processes,
+        scaling: match pool.scaling {
+            Scaling::Static => rapira_master::Scaling::Static,
+            Scaling::Dynamic {
+                min_spare,
+                max_spare,
+            } => rapira_master::Scaling::Dynamic {
+                min_spare,
+                max_spare,
+            },
+            Scaling::Ondemand => rapira_master::Scaling::Ondemand,
+        },
+        process_idle_timeout: pool.process_idle_timeout,
+        request_terminate_timeout: pool.request_terminate_timeout,
+        listeners,
+    }
 }
 
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
@@ -260,13 +309,14 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // One context for every pool, kept alive past `run` so the master keeps its listener dups.
     let mut prepare: PrepareCtx = PrepareCtx::new();
-    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = [http_pool(
-        settings.http,
-        &settings.supervisor,
-        &mut prepare,
-    )?]
-    .into_iter()
-    .unzip();
+    let mut configured = Vec::new();
+    if let Some(http) = settings.http {
+        configured.push(http_pool(http, &settings.supervisor, &mut prepare)?);
+    }
+    if let Some(grpc) = settings.grpc {
+        configured.push(grpc_pool(grpc, &settings.supervisor, &mut prepare)?);
+    }
+    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = configured.into_iter().unzip();
 
     // MINIT once, after every pool bound its listeners.
     let module: php_sys::PhpModule = Rapira::boot_master()?;

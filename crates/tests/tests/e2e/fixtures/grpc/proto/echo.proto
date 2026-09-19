@@ -1,0 +1,16 @@
+syntax = "proto3";
+
+package e2e.v1;
+
+import "google/protobuf/timestamp.proto";
+
+service Echo {
+  rpc Echo(Message) returns (Message);
+  rpc Fail(Message) returns (Message);
+  rpc Hold(Message) returns (Message);
+}
+
+message Message {
+  string text = 1;
+  google.protobuf.Timestamp sent_at = 2;
+}

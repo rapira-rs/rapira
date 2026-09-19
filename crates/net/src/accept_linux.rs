@@ -4,10 +4,10 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use tokio::io::Interest;
 use tokio::io::unix::AsyncFd;
 
-pub(super) type TcpListener = Listener<std::net::TcpListener>;
-pub(super) type UnixListener = Listener<std::os::unix::net::UnixListener>;
+pub type TcpListener = Listener<std::net::TcpListener>;
+pub type UnixListener = Listener<std::os::unix::net::UnixListener>;
 
-pub(super) struct Listener<L> {
+pub struct Listener<L> {
     epoll: AsyncFd<Epoll<L>>,
 }
 
@@ -23,7 +23,7 @@ impl<L> AsRawFd for Epoll<L> {
 }
 
 impl<L: AsRawFd> Listener<L> {
-    pub(super) fn from_std(listener: L) -> io::Result<Self> {
+    pub fn from_std(listener: L) -> io::Result<Self> {
         // SAFETY: epoll_create1 returns a new descriptor and takes no pointers.
         let fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
         if fd < 0 {
@@ -56,7 +56,7 @@ impl<L: AsRawFd> Listener<L> {
         }
     }
 
-    pub(super) fn on_accept(&self) -> io::Result<()> {
+    pub fn on_accept(&self) -> io::Result<()> {
         // Re-registration gives other exclusive waiters a chance to accept.
         // https://github.com/nginx/nginx/blob/release-1.27.5/src/event/ngx_event_accept.c#L432-L475
         self.epoll.get_ref().control(libc::EPOLL_CTL_DEL)?;
@@ -65,7 +65,7 @@ impl<L: AsRawFd> Listener<L> {
 }
 
 impl TcpListener {
-    pub(super) async fn accept(&self) -> io::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
+    pub async fn accept(&self) -> io::Result<(tokio::net::TcpStream, std::net::SocketAddr)> {
         let (stream, peer) = self.accept_with(std::net::TcpListener::accept).await?;
         stream.set_nonblocking(true)?;
         Ok((tokio::net::TcpStream::from_std(stream)?, peer))
@@ -73,7 +73,7 @@ impl TcpListener {
 }
 
 impl UnixListener {
-    pub(super) async fn accept(
+    pub async fn accept(
         &self,
     ) -> io::Result<(tokio::net::UnixStream, std::os::unix::net::SocketAddr)> {
         let (stream, peer) = self

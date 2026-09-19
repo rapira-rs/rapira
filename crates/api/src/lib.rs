@@ -3,11 +3,12 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
+pub mod grpc;
 mod middleware;
 mod prepare;
 pub use middleware::{
     Body, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer,
-    Protocol, empty_body,
+    Protocol, Rejection, empty_body,
 };
 pub use prepare::{LISTEN_BACKLOG, ListenAddr, PrepareCtx, PreparedListener};
 
@@ -35,6 +36,13 @@ pub trait Extension: Send + 'static {
 #[doc(hidden)]
 pub trait Backend: Send + Sync + 'static {
     fn exec(&self, req: Request) -> Pin<Box<dyn Future<Output = Result<Reply>> + Send + '_>>;
+
+    fn exec_grpc(
+        &self,
+        _req: grpc::Request,
+    ) -> Pin<Box<dyn Future<Output = Result<grpc::Reply>> + Send + '_>> {
+        Box::pin(async { Err(anyhow::anyhow!("gRPC execution is not supported")) })
+    }
 }
 
 pub enum ReplyEvent {
@@ -158,6 +166,10 @@ impl Php {
     /// A pre-dispatch refusal errors with a downcastable [`Rejected`]; response-shape failures surface from [`Reply::next`]/[`Reply::collect`].
     pub async fn exec(&self, req: Request) -> Result<Reply> {
         self.backend.exec(req).await
+    }
+
+    pub async fn exec_grpc(&self, req: grpc::Request) -> Result<grpc::Reply> {
+        self.backend.exec_grpc(req).await
     }
 }
 

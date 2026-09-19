@@ -3,9 +3,9 @@
 use Rapira\Http\FormField;
 use Rapira\Http\Multipart;
 use Rapira\Http\Request;
-use Rapira\Http\Tls;
 use Rapira\Http\UploadedFile;
 use Rapira\InetAddress;
+use Rapira\Tls;
 use Rapira\UnixAddress;
 
 $remote = new InetAddress('203.0.113.7', 44123);

@@ -23,10 +23,16 @@ jobs:
         with:
           php-version: ${{ env.PHP_VERSION }}
           coverage: none
-          extensions: bcmath, ctype, curl, dom, fileinfo, filter, iconv, igbinary, imap, intl, mbstring, opcache, openssl, pdo_pgsql, pdo_sqlite, pgsql, phar, posix, redis, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
+          extensions: bcmath, ctype, curl, dom, fileinfo, filter, iconv, igbinary, imap, intl, mbstring, opcache, openssl, pdo_pgsql, pdo_sqlite, pgsql, phar, posix, protobuf, redis, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
         env:
           phpts: nts
           fail-fast: true # a missing extension fails the job instead of warning
+
+      - name: Verify test extensions
+        run: |
+          php --ri protobuf
+          php --ri imap
+          php --ri openssl
 
       - name: Verify no coverage driver in the PHP build
         run: |
@@ -56,9 +62,6 @@ jobs:
           cache-on-failure: true
 
       - name: Generate coverage (lcov)
-        # a skip in a gated suite on Linux means a broken install, not a pass
-        env:
-          RAPIRA_REQUIRE_EXTS: imap,openssl
         run: >-
           cargo llvm-cov --workspace --lcov --output-path lcov.info
           --ignore-filename-regex '(crates/tests/|bindings\.rs$|/src/main\.rs$)'

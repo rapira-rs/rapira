@@ -1,0 +1,10 @@
+[grpc]
+listen = "127.0.0.1:9001"
+protos = ["proto"]
+reflection = true
+interceptors = []
+
+[grpc.pool]
+entrypoint = "grpc.php"
+mode = "dispatcher"
+processes = 2

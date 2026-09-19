@@ -3,7 +3,7 @@
 [![CI](https://github.com/rapira-rs/rapira/actions/workflows/ci.yml/badge.svg)](https://github.com/rapira-rs/rapira/actions/workflows/ci.yml) [![codecov](https://codecov.io/gh/rapira-rs/rapira/graph/badge.svg)](https://app.codecov.io/gh/rapira-rs/rapira) [![Release](https://img.shields.io/github/v/release/rapira-rs/rapira)](https://github.com/rapira-rs/rapira/releases) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE) [![Docs](https://img.shields.io/badge/docs-rapira.rs-4682b4)](https://rapira.rs)
 ![CodeRabbit Pull Request Reviews](https://img.shields.io/coderabbit/prs/github/rapira-rs/rapira?utm_source=oss&utm_medium=github&utm_campaign=rapira-rs%2Frapira&labelColor=171717&color=FF570A&link=https%3A%2F%2Fcoderabbit.ai&label=CodeRabbit+Reviews)
 
-Rapira is a PHP application server written in Rust. It embeds the PHP interpreter and serves HTTP directly. Run existing applications in classic mode, or keep them in memory across requests with worker and dispatcher modes.
+Rapira is a PHP application server written in Rust. It embeds the PHP interpreter and serves HTTP and unary gRPC. Run existing HTTP applications in classic mode, or keep them in memory across requests with worker and dispatcher modes.
 
 [Documentation](https://rapira.rs/docs/intro/) | [Quickstart](https://rapira.rs/docs/intro/quickstart) | [Configuration](https://rapira.rs/docs/configuration) | [Framework integration](https://rapira.rs/docs/frameworks/)
 
@@ -141,6 +141,26 @@ rapira serve rapira.toml
 ```
 
 See [examples](examples/) for routing, streaming, and asynchronous dispatch.
+
+### gRPC
+
+The gRPC plugin discovers services from `.proto` directories and passes binary protobuf messages to a synchronous PHP dispatcher. It serves native reflection on the same HTTP/2 listener.
+
+```toml
+[grpc]
+listen = "127.0.0.1:9001"
+protos = ["proto"]
+reflection = true
+interceptors = []
+
+[grpc.pool]
+entrypoint = "grpc.php"
+processes = 4
+```
+
+Rapira parses proto2 and proto3 schemas in Rust before workers fork. Standard `google/protobuf` imports are built in. Generate application PHP protobuf classes during your application build.
+
+See the [gRPC plugin](crates/plugins/grpc/README.md) and [runnable example](examples/grpc/). A configuration can contain HTTP and gRPC pools with separate listeners and entrypoints.
 
 ## Contributing
 

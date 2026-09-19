@@ -11,7 +11,10 @@
 ## Comments
 
 - `rapira_arginfo.h` is generated, regenerate from the stub.
-- Joke comments (`Rustttt`, "trust me, I'm a developer") are intentional. Do not flag them.
+
+## Reviews
+
+- Always use php-src during review. Check the C shim layer against the Zend Engine implementation.
 
 ## Tests
 

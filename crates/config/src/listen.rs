@@ -1,12 +1,33 @@
+use anyhow::Context;
 use std::fmt;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Listen {
     Tcp(SocketAddr),
     Unix(PathBuf),
+}
+
+pub(crate) fn resolve_listen(
+    value: Option<&str>,
+    table: &str,
+    default_port: u16,
+    config_dir: Option<&Path>,
+) -> anyhow::Result<Listen> {
+    let listen = match value {
+        Some(value) => value
+            .parse::<Listen>()
+            .with_context(|| format!("invalid {table}.listen `{value}`"))?,
+        None => Listen::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, default_port))),
+    };
+    match listen {
+        Listen::Unix(path) => Ok(Listen::Unix(std::path::absolute(
+            config_dir.unwrap_or_else(|| Path::new(".")).join(path),
+        )?)),
+        tcp => Ok(tcp),
+    }
 }
 
 impl fmt::Display for Listen {

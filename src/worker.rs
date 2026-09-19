@@ -48,10 +48,14 @@ pub struct PoolArgs {
     pub mode: Mode,
     pub entrypoint: PathBuf,
     pub max_requests: u64,
-    pub uploads: rapira_runtime::multipart::Limits,
-    /// sendFile() containment root, canonicalized per worker.
-    pub sendfile_root: PathBuf,
+    pub http: Option<HttpResources>,
     pub grace: Duration,
+}
+
+#[derive(Clone)]
+pub struct HttpResources {
+    pub uploads: rapira_runtime::multipart::Limits,
+    pub sendfile_root: PathBuf,
 }
 
 /// Returns the process exit code for the master's fork bracket; never runs PHP module teardown, MSHUTDOWN stays with the master.
@@ -60,13 +64,19 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         mode,
         entrypoint,
         max_requests,
-        mut uploads,
-        sendfile_root,
+        http,
         grace,
     } = args;
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { php_sys::rapira_child_init() };
-    php_sys::set_sendfile_root(sendfile_root);
+    let mut options = rapira_runtime::RuntimeOptions {
+        grace,
+        ..Default::default()
+    };
+    if let Some(http) = http {
+        php_sys::set_sendfile_root(http.sendfile_root);
+        options.uploads = Arc::new(http.uploads);
+    }
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
     let hooks: WorkerHooks = WorkerHooks {
         max_requests: effective_quota(max_requests),
@@ -94,6 +104,7 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
     let spool_dir: Option<PathBuf> = if dispatcher {
+        let uploads = Arc::make_mut(&mut options.uploads);
         uploads.dir = uploads
             .dir
             .join(format!("rapira-spool-{}", std::process::id()));
@@ -112,14 +123,7 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
     } else {
         None
     };
-    let running: rapira_runtime::Running = host.run_with_options(
-        handle,
-        entrypoint,
-        rapira_runtime::RuntimeOptions {
-            uploads: Arc::new(uploads),
-            grace,
-        },
-    );
+    let running: rapira_runtime::Running = host.run_with_options(handle, entrypoint, options);
     let _ = stopper.set(running.stopper());
     if WORKER_EXIT.load(SeqCst) != -1 {
         stopper.get().expect("just set").stop();

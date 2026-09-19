@@ -663,39 +663,51 @@ fn tls_view_reaches_php() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/request-worker.php")))?;
     let h = r.handle();
 
-    let mut rq = req("/", "dispatcher/request-worker.php");
-    rq.tls = Some(php_sys::types::TlsView {
-        version: "TLSv1.3".into(),
-        cipher: "TLS_AES_256_GCM_SHA384".into(),
-        alpn: Some("h2".into()),
-        server_name: Some("sni.example".into()),
-        cert: Some(php_sys::types::ClientCertView {
-            serial: "0AB1".into(),
-            organization: None,
-            fingerprint: "abcd".into(),
-        }),
-    });
-    let (status, body) = drain(h.handle_blocking(rq)?);
-    assert_eq!(status, 200);
-    assert!(
-        body.contains("tls=TLSv1.3|TLS_AES_256_GCM_SHA384|'h2'|'sni.example'|'0AB1'|NULL|'abcd'"),
-        "unexpected tls line in {body:?}"
-    );
-
-    let mut rq = req("/", "dispatcher/request-worker.php");
-    rq.tls = Some(php_sys::types::TlsView {
-        version: "TLSv1.2".into(),
-        cipher: "X".into(),
-        alpn: None,
-        server_name: None,
-        cert: None,
-    });
-    let (status, body) = drain(h.handle_blocking(rq)?);
-    assert_eq!(status, 200);
-    assert!(
-        body.contains("tls=TLSv1.2|X|NULL|NULL|NULL|NULL|NULL"),
-        "unexpected tls line in {body:?}"
-    );
+    struct Case {
+        name: &'static str,
+        tls: php_sys::types::TlsView,
+        expected: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "client_certificate",
+            tls: php_sys::types::TlsView {
+                version: "TLSv1.3".into(),
+                cipher: "TLS_AES_256_GCM_SHA384".into(),
+                alpn: Some("h2".into()),
+                server_name: Some("sni.example".into()),
+                cert: Some(php_sys::types::ClientCertView {
+                    serial: "0AB1".into(),
+                    organization: None,
+                    fingerprint: "abcd".into(),
+                }),
+            },
+            expected: "tls=TLSv1.3|TLS_AES_256_GCM_SHA384|'h2'|'sni.example'|'0AB1'|NULL|'abcd'",
+        },
+        Case {
+            name: "no_client_certificate",
+            tls: php_sys::types::TlsView {
+                version: "TLSv1.2".into(),
+                cipher: "X".into(),
+                alpn: None,
+                server_name: None,
+                cert: None,
+            },
+            expected: "tls=TLSv1.2|X|NULL|NULL|NULL|NULL|NULL",
+        },
+    ];
+    for case in cases {
+        let mut rq = req("/", "dispatcher/request-worker.php");
+        rq.tls = Some(case.tls);
+        let (status, body) = drain(h.handle_blocking(rq)?);
+        assert_eq!(status, 200, "{}: {body:?}", case.name);
+        assert!(
+            body.contains("tls-type=Rapira\\Tls"),
+            "{}: {body:?}",
+            case.name
+        );
+        assert!(body.contains(case.expected), "{}: {body:?}", case.name);
+    }
 
     drop(h);
     r.shutdown();

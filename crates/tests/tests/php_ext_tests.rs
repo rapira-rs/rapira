@@ -1,4 +1,4 @@
-use tests::{assert_skip_allowed, run_worker};
+use tests::run_worker;
 
 fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
     run_worker(name, uris, None)
@@ -7,7 +7,6 @@ fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
 fn success(name: &str, token: &str) -> anyhow::Result<()> {
     let out = run(name, &["/"])?;
     if out[0].1 == "skip" {
-        assert_skip_allowed(name);
         return Ok(());
     }
     assert_eq!(out[0].0, 200, "{name} must serve 200 (got: {:?})", out[0]);
@@ -22,7 +21,6 @@ fn success(name: &str, token: &str) -> anyhow::Result<()> {
 fn exception(name: &str, token: &str) -> anyhow::Result<()> {
     let out = run(name, &["/?boom=1", "/"])?;
     if out[0].1 == "skip" {
-        assert_skip_allowed(name);
         return Ok(());
     }
     assert_eq!(
@@ -246,7 +244,6 @@ fn openssl_error_ring_outlives_the_request() -> anyhow::Result<()> {
         ],
     )?;
     if out[0].1 == "skip" {
-        assert_skip_allowed("php_ext/openssl-worker.php");
         return Ok(());
     }
     assert_eq!(
@@ -283,7 +280,6 @@ fn openssl_error_ring_overwrites_the_oldest() -> anyhow::Result<()> {
         &["/?step=drain", "/?step=leak_many", "/?step=drain"],
     )?;
     if out[0].1 == "skip" {
-        assert_skip_allowed("php_ext/openssl-worker.php");
         return Ok(());
     }
     assert_eq!(

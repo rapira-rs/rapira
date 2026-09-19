@@ -1,3 +1,4 @@
+use crate::work::{Queued, Work};
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -6,7 +7,6 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::{error, info, trace};
-use types::Job;
 
 use crate::quota::{self, WorkerHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
@@ -18,12 +18,12 @@ thread_local! {
 }
 
 pub(crate) struct Intake {
-    pub(crate) tx: SyncSender<Job>,
+    pub(crate) tx: SyncSender<Queued>,
     pub(crate) pending: Arc<AtomicUsize>,
 }
 
 struct JobRx {
-    rx: Receiver<Job>,
+    rx: Receiver<Queued>,
     pending: Arc<AtomicUsize>,
 }
 
@@ -41,6 +41,7 @@ impl Drop for PhpModule {
 pub struct Rapira {
     pub(crate) intake: Option<Intake>,
     pub(crate) dispatcher: bool,
+    pub(crate) grpc: bool,
     worker: Option<JoinHandle<()>>,
     board: Option<rapira_scoreboard::Scoreboard>,
     module: Option<PhpModule>,
@@ -107,19 +108,20 @@ impl Rapira {
         };
         slot.bind(std::process::id());
         let pending = Arc::new(AtomicUsize::new(0));
-        let (intake_tx, intake_rx) = sync_channel::<Job>(1024);
+        let (intake_tx, intake_rx) = sync_channel::<Queued>(1024);
         let intake = Intake {
             tx: intake_tx,
             pending: pending.clone(),
         };
 
-        let dispatcher = matches!(mode, Mode::Dispatcher(_));
-        // SAFETY: safe, trust me, I'm a developer
+        let grpc = matches!(mode, Mode::GrpcDispatcher { .. });
+        let dispatcher = matches!(mode, Mode::Dispatcher(_) | Mode::GrpcDispatcher { .. });
+        // SAFETY: The PHP worker thread starts after this write.
         unsafe {
             crate::rapira_mode = match &mode {
                 Mode::Classic => RAPIRA_MODE_CLASSIC,
                 Mode::Worker(_) => RAPIRA_MODE_WORKER,
-                Mode::Dispatcher(_) => RAPIRA_MODE_DISPATCHER,
+                Mode::Dispatcher(_) | Mode::GrpcDispatcher { .. } => RAPIRA_MODE_DISPATCHER,
             } as c_int;
         };
 
@@ -139,6 +141,7 @@ impl Rapira {
         Ok(Self {
             intake: Some(intake),
             dispatcher,
+            grpc,
             worker: Some(worker),
             board,
             module: None,
@@ -192,34 +195,43 @@ impl Drop for Rapira {
 
 /// NTS inits module and request on different threads, so the call stack is re-initialized on this thread: https://github.com/php/php-src/pull/9104
 fn worker_main(mode: Mode, rx: JobRx) {
+    let (entrypoint, services) = match mode {
+        Mode::Classic => (None, None),
+        Mode::Worker(entrypoint) | Mode::Dispatcher(entrypoint) => (Some(entrypoint), None),
+        Mode::GrpcDispatcher {
+            entrypoint,
+            services,
+        } => (Some(entrypoint), Some(services)),
+    };
     JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
+    crate::grpc::install(services);
     loop {
         unsafe {
             rapira_init_call_stack();
         };
-        let exit: WorkerExit = match &mode {
-            Mode::Classic => {
+        let exit: WorkerExit = match &entrypoint {
+            None => {
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker(script) | Mode::Dispatcher(script) => rapira_worker(script.clone()),
+            Some(script) => rapira_worker(script.clone()),
         };
         if matches!(exit, WorkerExit::Closed) {
             break;
         }
     }
+    JOB_RX.with_borrow_mut(|slot| *slot = None);
 }
 
-pub(crate) fn pull_job() -> Option<Job> {
+pub(crate) fn pull_job() -> Option<Work> {
     match pull_job_wait(None) {
-        Pulled::Job(job) => Some(*job),
+        Pulled::Job(job) => Some(job),
         _ => None,
     }
 }
 
 pub(crate) enum Pulled {
-    // Boxed: a Job is ~600 bytes and the other variants are empty
-    Job(Box<Job>),
+    Job(Work),
     Timeout,
     Empty,
     Closed,
@@ -238,10 +250,7 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
         };
         sb_update(Event::Active);
         match got {
-            Ok(job) => {
-                job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(Box::new(job))
-            }
+            Ok(job) => Pulled::Job(job.work),
             Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
             Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
         }
@@ -258,10 +267,7 @@ pub(crate) fn pull_job_try() -> Pulled {
         let got = job_r.rx.try_recv();
         sb_update(Event::Active);
         match got {
-            Ok(job) => {
-                job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(Box::new(job))
-            }
+            Ok(job) => Pulled::Job(job.work),
             Err(TryRecvError::Empty) => Pulled::Empty,
             Err(TryRecvError::Disconnected) => Pulled::Closed,
         }
@@ -285,5 +291,81 @@ mod tests {
         assert_eq!(php_series(80_426), (8, 4));
         assert_eq!(php_series(80_500), php_series(80_599));
         assert_ne!(php_series(80_400), php_series(80_500));
+    }
+
+    #[test]
+    fn receive_budget_includes_discard_cleanup() {
+        use super::*;
+        use crate::work::{PendingGuard, Queued, ReceiveWait, Work};
+
+        struct SlowDrop;
+        impl AsRef<[u8]> for SlowDrop {
+            fn as_ref(&self) -> &[u8] {
+                b""
+            }
+        }
+        impl Drop for SlowDrop {
+            fn drop(&mut self) {
+                std::thread::sleep(Duration::from_millis(100));
+            }
+        }
+        let pending = Arc::new(AtomicUsize::new(0));
+        let (tx, rx) = sync_channel(2);
+        let (cancelled, receiver) = tokio::sync::oneshot::channel();
+        drop(receiver);
+        let (live, _receiver) = tokio::sync::oneshot::channel();
+        struct Case {
+            name: &'static str,
+            sender: tokio::sync::oneshot::Sender<crate::grpc::Reply>,
+            message: bytes::Bytes,
+        }
+        let cases = [
+            Case {
+                name: "cancelled",
+                sender: cancelled,
+                message: bytes::Bytes::from_owner(SlowDrop),
+            },
+            Case {
+                name: "live",
+                sender: live,
+                message: bytes::Bytes::new(),
+            },
+        ];
+        for case in cases {
+            let job = crate::grpc::Job {
+                request: crate::grpc::Request {
+                    method: case.name.into(),
+                    message: case.message,
+                    metadata: Vec::new(),
+                    remote: crate::types::Addr::Unix(None),
+                    tls: None,
+                    received_at: 0.0,
+                    deadline: None,
+                    expires_at: None,
+                },
+                sender: case.sender,
+            };
+            assert!(
+                tx.send(Queued {
+                    work: Work::Grpc(Box::new(job)),
+                    _pending: PendingGuard::arm(&pending)
+                })
+                .is_ok()
+            );
+        }
+        JOB_RX.with_borrow_mut(|slot| {
+            *slot = Some(JobRx {
+                rx,
+                pending: pending.clone(),
+            })
+        });
+        assert!(matches!(ReceiveWait::new(50_000).pull(), Pulled::Timeout));
+        assert_eq!(
+            pending.load(Ordering::Relaxed),
+            1,
+            "the live job stays queued after the budget expires"
+        );
+        JOB_RX.with_borrow_mut(|slot| *slot = None);
+        assert_eq!(pending.load(Ordering::Relaxed), 0);
     }
 }

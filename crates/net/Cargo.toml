@@ -1,0 +1,17 @@
+[package]
+name = "rapira_net"
+version = "0.8.1"
+edition.workspace = true
+publish = false
+license = "MIT"
+description = "Shared inherited listeners for Rapira plugins"
+
+[lints]
+workspace = true
+
+[dependencies]
+libc = { workspace = true }
+tokio = { workspace = true, features = ["net"] }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros", "time"] }

@@ -7,14 +7,11 @@ use extension_api::{Addr, ListenAddr, Php, PreparedListener, Result};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
+use rapira_net::{TcpListener, UnixListener};
 use tokio::io::{AsyncRead, AsyncWrite};
-#[cfg(not(target_os = "linux"))]
-use tokio::net::{TcpListener, UnixListener};
 use tokio::sync::watch::{self, channel};
 
 use crate::Config;
-#[cfg(target_os = "linux")]
-use crate::accept_linux::{TcpListener, UnixListener};
 use crate::handler::{RapiraService, Shared};
 
 enum Acceptor {

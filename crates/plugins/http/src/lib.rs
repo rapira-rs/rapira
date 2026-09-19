@@ -7,8 +7,6 @@ use extension_api::{Extension, ListenAddr, Middleware, Php, PrepareCtx, Prepared
 use tokio::runtime::Builder;
 use tokio::sync::watch;
 
-#[cfg(target_os = "linux")]
-mod accept_linux;
 mod bridge;
 mod check;
 mod handler;

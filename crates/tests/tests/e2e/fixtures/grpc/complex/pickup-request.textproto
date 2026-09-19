@@ -1,0 +1,18 @@
+order {
+  id: "order-43"
+  customer {
+    name: "Grace"
+    address { city: "New York" country: "US" }
+  }
+  items { sku: "pencil" quantity: 7 }
+  labels { key: "priority" value: "standard" }
+  placed_at { seconds: 1 nanos: 1 }
+  pickup_point: "locker-7"
+  token: "\377\000pickup"
+}
+note {
+  [type.googleapis.com/e2e.orders.v1.Note] { text: "Call first" }
+}
+options {
+  fields { key: "gift" value { bool_value: false } }
+}

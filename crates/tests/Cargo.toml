@@ -17,11 +17,20 @@ tracing-subscriber = "0.3"
 tracing-log = "0.2"
 
 [dev-dependencies]
+bytes = { workspace = true }
 extension_api = { workspace = true }
+h2 = "0.4"
+http = { workspace = true }
 http-body-util = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
 rapira_http = { workspace = true }
 rapira_runtime = { path = "../runtime" }
 tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+tokio-stream = "0.1"
+tonic = { workspace = true, features = ["transport"] }
+tonic-prost = { workspace = true }
+tonic-reflection = { workspace = true }
 # E2E harness (tests/e2e): process control for the spawned rapira binary.
 libc = "0.2"
 # E2E log-format assertions (tests/e2e/logging.rs).

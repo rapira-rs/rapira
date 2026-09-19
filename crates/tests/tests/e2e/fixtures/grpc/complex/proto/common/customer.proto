@@ -1,0 +1,15 @@
+syntax = "proto3";
+
+package e2e.common.v1;
+
+option php_namespace = "E2e\\Grpc\\Common";
+
+message Address {
+  string city = 1;
+  string country = 2;
+}
+
+message Customer {
+  string name = 1;
+  Address address = 2;
+}

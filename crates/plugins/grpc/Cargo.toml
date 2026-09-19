@@ -1,0 +1,39 @@
+[package]
+name = "rapira_grpc"
+version = "0.8.1"
+edition.workspace = true
+publish = false
+license = "MIT"
+description = "gRPC plugin for rapira"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+extension_api = { workspace = true }
+prost = { workspace = true }
+prost-types = { workspace = true }
+protox = "0.9.1"
+rapira_net = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+libc = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros"] }
+tonic = { workspace = true }
+tonic-prost = { workspace = true }
+tonic-reflection = { workspace = true }
+hyper = { version = "1", features = ["http2", "server"] }
+hyper-util = { version = "0.1", features = ["tokio", "server", "http2", "server-graceful"] }
+http-body = "1"
+base64 = "0.22"
+tower = { version = "0.5", features = ["util"] }
+tokio-stream = "0.1"
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["test-util", "io-util"] }
+h2 = "0.4"
+flate2 = "1"
