@@ -11,8 +11,9 @@ $cases = [
 ];
 $result = [];
 foreach ($cases as $case) {
+    $class = new ReflectionClass($case['class']);
     try {
-        (new ReflectionClass($case['class']))->newInstanceWithoutConstructor();
+        $class->newInstanceWithoutConstructor();
         $result[$case['name']] = 'constructed';
     } catch (Throwable $error) {
         $result[$case['name']] = get_class($error);

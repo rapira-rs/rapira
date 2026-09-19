@@ -200,10 +200,12 @@ pub unsafe extern "C" fn rapira_rs_grpc_receive(timeout: i64, poll: bool, out: *
         }
         let mut object: zval = std::mem::zeroed();
         object_init_ex(&mut object, rapira_ce_internal_grpc_call);
-        rapira_receive_untimed();
         let wait = ReceiveWait::new(timeout);
         loop {
-            match wait.pull() {
+            rapira_receive_untimed();
+            let pulled = wait.pull();
+            rapira_receive_timed();
+            match pulled {
                 Pulled::Job(job) => {
                     let Work::Grpc(job) = job else {
                         job.unavailable();
@@ -217,7 +219,6 @@ pub unsafe extern "C" fn rapira_rs_grpc_receive(timeout: i64, poll: bool, out: *
                     (*call_from(object.value.obj)).state = ptr.cast();
                     ACTIVE.set(ptr as usize);
                     work::note_received();
-                    rapira_receive_timed();
                     *out = object;
                     return true;
                 }

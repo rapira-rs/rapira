@@ -24,14 +24,15 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
         }
         let mut obj: zval = std::mem::zeroed();
         let _ = object_init_ex(&mut obj, rapira_ce_internal_http_exchange);
-        // SAFETY: plain zend timer bookkeeping on this thread; no bailout path.
-        rapira_receive_untimed();
         let wait = ReceiveWait::new(match mode {
             RecvMode::Try => 0,
             RecvMode::Wait(t) => t,
         });
         loop {
+            // SAFETY: plain Zend timer bookkeeping on this thread; no bailout path.
+            rapira_receive_untimed();
             let pulled = wait.pull();
+            rapira_receive_timed();
             match pulled {
                 Pulled::Job(job) => {
                     let Work::Http(job) = job else {
@@ -54,8 +55,6 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                     CURRENT.set(Unit::Handling(ptr));
                     work::note_received();
                     (*exchange_from(obj.value.obj)).job = ptr.cast();
-                    // SAFETY: plain zend timer bookkeeping; no bailout path.
-                    rapira_receive_timed();
                     (*ptr).armed_at = Instant::now();
                     *return_value = obj;
                     return true;

@@ -162,7 +162,10 @@ async fn dispatch(
         return Ok(res);
     }
     if !matches!(
-        req.headers().get("content-type").map(|v| v.as_bytes()),
+        req.headers()
+            .get("content-type")
+            .and_then(|value| value.as_bytes().split(|&byte| byte == b';').next())
+            .map(<[u8]>::trim_ascii),
         Some(b"application/grpc" | b"application/grpc+proto")
     ) {
         let mut res = HttpResponse::new(extension_api::empty_body());

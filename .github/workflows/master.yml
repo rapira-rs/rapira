@@ -78,6 +78,7 @@ jobs:
                   tar -xzf igbinary.tgz -C ext/igbinary --strip-components=1
                   tar -xzf redis.tgz -C ext/redis --strip-components=1
                   tar -xzf protobuf.tgz -C ext/protobuf --strip-components=1
+                  perl -pi -e 's/\bzval_dtor\b/zval_ptr_dtor_nogc/g' ext/protobuf/*.c
                   ./buildconf --force
                   ./configure \
                     --prefix="${PHP_PREFIX}" \

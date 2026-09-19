@@ -925,6 +925,46 @@ async fn route_and_transport_validation_precede_php() {
             http: 200,
             grpc: Some(tonic::Code::Ok),
         },
+        Case {
+            name: "native_grpc_with_parameters",
+            path: "/example.Echo/Call",
+            method: "POST",
+            content_type: "application/grpc;charset=utf-8",
+            http: 200,
+            grpc: Some(tonic::Code::Ok),
+        },
+        Case {
+            name: "native_proto_with_parameters",
+            path: "/example.Echo/Call",
+            method: "POST",
+            content_type: "application/grpc+proto;q=1",
+            http: 200,
+            grpc: Some(tonic::Code::Ok),
+        },
+        Case {
+            name: "native_proto_with_parameter_whitespace",
+            path: "/example.Echo/Call",
+            method: "POST",
+            content_type: "application/grpc+proto \t; charset=utf-8",
+            http: 200,
+            grpc: Some(tonic::Code::Ok),
+        },
+        Case {
+            name: "grpc_web_with_parameters_is_unsupported",
+            path: "/example.Echo/Call",
+            method: "POST",
+            content_type: "application/grpc-web;charset=utf-8",
+            http: 415,
+            grpc: None,
+        },
+        Case {
+            name: "unknown_proto_suffix_with_parameters_is_unsupported",
+            path: "/example.Echo/Call",
+            method: "POST",
+            content_type: "application/grpc+protobuf;charset=utf-8",
+            http: 415,
+            grpc: None,
+        },
     ];
     for case in cases {
         let backend = Arc::new(TestBackend::default());
