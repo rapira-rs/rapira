@@ -1,6 +1,8 @@
 # gRPC plugin
 
-The plugin serves native gRPC over cleartext HTTP/2 on TCP or Unix sockets. Each PHP worker handles one unary application call at a time. Tonic validates requests and handles gzip. Identity responses use Rust-owned payload buffers. PHP receives and returns binary protobuf payloads.
+The plugin serves native gRPC, binary gRPC-Web, and Connect on TCP or Unix sockets. Native gRPC uses cleartext HTTP/2. Binary gRPC-Web and Connect support HTTP/1.1 and HTTP/2 on the same listener. Each PHP worker handles one unary application call at a time. ConnectRPC handles protocol framing, compression, and error encoding. PHP receives and returns binary protobuf payloads.
+
+Application calls use POST with `application/grpc+proto`, `application/grpc-web+proto`, or `application/proto`. Native gRPC and gRPC-Web also accept their content types without the `+proto` suffix. JSON application messages, gRPC-Web text encoding, and application streaming are unsupported.
 
 ## Configuration
 
@@ -29,9 +31,9 @@ Import search roots use configuration order: `protos` first, then `import_paths`
 
 The master parses proto2 and proto3 schemas in Rust before workers fork. Standard `google/protobuf` imports are built in and resolve after the configured roots. Missing directories, invalid schemas, missing imports, conflicting definitions, and application streaming methods cause startup errors. Each method route is `/package.Service/Method`. Service names come from the schema.
 
-Message limits apply to protobuf message bytes. The `_mb` values use MiB. The pool uses the same scaling, recycling, and process watchdog settings as an HTTP pool. HTTP and gRPC can run together with separate listeners and entrypoints.
+Message limits apply to protobuf message bytes. Request limits also bound the encoded body or message, with an allowance for the five-byte frame prefix. The `_mb` values use MiB. Exceeding a limit produces `RESOURCE_EXHAUSTED`. The pool uses the same scaling, recycling, and process watchdog settings as an HTTP pool. HTTP and gRPC can run together with separate listeners and entrypoints.
 
-Gzip response compression is disabled by default. Set `enabled = true` in `[grpc.compression.gzip]` to enable it for application responses. The client must also advertise gzip in `grpc-accept-encoding`. Gzip requests are accepted with either setting. Message limits apply to the uncompressed payload in both directions.
+Gzip response compression is disabled by default. Set `enabled = true` in `[grpc.compression.gzip]` to enable it for application responses. Native gRPC and gRPC-Web clients must advertise gzip in `grpc-accept-encoding`. Connect clients use `accept-encoding`; when this header is absent, Connect accepts the request's `content-encoding`. Gzip requests are accepted with either configuration setting. Decompression obeys the request message limit. Reflection responses use identity encoding.
 
 Gzip can reduce bandwidth use for compressible payloads, but it uses CPU time. Keep response compression disabled when the CPU cost exceeds the bandwidth benefit, such as for random or already compressed payloads.
 
@@ -51,7 +53,7 @@ Schemas remain fixed for the master process. Worker replacement uses the prepare
 
 The application must finalize its active call before it receives another. Repeated finalization throws `AlreadyFinalizedError`. A response after cancellation throws `WorkDiscardedException`. An abandoned call or an uncaught exception produces a sanitized `INTERNAL` status. Applications convert expected errors to `Status` and call `fail()`.
 
-`Status` contains a `StatusCode`, a message, and `ErrorDetail` values. Each detail contains a protobuf type URL and serialized message bytes. The host encodes these in `grpc-status-details-bin`.
+`Status` contains a `StatusCode`, a message, and `ErrorDetail` values. Each detail contains a protobuf type URL and serialized message bytes. Native gRPC and gRPC-Web encode these in `grpc-status-details-bin`. Connect uses an HTTP error status and a JSON error body. Its error details contain the protobuf message name and base64-encoded bytes.
 
 ## Metadata and deadlines
 
@@ -59,11 +61,13 @@ Metadata preserves repeated values. Names are case-insensitive for lookup. Store
 
 Add text values with `addHeader()` and `addTrailer()`. Add binary values with `addBinaryHeader()` and `addBinaryTrailer()`. Response metadata rejects transport-reserved names. Both halves become fixed when the call completes. `headers()` and `trailers()` return immutable snapshots.
 
-The host enforces `grpc-timeout` from request receipt through queue waiting and response waiting. The PHP context exposes the corresponding Unix deadline. Cancellation closes the waiting transport call. PHP can check cancellation while it runs. The process watchdog controls a stuck worker.
+Native gRPC sends trailers as HTTP/2 trailers. gRPC-Web puts trailers in the final body frame. Unary Connect sends trailers as response headers with the `trailer-` prefix.
+
+The host enforces `grpc-timeout` for native gRPC and gRPC-Web, and `connect-timeout-ms` for Connect. The deadline starts at request receipt and includes interceptors, upload, queue waiting, and response waiting. The PHP context exposes the corresponding Unix deadline. Cancellation closes the waiting transport call. PHP can check cancellation while it runs. The process watchdog controls a stuck worker.
 
 ## Interceptors and reflection
 
-The Rust plugin accepts the shared `Middleware` and `Next` API as its interceptor chain. Requests carry `Protocol::Grpc` and `Peer` extensions. Each protocol has its own chain. Interceptors can inspect requests, initial responses, and body trailers. A final gRPC status can arrive in trailers after HTTP status `200`.
+The Rust plugin accepts the shared `Middleware` and `Next` API as its interceptor chain. All three wire protocols use this chain and carry `Protocol::Grpc` and `Peer` extensions. Interceptors can inspect requests, initial responses, and body trailers. A final gRPC status can arrive in trailers after HTTP status `200`.
 
 The standalone binary accepts an empty `interceptors` list. Rust hosts can supply custom interceptors through `Config::interceptors`.
 
@@ -74,6 +78,8 @@ Reflection uses `grpc.reflection.v1` and `grpc.reflection.v1alpha`. Both run in 
 Deploy the application's `.proto` files with the PHP entrypoint. Configure schema dependencies with `import_paths`. Schema loading runs entirely in the Rapira process.
 
 Generate PHP protobuf classes during the application build with the application's protobuf toolchain. See [the echo example](../../../examples/grpc/) for a complete server and reflection-based client commands.
+
+Browser clients can call the binary gRPC-Web or Connect endpoint directly through a same-origin reverse proxy. Configure CORS at the reverse proxy for cross-origin calls. An Envoy `grpc_web` filter can also translate browser requests to native gRPC on this listener.
 
 ## Large payloads
 

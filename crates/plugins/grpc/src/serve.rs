@@ -4,8 +4,8 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use extension_api::{Addr, ListenAddr, Php, PreparedListener, Result};
-use hyper::server::conn::http2;
 use hyper_util::rt::{TokioExecutor, TokioIo, TokioTimer};
+use hyper_util::server::conn::auto;
 use hyper_util::server::graceful::GracefulShutdown;
 use rapira_net::{TcpListener, UnixListener};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -43,8 +43,9 @@ pub(crate) async fn serve(
     let acceptor = create_acceptor(prepared)?;
     let shared = Arc::new(Shared::new(config, php)?);
     let graceful = GracefulShutdown::new();
-    let mut builder = http2::Builder::new(TokioExecutor::new());
-    builder.timer(TokioTimer::new());
+    let mut builder = auto::Builder::new(TokioExecutor::new());
+    builder.http1().timer(TokioTimer::new());
+    builder.http2().timer(TokioTimer::new());
     tracing::info!(target: "grpc", "listening on {listen:?}");
     let mut fatal = None;
     loop {
@@ -101,7 +102,7 @@ pub(crate) async fn serve(
 async fn accept_connection(
     acceptor: &Acceptor,
     listen: &ListenAddr,
-    builder: &http2::Builder<TokioExecutor>,
+    builder: &auto::Builder<TokioExecutor>,
     graceful: &GracefulShutdown,
     shared: &Arc<Shared>,
 ) -> std::io::Result<()> {
@@ -142,14 +143,16 @@ fn spawn_conn<S>(
     stream: S,
     remote: Addr,
     server: Addr,
-    builder: &http2::Builder<TokioExecutor>,
+    builder: &auto::Builder<TokioExecutor>,
     graceful: &GracefulShutdown,
     shared: &Arc<Shared>,
 ) where
     S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
 {
     let service = RapiraService::new(Arc::clone(shared), remote, server);
-    let connection = builder.serve_connection(TokioIo::new(stream), service);
+    let connection = builder
+        .serve_connection(TokioIo::new(stream), service)
+        .into_owned();
     let watched = graceful.watch(connection);
     tokio::spawn(async move {
         if let Err(error) = watched.await {

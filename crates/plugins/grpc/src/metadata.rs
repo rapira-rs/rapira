@@ -1,8 +1,8 @@
 use base64::Engine;
 use base64::engine::{DecodePaddingMode, GeneralPurpose, GeneralPurposeConfig};
+use connectrpc::ConnectError as Status;
 use extension_api::FieldLines;
 use http::{HeaderMap, HeaderName, HeaderValue};
-use tonic::Status;
 
 const BASE64: GeneralPurpose = GeneralPurpose::new(
     &base64::alphabet::STANDARD,

@@ -52,6 +52,8 @@ http-body-util = "0.1"
 libc = "0.2"
 prost = "0.14"
 prost-types = "0.14"
+connectrpc = { version = "0.9", default-features = false, features = ["gzip"] }
+connectrpc-reflection = { version = "0.9", default-features = false }
 tonic = { git = "https://github.com/grpc/grpc-rust", rev = "a597b92070dc12d2239923821f86391ad857d910", default-features = false, features = ["server", "codegen", "gzip"] }
 tonic-prost = { git = "https://github.com/grpc/grpc-rust", rev = "a597b92070dc12d2239923821f86391ad857d910" }
 tonic-reflection = { git = "https://github.com/grpc/grpc-rust", rev = "a597b92070dc12d2239923821f86391ad857d910" }

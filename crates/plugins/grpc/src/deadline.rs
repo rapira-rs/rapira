@@ -4,10 +4,12 @@ use std::task::{Context, Poll};
 use std::time::{Duration, Instant};
 
 use bytes::Bytes;
+use connectrpc::{ConnectError as Status, Protocol};
 use extension_api::{Body, BoxError};
 use http::HeaderMap;
 use http_body::{Body as HttpBody, Frame, SizeHint};
-use tonic::Status;
+
+use crate::response::ErrorContext;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Deadline {
@@ -26,19 +28,29 @@ pub(crate) fn parse(
     received: Instant,
     unix: f64,
 ) -> Result<Option<Deadline>, Status> {
-    let mut values = headers.get_all("grpc-timeout").iter();
+    let protocol = Protocol::detect(headers).map_or(Protocol::Grpc, |request| request.protocol);
+    let name = protocol.timeout_header();
+    let mut values = headers.get_all(name).iter();
     let Some(value) = values.next() else {
         return Ok(None);
     };
-    let invalid = || Status::invalid_argument("Invalid grpc-timeout");
+    let invalid = || Status::invalid_argument(format!("Invalid {name}"));
     if values.next().is_some() {
         return Err(invalid());
     }
     let value = value.as_bytes();
-    if !(2..=9).contains(&value.len()) {
-        return Err(invalid());
-    }
-    let (unit, digits) = value.split_last().unwrap();
+    let (unit, digits) = if protocol == Protocol::Connect {
+        if !(1..=10).contains(&value.len()) {
+            return Err(invalid());
+        }
+        (b'm', value)
+    } else {
+        if !(2..=9).contains(&value.len()) {
+            return Err(invalid());
+        }
+        let (unit, digits) = value.split_last().unwrap();
+        (*unit, digits)
+    };
     if !digits.iter().all(u8::is_ascii_digit) {
         return Err(invalid());
     }
@@ -68,16 +80,16 @@ pub(crate) struct DeadlineBody {
     inner: Option<Body>,
     deadline: Deadline,
     sleep: Pin<Box<tokio::time::Sleep>>,
-    response: bool,
+    error: Option<ErrorContext>,
 }
 
 impl DeadlineBody {
-    pub fn new(inner: Body, deadline: Deadline, response: bool) -> Self {
+    pub fn new(inner: Body, deadline: Deadline, error: ErrorContext) -> Self {
         Self {
             inner: Some(inner),
             deadline,
             sleep: Box::pin(tokio::time::sleep_until(deadline.expires_at.into())),
-            response,
+            error: Some(error),
         }
     }
 }
@@ -93,17 +105,16 @@ impl HttpBody for DeadlineBody {
         if self.inner.is_none() {
             return Poll::Ready(None);
         }
-        if self.deadline.expired() || self.sleep.as_mut().poll(cx).is_ready() {
-            self.inner = None;
-            return Poll::Ready(Some(if self.response {
-                let mut trailers = HeaderMap::new();
-                status()
-                    .add_header(&mut trailers)
-                    .map(|()| Frame::trailers(trailers))
-                    .map_err(BoxError::from)
+        if self.error.is_some()
+            && (self.deadline.expired() || self.sleep.as_mut().poll(cx).is_ready())
+        {
+            let error = self.error.take().unwrap();
+            if error.is_streaming() {
+                self.inner = Some(error.response(status()).into_body());
             } else {
-                Err(status().into())
-            }));
+                self.inner = None;
+                return Poll::Ready(Some(Err(status().into())));
+            }
         }
         let poll = Pin::new(self.inner.as_mut().unwrap()).poll_frame(cx);
         if matches!(&poll, Poll::Ready(None | Some(Err(_))))

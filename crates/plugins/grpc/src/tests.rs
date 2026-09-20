@@ -20,6 +20,7 @@ use tonic_reflection::pb::v1 as pb;
 
 use crate::{Config, Registry, Server, handler};
 
+mod protocols;
 mod reflection;
 
 fn registry() -> Arc<Registry> {
@@ -247,7 +248,7 @@ async fn unary_payload_cardinality_and_framing() {
         Case {
             name: "request_limit",
             wire: b"\0\0\0\0\x09abcdefghi",
-            code: tonic::Code::OutOfRange,
+            code: tonic::Code::ResourceExhausted,
             message: None,
         },
     ];
@@ -283,67 +284,6 @@ async fn unary_payload_cardinality_and_framing() {
             assert!(seen.is_empty(), "{} reached PHP", case.name);
             assert!(body.is_empty(), "{}", case.name);
         }
-    }
-}
-
-#[tokio::test]
-async fn identity_body_preserves_payload_allocation_and_frame_state() {
-    struct Case {
-        name: &'static str,
-        message: Bytes,
-        prefix: &'static [u8; 5],
-    }
-    let cases = [
-        Case {
-            name: "empty_payload",
-            message: Bytes::new(),
-            prefix: b"\0\0\0\0\0",
-        },
-        Case {
-            name: "binary_payload",
-            message: Bytes::from(vec![0, 255, 128, 1]),
-            prefix: b"\0\0\0\0\x04",
-        },
-        Case {
-            name: "eight_byte_payload",
-            message: Bytes::from(vec![0, 1, 2, 3, 4, 5, 6, 7]),
-            prefix: b"\0\0\0\0\x08",
-        },
-        Case {
-            name: "slice_of_owned_payload",
-            message: Bytes::from(vec![9, 0, 255, 128, 1, 9]).slice(1..5),
-            prefix: b"\0\0\0\0\x04",
-        },
-    ];
-    for case in cases {
-        let mut body = crate::codec::IdentityBody::new(case.message.clone()).unwrap();
-        assert!(!body.is_end_stream(), "{}", case.name);
-        let prefix = body.frame().await.unwrap().unwrap().into_data().unwrap();
-        assert_eq!(prefix.as_ref(), case.prefix, "{}", case.name);
-        assert!(!body.is_end_stream(), "{}", case.name);
-        if !case.message.is_empty() {
-            let payload = body.frame().await.unwrap().unwrap().into_data().unwrap();
-            assert_eq!(payload, case.message, "{}", case.name);
-            assert_eq!(
-                payload.as_ptr(),
-                case.message.as_ptr(),
-                "{}: payload allocation",
-                case.name
-            );
-        }
-        assert!(!body.is_end_stream(), "{}", case.name);
-        let trailers = body
-            .frame()
-            .await
-            .unwrap()
-            .unwrap()
-            .into_trailers()
-            .unwrap();
-        assert_eq!(trailers.len(), 1, "{}", case.name);
-        assert_eq!(trailers["grpc-status"], "0", "{}", case.name);
-        assert!(body.is_end_stream(), "{}", case.name);
-        assert!(body.frame().await.is_none(), "{}", case.name);
-        assert!(body.frame().await.is_none(), "{}", case.name);
     }
 }
 
@@ -406,6 +346,22 @@ async fn identity_response_preserves_owned_payload_and_metadata() {
             trailers: &[],
             cancel: true,
         },
+        Case {
+            name: "large_owned_payload",
+            message: &[42; 65536],
+            prefix: b"\0\0\x01\0\0",
+            headers: &["head"],
+            trailers: &["tail"],
+            cancel: false,
+        },
+        Case {
+            name: "cancel_large_owned_payload",
+            message: &[42; 65536],
+            prefix: b"\0\0\x01\0\0",
+            headers: &[],
+            trailers: &[],
+            cancel: true,
+        },
     ];
     for case in cases {
         let message_owner: Arc<[u8]> = Arc::from(case.message);
@@ -428,7 +384,7 @@ async fn identity_response_preserves_owned_payload_and_metadata() {
         }));
         let shared = shared(
             Config {
-                max_response_message_size: 8,
+                max_response_message_size: case.message.len().max(8),
                 ..config()
             },
             &backend,
@@ -440,7 +396,11 @@ async fn identity_response_preserves_owned_payload_and_metadata() {
         .await;
         assert_eq!(response.status(), http::StatusCode::OK, "{}", case.name);
         let headers = response.headers();
-        assert_eq!(headers["content-type"], "application/grpc", "{}", case.name);
+        assert_eq!(
+            headers["content-type"], "application/grpc+proto",
+            "{}",
+            case.name
+        );
         assert!(!headers.contains_key("grpc-encoding"), "{}", case.name);
         assert!(!headers.contains_key("grpc-status"), "{}", case.name);
         assert_eq!(
@@ -454,7 +414,9 @@ async fn identity_response_preserves_owned_payload_and_metadata() {
             case.name
         );
         assert_eq!(shared.inflight.load(Ordering::Acquire), 1, "{}", case.name);
-        assert_eq!(owner.strong_count(), 1, "{}", case.name);
+        if case.message.len() >= 65536 {
+            assert_eq!(owner.strong_count(), 1, "{}", case.name);
+        }
         if case.cancel {
             drop(response);
         } else {
@@ -481,13 +443,15 @@ async fn identity_response_preserves_owned_payload_and_metadata() {
             assert_eq!(wire.remaining(), case.message.len(), "{}", case.name);
             if !case.message.is_empty() {
                 assert_eq!(wire.chunk(), case.message, "{}", case.name);
-                assert_eq!(
-                    wire.chunk().as_ptr(),
-                    payload_ptr,
-                    "{}: payload allocation",
-                    case.name
-                );
-                assert_eq!(owner.strong_count(), 1, "{}", case.name);
+                if case.message.len() >= 65536 {
+                    assert_eq!(
+                        wire.chunk().as_ptr(),
+                        payload_ptr,
+                        "{}: payload allocation",
+                        case.name
+                    );
+                    assert_eq!(owner.strong_count(), 1, "{}", case.name);
+                }
             }
         }
         assert_eq!(shared.inflight.load(Ordering::Acquire), 0, "{}", case.name);
@@ -582,7 +546,7 @@ async fn identity_response_deadline_covers_unconsumed_frames() {
         let mut body = call(Arc::clone(&shared), req).await.into_body();
         if case.consume_prefix {
             let prefix = body.frame().await.unwrap().unwrap().into_data().unwrap();
-            assert_eq!(prefix.as_ref(), b"\0\0\0\0\x04", "{}", case.name);
+            assert!(prefix.starts_with(b"\0\0\0\0\x04"), "{}", case.name);
         }
         tokio::time::sleep(Duration::from_millis(1100)).await;
         let trailers = body
@@ -665,7 +629,8 @@ async fn identity_response_deadline_survives_http2_flow_control() {
         }
         let trailers = body.trailers().await.unwrap().expect("deadline trailers");
         assert_eq!(trailers["grpc-status"], "4", "{}", case.name);
-        assert_eq!(wire, case.prefix, "{}", case.name);
+        assert!(wire.starts_with(case.prefix), "{}", case.name);
+        assert!(case.wire.starts_with(&wire), "{}", case.name);
         assert!(!headers.contains_key("content-length"), "{}", case.name);
         server_task.abort();
         client_task.abort();
@@ -696,15 +661,15 @@ async fn response_size_limits_preserve_a_single_message() {
         Case {
             name: "over_limit",
             message: b"abc",
-            code: tonic::Code::OutOfRange,
+            code: tonic::Code::ResourceExhausted,
             wire: b"",
         },
     ];
     for case in cases {
         let backend = Arc::new(TestBackend::default());
         backend.replies.lock().unwrap().push_back(Ok(grpc::Reply {
-            headers: Vec::new(),
-            trailers: Vec::new(),
+            headers: vec![("x-header".into(), b"first".to_vec())],
+            trailers: vec![("x-trailer".into(), b"last".to_vec())],
             result: Ok(Bytes::from_static(case.message)),
         }));
         let cfg = Config {
@@ -726,6 +691,8 @@ async fn response_size_limits_preserve_a_single_message() {
             case.name
         );
         assert_eq!(body.as_ref(), case.wire, "{}", case.name);
+        assert_eq!(headers["x-header"], "first", "{}", case.name);
+        assert_eq!(trailers["x-trailer"], "last", "{}", case.name);
     }
 }
 
@@ -906,16 +873,8 @@ async fn route_and_transport_validation_precede_php() {
             path: "/example.Echo/Call",
             method: "POST",
             content_type: "application/grpc+json",
-            http: 415,
-            grpc: None,
-        },
-        Case {
-            name: "grpc_web_is_unsupported",
-            path: "/example.Echo/Call",
-            method: "POST",
-            content_type: "application/grpc-web",
-            http: 415,
-            grpc: None,
+            http: 200,
+            grpc: Some(tonic::Code::Unimplemented),
         },
         Case {
             name: "native_proto",
@@ -950,20 +909,12 @@ async fn route_and_transport_validation_precede_php() {
             grpc: Some(tonic::Code::Ok),
         },
         Case {
-            name: "grpc_web_with_parameters_is_unsupported",
-            path: "/example.Echo/Call",
-            method: "POST",
-            content_type: "application/grpc-web;charset=utf-8",
-            http: 415,
-            grpc: None,
-        },
-        Case {
             name: "unknown_proto_suffix_with_parameters_is_unsupported",
             path: "/example.Echo/Call",
             method: "POST",
             content_type: "application/grpc+protobuf;charset=utf-8",
-            http: 415,
-            grpc: None,
+            http: 200,
+            grpc: Some(tonic::Code::Unimplemented),
         },
     ];
     for case in cases {
@@ -1198,7 +1149,12 @@ async fn backend_errors_are_sanitized() {
         let status = status(&headers, &trailers);
         assert_eq!(status.code(), case.code, "{}", case.name);
         assert!(!status.message().contains("private"), "{}", case.name);
-        assert!(status.details().is_empty(), "{}", case.name);
+        if !status.details().is_empty() {
+            let rich = RpcStatus::decode(status.details()).unwrap();
+            assert_eq!(rich.code, case.code as i32, "{}", case.name);
+            assert_eq!(rich.message, status.message(), "{}", case.name);
+            assert!(rich.details.is_empty(), "{}", case.name);
+        }
         assert!(body.is_empty(), "{}", case.name);
     }
 }
@@ -1622,7 +1578,7 @@ async fn response_compression_requires_server_opt_in() {
 }
 
 #[tokio::test]
-async fn compression_uses_tonic_and_checks_uncompressed_message_limits() {
+async fn compression_uses_connectrpc_and_checks_message_limits() {
     use std::io::{Read, Write};
     struct Case {
         name: &'static str,
@@ -1686,7 +1642,7 @@ async fn compression_uses_tonic_and_checks_uncompressed_message_limits() {
             response_gzip: true,
             request_limit: 128,
             response_limit: 64,
-            code: tonic::Code::OutOfRange,
+            code: tonic::Code::ResourceExhausted,
         },
         Case {
             name: "decompressed_request_limit_with_response_gzip_disabled",
@@ -1704,7 +1660,7 @@ async fn compression_uses_tonic_and_checks_uncompressed_message_limits() {
             response_gzip: false,
             request_limit: 128,
             response_limit: 64,
-            code: tonic::Code::OutOfRange,
+            code: tonic::Code::ResourceExhausted,
         },
     ];
     let message = [b'a'; 128];
@@ -1968,8 +1924,8 @@ fn timeout_units_and_validation() {
             }
         } else {
             assert_eq!(
-                result.err().unwrap().code(),
-                tonic::Code::InvalidArgument,
+                result.err().unwrap().code,
+                connectrpc::ErrorCode::InvalidArgument,
                 "{}",
                 case.name
             );

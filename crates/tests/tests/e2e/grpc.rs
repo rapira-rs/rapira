@@ -19,6 +19,8 @@ use tonic_reflection::pb::v1::{
 
 use crate::harness::{self, BOOT, Server};
 
+mod protocols;
+
 #[derive(Default)]
 struct RawCodec;
 
@@ -258,7 +260,11 @@ async fn identity_responses_preserve_wire_bytes_and_metadata() {
                 let response = response.await.unwrap();
                 assert_eq!(response.status(), 200, "{}", case.name);
                 let headers = response.headers();
-                assert_eq!(headers["content-type"], "application/grpc", "{}", case.name);
+                assert_eq!(
+                    headers["content-type"], "application/grpc+proto",
+                    "{}",
+                    case.name
+                );
                 assert!(!headers.contains_key("grpc-encoding"), "{}", case.name);
                 assert!(!headers.contains_key("grpc-status"), "{}", case.name);
                 assert_eq!(

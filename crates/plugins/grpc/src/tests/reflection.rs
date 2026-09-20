@@ -77,7 +77,7 @@ async fn request_decode_errors_reach_both_reflection_versions() {
             version: "v1",
             invalid: OVERSIZED,
             valid_prefix: false,
-            code: Code::OutOfRange,
+            code: Code::ResourceExhausted,
         },
         Case {
             name: "v1_invalid_flag",
@@ -91,14 +91,14 @@ async fn request_decode_errors_reach_both_reflection_versions() {
             version: "v1",
             invalid: MALFORMED_PROTOBUF,
             valid_prefix: false,
-            code: Code::Internal,
+            code: Code::InvalidArgument,
         },
         Case {
             name: "v1_query_then_oversized",
             version: "v1",
             invalid: OVERSIZED,
             valid_prefix: true,
-            code: Code::OutOfRange,
+            code: Code::ResourceExhausted,
         },
         Case {
             name: "v1_query_then_invalid_flag",
@@ -112,14 +112,14 @@ async fn request_decode_errors_reach_both_reflection_versions() {
             version: "v1",
             invalid: MALFORMED_PROTOBUF,
             valid_prefix: true,
-            code: Code::Internal,
+            code: Code::InvalidArgument,
         },
         Case {
             name: "v1alpha_oversized",
             version: "v1alpha",
             invalid: OVERSIZED,
             valid_prefix: false,
-            code: Code::OutOfRange,
+            code: Code::ResourceExhausted,
         },
         Case {
             name: "v1alpha_invalid_flag",
@@ -133,14 +133,14 @@ async fn request_decode_errors_reach_both_reflection_versions() {
             version: "v1alpha",
             invalid: MALFORMED_PROTOBUF,
             valid_prefix: false,
-            code: Code::Internal,
+            code: Code::InvalidArgument,
         },
         Case {
             name: "v1alpha_query_then_oversized",
             version: "v1alpha",
             invalid: OVERSIZED,
             valid_prefix: true,
-            code: Code::OutOfRange,
+            code: Code::ResourceExhausted,
         },
         Case {
             name: "v1alpha_query_then_invalid_flag",
@@ -154,7 +154,7 @@ async fn request_decode_errors_reach_both_reflection_versions() {
             version: "v1alpha",
             invalid: MALFORMED_PROTOBUF,
             valid_prefix: true,
-            code: Code::Internal,
+            code: Code::InvalidArgument,
         },
     ];
     let mut observed = Vec::new();
@@ -224,7 +224,7 @@ async fn configured_response_errors_survive_input_error_observation() {
         let response = call(shared(cfg, &backend), request(&path(case.version), wire)).await;
         assert_eq!(
             outcome(response).await,
-            (0, Code::OutOfRange),
+            (0, Code::ResourceExhausted),
             "{}",
             case.name
         );

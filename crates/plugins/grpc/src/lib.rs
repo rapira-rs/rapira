@@ -7,12 +7,12 @@ use extension_api::{Extension, ListenAddr, Middleware, Php, PrepareCtx, Prepared
 use tokio::runtime::Builder;
 use tokio::sync::watch;
 
-mod codec;
 mod deadline;
 mod handler;
 mod metadata;
 mod reflection;
 mod registry;
+mod request;
 mod response;
 mod schema;
 mod serve;

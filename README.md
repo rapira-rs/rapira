@@ -144,7 +144,7 @@ See [examples](examples/) for routing, streaming, and asynchronous dispatch.
 
 ### gRPC
 
-The gRPC plugin discovers services from `.proto` directories and passes binary protobuf messages to a synchronous PHP dispatcher. It serves native reflection on the same HTTP/2 listener.
+The gRPC plugin discovers services from `.proto` directories and passes binary protobuf messages to a synchronous PHP dispatcher. Its ConnectRPC transport supports native gRPC over HTTP/2 and binary gRPC-Web and Connect over HTTP/1.1 or HTTP/2. Reflection uses the same listener.
 
 ```toml
 [grpc]
