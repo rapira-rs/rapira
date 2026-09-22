@@ -735,24 +735,26 @@ mod tests {
     }
 
     /// A reply that has not sent End yet is still pending at drop, so the drain task takes it.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn pending_reply_goes_to_the_drain_task() {
         let guard = guard();
         guard.end_flush.set(0).unwrap();
         let (reply, events, mut pending) = drain_reply();
         events.send(chunk("abc")).unwrap();
-        let mut b = ReplyBody::new(
-            reply,
-            Some(3),
-            guard,
-            None,
-            watch::channel(ConnectionState::default()).1,
-        );
+        let (_state, state_rx) = watch::channel(ConnectionState::default());
+        let mut b = ReplyBody::new(reply, Some(3), guard, None, state_rx);
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "abc");
         drop(b);
         assert!(
             pending.try_recv().is_ok(),
             "drop must poll the reply before it hands it over"
+        );
+        // The paused clock auto-advances once every task is idle, so the timeout proves the drain kept the reply.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), events.closed())
+                .await
+                .is_err(),
+            "the drain task must hold the reply until End arrives"
         );
         events.send(end(false)).unwrap();
         tokio::time::timeout(Duration::from_secs(5), events.closed())
