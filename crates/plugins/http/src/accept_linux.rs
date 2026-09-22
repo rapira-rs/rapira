@@ -422,4 +422,30 @@ mod tests {
         other_loop.join().unwrap();
         drop((first_client, second_client));
     }
+
+    /// A failed rotation leaves the listener unregistered, so it is reported as its own
+    /// kind for the accept loop to treat as fatal.
+    #[test]
+    fn a_failed_rotation_reports_a_fatal_kind() {
+        let bound = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        bound.set_nonblocking(true).unwrap();
+        let addr = bound.local_addr().unwrap();
+        let listener = TcpListener::from_std(bound, Wake::new().unwrap()).unwrap();
+        let _client = std::net::TcpStream::connect(addr).unwrap();
+        let replacement = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+
+        let error = listener
+            .accept_blocking_with(|registered| {
+                let accepted = registered.accept()?;
+                // A new socket under the registered descriptor number leaves the epoll entry
+                // without a descriptor, so the rotation's EPOLL_CTL_DEL fails with ENOENT.
+                // SAFETY: both descriptors stay open for the whole test.
+                let duplicated =
+                    unsafe { libc::dup2(replacement.as_raw_fd(), registered.as_raw_fd()) };
+                assert_ne!(duplicated, -1);
+                Ok(accepted)
+            })
+            .unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::Other, "{error}");
+    }
 }
