@@ -69,7 +69,7 @@ mode = "classic"
 rapira serve rapira.toml
 ```
 
-A worker starts in the entrypoint directory and keeps its working directory across requests. A `chdir()` in one request applies to every later request of that worker, until the worker recycles. Worker and dispatcher modes work the same way.
+A worker resolves the entrypoint directory when it starts and keeps its working directory across requests. A `chdir()` in one request applies to every later request of that worker, until the worker process exits. Worker and dispatcher modes work the same way. A deploy that re-points a symlink in the entrypoint path needs a reload (SIGHUP or SIGUSR2), so new workers start in the new directory.
 
 ### Worker
 
