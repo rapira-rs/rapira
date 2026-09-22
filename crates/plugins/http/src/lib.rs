@@ -127,10 +127,8 @@ impl Extension for Server {
     }
 
     async fn shutdown(&mut self) -> Result<()> {
-        if let Some(stop) = self.stop.take()
-            && let Err(e) = stop.stop()
-        {
-            tracing::error!(target: "http", "stopping the accept loop: {e}");
+        if let Some(stop) = self.stop.take() {
+            stop.stop();
         }
         if let Some(join) = self.join.take() {
             join.await

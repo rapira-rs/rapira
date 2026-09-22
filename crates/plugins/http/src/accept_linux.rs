@@ -36,14 +36,13 @@ impl Wake {
     }
 
     /// Makes the current or next [`Listener::accept_blocking`] return `None`.
-    pub(super) fn stop(&self) -> io::Result<()> {
+    pub(super) fn stop(&self) {
         let value: u64 = 1;
         // SAFETY: an eventfd write reads exactly the eight bytes of value.
         let written = unsafe { libc::write(self.0.as_raw_fd(), (&raw const value).cast(), 8) };
-        if written < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(())
+        // Nothing reads the counter, and an add of 1 fails only when the counter would overflow.
+        // https://man7.org/linux/man-pages/man2/eventfd.2.html
+        debug_assert_eq!(written, 8);
     }
 }
 
@@ -245,7 +244,7 @@ mod tests {
             order.push(rx.recv_timeout(WAIT).unwrap());
         }
         for wake in &wakes {
-            wake.stop().unwrap();
+            wake.stop();
         }
         for handle in loops {
             handle.join().unwrap();
@@ -284,7 +283,7 @@ mod tests {
         let wake = Wake::new().unwrap();
         let listener = TcpListener::from_std(bound, wake.handle()).unwrap();
 
-        wake.stop().unwrap();
+        wake.stop();
         assert!(listener.accept_blocking().unwrap().is_none());
     }
 
@@ -417,8 +416,8 @@ mod tests {
             "the wake must skip the listener that failed its accept"
         );
 
-        failing_wake.stop().unwrap();
-        other_wake.stop().unwrap();
+        failing_wake.stop();
+        other_wake.stop();
         failing_loop.join().unwrap();
         other_loop.join().unwrap();
         drop((first_client, second_client));

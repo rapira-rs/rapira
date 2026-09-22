@@ -37,9 +37,8 @@ impl Stop {
         self.0.subscribe()
     }
 
-    pub(crate) fn stop(&self) -> std::io::Result<()> {
+    pub(crate) fn stop(&self) {
         let _ = self.0.send(true);
-        Ok(())
     }
 }
 
