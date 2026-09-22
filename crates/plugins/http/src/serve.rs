@@ -266,11 +266,14 @@ fn listen_addr(listen: &ListenAddr) -> Addr {
 
 // Linux accept() forwards pending network errors of the new connection, so only errnos
 // that prove listener state are fatal. https://man7.org/linux/man-pages/man2/accept.2.html
+// `ErrorKind::Other` never carries an errno; it is the wrapped rotation failure, after
+// which the listener is unregistered.
 fn is_fatal_accept(e: &std::io::Error) -> bool {
-    matches!(
-        e.raw_os_error(),
-        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK)
-    )
+    e.kind() == std::io::ErrorKind::Other
+        || matches!(
+            e.raw_os_error(),
+            Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK)
+        )
 }
 
 fn is_skipped_accept(e: &std::io::Error) -> bool {
@@ -318,4 +321,51 @@ async fn accept_connection(acceptor: &Acceptor, serving: &Serving) -> std::io::R
         }
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Case {
+        name: &'static str,
+        error: std::io::Error,
+        fatal: bool,
+        skipped: bool,
+    }
+
+    /// Only an error that proves the listener is unusable ends the accept loop.
+    #[test]
+    fn accept_errors_end_the_loop_only_when_the_listener_is_gone() {
+        let cases = [
+            Case {
+                name: "a rotation failure leaves the listener unregistered",
+                error: std::io::Error::other("listener rotation failed"),
+                fatal: true,
+                skipped: false,
+            },
+            Case {
+                name: "EBADF proves the listener descriptor is gone",
+                error: std::io::Error::from_raw_os_error(libc::EBADF),
+                fatal: true,
+                skipped: false,
+            },
+            Case {
+                name: "EMFILE is a limit of this worker, not of the listener",
+                error: std::io::Error::from_raw_os_error(libc::EMFILE),
+                fatal: false,
+                skipped: false,
+            },
+            Case {
+                name: "ECONNABORTED concerns one connection",
+                error: std::io::Error::from_raw_os_error(libc::ECONNABORTED),
+                fatal: false,
+                skipped: true,
+            },
+        ];
+        for case in cases {
+            assert_eq!(is_fatal_accept(&case.error), case.fatal, "{}", case.name);
+            assert_eq!(is_skipped_accept(&case.error), case.skipped, "{}", case.name);
+        }
+    }
 }

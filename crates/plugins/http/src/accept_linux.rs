@@ -80,13 +80,15 @@ impl<L: AsRawFd> Listener<L> {
                 return Ok(None);
             }
             match accept(&self.listener) {
-                Ok(accepted) => {
-                    self.rotate()?;
-                    return Ok(Some(accepted));
-                }
                 // Another worker can take the connection before this accept runs.
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
-                Err(e) => return Err(e),
+                // Every other result moves this worker behind the others. A rotation failure
+                // leaves the listener unregistered, so it is wrapped as `ErrorKind::Other`,
+                // which the accept loop treats as fatal.
+                result => {
+                    self.rotate().map_err(io::Error::other)?;
+                    return result.map(Some);
+                }
             }
         }
     }
@@ -361,5 +363,64 @@ mod tests {
         assert!(stolen_stream.is_some());
         assert_eq!(peer, second_client.local_addr().unwrap());
         drop(first_client);
+    }
+
+    /// A listener whose accept failed must still move behind the others, so the next
+    /// wake goes to a worker that can accept.
+    #[test]
+    fn a_failed_accept_moves_the_listener_behind_the_others() {
+        let bound = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        bound.set_nonblocking(true).unwrap();
+        let addr = bound.local_addr().unwrap();
+        let thief = bound.try_clone().unwrap();
+        // Registration order is queue order: the failing listener starts at the head.
+        let failing_wake = Wake::new().unwrap();
+        let failing =
+            TcpListener::from_std(bound.try_clone().unwrap(), failing_wake.clone()).unwrap();
+        let other_wake = Wake::new().unwrap();
+        let other = TcpListener::from_std(bound, other_wake.clone()).unwrap();
+        let (tx, rx) = mpsc::channel();
+        let (failed_tx, failed_rx) = mpsc::channel();
+        let failing_loop = std::thread::spawn({
+            let tx = tx.clone();
+            move || {
+                // The first wake takes the connection away and fails as a worker at its
+                // descriptor limit does, so the listener has nothing to accept afterwards.
+                let error = failing
+                    .accept_blocking_with(
+                        |_| -> io::Result<(std::net::TcpStream, std::net::SocketAddr)> {
+                            drop(thief.accept()?);
+                            Err(io::Error::from_raw_os_error(libc::EMFILE))
+                        },
+                    )
+                    .unwrap_err();
+                assert_eq!(error.raw_os_error(), Some(libc::EMFILE));
+                failed_tx.send(()).unwrap();
+                let mut streams = Vec::new();
+                while let Some((stream, _)) = failing.accept_blocking().unwrap() {
+                    streams.push(stream);
+                    tx.send(0).unwrap();
+                }
+                streams
+            }
+        });
+        let other_loop = spawn_accept_loop(1, tx, move || other.accept_blocking());
+        std::thread::sleep(SETTLE);
+
+        let first_client = std::net::TcpStream::connect(addr).unwrap();
+        failed_rx.recv_timeout(WAIT).unwrap();
+        std::thread::sleep(SETTLE);
+        let second_client = std::net::TcpStream::connect(addr).unwrap();
+        assert_eq!(
+            rx.recv_timeout(WAIT).unwrap(),
+            1,
+            "the wake must skip the listener that failed its accept"
+        );
+
+        failing_wake.stop().unwrap();
+        other_wake.stop().unwrap();
+        failing_loop.join().unwrap();
+        other_loop.join().unwrap();
+        drop((first_client, second_client));
     }
 }
