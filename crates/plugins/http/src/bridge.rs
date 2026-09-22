@@ -444,7 +444,7 @@ mod tests {
     }
 
     fn guard() -> Arc<InflightReqCount> {
-        Arc::new(InflightReqCount::init(&Arc::new(AtomicUsize::new(0))))
+        Arc::new(InflightReqCount::init(&Arc::new(AtomicUsize::new(0)), None))
     }
 
     fn body(events: Vec<ReplyEvent>, declared_cl: Option<u64>) -> ReplyBody {
@@ -612,7 +612,7 @@ mod tests {
     /// A drain parked on an empty reply after one chunk, with the request still counted.
     async fn parked_drain() -> Drain {
         let inflight = Arc::new(AtomicUsize::new(0));
-        let guard = Arc::new(InflightReqCount::init(&inflight));
+        let guard = Arc::new(InflightReqCount::init(&inflight, None));
         let weak = Arc::downgrade(&guard);
         let (reply, events, pending) = drain_reply();
         events.send(chunk("discarded")).unwrap();
