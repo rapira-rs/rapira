@@ -46,6 +46,8 @@ unsafe extern "C" {
     pub fn rapira_request_teardown() -> c_int;
     pub fn rapira_process_init();
     pub fn rapira_child_init();
+    // Sets SAPI_OPTION_NO_CHDIR, so the worker owns its current directory (module.c).
+    pub fn rapira_no_chdir();
     pub fn rapira_release_temporary_streams();
     // Holds boot-registered shutdown functions until cycle end (module.c).
     pub fn rapira_stash_boot_shutdown_functions();

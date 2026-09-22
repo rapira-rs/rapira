@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
@@ -66,6 +66,17 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
     } = args;
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { php_sys::rapira_child_init() };
+    // The worker enters the entrypoint directory once and owns it from here; PHP keeps it over every script run.
+    unsafe { php_sys::rapira_no_chdir() };
+    let entrypoint_dir: &Path = entrypoint.parent().unwrap_or(Path::new("/"));
+    if let Err(e) = std::env::set_current_dir(entrypoint_dir) {
+        tracing::error!(
+            target: "rapira",
+            "entering the entrypoint directory {}: {e}",
+            entrypoint_dir.display()
+        );
+        return WORKER_EXIT_UNHEALTHY;
+    }
     php_sys::set_sendfile_root(sendfile_root);
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
     let hooks: WorkerHooks = WorkerHooks {

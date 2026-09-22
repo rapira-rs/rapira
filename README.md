@@ -69,6 +69,8 @@ mode = "classic"
 rapira serve rapira.toml
 ```
 
+A worker starts in the entrypoint directory and keeps its working directory across requests. A `chdir()` in one request applies to every later request of that worker, until the worker recycles. Worker and dispatcher modes work the same way.
+
 ### Worker
 
 [Worker mode](https://rapira.rs/docs/worker) calls a handler for each request and keeps application state in memory. Save this as `worker.php`:

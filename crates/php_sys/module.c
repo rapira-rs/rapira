@@ -451,6 +451,11 @@ void rapira_child_init(void) {
 #endif
 }
 
+// php_execute_script keeps the current directory over a script run (main/main.c, SAPI_OPTION_NO_CHDIR)
+void rapira_no_chdir(void) {
+    SG(options) |= SAPI_OPTION_NO_CHDIR;
+}
+
 // sapi_deactivate_module only NULLs temp streams; nothing reclaims the resource
 void rapira_release_temporary_streams(void) {
     zend_resource *val = NULL;
