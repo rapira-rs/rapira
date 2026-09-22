@@ -224,7 +224,17 @@ fn spawn_attempt(
 /// after the error line is longer than the tail window.
 pub fn spawn_boot_failure(fixture: &str, http_extra: &str) -> (ExitStatus, String) {
     let (dir, entrypoint) = stage_fixture(fixture);
-    let (child, addr) = spawn_attempt(&dir, 1, &entrypoint, http_extra, "", Some("info"), None);
+    boot_failure(dir, &entrypoint, http_extra)
+}
+
+/// [`spawn_boot_failure`] with the entrypoint written into the config verbatim, so a path no
+/// fixture can stage reaches the boot check.
+pub fn spawn_boot_failure_with_entrypoint(entrypoint: &str) -> (ExitStatus, String) {
+    boot_failure(scratch_dir(), entrypoint, "")
+}
+
+fn boot_failure(dir: PathBuf, entrypoint: &str, http_extra: &str) -> (ExitStatus, String) {
+    let (child, addr) = spawn_attempt(&dir, 1, entrypoint, http_extra, "", Some("info"), None);
     let mut srv = Server { child, addr, dir };
     let Some(status) = srv.wait_exit(BOOT) else {
         panic!("rapira did not exit");

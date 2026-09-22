@@ -201,6 +201,35 @@ fn a_top_level_pool_table_refuses_to_boot() {
     assert!(log.contains("unknown field `pool`"), "\n{log}");
 }
 
+/// The entrypoint is fixed for the pool's lifetime, so the master proves it is readable at boot.
+#[test]
+fn a_missing_entrypoint_refuses_to_boot() {
+    let (status, log) = spawn_boot_failure_with_entrypoint("no-such-entrypoint.php");
+    assert_eq!(status.code(), Some(1), "\n{log}");
+    assert!(log.contains("http.pool.entrypoint"), "\n{log}");
+    assert!(log.contains("no-such-entrypoint.php"), "\n{log}");
+    assert!(log.contains("is not readable"), "\n{log}");
+}
+
+#[test]
+fn an_unreadable_entrypoint_refuses_to_boot() {
+    use std::os::unix::fs::PermissionsExt;
+    let dir = scratch_dir();
+    let script = dir.join("index.php");
+    std::fs::write(&script, "<?php\n").expect("write entrypoint");
+    std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o000)).expect("chmod");
+    // Root bypasses permission checks; the case cannot occur for that user.
+    if std::fs::read(&script).is_ok() {
+        let _ = std::fs::remove_dir_all(&dir);
+        return;
+    }
+    let (status, log) = spawn_boot_failure_with_entrypoint(&script.display().to_string());
+    let _ = std::fs::remove_dir_all(&dir);
+    assert_eq!(status.code(), Some(1), "\n{log}");
+    assert!(log.contains("http.pool.entrypoint"), "\n{log}");
+    assert!(log.contains("is not readable"), "\n{log}");
+}
+
 #[test]
 fn master_failboot_exits_70() {
     let mut srv = spawn_with_config("lifecycle/fatal-worker.php", 1, "");
