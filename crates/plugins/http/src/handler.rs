@@ -20,48 +20,20 @@ pub(crate) struct Shared {
     pub php: Php,
     pub chain: Arc<[Arc<dyn Middleware>]>,
     pub inflight: Arc<AtomicUsize>,
-    /// Stops this worker from accepting while it is busy. `None` where the accept loop
-    /// has no registration to control.
-    pub gate: Option<Arc<dyn AcceptGate>>,
-}
-
-/// Registration control of the accept loop that serves this worker.
-pub(crate) trait AcceptGate: Send + Sync {
-    /// Takes the listener out of the accept loop while `busy`, puts it back when idle.
-    /// Idempotent.
-    fn set_busy(&self, busy: bool) -> std::io::Result<()>;
-}
-
-/// Requests in flight that make a worker stop accepting. A threshold of one means
-/// "accept only while no request runs" and costs two epoll_ctl calls per request in the
-/// common case of one connection per worker. Two costs nothing until the worker has a
-/// queue of its own.
-const GATE_INFLIGHT: usize = 2;
-
-/// Applies the registration that `inflight` implies. Every count below the threshold
-/// applies `false`, so a start and an end that race cannot leave an idle worker gated.
-fn update_gate(gate: Option<&Arc<dyn AcceptGate>>, inflight: usize) {
-    if let Some(gate) = gate
-        && let Err(e) = gate.set_busy(inflight >= GATE_INFLIGHT)
-    {
-        tracing::error!(target: "http", "listener gate failed: {e}");
-    }
 }
 
 pub(crate) struct InflightReqCount {
     counter: Arc<AtomicUsize>,
-    gate: Option<Arc<dyn AcceptGate>>,
     /// Connection flush count when the last response byte was handed to hyper.
     /// It lives on the shared guard: the body records it and the drain task reads it.
     pub(crate) end_flush: OnceLock<u64>,
 }
 
 impl InflightReqCount {
-    pub(crate) fn init(counter: &Arc<AtomicUsize>, gate: Option<&Arc<dyn AcceptGate>>) -> Self {
-        update_gate(gate, counter.fetch_add(1, Ordering::AcqRel) + 1);
+    pub(crate) fn init(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
         Self {
             counter: Arc::clone(counter),
-            gate: gate.cloned(),
             end_flush: OnceLock::new(),
         }
     }
@@ -69,10 +41,7 @@ impl InflightReqCount {
 
 impl Drop for InflightReqCount {
     fn drop(&mut self) {
-        update_gate(
-            self.gate.as_ref(),
-            self.counter.fetch_sub(1, Ordering::AcqRel) - 1,
-        );
+        self.counter.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -224,10 +193,8 @@ where
     B: Body<Data = bytes::Bytes> + Unpin + Send + 'static,
     B::Error: std::error::Error + Send + Sync + 'static,
 {
-    let reqs_counter: Arc<InflightReqCount> = Arc::new(InflightReqCount::init(
-        &handler.shared.inflight,
-        handler.shared.gate.as_ref(),
-    ));
+    let reqs_counter: Arc<InflightReqCount> =
+        Arc::new(InflightReqCount::init(&handler.shared.inflight));
     let received_at: f64 = std::time::UNIX_EPOCH
         .elapsed()
         .map(|d| d.as_secs_f64())
@@ -718,7 +685,6 @@ mod tests {
             php: Php::new(backend),
             chain: chain.into(),
             inflight: Arc::clone(&inflight),
-            gate: None,
         });
         let (closed_tx, closed) = tokio::sync::watch::channel(bridge::ConnectionState::default());
         let handler = Arc::new(Conn {

@@ -195,9 +195,6 @@ impl http_body::Body for ReplyBody {
     }
 }
 
-/// Maximum polls of the reply in [`Drop`]. It covers End behind a stray chunk.
-const END_POLLS: usize = 4;
-
 impl Drop for ReplyBody {
     fn drop(&mut self) {
         // A length-delimited HTTP body can finish before PHP sends End: https://www.rfc-editor.org/rfc/rfc9112#section-6.3
@@ -207,15 +204,10 @@ impl Drop for ReplyBody {
             && let Some(mut reply) = self.reply.take()
         {
             // A buffered reply queues End behind the last chunk, so consume it here.
-            // Only a reply that is still pending needs the drain task.
+            // Anything else goes to the drain task.
             let mut cx = Context::from_waker(std::task::Waker::noop());
-            for _ in 0..END_POLLS {
-                match reply.poll_next(&mut cx) {
-                    Poll::Ready(Some(ReplyEvent::End { .. }) | None) => return,
-                    // A chunk past a satisfied content-length is discarded, as the drain does.
-                    Poll::Ready(Some(_)) => {}
-                    Poll::Pending => break,
-                }
+            if let Poll::Ready(Some(ReplyEvent::End { .. }) | None) = reply.poll_next(&mut cx) {
+                return;
             }
             spawn_drain(reply, self.closed.clone(), Arc::clone(&self.guard));
         }
@@ -363,8 +355,6 @@ mod tests {
     struct Script {
         events: VecDeque<ReplyEvent>,
         dropped: Option<Arc<AtomicBool>>,
-        /// Turns true when the source yields End.
-        ended: Option<Arc<AtomicBool>>,
         /// Park forever once the events run out, like a worker that never finishes.
         hang: bool,
     }
@@ -372,12 +362,7 @@ mod tests {
     impl ReplySource for Script {
         fn poll_next(&mut self, _cx: &mut Context<'_>) -> Poll<Option<ReplyEvent>> {
             match self.events.pop_front() {
-                Some(ev) => {
-                    if let (ReplyEvent::End { .. }, Some(flag)) = (&ev, &self.ended) {
-                        flag.store(true, Ordering::Release);
-                    }
-                    Poll::Ready(Some(ev))
-                }
+                Some(ev) => Poll::Ready(Some(ev)),
                 None if self.hang => Poll::Pending,
                 None => Poll::Ready(None),
             }
@@ -427,7 +412,6 @@ mod tests {
         Reply::new(Box::new(Script {
             events: events.into(),
             dropped: None,
-            ended: None,
             hang: false,
         }))
     }
@@ -444,7 +428,7 @@ mod tests {
     }
 
     fn guard() -> Arc<InflightReqCount> {
-        Arc::new(InflightReqCount::init(&Arc::new(AtomicUsize::new(0)), None))
+        Arc::new(InflightReqCount::init(&Arc::new(AtomicUsize::new(0))))
     }
 
     fn body(events: Vec<ReplyEvent>, declared_cl: Option<u64>) -> ReplyBody {
@@ -542,7 +526,6 @@ mod tests {
         let source = Script {
             events: vec![chunk("head-flushed")].into(),
             dropped: Some(Arc::clone(&dropped)),
-            ended: None,
             hang: true,
         };
         let b = ReplyBody::new(
@@ -612,7 +595,7 @@ mod tests {
     /// A drain parked on an empty reply after one chunk, with the request still counted.
     async fn parked_drain() -> Drain {
         let inflight = Arc::new(AtomicUsize::new(0));
-        let guard = Arc::new(InflightReqCount::init(&inflight, None));
+        let guard = Arc::new(InflightReqCount::init(&inflight));
         let weak = Arc::downgrade(&guard);
         let (reply, events, pending) = drain_reply();
         events.send(chunk("discarded")).unwrap();
@@ -693,7 +676,6 @@ mod tests {
         Reply::new(Box::new(Script {
             events: vec![chunk("abc")].into(),
             dropped: Some(Arc::clone(dropped)),
-            ended: None,
             hang: true,
         }))
     }
@@ -725,17 +707,13 @@ mod tests {
     /// The buffered path queues End behind the last chunk: drop consumes it without a drain task.
     #[tokio::test]
     async fn queued_end_is_consumed_at_drop_without_a_task() {
-        let ended = Arc::new(AtomicBool::new(false));
         let guard = guard();
         guard.end_flush.set(0).unwrap();
-        let source = Script {
-            events: vec![chunk("hello"), end(false)].into(),
-            dropped: None,
-            ended: Some(Arc::clone(&ended)),
-            hang: true,
-        };
+        let (reply, events, mut pending) = drain_reply();
+        events.send(chunk("hello")).unwrap();
+        events.send(end(false)).unwrap();
         let mut b = ReplyBody::new(
-            Reply::new(Box::new(source)),
+            reply,
             Some(5),
             guard,
             None,
@@ -746,7 +724,7 @@ mod tests {
         let tasks = metrics.num_alive_tasks();
         drop(b);
         assert!(
-            ended.load(Ordering::Acquire),
+            pending.try_recv().is_err(),
             "drop must consume the queued End in place"
         );
         assert_eq!(

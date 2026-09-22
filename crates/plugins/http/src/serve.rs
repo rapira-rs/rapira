@@ -16,27 +16,41 @@ use tokio::sync::watch::channel;
 
 use crate::Config;
 #[cfg(target_os = "linux")]
-use crate::accept_linux::{Accepted, TcpListener, UnixListener, Wake};
-use crate::handler::{AcceptGate, RapiraService, Shared};
+use crate::accept_linux::{TcpListener, UnixListener};
+use crate::handler::{RapiraService, Shared};
+
+/// Stops the accept loop. The blocked acceptor waits on this eventfd.
+#[cfg(target_os = "linux")]
+pub(crate) type Stop = crate::accept_linux::Wake;
+
+/// Stops the accept loop. The async acceptor selects on this flag.
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct Stop(watch::Sender<bool>);
+
+#[cfg(not(target_os = "linux"))]
+impl Stop {
+    pub(crate) fn new() -> std::io::Result<Self> {
+        Ok(Self(watch::channel(false).0))
+    }
+
+    pub(crate) fn handle(&self) -> watch::Receiver<bool> {
+        self.0.subscribe()
+    }
+
+    pub(crate) fn stop(&self) -> std::io::Result<()> {
+        let _ = self.0.send(true);
+        Ok(())
+    }
+}
 
 enum Acceptor {
     Tcp(TcpListener),
     Unix(UnixListener),
 }
 
-#[cfg(target_os = "linux")]
-impl Acceptor {
-    fn gate(&self) -> Arc<dyn AcceptGate> {
-        match self {
-            Acceptor::Tcp(l) => l.gate(),
-            Acceptor::Unix(l) => l.gate(),
-        }
-    }
-}
-
 fn create_acceptor(
     prepared: PreparedListener,
-    #[cfg(target_os = "linux")] wake: Wake,
+    #[cfg(target_os = "linux")] stop: Stop,
 ) -> Result<Acceptor> {
     use std::os::fd::{FromRawFd, IntoRawFd};
     let tcp: bool = matches!(prepared.addr(), ListenAddr::Tcp(_));
@@ -45,14 +59,14 @@ fn create_acceptor(
     if tcp {
         let std = unsafe { std::net::TcpListener::from_raw_fd(prepared.into_raw_fd()) };
         #[cfg(target_os = "linux")]
-        let listener = TcpListener::from_std(std, wake)?;
+        let listener = TcpListener::from_std(std, stop)?;
         #[cfg(not(target_os = "linux"))]
         let listener = TcpListener::from_std(std)?;
         Ok(Acceptor::Tcp(listener))
     } else {
         let std = unsafe { std::os::unix::net::UnixListener::from_raw_fd(prepared.into_raw_fd()) };
         #[cfg(target_os = "linux")]
-        let listener = UnixListener::from_std(std, wake)?;
+        let listener = UnixListener::from_std(std, stop)?;
         #[cfg(not(target_os = "linux"))]
         let listener = UnixListener::from_std(std)?;
         Ok(Acceptor::Unix(listener))
@@ -67,7 +81,7 @@ struct Serving {
 }
 
 impl Serving {
-    fn start(php: Php, config: Config, gate: Option<Arc<dyn AcceptGate>>) -> Self {
+    fn start(php: Php, config: Config) -> Self {
         match &config.listen {
             ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
             ListenAddr::Unix(p) => {
@@ -80,7 +94,6 @@ impl Serving {
             php,
             chain,
             inflight: Arc::new(AtomicUsize::new(0)),
-            gate,
         });
         let mut builder = http1::Builder::new();
         builder
@@ -94,6 +107,20 @@ impl Serving {
             graceful: GracefulShutdown::new(),
             builder,
         }
+    }
+
+    fn spawn_tcp(&self, stream: tokio::net::TcpStream, peer: std::net::SocketAddr) {
+        let _ = stream.set_nodelay(true);
+        let server = stream
+            .local_addr()
+            .map(Addr::Inet)
+            .unwrap_or_else(|_| listen_addr(&self.shared.cfg.listen));
+        self.spawn_conn(stream, Addr::Inet(peer), server);
+    }
+
+    fn spawn_unix(&self, stream: tokio::net::UnixStream, peer: Option<&std::path::Path>) {
+        let remote = Addr::Unix(peer.map(Into::into));
+        self.spawn_conn(stream, remote, listen_addr(&self.shared.cfg.listen));
     }
 
     fn spawn_conn<S>(&self, stream: S, remote: Addr, server: Addr)
@@ -164,11 +191,11 @@ pub(crate) fn serve(
     php: Php,
     config: Config,
     prepared: PreparedListener,
-    wake: Wake,
+    stop: Stop,
     rt: &tokio::runtime::Runtime,
 ) -> Result<()> {
-    let acceptor = create_acceptor(prepared, wake)?;
-    let serving = Serving::start(php, config, Some(acceptor.gate()));
+    let acceptor = create_acceptor(prepared, stop)?;
+    let serving = Serving::start(php, config);
     let mut fatal: Option<anyhow::Error> = None;
     {
         // tokio::spawn and from_std reach the runtime the connections run on.
@@ -203,7 +230,7 @@ pub(crate) async fn serve(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let acceptor = create_acceptor(prepared)?;
-    let serving = Serving::start(php, config, None);
+    let serving = Serving::start(php, config);
     let mut fatal: Option<anyhow::Error> = None;
     loop {
         tokio::select! {
@@ -258,26 +285,20 @@ fn is_skipped_accept(e: &std::io::Error) -> bool {
 /// Takes one connection. False means the wake descriptor stopped the loop.
 #[cfg(target_os = "linux")]
 fn accept_blocking(acceptor: &Acceptor, serving: &Serving) -> std::io::Result<bool> {
-    let listen = &serving.shared.cfg.listen;
     match acceptor {
         Acceptor::Tcp(l) => match l.accept_blocking()? {
-            Accepted::Shutdown => return Ok(false),
-            Accepted::Stream(stream, peer) => {
-                let stream = tokio::net::TcpStream::from_std(stream)?;
-                let _ = stream.set_nodelay(true);
-                let server = stream
-                    .local_addr()
-                    .map(Addr::Inet)
-                    .unwrap_or_else(|_| listen_addr(listen));
-                serving.spawn_conn(stream, Addr::Inet(peer), server);
+            None => return Ok(false),
+            Some((stream, peer)) => {
+                serving.spawn_tcp(tokio::net::TcpStream::from_std(stream)?, peer);
             }
         },
         Acceptor::Unix(l) => match l.accept_blocking()? {
-            Accepted::Shutdown => return Ok(false),
-            Accepted::Stream(stream, peer) => {
-                let stream = tokio::net::UnixStream::from_std(stream)?;
-                let remote = Addr::Unix(peer.as_pathname().map(Into::into));
-                serving.spawn_conn(stream, remote, listen_addr(listen));
+            None => return Ok(false),
+            Some((stream, peer)) => {
+                serving.spawn_unix(
+                    tokio::net::UnixStream::from_std(stream)?,
+                    peer.as_pathname(),
+                );
             }
         },
     }
@@ -286,21 +307,14 @@ fn accept_blocking(acceptor: &Acceptor, serving: &Serving) -> std::io::Result<bo
 
 #[cfg(not(target_os = "linux"))]
 async fn accept_connection(acceptor: &Acceptor, serving: &Serving) -> std::io::Result<()> {
-    let listen = &serving.shared.cfg.listen;
     match acceptor {
         Acceptor::Tcp(l) => {
             let (stream, peer) = l.accept().await?;
-            let _ = stream.set_nodelay(true);
-            let server = stream
-                .local_addr()
-                .map(Addr::Inet)
-                .unwrap_or_else(|_| listen_addr(listen));
-            serving.spawn_conn(stream, Addr::Inet(peer), server);
+            serving.spawn_tcp(stream, peer);
         }
         Acceptor::Unix(l) => {
             let (stream, peer) = l.accept().await?;
-            let remote = Addr::Unix(peer.as_pathname().map(Into::into));
-            serving.spawn_conn(stream, remote, listen_addr(listen));
+            serving.spawn_unix(stream, peer.as_pathname());
         }
     }
     Ok(())

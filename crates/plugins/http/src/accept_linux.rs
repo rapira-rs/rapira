@@ -1,8 +1,6 @@
 use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
-
-use crate::handler::AcceptGate;
+use std::sync::Arc;
 
 pub(super) type TcpListener = Listener<std::net::TcpListener>;
 pub(super) type UnixListener = Listener<std::os::unix::net::UnixListener>;
@@ -16,34 +14,10 @@ const WAKE_TAG: u64 = 1;
 #[derive(Clone)]
 pub(super) struct Wake(Arc<OwnedFd>);
 
-/// One result of [`Listener::accept_blocking`].
-pub(super) enum Accepted<S, A> {
-    Stream(S, A),
-    Shutdown,
-}
-
 pub(super) struct Listener<L> {
-    inner: Arc<Inner<L>>,
-}
-
-struct Inner<L> {
     epoll: OwnedFd,
     listener: L,
     wake: Wake,
-    state: Mutex<Registration>,
-}
-
-struct Registration {
-    /// The listener sits in this epoll.
-    registered: bool,
-    /// The worker is busy and takes no new connection.
-    gated: bool,
-}
-
-/// The descriptors one [`Inner::wait`] call reports.
-struct Ready {
-    listener: bool,
-    wake: bool,
 }
 
 impl Wake {
@@ -57,8 +31,12 @@ impl Wake {
         Ok(Self(Arc::new(unsafe { OwnedFd::from_raw_fd(fd) })))
     }
 
-    /// Makes the current or next [`Listener::accept_blocking`] return [`Accepted::Shutdown`].
-    pub(super) fn wake(&self) -> io::Result<()> {
+    pub(super) fn handle(&self) -> Self {
+        self.clone()
+    }
+
+    /// Makes the current or next [`Listener::accept_blocking`] return `None`.
+    pub(super) fn stop(&self) -> io::Result<()> {
         let value: u64 = 1;
         // SAFETY: an eventfd write reads exactly the eight bytes of value.
         let written = unsafe { libc::write(self.0.as_raw_fd(), (&raw const value).cast(), 8) };
@@ -66,13 +44,6 @@ impl Wake {
             return Err(io::Error::last_os_error());
         }
         Ok(())
-    }
-
-    /// Clears the counter so the next wait blocks again. An empty eventfd reads EAGAIN.
-    fn drain(&self) {
-        let mut value: u64 = 0;
-        // SAFETY: an eventfd read writes exactly the eight bytes of value.
-        let _ = unsafe { libc::read(self.0.as_raw_fd(), (&raw mut value).cast(), 8) };
     }
 }
 
@@ -83,97 +54,41 @@ impl<L: AsRawFd> Listener<L> {
         if fd < 0 {
             return Err(io::Error::last_os_error());
         }
-        let inner = Inner {
+        let listener = Self {
             // SAFETY: fd is a new descriptor owned by this instance.
             epoll: unsafe { OwnedFd::from_raw_fd(fd) },
             listener,
             wake,
-            state: Mutex::new(Registration {
-                registered: false,
-                gated: false,
-            }),
         };
-        inner.control(
+        listener.control(
             libc::EPOLL_CTL_ADD,
-            inner.wake.0.as_raw_fd(),
+            listener.wake.0.as_raw_fd(),
             libc::EPOLLIN as u32,
             WAKE_TAG,
         )?;
-        inner.apply(&mut inner.state())?;
-        Ok(Self {
-            inner: Arc::new(inner),
-        })
+        listener.listener_control(libc::EPOLL_CTL_ADD)?;
+        Ok(listener)
     }
 
-    /// Blocks until this worker owns a connection or the wake descriptor fires.
+    /// Blocks until this worker owns a connection. `None` means the wake descriptor fired.
     fn accept_blocking_with<S, A>(
         &self,
         mut accept: impl FnMut(&L) -> io::Result<(S, A)>,
-    ) -> io::Result<Accepted<S, A>> {
+    ) -> io::Result<Option<(S, A)>> {
         loop {
-            let ready = self.inner.wait()?;
-            if ready.wake {
-                self.inner.wake.drain();
-                return Ok(Accepted::Shutdown);
+            if self.wait()? {
+                return Ok(None);
             }
-            if !ready.listener {
-                continue;
-            }
-            match accept(&self.inner.listener) {
-                Ok((stream, peer)) => {
-                    self.inner.rotate()?;
-                    return Ok(Accepted::Stream(stream, peer));
+            match accept(&self.listener) {
+                Ok(accepted) => {
+                    self.rotate()?;
+                    return Ok(Some(accepted));
                 }
                 // Another worker can take the connection before this accept runs.
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
                 Err(e) => return Err(e),
             }
         }
-    }
-}
-
-impl<L: AsRawFd + Send + Sync + 'static> Listener<L> {
-    /// The handle that stops and restarts accepting while the loop runs.
-    pub(super) fn gate(&self) -> Arc<dyn AcceptGate> {
-        self.inner.clone()
-    }
-}
-
-impl TcpListener {
-    pub(super) fn accept_blocking(
-        &self,
-    ) -> io::Result<Accepted<std::net::TcpStream, std::net::SocketAddr>> {
-        self.accept_blocking_with(|listener| {
-            let (stream, peer) = listener.accept()?;
-            stream.set_nonblocking(true)?;
-            Ok((stream, peer))
-        })
-    }
-}
-
-impl UnixListener {
-    pub(super) fn accept_blocking(
-        &self,
-    ) -> io::Result<Accepted<std::os::unix::net::UnixStream, std::os::unix::net::SocketAddr>> {
-        self.accept_blocking_with(|listener| {
-            let (stream, peer) = listener.accept()?;
-            stream.set_nonblocking(true)?;
-            Ok((stream, peer))
-        })
-    }
-}
-
-impl<L: AsRawFd + Send + Sync> AcceptGate for Inner<L> {
-    fn set_busy(&self, busy: bool) -> io::Result<()> {
-        let mut state = self.state();
-        state.gated = busy;
-        self.apply(&mut state)
-    }
-}
-
-impl<L: AsRawFd> Inner<L> {
-    fn state(&self) -> MutexGuard<'_, Registration> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
     fn control(&self, operation: libc::c_int, fd: RawFd, events: u32, tag: u64) -> io::Result<()> {
@@ -206,61 +121,67 @@ impl<L: AsRawFd> Inner<L> {
         )
     }
 
-    /// Holds the registration the gate asks for.
-    fn apply(&self, state: &mut Registration) -> io::Result<()> {
-        if state.gated && state.registered {
-            self.listener_control(libc::EPOLL_CTL_DEL)?;
-            state.registered = false;
-        } else if !state.gated && !state.registered {
-            self.listener_control(libc::EPOLL_CTL_ADD)?;
-            state.registered = true;
-        }
-        Ok(())
-    }
-
     /// Re-registration moves this worker to the tail of the wait queue, so the next
     /// connection reaches another worker first. EPOLL_CTL_MOD rejects an exclusive
     /// item, so the item is removed and added again.
     /// https://github.com/nginx/nginx/blob/release-1.27.5/src/event/ngx_event_accept.c#L432-L475
     fn rotate(&self) -> io::Result<()> {
-        let mut state = self.state();
-        if state.registered {
-            self.listener_control(libc::EPOLL_CTL_DEL)?;
-            state.registered = false;
-        }
-        self.apply(&mut state)
+        self.listener_control(libc::EPOLL_CTL_DEL)?;
+        self.listener_control(libc::EPOLL_CTL_ADD)
     }
 
-    fn wait(&self) -> io::Result<Ready> {
+    /// Blocks until a registered descriptor is ready. True means the wake descriptor fired.
+    fn wait(&self) -> io::Result<bool> {
         let mut events = [libc::epoll_event { events: 0, u64: 0 }; 2];
         loop {
             // SAFETY: events holds one slot per registered descriptor.
             let count =
                 unsafe { libc::epoll_wait(self.epoll.as_raw_fd(), events.as_mut_ptr(), 2, -1) };
-            if count < 0 {
-                let error = io::Error::last_os_error();
-                if error.kind() != io::ErrorKind::Interrupted {
-                    return Err(error);
-                }
-                continue;
+            if count >= 0 {
+                return Ok(events[..count as usize]
+                    .iter()
+                    .any(|event| event.u64 == WAKE_TAG));
             }
-            let mut ready = Ready {
-                listener: false,
-                wake: false,
-            };
-            for event in &events[..count as usize] {
-                match event.u64 {
-                    WAKE_TAG => ready.wake = true,
-                    _ => ready.listener = true,
-                }
+            let error = io::Error::last_os_error();
+            if error.kind() != io::ErrorKind::Interrupted {
+                return Err(error);
             }
-            return Ok(ready);
         }
+    }
+}
+
+impl TcpListener {
+    pub(super) fn accept_blocking(
+        &self,
+    ) -> io::Result<Option<(std::net::TcpStream, std::net::SocketAddr)>> {
+        self.accept_blocking_with(|listener| {
+            let (stream, peer) = listener.accept()?;
+            stream.set_nonblocking(true)?;
+            Ok((stream, peer))
+        })
+    }
+}
+
+impl UnixListener {
+    pub(super) fn accept_blocking(
+        &self,
+    ) -> io::Result<
+        Option<(
+            std::os::unix::net::UnixStream,
+            std::os::unix::net::SocketAddr,
+        )>,
+    > {
+        self.accept_blocking_with(|listener| {
+            let (stream, peer) = listener.accept()?;
+            stream.set_nonblocking(true)?;
+            Ok((stream, peer))
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::io::{Read, Write};
     use std::sync::mpsc;
     use std::thread::JoinHandle;
     use std::time::Duration;
@@ -280,42 +201,19 @@ mod tests {
 
     /// One accept loop, as a worker runs it: every accepted stream stays open and the
     /// worker id goes to `tx` in accept order.
-    fn spawn_accept_loop<S: Send + 'static>(
+    fn spawn_accept_loop<S: Send + 'static, A: Send + 'static>(
         id: usize,
         tx: mpsc::Sender<usize>,
-        mut accept: impl FnMut() -> io::Result<Option<S>> + Send + 'static,
+        mut accept: impl FnMut() -> io::Result<Option<(S, A)>> + Send + 'static,
     ) -> JoinHandle<Vec<S>> {
         std::thread::spawn(move || {
             let mut streams = Vec::new();
-            while let Some(stream) = accept().unwrap() {
+            while let Some((stream, _)) = accept().unwrap() {
                 streams.push(stream);
                 tx.send(id).unwrap();
             }
             streams
         })
-    }
-
-    fn next_tcp(listener: &TcpListener) -> io::Result<Option<std::net::TcpStream>> {
-        Ok(match listener.accept_blocking()? {
-            Accepted::Stream(stream, _) => Some(stream),
-            Accepted::Shutdown => None,
-        })
-    }
-
-    fn next_unix(listener: &UnixListener) -> io::Result<Option<std::os::unix::net::UnixStream>> {
-        Ok(match listener.accept_blocking()? {
-            Accepted::Stream(stream, _) => Some(stream),
-            Accepted::Shutdown => None,
-        })
-    }
-
-    fn stop<S>(wakes: &[Wake], loops: Vec<JoinHandle<Vec<S>>>) {
-        for wake in wakes {
-            wake.wake().unwrap();
-        }
-        for handle in loops {
-            handle.join().unwrap();
-        }
     }
 
     /// Two epoll instances on one listening socket stand in for two workers: each
@@ -333,7 +231,7 @@ mod tests {
             let listener = TcpListener::from_std(bound.try_clone().unwrap(), wake.clone()).unwrap();
             wakes.push(wake);
             loops.push(spawn_accept_loop(id, tx.clone(), move || {
-                next_tcp(&listener)
+                listener.accept_blocking()
             }));
         }
         std::thread::sleep(SETTLE);
@@ -344,7 +242,12 @@ mod tests {
             clients.push(std::net::TcpStream::connect(addr).unwrap());
             order.push(rx.recv_timeout(WAIT).unwrap());
         }
-        stop(&wakes, loops);
+        for wake in &wakes {
+            wake.stop().unwrap();
+        }
+        for handle in loops {
+            handle.join().unwrap();
+        }
 
         let first = order[0];
         assert_eq!(
@@ -355,107 +258,37 @@ mod tests {
     }
 
     #[test]
-    fn exclusive_wake_alternates_between_unix_listeners() {
+    fn unix_listener_accepts_a_nonblocking_stream() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("http.sock");
         let bound = std::os::unix::net::UnixListener::bind(&path).unwrap();
         bound.set_nonblocking(true).unwrap();
-        let (tx, rx) = mpsc::channel();
-        let mut wakes = Vec::new();
-        let mut loops = Vec::new();
-        for id in 0..2 {
-            let wake = Wake::new().unwrap();
-            let listener =
-                UnixListener::from_std(bound.try_clone().unwrap(), wake.clone()).unwrap();
-            wakes.push(wake);
-            loops.push(spawn_accept_loop(id, tx.clone(), move || {
-                next_unix(&listener)
-            }));
-        }
-        std::thread::sleep(SETTLE);
+        let listener = UnixListener::from_std(bound, Wake::new().unwrap()).unwrap();
+        let mut client = std::os::unix::net::UnixStream::connect(&path).unwrap();
+        client.write_all(b"x").unwrap();
 
-        let mut clients = Vec::new();
-        let mut order = Vec::new();
-        for _ in 0..4 {
-            clients.push(std::os::unix::net::UnixStream::connect(&path).unwrap());
-            order.push(rx.recv_timeout(WAIT).unwrap());
-        }
-        stop(&wakes, loops);
-
-        let first = order[0];
-        assert_eq!(order, vec![first, 1 - first, first, 1 - first]);
-    }
-
-    #[test]
-    fn a_busy_listener_leaves_the_connections_to_the_idle_one() {
-        let bound = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        bound.set_nonblocking(true).unwrap();
-        let addr = bound.local_addr().unwrap();
-        let (tx, rx) = mpsc::channel();
-        let mut wakes = Vec::new();
-        let mut gates = Vec::new();
-        let mut loops = Vec::new();
-        for id in 0..2 {
-            let wake = Wake::new().unwrap();
-            let listener = TcpListener::from_std(bound.try_clone().unwrap(), wake.clone()).unwrap();
-            wakes.push(wake);
-            gates.push(listener.gate());
-            loops.push(spawn_accept_loop(id, tx.clone(), move || {
-                next_tcp(&listener)
-            }));
-        }
-        std::thread::sleep(SETTLE);
-
-        gates[0].set_busy(true).unwrap();
-        let mut clients = Vec::new();
-        let mut order = Vec::new();
-        for _ in 0..4 {
-            clients.push(std::net::TcpStream::connect(addr).unwrap());
-            order.push(rx.recv_timeout(WAIT).unwrap());
-        }
-        assert_eq!(order, vec![1, 1, 1, 1], "a busy worker must not accept");
-
-        gates[0].set_busy(false).unwrap();
-        let mut resumed = Vec::new();
-        for _ in 0..2 {
-            clients.push(std::net::TcpStream::connect(addr).unwrap());
-            resumed.push(rx.recv_timeout(WAIT).unwrap());
-        }
-        stop(&wakes, loops);
-
-        assert!(
-            resumed.contains(&0),
-            "an idle worker must take part again: {resumed:?}"
-        );
-    }
-
-    #[test]
-    fn a_wake_stops_the_loop_and_leaves_it_usable() {
-        let bound = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        bound.set_nonblocking(true).unwrap();
-        let addr = bound.local_addr().unwrap();
-        let wake = Wake::new().unwrap();
-        let listener = TcpListener::from_std(bound, wake.clone()).unwrap();
-
-        wake.wake().unwrap();
-        assert!(matches!(
-            listener.accept_blocking().unwrap(),
-            Accepted::Shutdown
-        ));
-
-        let client = std::net::TcpStream::connect(addr).unwrap();
-        let Accepted::Stream(stream, peer) = listener.accept_blocking().unwrap() else {
-            panic!("a drained wake must not stop the loop again")
-        };
-        assert_eq!(peer, client.local_addr().unwrap());
+        let (mut stream, _) = listener.accept_blocking().unwrap().unwrap();
         assert_nonblocking(&stream);
+        stream.set_nonblocking(false).unwrap();
+        let mut byte = [0_u8; 1];
+        stream.read_exact(&mut byte).unwrap();
+        assert_eq!(&byte, b"x");
+    }
+
+    #[test]
+    fn a_wake_stops_the_loop() {
+        let bound = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        bound.set_nonblocking(true).unwrap();
+        let wake = Wake::new().unwrap();
+        let listener = TcpListener::from_std(bound, wake.handle()).unwrap();
+
+        wake.stop().unwrap();
+        assert!(listener.accept_blocking().unwrap().is_none());
     }
 
     /// Re-registration must not lose the connections already queued on the socket.
     #[test]
     fn queued_connections_survive_each_rotation() {
-        use std::io::{Read, Write};
-
         let bound = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         bound.set_nonblocking(true).unwrap();
         let addr = bound.local_addr().unwrap();
@@ -469,9 +302,10 @@ mod tests {
 
         let mut received = std::collections::BTreeSet::new();
         for _ in 0..16 {
-            let Accepted::Stream(mut stream, peer) = listener.accept_blocking().unwrap() else {
-                panic!("a queued connection must not turn into a shutdown")
-            };
+            let (mut stream, peer) = listener
+                .accept_blocking()
+                .unwrap()
+                .expect("a queued connection must not turn into a shutdown");
             assert!(
                 clients
                     .iter()
@@ -522,9 +356,7 @@ mod tests {
             .unwrap();
         let second_client = second_client.join().unwrap();
 
-        let Accepted::Stream(_, peer) = accepted else {
-            panic!("the loop must wait for the next connection")
-        };
+        let (_, peer) = accepted.expect("the loop must wait for the next connection");
         assert_eq!(calls, 2);
         assert!(stolen_stream.is_some());
         assert_eq!(peer, second_client.local_addr().unwrap());

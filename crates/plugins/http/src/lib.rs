@@ -5,8 +5,6 @@ use std::time::Duration;
 use anyhow::anyhow;
 use extension_api::{Extension, ListenAddr, Middleware, Php, PrepareCtx, PreparedListener, Result};
 use tokio::runtime::Builder;
-#[cfg(not(target_os = "linux"))]
-use tokio::sync::watch;
 
 #[cfg(target_os = "linux")]
 mod accept_linux;
@@ -57,10 +55,7 @@ impl Default for Config {
 pub struct Server {
     config: Config,
     prepared: Option<PreparedListener>,
-    #[cfg(target_os = "linux")]
-    wake: Option<accept_linux::Wake>,
-    #[cfg(not(target_os = "linux"))]
-    shutdown: Option<watch::Sender<bool>>,
+    stop: Option<serve::Stop>,
     join: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
@@ -71,10 +66,7 @@ impl Extension for Server {
         Self {
             config,
             prepared: None,
-            #[cfg(target_os = "linux")]
-            wake: None,
-            #[cfg(not(target_os = "linux"))]
-            shutdown: None,
+            stop: None,
             join: None,
         }
     }
@@ -103,13 +95,8 @@ impl Extension for Server {
         let Some(prepared) = self.prepared.take() else {
             return Err(anyhow!("http listener was not prepared"));
         };
-        #[cfg(target_os = "linux")]
-        let wake =
-            accept_linux::Wake::new().map_err(|e| anyhow!("creating the http wake fd: {e}"))?;
-        #[cfg(target_os = "linux")]
-        let loop_wake = wake.clone();
-        #[cfg(not(target_os = "linux"))]
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
+        let stop = serve::Stop::new().map_err(|e| anyhow!("creating the http stop handle: {e}"))?;
+        let handle = stop.handle();
 
         let thread = std::thread::Builder::new()
             .name("rapira-http".into())
@@ -122,22 +109,15 @@ impl Extension for Server {
                     .map_err(|e| anyhow!("building the http runtime: {e}"))?;
                 #[cfg(target_os = "linux")]
                 {
-                    serve::serve(php, config, prepared, loop_wake, &rt)
+                    serve::serve(php, config, prepared, handle, &rt)
                 }
                 #[cfg(not(target_os = "linux"))]
                 {
-                    rt.block_on(serve::serve(php, config, prepared, shutdown_rx))
+                    rt.block_on(serve::serve(php, config, prepared, handle))
                 }
             })?;
 
-        #[cfg(target_os = "linux")]
-        {
-            self.wake = Some(wake);
-        }
-        #[cfg(not(target_os = "linux"))]
-        {
-            self.shutdown = Some(shutdown_tx);
-        }
+        self.stop = Some(stop);
         let join = self
             .join
             .insert(tokio::task::spawn_blocking(move || join_thread(thread)));
@@ -147,15 +127,10 @@ impl Extension for Server {
     }
 
     async fn shutdown(&mut self) -> Result<()> {
-        #[cfg(target_os = "linux")]
-        if let Some(wake) = self.wake.take()
-            && let Err(e) = wake.wake()
+        if let Some(stop) = self.stop.take()
+            && let Err(e) = stop.stop()
         {
             tracing::error!(target: "http", "stopping the accept loop: {e}");
-        }
-        #[cfg(not(target_os = "linux"))]
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(true);
         }
         if let Some(join) = self.join.take() {
             join.await
