@@ -10,7 +10,6 @@ use rapira_http::{
 };
 use rapira_master::PoolConfig;
 use rapira_runtime::ExtensionRuntime;
-use rapira_scoreboard::Scoreboard;
 use std::{
     fs::{File, OpenOptions, read_dir, remove_file},
     os::fd::RawFd,
@@ -292,10 +291,9 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         process_control_timeout: settings.supervisor.process_control_timeout,
         pidfile: settings.supervisor.pidfile,
     };
-    let scoreboard: Scoreboard = Scoreboard::create(cfg.scoreboard_slots()?)?;
 
     let stop: Result<rapira_master::StopReason, anyhow::Error> =
-        rapira_master::run(cfg, scoreboard, move |env: rapira_master::WorkerEnv| {
+        rapira_master::run(cfg, move |env: rapira_master::WorkerEnv| {
             let pool: &mut PoolRun = &mut pools[env.pool];
             let host: ExtensionRuntime = pool.host.take().expect("fresh child owns the host copy");
             worker::worker_body(env, host, pool.args.clone())

@@ -99,12 +99,8 @@ pub enum StopReason {
 }
 
 /// Returns in the parent on a clean or forced stop; in a forked child it never returns: the worker closure runs and the child `_exit`s.
-/// `scoreboard` must have `cfg.scoreboard_slots()` slots: `Master::new` slices it with the same arithmetic and panics on a smaller board.
-pub fn run(
-    cfg: MasterConfig,
-    scoreboard: Scoreboard,
-    worker: impl FnMut(WorkerEnv) -> i32,
-) -> anyhow::Result<StopReason> {
+pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::Result<StopReason> {
+    let scoreboard: Scoreboard = Scoreboard::create(cfg.scoreboard_slots()?)?;
     let self_pipe: signals::SelfPipe = signals::install_master_signals()?;
     let lifeline: lifeline::Lifeline = lifeline::Lifeline::create()?;
     let _pidfile: Option<pidfile::PidFile> = match &cfg.pidfile {

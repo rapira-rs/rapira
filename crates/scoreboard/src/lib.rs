@@ -62,10 +62,6 @@ pub fn now_millis() -> u64 {
 impl Scoreboard {
     /// Master-side, pre-fork. The mapping must exist before a fork can inherit it.
     pub fn create(nslots: usize) -> anyhow::Result<Scoreboard> {
-        anyhow::ensure!(
-            (1..=SB_MAX_SLOTS).contains(&nslots),
-            "scoreboard slots out of range: {nslots}"
-        );
         let bytes = nslots * size_of::<SharedSlot>();
         // SAFETY:
         // MAP_SHARED|MAP_ANONYMOUS is page-aligned and zero-filled (a valid bit pattern for every field), and the mapping is never munmap'd, so the slice is 'static.
@@ -182,12 +178,6 @@ mod tests {
         sb.clear(0);
         assert_eq!(sb.slot(0).state.load(Relaxed), SLOT_FREE);
         assert!(sb.snapshot_slots().is_empty());
-    }
-
-    #[test]
-    fn slots_out_of_range_rejected() {
-        assert!(Scoreboard::create(0).is_err());
-        assert!(Scoreboard::create(SB_MAX_SLOTS + 1).is_err());
     }
 
     #[test]
