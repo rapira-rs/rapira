@@ -1,5 +1,6 @@
 PHP_CONFIG ?= php-config
 LOCATE_PHP = PREFIX=$$($(PHP_CONFIG) --prefix 2>/dev/null); test -n "$$PREFIX" || { echo "$(PHP_CONFIG) not found; set PHP_CONFIG=/path/to/php-config"; exit 1; }; LIBPHP=$$(find "$$PREFIX/lib64" "$$PREFIX/lib" "$$PREFIX"/lib/php* -maxdepth 1 \( -name 'libphp*.so' -o -name 'libphp*.dylib' \) 2>/dev/null | head -1); test -n "$$LIBPHP" || { echo "no libphp*.so/.dylib under $$PREFIX; install your distro's PHP embed package or build PHP with --enable-embed=shared"; exit 1; }; LIBDIR=$$(dirname "$$LIBPHP"); mkdir -p target/phplib || exit 1; case "$$LIBPHP" in *.dylib) ln -sf "$$LIBPHP" target/phplib/libphp.dylib || exit 1;; *) ln -sf "$$LIBPHP" target/phplib/libphp.so || exit 1;; esac; PHPLIB="$$PWD/target/phplib"
+PHP_ENV = PHP_CONFIG=$(PHP_CONFIG) LD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" RUSTFLAGS="-L native=$$PHPLIB"
 
 GEN_STUB ?= $(shell $(PHP_CONFIG) --prefix)/lib/php/build/gen_stub.php
 PHP_BIN ?= $(shell $(PHP_CONFIG) --prefix)/bin/php
@@ -21,27 +22,12 @@ test:
 
 test_nts:
 	@$(LOCATE_PHP); \
-	CARGO_TARGET_DIR=target/nts \
-	PHP_CONFIG=$(PHP_CONFIG) \
-	LD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
-	DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
-	RUSTFLAGS="-L native=$$PHPLIB" \
-	cargo test --workspace
+	CARGO_TARGET_DIR=target/nts $(PHP_ENV) cargo test --workspace
 
 test_e2e:
 	@$(LOCATE_PHP); \
-	CARGO_TARGET_DIR=target/nts \
-	PHP_CONFIG=$(PHP_CONFIG) \
-	LD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
-	DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
-	RUSTFLAGS="-L native=$$PHPLIB" \
-	cargo build -p rapira_core --bin rapira && \
-	CARGO_TARGET_DIR=target/nts \
-	PHP_CONFIG=$(PHP_CONFIG) \
-	LD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
-	DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
-	RUSTFLAGS="-L native=$$PHPLIB" \
-	cargo test -p tests --test e2e --features e2e -- --test-threads=1
+	CARGO_TARGET_DIR=target/nts $(PHP_ENV) cargo build -p rapira_core --bin rapira && \
+	CARGO_TARGET_DIR=target/nts $(PHP_ENV) cargo test -p tests --test e2e --features e2e -- --test-threads=1
 
 PHP_SRC ?= ../../third-party/php-src
 PHP_PREFIX ?= $(HOME)/.local/share/php-nts
@@ -71,10 +57,5 @@ php-macos:
 
 coverage:
 	@$(LOCATE_PHP); \
-	CARGO_TARGET_DIR=target/coverage \
-	PHP_CONFIG=$(PHP_CONFIG) \
-	LD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
-	DYLD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" \
-	RUSTFLAGS="-L native=$$PHPLIB" \
-	cargo llvm-cov --workspace --lcov --output-path lcov.info \
+	CARGO_TARGET_DIR=target/coverage $(PHP_ENV) cargo llvm-cov --workspace --lcov --output-path lcov.info \
 		--ignore-filename-regex '(crates/tests/|bindings\.rs$$|/src/main\.rs$$)'
