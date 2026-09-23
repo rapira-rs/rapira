@@ -324,8 +324,8 @@ impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLaye
 /// One `app`-target record left by `\Rapira\log()`: level, message, context JSON.
 pub type AppRecord = (tracing::Level, String, String);
 
-/// Runs `script` in classic mode and returns its `app`-target records; the fixture must echo `logged` last, so a script that died half way cannot masquerade as one that logged nothing.
-pub fn app_records(script: &str) -> Vec<AppRecord> {
+/// Runs `script` in classic mode and returns its `app`-target records and its `php`-target messages, both read under the PHP lock; the fixture must echo `logged` last, so a script that died half way cannot masquerade as one that logged nothing.
+pub fn app_records(script: &str) -> (Vec<AppRecord>, Vec<String>) {
     let _guard = php_lock();
     init_log_capture();
     captured().clear();
@@ -339,16 +339,23 @@ pub fn app_records(script: &str) -> Vec<AppRecord> {
     assert_eq!(status, 200, "{script} must run clean (body: {body:?})");
     assert!(body.contains("logged"), "{script} ran to the end: {body:?}");
 
-    captured()
+    let all = captured();
+    let app = all
         .iter()
         .filter(|c| c.target == "app")
         .map(|c| (c.level, c.message.clone(), c.context.clone()))
-        .collect()
+        .collect();
+    let php = all
+        .iter()
+        .filter(|c| c.target == "php")
+        .map(|c| c.message.clone())
+        .collect();
+    (app, php)
 }
 
 /// The one `app` record `script` must leave; asserting the count fails the test on a stray extra record instead of ignoring it.
 pub fn app_record(script: &str) -> AppRecord {
-    let records = app_records(script);
+    let (records, _) = app_records(script);
     assert_eq!(
         records.len(),
         1,
