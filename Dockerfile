@@ -38,8 +38,6 @@ RUN set -eux; \
     apt-get install -y --no-install-recommends clang libclang-dev; \
     rm -rf /var/lib/apt/lists/*
 
-RUN rustup toolchain install stable --profile minimal --component rustfmt --component clippy
-
 WORKDIR /src
 COPY . .
 
