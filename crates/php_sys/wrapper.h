@@ -17,6 +17,12 @@
 #include <main/php_output.h>
 #include <main/php_variables.h>
 // clang-format on
+
+// ZTS comes from the main/php_config.h of the headers this build compiles against.
+#ifdef ZTS
+#error "rapira is NTS-only, but these PHP headers are from a thread-safe (ZTS) build. Rebuild PHP without --enable-zts, or point PHP_CONFIG at an NTS php-config."
+#endif
+
 #ifdef HAVE_PHP_SESSION
 #include <ext/session/php_session.h>
 #endif
