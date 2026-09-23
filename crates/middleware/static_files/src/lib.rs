@@ -64,8 +64,8 @@ impl StaticFiles {
 /// an unreadable path this way. The backend reports a directory with `IsADirectory`.
 /// https://docs.rs/tower-http/0.7.1/tower_http/services/struct.ServeDir.html#method.try_call
 ///
-/// A `HEAD` probe also reports a bad file name here. A segment over `NAME_MAX` gives
-/// `InvalidFilename`. A NUL byte gives `InvalidInput`. A `GET` answers 404 for both names.
+/// A bad file name also reaches this check. A segment over `NAME_MAX` gives `InvalidFilename`.
+/// A NUL byte gives `InvalidInput` on `HEAD`. A `GET` answers 404 for a NUL byte.
 fn is_miss(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
@@ -318,7 +318,6 @@ mod tests {
         }
     }
 
-    /// An empty forbid list is explicit: the middleware serves every file in the root.
     #[tokio::test(flavor = "current_thread")]
     async fn an_empty_forbid_list_serves_php_sources() {
         let dir = root();

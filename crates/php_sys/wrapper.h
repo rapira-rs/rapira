@@ -70,7 +70,8 @@ typedef struct {
     zend_object std;
 } rapira_dispatcher_info_obj;
 
-// Class entries for rapira.stub.php, bound in Rust as static muts; rapira_register_classes assigns them in MINIT, before any object of these classes can exist.
+// Class entries for the three stubs; rapira_register_classes assigns them in MINIT, before any object of these classes can exist.
+// Rust binds them as static muts, except the C-only log_level, mode and not_in_worker_mode_error entries.
 extern zend_class_entry *rapira_ce_log_level;
 extern zend_class_entry *rapira_ce_mode;
 extern zend_class_entry *rapira_ce_closed_exception;

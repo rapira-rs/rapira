@@ -53,8 +53,8 @@ fn create_acceptor(
 ) -> Result<Acceptor> {
     use std::os::fd::{FromRawFd, IntoRawFd};
     let tcp: bool = matches!(prepared.addr(), ListenAddr::Tcp(_));
-    // SAFETY: into_raw_fd transfers sole ownership of a listening socket; prepare
-    // already set O_NONBLOCK, which from_std requires but does not set.
+    // SAFETY: into_raw_fd transfers sole ownership of a listening socket.
+    // prepare set O_NONBLOCK: both acceptors need an accept that does not block.
     if tcp {
         let std = unsafe { std::net::TcpListener::from_raw_fd(prepared.into_raw_fd()) };
         #[cfg(target_os = "linux")]

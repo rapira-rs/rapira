@@ -32,10 +32,10 @@ bind! {
     zend_throw_error, zend_value_error, zend_throw_exception,
     // instanceof_function is inline; only its slow path is exported
     zend_update_property_str, instanceof_function_slow, zend_zval_value_name, IS_OBJECT,
-    // add_assoc_str/add_index_zval/smart_str_free are inline: these are their exported carriers and shim
     zend_read_property, zend_get_exception_base, zend_ce_throwable, php_json_encode,
-    smart_str, PHP_JSON_PARTIAL_OUTPUT_ON_ERROR, add_assoc_stringl_ex,
-    zend_hash_index_update, rapira_smart_str_free,
+    smart_str, PHP_JSON_PARTIAL_OUTPUT_ON_ERROR,
+    // add_assoc_str/add_index_zval/smart_str_free are inline: these are their exported carriers and shim
+    add_assoc_stringl_ex, zend_hash_index_update, rapira_smart_str_free,
     // zend_update_property*: the EG(fake_scope) swap inside is what initializes readonly props
     object_init_ex, zend_update_property, zend_update_property_stringl,
     zend_update_property_long, zend_update_property_double, zend_update_property_null,
@@ -49,8 +49,8 @@ bind! {
     zend_hash_str_update, zend_string_init_interned,
     php_default_post_reader, php_default_treat_data, php_default_input_filter,
     zend_unset_timeout, php_handle_auth_data,
-    SAPI_HEADER_SENT_SUCCESSFULLY, SAPI_HEADER_SEND_FAILED, IS_UNDEF, IS_STRING, // E_CORE and E_FATAL_ERRORS are php-src's own groupings
+    SAPI_HEADER_SENT_SUCCESSFULLY, SAPI_HEADER_SEND_FAILED, IS_UNDEF, IS_STRING,
     E_WARNING, E_CORE_WARNING, E_COMPILE_WARNING, E_USER_WARNING,
     E_NOTICE, E_USER_NOTICE, E_DEPRECATED, E_USER_DEPRECATED,
-    E_CORE, E_FATAL_ERRORS,
+    E_CORE, E_FATAL_ERRORS, // php-src's own groupings
 }

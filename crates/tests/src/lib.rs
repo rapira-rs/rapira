@@ -488,7 +488,7 @@ mod tests {
         }
     }
 
-    /// The four stream outcomes map to the three documented errors and Ok.
+    /// Each failed stream maps to its error: no events, no `End`, a truncated `End`, no head.
     #[tokio::test]
     async fn collect_maps_stream_outcomes() {
         let died = collect(reply(Vec::new())).await.unwrap_err();

@@ -85,7 +85,7 @@ pub(super) fn parse_content_length(v: &[u8]) -> Option<u64> {
     s.parse().ok()
 }
 
-/// RFC 9110 §5.6.2 tchar: a non-token name is dropped silently downstream instead of raising ValueError.
+/// RFC 9110 §5.6.2 tchar: a non-token name raises ValueError here, because the front drops it silently.
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2
 pub(super) fn wire_token(name: &[u8]) -> bool {
     !name.is_empty() && name.iter().all(|&b| is_tchar(b))

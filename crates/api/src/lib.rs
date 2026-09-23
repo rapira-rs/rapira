@@ -119,9 +119,9 @@ pub struct ClientCert {
 pub struct Tls {
     pub version: String,
     pub cipher: String,
-    /// Tls::$negotiatedProtocol`
+    /// PHP `Tls::$negotiatedProtocol`.
     pub alpn: Option<String>,
-    /// Tls::$requestedServerName`
+    /// PHP `Tls::$requestedServerName`.
     pub server_name: Option<String>,
     pub cert: Option<ClientCert>,
 }
@@ -140,7 +140,7 @@ impl std::fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
-/// An extension with no wire form for a fidelity fact passes None, never a fabricated default.
+/// An extension passes `None` for a field that its protocol does not carry.
 pub struct Request {
     pub method: String,
     pub uri: String,

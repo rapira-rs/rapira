@@ -7,7 +7,7 @@ use php_sys::{Mode, Rapira, WorkerHooks};
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
 use rapira_runtime::{ExtensionRuntime, Stopper};
 
-/// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset (drained to 0).
+/// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset, so the extension outcomes set the exit code.
 static WORKER_EXIT: AtomicI32 = AtomicI32::new(-1);
 
 /// Racing ahead of the stopper registration is fine: the boot path re-checks WORKER_EXIT right after registering.

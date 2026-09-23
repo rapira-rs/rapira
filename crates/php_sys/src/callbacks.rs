@@ -69,12 +69,14 @@ impl SapiHeader {
     }
 }
 
-/// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2; `field-name = token`, §5.1).
+/// Returns true for an RFC 9110 `tchar`, the byte set of `field-name = token`.
+/// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2
 pub(crate) fn is_tchar(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
 }
 
-/// (RFC 9110 §5.5, https://www.rfc-editor.org/rfc/rfc9110#section-5.5)
+/// Returns true for a byte that RFC 9110 permits in a field value.
+/// https://www.rfc-editor.org/rfc/rfc9110#section-5.5
 pub(crate) fn is_field_value_byte(b: u8) -> bool {
     (b >= 0x20 && b != 0x7f) || b == b'\t'
 }
@@ -92,8 +94,8 @@ fn split_header_line(line: &[u8]) -> Option<(String, Vec<u8>)> {
     Some((std::str::from_utf8(name).ok()?.to_owned(), value.to_vec()))
 }
 
-/// Writes the NUL-terminated `HTTP_` name of `field` into `buf`.
-/// (RFC 3875 §4.1.18, https://www.rfc-editor.org/rfc/rfc3875#section-4.1.18)
+/// Writes the NUL-terminated `HTTP_` meta-variable name of `field` into `buf`.
+/// https://www.rfc-editor.org/rfc/rfc3875#section-4.1.18
 fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
     buf.clear();
     buf.extend_from_slice(b"HTTP_");

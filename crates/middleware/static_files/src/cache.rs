@@ -187,9 +187,7 @@ impl Store {
         self.bytes - reclaimed + Self::footprint(path, body as usize) <= MAX_TOTAL
     }
 
-    /// Removes every entry outside the freshness window. `revalidate` moves `checked` forward
-    /// on each access. The entries that stay are therefore the entries that a client asked for
-    /// in the last second.
+    /// Removes every entry that no stat or fill confirmed in the last second.
     fn drop_expired(&mut self, now: Instant) {
         let mut freed = 0;
         self.map.retain(|path, entry| {

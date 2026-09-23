@@ -122,7 +122,7 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
     }
 }
 
-// the request graph builder lives in Rust (exchange.rs); this shell owns the macro layer
+// the request graph builder lives in Rust (src/exchange/); this shell owns the macro layer
 ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest) {
     ZEND_PARSE_PARAMETERS_NONE();
     rapira_exchange_obj *ex = rapira_exchange_from(Z_OBJ_P(ZEND_THIS));

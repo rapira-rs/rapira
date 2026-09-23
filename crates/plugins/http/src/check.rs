@@ -41,8 +41,6 @@ pub(crate) fn authority(
 
 pub(crate) fn apply_field_name_policy(
     headers: &mut HeaderMap,
-    // what to do with the unsafe field names
-    // we can drop them, or reject the req
     policy: UnsafeFieldNames,
     superglobals: bool,
 ) -> Result<(), Rejection> {
@@ -119,7 +117,6 @@ pub(crate) fn check_request(
 
     apply_field_name_policy(&mut parts.headers, unsafe_field_names, superglobals)?;
 
-    // compare content len
     let declared = parts
         .headers
         .get(CONTENT_LENGTH)

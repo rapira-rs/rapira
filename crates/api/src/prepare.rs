@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-/// The backlog every master-bound listener gets: the master binds pre-fork and workers inherit the queue without re-listening. The value is a request the kernel clamps to net.core.somaxconn, so over-asking costs nothing while under-asking drops SYNs during a fork storm. https://man7.org/linux/man-pages/man2/listen.2.html
+/// The backlog of every master-bound listener. The master binds before the fork, and the workers inherit the queue. The kernel caps the value at `net.core.somaxconn`. https://man7.org/linux/man-pages/man2/listen.2.html
 const LISTEN_BACKLOG: i32 = 65535;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -50,7 +50,7 @@ impl PrepareCtx {
         self.fds.iter().map(|fd| fd.as_raw_fd()).collect()
     }
 
-    /// Nonblocking is set here because the adopting extension hands the fd to tokio's `from_std`, which requires O_NONBLOCK and does not set it.
+    /// Sets O_NONBLOCK: tokio's `from_std` requires it, and the Linux acceptor needs `accept` to return WouldBlock when another worker takes the connection.
     pub fn bind_tcp(&mut self, addr: SocketAddr) -> anyhow::Result<PreparedListener> {
         let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))
             .with_context(|| format!("socket for {addr}"))?;

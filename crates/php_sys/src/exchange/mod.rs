@@ -78,7 +78,7 @@ pub(crate) fn cycle_reset() {
 pub(crate) fn reclaim_current() {
     if let Some(ptr) = CYCLE.get().unit {
         update(|c| c.unit = None);
-        // SAFETY: the pointer came from Box::into_raw in finish_pull, and exchange_drop untracks before reclaiming.
+        // SAFETY: the pointer came from Box::into_raw in receive, and rapira_rs_exchange_drop clears the unit before it reclaims.
         let st = unsafe { Box::from_raw(ptr) };
         if st.stage != Stage::Finalized {
             sb_update(Event::Handled(true));

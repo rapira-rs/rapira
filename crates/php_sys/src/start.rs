@@ -242,7 +242,7 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
     })
 }
 
-/// The Idle/Active pair still runs: a polling worker must refresh last_activity_ms or the master watchdog TERMs it as a stuck request (master/src/events.rs:509-517).
+/// The Idle/Active pair still runs: a polling worker must refresh last_activity_ms or the master watchdog TERMs it as a stuck request (`Pool::watchdog_tick`).
 pub(crate) fn pull_job_try() -> Pulled {
     JOB_RX.with_borrow_mut(|slot| {
         let Some(job_r) = slot.as_mut() else {

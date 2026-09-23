@@ -381,7 +381,7 @@ mod tests {
         assert!(merge(file, Some(Path::new("/w"))).is_ok());
     }
 
-    /// Zero means "off" for its siblings, but a zero stop budget escalates instantly and leaves the drain no time.
+    /// A zero stop budget escalates at once and leaves the drain no time.
     #[test]
     fn supervisor_control_timeout_zero_is_rejected() {
         let file = load_str(

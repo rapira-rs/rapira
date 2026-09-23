@@ -10,7 +10,7 @@ Connections are served by hyper's http1 builder. Each request runs through admis
 
 ## Middleware
 
-`Config.middleware` holds an `extension_api::Middleware` chain, outermost first, shared by every protocol this plugin serves. A middleware sees `http::Request<Body>`/`http::Response<Body>` with `Protocol` and `Peer` in the request extensions, and either calls `next.run(req)` or answers on its own. The extensions also carry private per-request state for the handler. Keep the extensions when you rebuild a request. Do not retain them past the call. Admission checks run before the chain, so middleware never sees a request that was refused at the door.
+`Config.middleware` holds an `extension_api::Middleware` chain, outermost first, shared by every protocol this plugin serves. A middleware sees `http::Request<Body>`/`http::Response<Body>` with `Protocol` and `Peer` in the request extensions, and either calls `next.run(req)` or answers on its own. The extensions also carry private per-request state for the handler. Keep the extensions when you rebuild a request. Do not retain them past the call. Admission checks run before the chain. A request that fails them does not reach the middleware.
 
 Built-in middleware lives under `crates/middleware`, one crate per middleware. The `middleware` list in `[http]` selects the built-in middleware and sets the chain order. `rapira_static_files::StaticFiles` serves files from `[http.static].root`. A miss falls through the chain to PHP. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
 

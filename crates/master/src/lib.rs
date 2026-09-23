@@ -63,7 +63,6 @@ pub struct MasterConfig {
 
 impl MasterConfig {
     /// Two slots per worker, pools contiguous in order. Names the pool that pushes the total past the cap.
-    /// Every `processes` is at least 1; the config layer enforces the floor.
     pub fn scoreboard_slots(&self) -> anyhow::Result<usize> {
         let mut slots: usize = 0;
         for p in &self.pools {
@@ -94,7 +93,7 @@ pub struct WorkerEnv {
 pub enum StopReason {
     /// All workers drained cleanly: the caller tears down PHP and exits 0.
     Drained,
-    /// Second stop signal or TERM while stopping: the caller exits 130 without PHP teardown.
+    /// TERM or INT while stopping: the caller exits 130 without PHP teardown.
     Forced,
 }
 

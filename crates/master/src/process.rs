@@ -154,7 +154,7 @@ pub(crate) fn reap_all(tables: &mut [&mut ProcTable]) -> Vec<(usize, WorkerProc,
 }
 
 pub(crate) fn kill(pid: libc::pid_t, sig: c_int) {
-    // SAFETY: kill is always safe; a stale pid yields ESRCH, harmlessly ignored.
+    // SAFETY: kill takes no pointers.
     unsafe { libc::kill(pid, sig) };
 }
 
@@ -210,7 +210,7 @@ fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
     // SAFETY: block/old are live sigset_ts.
     unsafe { libc::sigprocmask(libc::SIG_BLOCK, &block, &mut old) };
 
-    // SAFETY: fork in a single-threaded master; the child branch is async-signal-safe until _exit.
+    // SAFETY: fork in a single-threaded master, so no other thread holds a lock the child inherits.
     match unsafe { libc::fork() } {
         0 => {
             // SAFETY: all calls below are async-signal-safe or operate on fds we own.

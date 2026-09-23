@@ -107,7 +107,7 @@ unsafe fn flatten_throwable(dst: *mut zval, ex: *mut zend_object, depth: i32) {
     }
 }
 
-/// Frame rules (zend.rs) hold until the encode completes: the returned Vec is created after the last bailing call.
+/// A Zend bailout longjmps through this frame, so it holds no value with Drop glue: the returned Vec is created after the last bailing call.
 unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
     unsafe {
         let mut rebuilt: zval = std::mem::zeroed();

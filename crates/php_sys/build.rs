@@ -15,7 +15,7 @@ struct PhpBuild {
     version: (u32, u32),
 }
 
-// bindgen 0.73 panics on php-src master's `preserve_none` opcode handlers, so `_zend_op` stays opaque: https://clang.llvm.org/docs/AttributeReference.html#preserve-none
+// bindgen panics on php-src master's `preserve_none` opcode handlers, so `_zend_op` stays opaque: https://clang.llvm.org/docs/AttributeReference.html#preserve-none
 fn main() -> anyhow::Result<()> {
     println!("cargo:rustc-check-cfg=cfg(php84)");
     println!("cargo:rustc-check-cfg=cfg(php85)");

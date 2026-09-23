@@ -38,7 +38,7 @@ pub(crate) fn dynamic_tick(inp: &DynInput, spawn_rate: &mut u32) -> DynAction {
     DynAction::Steady
 }
 
-/// Total on its own: `midpoint` needs no `min_spare <= max_spare` ordering and cannot overflow.
+/// Initial worker count of a dynamic pool: the spare midpoint, capped at `max_children`.
 pub(crate) fn dynamic_start_count(
     min_spare: usize,
     max_spare: usize,

@@ -74,7 +74,7 @@ impl ExtensionRuntime {
         self.run_with_options(rapira, script, RuntimeOptions::default())
     }
 
-    /// One worker thread: this runtime only drives `drive`'s shutdown timeout, and it exists in every forked worker process.
+    /// One worker thread: this runtime drives only the `drive` future of each extension, and it exists in every forked worker process.
     pub fn run_with_options(
         self,
         rapira: RapiraHandle,
@@ -336,7 +336,7 @@ fn sigset(signals: &[libc::c_int]) -> libc::sigset_t {
     }
 }
 
-/// Blocks until one of `signals` (already blocked) is delivered; `sigwait` because Darwin lacks `sigtimedwait`: https://man7.org/linux/man-pages/man2/sigwaitinfo.2.html
+/// Blocks until one of `signals` (already blocked) is delivered. https://man7.org/linux/man-pages/man3/sigwait.3.html
 fn wait_signal(signals: &[libc::c_int]) -> libc::c_int {
     // SAFETY: `set` and `sig` are stack values live for the whole call.
     unsafe {

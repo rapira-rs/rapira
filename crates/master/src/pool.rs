@@ -29,7 +29,7 @@ pub(crate) struct Reload {
     pub deadline: Instant,
 }
 
-/// One plugin's workers. Every index here is local to this pool's board view.
+/// One plugin's workers.
 pub(crate) struct Pool {
     pub index: usize,
     pub cfg: PoolConfig,
@@ -95,7 +95,7 @@ impl Pool {
             .sum()
     }
 
-    /// Must run before a slot clear or a replacement bind can overwrite the scoreboard counters.
+    /// Must run before a replacement bind resets the slot counters.
     fn latch_served(&mut self) {
         if !self.ever_served && self.total_successful() > 0 {
             self.ever_served = true;

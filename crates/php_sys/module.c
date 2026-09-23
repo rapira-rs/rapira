@@ -60,7 +60,7 @@ PHP_FUNCTION(rapira_finish_request) {
         RETURN_THROWS();
     }
     if (rapira_finish_output() != OK) {
-        // re-raise: rapira_run_handler classifies it, 500s and recycles
+        // re-raise: rapira_run_handler (worker mode) or php_execute_script (classic mode) catches it
         zend_bailout();
     }
     rapira_rs_finish_response();
@@ -156,7 +156,7 @@ static void rapira_request_init(void) {
     // init_compiler clears this per cycle (zend_compile.c:461), not per job
     CG(unclean_shutdown) = false;
 
-    // reset_signals=0: the SIGRTMIN handler is installed process-wide at boot
+    // reset_signals=0: the cycle's php_request_startup installed the SIGPROF handler
     if (rapira_job_timeout < 0) {
         rapira_job_timeout = EG(timeout_seconds);
     }
@@ -188,7 +188,7 @@ static void rapira_request_init(void) {
     }
 }
 
-// sapi_activate re-arms CG(auto_globals) per request; worker mode skips it.
+// php_hash_environment re-arms CG(auto_globals) per request; the per-job path skips it.
 static void rapira_activate_auto_globals(void) {
     zend_auto_global *auto_global = NULL;
     zend_string *_env = ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_ENV);
@@ -360,7 +360,7 @@ static void rapira_release_header_callback(void) {
 // per-request sapi teardown (main/main.c:1985,2002,2031)
 int rapira_request_teardown(void) {
     int bailed = OK;
-    // the VM stack is popped when handleRequest returns, so close frames here
+    // the VM stack is popped when handle_request returns, so close frames here
     zend_execute_data *observed_base = EG(current_observed_frame);
 
     RAPIRA_GUARD(php_output_end_all(), bailed, observed_base);
