@@ -319,7 +319,11 @@ impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<T> {
         let poll = Pin::new(&mut this.io).poll_flush(cx);
         let poll = this.gate(cx, poll);
         if matches!(poll, Poll::Ready(Ok(()))) {
-            this.state.send_modify(|s| s.flushes += 1);
+            // The drain reads the count when the close wakes it, so a flush sends no notification.
+            this.state.send_if_modified(|s| {
+                s.flushes += 1;
+                false
+            });
         }
         poll
     }
