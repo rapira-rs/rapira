@@ -364,7 +364,12 @@ mod tests {
         ];
         for case in cases {
             assert_eq!(is_fatal_accept(&case.error), case.fatal, "{}", case.name);
-            assert_eq!(is_skipped_accept(&case.error), case.skipped, "{}", case.name);
+            assert_eq!(
+                is_skipped_accept(&case.error),
+                case.skipped,
+                "{}",
+                case.name
+            );
         }
     }
 }
