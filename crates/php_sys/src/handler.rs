@@ -34,7 +34,7 @@ impl std::error::Error for HandleError {}
 
 #[derive(Clone)]
 pub struct RapiraHandle {
-    intake: SyncSender<Job>,
+    intake: SyncSender<Box<Job>>,
     pending: Arc<AtomicUsize>,
     dispatcher: bool,
 }
@@ -86,9 +86,9 @@ impl RapiraHandle {
     pub async fn handle(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
         req.received_at.get_or_insert_with(now_unix_f64);
         let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
-        let mut job = Job {
+        let mut job = Box::new(Job {
             ctx: Context::new(req, tx, !self.dispatcher),
-        };
+        });
         let pending = PendingGuard::arm(&self.pending);
         let deadline = Instant::now() + INTAKE_WAIT;
         loop {
@@ -120,9 +120,9 @@ impl RapiraHandle {
         let pending = PendingGuard::arm(&self.pending);
         if self
             .intake
-            .send(Job {
+            .send(Box::new(Job {
                 ctx: Context::new(req, tx, !self.dispatcher),
-            })
+            }))
             .is_err()
         {
             return Err(HandleError::Stopped);

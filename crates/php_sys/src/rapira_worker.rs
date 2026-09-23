@@ -202,7 +202,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 }
 
 /// The first call tears down the bootstrap request php_request_startup() left behind, before any job is served.
-fn next_job() -> Option<Job> {
+fn next_job() -> Option<Box<Job>> {
     WORKER.with_borrow_mut(|w| {
         let wc = w.as_mut()?;
         if std::mem::take(&mut wc.first_call) {

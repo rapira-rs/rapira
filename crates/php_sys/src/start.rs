@@ -18,12 +18,12 @@ thread_local! {
 }
 
 pub(crate) struct Intake {
-    pub(crate) tx: SyncSender<Job>,
+    pub(crate) tx: SyncSender<Box<Job>>,
     pub(crate) pending: Arc<AtomicUsize>,
 }
 
 struct JobRx {
-    rx: Receiver<Job>,
+    rx: Receiver<Box<Job>>,
     pending: Arc<AtomicUsize>,
 }
 
@@ -106,7 +106,7 @@ impl Rapira {
         };
         slot.bind(std::process::id());
         let pending = Arc::new(AtomicUsize::new(0));
-        let (intake_tx, intake_rx) = sync_channel::<Job>(1024);
+        let (intake_tx, intake_rx) = sync_channel::<Box<Job>>(1024);
         let intake = Intake {
             tx: intake_tx,
             pending: pending.clone(),
@@ -209,15 +209,14 @@ fn worker_main(mode: Mode, rx: JobRx) {
     }
 }
 
-pub(crate) fn pull_job() -> Option<Job> {
+pub(crate) fn pull_job() -> Option<Box<Job>> {
     match pull_job_wait(None) {
-        Pulled::Job(job) => Some(*job),
+        Pulled::Job(job) => Some(job),
         _ => None,
     }
 }
 
 pub(crate) enum Pulled {
-    // Boxed: a Job is ~600 bytes and the other variants are empty
     Job(Box<Job>),
     Timeout,
     Empty,
@@ -239,7 +238,7 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
         match got {
             Ok(job) => {
                 job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(Box::new(job))
+                Pulled::Job(job)
             }
             Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
             Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
@@ -259,7 +258,7 @@ pub(crate) fn pull_job_try() -> Pulled {
         match got {
             Ok(job) => {
                 job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(Box::new(job))
+                Pulled::Job(job)
             }
             Err(TryRecvError::Empty) => Pulled::Empty,
             Err(TryRecvError::Disconnected) => Pulled::Closed,
