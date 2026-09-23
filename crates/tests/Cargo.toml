@@ -12,9 +12,8 @@ anyhow = "1"
 php_sys = { path = "../php_sys" }
 tokio = { version = "1", features = ["sync", "time"] }
 tracing = "0.1"
-# Capture layer (init_log_capture); tracing-log normalizes still-bridged records.
+# Capture layer (init_log_capture).
 tracing-subscriber = "0.3"
-tracing-log = "0.2"
 
 [dev-dependencies]
 extension_api = { workspace = true }

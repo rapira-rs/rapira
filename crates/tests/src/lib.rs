@@ -273,7 +273,7 @@ pub fn captured() -> sync::MutexGuard<'static, Vec<Captured>> {
     LOG_CAPTURE.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
-/// Collects the `message` and `context` fields; `log.*` metadata fields from still-bridged records are ignored.
+/// Collects the `message` and `context` fields; other fields are ignored.
 #[derive(Default)]
 struct Msg {
     message: String,
@@ -308,8 +308,7 @@ struct CaptureLayer;
 
 impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLayer {
     fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        let norm = tracing_log::NormalizeEvent::normalized_metadata(event);
-        let meta = norm.as_ref().unwrap_or_else(|| event.metadata());
+        let meta = event.metadata();
         let mut msg = Msg::default();
         event.record(&mut msg);
         captured().push(Captured {
@@ -383,7 +382,7 @@ pub fn wait_app_record(message: &str) -> String {
     }
 }
 
-/// Installs the capturing subscriber once, unfiltered, so even trace-level records from `tracing` and the `log` facade reach `LOG_CAPTURE`.
+/// Installs the capturing subscriber once, unfiltered, so even trace-level records reach `LOG_CAPTURE`.
 pub fn init_log_capture() {
     static ONCE: Once = Once::new();
     ONCE.call_once(|| {
