@@ -10,7 +10,7 @@
 
 ## Comments
 
-- `rapira_arginfo.h` is generated, regenerate from the stub.
+- `make stubs` generates the three `crates/php_sys/*_arginfo.h` headers from the three stubs.
 - Joke comments (`Rustttt`, "trust me, I'm a developer") are intentional. Do not flag them.
 
 ## Tests
