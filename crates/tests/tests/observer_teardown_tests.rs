@@ -14,7 +14,10 @@ fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()
     let h = r.handle();
 
     for _ in 0..3 {
-        let (_, body) = drain(h.handle_blocking(req("/", "shared/session-bailout-worker.php"))?);
+        let (_, body) = drain(tests::submit(
+            &h,
+            req("/", "shared/session-bailout-worker.php"),
+        )?);
         assert!(
             body.contains("sid="),
             "worker must keep serving (got {body:?})"

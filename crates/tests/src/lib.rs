@@ -1,7 +1,7 @@
-use php_sys::{Frame, Mode, Rapira, Request};
+use php_sys::{Frame, HandleError, Mode, Rapira, RapiraHandle, Request};
 use std::env::set_var;
 use std::path::{Path, PathBuf};
-use std::sync::{self, Mutex, Once, PoisonError};
+use std::sync::{self, Mutex, Once, OnceLock, PoisonError};
 use tokio::sync::mpsc;
 
 static PHP_LOCK: Mutex<()> = Mutex::new(());
@@ -46,11 +46,23 @@ pub fn run_worker(
     let h = r.handle();
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {
-        out.push(drain(h.handle_blocking(req(uri, name))?));
+        out.push(drain(submit(&h, req(uri, name))?));
     }
     drop(h);
     r.shutdown();
     Ok(out)
+}
+
+/// Submits `req` through the async intake of `h` and blocks until the job is queued.
+pub fn submit(h: &RapiraHandle, req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
+    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
+    RT.get_or_init(|| {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_time()
+            .build()
+            .expect("tokio runtime")
+    })
+    .block_on(h.handle(req))
 }
 
 /// Panics when RAPIRA_REQUIRE_EXTS names an extension this fixture covers: a skip where CI installs the extension is a broken install.
@@ -326,7 +338,7 @@ pub fn app_records(script: &str) -> (Vec<AppRecord>, Vec<String>) {
 
     let r = Rapira::start(Mode::Classic).expect("classic boot");
     let h = r.handle();
-    let (status, body) = drain(h.handle_blocking(req("/", script)).expect("dispatch"));
+    let (status, body) = drain(submit(&h, req("/", script)).expect("dispatch"));
     drop(h);
     r.shutdown();
 

@@ -8,7 +8,10 @@ fn verbs_probe(query: &str) -> anyhow::Result<(u16, String)> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle();
-    let out = drain(h.handle_blocking(req(query, "dispatcher/verbs-worker.php"))?);
+    let out = drain(tests::submit(
+        &h,
+        req(query, "dispatcher/verbs-worker.php"),
+    )?);
     drop(h);
     r.shutdown();
     Ok(out)
@@ -24,7 +27,10 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
     let h = r.handle();
 
-    let resp = drain_resp(h.handle_blocking(req("/first", "dispatcher/echo-loop-worker.php"))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/first", "dispatcher/echo-loop-worker.php"),
+    )?);
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.header("x-rapira-target").as_deref(), Some("/first"));
     assert_eq!(
@@ -36,7 +42,7 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     let mut rq2 = req("/second", "dispatcher/echo-loop-worker.php");
     rq2.body = php_sys::types::Body::Raw(Cursor::new(b"two".to_vec()));
     rq2.content_length = 3;
-    let resp = drain_resp(h.handle_blocking(rq2)?);
+    let resp = drain_resp(tests::submit(&h, rq2)?);
     assert_eq!(resp.header("x-rapira-target").as_deref(), Some("/second"));
     assert_eq!(resp.body_string(), "method=GET body=two");
 
@@ -106,10 +112,10 @@ fn double_finalize_throws_already_finalized() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle();
 
-    let (status, body) = drain(h.handle_blocking(req(
-        "/?probe=double-finalize",
-        "dispatcher/verbs-worker.php",
-    ))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/?probe=double-finalize", "dispatcher/verbs-worker.php"),
+    )?);
     assert_eq!((status, body.as_str()), (200, "first"));
 
     drop(h);
@@ -169,8 +175,10 @@ fn verb_edges_throw_their_documented_classes() -> anyhow::Result<()> {
 
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle();
-    let (status, body) =
-        drain(h.handle_blocking(req("/?probe=verb-edges", "dispatcher/verbs-worker.php"))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/?probe=verb-edges", "dispatcher/verbs-worker.php"),
+    )?);
     assert_eq!((status, body.as_str()), (200, "try-busy;neg-timeout"));
     drop(h);
     r.shutdown();
@@ -196,17 +204,25 @@ fn try_and_timed_receive_serve_units() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/poll-worker.php")))?;
     let h = r.handle();
 
-    let (status, body) = drain(h.handle_blocking(req("/one", "dispatcher/poll-worker.php"))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/one", "dispatcher/poll-worker.php"),
+    )?);
     assert_eq!((status, body.as_str()), (200, "served-by=try target=/one"));
 
-    let (status, body) =
-        drain(h.handle_blocking(req("/two?mode=timed", "dispatcher/poll-worker.php"))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/two?mode=timed", "dispatcher/poll-worker.php"),
+    )?);
     assert_eq!(
         (status, body.as_str()),
         (200, "served-by=try target=/two?mode=timed")
     );
 
-    let (status, body) = drain(h.handle_blocking(req("/three", "dispatcher/poll-worker.php"))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/three", "dispatcher/poll-worker.php"),
+    )?);
     assert_eq!(
         (status, body.as_str()),
         (200, "served-by=timed target=/three")
@@ -223,8 +239,10 @@ fn interim_head_is_emitted_before_the_final_head() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle();
-    let resp =
-        drain_resp(h.handle_blocking(req("/?probe=interim", "dispatcher/verbs-worker.php"))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/?probe=interim", "dispatcher/verbs-worker.php"),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -247,8 +265,10 @@ fn writehead_101_commits_as_final() -> anyhow::Result<()> {
     captured().clear();
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle();
-    let resp =
-        drain_resp(h.handle_blocking(req("/?probe=upgrade", "dispatcher/verbs-worker.php"))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/?probe=upgrade", "dispatcher/verbs-worker.php"),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -282,7 +302,10 @@ fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle();
 
-    let resp = drain_resp(h.handle_blocking(req("/?probe=multi", "dispatcher/verbs-worker.php"))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/?probe=multi", "dispatcher/verbs-worker.php"),
+    )?);
     let head = resp.head.as_ref().expect("head committed");
     assert_eq!(head.status, 200);
     let multi: Vec<String> = head
@@ -319,8 +342,10 @@ fn abandoned_exchange_fails_that_unit_only() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle();
 
-    let resp =
-        drain_resp(h.handle_blocking(req("/?probe=abandon", "dispatcher/verbs-worker.php"))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/?probe=abandon", "dispatcher/verbs-worker.php"),
+    )?);
     assert_eq!(
         (
             resp.status(),
@@ -332,7 +357,7 @@ fn abandoned_exchange_fails_that_unit_only() -> anyhow::Result<()> {
         "an abandoned unit is failed by the host with a complete 500"
     );
 
-    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
+    let (status, body) = drain(tests::submit(&h, req("/", "dispatcher/verbs-worker.php"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "state=false"),
@@ -351,16 +376,17 @@ fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle();
 
-    let resp = drain_resp(
-        h.handle_blocking(req("/?probe=bail-with-unit", "dispatcher/verbs-worker.php"))?,
-    );
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/?probe=bail-with-unit", "dispatcher/verbs-worker.php"),
+    )?);
     assert!(
         resp.head.is_none() && !resp.ended,
         "a cycle-death loss must stay unsent (got status {})",
         resp.status()
     );
 
-    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
+    let (status, body) = drain(tests::submit(&h, req("/", "dispatcher/verbs-worker.php"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "state=false"),
@@ -379,13 +405,15 @@ fn abandoned_mid_stream_exchange_truncates() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle();
 
-    let resp =
-        drain_resp(h.handle_blocking(req("/?probe=abandon-mid", "dispatcher/verbs-worker.php"))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/?probe=abandon-mid", "dispatcher/verbs-worker.php"),
+    )?);
     assert_eq!(resp.status(), 200, "the committed head stands");
     assert_eq!(resp.body, b"partial");
     assert!(resp.truncated, "the cut must be visible to the client");
 
-    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
+    let (status, body) = drain(tests::submit(&h, req("/", "dispatcher/verbs-worker.php"))?);
     assert_eq!((status, body.as_str()), (200, "state=false"));
 
     drop(h);
@@ -416,7 +444,7 @@ fn abandoned_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
             size: 7,
         }],
     });
-    let (status, body) = drain(h.handle_blocking(rq)?);
+    let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(
         (status, body.as_str()),
         (500, ""),
@@ -439,11 +467,13 @@ fn exit_after_serving_recycles_the_worker() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle();
 
-    let (status, body) =
-        drain(h.handle_blocking(req("/?probe=exit", "dispatcher/verbs-worker.php"))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/?probe=exit", "dispatcher/verbs-worker.php"),
+    )?);
     assert_eq!((status, body.as_str()), (200, "bye"));
 
-    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
+    let (status, body) = drain(tests::submit(&h, req("/", "dispatcher/verbs-worker.php"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "state=false"),
@@ -465,15 +495,17 @@ fn head_and_204_drop_the_body() -> anyhow::Result<()> {
 
     let mut head_rq = req("/", "dispatcher/verbs-worker.php");
     head_rq.method = "HEAD".into();
-    let (status, body) = drain(h.handle_blocking(head_rq)?);
+    let (status, body) = drain(tests::submit(&h, head_rq)?);
     assert_eq!(
         (status, body.as_str()),
         (200, ""),
         "HEAD keeps the GET head but drops the body"
     );
 
-    let (status, body) =
-        drain(h.handle_blocking(req("/?probe=head204", "dispatcher/verbs-worker.php"))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/?probe=head204", "dispatcher/verbs-worker.php"),
+    )?);
     assert_eq!((status, body.as_str()), (204, ""));
 
     drop(h);
@@ -503,7 +535,7 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
     rq.target = Some(b"/path%2Fa?x=1\xe9".to_vec());
     rq.body = php_sys::types::Body::Raw(Cursor::new(b"hello".to_vec()));
     rq.content_length = 5;
-    let (status, body) = drain(h.handle_blocking(rq)?);
+    let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(status, 200);
     let target_hex = format!(
         "target-hex={}",
@@ -539,7 +571,10 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
         assert!(body.contains(line), "missing {line:?} in {body:?}");
     }
 
-    let (status, body) = drain(h.handle_blocking(req("/again", "dispatcher/request-worker.php"))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/again", "dispatcher/request-worker.php"),
+    )?);
     assert_eq!(status, 200, "body: {body:?}");
     assert!(
         body.contains("memo-same=true"),
@@ -561,7 +596,7 @@ fn plugin_stamped_fields_pass_through() -> anyhow::Result<()> {
     let mut rq = req("/p", "dispatcher/request-worker.php");
     rq.protocol = "HTTP/2.0".into();
     rq.received_at = Some(123.5);
-    let (status, body) = drain(h.handle_blocking(rq)?);
+    let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(status, 200);
     for line in [
         "protocol=HTTP/2",
@@ -587,7 +622,7 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
     let mut rq = req("/", "dispatcher/request-worker.php");
     rq.remote = php_sys::types::Addr::Unix(None);
     rq.server = php_sys::types::Addr::Unix(Some("/run/rapira.sock".into()));
-    let (status, body) = drain(h.handle_blocking(rq)?);
+    let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(status, 200);
     for line in [
         "remote=Rapira\\UnixAddress",
@@ -614,7 +649,7 @@ fn uri_synthesis_covers_https_and_asterisk_form() -> anyhow::Result<()> {
     let mut rq = req("/secure", "dispatcher/request-worker.php");
     rq.https = true;
     rq.protocol = "HTTP/3.0".into();
-    let (status, body) = drain(h.handle_blocking(rq)?);
+    let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(status, 200);
     for line in ["uri=https://127.0.0.1:8080/secure", "protocol=HTTP/3"] {
         assert!(body.contains(line), "missing {line:?} in {body:?}");
@@ -622,7 +657,7 @@ fn uri_synthesis_covers_https_and_asterisk_form() -> anyhow::Result<()> {
 
     let mut rq = req("*", "dispatcher/request-worker.php");
     rq.method = "OPTIONS".into();
-    let (status, body) = drain(h.handle_blocking(rq)?);
+    let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(status, 200);
     for line in [
         "method=OPTIONS",
@@ -656,7 +691,7 @@ fn tls_view_reaches_php() -> anyhow::Result<()> {
             fingerprint: "abcd".into(),
         }),
     });
-    let (status, body) = drain(h.handle_blocking(rq)?);
+    let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(status, 200);
     assert!(
         body.contains("tls=TLSv1.3|TLS_AES_256_GCM_SHA384|'h2'|'sni.example'|'0AB1'|NULL|'abcd'"),
@@ -671,7 +706,7 @@ fn tls_view_reaches_php() -> anyhow::Result<()> {
         server_name: None,
         cert: None,
     });
-    let (status, body) = drain(h.handle_blocking(rq)?);
+    let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(status, 200);
     assert!(
         body.contains("tls=TLSv1.2|X|NULL|NULL|NULL|NULL|NULL"),
@@ -717,7 +752,7 @@ fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
             size: 7,
         }],
     });
-    let (status, body) = drain(h.handle_blocking(rq)?);
+    let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(status, 200, "body: {body:?}");
     for line in [
         "class=Rapira\\Http\\Multipart",
@@ -777,7 +812,7 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
             file(b"fb", b"b.bin", &spool_b, 5),
         ],
     });
-    let (status, body) = drain(h.handle_blocking(rq)?);
+    let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(status, 200, "body: {body:?}");
     for line in [
         "counts=2/2",
@@ -814,7 +849,7 @@ fn stream_probe(
 )> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
     let h = r.handle();
-    let rx = h.handle_blocking(req(query, "dispatcher/stream-worker.php"))?;
+    let rx = tests::submit(&h, req(query, "dispatcher/stream-worker.php"))?;
     Ok((r, h, rx))
 }
 
@@ -935,7 +970,7 @@ fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
     let h = r.handle();
 
-    let rx = h.handle_blocking(req("/?probe=discard", "dispatcher/stream-worker.php"))?;
+    let rx = tests::submit(&h, req("/?probe=discard", "dispatcher/stream-worker.php"))?;
     wait_app_record("discard-held");
     drop(rx);
 
@@ -947,8 +982,10 @@ fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
     assert!(ctx.contains(r#""cancelled":true"#), "isCancelled in {ctx}");
     assert!(ctx.contains(r#""finalized":true"#), "isFinalized in {ctx}");
 
-    let resp =
-        drain_resp(h.handle_blocking(req("/?probe=chunks", "dispatcher/stream-worker.php"))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/?probe=chunks", "dispatcher/stream-worker.php"),
+    )?);
     assert_eq!(resp.body_string(), "one,two,three");
 
     drop(h);
@@ -997,7 +1034,10 @@ fn sendfile_one_shot_carries_the_file_length() -> anyhow::Result<()> {
     let path = sendfile_setup("sendfile");
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
     let h = r.handle();
-    let resp = drain_resp(h.handle_blocking(with_path_header("/?probe=sendfile", &path))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        with_path_header("/?probe=sendfile", &path),
+    )?);
     drop(h);
     r.shutdown();
     std::fs::remove_file(&path).ok();
@@ -1016,7 +1056,10 @@ fn sendfile_slice_serves_the_named_bytes() -> anyhow::Result<()> {
     let path = sendfile_setup("slice");
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
     let h = r.handle();
-    let resp = drain_resp(h.handle_blocking(with_path_header("/?probe=sendfile-slice", &path))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        with_path_header("/?probe=sendfile-slice", &path),
+    )?);
     drop(h);
     r.shutdown();
     std::fs::remove_file(&path).ok();
@@ -1034,10 +1077,10 @@ fn sendfile_missing_file_still_answers_404() -> anyhow::Result<()> {
     php_sys::set_sendfile_root(std::env::temp_dir());
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
     let h = r.handle();
-    let resp = drain_resp(h.handle_blocking(req(
-        "/?probe=sendfile-missing",
-        "dispatcher/stream-worker.php",
-    ))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/?probe=sendfile-missing", "dispatcher/stream-worker.php"),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -1053,10 +1096,13 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
     php_sys::set_sendfile_root(std::env::temp_dir());
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
     let h = r.handle();
-    let resp = drain_resp(h.handle_blocking(with_path_header(
-        "/?probe=sendfile-escape",
-        std::path::Path::new("/etc/hosts"),
-    ))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        with_path_header(
+            "/?probe=sendfile-escape",
+            std::path::Path::new("/etc/hosts"),
+        ),
+    )?);
     drop(h);
     r.shutdown();
 

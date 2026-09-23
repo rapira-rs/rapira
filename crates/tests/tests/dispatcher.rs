@@ -7,8 +7,10 @@ fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let (status, body) =
-        drain(h.handle_blocking(req("/", "dispatcher/not-in-dispatcher-mode.php"))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/", "dispatcher/not-in-dispatcher-mode.php"),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -64,7 +66,10 @@ fn host_created_only() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/host-created-only.php"))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/", "dispatcher/host-created-only.php"),
+    )?);
     drop(h);
     r.shutdown();
 

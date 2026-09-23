@@ -10,7 +10,7 @@ workspace = true
 [dependencies]
 anyhow = "1"
 php_sys = { path = "../php_sys" }
-tokio = { version = "1", features = ["sync", "time"] }
+tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
 # Capture layer (init_log_capture).
 tracing-subscriber = "0.3"

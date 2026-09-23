@@ -33,7 +33,7 @@ fn post_superglobals_classic() -> anyhow::Result<()> {
         Some("application/x-www-form-urlencoded"),
         b"bam=bam&some=10".to_vec(),
     );
-    let (status, body) = drain(h.handle_blocking(request)?);
+    let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
     r.shutdown();
 
@@ -60,18 +60,24 @@ fn post_superglobals_worker() -> anyhow::Result<()> {
         "ported_tests/post-superglobals-worker.php",
     )))?;
     let h = r.handle();
-    let (s1, b1) = drain(h.handle_blocking(post(
-        "ported_tests/post-superglobals-worker.php",
-        "foo=bar&iG=42",
-        Some("application/x-www-form-urlencoded"),
-        b"baz=bat&i=7".to_vec(),
-    ))?);
-    let (s2, b2) = drain(h.handle_blocking(post(
-        "ported_tests/post-superglobals-worker.php",
-        "foo=bar&iG=43",
-        Some("application/x-www-form-urlencoded"),
-        b"baz=bat&i=8".to_vec(),
-    ))?);
+    let (s1, b1) = drain(tests::submit(
+        &h,
+        post(
+            "ported_tests/post-superglobals-worker.php",
+            "foo=bar&iG=42",
+            Some("application/x-www-form-urlencoded"),
+            b"baz=bat&i=7".to_vec(),
+        ),
+    )?);
+    let (s2, b2) = drain(tests::submit(
+        &h,
+        post(
+            "ported_tests/post-superglobals-worker.php",
+            "foo=bar&iG=43",
+            Some("application/x-www-form-urlencoded"),
+            b"baz=bat&i=8".to_vec(),
+        ),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -98,12 +104,15 @@ fn request_merge_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let (status, body) = drain(h.handle_blocking(post(
-        "ported_tests/request-merge.php",
-        "get_key=get_value_1",
-        Some("application/x-www-form-urlencoded"),
-        b"post_key=post_value_1".to_vec(),
-    ))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        post(
+            "ported_tests/request-merge.php",
+            "get_key=get_value_1",
+            Some("application/x-www-form-urlencoded"),
+            b"post_key=post_value_1".to_vec(),
+        ),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -125,12 +134,15 @@ fn request_merge_worker() -> anyhow::Result<()> {
     let h = r.handle();
     for i in 1..=3 {
         let body_bytes = format!("post_key=post_value_{i}").into_bytes();
-        let (status, body) = drain(h.handle_blocking(post(
-            "ported_tests/request-merge-worker.php",
-            &format!("get_key=get_value_{i}"),
-            Some("application/x-www-form-urlencoded"),
-            body_bytes,
-        ))?);
+        let (status, body) = drain(tests::submit(
+            &h,
+            post(
+                "ported_tests/request-merge-worker.php",
+                &format!("get_key=get_value_{i}"),
+                Some("application/x-www-form-urlencoded"),
+                body_bytes,
+            ),
+        )?);
         assert_eq!(status, 200);
         assert!(
             body.contains(&format!("'get_key' => 'get_value_{i}'"))
@@ -155,10 +167,13 @@ fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
         } else {
             format!("val={i}")
         };
-        let (status, body) = drain(h.handle_blocking(req(
-            &format!("/jit-request-worker.php?{query}"),
-            "ported_tests/jit-request-worker.php",
-        ))?);
+        let (status, body) = drain(tests::submit(
+            &h,
+            req(
+                &format!("/jit-request-worker.php?{query}"),
+                "ported_tests/jit-request-worker.php",
+            ),
+        )?);
         assert_eq!(status, 200);
         assert!(
             body.contains(&format!("'val' => '{i}'")),
@@ -193,7 +208,7 @@ fn cookies_refresh_worker() -> anyhow::Result<()> {
         request
             .headers
             .push(("Cookie".into(), format!("foo=bar; i={i}").into_bytes()));
-        let (status, body) = drain(h.handle_blocking(request)?);
+        let (status, body) = drain(tests::submit(&h, request)?);
         assert_eq!(status, 200);
         assert!(
             body.contains("'foo' => 'bar'") && body.contains(&format!("'i' => '{i}'")),
@@ -216,7 +231,7 @@ fn malformed_cookies_classic() -> anyhow::Result<()> {
         "Cookie".into(),
         "foo =bar; ===;;==;  .dot.=val  ; PHPSESSID=1234; dup=first; dup=second".into(),
     ));
-    let (status, body) = drain(h.handle_blocking(request)?);
+    let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
     r.shutdown();
 
@@ -245,7 +260,10 @@ fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
     let r = Rapira::start(mode)?;
     let h = r.handle();
 
-    let r1 = drain_resp(h.handle_blocking(req(&format!("/{fixture_name}"), fixture_name))?);
+    let r1 = drain_resp(tests::submit(
+        &h,
+        req(&format!("/{fixture_name}"), fixture_name),
+    )?);
     assert_eq!(r1.status(), 200);
     assert_eq!(
         r1.body_string(),
@@ -270,7 +288,7 @@ fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
     request
         .headers
         .push(("Cookie".into(), format!("PHPSESSID={sid}").into_bytes()));
-    let r2 = drain_resp(h.handle_blocking(request)?);
+    let r2 = drain_resp(tests::submit(&h, request)?);
     drop(h);
     r.shutdown();
 
@@ -304,14 +322,20 @@ fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
         "ported_tests/session-handler-worker.php",
     )))?;
     let h = r.handle();
-    let (s1, b1) = drain(h.handle_blocking(req(
-        "/session-handler-worker.php?action=register",
-        "ported_tests/session-handler-worker.php",
-    ))?);
-    let (s2, b2) = drain(h.handle_blocking(req(
-        "/session-handler-worker.php",
-        "ported_tests/session-handler-worker.php",
-    ))?);
+    let (s1, b1) = drain(tests::submit(
+        &h,
+        req(
+            "/session-handler-worker.php?action=register",
+            "ported_tests/session-handler-worker.php",
+        ),
+    )?);
+    let (s2, b2) = drain(tests::submit(
+        &h,
+        req(
+            "/session-handler-worker.php",
+            "ported_tests/session-handler-worker.php",
+        ),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -340,18 +364,27 @@ fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
         "ported_tests/preloop-session-handler-worker.php",
     )))?;
     let h = r.handle();
-    let (s1, b1) = drain(h.handle_blocking(req(
-        "/preloop-session-handler-worker.php?action=check",
-        "ported_tests/preloop-session-handler-worker.php",
-    ))?);
-    let (s2, b2) = drain(h.handle_blocking(req(
-        "/preloop-session-handler-worker.php?action=use_session",
-        "ported_tests/preloop-session-handler-worker.php",
-    ))?);
-    let (s3, b3) = drain(h.handle_blocking(req(
-        "/preloop-session-handler-worker.php?action=check",
-        "ported_tests/preloop-session-handler-worker.php",
-    ))?);
+    let (s1, b1) = drain(tests::submit(
+        &h,
+        req(
+            "/preloop-session-handler-worker.php?action=check",
+            "ported_tests/preloop-session-handler-worker.php",
+        ),
+    )?);
+    let (s2, b2) = drain(tests::submit(
+        &h,
+        req(
+            "/preloop-session-handler-worker.php?action=use_session",
+            "ported_tests/preloop-session-handler-worker.php",
+        ),
+    )?);
+    let (s3, b3) = drain(tests::submit(
+        &h,
+        req(
+            "/preloop-session-handler-worker.php?action=check",
+            "ported_tests/preloop-session-handler-worker.php",
+        ),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -378,10 +411,13 @@ fn response_header_edges_worker() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("ported_tests/headers-worker.php")))?;
     let h = r.handle();
     for i in [42, 43] {
-        let resp = drain_resp(h.handle_blocking(req(
-            &format!("/headers-worker.php?i={i}"),
-            "ported_tests/headers-worker.php",
-        ))?);
+        let resp = drain_resp(tests::submit(
+            &h,
+            req(
+                &format!("/headers-worker.php?i={i}"),
+                "ported_tests/headers-worker.php",
+            ),
+        )?);
         assert_eq!(
             resp.status(),
             201,
@@ -431,10 +467,13 @@ fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let resp = drain_resp(h.handle_blocking(req(
-        "/response-headers.php?i=1",
-        "ported_tests/response-headers.php",
-    ))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req(
+            "/response-headers.php?i=1",
+            "ported_tests/response-headers.php",
+        ),
+    )?);
     drop(h);
     r.shutdown();
     assert_headers_list_response(&resp, 1);
@@ -450,10 +489,13 @@ fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
     )))?;
     let h = r.handle();
     for i in [1u16, 2] {
-        let resp = drain_resp(h.handle_blocking(req(
-            &format!("/response-headers-worker.php?i={i}"),
-            "ported_tests/response-headers-worker.php",
-        ))?);
+        let resp = drain_resp(tests::submit(
+            &h,
+            req(
+                &format!("/response-headers-worker.php?i={i}"),
+                "ported_tests/response-headers-worker.php",
+            ),
+        )?);
         assert_headers_list_response(&resp, i);
     }
     drop(h);
@@ -468,10 +510,13 @@ fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("ported_tests/flush-worker.php")))?;
     let h = r.handle();
     for i in [42, 43] {
-        let rx = h.handle_blocking(req(
-            &format!("/flush-worker.php?i={i}"),
-            "ported_tests/flush-worker.php",
-        ))?;
+        let rx = tests::submit(
+            &h,
+            req(
+                &format!("/flush-worker.php?i={i}"),
+                "ported_tests/flush-worker.php",
+            ),
+        )?;
         let resp = drain_resp(rx);
         assert_eq!(resp.heads, 1, "exactly one head per response");
         assert_eq!(resp.status(), 200);
@@ -493,8 +538,10 @@ fn raw_status_line_204_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let resp =
-        drain_resp(h.handle_blocking(req("/only-headers.php", "ported_tests/only-headers.php"))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/only-headers.php", "ported_tests/only-headers.php"),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -522,12 +569,15 @@ fn large_post_body_worker() -> anyhow::Result<()> {
     )))?;
     let h = r.handle();
     for _ in 0..2 {
-        let (status, body) = drain(h.handle_blocking(post(
-            "ported_tests/large-request-worker.php",
-            "",
-            None,
-            vec![b'f'; 6_048_576],
-        ))?);
+        let (status, body) = drain(tests::submit(
+            &h,
+            post(
+                "ported_tests/large-request-worker.php",
+                "",
+                None,
+                vec![b'f'; 6_048_576],
+            ),
+        )?);
         assert_eq!(status, 200);
         assert_eq!(body, "Request body size: 6048576");
     }
@@ -576,12 +626,15 @@ fn multipart_upload_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let (status, body) = drain(h.handle_blocking(post(
-        "ported_tests/upload.php",
-        "",
-        Some("multipart/form-data; boundary=RAPIRA"),
-        multipart_body(),
-    ))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        post(
+            "ported_tests/upload.php",
+            "",
+            Some("multipart/form-data; boundary=RAPIRA"),
+            multipart_body(),
+        ),
+    )?);
     drop(h);
     r.shutdown();
     assert_upload_and_cleanup(status, &body);
@@ -594,12 +647,15 @@ fn multipart_upload_worker() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("ported_tests/upload-worker.php")))?;
     let h = r.handle();
     for _ in 0..2 {
-        let (status, body) = drain(h.handle_blocking(post(
-            "ported_tests/upload-worker.php",
-            "",
-            Some("multipart/form-data; boundary=RAPIRA"),
-            multipart_body(),
-        ))?);
+        let (status, body) = drain(tests::submit(
+            &h,
+            post(
+                "ported_tests/upload-worker.php",
+                "",
+                Some("multipart/form-data; boundary=RAPIRA"),
+                multipart_body(),
+            ),
+        )?);
         assert_upload_and_cleanup(status, &body);
     }
     drop(h);
@@ -613,20 +669,25 @@ fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<(
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("ported_tests/upload-worker.php")))?;
     let h = r.handle();
-    let (s1, b1) = drain(h.handle_blocking(post(
-        "ported_tests/upload-worker.php",
-        "",
-        Some("multipart/form-data; boundary=RAPIRA"),
-        multipart_body(),
-    ))?);
+    let (s1, b1) = drain(tests::submit(
+        &h,
+        post(
+            "ported_tests/upload-worker.php",
+            "",
+            Some("multipart/form-data; boundary=RAPIRA"),
+            multipart_body(),
+        ),
+    )?);
     assert_eq!(s1, 200);
     assert!(
         b1.starts_with("foo.txt|"),
         "req1 must see the upload (got {b1:?})"
     );
 
-    let (s2, b2) =
-        drain(h.handle_blocking(req("/upload-worker.php", "ported_tests/upload-worker.php"))?);
+    let (s2, b2) = drain(tests::submit(
+        &h,
+        req("/upload-worker.php", "ported_tests/upload-worker.php"),
+    )?);
     assert_eq!(s2, 200);
     assert_eq!(
         b2, "NO FILE",
@@ -644,10 +705,13 @@ fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("shared/output-then-throw-worker.php")))?;
     let h = r.handle();
     for i in [1, 2] {
-        let resp = drain_resp(h.handle_blocking(req(
-            &format!("/output-then-throw-worker.php?i={i}"),
-            "shared/output-then-throw-worker.php",
-        ))?);
+        let resp = drain_resp(tests::submit(
+            &h,
+            req(
+                &format!("/output-then-throw-worker.php?i={i}"),
+                "shared/output-then-throw-worker.php",
+            ),
+        )?);
         assert_eq!(resp.heads, 1, "exactly one head frame (got {})", resp.heads);
         assert_eq!(resp.status(), 200, "headers were committed by the echo");
         let body = resp.body_string();
@@ -671,14 +735,20 @@ fn no_destructor_sweep_between_jobs_worker() -> anyhow::Result<()> {
         "ported_tests/preloop-destruct-worker.php",
     )))?;
     let h = r.handle();
-    let (s1, b1) = drain(h.handle_blocking(req(
-        "/preloop-destruct-worker.php",
-        "ported_tests/preloop-destruct-worker.php",
-    ))?);
-    let (s2, b2) = drain(h.handle_blocking(req(
-        "/preloop-destruct-worker.php",
-        "ported_tests/preloop-destruct-worker.php",
-    ))?);
+    let (s1, b1) = drain(tests::submit(
+        &h,
+        req(
+            "/preloop-destruct-worker.php",
+            "ported_tests/preloop-destruct-worker.php",
+        ),
+    )?);
+    let (s2, b2) = drain(tests::submit(
+        &h,
+        req(
+            "/preloop-destruct-worker.php",
+            "ported_tests/preloop-destruct-worker.php",
+        ),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -705,14 +775,20 @@ fn throwing_destructor_after_job_stays_contained_worker() -> anyhow::Result<()> 
         "ported_tests/dtor-throw-shutdown-worker.php",
     )))?;
     let h = r.handle();
-    let (s1, b1) = drain(h.handle_blocking(req(
-        "/dtor-throw-shutdown-worker.php",
-        "ported_tests/dtor-throw-shutdown-worker.php",
-    ))?);
-    let (s2, b2) = drain(h.handle_blocking(req(
-        "/dtor-throw-shutdown-worker.php",
-        "ported_tests/dtor-throw-shutdown-worker.php",
-    ))?);
+    let (s1, b1) = drain(tests::submit(
+        &h,
+        req(
+            "/dtor-throw-shutdown-worker.php",
+            "ported_tests/dtor-throw-shutdown-worker.php",
+        ),
+    )?);
+    let (s2, b2) = drain(tests::submit(
+        &h,
+        req(
+            "/dtor-throw-shutdown-worker.php",
+            "ported_tests/dtor-throw-shutdown-worker.php",
+        ),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -737,10 +813,13 @@ fn boot_shutdown_function_fires_once_at_worker_exit() -> anyhow::Result<()> {
     )))?;
     let h = r.handle();
     for _ in 0..2 {
-        let (status, body) = drain(h.handle_blocking(req(
-            "/boot-shutdown-worker.php",
-            "ported_tests/boot-shutdown-worker.php",
-        ))?);
+        let (status, body) = drain(tests::submit(
+            &h,
+            req(
+                "/boot-shutdown-worker.php",
+                "ported_tests/boot-shutdown-worker.php",
+            ),
+        )?);
         assert_eq!(status, 200);
         assert_eq!(
             body, "fired=0",
@@ -780,10 +859,13 @@ fn job_shutdown_function_fires_at_end_of_its_job() -> anyhow::Result<()> {
         "req=2 job_fired=1 boot_fired=0",
         "req=3 job_fired=1 boot_fired=0",
     ] {
-        let (status, body) = drain(h.handle_blocking(req(
-            "/job-shutdown-worker.php",
-            "ported_tests/job-shutdown-worker.php",
-        ))?);
+        let (status, body) = drain(tests::submit(
+            &h,
+            req(
+                "/job-shutdown-worker.php",
+                "ported_tests/job-shutdown-worker.php",
+            ),
+        )?);
         assert_eq!((status, body.as_str()), (200, want));
     }
 
@@ -818,10 +900,13 @@ fn late_shutdown_function_runs_after_boot_entries() -> anyhow::Result<()> {
     )))?;
     let h = r.handle();
     for _ in 0..2 {
-        let (status, body) = drain(h.handle_blocking(req(
-            "/late-shutdown-worker.php",
-            "ported_tests/late-shutdown-worker.php",
-        ))?);
+        let (status, body) = drain(tests::submit(
+            &h,
+            req(
+                "/late-shutdown-worker.php",
+                "ported_tests/late-shutdown-worker.php",
+            ),
+        )?);
         assert_eq!((status, body.as_str()), (200, "ok"));
     }
 
@@ -856,10 +941,13 @@ fn fatal_in_boot_shutdown_function_exits_clean() -> anyhow::Result<()> {
         "ported_tests/shutdown-fatal-boot-worker.php",
     )))?;
     let h = r.handle();
-    let (status, body) = drain(h.handle_blocking(req(
-        "/shutdown-fatal-boot-worker.php",
-        "ported_tests/shutdown-fatal-boot-worker.php",
-    ))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req(
+            "/shutdown-fatal-boot-worker.php",
+            "ported_tests/shutdown-fatal-boot-worker.php",
+        ),
+    )?);
     assert_eq!((status, body.as_str()), (200, "ok"));
 
     drop(h);
@@ -887,10 +975,13 @@ fn boot_global_object_survives_requests() -> anyhow::Result<()> {
         "kernel=ok calls=2",
         "kernel=ok calls=3",
     ] {
-        let (status, body) = drain(h.handle_blocking(req(
-            "/boot-global-worker.php",
-            "ported_tests/boot-global-worker.php",
-        ))?);
+        let (status, body) = drain(tests::submit(
+            &h,
+            req(
+                "/boot-global-worker.php",
+                "ported_tests/boot-global-worker.php",
+            ),
+        )?);
         assert_eq!((status, body.as_str()), (200, want));
     }
     assert_eq!(
@@ -915,10 +1006,13 @@ fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("shared/output-then-throw-worker.php")))?;
     let h = r.handle();
-    let resp = drain_resp(h.handle_blocking(req(
-        "/output-then-throw-worker.php?i=1",
-        "shared/output-then-throw-worker.php",
-    ))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req(
+            "/output-then-throw-worker.php?i=1",
+            "shared/output-then-throw-worker.php",
+        ),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -933,10 +1027,13 @@ fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let resp = drain_resp(h.handle_blocking(req(
-        "/exit-after-output-classic.php",
-        "ported_tests/exit-after-output-classic.php",
-    ))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req(
+            "/exit-after-output-classic.php",
+            "ported_tests/exit-after-output-classic.php",
+        ),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -953,10 +1050,13 @@ fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let resp = drain_resp(h.handle_blocking(req(
-        "/throw-after-output-classic.php",
-        "ported_tests/throw-after-output-classic.php",
-    ))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req(
+            "/throw-after-output-classic.php",
+            "ported_tests/throw-after-output-classic.php",
+        ),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -973,10 +1073,13 @@ fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("ported_tests/file-stream-worker.php")))?;
     let h = r.handle();
     for expected in ["word1", "word2", "word3"] {
-        let (status, body) = drain(h.handle_blocking(req(
-            "/file-stream-worker.php",
-            "ported_tests/file-stream-worker.php",
-        ))?);
+        let (status, body) = drain(tests::submit(
+            &h,
+            req(
+                "/file-stream-worker.php",
+                "ported_tests/file-stream-worker.php",
+            ),
+        )?);
         assert_eq!(status, 200);
         assert_eq!(
             body, expected,
@@ -995,7 +1098,10 @@ fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
         "shared/error-keeps-headers-worker.php",
     )))?;
     let h = r.handle();
-    let resp = drain_resp(h.handle_blocking(req("/", "shared/error-keeps-headers-worker.php"))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/", "shared/error-keeps-headers-worker.php"),
+    )?);
     drop(h);
     r.shutdown();
     assert_eq!(resp.heads, 1);
@@ -1019,7 +1125,7 @@ fn multi_cookie_headers_classic() -> anyhow::Result<()> {
     let h = r.handle();
     let mut request = req("/multi-cookie.php", "ported_tests/multi-cookie.php");
     request.headers.push(("Cookie".into(), "a=1; b=2".into()));
-    let (status, body) = drain(h.handle_blocking(request)?);
+    let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
     r.shutdown();
     assert_eq!((status, body.as_str()), (200, "1,2,a=1; b=2"));
@@ -1043,7 +1149,7 @@ fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
     ] {
         request.headers.push((name.into(), value.into()));
     }
-    let (status, body) = drain(h.handle_blocking(request)?);
+    let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
     r.shutdown();
     assert_eq!(
@@ -1058,7 +1164,10 @@ fn latin1_header_value_passes_through() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let resp = drain_resp(h.handle_blocking(req("/", "ported_tests/latin1-header.php"))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/", "ported_tests/latin1-header.php"),
+    )?);
     drop(h);
     r.shutdown();
     let v = resp
@@ -1079,10 +1188,10 @@ fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let resp = drain_resp(h.handle_blocking(req(
-        "/error-keeps-headers.php",
-        "shared/error-keeps-headers.php",
-    ))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/error-keeps-headers.php", "shared/error-keeps-headers.php"),
+    )?);
     drop(h);
     r.shutdown();
     assert_eq!(resp.heads, 1, "exactly one head");
@@ -1115,7 +1224,7 @@ fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     let mut ctype = b"multipart/form-data; boundary=".to_vec();
     ctype.extend_from_slice(boundary);
     request.content_type = Some(ctype);
-    let (status, body) = drain(h.handle_blocking(request)?);
+    let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
     r.shutdown();
     assert_upload_and_cleanup(status, &body);
@@ -1128,10 +1237,13 @@ fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("ported_tests/bad-header-worker.php")))?;
     let h = r.handle();
-    let resp = drain_resp(h.handle_blocking(req(
-        "/bad-header-worker.php",
-        "ported_tests/bad-header-worker.php",
-    ))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req(
+            "/bad-header-worker.php",
+            "ported_tests/bad-header-worker.php",
+        ),
+    )?);
     drop(h);
     r.shutdown();
 

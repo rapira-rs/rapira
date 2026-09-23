@@ -8,7 +8,7 @@ fn worker_mode_answers_worker_for_every_job() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("mode/worker.php")))?;
     let h = r.handle();
     for job in 0..2 {
-        let resp = drain_resp(h.handle_blocking(req("/", "mode/worker.php"))?);
+        let resp = drain_resp(tests::submit(&h, req("/", "mode/worker.php"))?);
         assert_eq!(resp.status(), 200, "job {job}");
         assert_eq!(resp.body_string(), "Worker:case:same:unbacked", "job {job}");
     }
@@ -51,7 +51,7 @@ fn classic_mode_answers_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let (status, body) = drain(h.handle_blocking(req("/", "mode/classic.php"))?);
+    let (status, body) = drain(tests::submit(&h, req("/", "mode/classic.php"))?);
     drop(h);
     r.shutdown();
 

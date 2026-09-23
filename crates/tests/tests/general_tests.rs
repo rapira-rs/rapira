@@ -21,11 +21,14 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("general_tests/abort-worker.php")))?;
     let h = r.handle();
 
-    let rx = h.handle_blocking(req("/", "general_tests/abort-worker.php"))?;
+    let rx = tests::submit(&h, req("/", "general_tests/abort-worker.php"))?;
     wait_app_record("held");
     drop(rx);
 
-    let (s2, b2) = drain(h.handle_blocking(req("/?probe=1", "general_tests/abort-worker.php"))?);
+    let (s2, b2) = drain(tests::submit(
+        &h,
+        req("/?probe=1", "general_tests/abort-worker.php"),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -49,8 +52,10 @@ fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     let h = r.handle();
 
     let send = |h: &php_sys::RapiraHandle| -> anyhow::Result<i64> {
-        let (_, b) =
-            drain(h.handle_blocking(post("general_tests/resources-worker.php", b"x=1".to_vec()))?);
+        let (_, b) = drain(tests::submit(
+            h,
+            post("general_tests/resources-worker.php", b"x=1".to_vec()),
+        )?);
         b.split_once("streams=")
             .and_then(|(_, n)| n.trim().parse().ok())
             .ok_or_else(|| anyhow::anyhow!("fixture must print streams=N (got: {b:?})"))
@@ -77,7 +82,7 @@ fn https_server_vars() -> anyhow::Result<()> {
     let h = r.handle();
     let mut request = req("/", "shared/server-variables.php");
     request.https = true;
-    let (status, body) = drain(h.handle_blocking(request)?);
+    let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
     r.shutdown();
 
@@ -101,10 +106,14 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
         "general_tests/exception-handler-worker.php",
     )))?;
     let h = r.handle();
-    let (s1, b1) =
-        drain(h.handle_blocking(req("/", "general_tests/exception-handler-worker.php"))?);
-    let (s2, b2) =
-        drain(h.handle_blocking(req("/", "general_tests/exception-handler-worker.php"))?);
+    let (s1, b1) = drain(tests::submit(
+        &h,
+        req("/", "general_tests/exception-handler-worker.php"),
+    )?);
+    let (s2, b2) = drain(tests::submit(
+        &h,
+        req("/", "general_tests/exception-handler-worker.php"),
+    )?);
     drop(h);
     let snap = r.scoreboard().expect("private scoreboard slot");
     r.shutdown();
@@ -132,7 +141,10 @@ fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     )))?;
     let h = r.handle();
 
-    let resp = drain_resp(h.handle_blocking(req("/", "general_tests/throw-quiet-worker.php"))?);
+    let resp = drain_resp(tests::submit(
+        &h,
+        req("/", "general_tests/throw-quiet-worker.php"),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -155,8 +167,14 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("shared/session-bailout-worker.php")))?;
     let h = r.handle();
-    let (_, b1) = drain(h.handle_blocking(req("/", "shared/session-bailout-worker.php"))?);
-    let (_, b2) = drain(h.handle_blocking(req("/", "shared/session-bailout-worker.php"))?);
+    let (_, b1) = drain(tests::submit(
+        &h,
+        req("/", "shared/session-bailout-worker.php"),
+    )?);
+    let (_, b2) = drain(tests::submit(
+        &h,
+        req("/", "shared/session-bailout-worker.php"),
+    )?);
     drop(h);
     r.shutdown();
 
@@ -183,11 +201,15 @@ fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
         "general_tests/fatal-exception-handler-worker.php",
     )))?;
     let h = r.handle();
-    let (s1, _) =
-        drain(h.handle_blocking(req("/", "general_tests/fatal-exception-handler-worker.php"))?);
+    let (s1, _) = drain(tests::submit(
+        &h,
+        req("/", "general_tests/fatal-exception-handler-worker.php"),
+    )?);
     assert!(s1 == 200, "req1 must return a head, not hang (got {s1})");
-    let (s2, _) =
-        drain(h.handle_blocking(req("/", "general_tests/fatal-exception-handler-worker.php"))?);
+    let (s2, _) = drain(tests::submit(
+        &h,
+        req("/", "general_tests/fatal-exception-handler-worker.php"),
+    )?);
     assert!(
         s2 == 200 || s2 == 500,
         "worker must survive and serve req2 (got {s2})"
@@ -210,23 +232,23 @@ fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
             .and_then(|s| s.parse().ok())
             .expect("mem= output")
     };
-    let b0 = mem(drain(h.handle_blocking(req(
-        "/?step=probe",
-        "general_tests/fatal-backtrace-worker.php",
-    ))?)
+    let b0 = mem(drain(tests::submit(
+        &h,
+        req("/?step=probe", "general_tests/fatal-backtrace-worker.php"),
+    )?)
     .1);
-    let (_, boom) = drain(h.handle_blocking(req(
-        "/?step=boom",
-        "general_tests/fatal-backtrace-worker.php",
-    ))?);
+    let (_, boom) = drain(tests::submit(
+        &h,
+        req("/?step=boom", "general_tests/fatal-backtrace-worker.php"),
+    )?);
     assert!(
         boom.contains("boomed"),
         "error consumed + execution continued (got {boom:?})"
     );
-    let leaked = mem(drain(h.handle_blocking(req(
-        "/?step=probe",
-        "general_tests/fatal-backtrace-worker.php",
-    ))?)
+    let leaked = mem(drain(tests::submit(
+        &h,
+        req("/?step=probe", "general_tests/fatal-backtrace-worker.php"),
+    )?)
     .1) - b0;
     assert!(
         leaked < 5 * 1024 * 1024,
@@ -242,8 +264,14 @@ fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("shared/shutdown-fatal-worker.php")))?;
     let h = r.handle();
-    let (_, b1) = drain(h.handle_blocking(req("/?boom=1", "shared/shutdown-fatal-worker.php"))?);
-    let (s2, b2) = drain(h.handle_blocking(req("/", "shared/shutdown-fatal-worker.php"))?);
+    let (_, b1) = drain(tests::submit(
+        &h,
+        req("/?boom=1", "shared/shutdown-fatal-worker.php"),
+    )?);
+    let (s2, b2) = drain(tests::submit(
+        &h,
+        req("/", "shared/shutdown-fatal-worker.php"),
+    )?);
     drop(h);
     r.shutdown();
     assert!(b1.contains("ok counter=1"), "req1 baseline (got: {b1:?})");
@@ -264,11 +292,13 @@ fn client_disconnect_respects_ignore_user_abort() -> anyhow::Result<()> {
         "general_tests/abort-ignore-worker.php",
     )))?;
     let h = r.handle();
-    let rx = h.handle_blocking(req("/", "general_tests/abort-ignore-worker.php"))?;
+    let rx = tests::submit(&h, req("/", "general_tests/abort-ignore-worker.php"))?;
     wait_app_record("held");
     drop(rx);
-    let (s2, b2) =
-        drain(h.handle_blocking(req("/?probe=1", "general_tests/abort-ignore-worker.php"))?);
+    let (s2, b2) = drain(tests::submit(
+        &h,
+        req("/?probe=1", "general_tests/abort-ignore-worker.php"),
+    )?);
     drop(h);
     r.shutdown();
     assert_eq!(s2, 200, "worker must survive the ignored abort");

@@ -17,16 +17,20 @@ fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("observer_tests/observer-bailout.php")))?;
     let h = r.handle();
 
-    let (_, probe) =
-        drain(h.handle_blocking(req("/?mode=ok", "observer_tests/observer-bailout.php"))?);
+    let (_, probe) = drain(tests::submit(
+        &h,
+        req("/?mode=ok", "observer_tests/observer-bailout.php"),
+    )?);
     if probe.contains("skip") {
         drop(h);
         r.shutdown();
         return Ok(());
     }
 
-    let (_, b1) =
-        drain(h.handle_blocking(req("/?mode=fatal", "observer_tests/observer-bailout.php"))?);
+    let (_, b1) = drain(tests::submit(
+        &h,
+        req("/?mode=fatal", "observer_tests/observer-bailout.php"),
+    )?);
     let mut pos = 0;
     for marker in ["<outer>", "<inner>", "</inner>", "</outer>"] {
         let i = b1[pos..].find(marker).unwrap_or_else(|| {
@@ -42,8 +46,10 @@ fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
         );
     }
 
-    let (_, b2) =
-        drain(h.handle_blocking(req("/?mode=ok", "observer_tests/observer-bailout.php"))?);
+    let (_, b2) = drain(tests::submit(
+        &h,
+        req("/?mode=ok", "observer_tests/observer-bailout.php"),
+    )?);
     assert!(
         b2.contains("</outer>") && b2.contains("ok"),
         "worker survives, next request balanced (got {b2:?})"
