@@ -87,7 +87,6 @@ fn run_cycle(script: &Path) -> Cycle {
     log_and_clear_last_error();
     if Outcome::from_c(unsafe { rapira_request_shutdown() }) == Outcome::Bailout {
         error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
-        sb_update(scoreboard::Event::Restart);
         return Cycle::Restart;
     }
 
