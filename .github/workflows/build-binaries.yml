@@ -277,25 +277,32 @@ jobs:
                   else
                     BIN="$ROOT/bin/rapira"; LIB="$ROOT/lib/rapira"
                     cp "$PHP_PREFIX/lib/libphp.dylib" "$LIB/"
+                    # $1 is the file to fix. $2 is the directory that its @rpath and @loader_path dependencies resolve against.
+                    # Homebrew libraries load siblings through @loader_path, for example libbrotlidec and libicuuc.
                     bundle() {
                       otool -L "$1" | awk 'NR>1{print $1}' | while read -r dep; do
-                        case "$dep" in /usr/lib/*|/System/*|@*) continue;; esac
+                        case "$dep" in
+                          /usr/lib/*|/System/*) continue;;
+                          @rpath/*|@loader_path/*) src="$2/${dep#@*/}";;
+                          @*) continue;;
+                          *) src="$dep";;
+                        esac
                         base=$(basename "$dep")
                         if [ ! -f "$LIB/$base" ]; then
-                          cp "$dep" "$LIB/$base"; chmod u+w "$LIB/$base"
+                          cp "$src" "$LIB/$base"; chmod u+w "$LIB/$base"
                           install_name_tool -id "@rpath/$base" "$LIB/$base"
-                          bundle "$LIB/$base"
+                          bundle "$LIB/$base" "$(dirname "$src")"
                         fi
                         install_name_tool -change "$dep" "@rpath/$base" "$1"
                       done
                     }
                     install_name_tool -id @rpath/libphp.dylib "$LIB/libphp.dylib"
-                    for f in "$LIB"/*; do bundle "$f"; done
-                    bundle "$BIN"
-                    for f in "$LIB"/*; do install_name_tool -add_rpath @loader_path "$f" 2>/dev/null || true; done
+                    for f in "$LIB"/*; do bundle "$f" "$PHP_PREFIX/lib"; done
+                    bundle "$BIN" "$PHP_PREFIX/lib"
                     codesign --force -s - "$LIB"/*
                     codesign --force -s - "$BIN"
                     codesign -v "$BIN"
+                    "$BIN" --version
                   fi
 
             - name: Archive
