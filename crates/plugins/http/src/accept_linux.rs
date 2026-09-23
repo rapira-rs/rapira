@@ -98,17 +98,11 @@ impl<L: AsRawFd> Listener<L> {
         // Each worker registers the shared listener in its own epoll instance.
         // https://man7.org/linux/man-pages/man2/epoll_ctl.2.html
         let mut event = libc::epoll_event { events, u64: tag };
-        loop {
-            // SAFETY: event is initialized and remains valid for this call.
-            let result =
-                unsafe { libc::epoll_ctl(self.epoll.as_raw_fd(), operation, fd, &mut event) };
-            if result == 0 {
-                return Ok(());
-            }
-            let error = io::Error::last_os_error();
-            if error.kind() != io::ErrorKind::Interrupted {
-                return Err(error);
-            }
+        // SAFETY: event is initialized and remains valid for this call.
+        if unsafe { libc::epoll_ctl(self.epoll.as_raw_fd(), operation, fd, &mut event) } == 0 {
+            Ok(())
+        } else {
+            Err(io::Error::last_os_error())
         }
     }
 

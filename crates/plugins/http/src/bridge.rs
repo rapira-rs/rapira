@@ -185,14 +185,6 @@ impl http_body::Body for ReplyBody {
             }
         }
     }
-
-    fn is_end_stream(&self) -> bool {
-        false
-    }
-
-    fn size_hint(&self) -> http_body::SizeHint {
-        http_body::SizeHint::default()
-    }
 }
 
 impl Drop for ReplyBody {

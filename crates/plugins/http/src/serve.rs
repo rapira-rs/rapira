@@ -97,10 +97,7 @@ impl Serving {
         let mut builder = http1::Builder::new();
         builder
             .timer(TokioTimer::new())
-            .header_read_timeout(shared.cfg.keepalive_timeout)
-            .preserve_header_case(false)
-            .half_close(false)
-            .keep_alive(true);
+            .header_read_timeout(shared.cfg.keepalive_timeout);
         Self {
             shared,
             graceful: GracefulShutdown::new(),
