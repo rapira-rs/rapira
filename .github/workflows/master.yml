@@ -48,7 +48,7 @@ jobs:
               shell: bash
               run: echo "sha=$(git ls-remote https://github.com/php/php-src.git master | cut -f1)" >> "$GITHUB_OUTPUT"
 
-            # restore/save are split so the 15-25 min PHP build is kept even when a later cargo step fails: cache@v4's post-save only runs on job success.
+            # restore/save are split so the 2.5 to 5 min PHP build is kept even when a later cargo step fails: the actions/cache post-save only runs on job success.
             - name: Restore NTS+debug PHP (embed SAPI)
               id: php
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
