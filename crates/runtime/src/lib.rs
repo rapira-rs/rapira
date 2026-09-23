@@ -225,7 +225,7 @@ impl RapiraBackend {
                     .map_err(|e| anyhow::anyhow!("multipart parse task failed: {e}"))?;
             php_sys::types::Body::Multipart(parsed.map_err(parse_err)?)
         } else {
-            php_sys::types::Body::Raw(Box::new(Cursor::new(std::mem::take(&mut req.body))))
+            php_sys::types::Body::Raw(Cursor::new(std::mem::take(&mut req.body)))
         };
 
         Ok(php_sys::Request {

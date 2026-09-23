@@ -84,7 +84,7 @@ pub fn req(uri: &str, fixture_name: &str) -> Request {
         server_vars: vec![],
         content_type: None,
         content_length: 0,
-        body: php_sys::types::Body::Raw(Box::new(std::io::empty())),
+        body: php_sys::types::Body::Raw(std::io::Cursor::new(Vec::new())),
         received_at: None,
         tls: None,
     }

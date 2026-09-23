@@ -34,7 +34,7 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     );
 
     let mut rq2 = req("/second", "dispatcher/echo-loop-worker.php");
-    rq2.body = php_sys::types::Body::Raw(Box::new(Cursor::new(b"two".to_vec())));
+    rq2.body = php_sys::types::Body::Raw(Cursor::new(b"two".to_vec()));
     rq2.content_length = 3;
     let resp = drain_resp(h.handle_blocking(rq2)?);
     assert_eq!(resp.header("x-rapira-target").as_deref(), Some("/second"));
@@ -501,7 +501,7 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
     ];
     rq.authority = Some(b"example.test".to_vec());
     rq.target = Some(b"/path%2Fa?x=1\xe9".to_vec());
-    rq.body = php_sys::types::Body::Raw(Box::new(Cursor::new(b"hello".to_vec())));
+    rq.body = php_sys::types::Body::Raw(Cursor::new(b"hello".to_vec()));
     rq.content_length = 5;
     let (status, body) = drain(h.handle_blocking(rq)?);
     assert_eq!(status, 200);

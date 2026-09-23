@@ -174,15 +174,16 @@ unsafe fn build_request_impl(ex: *mut rapira_exchange_obj, return_value: *mut zv
             return true;
         }
         let ce: *mut zend_class_entry = rapira_ce_http_request;
-        let st = &*(*ex).job.cast::<ExchangeState>();
+        let st = &mut *(*ex).job.cast::<ExchangeState>();
         let req = &st.job.ctx.req;
+        let view = st.view.get_or_insert_with(|| RequestView::new(req));
 
         let mut headers: zval = std::mem::zeroed();
-        emit_headers(&mut headers, &st.headers);
+        emit_headers(&mut headers, &view.headers);
         let mut remote: zval = std::mem::zeroed();
-        build_address(&mut remote, &st.remote);
+        build_address(&mut remote, &view.remote);
         let mut server: zval = std::mem::zeroed();
-        build_address(&mut server, &st.server);
+        build_address(&mut server, &view.server);
         let mut tls: zval = std::mem::zeroed();
         if let Some(t) = req.tls.as_ref() {
             build_tls(&mut tls, t);
@@ -210,10 +211,11 @@ unsafe fn build_request_impl(ex: *mut rapira_exchange_obj, return_value: *mut zv
         let _ = object_init_ex(&mut reqz, ce);
         let o = reqz.value.obj;
         zend::prop_stringl(ce, o, c"method", req.method.as_bytes());
-        zend::prop_stringl(ce, o, c"uri", st.uri_abs.as_bytes());
-        zend::prop_stringl(ce, o, c"target", &st.target);
-        zend::prop_str_or_null(ce, o, c"authority", st.authority.as_deref());
-        zend::prop_stringl(ce, o, c"protocol", st.protocol_php.as_bytes());
+        zend::prop_stringl(ce, o, c"uri", view.uri_abs.as_bytes());
+        let target = req.target.as_deref().unwrap_or(req.uri.as_bytes());
+        zend::prop_stringl(ce, o, c"target", target);
+        zend::prop_str_or_null(ce, o, c"authority", req.authority.as_deref());
+        zend::prop_stringl(ce, o, c"protocol", protocol_php(&req.protocol).as_bytes());
         zend::prop_zval(ce, o, c"headers", &mut headers);
         zval_ptr_dtor(&mut headers);
         match &st.body {

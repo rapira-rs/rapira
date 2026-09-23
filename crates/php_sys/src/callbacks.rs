@@ -5,6 +5,7 @@ use crate::*;
 use core::slice;
 use std::borrow::Cow;
 use std::ffi::{CStr, CString};
+use std::io::Read;
 use std::mem::ManuallyDrop;
 use std::os::raw::{c_char, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -224,16 +225,7 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
             return 0;
         };
         let dst = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), count) };
-        let mut filled = 0;
-        while filled < count {
-            match reader.read(&mut dst[filled..]) {
-                Ok(0) => break,
-                Ok(n) => filled += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return 0,
-            }
-        }
-        filled
+        reader.read(dst).unwrap_or(0)
     })
 }
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {

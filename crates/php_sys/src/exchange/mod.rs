@@ -1,7 +1,6 @@
 pub(crate) use std::{
     cell::Cell,
     ffi::{CStr, CString, c_char, c_int, c_void},
-    io::Read,
     path::Path,
     time::{Duration, Instant},
 };
@@ -25,7 +24,9 @@ pub(crate) use crate::{
     rapira_receive_timed, rapira_receive_untimed,
     scoreboard::{Event, sb_update},
     start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
-    types::{Addr, Body, FieldLines, FormField, Frame, Job, ResponseHead, TlsView, UploadedFile},
+    types::{
+        Addr, Body, FieldLines, FormField, Frame, Job, Request, ResponseHead, TlsView, UploadedFile,
+    },
     zend, zend_class_entry, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_set_timeout,
     zend_string, zend_unset_timeout, zval, zval_add_ref, zval_ptr_dtor,
@@ -145,7 +146,6 @@ struct FilePart {
     headers: Grouped,
 }
 
-/// Rendered at construction so the builder frame holds no owned allocations (zend.rs frame rule).
 enum AddrOwned {
     Inet {
         ip: String,
@@ -195,18 +195,53 @@ impl Grouped {
     }
 }
 
+/// Contract spelling for `Request::$protocol`: HTTP/2, not the CGI HTTP/2.0.
+fn protocol_php(protocol: &str) -> &str {
+    match protocol {
+        "HTTP/2.0" => "HTTP/2",
+        "HTTP/3.0" => "HTTP/3",
+        p => p,
+    }
+}
+
+/// Owned values of the `Request` object. The builder keeps them in the state because a Zend OOM bailout longjmps through its frame, so that frame holds no values with Drop glue.
+struct RequestView {
+    headers: Grouped,
+    uri_abs: String,
+    remote: AddrOwned,
+    server: AddrOwned,
+}
+
+impl RequestView {
+    fn new(req: &Request) -> Self {
+        let scheme = if req.https { "https" } else { "http" };
+        let host = match &req.authority {
+            Some(a) => String::from_utf8_lossy(a).into_owned(),
+            None => match &req.server {
+                Addr::Inet(sa) => sa.to_string(),
+                Addr::Unix(_) => format!("{}:{}", req.server_name, req.server_port),
+            },
+        };
+        let path = if req.uri.starts_with('/') {
+            req.uri.as_str()
+        } else {
+            "/"
+        };
+        Self {
+            headers: Grouped::new(&req.headers),
+            uri_abs: format!("{scheme}://{host}{path}"),
+            remote: AddrOwned::new(&req.remote),
+            server: AddrOwned::new(&req.server),
+        }
+    }
+}
+
 pub struct ExchangeState {
     // body above job: declaration drop order unlinks the spool files before the frame sender closes
     body: BodyState,
     job: Box<Job>,
-    headers: Grouped,
-    uri_abs: String,
-    target: Vec<u8>,
-    authority: Option<Vec<u8>>,
-    /// Contract spelling for `Request::$protocol`: HTTP/2, not the CGI HTTP/2.0.
-    protocol_php: String,
-    remote: AddrOwned,
-    server: AddrOwned,
+    /// Filled by the first `getRequest()`.
+    view: Option<RequestView>,
     stage: Stage,
     head_sent: bool,
     pending: Option<PendingHead>,
@@ -221,23 +256,13 @@ pub struct ExchangeState {
 }
 
 impl ExchangeState {
-    /// Err hands the job back with its sender intact; the caller fails the unit.
-    fn new(mut job: Box<Job>) -> Result<Self, Box<Job>> {
-        let taken = std::mem::replace(&mut job.ctx.req.body, Body::Raw(Box::new(std::io::empty())));
+    fn new(mut job: Box<Job>) -> Self {
+        let taken = std::mem::replace(
+            &mut job.ctx.req.body,
+            Body::Raw(std::io::Cursor::new(Vec::new())),
+        );
         let body = match taken {
-            Body::Raw(mut reader) => {
-                let mut buf = Vec::new();
-                if let Err(e) = reader.read_to_end(&mut buf) {
-                    tracing::error!(
-                        target: "rapira",
-                        "request body read failed for {} {}: {e}",
-                        job.ctx.req.method, job.ctx.req.uri
-                    );
-                    job.ctx.req.body = Body::Raw(Box::new(std::io::empty()));
-                    return Err(job);
-                }
-                BodyState::Raw(buf)
-            }
+            Body::Raw(cursor) => BodyState::Raw(cursor.into_inner()),
             Body::Multipart(mb) => BodyState::Multipart {
                 fields: mb
                     .fields
@@ -258,49 +283,12 @@ impl ExchangeState {
                     .collect(),
             },
         };
+        let bodiless = job.ctx.req.method.eq_ignore_ascii_case("HEAD");
 
-        let req = &job.ctx.req;
-        let headers = Grouped::new(&req.headers);
-        let authority = req.authority.clone();
-        let target = req
-            .target
-            .clone()
-            .unwrap_or_else(|| req.uri.clone().into_bytes());
-        let protocol_php = match req.protocol.as_str() {
-            "HTTP/2.0" => "HTTP/2".to_owned(),
-            "HTTP/3.0" => "HTTP/3".to_owned(),
-            p => p.to_owned(),
-        };
-        let remote = AddrOwned::new(&req.remote);
-        let server = AddrOwned::new(&req.server);
-
-        let scheme = if req.https { "https" } else { "http" };
-        let host = match &authority {
-            Some(a) => String::from_utf8_lossy(a).into_owned(),
-            None => match &req.server {
-                Addr::Inet(sa) => sa.to_string(),
-                Addr::Unix(_) => format!("{}:{}", req.server_name, req.server_port),
-            },
-        };
-        let path = if req.uri.starts_with('/') {
-            req.uri.as_str()
-        } else {
-            "/"
-        };
-        let uri_abs = format!("{scheme}://{host}{path}");
-
-        let bodiless = req.method.eq_ignore_ascii_case("HEAD");
-
-        Ok(Self {
+        Self {
             job,
             body,
-            headers,
-            uri_abs,
-            target,
-            authority,
-            protocol_php,
-            remote,
-            server,
+            view: None,
             stage: Stage::Open,
             head_sent: false,
             pending: None,
@@ -309,7 +297,7 @@ impl ExchangeState {
             discarded: false,
             bodiless,
             armed_at: Instant::now(),
-        })
+        }
     }
 
     fn host_closed(&self) -> bool {

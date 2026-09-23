@@ -8,7 +8,7 @@ fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u
     r.method = "POST".into();
     r.content_type = content_type.map(|s| s.as_bytes().to_vec());
     r.content_length = body.len() as i64;
-    r.body = php_sys::types::Body::Raw(Box::new(std::io::Cursor::new(body)));
+    r.body = php_sys::types::Body::Raw(std::io::Cursor::new(body));
     r
 }
 

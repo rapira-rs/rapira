@@ -1,53 +1,15 @@
-use std::io::Read;
-
 use php_sys::{Mode, Rapira, Request};
 use tests::{
     captured, drain, drain_resp, fixture, init_log_capture, php_lock, req, wait_app_record,
 };
 
-/// Body source returning at most one byte per read() call, legal `Read` behavior for streaming bodies.
-struct Trickle(std::io::Cursor<Vec<u8>>);
-
-impl Read for Trickle {
-    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
-        let end = buf.len().min(1);
-        self.0.read(&mut buf[..end])
-    }
-}
-
-fn post(fixture_name: &str, body: Box<dyn Read + Send>, len: i64) -> Request {
+fn post(fixture_name: &str, body: Vec<u8>) -> Request {
     let mut r: Request = req("/", fixture_name);
     r.method = "POST".into();
     r.content_type = Some("text/plain".into());
-    r.content_length = len;
-    r.body = php_sys::types::Body::Raw(body);
+    r.content_length = body.len() as i64;
+    r.body = php_sys::types::Body::Raw(std::io::Cursor::new(body));
     r
-}
-
-// php-src treats any short read_post() return as end-of-body (SG(post_read)=1, main/SAPI.c), so a callback that does not fill the buffer truncates the POST body.
-#[test]
-fn post_body_survives_partial_reads() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("general_tests/input-worker.php")))?;
-    let h = r.handle();
-
-    let payload = b"hello rapira post".to_vec();
-    let len = payload.len() as i64;
-    let request = post(
-        "general_tests/input-worker.php",
-        Box::new(Trickle(std::io::Cursor::new(payload))),
-        len,
-    );
-    let (status, body) = drain(h.handle_blocking(request)?);
-    drop(h);
-    r.shutdown();
-
-    assert_eq!(status, 200);
-    assert!(
-        body.contains("len=17") && body.contains("body=hello rapira post"),
-        "php://input must see the whole trickled body (got: {body:?})"
-    );
-    Ok(())
 }
 
 // PHP core ignores ub_write's return value, so the SAPI must raise php_handle_aborted_connection() itself, and the aborted status must not leak into the next request.
@@ -87,13 +49,8 @@ fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     let h = r.handle();
 
     let send = |h: &php_sys::RapiraHandle| -> anyhow::Result<i64> {
-        let body = b"x=1".to_vec();
-        let len = body.len() as i64;
-        let (_, b) = drain(h.handle_blocking(post(
-            "general_tests/resources-worker.php",
-            Box::new(std::io::Cursor::new(body)),
-            len,
-        ))?);
+        let (_, b) =
+            drain(h.handle_blocking(post("general_tests/resources-worker.php", b"x=1".to_vec()))?);
         b.split_once("streams=")
             .and_then(|(_, n)| n.trim().parse().ok())
             .ok_or_else(|| anyhow::anyhow!("fixture must print streams=N (got: {b:?})"))

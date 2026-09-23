@@ -21,7 +21,7 @@ fn base_req() -> Request {
         server_vars: Vec::new(),
         content_type: None,
         content_length: 0,
-        body: Body::Raw(Box::new(std::io::empty())),
+        body: Body::Raw(std::io::Cursor::new(Vec::new())),
         received_at: None,
         tls: None,
     }
@@ -67,10 +67,7 @@ fn state_of(
     let job = Box::new(Job {
         ctx: Context::new(req, tx, /*superglobals=*/ false),
     });
-    let Ok(st) = ExchangeState::new(job) else {
-        unreachable!("empty cursor body always reads")
-    };
-    (st, rx)
+    (ExchangeState::new(job), rx)
 }
 
 fn state() -> (
@@ -149,15 +146,16 @@ fn wire_validators_match_the_classic_byte_sets() {
     assert!(!wire_value(b"nul\0"));
 }
 
-/// Construction normalizes the protocol spelling and maps an empty unix path to the unnamed endpoint.
+/// The view normalizes the protocol spelling and maps an empty unix path to the unnamed endpoint.
 #[test]
-fn construction_normalizes_protocol_and_empty_unix_path() {
+fn view_normalizes_protocol_and_empty_unix_path() {
     let mut req = base_req();
-    req.protocol = "HTTP/3.0".into();
     req.remote = Addr::Unix(Some(PathBuf::new()));
-    let (st, _rx) = state_of(req);
-    assert_eq!(st.protocol_php, "HTTP/3");
-    assert!(matches!(st.remote, AddrOwned::Unix(None)));
+    assert_eq!(protocol_php("HTTP/3.0"), "HTTP/3");
+    assert!(matches!(
+        RequestView::new(&req).remote,
+        AddrOwned::Unix(None)
+    ));
 }
 
 /// A one-shot write carries its computed length on the Head frame; a streamed write leaves framing to the front.

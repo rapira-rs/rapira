@@ -1,7 +1,6 @@
 use bytes::Bytes;
 use std::collections::HashMap;
 use std::ffi::CString;
-use std::io::Read;
 use std::os::raw::c_int;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -133,7 +132,7 @@ pub struct MultipartBody {
 }
 
 pub enum Body {
-    Raw(Box<dyn Read + Send>),
+    Raw(std::io::Cursor<Vec<u8>>),
     Multipart(MultipartBody),
 }
 
@@ -406,7 +405,7 @@ mod tests {
                 server_vars: Vec::new(),
                 content_type: None,
                 content_length: -1,
-                body: Body::Raw(Box::new(std::io::empty())),
+                body: Body::Raw(std::io::Cursor::new(Vec::new())),
                 received_at: None,
                 tls: None,
             },

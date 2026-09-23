@@ -149,7 +149,7 @@ fn server_variables() -> anyhow::Result<()> {
     request.method = "POST".into();
     request.content_type = Some("text/plain".into());
     request.content_length = 3;
-    request.body = php_sys::types::Body::Raw(Box::new(std::io::Cursor::new(b"foo".to_vec())));
+    request.body = php_sys::types::Body::Raw(std::io::Cursor::new(b"foo".to_vec()));
     request
         .headers
         .push(("Authorization".into(), "Basic dmFsZXJ5OnBhc3N3b3Jk".into()));
