@@ -275,7 +275,7 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
         superglobals: false,
         middleware: vec![Arc::new(PrefixBody)],
         ..rapira_http::Config::default()
-    })?;
+    });
     let mut prepared = PrepareCtx::new();
     host.prepare_all(&mut prepared)?;
     // SAFETY: prepared owns the descriptor for the lifetime of this borrow.

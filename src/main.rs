@@ -230,7 +230,7 @@ fn http_pool(
     // ---------------------------------------------------------------------
 
     let mut host: ExtensionRuntime = ExtensionRuntime::new();
-    host.register::<HttpServer>(http_cfg)?;
+    host.register::<HttpServer>(http_cfg);
     let listeners: Vec<RawFd> = prepare_pool(&mut host, prepare)?;
 
     Ok((
@@ -324,8 +324,7 @@ mod tests {
         host.register::<HttpServer>(HttpConfig {
             listen: ListenAddr::Tcp("127.0.0.1:0".parse().expect("loopback addr")),
             ..HttpConfig::default()
-        })
-        .expect("register the http extension");
+        });
         host
     }
 

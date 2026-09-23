@@ -52,17 +52,12 @@ impl ExtensionRuntime {
         Self::default()
     }
 
-    pub fn register<E: Extension>(&mut self, config: E::Config) -> anyhow::Result<()> {
+    pub fn register<E: Extension>(&mut self, config: E::Config) {
         let ext = E::init(config);
-        let name = ext.name().to_string();
-        if self.exts.iter().any(|e| e.name == name) {
-            anyhow::bail!("duplicate extension {name:?}");
-        }
         self.exts.push(Registered {
-            name,
+            name: ext.name().to_string(),
             ext: Box::new(ext),
         });
-        Ok(())
     }
 
     /// Master-side, pre-fork: runs every extension's `prepare` in registration order.
@@ -226,8 +221,8 @@ impl RapiraBackend {
             method: req.method,
             https: req.https,
             protocol: req.protocol,
-            target: req.target.filter(|t| !t.is_empty()),
-            authority: req.authority.filter(|a| !a.is_empty()),
+            target: req.target,
+            authority: req.authority,
             remote: map_addr(req.remote),
             server: map_addr(req.server),
             server_name: req.server_name,
