@@ -32,7 +32,7 @@ members = [
 
 [workspace.dependencies]
 anyhow = "1"
-tracing = "0.1"
+tracing = { version = "0.1", default-features = false, features = ["std"] }
 php_sys = { path = "crates/php_sys" }
 rapira_runtime = { path = "crates/runtime" }
 rapira_config = { path = "crates/config" }
@@ -59,15 +59,14 @@ anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 extension_api = { workspace = true }
 rapira_master = { workspace = true }
-rapira_scoreboard = { workspace = true }
 rapira_runtime = { workspace = true }
 php_sys = { workspace = true }
 rapira_config = { workspace = true }
 rapira_static_files = { workspace = true }
 rapira_http = { workspace = true }
-libc = "0.2"
+libc = { workspace = true }
 mimalloc = "0.1"
-tracing.workspace = true
+tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono", "json"] }
 
 [dev-dependencies]

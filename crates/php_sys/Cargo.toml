@@ -10,7 +10,7 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["sync", "rt", "time"] }
+tokio = { workspace = true, features = ["time"] }
 rapira_scoreboard = { workspace = true }
 bytes = { workspace = true }
 

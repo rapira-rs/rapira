@@ -8,21 +8,21 @@ publish = false
 workspace = true
 
 [dependencies]
-anyhow = "1"
+anyhow = { workspace = true }
 extension_api = { workspace = true }
-php_sys = { path = "../php_sys" }
-tokio = { version = "1", features = ["rt", "sync", "time"] }
-tracing = "0.1"
+php_sys = { workspace = true }
+tokio = { workspace = true, features = ["rt", "time"] }
+tracing = { workspace = true }
 # Capture layer (init_log_capture).
 tracing-subscriber = "0.3"
 
 [dev-dependencies]
 http-body-util = { workspace = true }
 rapira_http = { workspace = true }
-rapira_runtime = { path = "../runtime" }
-tokio = { version = "1", features = ["macros", "rt", "rt-multi-thread"] }
+rapira_runtime = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # E2E harness (tests/e2e): process control for the spawned rapira binary.
-libc = "0.2"
+libc = { workspace = true }
 # E2E log-format assertions (tests/e2e/logging.rs).
 serde_json = "1"
 
