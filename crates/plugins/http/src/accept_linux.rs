@@ -83,7 +83,9 @@ impl<L: AsRawFd> Listener<L> {
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
                 // Every other result moves this worker behind the others. A rotation failure
                 // leaves the listener unregistered, so it is wrapped as `ErrorKind::Other`,
-                // which the accept loop treats as fatal.
+                // which the accept loop treats as fatal. The stream accepted in that call closes:
+                // for a valid listener only ENOMEM or ENOSPC fail the rotation, and these can
+                // also fail the tokio registration of the stream.
                 result => {
                     self.rotate().map_err(io::Error::other)?;
                     return result.map(Some);
