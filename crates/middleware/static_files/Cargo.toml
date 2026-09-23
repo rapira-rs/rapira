@@ -13,7 +13,6 @@ workspace = true
 extension_api = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
-libc = { workspace = true }
 http-body-util = { workspace = true }
 tracing = { workspace = true }
 percent-encoding = "2"

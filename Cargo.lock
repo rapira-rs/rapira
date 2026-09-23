@@ -764,7 +764,6 @@ dependencies = [
  "extension_api",
  "http",
  "http-body-util",
- "libc",
  "percent-encoding",
  "tempfile",
  "tokio",

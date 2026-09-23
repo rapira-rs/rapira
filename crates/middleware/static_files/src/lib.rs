@@ -74,7 +74,8 @@ fn is_miss(e: &std::io::Error) -> bool {
             | std::io::ErrorKind::IsADirectory
             | std::io::ErrorKind::InvalidFilename
             | std::io::ErrorKind::InvalidInput
-    ) || e.raw_os_error() == Some(libc::ENOTDIR)
+            | std::io::ErrorKind::NotADirectory
+    )
 }
 
 impl Middleware for StaticFiles {
