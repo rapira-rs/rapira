@@ -1,8 +1,7 @@
 use std::time::{Duration, Instant};
 
 use crate::harness::{
-    Conn, decode_chunked, diagnostics, http_get, http_get_raw, spawn_with_config,
-    wait_log_contains, wait_workers,
+    Conn, diagnostics, http_get, http_get_raw, spawn_with_config, wait_log_contains, wait_workers,
 };
 
 const T: Duration = Duration::from_secs(10);
@@ -484,10 +483,10 @@ fn worker_death_mid_stream_truncates_the_response() {
     assert_eq!(status, 200);
     c.read_body_until(b"first,", T).expect("first chunk");
     let rest = c.read_remaining(T).expect("connection drops");
-    let full = [b"6\r\nfirst,\r\n".to_vec(), rest].concat();
     assert!(
-        decode_chunked(&full).is_err(),
-        "no clean terminator after a mid-stream death"
+        !rest.ends_with(b"0\r\n\r\n"),
+        "no clean terminator after a mid-stream death: {:?}",
+        String::from_utf8_lossy(&rest)
     );
 }
 
