@@ -12,7 +12,7 @@ use rapira_master::PoolConfig;
 use rapira_runtime::ExtensionRuntime;
 use rapira_scoreboard::Scoreboard;
 use std::{
-    fs::{OpenOptions, read_dir, remove_file},
+    fs::{File, OpenOptions, read_dir, remove_file},
     os::fd::RawFd,
     path::{Path, PathBuf},
     sync::Arc,
@@ -130,6 +130,21 @@ fn http_pool(
     prepare: &mut PrepareCtx,
 ) -> anyhow::Result<(PoolRun, PoolConfig)> {
     let entrypoint: PathBuf = http.pool.entrypoint;
+    // The entrypoint is fixed for the pool's lifetime, so one open at boot covers every request.
+    // The open proves read permission; the metadata check rejects a directory.
+    let meta = File::open(&entrypoint)
+        .and_then(|f| f.metadata())
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "http.pool.entrypoint {} is not readable: {e}",
+                entrypoint.display()
+            )
+        })?;
+    anyhow::ensure!(
+        meta.is_file(),
+        "http.pool.entrypoint {} is not a regular file",
+        entrypoint.display()
+    );
     let mode: Mode = match http.pool.mode {
         RunMode::Classic => Mode::Classic,
         RunMode::Worker => Mode::Worker(entrypoint.clone()),

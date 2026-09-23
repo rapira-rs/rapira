@@ -10,32 +10,218 @@ use hyper_util::server::graceful::GracefulShutdown;
 use tokio::io::{AsyncRead, AsyncWrite};
 #[cfg(not(target_os = "linux"))]
 use tokio::net::{TcpListener, UnixListener};
-use tokio::sync::watch::{self, channel};
+#[cfg(not(target_os = "linux"))]
+use tokio::sync::watch;
+use tokio::sync::watch::channel;
 
 use crate::Config;
 #[cfg(target_os = "linux")]
 use crate::accept_linux::{TcpListener, UnixListener};
 use crate::handler::{RapiraService, Shared};
 
+/// Stops the accept loop. The blocked acceptor waits on this eventfd.
+#[cfg(target_os = "linux")]
+pub(crate) type Stop = crate::accept_linux::Wake;
+
+/// Stops the accept loop. The async acceptor selects on this flag.
+#[cfg(not(target_os = "linux"))]
+pub(crate) struct Stop(watch::Sender<bool>);
+
+#[cfg(not(target_os = "linux"))]
+impl Stop {
+    pub(crate) fn new() -> std::io::Result<Self> {
+        Ok(Self(watch::channel(false).0))
+    }
+
+    pub(crate) fn handle(&self) -> watch::Receiver<bool> {
+        self.0.subscribe()
+    }
+
+    pub(crate) fn stop(&self) {
+        let _ = self.0.send(true);
+    }
+}
+
 enum Acceptor {
     Tcp(TcpListener),
     Unix(UnixListener),
 }
 
-fn create_acceptor(prepared: PreparedListener) -> Result<Acceptor> {
+fn create_acceptor(
+    prepared: PreparedListener,
+    #[cfg(target_os = "linux")] stop: Stop,
+) -> Result<Acceptor> {
     use std::os::fd::{FromRawFd, IntoRawFd};
     let tcp: bool = matches!(prepared.addr(), ListenAddr::Tcp(_));
     // SAFETY: into_raw_fd transfers sole ownership of a listening socket; prepare
     // already set O_NONBLOCK, which from_std requires but does not set.
     if tcp {
         let std = unsafe { std::net::TcpListener::from_raw_fd(prepared.into_raw_fd()) };
-        Ok(Acceptor::Tcp(TcpListener::from_std(std)?))
+        #[cfg(target_os = "linux")]
+        let listener = TcpListener::from_std(std, stop)?;
+        #[cfg(not(target_os = "linux"))]
+        let listener = TcpListener::from_std(std)?;
+        Ok(Acceptor::Tcp(listener))
     } else {
         let std = unsafe { std::os::unix::net::UnixListener::from_raw_fd(prepared.into_raw_fd()) };
-        Ok(Acceptor::Unix(UnixListener::from_std(std)?))
+        #[cfg(target_os = "linux")]
+        let listener = UnixListener::from_std(std, stop)?;
+        #[cfg(not(target_os = "linux"))]
+        let listener = UnixListener::from_std(std)?;
+        Ok(Acceptor::Unix(listener))
     }
 }
 
+/// Everything the accept loop hands to a connection, and the drain that follows it.
+struct Serving {
+    shared: Arc<Shared>,
+    graceful: GracefulShutdown,
+    builder: http1::Builder,
+}
+
+impl Serving {
+    fn start(php: Php, config: Config) -> Self {
+        match &config.listen {
+            ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
+            ListenAddr::Unix(p) => {
+                tracing::info!(target: "http", "listening on unix:{}", p.display())
+            }
+        }
+        let chain: Arc<[_]> = config.middleware.clone().into();
+        let shared = Arc::new(Shared {
+            cfg: config,
+            php,
+            chain,
+            inflight: Arc::new(AtomicUsize::new(0)),
+        });
+        let mut builder = http1::Builder::new();
+        builder
+            .timer(TokioTimer::new())
+            .header_read_timeout(shared.cfg.keepalive_timeout)
+            .preserve_header_case(false)
+            .half_close(false)
+            .keep_alive(true);
+        Self {
+            shared,
+            graceful: GracefulShutdown::new(),
+            builder,
+        }
+    }
+
+    fn spawn_tcp(&self, stream: tokio::net::TcpStream, peer: std::net::SocketAddr) {
+        let _ = stream.set_nodelay(true);
+        let server = stream
+            .local_addr()
+            .map(Addr::Inet)
+            .unwrap_or_else(|_| listen_addr(&self.shared.cfg.listen));
+        self.spawn_conn(stream, Addr::Inet(peer), server);
+    }
+
+    fn spawn_unix(&self, stream: tokio::net::UnixStream, peer: Option<&std::path::Path>) {
+        let remote = Addr::Unix(peer.map(Into::into));
+        self.spawn_conn(stream, remote, listen_addr(&self.shared.cfg.listen));
+    }
+
+    fn spawn_conn<S>(&self, stream: S, remote: Addr, server: Addr)
+    where
+        S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
+    {
+        let (closed_tx, closed_rx) = channel(crate::bridge::ConnectionState::default());
+        let svc = RapiraService::new(Arc::clone(&self.shared), remote, server, closed_rx);
+        let io = crate::bridge::TimedIo::new(
+            TokioIo::new(stream),
+            self.shared.cfg.write_timeout,
+            closed_tx.clone(),
+        );
+        let connection = self.builder.serve_connection(io, svc);
+        let watched = self.graceful.watch(connection);
+        tokio::spawn(async move {
+            if let Err(e) = watched.await {
+                tracing::debug!(target: "http", "connection ended with error: {e}");
+            }
+            closed_tx.send_modify(|s| s.closed = true);
+        });
+    }
+
+    /// Waits out the connections in flight. The acceptor is already gone.
+    async fn drain(self, fatal: Option<anyhow::Error>) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + self.shared.cfg.drain_grace;
+        if tokio::time::timeout_at(deadline, self.graceful.shutdown())
+            .await
+            .is_err()
+        {
+            tracing::warn!(
+                target: "http",
+                "graceful connection shutdown did not finish within {:?}",
+                self.shared.cfg.drain_grace
+            );
+        }
+        while self.shared.inflight.load(Ordering::Acquire) > 0
+            && tokio::time::Instant::now() < deadline
+        {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+        let stranded = self.shared.inflight.load(Ordering::Acquire);
+        if let Some(e) = fatal {
+            if stranded > 0 {
+                tracing::warn!(
+                    target: "http",
+                    "{stranded} request(s) still in flight when the listener failed"
+                );
+            }
+            return Err(e);
+        }
+        if stranded > 0 {
+            return Err(anyhow!(
+                "http drain timed out after {:?} with {stranded} request(s) in flight; \
+                 their responses were cut short",
+                self.shared.cfg.drain_grace
+            ));
+        }
+        tracing::info!(target: "http", "drained cleanly; accept loop stopped");
+        Ok(())
+    }
+}
+
+/// Runs the accept loop on the calling thread. A blocked accept is what lets the kernel
+/// hand each connection to one worker.
+#[cfg(target_os = "linux")]
+pub(crate) fn serve(
+    php: Php,
+    config: Config,
+    prepared: PreparedListener,
+    stop: Stop,
+    rt: &tokio::runtime::Runtime,
+) -> Result<()> {
+    let acceptor = create_acceptor(prepared, stop)?;
+    let serving = Serving::start(php, config);
+    let mut fatal: Option<anyhow::Error> = None;
+    {
+        // tokio::spawn and from_std reach the runtime the connections run on.
+        let _guard = rt.enter();
+        loop {
+            match accept_blocking(&acceptor, &serving) {
+                Ok(true) => {}
+                Ok(false) => break,
+                Err(e) if is_fatal_accept(&e) => {
+                    fatal = Some(anyhow!("listener failed: {e}"));
+                    break;
+                }
+                Err(e) if is_skipped_accept(&e) => {
+                    tracing::debug!(target: "http", "accept skipped: {e}");
+                }
+                Err(e) => {
+                    tracing::warn!(target: "http", "accept failed: {e}");
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            }
+        }
+    }
+    drop(acceptor);
+    rt.block_on(serving.drain(fatal))
+}
+
+#[cfg(not(target_os = "linux"))]
 pub(crate) async fn serve(
     php: Php,
     config: Config,
@@ -43,54 +229,19 @@ pub(crate) async fn serve(
     mut shutdown: watch::Receiver<bool>,
 ) -> Result<()> {
     let acceptor = create_acceptor(prepared)?;
-    match &config.listen {
-        ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
-        ListenAddr::Unix(p) => tracing::info!(target: "http", "listening on unix:{}", p.display()),
-    }
-
-    let chain: Arc<[_]> = config.middleware.clone().into();
-    let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
-    let shared = Arc::new(Shared {
-        cfg: config,
-        php,
-        chain,
-        inflight: Arc::clone(&inflight),
-    });
-    let graceful = GracefulShutdown::new();
-
-    let mut builder = http1::Builder::new();
-    builder
-        .timer(TokioTimer::new())
-        .header_read_timeout(shared.cfg.keepalive_timeout)
-        .preserve_header_case(false)
-        .half_close(false)
-        .keep_alive(true);
+    let serving = Serving::start(php, config);
     let mut fatal: Option<anyhow::Error> = None;
     loop {
         tokio::select! {
             biased;
             _ = shutdown.wait_for(|stop| *stop) => break,
-            res = accept_connection(&acceptor, &shared.cfg.listen, &builder, &graceful, &shared) => match res {
-                Ok(()) => {
-                    #[cfg(target_os = "linux")]
-                    if let Err(e) = match &acceptor {
-                        Acceptor::Tcp(listener) => listener.on_accept(),
-                        Acceptor::Unix(listener) => listener.on_accept(),
-                    } {
-                        fatal = Some(anyhow!("listener rotation failed: {e}"));
-                        break;
-                    }
-                }
+            res = accept_connection(&acceptor, &serving) => match res {
+                Ok(()) => {}
                 Err(e) if is_fatal_accept(&e) => {
                     fatal = Some(anyhow!("listener failed: {e}"));
                     break;
                 }
-                Err(e) if matches!(
-                    e.kind(),
-                    std::io::ErrorKind::ConnectionAborted
-                        | std::io::ErrorKind::ConnectionReset
-                        | std::io::ErrorKind::Interrupted
-                ) => {
+                Err(e) if is_skipped_accept(&e) => {
                     tracing::debug!(target: "http", "accept skipped: {e}");
                 }
                 Err(e) => {
@@ -102,39 +253,7 @@ pub(crate) async fn serve(
     }
 
     drop(acceptor);
-    let deadline = tokio::time::Instant::now() + shared.cfg.drain_grace;
-    if tokio::time::timeout_at(deadline, graceful.shutdown())
-        .await
-        .is_err()
-    {
-        tracing::warn!(
-            target: "http",
-            "graceful connection shutdown did not finish within {:?}",
-            shared.cfg.drain_grace
-        );
-    }
-    while inflight.load(Ordering::Acquire) > 0 && tokio::time::Instant::now() < deadline {
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    }
-    let stranded = inflight.load(Ordering::Acquire);
-    if let Some(e) = fatal {
-        if stranded > 0 {
-            tracing::warn!(
-                target: "http",
-                "{stranded} request(s) still in flight when the listener failed"
-            );
-        }
-        return Err(e);
-    }
-    if stranded > 0 {
-        return Err(anyhow!(
-            "http drain timed out after {:?} with {stranded} request(s) in flight; \
-             their responses were cut short",
-            shared.cfg.drain_grace
-        ));
-    }
-    tracing::info!(target: "http", "drained cleanly; accept loop stopped");
-    Ok(())
+    serving.drain(fatal).await
 }
 
 fn listen_addr(listen: &ListenAddr) -> Addr {
@@ -146,159 +265,111 @@ fn listen_addr(listen: &ListenAddr) -> Addr {
 
 // Linux accept() forwards pending network errors of the new connection, so only errnos
 // that prove listener state are fatal. https://man7.org/linux/man-pages/man2/accept.2.html
+// `ErrorKind::Other` never carries an errno; it is the wrapped rotation failure, after
+// which the listener is unregistered.
 fn is_fatal_accept(e: &std::io::Error) -> bool {
+    e.kind() == std::io::ErrorKind::Other
+        || matches!(
+            e.raw_os_error(),
+            Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK)
+        )
+}
+
+fn is_skipped_accept(e: &std::io::Error) -> bool {
     matches!(
-        e.raw_os_error(),
-        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK)
+        e.kind(),
+        std::io::ErrorKind::ConnectionAborted
+            | std::io::ErrorKind::ConnectionReset
+            | std::io::ErrorKind::Interrupted
     )
 }
 
-async fn accept_connection(
-    acceptor: &Acceptor,
-    listen: &ListenAddr,
-    builder: &http1::Builder,
-    graceful: &GracefulShutdown,
-    shared: &Arc<Shared>,
-) -> std::io::Result<()> {
+/// Takes one connection. False means the wake descriptor stopped the loop.
+#[cfg(target_os = "linux")]
+fn accept_blocking(acceptor: &Acceptor, serving: &Serving) -> std::io::Result<bool> {
+    match acceptor {
+        Acceptor::Tcp(l) => match l.accept_blocking()? {
+            None => return Ok(false),
+            Some((stream, peer)) => {
+                serving.spawn_tcp(tokio::net::TcpStream::from_std(stream)?, peer);
+            }
+        },
+        Acceptor::Unix(l) => match l.accept_blocking()? {
+            None => return Ok(false),
+            Some((stream, peer)) => {
+                serving.spawn_unix(
+                    tokio::net::UnixStream::from_std(stream)?,
+                    peer.as_pathname(),
+                );
+            }
+        },
+    }
+    Ok(true)
+}
+
+#[cfg(not(target_os = "linux"))]
+async fn accept_connection(acceptor: &Acceptor, serving: &Serving) -> std::io::Result<()> {
     match acceptor {
         Acceptor::Tcp(l) => {
             let (stream, peer) = l.accept().await?;
-            let _ = stream.set_nodelay(true);
-            let server = stream
-                .local_addr()
-                .map(Addr::Inet)
-                .unwrap_or_else(|_| listen_addr(listen));
-            spawn_conn(stream, Addr::Inet(peer), server, builder, graceful, shared);
+            serving.spawn_tcp(stream, peer);
         }
         Acceptor::Unix(l) => {
             let (stream, peer) = l.accept().await?;
-            let remote = Addr::Unix(peer.as_pathname().map(Into::into));
-            let server = listen_addr(listen);
-            spawn_conn(stream, remote, server, builder, graceful, shared);
+            serving.spawn_unix(stream, peer.as_pathname());
         }
     }
     Ok(())
 }
 
-fn spawn_conn<S>(
-    stream: S,
-    remote: Addr,
-    server: Addr,
-    builder: &http1::Builder,
-    graceful: &GracefulShutdown,
-    shared: &Arc<Shared>,
-) where
-    S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
-{
-    let (closed_tx, closed_rx) = channel(crate::bridge::ConnectionState::default());
-    let svc = RapiraService::new(Arc::clone(shared), remote, server, closed_rx);
-    let io = crate::bridge::TimedIo::new(
-        TokioIo::new(stream),
-        shared.cfg.write_timeout,
-        closed_tx.clone(),
-    );
-    let connection = builder.serve_connection(io, svc);
-    let watched = graceful.watch(connection);
-    tokio::spawn(async move {
-        if let Err(e) = watched.await {
-            tracing::debug!(target: "http", "connection ended with error: {e}");
-        }
-        closed_tx.send_modify(|s| s.closed = true);
-    });
-}
-
 #[cfg(test)]
 mod tests {
-    use std::collections::BTreeSet;
-    use std::future::{Future, poll_fn};
-    use std::io::Write;
-    use std::os::fd::AsRawFd;
-    use std::task::Poll;
-
-    use tokio::io::AsyncReadExt;
-
     use super::*;
 
-    fn assert_nonblocking(stream: &impl AsRawFd) {
-        // SAFETY: fcntl reads flags from the live stream descriptor.
-        let flags = unsafe { libc::fcntl(stream.as_raw_fd(), libc::F_GETFL) };
-        assert_ne!(flags, -1);
-        assert_ne!(flags & libc::O_NONBLOCK, 0);
+    struct Case {
+        name: &'static str,
+        error: std::io::Error,
+        fatal: bool,
+        skipped: bool,
     }
 
-    #[tokio::test]
-    async fn queued_tcp_connections_remain_ready_after_each_accept() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let addr = listener.local_addr().unwrap();
-        let mut clients = Vec::new();
-        for byte in 0..16_u8 {
-            let mut client = std::net::TcpStream::connect(addr).unwrap();
-            client.write_all(&[byte]).unwrap();
-            clients.push(client);
-        }
-        let listener = TcpListener::from_std(listener).unwrap();
-        let mut received = BTreeSet::new();
-        for _ in 0..16 {
-            let (mut stream, peer) =
-                tokio::time::timeout(Duration::from_secs(2), listener.accept())
-                    .await
-                    .expect("queued connection must remain ready")
-                    .unwrap();
-            assert!(
-                clients
-                    .iter()
-                    .any(|client| client.local_addr().unwrap() == peer)
+    /// Only an error that proves the listener is unusable ends the accept loop.
+    #[test]
+    fn accept_errors_end_the_loop_only_when_the_listener_is_gone() {
+        let cases = [
+            Case {
+                name: "a rotation failure leaves the listener unregistered",
+                error: std::io::Error::other("listener rotation failed"),
+                fatal: true,
+                skipped: false,
+            },
+            Case {
+                name: "EBADF proves the listener descriptor is gone",
+                error: std::io::Error::from_raw_os_error(libc::EBADF),
+                fatal: true,
+                skipped: false,
+            },
+            Case {
+                name: "EMFILE is a limit of this worker, not of the listener",
+                error: std::io::Error::from_raw_os_error(libc::EMFILE),
+                fatal: false,
+                skipped: false,
+            },
+            Case {
+                name: "ECONNABORTED concerns one connection",
+                error: std::io::Error::from_raw_os_error(libc::ECONNABORTED),
+                fatal: false,
+                skipped: true,
+            },
+        ];
+        for case in cases {
+            assert_eq!(is_fatal_accept(&case.error), case.fatal, "{}", case.name);
+            assert_eq!(
+                is_skipped_accept(&case.error),
+                case.skipped,
+                "{}",
+                case.name
             );
-            assert_nonblocking(&stream);
-            received.insert(stream.read_u8().await.unwrap());
-            #[cfg(target_os = "linux")]
-            listener.on_accept().unwrap();
         }
-        assert_eq!(received, (0..16).collect());
-    }
-
-    #[tokio::test]
-    async fn canceled_tcp_accept_keeps_the_next_connection() {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let addr = listener.local_addr().unwrap();
-        let listener = TcpListener::from_std(listener).unwrap();
-        let mut pending = Box::pin(listener.accept());
-        assert!(poll_fn(|cx| Poll::Ready(pending.as_mut().poll(cx).is_pending())).await);
-        drop(pending);
-        let client = std::net::TcpStream::connect(addr).unwrap();
-        let (_, peer) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
-            .await
-            .expect("accept must remain usable after cancellation")
-            .unwrap();
-        assert_eq!(peer, client.local_addr().unwrap());
-    }
-
-    #[tokio::test]
-    async fn queued_unix_connections_remain_ready_after_each_accept() {
-        let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("http.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        listener.set_nonblocking(true).unwrap();
-        let mut clients = Vec::new();
-        for byte in 0..16_u8 {
-            let mut client = std::os::unix::net::UnixStream::connect(&path).unwrap();
-            client.write_all(&[byte]).unwrap();
-            clients.push(client);
-        }
-        let listener = UnixListener::from_std(listener).unwrap();
-        let mut received = BTreeSet::new();
-        for _ in 0..16 {
-            let (mut stream, _) = tokio::time::timeout(Duration::from_secs(2), listener.accept())
-                .await
-                .expect("queued connection must remain ready")
-                .unwrap();
-            assert_nonblocking(&stream);
-            received.insert(stream.read_u8().await.unwrap());
-            #[cfg(target_os = "linux")]
-            listener.on_accept().unwrap();
-        }
-        assert_eq!(received, (0..16).collect());
     }
 }

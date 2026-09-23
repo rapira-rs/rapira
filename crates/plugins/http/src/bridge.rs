@@ -201,8 +201,14 @@ impl Drop for ReplyBody {
         if self.declared_cl == Some(self.sent)
             && !matches!(self.staged, Some(ReplyEvent::End { .. }))
             && self.guard.end_flush.get().is_some()
-            && let Some(reply) = self.reply.take()
+            && let Some(mut reply) = self.reply.take()
         {
+            // A buffered reply queues End behind the last chunk, so consume it here.
+            // Anything else goes to the drain task.
+            let mut cx = Context::from_waker(std::task::Waker::noop());
+            if let Poll::Ready(Some(ReplyEvent::End { .. }) | None) = reply.poll_next(&mut cx) {
+                return;
+            }
             spawn_drain(reply, self.closed.clone(), Arc::clone(&self.guard));
         }
     }
@@ -696,6 +702,64 @@ mod tests {
         })
         .await
         .expect("an unflushed drain must cancel on close");
+    }
+
+    /// The buffered path queues End behind the last chunk: drop consumes it without a drain task.
+    #[tokio::test]
+    async fn queued_end_is_consumed_at_drop_without_a_task() {
+        let guard = guard();
+        guard.end_flush.set(0).unwrap();
+        let (reply, events, mut pending) = drain_reply();
+        events.send(chunk("hello")).unwrap();
+        events.send(end(false)).unwrap();
+        let mut b = ReplyBody::new(
+            reply,
+            Some(5),
+            guard,
+            None,
+            watch::channel(ConnectionState::default()).1,
+        );
+        assert_eq!(data(&mut b).await.unwrap().unwrap(), "hello");
+        let metrics = tokio::runtime::Handle::current().metrics();
+        let tasks = metrics.num_alive_tasks();
+        drop(b);
+        assert!(
+            pending.try_recv().is_err(),
+            "drop must consume the queued End in place"
+        );
+        assert_eq!(
+            metrics.num_alive_tasks(),
+            tasks,
+            "a queued End must not cost a drain task"
+        );
+    }
+
+    /// A reply that has not sent End yet is still pending at drop, so the drain task takes it.
+    #[tokio::test(start_paused = true)]
+    async fn pending_reply_goes_to_the_drain_task() {
+        let guard = guard();
+        guard.end_flush.set(0).unwrap();
+        let (reply, events, mut pending) = drain_reply();
+        events.send(chunk("abc")).unwrap();
+        let (_state, state_rx) = watch::channel(ConnectionState::default());
+        let mut b = ReplyBody::new(reply, Some(3), guard, None, state_rx);
+        assert_eq!(data(&mut b).await.unwrap().unwrap(), "abc");
+        drop(b);
+        assert!(
+            pending.try_recv().is_ok(),
+            "drop must poll the reply before it hands it over"
+        );
+        // The paused clock auto-advances once every task is idle, so the timeout proves the drain kept the reply.
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), events.closed())
+                .await
+                .is_err(),
+            "the drain task must hold the reply until End arrives"
+        );
+        events.send(end(false)).unwrap();
+        tokio::time::timeout(Duration::from_secs(5), events.closed())
+            .await
+            .expect("the drain task must consume End");
     }
 
     /// Without the watermark the bytes never reached hyper: dropping the body cancels PHP at once.

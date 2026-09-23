@@ -1,4 +1,5 @@
 mod apm;
+mod classic;
 mod concurrency;
 mod extensions;
 mod harness;

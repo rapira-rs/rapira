@@ -5,7 +5,6 @@ use std::time::Duration;
 use anyhow::anyhow;
 use extension_api::{Extension, ListenAddr, Middleware, Php, PrepareCtx, PreparedListener, Result};
 use tokio::runtime::Builder;
-use tokio::sync::watch;
 
 #[cfg(target_os = "linux")]
 mod accept_linux;
@@ -56,7 +55,7 @@ impl Default for Config {
 pub struct Server {
     config: Config,
     prepared: Option<PreparedListener>,
-    shutdown: Option<watch::Sender<bool>>,
+    stop: Option<serve::Stop>,
     join: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
@@ -67,7 +66,7 @@ impl Extension for Server {
         Self {
             config,
             prepared: None,
-            shutdown: None,
+            stop: None,
             join: None,
         }
     }
@@ -92,11 +91,12 @@ impl Extension for Server {
     }
 
     async fn run(&mut self, php: Php) -> Result<()> {
-        let (shutdown_tx, shutdown_rx) = watch::channel(false);
         let config = self.config.clone();
         let Some(prepared) = self.prepared.take() else {
             return Err(anyhow!("http listener was not prepared"));
         };
+        let stop = serve::Stop::new().map_err(|e| anyhow!("creating the http stop handle: {e}"))?;
+        let handle = stop.handle();
 
         let thread = std::thread::Builder::new()
             .name("rapira-http".into())
@@ -107,10 +107,17 @@ impl Extension for Server {
                     .thread_name("rapira-http-io")
                     .build()
                     .map_err(|e| anyhow!("building the http runtime: {e}"))?;
-                rt.block_on(serve::serve(php, config, prepared, shutdown_rx))
+                #[cfg(target_os = "linux")]
+                {
+                    serve::serve(php, config, prepared, handle, &rt)
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    rt.block_on(serve::serve(php, config, prepared, handle))
+                }
             })?;
 
-        self.shutdown = Some(shutdown_tx);
+        self.stop = Some(stop);
         let join = self
             .join
             .insert(tokio::task::spawn_blocking(move || join_thread(thread)));
@@ -120,8 +127,8 @@ impl Extension for Server {
     }
 
     async fn shutdown(&mut self) -> Result<()> {
-        if let Some(shutdown) = self.shutdown.take() {
-            let _ = shutdown.send(true);
+        if let Some(stop) = self.stop.take() {
+            stop.stop();
         }
         if let Some(join) = self.join.take() {
             join.await

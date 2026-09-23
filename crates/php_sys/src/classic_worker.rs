@@ -1,5 +1,3 @@
-use std::{fs::File, io::ErrorKind};
-
 use crate::{
     callbacks::{finalize_response, send_error_head},
     context::{bind_server_context, populate_request_context, unbind_server_context},
@@ -9,14 +7,6 @@ use crate::{
     types::Job,
     *,
 };
-
-fn status_for_open_error(kind: ErrorKind) -> u16 {
-    match kind {
-        ErrorKind::NotFound => 404,
-        ErrorKind::PermissionDenied => 403,
-        _ => 500,
-    }
-}
 
 pub(crate) fn classic_worker() {
     while let Some(mut job) = pull_job() {
@@ -39,20 +29,12 @@ fn classic_executor(job: &mut Job) -> (Event, bool) {
         }
         crate::context::apply_proto_num(&job.ctx);
 
-        let exec_err: bool = match File::open(&job.ctx.req.script_filename) {
-            Err(e) => {
-                send_error_head(&mut job.ctx, status_for_open_error(e.kind()));
-                true
-            }
-            Ok(_) => {
-                let failed = !run_script(&job.ctx.req.script_filename);
-                let pg = rapira_pg();
-                failed
-                    && ((*rapira_cg()).unclean_shutdown
-                        || (!(*pg).last_error_message.is_null()
-                            && (*pg).last_error_type & E_FATAL_ERRORS as i32 != 0))
-            }
-        };
+        let failed = !run_script(&job.ctx.req.script_filename);
+        let pg = rapira_pg();
+        let exec_err: bool = failed
+            && ((*rapira_cg()).unclean_shutdown
+                || (!(*pg).last_error_message.is_null()
+                    && (*pg).last_error_type & E_FATAL_ERRORS as i32 != 0));
         job.ctx.tearing_down = true;
         rapira_request_shutdown();
 
