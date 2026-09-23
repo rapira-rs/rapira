@@ -5,14 +5,14 @@ use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use crate::signals::set_cloexec;
 
 /// `wr` is never written: its disappearance is what signals master death to every worker's `rd`.
-pub struct Lifeline {
-    pub rd: OwnedFd,
-    pub wr: OwnedFd,
+pub(crate) struct Lifeline {
+    pub(crate) rd: OwnedFd,
+    pub(crate) wr: OwnedFd,
 }
 
 impl Lifeline {
     /// Both ends are `CLOEXEC`: fork still inherits them, the flag only keeps them out of exec'd processes.
-    pub fn create() -> anyhow::Result<Lifeline> {
+    pub(crate) fn create() -> anyhow::Result<Lifeline> {
         let mut fds = [0 as RawFd; 2];
         #[cfg(target_os = "linux")]
         // SAFETY: fds is a 2-element array the syscall fills with valid fds.

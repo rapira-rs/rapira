@@ -118,11 +118,8 @@ impl Pool {
     }
 
     fn find_spawn_slot(&self) -> Option<usize> {
-        (0..self.table.slots.len()).find(|&i| {
-            self.slot_is_free(i)
-                && self.table.slots[i].respawn_at.is_none()
-                && !self.table.has_proc(i)
-        })
+        (0..self.table.slots.len())
+            .find(|&i| self.slot_is_free(i) && self.table.slots[i].respawn_at.is_none())
     }
 
     fn oldest_idle_pid(&self) -> Option<libc::pid_t> {
@@ -310,9 +307,7 @@ impl Pool {
                     phase: ReloadPhase::Drain { draining, phase },
                     deadline: now + Duration::from_secs(1),
                 });
-                if self.table.has_pid(draining) {
-                    kill(draining, sig);
-                }
+                kill(draining, sig);
             }
         }
     }
@@ -450,7 +445,7 @@ impl Pool {
     fn static_refill(&mut self, now: Instant, spawner: &mut dyn Spawner) {
         let running = self.table.running();
         let pending = (0..self.table.slots.len())
-            .filter(|&i| self.table.slots[i].respawn_at.is_some() && !self.table.has_proc(i))
+            .filter(|&i| self.table.slots[i].respawn_at.is_some())
             .count();
         let committed = running + pending;
         let target = self.cfg.processes;
@@ -536,7 +531,6 @@ impl Pool {
         for slot in 0..self.table.slots.len() {
             if let Some(t) = self.table.slots[slot].respawn_at
                 && now >= t
-                && !self.table.has_proc(slot)
             {
                 self.table.slots[slot].cancel_respawn();
                 if !matches!(self.cfg.scaling, Scaling::Ondemand) {

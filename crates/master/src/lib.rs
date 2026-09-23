@@ -13,7 +13,7 @@ mod process;
 mod scaling;
 mod signals;
 
-pub use lifeline::{Lifeline, spawn_lifeline_watch};
+pub use lifeline::spawn_lifeline_watch;
 pub use signals::block_early_signals;
 
 /// Worker exit-code protocol: the worker emits, the master consumes; any other code is a crash.
@@ -106,7 +106,7 @@ pub fn run(
     worker: impl FnMut(WorkerEnv) -> i32,
 ) -> anyhow::Result<StopReason> {
     let self_pipe: signals::SelfPipe = signals::install_master_signals()?;
-    let lifeline: Lifeline = Lifeline::create()?;
+    let lifeline: lifeline::Lifeline = lifeline::Lifeline::create()?;
     let _pidfile: Option<pidfile::PidFile> = match &cfg.pidfile {
         Some(p) => Some(pidfile::PidFile::write(p)?),
         None => None,

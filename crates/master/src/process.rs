@@ -114,14 +114,6 @@ impl ProcTable {
         self.procs.len()
     }
 
-    pub fn has_proc(&self, slot: usize) -> bool {
-        self.procs.iter().any(|p| p.slot == slot)
-    }
-
-    pub fn has_pid(&self, pid: libc::pid_t) -> bool {
-        self.procs.iter().any(|p| p.pid == pid)
-    }
-
     fn remove(&mut self, pid: libc::pid_t) -> Option<WorkerProc> {
         let i = self.procs.iter().position(|p| p.pid == pid)?;
         Some(self.procs.swap_remove(i))
