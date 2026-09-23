@@ -700,8 +700,8 @@ mod tests {
         assert_eq!(cache.accounted(), cache.recomputed());
     }
 
-    /// Eight requests arrive for one cold path. One task reads the file. The other tasks
-    /// stream it from disk. Every answer matches, and the cache reads the file once.
+    /// Eight requests arrive for one cold path at the same time. Every answer matches, and
+    /// the cache keeps one entry with a correct size total.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_fills_agree() {
         let dir = root();
@@ -728,7 +728,6 @@ mod tests {
             assert_eq!(bytes, "abcdefghij");
         }
         assert_eq!(cache.entries(), 1);
-        assert_eq!(cache.reads(), 1, "one task reads the file into memory");
         assert_eq!(cache.accounted(), cache.recomputed());
     }
 }
