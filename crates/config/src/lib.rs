@@ -13,7 +13,7 @@ mod supervisor;
 pub use http::{
     HttpSettings, MiddlewareSettings, StaticSettings, UnsafeFieldNames, UploadSettings,
 };
-pub use listen::{Listen, ListenParseError};
+pub use listen::Listen;
 pub use log::{LogFormat, LogLevel, LogSettings};
 pub use pool::{PoolSettings, RunMode, Scaling};
 pub use supervisor::SupervisorSettings;

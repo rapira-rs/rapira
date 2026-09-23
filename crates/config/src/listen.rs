@@ -18,44 +18,29 @@ impl fmt::Display for Listen {
     }
 }
 
-#[derive(Debug)]
-pub struct ListenParseError(String);
-
-impl fmt::Display for ListenParseError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(&self.0)
-    }
-}
-
-impl std::error::Error for ListenParseError {}
-
 impl FromStr for Listen {
-    type Err = ListenParseError;
+    type Err = anyhow::Error;
 
     /// The `:port` check runs before the `SocketAddr` parse: an IPv6 literal contains ':' but never leads with one.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
         if let Some(path) = s.strip_prefix("unix:") {
             if path.is_empty() {
-                return Err(ListenParseError("unix socket path is empty".into()));
+                anyhow::bail!("unix socket path is empty");
             }
             return Ok(Listen::Unix(PathBuf::from(path)));
         }
         if !s.contains(':') {
-            return Err(ListenParseError(format!(
-                "`{s}` is not a listen address: use host:port, :port, or unix:<path>"
-            )));
+            anyhow::bail!("`{s}` is not a listen address: use host:port, :port, or unix:<path>");
         }
         if let Some(port) = s.strip_prefix(':') {
             let port: u16 = port
                 .parse()
-                .map_err(|_| ListenParseError(format!("`{s}` has an invalid port")))?;
+                .map_err(|_| anyhow::anyhow!("`{s}` has an invalid port"))?;
             return Ok(Listen::Tcp(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))));
         }
         s.parse::<SocketAddr>().map(Listen::Tcp).map_err(|_| {
-            ListenParseError(format!(
-                "`{s}` is not host:port (expected an IP literal, e.g. 127.0.0.1:8000)"
-            ))
+            anyhow::anyhow!("`{s}` is not host:port (expected an IP literal, e.g. 127.0.0.1:8000)")
         })
     }
 }
