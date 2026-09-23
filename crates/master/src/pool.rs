@@ -238,17 +238,6 @@ impl Pool {
         }
     }
 
-    fn reload_try_advance(&mut self, now: Instant) {
-        if let Some(Reload {
-            phase: ReloadPhase::Await { slot, .. },
-            ..
-        }) = self.reload
-            && self.slot_is_serving(slot)
-        {
-            self.reload_quit_next(now);
-        }
-    }
-
     fn reload_quit_next(&mut self, now: Instant) {
         let cur = self.table.generation;
         let target = self
@@ -280,14 +269,9 @@ impl Pool {
         };
         match reload.phase {
             ReloadPhase::Await { slot, until } => {
-                self.reload_try_advance(now);
-                let Some(r) = self.reload.as_mut() else {
-                    return;
-                };
-                if !matches!(r.phase, ReloadPhase::Await { .. }) {
-                    return;
-                }
-                if now >= until {
+                if self.slot_is_serving(slot) {
+                    self.reload_quit_next(now);
+                } else if now >= until {
                     tracing::warn!(
                         target: "master",
                         "{} pool: reload replacement slot {slot} not serving within the control timeout; proceeding",
@@ -295,7 +279,10 @@ impl Pool {
                     );
                     self.reload_quit_next(now);
                 } else {
-                    r.deadline = now + RELOAD_GATE_POLL;
+                    self.reload = Some(Reload {
+                        deadline: now + RELOAD_GATE_POLL,
+                        ..reload
+                    });
                 }
             }
             ReloadPhase::Drain {
@@ -748,14 +735,14 @@ mod tests {
             deadline: t0,
         });
 
-        p.reload_try_advance(t0);
+        p.on_reload_deadline(t0);
         assert!(matches!(
             p.reload.unwrap().phase,
             ReloadPhase::Await { slot: 3, .. }
         ));
 
         p.set_slot(3, SLOT_IDLE);
-        p.reload_try_advance(t0);
+        p.on_reload_deadline(t0);
         assert!(matches!(
             p.reload.unwrap().phase,
             ReloadPhase::Drain {
@@ -783,7 +770,7 @@ mod tests {
             deadline: t0,
         });
 
-        p.reload_try_advance(t0);
+        p.on_reload_deadline(t0);
         assert!(matches!(
             p.reload.unwrap().phase,
             ReloadPhase::Drain {
