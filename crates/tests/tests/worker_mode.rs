@@ -1,5 +1,7 @@
 use php_sys::{Mode, Rapira};
-use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
+use tests::{
+    captured, drain, drain_resp, fixture, init_log_capture, php_lock, req, wait_app_record,
+};
 
 /// Superglobals are rebuilt per job over the resident loop: query state must not leak.
 #[test]
@@ -233,14 +235,7 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     let h = r.handle();
 
     let rx_a = h.handle_blocking(req("/", "worker/held-worker.php"))?;
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while !captured()
-        .iter()
-        .any(|c| c.target == "app" && c.message == "held")
-    {
-        assert!(std::time::Instant::now() < deadline, "fixture never held");
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
+    wait_app_record("held");
     drop(h.handle_blocking(req("/", "worker/held-worker.php"))?);
     let resp_a = drain_resp(rx_a);
     assert_eq!(resp_a.body_string(), "done");

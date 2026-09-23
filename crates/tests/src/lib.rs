@@ -357,6 +357,25 @@ pub fn app_record(script: &str) -> AppRecord {
     records.into_iter().next().expect("checked above")
 }
 
+/// Polls the captured records until an `app` record with `message` appears, for at most 10 s; returns its context.
+pub fn wait_app_record(message: &str) -> String {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+    loop {
+        if let Some(ctx) = captured()
+            .iter()
+            .find(|c| c.target == "app" && c.message == message)
+            .map(|c| c.context.clone())
+        {
+            return ctx;
+        }
+        assert!(
+            std::time::Instant::now() < deadline,
+            "no {message:?} app record within 10s"
+        );
+        std::thread::sleep(std::time::Duration::from_millis(20));
+    }
+}
+
 /// Installs the capturing subscriber once, unfiltered, so even trace-level records from `tracing` and the `log` facade reach `LOG_CAPTURE`.
 pub fn init_log_capture() {
     static ONCE: Once = Once::new();

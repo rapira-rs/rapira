@@ -1,6 +1,8 @@
 use php_sys::{Frame, Mode, Rapira};
 use std::io::Cursor;
-use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
+use tests::{
+    captured, drain, drain_resp, fixture, init_log_capture, php_lock, req, wait_app_record,
+};
 
 fn verbs_probe(query: &str) -> anyhow::Result<(u16, String)> {
     let _guard = php_lock();
@@ -63,20 +65,7 @@ fn recv_probes_on_an_empty_channel() -> anyhow::Result<()> {
         "dispatcher/recv-probes-worker.php",
     )))?;
 
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if captured()
-            .iter()
-            .any(|c| c.target == "app" && c.message == "recv-probes")
-        {
-            break;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "recv-probes record never appeared"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
+    wait_app_record("recv-probes");
     r.shutdown();
 
     let contexts: Vec<String> = captured()
@@ -835,25 +824,6 @@ fn stream_probe(
     let h = r.handle();
     let rx = h.handle_blocking(req(query, "dispatcher/stream-worker.php"))?;
     Ok((r, h, rx))
-}
-
-/// Poll the app log for `message`, bounded; returns its JSON context.
-fn wait_app_record(message: &str) -> String {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if let Some(ctx) = captured()
-            .iter()
-            .find(|c| c.target == "app" && c.message == message)
-            .map(|c| c.context.clone())
-        {
-            return ctx;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no {message:?} app record within 10s"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
 }
 
 /// `flush()` puts the head on the wire while the body is still 300ms away.

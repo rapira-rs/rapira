@@ -1,22 +1,9 @@
 use std::io::Read;
 
 use php_sys::{Mode, Rapira, Request};
-use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
-
-/// Blocks until the fixture logs `message`, so the handler is provably executing before the client drops the receiver.
-fn wait_app_record(message: &str) {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        if captured()
-            .iter()
-            .any(|c| c.target == "app" && c.message == message)
-        {
-            return;
-        }
-        std::thread::sleep(std::time::Duration::from_millis(5));
-    }
-    panic!("no app record {message:?} within 10s");
-}
+use tests::{
+    captured, drain, drain_resp, fixture, init_log_capture, php_lock, req, wait_app_record,
+};
 
 /// Body source returning at most one byte per read() call, legal `Read` behavior for streaming bodies.
 struct Trickle(std::io::Cursor<Vec<u8>>);
