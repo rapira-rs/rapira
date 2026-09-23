@@ -3,7 +3,7 @@ use crate::diagnostics::syslog_to_level;
 use crate::types::{Context, StreamState};
 use crate::*;
 use core::slice;
-use std::ffi::{CStr, CString};
+use std::ffi::CStr;
 use std::io::Read;
 use std::mem::ManuallyDrop;
 use std::os::raw::{c_char, c_int};
@@ -108,12 +108,11 @@ fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
     CStr::from_bytes_until_nul(buf).unwrap_or_default()
 }
 
-/// php_register_variable_safe is last-write-wins, so the call order is the precedence rule: CONTENT_LENGTH, then HTTP_*, then host-supplied server vars.
+/// php_register_variable_safe is last-write-wins, so the call order is the precedence rule: CONTENT_LENGTH, then HTTP_*.
 /// Owned buffers stay in ManuallyDrop because `put` can bail out over this frame.
 fn cgi_header_vars(
     headers: &[(String, Vec<u8>)],
     content_length: i64,
-    server_vars: &[(String, String)],
     mut put: impl FnMut(&CStr, &[u8]),
 ) {
     if content_length >= 0 {
@@ -126,11 +125,6 @@ fn cgi_header_vars(
         put(cgi_header_name(&mut name, field), value);
     }
     drop(ManuallyDrop::into_inner(name));
-    for (name, value) in server_vars {
-        let name = ManuallyDrop::new(CString::new(name.as_str()).unwrap_or_default());
-        put(&name, value.as_bytes());
-        drop(ManuallyDrop::into_inner(name));
-    }
 }
 
 /// # Safety
@@ -299,25 +293,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             put_bytes(c"CONTENT_TYPE", ct);
         }
 
-        cgi_header_vars(
-            &ctx.req.headers,
-            ctx.req.content_length,
-            &ctx.req.server_vars,
-            put_bytes,
-        );
-    })
-}
-pub(crate) unsafe extern "C" fn getenv_cb(name: *const c_char, name_len: usize) -> *mut c_char {
-    with_ctx(null_mut(), |ctx| {
-        if name.is_null() {
-            return null_mut();
-        }
-
-        let key = unsafe { slice::from_raw_parts(name.cast::<u8>(), name_len) };
-        ctx.c
-            .as_ref()
-            .and_then(|c| c.env.get(key))
-            .map_or(null_mut(), |v| v.as_ptr() as *mut c_char)
+        cgi_header_vars(&ctx.req.headers, ctx.req.content_length, put_bytes);
     })
 }
 pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type: c_int) {
@@ -348,13 +324,6 @@ pub(crate) fn finalize_response(c: &mut Context, errored: bool) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    fn hdrs(pairs: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), v.as_bytes().to_vec()))
-            .collect()
-    }
 
     #[test]
     fn header_line_needs_a_colon_and_a_name() {
@@ -403,26 +372,6 @@ mod tests {
         assert_eq!(
             cgi_header_name(&mut buf, "accept").to_bytes(),
             b"HTTP_ACCEPT"
-        );
-    }
-
-    /// A shorter name after a longer one checks that the reused name buffer keeps no stale bytes.
-    #[test]
-    fn registration_order_gives_server_vars_precedence() {
-        let headers = hdrs(&[("accept-language", "en"), ("accept", "text/*")]);
-        let server_vars = [("HTTP_ACCEPT".to_owned(), "override".to_owned())];
-        let mut pairs: Vec<(String, Vec<u8>)> = Vec::new();
-        cgi_header_vars(&headers, 12, &server_vars, |n, v| {
-            pairs.push((n.to_string_lossy().into_owned(), v.to_vec()))
-        });
-        assert_eq!(
-            pairs,
-            hdrs(&[
-                ("CONTENT_LENGTH", "12"),
-                ("HTTP_ACCEPT_LANGUAGE", "en"),
-                ("HTTP_ACCEPT", "text/*"),
-                ("HTTP_ACCEPT", "override"),
-            ])
         );
     }
 }

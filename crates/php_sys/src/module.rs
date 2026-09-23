@@ -38,7 +38,7 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         ub_write: Some(rapira_ub_write),
         flush: None,
         get_stat: None,
-        getenv: Some(callbacks::getenv_cb),
+        getenv: None,
         header_handler: None,
         send_headers: Some(callbacks::send_headers),
         send_header: None,

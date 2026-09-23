@@ -242,7 +242,6 @@ impl RapiraBackend {
             content_length,
             body,
             headers: req.headers,
-            server_vars: Vec::new(),
             uri: req.uri,
             received_at: req.received_at,
             tls: req.tls.map(map_tls),

@@ -18,7 +18,6 @@ fn base_req() -> Request {
         server_name: String::new(),
         server_port: 8080,
         headers: Vec::new(),
-        server_vars: Vec::new(),
         content_type: None,
         content_length: 0,
         body: Body::Raw(std::io::Cursor::new(Vec::new())),

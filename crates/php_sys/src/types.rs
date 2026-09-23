@@ -1,5 +1,4 @@
 use bytes::Bytes;
-use std::collections::HashMap;
 use std::ffi::CString;
 use std::os::raw::c_int;
 use std::path::PathBuf;
@@ -151,7 +150,6 @@ pub struct Request {
     pub server_name: String,
     pub server_port: u16,
     pub headers: FieldLines,
-    pub server_vars: Vec<(String, String)>,
     /// First content-type field line, raw bytes.
     pub content_type: Option<Vec<u8>>,
     /// Wire byte count, never re-derived from parsed parts; -1 if unknown.
@@ -184,7 +182,6 @@ pub struct ReqC {
     pub ctype: Option<CString>,
     pub cookie: Option<CString>,
     pub authorization: Option<CString>,
-    pub env: HashMap<Box<[u8]>, CString>,
     pub remote_addr: String,
     pub remote_port: String,
     pub server_port: String,
@@ -225,18 +222,6 @@ impl ReqC {
             .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
             .map(|(_, v)| cgi_cstring("Authorization", v));
 
-        let env: HashMap<Box<[u8]>, CString> = r
-            .server_vars
-            .iter()
-            .filter_map(|(k, v)| match CString::new(v.as_bytes()) {
-                Ok(v) => Some((k.as_bytes().into(), v)),
-                Err(_) => {
-                    tracing::warn!(target: "rapira", "server var {k} carries a NUL byte; dropped");
-                    None
-                }
-            })
-            .collect();
-
         let (remote_addr, remote_port) = cgi_addr_strings(&r.remote);
 
         Self {
@@ -256,7 +241,6 @@ impl ReqC {
                 .content_type
                 .as_deref()
                 .map(|s| cgi_cstring("CONTENT_TYPE", s)),
-            env,
             remote_addr,
             remote_port,
             server_port: r.server_port.to_string(),
@@ -395,7 +379,6 @@ mod tests {
                 server_name: String::new(),
                 server_port: 8080,
                 headers: Vec::new(),
-                server_vars: Vec::new(),
                 content_type: None,
                 content_length: -1,
                 body: Body::Raw(std::io::Cursor::new(Vec::new())),

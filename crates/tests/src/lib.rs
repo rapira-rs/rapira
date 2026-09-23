@@ -81,7 +81,6 @@ pub fn req(uri: &str, fixture_name: &str) -> Request {
         server_name: "localhost".into(),
         server_port: 8080,
         headers: vec![],
-        server_vars: vec![],
         content_type: None,
         content_length: 0,
         body: php_sys::types::Body::Raw(std::io::Cursor::new(Vec::new())),
