@@ -10,7 +10,7 @@ use types::Job;
 
 use crate::quota::{self, WorkerHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
-use crate::scoreboard::{Event, ScoreboardSnapshot, sb_set, sb_update};
+use crate::scoreboard::{Event, sb_set, sb_update};
 use crate::{classic_worker::classic_worker, types::Mode, *};
 
 thread_local! {
@@ -18,12 +18,12 @@ thread_local! {
 }
 
 pub(crate) struct Intake {
-    pub(crate) tx: SyncSender<Job>,
+    pub(crate) tx: SyncSender<Box<Job>>,
     pub(crate) pending: Arc<AtomicUsize>,
 }
 
 struct JobRx {
-    rx: Receiver<Job>,
+    rx: Receiver<Box<Job>>,
     pending: Arc<AtomicUsize>,
 }
 
@@ -53,9 +53,9 @@ fn php_series(id: u32) -> (u32, u32) {
 
 /// Zend structs are bound by bindgen at build time, so a libphp from another PHP minor is an ABI mismatch (`sapi_startup` handed a differently shaped struct), not a load error.
 fn check_linked_php() -> anyhow::Result<()> {
-    // SAFETY: both accessors read a compile-time constant and touch no engine state, so this is valid pre-startup.
-    let (headers, linked) = unsafe { (rapira_headers_php_version_id(), php_version_id()) };
-    let (want, got) = (php_series(headers), php_series(linked));
+    // SAFETY: php_version_id() returns a compile-time constant and touches no engine state, so this is valid pre-startup.
+    let linked = unsafe { php_version_id() };
+    let (want, got) = (php_series(PHP_VERSION_ID), php_series(linked));
     anyhow::ensure!(
         want == got,
         "linked libphp is PHP {}.{}, but this rapira was built against PHP {}.{}. \
@@ -73,11 +73,10 @@ impl Rapira {
         check_linked_php()?;
         let mut module: _sapi_module_struct = module::build_sapi_module();
         let started: bool = unsafe {
+            // The Rust runtime sets SIGPIPE to SIG_IGN before main, so a write to a closed peer returns EPIPE: https://doc.rust-lang.org/beta/unstable-book/compiler-flags/on-broken-pipe.html
             rapira_process_init();
             sapi_startup(&mut module);
-            module
-                .startup
-                .is_some_and(|start| start(&mut module) == SUCCESS)
+            php_module_startup(&mut module, &raw mut rapira_module_entry) == SUCCESS
         };
 
         if !started {
@@ -107,7 +106,7 @@ impl Rapira {
         };
         slot.bind(std::process::id());
         let pending = Arc::new(AtomicUsize::new(0));
-        let (intake_tx, intake_rx) = sync_channel::<Job>(1024);
+        let (intake_tx, intake_rx) = sync_channel::<Box<Job>>(1024);
         let intake = Intake {
             tx: intake_tx,
             pending: pending.clone(),
@@ -153,13 +152,9 @@ impl Rapira {
         Ok(rapira)
     }
 
-    pub fn shutdown(self) {}
-
-    pub fn scoreboard(&self) -> ScoreboardSnapshot {
-        match &self.board {
-            Some(board) => crate::scoreboard::snapshot(board),
-            None => ScoreboardSnapshot::default(),
-        }
+    /// The slot of the private one-slot board. It is `None` when the master owns the slot.
+    pub fn scoreboard(&self) -> Option<rapira_scoreboard::SlotSnapshot> {
+        self.board?.snapshot_slots().pop()
     }
 }
 
@@ -210,15 +205,14 @@ fn worker_main(mode: Mode, rx: JobRx) {
     }
 }
 
-pub(crate) fn pull_job() -> Option<Job> {
+pub(crate) fn pull_job() -> Option<Box<Job>> {
     match pull_job_wait(None) {
-        Pulled::Job(job) => Some(*job),
+        Pulled::Job(job) => Some(job),
         _ => None,
     }
 }
 
 pub(crate) enum Pulled {
-    // Boxed: a Job is ~600 bytes and the other variants are empty
     Job(Box<Job>),
     Timeout,
     Empty,
@@ -240,7 +234,7 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
         match got {
             Ok(job) => {
                 job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(Box::new(job))
+                Pulled::Job(job)
             }
             Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
             Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
@@ -248,7 +242,7 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
     })
 }
 
-/// The Idle/Active pair still runs: a polling worker must refresh last_activity_ms or the master watchdog TERMs it as a stuck request (master/src/events.rs:509-517).
+/// The Idle/Active pair still runs: a polling worker must refresh last_activity_ms or the master watchdog TERMs it as a stuck request (`Pool::watchdog_tick`).
 pub(crate) fn pull_job_try() -> Pulled {
     JOB_RX.with_borrow_mut(|slot| {
         let Some(job_r) = slot.as_mut() else {
@@ -260,7 +254,7 @@ pub(crate) fn pull_job_try() -> Pulled {
         match got {
             Ok(job) => {
                 job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(Box::new(job))
+                Pulled::Job(job)
             }
             Err(TryRecvError::Empty) => Pulled::Empty,
             Err(TryRecvError::Disconnected) => Pulled::Closed,

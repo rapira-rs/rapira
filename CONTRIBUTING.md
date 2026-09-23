@@ -5,7 +5,7 @@ This repository contains the server: the SAPI core (`crates/php_sys`), the exten
 ## Prerequisites
 
 - Rust stable - `rust-toolchain.toml` selects the exact channel for you
-- A C compiler and `pkg-config` (the build compiles `wrapper.c`/`module.c` against the PHP headers)
+- A C compiler (the build compiles `crates/php_sys/*.c` against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
 - PHP 8.4 or 8.5, **NTS**, built with the embed SAPI (`--enable-embed=shared`). ZTS builds are rejected at compile time.
 
@@ -35,7 +35,7 @@ make test   # runs test_nts, then test_e2e - sequentially on purpose
 - `make test_nts` - the in-process unit and integration suites (`cargo test --workspace`; the e2e suite is feature-gated off here).
 - `make test_e2e` - the spawn-the-binary end-to-end suite (`crates/tests`, `--features e2e`): forks workers, binds ports, drives real HTTP, asserts signal/reload/scaling behavior. Single-threaded on purpose; never run it concurrently with `test_nts`.
 - `make coverage` - needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
-- `make stubs` - maintainers only: regenerates `crates/php_sys/rapira_arginfo.h` from `rapira.stub.php` with PHP's `gen_stub.php`. Never edit the generated header by hand.
+- `make stubs` - maintainers only: regenerates the three `crates/php_sys/*_arginfo.h` headers from the three `crates/php_sys/*.stub.php` stubs with PHP's `gen_stub.php`. Never edit the generated headers by hand.
 
 Test placement: unit tests live inside their crate; integration tests in `crates/tests`; end-to-end tests under `crates/tests/tests/e2e/` behind the `e2e` feature.
 

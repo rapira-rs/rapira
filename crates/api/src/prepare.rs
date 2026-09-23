@@ -6,8 +6,8 @@ use std::path::{Path, PathBuf};
 use anyhow::Context;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
-/// The backlog every master-bound listener gets: the master binds pre-fork and workers inherit the queue without re-listening. The value is a request the kernel clamps to net.core.somaxconn, so over-asking costs nothing while under-asking drops SYNs during a fork storm. https://man7.org/linux/man-pages/man2/listen.2.html
-pub const LISTEN_BACKLOG: i32 = 65535;
+/// The backlog of every master-bound listener. The master binds before the fork, and the workers inherit the queue. The kernel caps the value at `net.core.somaxconn`. https://man7.org/linux/man-pages/man2/listen.2.html
+const LISTEN_BACKLOG: i32 = 65535;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ListenAddr {
@@ -28,12 +28,6 @@ impl PreparedListener {
     }
 }
 
-impl AsRawFd for PreparedListener {
-    fn as_raw_fd(&self) -> RawFd {
-        self.fd.as_raw_fd()
-    }
-}
-
 impl IntoRawFd for PreparedListener {
     fn into_raw_fd(self) -> RawFd {
         self.fd.into_raw_fd()
@@ -41,25 +35,14 @@ impl IntoRawFd for PreparedListener {
 }
 
 /// Runs before any fork and before a runtime exists: sync syscalls only, one context per boot.
+#[derive(Default)]
 pub struct PrepareCtx {
-    backlog: i32,
-    bound: Vec<ListenAddr>,
     fds: Vec<OwnedFd>,
-}
-
-impl Default for PrepareCtx {
-    fn default() -> Self {
-        Self::new()
-    }
 }
 
 impl PrepareCtx {
     pub fn new() -> Self {
-        Self {
-            backlog: LISTEN_BACKLOG,
-            bound: Vec::new(),
-            fds: Vec::new(),
-        }
+        Self::default()
     }
 
     /// Backed by dups owned by this context, so the fds stay valid even if an extension drops its `PreparedListener`.
@@ -67,7 +50,7 @@ impl PrepareCtx {
         self.fds.iter().map(|fd| fd.as_raw_fd()).collect()
     }
 
-    /// Nonblocking is set here because the adopting extension hands the fd to tokio's `from_std`, which requires O_NONBLOCK and does not set it.
+    /// Sets O_NONBLOCK: tokio's `from_std` requires it, and the Linux acceptor needs `accept` to return WouldBlock when another worker takes the connection.
     pub fn bind_tcp(&mut self, addr: SocketAddr) -> anyhow::Result<PreparedListener> {
         let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))
             .with_context(|| format!("socket for {addr}"))?;
@@ -76,7 +59,7 @@ impl PrepareCtx {
             .bind(&addr.into())
             .with_context(|| format!("bind {addr}"))?;
         socket
-            .listen(self.backlog)
+            .listen(LISTEN_BACKLOG)
             .with_context(|| format!("listen {addr}"))?;
         socket.set_nonblocking(true)?;
         let resolved = socket
@@ -85,7 +68,7 @@ impl PrepareCtx {
             .expect("inet socket has an inet local addr");
         let addr = ListenAddr::Tcp(resolved);
         let dup = socket.try_clone().context("dup listener fd")?;
-        self.record(addr.clone(), dup.into())?;
+        self.fds.push(dup.into());
         Ok(PreparedListener {
             fd: socket.into(),
             addr,
@@ -123,26 +106,16 @@ impl PrepareCtx {
         socket
             .bind(&SockAddr::unix(path)?)
             .with_context(|| format!("bind unix:{}", path.display()))?;
-        socket.listen(self.backlog)?;
+        socket.listen(LISTEN_BACKLOG)?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
         socket.set_nonblocking(true)?;
         let addr = ListenAddr::Unix(path.to_owned());
         let dup = socket.try_clone().context("dup listener fd")?;
-        self.record(addr.clone(), dup.into())?;
+        self.fds.push(dup.into());
         Ok(PreparedListener {
             fd: socket.into(),
             addr,
         })
-    }
-
-    fn record(&mut self, addr: ListenAddr, fd: OwnedFd) -> anyhow::Result<()> {
-        anyhow::ensure!(
-            !self.bound.contains(&addr),
-            "duplicate listener: {addr:?} already prepared"
-        );
-        self.bound.push(addr);
-        self.fds.push(fd);
-        Ok(())
     }
 }
 
@@ -160,15 +133,16 @@ mod tests {
         };
         assert_ne!(resolved.port(), 0);
 
-        let flags = unsafe { libc::fcntl(l.as_raw_fd(), libc::F_GETFL) };
+        let fd = l.into_raw_fd();
+        let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
         assert!(flags & libc::O_NONBLOCK != 0, "O_NONBLOCK expected");
-        let fdflags = unsafe { libc::fcntl(l.as_raw_fd(), libc::F_GETFD) };
+        let fdflags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
         assert!(fdflags & libc::FD_CLOEXEC != 0, "FD_CLOEXEC expected");
 
         let mut client = std::net::TcpStream::connect(resolved).unwrap();
         let std_l: std::net::TcpListener = {
-            use std::os::fd::{FromRawFd, IntoRawFd};
-            unsafe { std::net::TcpListener::from_raw_fd(l.into_raw_fd()) }
+            use std::os::fd::FromRawFd;
+            unsafe { std::net::TcpListener::from_raw_fd(fd) }
         };
         std_l.set_nonblocking(false).unwrap();
         let (mut srv, _) = std_l.accept().unwrap();

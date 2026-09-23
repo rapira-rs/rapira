@@ -24,7 +24,7 @@
 //! The backend runs `stat` and `open` on a runtime thread. A slow filesystem therefore
 //! blocks the runtime. The root must be on local storage.
 
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 use std::future::{Ready, ready};
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
@@ -155,8 +155,6 @@ struct Entry {
 #[derive(Default)]
 struct Store {
     map: HashMap<PathBuf, Entry>,
-    /// The paths that a task reads into memory at this moment.
-    filling: HashSet<PathBuf>,
     bytes: usize,
     #[cfg(test)]
     reads: usize,
@@ -189,9 +187,7 @@ impl Store {
         self.bytes - reclaimed + Self::footprint(path, body as usize) <= MAX_TOTAL
     }
 
-    /// Removes every entry outside the freshness window. `revalidate` moves `checked` forward
-    /// on each access. The entries that stay are therefore the entries that a client asked for
-    /// in the last second.
+    /// Removes every entry that no stat or fill confirmed in the last second.
     fn drop_expired(&mut self, now: Instant) {
         let mut freed = 0;
         self.map.retain(|path, entry| {
@@ -241,29 +237,6 @@ impl Store {
                 checked: now,
             },
         );
-    }
-}
-
-/// Marks a path while one task reads it into memory. Clears the mark when the read ends.
-struct FillGuard {
-    backend: CachingBackend,
-    path: PathBuf,
-}
-
-impl FillGuard {
-    /// Returns `None` when another task already reads this path.
-    fn claim(backend: &CachingBackend, path: &Path) -> Option<Self> {
-        let claimed = backend.lock().filling.insert(path.to_path_buf());
-        claimed.then(|| Self {
-            backend: backend.clone(),
-            path: path.to_path_buf(),
-        })
-    }
-}
-
-impl Drop for FillGuard {
-    fn drop(&mut self) {
-        self.backend.lock().filling.remove(&self.path);
     }
 }
 
@@ -334,16 +307,6 @@ impl CachingBackend {
             return Ok(Self::stream(file, meta));
         }
 
-        // One task at a time reads a file into memory. Another task that wants the same file
-        // streams it from disk. A burst on a cold path therefore costs one read.
-        let Some(_filling) = FillGuard::claim(&self, &path) else {
-            return Ok(Self::stream(file, meta));
-        };
-        // The open and the stat above take time. Another task can complete the read in that
-        // interval.
-        if let Some(cached) = self.hit(&path) {
-            return Ok(cached);
-        }
         #[cfg(test)]
         {
             self.lock().reads += 1;

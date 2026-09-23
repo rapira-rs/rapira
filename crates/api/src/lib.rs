@@ -9,10 +9,9 @@ pub use middleware::{
     Body, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer,
     Protocol, empty_body,
 };
-pub use prepare::{LISTEN_BACKLOG, ListenAddr, PrepareCtx, PreparedListener};
+pub use prepare::{ListenAddr, PrepareCtx, PreparedListener};
 
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
-pub type FieldLines = Vec<(String, Vec<u8>)>;
 
 /// Lifecycle: `init` → `prepare` (master-side, pre-fork) → `run` → `shutdown`; the host drops the in-flight `run` future before it calls `shutdown`.
 pub trait Extension: Send + 'static {
@@ -40,14 +39,13 @@ pub trait Backend: Send + Sync + 'static {
 pub enum ReplyEvent {
     Interim {
         status: u16,
-        headers: FieldLines,
+        headers: http::HeaderMap,
     },
     Head {
         status: u16,
-        headers: FieldLines,
+        headers: http::HeaderMap,
         content_length: Option<u64>,
         bodiless: bool,
-        body_coded: bool,
     },
     Chunk(bytes::Bytes),
     File {
@@ -57,7 +55,7 @@ pub enum ReplyEvent {
         len: u64,
     },
     End {
-        trailers: FieldLines,
+        trailers: http::HeaderMap,
         truncated: bool,
     },
 }
@@ -83,64 +81,6 @@ impl Reply {
     pub async fn next(&mut self) -> Option<ReplyEvent> {
         std::future::poll_fn(|cx| self.0.poll_next(cx)).await
     }
-
-    pub async fn collect(mut self) -> Result<Response> {
-        let mut response: Option<Response> = None;
-        let mut end: Option<bool> = None;
-        while let Some(ev) = self.next().await {
-            match ev {
-                ReplyEvent::Interim { .. } => {}
-                ReplyEvent::Head {
-                    status, headers, ..
-                } => {
-                    response = Some(Response {
-                        status,
-                        headers,
-                        body: Vec::new(),
-                    });
-                }
-                ReplyEvent::Chunk(b) => {
-                    if let Some(r) = response.as_mut() {
-                        r.body.extend_from_slice(&b);
-                    }
-                }
-                ReplyEvent::File { file, offset, len } => {
-                    if let Some(r) = response.as_mut() {
-                        r.body.extend_from_slice(&read_slice(&file, offset, len)?);
-                    }
-                }
-                ReplyEvent::End { truncated, .. } => {
-                    end = Some(truncated);
-                    break;
-                }
-            }
-        }
-        match (response, end) {
-            (None, None) => Err(anyhow::anyhow!(
-                "php worker died mid-response (channel closed without a response)"
-            )),
-            (Some(_), None) | (_, Some(true)) => {
-                Err(anyhow::anyhow!("php crashed mid-response; body truncated"))
-            }
-            (None, Some(false)) => Err(anyhow::anyhow!("php produced no response head")),
-            (Some(r), Some(false)) => Ok(r),
-        }
-    }
-}
-
-fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Vec<u8>> {
-    use std::os::unix::fs::FileExt;
-    let mut out = vec![0u8; usize::try_from(len).unwrap_or(usize::MAX)];
-    let mut done = 0usize;
-    while done < out.len() {
-        let n = file.read_at(&mut out[done..], offset + done as u64)?;
-        if n == 0 {
-            break;
-        }
-        done += n;
-    }
-    out.truncate(done);
-    Ok(out)
 }
 
 /// Every clone shares the host's backend handle: never keep a spare past `run`/`shutdown`, the host's shutdown contract needs them all dropped.
@@ -155,7 +95,7 @@ impl Php {
         Self { backend }
     }
 
-    /// A pre-dispatch refusal errors with a downcastable [`Rejected`]; response-shape failures surface from [`Reply::next`]/[`Reply::collect`].
+    /// A pre-dispatch refusal errors with a downcastable [`Rejected`]; response-shape failures surface from [`Reply::next`].
     pub async fn exec(&self, req: Request) -> Result<Reply> {
         self.backend.exec(req).await
     }
@@ -178,9 +118,9 @@ pub struct ClientCert {
 pub struct Tls {
     pub version: String,
     pub cipher: String,
-    /// Tls::$negotiatedProtocol`
+    /// PHP `Tls::$negotiatedProtocol`.
     pub alpn: Option<String>,
-    /// Tls::$requestedServerName`
+    /// PHP `Tls::$requestedServerName`.
     pub server_name: Option<String>,
     pub cert: Option<ClientCert>,
 }
@@ -199,7 +139,7 @@ impl std::fmt::Display for Rejected {
 
 impl std::error::Error for Rejected {}
 
-/// An extension with no wire form for a fidelity fact passes None, never a fabricated default.
+/// An extension passes `None` for a field that its protocol does not carry.
 pub struct Request {
     pub method: String,
     pub uri: String,
@@ -213,13 +153,6 @@ pub struct Request {
     pub server_port: u16,
     pub tls: Option<Tls>,
     pub received_at: Option<f64>,
-    pub headers: FieldLines,
-    pub body: Vec<u8>,
-}
-
-#[derive(Debug)]
-pub struct Response {
-    pub status: u16,
-    pub headers: FieldLines,
+    pub headers: http::HeaderMap,
     pub body: Vec<u8>,
 }

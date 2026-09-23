@@ -15,7 +15,7 @@ struct PhpBuild {
     version: (u32, u32),
 }
 
-// bindgen 0.72 panics on php-src master's `preserve_none` opcode handlers, so `_zend_op` stays opaque: https://clang.llvm.org/docs/AttributeReference.html#preserve-none
+// bindgen panics on php-src master's `preserve_none` opcode handlers, so `_zend_op` stays opaque: https://clang.llvm.org/docs/AttributeReference.html#preserve-none
 fn main() -> anyhow::Result<()> {
     println!("cargo:rustc-check-cfg=cfg(php84)");
     println!("cargo:rustc-check-cfg=cfg(php85)");
@@ -54,7 +54,6 @@ fn main() -> anyhow::Result<()> {
         .header("wrapper.h")
         .clang_args(php.includes.iter().map(|d| format!("-I{d}")))
         .opaque_type("_zend_op");
-    bindings = bindings.layout_tests(true);
     #[cfg(target_os = "macos")]
     {
         bindings = macos_sysroot(bindings);
@@ -124,61 +123,11 @@ fn discover_php() -> anyhow::Result<PhpBuild> {
         .collect();
     let prefix: String = php_config("--prefix")?;
     let version: (u32, u32) = parse_version(&php_config("--version")?)?;
-    let bin: String = resolve_php_binary();
-    anyhow::ensure!(
-        !detect_zts(&bin)?,
-        "rapira is NTS-only: `{bin}` is a thread-safe (ZTS) PHP build.\n\
-         Rebuild PHP without --enable-zts, or point PHP_CONFIG at an NTS php-config."
-    );
     Ok(PhpBuild {
         includes,
         lib_dirs: vec![format!("{prefix}/lib"), format!("{prefix}/lib64")],
         version,
     })
-}
-
-// `php-config --php-binary` can name a path that does not exist (Homebrew kegs do), so fall back to `php` on PATH.
-fn resolve_php_binary() -> String {
-    if let Ok(bin) = php_config("--php-binary")
-        && std::path::Path::new(&bin).exists()
-    {
-        return bin;
-    }
-    "php".to_string()
-}
-
-fn detect_zts(php_binary: &str) -> anyhow::Result<bool> {
-    let zts_const = Command::new(php_binary)
-        .args(["-r", "echo PHP_ZTS;"])
-        .output()
-        .ok()
-        .and_then(|out| match String::from_utf8_lossy(&out.stdout).trim() {
-            "1" => Some(true),
-            "0" => Some(false),
-            _ => None,
-        });
-
-    match zts_const {
-        Some(z) => Ok(z),
-        None => php_info_field(&php_info(php_binary)?, "Thread Safety")
-            .map(|v| v == "enabled")
-            .context("could not determine Thread Safety from `php -i`"),
-    }
-}
-
-fn php_info(php_binary: &str) -> anyhow::Result<String> {
-    let out = Command::new(php_binary)
-        .arg("-i")
-        .output()
-        .context("running `php -i`")?;
-    Ok(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-fn php_info_field<'a>(info: &'a str, key: &str) -> Option<&'a str> {
-    let needle = format!("{key} => ");
-    info.lines()
-        .find_map(|l| l.split(needle.as_str()).nth(1))
-        .map(str::trim)
 }
 
 fn php_config(arg: &str) -> anyhow::Result<String> {

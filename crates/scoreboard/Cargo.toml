@@ -8,4 +8,4 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-libc = "0.2"
+libc = { workspace = true }

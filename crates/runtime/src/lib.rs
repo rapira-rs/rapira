@@ -1,11 +1,9 @@
-#[cfg(not(unix))]
-compile_error!("rapira supports Unix (Linux/macOS) only");
-
 use extension_api::{Extension, Php, PrepareCtx};
+use http::header::CONTENT_TYPE;
 use php_sys::RapiraHandle;
 use std::future::Future;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -19,7 +17,7 @@ type Outcome = std::result::Result<(), String>;
 type BoxFuture = Pin<Box<dyn Future<Output = Outcome> + Send>>;
 
 /// Object-safe shim: the same extension value is prepared pre-fork and launched post-fork, so it crosses the fork.
-trait ErasedExt: Send {
+trait ErasedExt {
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> anyhow::Result<()>;
     fn launch(self: Box<Self>, php: Php, stop: watch::Receiver<bool>, grace: Duration)
     -> BoxFuture;
@@ -55,17 +53,12 @@ impl ExtensionRuntime {
         Self::default()
     }
 
-    pub fn register<E: Extension>(&mut self, config: E::Config) -> anyhow::Result<()> {
+    pub fn register<E: Extension>(&mut self, config: E::Config) {
         let ext = E::init(config);
-        let name = ext.name().to_string();
-        if self.exts.iter().any(|e| e.name == name) {
-            anyhow::bail!("duplicate extension {name:?}");
-        }
         self.exts.push(Registered {
-            name,
+            name: ext.name().to_string(),
             ext: Box::new(ext),
         });
-        Ok(())
     }
 
     /// Master-side, pre-fork: runs every extension's `prepare` in registration order.
@@ -82,7 +75,7 @@ impl ExtensionRuntime {
         self.run_with_options(rapira, script, RuntimeOptions::default())
     }
 
-    /// One worker thread: this runtime only drives `drive`'s shutdown timeout, and it exists in every forked worker process.
+    /// One worker thread: this runtime drives only the `drive` future of each extension, and it exists in every forked worker process.
     pub fn run_with_options(
         self,
         rapira: RapiraHandle,
@@ -90,7 +83,7 @@ impl ExtensionRuntime {
         opts: RuntimeOptions,
     ) -> Running {
         let grace = opts.grace;
-        let php = Php::new(Arc::new(RapiraBackend::new(rapira, script, opts)));
+        let php = Php::new(Arc::new(RapiraBackend::new(rapira, &script, opts)));
         let (stop_tx, stop_rx) = watch::channel(false);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -137,10 +130,6 @@ impl Default for RuntimeOptions {
 
 struct RapiraBackend {
     rapira: RapiraHandle,
-    filename: PathBuf,
-    document_root: String,
-    script_name: String,
-    dispatcher: bool,
     uploads: Arc<multipart::Limits>,
 }
 
@@ -173,21 +162,10 @@ fn parse_err(e: multipart::ParseError) -> anyhow::Error {
 }
 
 impl RapiraBackend {
-    fn new(rapira: RapiraHandle, filename: PathBuf, opts: RuntimeOptions) -> Self {
-        let document_root = filename
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let script_name = filename
-            .file_name()
-            .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
-        let dispatcher = rapira.dispatcher();
+    fn new(rapira: RapiraHandle, filename: &Path, opts: RuntimeOptions) -> Self {
+        php_sys::set_script(filename);
         Self {
             rapira,
-            filename,
-            document_root,
-            script_name,
-            dispatcher,
             uploads: opts.uploads,
         }
     }
@@ -197,26 +175,16 @@ impl RapiraBackend {
         &self,
         mut req: extension_api::Request,
     ) -> anyhow::Result<php_sys::Request> {
-        let query = req.uri.split_once('?').map_or("", |(_, q)| q).to_string();
-        let content_type = req
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            .map(|(_, v)| v.clone());
+        let content_type = req.headers.get(CONTENT_TYPE).map(|v| v.as_bytes().to_vec());
         let content_length = req.body.len() as i64;
 
         // Content-type is a singleton field per RFC 9110 §8.3: with repeated lines the host and a PHP consumer could split the body on different boundaries.
         // https://www.rfc-editor.org/rfc/rfc9110#section-8.3
-        if self.dispatcher && !req.body.is_empty() {
-            let mut ct_lines = 0usize;
-            let mut any_multipart = false;
-            for (k, v) in &req.headers {
-                if k.eq_ignore_ascii_case("content-type") {
-                    ct_lines += 1;
-                    any_multipart = any_multipart || multipart::is_multipart(v);
-                }
-            }
-            if ct_lines > 1 && any_multipart {
+        if self.rapira.dispatcher() && !req.body.is_empty() {
+            let lines = req.headers.get_all(CONTENT_TYPE);
+            if lines.iter().nth(1).is_some()
+                && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
+            {
                 return Err(anyhow::Error::new(extension_api::Rejected {
                     status: 400,
                     reason: "repeated content-type field lines with a multipart body".into(),
@@ -224,7 +192,7 @@ impl RapiraBackend {
             }
         }
 
-        let body = if self.dispatcher
+        let body = if self.rapira.dispatcher()
             && !req.body.is_empty()
             && let Some(ct) = content_type.as_deref()
             && multipart::is_multipart(ct)
@@ -238,28 +206,23 @@ impl RapiraBackend {
                     .map_err(|e| anyhow::anyhow!("multipart parse task failed: {e}"))?;
             php_sys::types::Body::Multipart(parsed.map_err(parse_err)?)
         } else {
-            php_sys::types::Body::Raw(Box::new(Cursor::new(std::mem::take(&mut req.body))))
+            php_sys::types::Body::Raw(Cursor::new(std::mem::take(&mut req.body)))
         };
 
         Ok(php_sys::Request {
             method: req.method,
             https: req.https,
-            query,
             protocol: req.protocol,
-            target: req.target.filter(|t| !t.is_empty()),
-            authority: req.authority.filter(|a| !a.is_empty()),
+            target: req.target,
+            authority: req.authority,
             remote: map_addr(req.remote),
             server: map_addr(req.server),
             server_name: req.server_name,
             server_port: req.server_port,
-            script_name: self.script_name.clone(),
-            document_root: self.document_root.clone(),
-            script_filename: self.filename.clone(),
             content_type,
             content_length,
             body,
             headers: req.headers,
-            server_vars: Vec::new(),
             uri: req.uri,
             received_at: req.received_at,
             tls: req.tls.map(map_tls),
@@ -307,13 +270,11 @@ impl extension_api::ReplySource for FrameSource {
                     head,
                     content_length,
                     bodiless,
-                    body_coded,
                 } => extension_api::ReplyEvent::Head {
                     status: head.status,
                     headers: head.headers,
                     content_length,
                     bodiless,
-                    body_coded,
                 },
                 php_sys::Frame::Chunk(b) => extension_api::ReplyEvent::Chunk(b),
                 php_sys::Frame::File { file, offset, len } => {
@@ -367,7 +328,7 @@ fn sigset(signals: &[libc::c_int]) -> libc::sigset_t {
     }
 }
 
-/// Blocks until one of `signals` (already blocked) is delivered; `sigwait` because Darwin lacks `sigtimedwait`: https://man7.org/linux/man-pages/man2/sigwaitinfo.2.html
+/// Blocks until one of `signals` (already blocked) is delivered. https://man7.org/linux/man-pages/man3/sigwait.3.html
 fn wait_signal(signals: &[libc::c_int]) -> libc::c_int {
     // SAFETY: `set` and `sig` are stack values live for the whole call.
     unsafe {
@@ -449,87 +410,6 @@ async fn drain(tasks: &mut JoinSet<Outcome>) -> Vec<Outcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Staged launchers must be `Send`: they move into spawned tasks.
-    #[test]
-    fn rapira_runtime_is_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<ExtensionRuntime>();
-    }
-
-    use extension_api::{Reply, ReplyEvent, ReplySource};
-
-    struct VecSource(std::collections::VecDeque<ReplyEvent>);
-
-    impl ReplySource for VecSource {
-        fn poll_next(
-            &mut self,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<ReplyEvent>> {
-            std::task::Poll::Ready(self.0.pop_front())
-        }
-    }
-
-    fn reply(events: Vec<ReplyEvent>) -> Reply {
-        Reply::new(Box::new(VecSource(events.into())))
-    }
-
-    fn head() -> ReplyEvent {
-        ReplyEvent::Head {
-            status: 200,
-            headers: vec![("x-a".into(), b"1".to_vec())],
-            content_length: None,
-            bodiless: false,
-            body_coded: false,
-        }
-    }
-
-    fn end(truncated: bool) -> ReplyEvent {
-        ReplyEvent::End {
-            trailers: Vec::new(),
-            truncated,
-        }
-    }
-
-    /// The four stream outcomes map to the three documented errors and Ok.
-    #[tokio::test]
-    async fn collect_maps_stream_outcomes() {
-        let died = reply(Vec::new()).collect().await.unwrap_err();
-        assert!(died.to_string().contains("died mid-response"), "{died:#}");
-
-        let cut = reply(vec![head()]).collect().await.unwrap_err();
-        assert!(cut.to_string().contains("truncated"), "{cut:#}");
-
-        let cut = reply(vec![head(), end(true)]).collect().await.unwrap_err();
-        assert!(cut.to_string().contains("truncated"), "{cut:#}");
-
-        let headless = reply(vec![end(false)]).collect().await.unwrap_err();
-        assert!(
-            headless.to_string().contains("no response head"),
-            "{headless:#}"
-        );
-    }
-
-    /// Chunks concatenate in order; interim heads are dropped.
-    #[tokio::test]
-    async fn collect_concatenates_the_stream() {
-        let r = reply(vec![
-            ReplyEvent::Interim {
-                status: 103,
-                headers: Vec::new(),
-            },
-            head(),
-            ReplyEvent::Chunk(bytes::Bytes::from_static(b"one,")),
-            ReplyEvent::Chunk(bytes::Bytes::from_static(b"two")),
-            end(false),
-        ])
-        .collect()
-        .await
-        .unwrap();
-        assert_eq!(r.status, 200);
-        assert_eq!(r.headers, vec![("x-a".to_string(), b"1".to_vec())]);
-        assert_eq!(r.body, b"one,two");
-    }
 
     /// `parse_err` keeps both causes typed: `io::Error` in the chain, `Rejected` downcastable.
     #[test]

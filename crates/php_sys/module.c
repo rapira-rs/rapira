@@ -3,11 +3,6 @@
 #include "wrapper.h"
 #include "zend_types.h"
 
-// injected by build.rs
-#ifndef RAPIRA_VERSION
-#define RAPIRA_VERSION "0.0.0-dev"
-#endif
-
 extern void rapira_rs_finish_response(void);
 
 // php_handle_aborted_connection (main.c:2722) longjmps past Rust's catch_unwind
@@ -25,7 +20,6 @@ size_t rapira_ub_write(const char *str, size_t len) {
 enum {
     OK = 0,
     BAILOUT = 1,
-    EXIT = 2,
     THROW = 3,
 };
 
@@ -66,7 +60,7 @@ PHP_FUNCTION(rapira_finish_request) {
         RETURN_THROWS();
     }
     if (rapira_finish_output() != OK) {
-        // re-raise: rapira_run_handler classifies it, 500s and recycles
+        // re-raise: rapira_run_handler (worker mode) or php_execute_script (classic mode) catches it
         zend_bailout();
     }
     rapira_rs_finish_response();
@@ -162,7 +156,7 @@ static void rapira_request_init(void) {
     // init_compiler clears this per cycle (zend_compile.c:461), not per job
     CG(unclean_shutdown) = false;
 
-    // reset_signals=0: the SIGRTMIN handler is installed process-wide at boot
+    // reset_signals=0: the cycle's php_request_startup installed the SIGPROF handler
     if (rapira_job_timeout < 0) {
         rapira_job_timeout = EG(timeout_seconds);
     }
@@ -194,7 +188,7 @@ static void rapira_request_init(void) {
     }
 }
 
-// sapi_activate re-arms CG(auto_globals) per request; worker mode skips it.
+// php_hash_environment re-arms CG(auto_globals) per request; the per-job path skips it.
 static void rapira_activate_auto_globals(void) {
     zend_auto_global *auto_global = NULL;
     zend_string *_env = ZSTR_KNOWN(ZEND_STR_AUTOGLOBAL_ENV);
@@ -272,12 +266,9 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     int outcome = OK;
     zval retval;
     ZVAL_UNDEF(&retval);
-    fci->size = sizeof *fci;
     // fci does not outlive this frame
     // cppcheck-suppress autoVariables
     fci->retval = &retval;
-    fci->param_count = 0;
-    fci->named_params = NULL;
 
     // only _zend_bailout sets it mid-request (zend.c:1264): 0->1 proves bailout
     bool unclean_at_entry = CG(unclean_shutdown);
@@ -294,7 +285,6 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
         if (EG(exception)) {
             if (zend_is_unwind_exit(EG(exception)) ||
                 zend_is_graceful_exit(EG(exception))) {
-                outcome = EXIT;
                 zend_clear_exception();
             } else {
                 // the zend_try contains a bailout from the userland handler
@@ -370,7 +360,7 @@ static void rapira_release_header_callback(void) {
 // per-request sapi teardown (main/main.c:1985,2002,2031)
 int rapira_request_teardown(void) {
     int bailed = OK;
-    // the VM stack is popped when handleRequest returns, so close frames here
+    // the VM stack is popped when handle_request returns, so close frames here
     zend_execute_data *observed_base = EG(current_observed_frame);
 
     RAPIRA_GUARD(php_output_end_all(), bailed, observed_base);
@@ -433,14 +423,6 @@ void rapira_clear_last_error(void) {
 void rapira_process_init(void) {
     // ext_functions[] is file-static, so wire it up before php_module_startup
     rapira_module_entry.functions = rapira_php_functions();
-
-#if defined(SIGPIPE) && defined(SIG_IGN)
-    // Ignore SIGPIPE so writes to a hung-up client return EPIPE, not a signal.
-    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
-        perror("rapira: signal(SIGPIPE, SIG_IGN)");
-        abort();
-    }
-#endif
     zend_signal_startup();
 }
 

@@ -2,21 +2,6 @@ use crate::harness::*;
 use std::time::{Duration, Instant};
 
 #[test]
-fn static_pool_forks_n_workers() {
-    let srv = spawn_with_config("shared/echo-worker.php", 3, "");
-    wait_workers(&srv, Duration::from_secs(20), "3 static workers", |p| {
-        p.len() == 3
-    });
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
-    assert_eq!(
-        code,
-        200,
-        "pool should serve once up\n{}",
-        diagnostics(&srv)
-    );
-}
-
-#[test]
 fn http_round_trip() {
     let srv = spawn_with_config("shared/echo-worker.php", 1, "");
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
@@ -134,6 +119,58 @@ fn sigterm_master_stops() {
     let status = srv.wait_exit(STOP_BUDGET);
     assert_exit_code(status, MASTER_EXIT_OK, &srv);
     wait_pids_gone(&pids, Duration::from_secs(10), &srv);
+}
+
+/// Worker exit code after a clean drain (`rapira_master::WORKER_EXIT_DRAINED`).
+#[cfg(target_os = "linux")]
+const WORKER_EXIT_DRAINED: i32 = 0;
+
+/// Reaps `pid`, a child of this process, and returns its exit code; `None` if it was killed by a signal.
+#[cfg(target_os = "linux")]
+fn wait_child_exit(pid: u32, timeout: Duration, srv: &Server) -> Option<i32> {
+    let end = Instant::now() + timeout;
+    loop {
+        let mut status: libc::c_int = 0;
+        // SAFETY: non-blocking waitpid on a child of this process; status is a live out-param.
+        let rc = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
+        if rc == pid as libc::pid_t {
+            return libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status));
+        }
+        assert_eq!(rc, 0, "waitpid({pid}): {}", std::io::Error::last_os_error());
+        assert!(
+            Instant::now() < end,
+            "worker {pid} survived the master\n{}",
+            diagnostics(srv)
+        );
+        std::thread::sleep(Duration::from_millis(50));
+    }
+}
+
+/// The test process is a child subreaper while the master dies, so the orphaned workers become its children and their exit codes are visible. https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html
+#[cfg(target_os = "linux")]
+#[test]
+fn killed_master_leaves_workers_to_drain() {
+    let mut srv = spawn_with_config("shared/echo-worker.php", 2, "");
+    let pids = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
+    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+
+    // SAFETY: prctl with integer arguments only.
+    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
+    signal(srv.pid(), libc::SIGKILL);
+    let status = srv.wait_exit(Duration::from_secs(10));
+    // SAFETY: prctl with integer arguments only.
+    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0) };
+    assert!(status.is_some(), "master survived SIGKILL");
+
+    for pid in pids {
+        assert_eq!(
+            wait_child_exit(pid, Duration::from_secs(20), &srv),
+            Some(WORKER_EXIT_DRAINED),
+            "worker {pid} did not drain after the master died\n{}",
+            diagnostics(&srv)
+        );
+    }
 }
 
 #[test]

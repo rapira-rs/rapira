@@ -7,7 +7,6 @@ pub mod diagnostics;
 pub mod dispatcher;
 pub mod exchange;
 pub mod executor;
-pub(crate) mod fold;
 pub mod handler;
 pub mod module;
 pub mod quota;
@@ -21,13 +20,14 @@ pub(crate) mod zend;
 use std::ffi::c_int;
 
 pub use bindings::*;
+pub use context::set_script;
 pub use exchange::set_sendfile_root;
 pub use handler::{HandleError, RapiraHandle};
 pub use quota::WorkerHooks;
 pub use start::{PhpModule, Rapira};
 pub use types::{Frame, Mode, Request, ResponseHead};
 
-// Zend SUCCESS/FAILURE differ across php-src versions, so they are hardcoded rather than bound from the headers.
+// bindgen names the Zend SUCCESS/FAILURE constants differently across php-src versions, so the values are hardcoded.
 pub const SUCCESS: c_int = 0;
 pub const FAILURE: c_int = -1;
 

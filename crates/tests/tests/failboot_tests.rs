@@ -29,10 +29,10 @@ fn module_startup_failure_then_clean_restart() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
     assert_eq!(
-        drain(h.handle_blocking(req("/", "shared/hello.php"))?).0,
+        drain(tests::submit(&h, req("/", "shared/hello.php"))?).0,
         200
     );
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }

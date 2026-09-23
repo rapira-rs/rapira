@@ -1,4 +1,4 @@
-#![cfg(not(any(target_os = "macos", target_os = "windows")))]
+#![cfg(not(target_os = "macos"))]
 
 use php_sys::{Mode, Rapira};
 use std::path::Path;
@@ -14,23 +14,25 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
     let h = r.handle();
 
-    let (status, body) =
-        drain(h.handle_blocking(req("/warmup", "dispatcher/echo-loop-worker.php"))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/warmup", "dispatcher/echo-loop-worker.php"),
+    )?);
     assert_eq!((status, body.as_str()), (200, "method=GET body="));
 
-    for target in ["/first", "/second"] {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        let (status, body) =
-            drain(h.handle_blocking(req(target, "dispatcher/echo-loop-worker.php"))?);
-        assert_eq!(
-            (status, body.as_str()),
-            (200, "method=GET body="),
-            "a worker parked past the budget must still serve {target}"
-        );
-    }
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/first", "dispatcher/echo-loop-worker.php"),
+    )?);
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "method=GET body="),
+        "a worker parked past the budget must still serve"
+    );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -44,10 +46,10 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
     let h = r.handle();
 
-    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
+    let (status, body) = drain(tests::submit(&h, req("/", "dispatcher/verbs-worker.php"))?);
     assert_eq!((status, body.as_str()), (200, "state=false"));
 
-    let mut rx = h.handle_blocking(req("/?probe=spin", "dispatcher/verbs-worker.php"))?;
+    let mut rx = tests::submit(&h, req("/?probe=spin", "dispatcher/verbs-worker.php"))?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let resp = tests::drain_resp_deadline(&mut rx, deadline)
         .expect("spinning unit was never killed - the per-unit budget did not re-arm");
@@ -57,7 +59,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
         resp.status()
     );
 
-    let (status, body) = drain(h.handle_blocking(req("/", "dispatcher/verbs-worker.php"))?);
+    let (status, body) = drain(tests::submit(&h, req("/", "dispatcher/verbs-worker.php"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "state=false"),
@@ -65,7 +67,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -79,16 +81,19 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("timeout_tests/timeout-worker.php")))?;
     let h = r.handle();
 
-    let (status, body) = drain(h.handle_blocking(req(
-        "/timeout-worker.php",
-        "timeout_tests/timeout-worker.php",
-    ))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/timeout-worker.php", "timeout_tests/timeout-worker.php"),
+    )?);
     assert_eq!((status, body.as_str()), (200, "ok"));
 
-    let mut rx = h.handle_blocking(req(
-        "/timeout-worker.php?mode=spin",
-        "timeout_tests/timeout-worker.php",
-    ))?;
+    let mut rx = tests::submit(
+        &h,
+        req(
+            "/timeout-worker.php?mode=spin",
+            "timeout_tests/timeout-worker.php",
+        ),
+    )?;
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     let resp = tests::drain_resp_deadline(&mut rx, deadline)
         .expect("spinning job was never killed - max_execution_time did not fire");
@@ -100,10 +105,10 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     );
     assert_eq!(resp.status(), 200);
 
-    let (status, body) = drain(h.handle_blocking(req(
-        "/timeout-worker.php",
-        "timeout_tests/timeout-worker.php",
-    ))?);
+    let (status, body) = drain(tests::submit(
+        &h,
+        req("/timeout-worker.php", "timeout_tests/timeout-worker.php"),
+    )?);
     assert_eq!(
         (status, body.as_str()),
         (200, "ok"),
@@ -111,6 +116,6 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }

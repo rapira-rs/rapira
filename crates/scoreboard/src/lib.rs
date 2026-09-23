@@ -20,11 +20,10 @@ pub struct SharedSlot {
     pub handled: AtomicU64,
     pub errors: AtomicU64,
     pub recycles: AtomicU64,
-    pub restarts: AtomicU64,
     pub unhealthy: AtomicU32,
     _pad: [u8; 4],
     pub last_activity_ms: AtomicU64,
-    _tail: [u8; 8],
+    _tail: [u8; 16],
 }
 
 const _: () = assert!(size_of::<SharedSlot>() == 64 && align_of::<SharedSlot>() == 64);
@@ -43,9 +42,7 @@ pub struct SlotSnapshot {
     pub handled: u64,
     pub errors: u64,
     pub recycles: u64,
-    pub restarts: u64,
     pub unhealthy: bool,
-    pub last_activity_ms: u64,
 }
 
 /// Milliseconds on `CLOCK_MONOTONIC`. The values compare across processes within one boot. Wall-clock steps do not move them.
@@ -61,11 +58,8 @@ pub fn now_millis() -> u64 {
 
 impl Scoreboard {
     /// Master-side, pre-fork. The mapping must exist before a fork can inherit it.
+    /// Callers pass a bounded count: the master derives it from `MasterConfig::scoreboard_slots`, php_sys passes 1.
     pub fn create(nslots: usize) -> anyhow::Result<Scoreboard> {
-        anyhow::ensure!(
-            (1..=SB_MAX_SLOTS).contains(&nslots),
-            "scoreboard slots out of range: {nslots}"
-        );
         let bytes = nslots * size_of::<SharedSlot>();
         // SAFETY:
         // MAP_SHARED|MAP_ANONYMOUS is page-aligned and zero-filled (a valid bit pattern for every field), and the mapping is never munmap'd, so the slice is 'static.
@@ -133,9 +127,7 @@ impl Scoreboard {
                 handled: s.handled.load(Relaxed),
                 errors: s.errors.load(Relaxed),
                 recycles: s.recycles.load(Relaxed),
-                restarts: s.restarts.load(Relaxed),
                 unhealthy: s.unhealthy.load(Relaxed) != 0,
-                last_activity_ms: s.last_activity_ms.load(Relaxed),
             })
             .collect()
     }
@@ -147,7 +139,6 @@ impl SharedSlot {
         self.handled.store(0, Relaxed);
         self.errors.store(0, Relaxed);
         self.recycles.store(0, Relaxed);
-        self.restarts.store(0, Relaxed);
         self.unhealthy.store(0, Relaxed);
         self.pid.store(pid, Relaxed);
         self.last_activity_ms.store(now_millis(), Relaxed);
@@ -182,12 +173,6 @@ mod tests {
         sb.clear(0);
         assert_eq!(sb.slot(0).state.load(Relaxed), SLOT_FREE);
         assert!(sb.snapshot_slots().is_empty());
-    }
-
-    #[test]
-    fn slots_out_of_range_rejected() {
-        assert!(Scoreboard::create(0).is_err());
-        assert!(Scoreboard::create(SB_MAX_SLOTS + 1).is_err());
     }
 
     #[test]

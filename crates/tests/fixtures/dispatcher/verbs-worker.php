@@ -163,11 +163,6 @@ try {
             @trigger_error('bail with unit out', E_USER_ERROR); // bailout: the unit dies with the cycle
             continue;
         }
-        if ($probe === 'destruct-explicit') {
-            $ex->__destruct(); // explicit call is a no-op on a live unit
-            $ex->writeBody('explicit-destruct-ok');
-            continue;
-        }
         if ($probe === 'head204') {
             $ex->writeHead(204);
             $ex->writeBody('dropped-at-seal');

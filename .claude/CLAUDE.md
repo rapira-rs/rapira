@@ -1,6 +1,6 @@
 ## Settled, do not reopen
 
-- NTS only, `build.rs` rejects ZTS. Unix only.
+- NTS only, `wrapper.h` rejects ZTS headers at compile time. Unix only.
 - One interpreter per forked worker. Master is single-threaded, no tokio; workers inherit listener fds.
 - MINIT runs once in the master pre-fork so opcache SHM is inherited. Workers exit rather than tear the module down.
 - Foreground only, no daemonize. Pidfile stays.
@@ -10,7 +10,7 @@
 
 ## Comments
 
-- `rapira_arginfo.h` is generated, regenerate from the stub.
+- `make stubs` generates the three `crates/php_sys/*_arginfo.h` headers from the three stubs.
 - Joke comments (`Rustttt`, "trust me, I'm a developer") are intentional. Do not flag them.
 
 ## Tests

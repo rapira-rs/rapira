@@ -41,7 +41,7 @@ async fn worker_survives_exit() -> anyhow::Result<()> {
         "worker must survive exit() and serve the next request (got: {b3:?})"
     );
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -81,6 +81,6 @@ async fn many_producers_test() -> anyhow::Result<()> {
         }
     }
 
-    r.shutdown();
+    drop(r);
     Ok(())
 }

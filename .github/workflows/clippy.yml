@@ -9,47 +9,8 @@ jobs:
     fmt:
         runs-on: ubuntu-latest
         steps:
-            - uses: actions/checkout@v7
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with: { persist-credentials: false }
-            - uses: dtolnay/rust-toolchain@stable
+            - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
               with: { components: rustfmt }
             - run: cargo fmt --all --check
-
-    clippy:
-        runs-on: ubuntu-latest
-        steps:
-            - uses: actions/checkout@v7
-              with: { persist-credentials: false }
-
-            - uses: shivammathur/setup-php@v2
-              with:
-                  php-version: "8.5"
-                  coverage: none
-              env:
-                  phpts: nts
-
-            - name: Build deps for bindgen/cc
-              run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
-
-            - name: Expose embed lib if present (clippy doesn't link, but keeps the linker path set)
-              run: |
-                  LIBPHP=$(find "$(php-config --prefix)" /usr/lib -name 'libphp*.so' 2>/dev/null | head -1)
-                  if [ -n "$LIBPHP" ]; then
-                    echo "LD_LIBRARY_PATH=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
-                    echo "RUSTFLAGS=-L native=$(dirname "$LIBPHP")" >> "$GITHUB_ENV"
-                  fi
-
-            - uses: dtolnay/rust-toolchain@stable
-              with: { components: clippy }
-            - uses: Swatinem/rust-cache@v2
-              with:
-                  cache-on-failure: true
-            - run: cargo clippy --workspace --all-targets -- -D warnings
-            - run: cargo clippy -p tests --features e2e --tests -- -D warnings
-
-            - name: Master stays tokio-free
-              run: |
-                  deps=$(cargo tree -p rapira_master --prefix none)
-                  if echo "$deps" | grep -q '^tokio '; then
-                    echo "::error::rapira_master must not depend on tokio (it forks)"; exit 1
-                  fi

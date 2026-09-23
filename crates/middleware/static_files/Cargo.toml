@@ -13,7 +13,6 @@ workspace = true
 extension_api = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
-libc = { workspace = true }
 http-body-util = { workspace = true }
 tracing = { workspace = true }
 percent-encoding = "2"
@@ -22,4 +21,4 @@ tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }
 
 [dev-dependencies]
 tempfile = "3"
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros"] }
+tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

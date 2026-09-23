@@ -3,10 +3,14 @@ use crate::diagnostics::syslog_to_level;
 use crate::types::{Context, StreamState};
 use crate::*;
 use core::slice;
-use std::borrow::Cow;
-use std::ffi::{CStr, CString};
+use http::header::{
+    AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, FROM, HeaderMap, HeaderName, HeaderValue,
+    PROXY_AUTHORIZATION, REFERER,
+};
+use std::ffi::CStr;
+use std::io::Read;
 use std::mem::ManuallyDrop;
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::null_mut;
 
@@ -51,7 +55,7 @@ impl SapiHeaders {
 struct SapiHeader(*const sapi_header_struct);
 
 impl SapiHeader {
-    fn name_value(&self) -> Option<(String, Vec<u8>)> {
+    fn name_value(&self) -> Option<(HeaderName, HeaderValue)> {
         let sh = unsafe { &*self.0 };
         if sh.header.is_null() || sh.header_len == 0 {
             return None;
@@ -69,77 +73,91 @@ impl SapiHeader {
     }
 }
 
-/// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2; `field-name = token`, §5.1).
-pub(crate) fn is_tchar(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
-}
-
-/// (RFC 9110 §5.5, https://www.rfc-editor.org/rfc/rfc9110#section-5.5)
-pub(crate) fn is_field_value_byte(b: u8) -> bool {
-    (b >= 0x20 && b != 0x7f) || b == b'\t'
-}
-
-fn split_header_line(line: &[u8]) -> Option<(String, Vec<u8>)> {
+/// `HeaderName::from_bytes` accepts only the RFC 9110 `tchar` set and `HeaderValue::from_bytes` only the field-value bytes.
+/// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2
+/// https://www.rfc-editor.org/rfc/rfc9110#section-5.5
+fn split_header_line(line: &[u8]) -> Option<(HeaderName, HeaderValue)> {
     let i: usize = line.iter().position(|&b| b == b':')?;
-    let name: &[u8] = line[..i].trim_ascii();
-    let value: &[u8] = line[i + 1..].trim_ascii();
-    if name.is_empty() || !name.iter().all(|&b| is_tchar(b)) {
-        return None;
-    }
-    if !value.iter().all(|&b| is_field_value_byte(b)) {
-        return None;
-    }
-    Some((std::str::from_utf8(name).ok()?.to_owned(), value.to_vec()))
+    let name = HeaderName::from_bytes(line[..i].trim_ascii()).ok()?;
+    let value = HeaderValue::from_bytes(line[i + 1..].trim_ascii()).ok()?;
+    Some((name, value))
 }
 
-/// (RFC 3875 §4.1.18, https://www.rfc-editor.org/rfc/rfc3875#section-4.1.18)
-fn cgi_header_name(field: &str) -> CString {
-    let mut name: Vec<u8> = Vec::with_capacity(b"HTTP_".len() + field.len() + 1);
-    name.extend_from_slice(b"HTTP_");
+/// Separator joining repeats of `name`; `None` marks a singleton field, where the first line wins and the rest are dropped.
+/// Combining is legal only for comma-list fields: https://www.rfc-editor.org/rfc/rfc9110#section-5.3
+/// `Cookie` rejoins on `"; "`: https://www.rfc-editor.org/rfc/rfc6265#section-4.2.1
+fn field_line_separator(name: &HeaderName) -> Option<&'static [u8]> {
+    static SINGLETON: [HeaderName; 6] = [
+        AUTHORIZATION,
+        PROXY_AUTHORIZATION,
+        CONTENT_TYPE,
+        CONTENT_LENGTH,
+        REFERER,
+        FROM,
+    ];
+    if SINGLETON.contains(name) {
+        None
+    } else if name == COOKIE {
+        Some(b"; ")
+    } else {
+        Some(b", ")
+    }
+}
+
+/// Returns the one CGI value of `name`. Repeated lines join into `buf` on the field separator; a single line or a singleton field returns the first line and leaves `buf` unchanged.
+pub(crate) fn joined_field<'a>(
+    headers: &'a HeaderMap,
+    name: &HeaderName,
+    buf: &'a mut Vec<u8>,
+) -> Option<&'a [u8]> {
+    let mut values = headers.get_all(name).iter().map(HeaderValue::as_bytes);
+    let first = values.next()?;
+    let (Some(sep), Some(second)) = (field_line_separator(name), values.next()) else {
+        return Some(first);
+    };
+    buf.clear();
+    buf.extend_from_slice(first);
+    for value in std::iter::once(second).chain(values) {
+        buf.extend_from_slice(sep);
+        buf.extend_from_slice(value);
+    }
+    Some(buf)
+}
+
+/// Writes the NUL-terminated `HTTP_` meta-variable name of `field` into `buf`.
+/// https://www.rfc-editor.org/rfc/rfc3875#section-4.1.18
+fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
+    buf.clear();
+    buf.extend_from_slice(b"HTTP_");
     for &b in field.as_bytes() {
-        name.push(if b == b'-' {
+        buf.push(if b == b'-' {
             b'_'
         } else {
             b.to_ascii_uppercase()
         });
     }
-    CString::new(name).unwrap_or_default()
+    buf.push(0);
+    CStr::from_bytes_until_nul(buf).unwrap_or_default()
 }
 
-fn cgi_header_vars<'a>(
-    headers: &'a [(String, Vec<u8>)],
-    content_length: i64,
-    server_vars: &'a [(String, String)],
-) -> ManuallyDrop<Vec<(CString, Cow<'a, [u8]>)>> {
-    let mut pairs: Vec<(CString, Cow<'a, [u8]>)> =
-        Vec::with_capacity(1 + headers.len() + server_vars.len());
-
+/// php_register_variable_safe is last-write-wins, so the call order is the precedence rule: CONTENT_LENGTH, then HTTP_*.
+/// Each name registers once, with its repeats joined.
+/// Owned buffers stay in ManuallyDrop because `put` can bail out over this frame.
+fn cgi_header_vars(headers: &HeaderMap, content_length: i64, mut put: impl FnMut(&CStr, &[u8])) {
     if content_length >= 0 {
-        pairs.push((
-            c"CONTENT_LENGTH".to_owned(),
-            Cow::Owned(content_length.to_string().into_bytes()),
-        ));
+        let len = ManuallyDrop::new(content_length.to_string());
+        put(c"CONTENT_LENGTH", len.as_bytes());
+        drop(ManuallyDrop::into_inner(len));
     }
-    for (field, value) in headers {
-        pairs.push((cgi_header_name(field), Cow::Borrowed(value.as_slice())));
+    let mut name = ManuallyDrop::new(Vec::new());
+    let mut joined = ManuallyDrop::new(Vec::new());
+    for field in headers.keys() {
+        if let Some(value) = joined_field(headers, field, &mut joined) {
+            put(cgi_header_name(&mut name, field.as_str()), value);
+        }
     }
-    for (name, value) in server_vars {
-        pairs.push((
-            CString::new(name.as_str()).unwrap_or_default(),
-            Cow::Borrowed(value.as_bytes()),
-        ));
-    }
-    ManuallyDrop::new(pairs)
-}
-
-pub(crate) unsafe extern "C" fn sapi_startup_cb(sapi_module: *mut sapi_module_struct) -> c_int {
-    unsafe { php_module_startup(sapi_module, &raw mut rapira_module_entry) }
-}
-pub(crate) unsafe extern "C" fn sapi_shutdown_cb(_sapi_module: *mut sapi_module_struct) -> c_int {
-    unsafe {
-        php_module_shutdown();
-    }
-    SUCCESS
+    drop(ManuallyDrop::into_inner(joined));
+    drop(ManuallyDrop::into_inner(name));
 }
 
 /// # Safety
@@ -164,7 +182,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
 
             if ctx.stream == StreamState::NotSent {
                 let status = unsafe { SapiHeaders(&mut (*rapira_sg()).sapi_headers).status() };
-                ctx.commit_head(status, vec![]);
+                ctx.commit_head(status, HeaderMap::new());
             }
 
             if let Some(tx) = &ctx.sender {
@@ -218,7 +236,7 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
         };
 
         let h = SapiHeaders(h);
-        let headers: Vec<(String, Vec<u8>)> = h
+        let headers: HeaderMap = h
             .lines()
             .filter_map(|l: SapiHeader| l.name_value())
             .collect();
@@ -227,8 +245,6 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
     })
 }
 
-pub(crate) unsafe extern "C" fn flush(_sc: *mut c_void) {}
-
 pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usize {
     with_ctx(0, |ctx| {
         let crate::types::Body::Raw(reader) = &mut ctx.req.body else {
@@ -236,16 +252,7 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
             return 0;
         };
         let dst = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), count) };
-        let mut filled = 0;
-        while filled < count {
-            match reader.read(&mut dst[filled..]) {
-                Ok(0) => break,
-                Ok(n) => filled += n,
-                Err(e) if e.kind() == std::io::ErrorKind::Interrupted => continue,
-                Err(_) => return 0,
-            }
-        }
-        filled
+        reader.read(dst).unwrap_or(0)
     })
 }
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
@@ -268,14 +275,15 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             );
         };
         let put = |name: &CStr, val: &str| put_bytes(name, val.as_bytes());
-        put(c"PHP_SELF", &ctx.req.script_name);
-        let doc_uri = ctx
+        let script = crate::context::script();
+        put(c"PHP_SELF", script.script_name);
+        let (doc_uri, query) = ctx
             .req
             .uri
             .split_once('?')
-            .map_or(ctx.req.uri.as_str(), |(p, _)| p);
+            .unwrap_or((ctx.req.uri.as_str(), ""));
         put(c"DOCUMENT_URI", doc_uri);
-        put(c"DOCUMENT_ROOT", &ctx.req.document_root);
+        put(c"DOCUMENT_ROOT", script.document_root);
         put(
             c"REQUEST_SCHEME",
             if ctx.req.https { "https" } else { "http" },
@@ -288,9 +296,9 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put(c"REMOTE_IDENT", "");
         put(c"REQUEST_METHOD", &ctx.req.method);
         put(c"REQUEST_URI", &ctx.req.uri);
-        put(c"QUERY_STRING", &ctx.req.query);
+        put(c"QUERY_STRING", query);
         put_bytes(c"SCRIPT_FILENAME", reqc.script.to_bytes());
-        put(c"SCRIPT_NAME", &ctx.req.script_name);
+        put(c"SCRIPT_NAME", script.script_name);
         put(c"SERVER_PROTOCOL", &ctx.req.protocol);
         put(c"SERVER_SOFTWARE", "Rapira");
         put(c"SERVER_NAME", &ctx.req.server_name);
@@ -302,9 +310,12 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         let auth_type: &[u8] = ctx
             .req
             .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-            .and_then(|(_, v)| v.split(|b| b.is_ascii_whitespace()).find(|s| !s.is_empty()))
+            .get(AUTHORIZATION)
+            .and_then(|v| {
+                v.as_bytes()
+                    .split(|b| b.is_ascii_whitespace())
+                    .find(|s| !s.is_empty())
+            })
             .unwrap_or(b"");
         put_bytes(c"AUTH_TYPE", auth_type);
 
@@ -318,28 +329,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             put_bytes(c"CONTENT_TYPE", ct);
         }
 
-        let pairs = cgi_header_vars(
-            &reqc.folded_headers,
-            ctx.req.content_length,
-            &ctx.req.server_vars,
-        );
-        for (name, val) in pairs.iter() {
-            put_bytes(name, &val[..]);
-        }
-        drop(ManuallyDrop::into_inner(pairs));
-    })
-}
-pub(crate) unsafe extern "C" fn getenv_cb(name: *const c_char, name_len: usize) -> *mut c_char {
-    with_ctx(null_mut(), |ctx| {
-        if name.is_null() {
-            return null_mut();
-        }
-
-        let key = unsafe { slice::from_raw_parts(name.cast::<u8>(), name_len) };
-        ctx.c
-            .as_ref()
-            .and_then(|c| c.env.get(key))
-            .map_or(null_mut(), |v| v.as_ptr() as *mut c_char)
+        cgi_header_vars(&ctx.req.headers, ctx.req.content_length, put_bytes);
     })
 }
 pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type: c_int) {
@@ -356,7 +346,7 @@ pub(crate) fn send_error_head(c: &mut Context, status: u16) {
     if c.stream != StreamState::NotSent {
         return;
     }
-    c.commit_head(status, vec![]);
+    c.commit_head(status, HeaderMap::new());
 }
 
 pub(crate) fn finalize_response(c: &mut Context, errored: bool) -> bool {
@@ -371,20 +361,6 @@ pub(crate) fn finalize_response(c: &mut Context, errored: bool) -> bool {
 mod tests {
     use super::*;
 
-    fn hdrs(pairs: &[(&str, &str)]) -> Vec<(String, Vec<u8>)> {
-        pairs
-            .iter()
-            .map(|(k, v)| ((*k).to_owned(), v.as_bytes().to_vec()))
-            .collect()
-    }
-
-    fn names(pairs: &[(CString, Cow<[u8]>)]) -> Vec<String> {
-        pairs
-            .iter()
-            .map(|(n, _)| n.to_string_lossy().into_owned())
-            .collect()
-    }
-
     #[test]
     fn header_line_needs_a_colon_and_a_name() {
         assert!(split_header_line(b"no colon here").is_none());
@@ -395,8 +371,8 @@ mod tests {
     #[test]
     fn header_line_trims_both_halves() {
         let (name, value) = split_header_line(b"X-Trace :  hello  ").unwrap();
-        assert_eq!(name, "X-Trace");
-        assert_eq!(value, b"hello");
+        assert_eq!(name, "x-trace");
+        assert_eq!(value, "hello");
     }
 
     /// sapi_header_op screens only CR, LF and NUL, so these still arrive here.
@@ -410,32 +386,134 @@ mod tests {
     #[test]
     fn obs_text_and_underscores_stay_legal() {
         assert_eq!(
-            split_header_line(b"X-Bin: \xff\xfe").unwrap().1,
+            split_header_line(b"X-Bin: \xff\xfe").unwrap().1.as_bytes(),
             b"\xff\xfe"
         );
-        assert_eq!(split_header_line(b"X_Custom: 1").unwrap().0, "X_Custom");
+        assert_eq!(split_header_line(b"X_Custom: 1").unwrap().0, "x_custom");
+    }
+
+    fn map(lines: &[(&str, &str)]) -> HeaderMap {
+        lines
+            .iter()
+            .map(|(k, v)| {
+                (
+                    HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    HeaderValue::from_str(v).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// List fields join on ", ", Cookie on "; ", and a singleton field keeps its first line.
+    #[test]
+    fn repeated_field_lines_join_per_field() {
+        struct Case {
+            name: &'static str,
+            lines: &'static [(&'static str, &'static str)],
+            field: &'static str,
+            want: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "cookie joins on a semicolon",
+                lines: &[
+                    ("cookie", "a=1"),
+                    ("x-forwarded-for", "1.2.3.4"),
+                    ("Cookie", "b=2"),
+                ],
+                field: "cookie",
+                want: Some("a=1; b=2"),
+            },
+            Case {
+                name: "list field joins on a comma",
+                lines: &[
+                    ("x-forwarded-for", "1.2.3.4"),
+                    ("accept", "text/*"),
+                    ("X-Forwarded-For", "5.6.7.8"),
+                ],
+                field: "x-forwarded-for",
+                want: Some("1.2.3.4, 5.6.7.8"),
+            },
+            Case {
+                name: "single line passes through",
+                lines: &[("accept", "text/*")],
+                field: "accept",
+                want: Some("text/*"),
+            },
+            Case {
+                name: "authorization keeps the first line",
+                lines: &[
+                    ("authorization", "Bearer one"),
+                    ("Authorization", "Bearer two"),
+                ],
+                field: "authorization",
+                want: Some("Bearer one"),
+            },
+            Case {
+                name: "content-type keeps the first line",
+                lines: &[
+                    ("content-type", "text/plain"),
+                    ("content-type", "text/html"),
+                ],
+                field: "content-type",
+                want: Some("text/plain"),
+            },
+            Case {
+                name: "absent field has no value",
+                lines: &[("accept", "text/*")],
+                field: "referer",
+                want: None,
+            },
+        ];
+        for case in cases {
+            let headers = map(case.lines);
+            let mut buf = Vec::new();
+            let got = joined_field(&headers, &HeaderName::from_static(case.field), &mut buf);
+            assert_eq!(got, case.want.map(str::as_bytes), "{}", case.name);
+        }
+    }
+
+    /// `HTTP_*` registration is last-write-wins: each name registers once, after CONTENT_LENGTH, in the order of its first line.
+    #[test]
+    fn cgi_header_vars_register_each_name_once() {
+        let headers = map(&[
+            ("x-forwarded-for", "1.2.3.4"),
+            ("cookie", "a=1"),
+            ("x-forwarded-for", "5.6.7.8"),
+            ("cookie", "b=2"),
+        ]);
+        let mut got = Vec::new();
+        cgi_header_vars(&headers, 5, |name, value| {
+            got.push((
+                name.to_str().unwrap().to_owned(),
+                String::from_utf8(value.to_vec()).unwrap(),
+            ));
+        });
+        let want = [
+            ("CONTENT_LENGTH", "5"),
+            ("HTTP_X_FORWARDED_FOR", "1.2.3.4, 5.6.7.8"),
+            ("HTTP_COOKIE", "a=1; b=2"),
+        ]
+        .map(|(n, v)| (n.to_owned(), v.to_owned()));
+        assert_eq!(got, want);
     }
 
     /// The front screens field names against `[A-Za-z0-9-]`; that screen is complete only while this mapper rewrites nothing but `-`.
+    /// One buffer serves every name of a request, so a shorter name after a longer one must not keep the old tail.
     #[test]
     fn cgi_header_name_rewrites_only_dash() {
-        assert_eq!(cgi_header_name("x-foo").to_bytes(), b"HTTP_X_FOO");
-        assert_eq!(cgi_header_name("x_foo").to_bytes(), b"HTTP_X_FOO");
-        assert_eq!(cgi_header_name("x.foo").to_bytes(), b"HTTP_X.FOO");
-        assert_eq!(cgi_header_name("x~foo").to_bytes(), b"HTTP_X~FOO");
-    }
-
-    /// php_register_variable_safe is last-write-wins, so batch order is the precedence rule: CONTENT_LENGTH, then HTTP_*, then host-supplied server vars.
-    #[test]
-    fn registration_order_gives_server_vars_precedence() {
-        let headers = hdrs(&[("accept", "text/*")]);
-        let server_vars = [("HTTP_ACCEPT".to_owned(), "override".to_owned())];
-        let pairs = ManuallyDrop::into_inner(cgi_header_vars(&headers, 12, &server_vars));
+        let mut buf = Vec::new();
+        assert_eq!(cgi_header_name(&mut buf, "x-foo").to_bytes(), b"HTTP_X_FOO");
+        assert_eq!(cgi_header_name(&mut buf, "x_foo").to_bytes(), b"HTTP_X_FOO");
+        assert_eq!(cgi_header_name(&mut buf, "x.foo").to_bytes(), b"HTTP_X.FOO");
+        assert_eq!(cgi_header_name(&mut buf, "x~foo").to_bytes(), b"HTTP_X~FOO");
         assert_eq!(
-            names(&pairs),
-            ["CONTENT_LENGTH", "HTTP_ACCEPT", "HTTP_ACCEPT"]
+            cgi_header_name(&mut buf, "accept-language").to_bytes(),
+            b"HTTP_ACCEPT_LANGUAGE"
         );
-        assert_eq!(pairs[0].1.as_ref(), b"12");
-        assert_eq!(pairs[2].1.as_ref(), b"override");
+        assert_eq!(
+            cgi_header_name(&mut buf, "accept").to_bytes(),
+            b"HTTP_ACCEPT"
+        );
     }
 }

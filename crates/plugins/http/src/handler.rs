@@ -60,6 +60,10 @@ pub(crate) struct RespBody {
     transport: Option<(u64, tokio::sync::watch::Receiver<bridge::ConnectionState>)>,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one value per response; a Box would cost an allocation per response"
+)]
 enum BodyKind {
     Reply(bridge::ReplyBody),
     Empty,
@@ -227,9 +231,9 @@ where
             &handler.closed,
             authority,
             reqs_counter,
-            &parts,
+            &mut parts,
             incoming,
-            &peer,
+            peer,
         )
         .await;
     }
@@ -284,9 +288,9 @@ impl Conn {
             &self.closed,
             state.authority,
             state.guard,
-            &parts,
+            &mut parts,
             body,
-            &peer,
+            peer,
         )
         .await
         .map(BodyExt::boxed_unsync)
@@ -298,9 +302,9 @@ async fn serve_php<B>(
     closed: &tokio::sync::watch::Receiver<bridge::ConnectionState>,
     authority: Option<Vec<u8>>,
     guard: Arc<InflightReqCount>,
-    parts: &http::request::Parts,
+    parts: &mut http::request::Parts,
     body: B,
-    peer: &Peer,
+    peer: Peer,
 ) -> http::Response<RespBody>
 where
     B: Body<Data = bytes::Bytes> + Unpin,
@@ -308,7 +312,9 @@ where
 {
     let cfg = &shared.cfg;
     let mut body = body;
-    let mut collected: Vec<u8> = Vec::new();
+    // The direct path bounds the hint through the content-length check; a middleware body can report any lower bound.
+    let reserve = body.size_hint().lower().min(cfg.max_body_size as u64) as usize;
+    let mut collected: Vec<u8> = Vec::with_capacity(reserve);
     loop {
         // hyper only times the head read, so each body frame gets its own progress bound here.
         let frame = match tokio::time::timeout(cfg.keepalive_timeout, body.frame()).await {
@@ -552,20 +558,18 @@ mod tests {
     fn head(bodiless: bool) -> ReplyEvent {
         ReplyEvent::Head {
             status: 200,
-            headers: Vec::new(),
+            headers: http::HeaderMap::new(),
             content_length: None,
             bodiless,
-            body_coded: false,
         }
     }
 
     fn head_cl(content_length: u64) -> ReplyEvent {
         ReplyEvent::Head {
             status: 200,
-            headers: Vec::new(),
+            headers: http::HeaderMap::new(),
             content_length: Some(content_length),
             bodiless: false,
-            body_coded: false,
         }
     }
 
@@ -575,7 +579,7 @@ mod tests {
 
     fn end() -> ReplyEvent {
         ReplyEvent::End {
-            trailers: Vec::new(),
+            trailers: http::HeaderMap::new(),
             truncated: false,
         }
     }
@@ -738,26 +742,9 @@ mod tests {
         assert_eq!(inflight.load(Ordering::Acquire), 0);
     }
 
-    /// One request counts once, no matter how many holders share the guard.
+    /// A bodiless reply keeps the response guarded after its reply is consumed to End.
     #[tokio::test]
-    async fn chained_response_counts_one_request() {
-        let backend = Arc::new(Scripted::one(vec![head(false), end()], None));
-        let (handler, inflight, _closed_tx) =
-            setup(backend, vec![Arc::new(Pass) as Arc<dyn Middleware>]);
-        let res = handle(handler, get_request()).await;
-        assert_eq!(res.status(), http::StatusCode::OK);
-        assert_eq!(
-            inflight.load(Ordering::Acquire),
-            1,
-            "one request must count once"
-        );
-        drop(res);
-        assert_eq!(inflight.load(Ordering::Acquire), 0);
-    }
-
-    /// A bodiless reply keeps the response guarded after the drain task finishes.
-    #[tokio::test]
-    async fn bodiless_response_stays_guarded_after_the_drain_ends() {
+    async fn bodiless_response_stays_guarded_after_the_reply_ends() {
         let dropped = Arc::new(AtomicBool::new(false));
         let backend = Arc::new(Scripted::one(
             vec![head(true), end()],
@@ -772,7 +759,7 @@ mod tests {
             }
         })
         .await
-        .expect("drain must run to End");
+        .expect("the reply must be consumed to End");
         assert_eq!(
             inflight.load(Ordering::Acquire),
             1,

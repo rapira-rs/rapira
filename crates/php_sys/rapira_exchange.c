@@ -25,11 +25,10 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, __construct) {
     zend_throw_error(NULL, "host-created");
 }
 
+// receive() sets job before PHP code can reach the object
 static void *exchange_job(zval *this_ptr) {
     void *job = rapira_exchange_from(Z_OBJ_P(this_ptr))->job;
-    if (job == NULL) {
-        zend_throw_error(NULL, "exchange carries no host state");
-    }
+    ZEND_ASSERT(job != NULL);
     return job;
 }
 
@@ -43,9 +42,6 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeHead) {
     ZEND_PARSE_PARAMETERS_END();
 
     void *job = exchange_job(ZEND_THIS);
-    if (job == NULL) {
-        RETURN_THROWS();
-    }
     if (!rapira_rs_exchange_write_head(job, (int64_t)status, headers)) {
         rapira_throw_or_backstop("writeHead");
         RETURN_THROWS();
@@ -62,9 +58,6 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeBody) {
     ZEND_PARSE_PARAMETERS_END();
 
     void *job = exchange_job(ZEND_THIS);
-    if (job == NULL) {
-        RETURN_THROWS();
-    }
     if (!rapira_rs_exchange_write_body(job, ZSTR_VAL(content),
                                        ZSTR_LEN(content), eos)) {
         rapira_throw_or_backstop("writeBody");
@@ -75,18 +68,12 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeBody) {
 ZEND_METHOD(Rapira_Internal_Http_Exchange, isFinalized) {
     ZEND_PARSE_PARAMETERS_NONE();
     void *job = exchange_job(ZEND_THIS);
-    if (job == NULL) {
-        RETURN_THROWS();
-    }
     RETURN_BOOL(rapira_rs_exchange_is_finalized(job));
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, isCancelled) {
     ZEND_PARSE_PARAMETERS_NONE();
     void *job = exchange_job(ZEND_THIS);
-    if (job == NULL) {
-        RETURN_THROWS();
-    }
     RETURN_BOOL(rapira_rs_exchange_is_cancelled(job));
 }
 
@@ -105,9 +92,6 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, sendFile) {
     ZEND_PARSE_PARAMETERS_END();
 
     void *job = exchange_job(ZEND_THIS);
-    if (job == NULL) {
-        RETURN_THROWS();
-    }
     if (!rapira_rs_exchange_send_file(job, ZSTR_VAL(path), ZSTR_LEN(path),
                                       (int64_t)offset, (int64_t)length,
                                       length_is_null, eos)) {
@@ -123,9 +107,6 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeTrailers) {
     ZEND_PARSE_PARAMETERS_END();
 
     void *job = exchange_job(ZEND_THIS);
-    if (job == NULL) {
-        RETURN_THROWS();
-    }
     if (!rapira_rs_exchange_write_trailers(job, trailers)) {
         rapira_throw_or_backstop("writeTrailers");
         RETURN_THROWS();
@@ -135,33 +116,18 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeTrailers) {
 ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
     ZEND_PARSE_PARAMETERS_NONE();
     void *job = exchange_job(ZEND_THIS);
-    if (job == NULL) {
-        RETURN_THROWS();
-    }
     if (!rapira_rs_exchange_flush(job)) {
         rapira_throw_or_backstop("flush");
         RETURN_THROWS();
     }
 }
 
-// body is empty: the reporting runs in free_obj when the last reference drops
-ZEND_METHOD(Rapira_Internal_Http_Exchange, __destruct) {
-    (void)return_value;
-    ZEND_PARSE_PARAMETERS_NONE();
-}
-
-// the request graph builder lives in Rust (exchange.rs); this shell owns the macro layer
+// the request graph builder lives in Rust (src/exchange/); this shell owns the macro layer
 ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (exchange_job(ZEND_THIS) == NULL) {
-        RETURN_THROWS();
-    }
     rapira_exchange_obj *ex = rapira_exchange_from(Z_OBJ_P(ZEND_THIS));
     if (!rapira_rs_exchange_build_request(ex, return_value)) {
-        // the builder throws before returning false; a caught Rust panic cannot, so backstop here
-        if (!EG(exception)) {
-            zend_throw_error(NULL, "request construction failed");
-        }
+        rapira_throw_or_backstop("getRequest");
         RETURN_THROWS();
     }
 }

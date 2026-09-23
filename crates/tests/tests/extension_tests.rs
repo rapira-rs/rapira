@@ -1,15 +1,13 @@
-use extension_api::{Extension, Php, Request, Response, Result};
+use extension_api::{Extension, Php, Request, Result};
+use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue, SET_COOKIE};
 use php_sys::{Mode, Rapira};
 use rapira_runtime::ExtensionRuntime;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tests::{fixture, php_lock};
-
-/// Distinct ids so the same type can be registered many times (dup-name check).
-static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
+use tests::{Response, collect, fixture, php_lock};
 
 async fn exec_full(php: &Php, req: Request) -> Result<Response> {
-    php.exec(req).await?.collect().await
+    collect(php.exec(req).await?).await
 }
 
 fn get_request(uri: &str) -> Request {
@@ -26,27 +24,23 @@ fn get_request(uri: &str) -> Request {
         server_port: 80,
         tls: None,
         received_at: None,
-        headers: Vec::new(),
+        headers: HeaderMap::new(),
         body: Vec::new(),
     }
 }
 
 /// Drives two requests concurrently; distinct bodies prove both ran.
-struct Driver {
-    id: String,
-}
+struct Driver;
 
 impl Extension for Driver {
     type Config = ();
 
     fn init(_config: ()) -> Self {
-        Driver {
-            id: format!("ext{}", NEXT_ID.fetch_add(1, Ordering::Relaxed)),
-        }
+        Driver
     }
 
     fn name(&self) -> &str {
-        &self.id
+        "driver"
     }
 
     async fn run(&mut self, php: Php) -> Result<()> {
@@ -70,52 +64,28 @@ fn check(res: &Response, want: &str) -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Worker(fixture(
-        "extension_tests/ext-driver-worker.php",
-    )))?;
-    let mut host = ExtensionRuntime::new();
-    host.register::<Driver>(())?;
-    let outcomes = host
-        .run(
-            rapira.handle(),
-            fixture("extension_tests/ext-driver-worker.php"),
-        )
-        .join();
-    drop(rapira);
-    assert_eq!(outcomes.len(), 1);
-    assert!(outcomes[0].is_ok(), "driver failed: {:?}", outcomes[0]);
-    Ok(())
-}
-
 /// A rejected body surfaces as a downcastable `Rejected` at exec() and never reaches the pool.
-struct RejectDriver {
-    id: String,
-}
+struct RejectDriver;
 
 impl Extension for RejectDriver {
     type Config = ();
 
     fn init(_config: ()) -> Self {
-        RejectDriver {
-            id: format!("ext{}", NEXT_ID.fetch_add(1, Ordering::Relaxed)),
-        }
+        RejectDriver
     }
 
     fn name(&self) -> &str {
-        &self.id
+        "reject-driver"
     }
 
     async fn run(&mut self, php: Php) -> Result<()> {
         let multipart_post = |body: Vec<u8>| {
             let mut r = get_request("/?from=a");
             r.method = "POST".into();
-            r.headers = vec![(
-                "content-type".into(),
-                b"multipart/form-data; boundary=B".to_vec(),
-            )];
+            r.headers = HeaderMap::from_iter([(
+                CONTENT_TYPE,
+                HeaderValue::from_static("multipart/form-data; boundary=B"),
+            )]);
             r.body = body;
             r
         };
@@ -152,17 +122,13 @@ impl Extension for RejectDriver {
             rejected.status
         );
 
-        let plain_line = || ("content-type".to_string(), b"text/plain".to_vec());
-        let multipart_line = || {
-            (
-                "content-type".to_string(),
-                b"multipart/form-data; boundary=EVIL".to_vec(),
-            )
-        };
-        for headers in [
-            vec![plain_line(), multipart_line()],
-            vec![multipart_line(), plain_line()],
+        let plain_line = HeaderValue::from_static("text/plain");
+        let multipart_line = HeaderValue::from_static("multipart/form-data; boundary=EVIL");
+        for lines in [
+            [plain_line.clone(), multipart_line.clone()],
+            [multipart_line.clone(), plain_line.clone()],
         ] {
+            let headers = HeaderMap::from_iter(lines.map(|v| (CONTENT_TYPE, v)));
             let mut smuggle = multipart_post(
                 b"--EVIL\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--EVIL--".to_vec(),
             );
@@ -186,7 +152,7 @@ impl Extension for RejectDriver {
             "method=POST body=",
         )?;
         let mut plain = multipart_post(b"--B\r\nnot really\r\n--B--".to_vec());
-        plain.headers = vec![("content-type".into(), b"text/plain".to_vec())];
+        plain.headers = HeaderMap::from_iter([(CONTENT_TYPE, plain_line)]);
         check(
             &exec_full(&php, plain).await?,
             "method=POST body=--B\r\nnot really\r\n--B--",
@@ -204,7 +170,7 @@ fn rejected_bodies_never_reach_the_pool() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
     let mut host = ExtensionRuntime::new();
-    host.register::<RejectDriver>(())?;
+    host.register::<RejectDriver>(());
     let limits = rapira_runtime::multipart::Limits {
         max_file_size: 1024,
         ..rapira_runtime::multipart::Limits::default()
@@ -230,7 +196,7 @@ fn classic_mode_serves_exec() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionRuntime::new();
-    host.register::<Driver>(())?;
+    host.register::<Driver>(());
     let outcomes = host
         .run(
             rapira.handle(),
@@ -265,9 +231,7 @@ impl Extension for ErrorPathDriver {
         let resp = exec_full(&php, get_request("/")).await?;
         anyhow::ensure!(resp.status == 404, "expected 404, got {}", resp.status);
         anyhow::ensure!(
-            resp.headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("set-cookie")),
+            resp.headers.contains_key(SET_COOKIE),
             "the session Set-Cookie must survive the buffered error path"
         );
         Ok(())
@@ -281,7 +245,7 @@ fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
         "shared/error-keeps-headers-worker.php",
     )))?;
     let mut host = ExtensionRuntime::new();
-    host.register::<ErrorPathDriver>(())?;
+    host.register::<ErrorPathDriver>(());
     let outcomes = host
         .run(
             rapira.handle(),
@@ -334,7 +298,7 @@ fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Worker(fixture("shared/output-then-throw-worker.php")))?;
     let mut host = ExtensionRuntime::new();
-    host.register::<TruncatedDriver>(())?;
+    host.register::<TruncatedDriver>(());
     let outcomes = host
         .run(
             rapira.handle(),
@@ -356,7 +320,7 @@ fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionRuntime::new();
-    host.register::<ErrorPathDriver>(())?;
+    host.register::<ErrorPathDriver>(());
     let outcomes = host
         .run(rapira.handle(), fixture("shared/error-keeps-headers.php"))
         .join();
@@ -402,7 +366,7 @@ fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
     RESIDENT_SHUTDOWN.store(false, Ordering::Relaxed);
     let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionRuntime::new();
-    host.register::<Resident>(())?;
+    host.register::<Resident>(());
     let running = host.run(
         rapira.handle(),
         fixture("extension_tests/ext-driver-classic.php"),
@@ -431,7 +395,7 @@ fn many_extensions_run() -> anyhow::Result<()> {
     )))?;
     let mut host = ExtensionRuntime::new();
     for _ in 0..N {
-        host.register::<Driver>(())?;
+        host.register::<Driver>(());
     }
     let outcomes = host
         .run(
@@ -448,40 +412,11 @@ fn many_extensions_run() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A fixed name so two registrations collide.
-struct Fixed;
-
-impl Extension for Fixed {
-    type Config = ();
-
-    fn init(_config: ()) -> Self {
-        Fixed
-    }
-
-    fn name(&self) -> &str {
-        "fixed"
-    }
-    async fn run(&mut self, _php: Php) -> Result<()> {
-        Ok(())
-    }
-}
-
-#[test]
-fn duplicate_extension_name_is_rejected() {
-    let mut host = ExtensionRuntime::new();
-    host.register::<Fixed>(()).unwrap();
-    let err = host.register::<Fixed>(()).unwrap_err();
-    assert!(
-        err.to_string().contains("duplicate extension"),
-        "expected a duplicate-name error, got: {err}"
-    );
-}
-
 fn run_one<E: Extension<Config = ()>>() -> anyhow::Result<Vec<Result<(), String>>> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionRuntime::new();
-    host.register::<E>(())?;
+    host.register::<E>(());
     let outcomes = host
         .run(
             rapira.handle(),
@@ -579,7 +514,7 @@ fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
     let _guard = php_lock();
     let rapira = Rapira::start(Mode::Classic)?;
     let mut host = ExtensionRuntime::new();
-    host.register::<SlowShutdown>(())?;
+    host.register::<SlowShutdown>(());
     let running = host.run_with_options(
         rapira.handle(),
         fixture("extension_tests/ext-driver-classic.php"),

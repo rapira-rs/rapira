@@ -87,30 +87,12 @@ fn run_cycle(script: &Path) -> Cycle {
     log_and_clear_last_error();
     if Outcome::from_c(unsafe { rapira_request_shutdown() }) == Outcome::Bailout {
         error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
-        sb_update(scoreboard::Event::Restart);
         return Cycle::Restart;
     }
 
-    classify(CycleEnd {
-        closed: crate::exchange::closed_seen(),
-        recycle,
-        served: crate::exchange::served_any(),
-        received: crate::exchange::received_any(),
-    })
-}
-
-struct CycleEnd {
-    closed: bool,
-    recycle: bool,
-    served: bool,
-    received: bool,
-}
-
-/// Restart (a shutdown bailout) is decided before this runs.
-fn classify(end: CycleEnd) -> Cycle {
-    if end.closed {
+    if crate::exchange::closed_seen() {
         Cycle::Stop
-    } else if end.recycle || end.served || end.received {
+    } else if recycle || crate::exchange::received_any() {
         Cycle::Recycle
     } else {
         Cycle::Failed
@@ -219,7 +201,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 }
 
 /// The first call tears down the bootstrap request php_request_startup() left behind, before any job is served.
-fn next_job() -> Option<Job> {
+fn next_job() -> Option<Box<Job>> {
     WORKER.with_borrow_mut(|w| {
         let wc = w.as_mut()?;
         if std::mem::take(&mut wc.first_call) {

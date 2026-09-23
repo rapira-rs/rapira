@@ -14,7 +14,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
             "failboot_worker_tests/failboot-worker.php",
         )))?;
         let h = r.handle();
-        let rx = h.handle_blocking(req("/", "failboot_worker_tests/failboot-worker.php"))?;
+        let rx = tests::submit(&h, req("/", "failboot_worker_tests/failboot-worker.php"))?;
         drop(h);
         let (status, body) = drain(rx);
         drop(r);
@@ -34,7 +34,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
 #[test]
 fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let (done_tx, done_rx) = mpsc::sync_channel::<(usize, Vec<u16>)>(1);
+    let (done_tx, done_rx) = mpsc::sync_channel::<(bool, Vec<u16>)>(1);
 
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
         let r = Rapira::start(Mode::Dispatcher(fixture(
@@ -43,13 +43,15 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
         let h = r.handle();
         let mut statuses = Vec::new();
         for _ in 0..5 {
-            let (s, _) =
-                drain(h.handle_blocking(req("/", "failboot_worker_tests/failboot-worker.php"))?);
+            let (s, _) = drain(tests::submit(
+                &h,
+                req("/", "failboot_worker_tests/failboot-worker.php"),
+            )?);
             statuses.push(s);
         }
-        let unhealthy = r.scoreboard().unhealthy;
+        let unhealthy = r.scoreboard().expect("private scoreboard slot").unhealthy;
         drop(h);
-        r.shutdown();
+        drop(r);
         let _ = done_tx.send((unhealthy, statuses));
         Ok(())
     });
@@ -61,8 +63,8 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
         statuses.iter().all(|&s| s == 503),
         "each boot-failed job must 503 (got {statuses:?})"
     );
-    assert_eq!(
-        unhealthy, 1,
+    assert!(
+        unhealthy,
         "5 consecutive boot failures must flag the worker unhealthy"
     );
     scenario.join().expect("scenario thread panicked")?;

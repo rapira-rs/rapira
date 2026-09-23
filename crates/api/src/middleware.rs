@@ -15,7 +15,6 @@ pub type Body = http_body_util::combinators::UnsyncBoxBody<Bytes, BoxError>;
 pub type HttpRequest = http::Request<Body>;
 pub type HttpResponse = http::Response<Body>;
 
-/// An empty [`Body`].
 pub fn empty_body() -> Body {
     use http_body_util::BodyExt;
     http_body_util::Empty::<Bytes>::new()

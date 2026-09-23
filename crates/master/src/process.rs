@@ -7,8 +7,6 @@ use libc::c_int;
 
 use crate::WorkerEnv;
 use crate::lifeline::Lifeline;
-#[cfg(target_os = "linux")]
-use crate::signals::master_pid;
 use crate::signals::{MASTER_SIGNALS, SelfPipe, sigset};
 use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY};
 use rapira_scoreboard::SharedSlot;
@@ -116,14 +114,6 @@ impl ProcTable {
         self.procs.len()
     }
 
-    pub fn has_proc(&self, slot: usize) -> bool {
-        self.procs.iter().any(|p| p.slot == slot)
-    }
-
-    pub fn has_pid(&self, pid: libc::pid_t) -> bool {
-        self.procs.iter().any(|p| p.pid == pid)
-    }
-
     fn remove(&mut self, pid: libc::pid_t) -> Option<WorkerProc> {
         let i = self.procs.iter().position(|p| p.pid == pid)?;
         Some(self.procs.swap_remove(i))
@@ -164,7 +154,7 @@ pub(crate) fn reap_all(tables: &mut [&mut ProcTable]) -> Vec<(usize, WorkerProc,
 }
 
 pub(crate) fn kill(pid: libc::pid_t, sig: c_int) {
-    // SAFETY: kill is always safe; a stale pid yields ESRCH, harmlessly ignored.
+    // SAFETY: kill takes no pointers.
     unsafe { libc::kill(pid, sig) };
 }
 
@@ -220,7 +210,7 @@ fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
     // SAFETY: block/old are live sigset_ts.
     unsafe { libc::sigprocmask(libc::SIG_BLOCK, &block, &mut old) };
 
-    // SAFETY: fork in a single-threaded master; the child branch is async-signal-safe until _exit.
+    // SAFETY: fork in a single-threaded master, so no other thread holds a lock the child inherits.
     match unsafe { libc::fork() } {
         0 => {
             // SAFETY: all calls below are async-signal-safe or operate on fds we own.
@@ -242,13 +232,7 @@ fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
                 libc::sigaction(libc::SIGUSR2, &ign, std::ptr::null_mut());
 
                 #[cfg(target_os = "linux")]
-                {
-                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGQUIT);
-                    libc::prctl(libc::PR_SET_NAME, c"rapira-worker".as_ptr());
-                    if libc::getppid() != master_pid() {
-                        libc::kill(libc::getpid(), libc::SIGQUIT);
-                    }
-                }
+                libc::prctl(libc::PR_SET_NAME, c"rapira-worker".as_ptr());
 
                 let hold = sigset(&[libc::SIGQUIT, libc::SIGINT]);
                 libc::sigprocmask(libc::SIG_SETMASK, &hold, std::ptr::null_mut());

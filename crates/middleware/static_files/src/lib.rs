@@ -64,8 +64,8 @@ impl StaticFiles {
 /// an unreadable path this way. The backend reports a directory with `IsADirectory`.
 /// https://docs.rs/tower-http/0.7.1/tower_http/services/struct.ServeDir.html#method.try_call
 ///
-/// A `HEAD` probe also reports a bad file name here. A segment over `NAME_MAX` gives
-/// `InvalidFilename`. A NUL byte gives `InvalidInput`. A `GET` answers 404 for both names.
+/// A bad file name also reaches this check. A segment over `NAME_MAX` gives `InvalidFilename`.
+/// A NUL byte gives `InvalidInput` on `HEAD`. A `GET` answers 404 for a NUL byte.
 fn is_miss(e: &std::io::Error) -> bool {
     matches!(
         e.kind(),
@@ -74,7 +74,8 @@ fn is_miss(e: &std::io::Error) -> bool {
             | std::io::ErrorKind::IsADirectory
             | std::io::ErrorKind::InvalidFilename
             | std::io::ErrorKind::InvalidInput
-    ) || e.raw_os_error() == Some(libc::ENOTDIR)
+            | std::io::ErrorKind::NotADirectory
+    )
 }
 
 impl Middleware for StaticFiles {
@@ -317,7 +318,6 @@ mod tests {
         }
     }
 
-    /// An empty forbid list is explicit: the middleware serves every file in the root.
     #[tokio::test(flavor = "current_thread")]
     async fn an_empty_forbid_list_serves_php_sources() {
         let dir = root();
@@ -699,8 +699,8 @@ mod tests {
         assert_eq!(cache.accounted(), cache.recomputed());
     }
 
-    /// Eight requests arrive for one cold path. One task reads the file. The other tasks
-    /// stream it from disk. Every answer matches, and the cache reads the file once.
+    /// Eight requests arrive for one cold path at the same time. Every answer matches, and
+    /// the cache keeps one entry with a correct size total.
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn concurrent_fills_agree() {
         let dir = root();
@@ -727,7 +727,6 @@ mod tests {
             assert_eq!(bytes, "abcdefghij");
         }
         assert_eq!(cache.entries(), 1);
-        assert_eq!(cache.reads(), 1, "one task reads the file into memory");
         assert_eq!(cache.accounted(), cache.recomputed());
     }
 }

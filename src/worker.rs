@@ -7,7 +7,7 @@ use php_sys::{Mode, Rapira, WorkerHooks};
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
 use rapira_runtime::{ExtensionRuntime, Stopper};
 
-/// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset (drained to 0).
+/// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset, so the extension outcomes set the exit code.
 static WORKER_EXIT: AtomicI32 = AtomicI32::new(-1);
 
 /// Racing ahead of the stopper registration is fine: the boot path re-checks WORKER_EXIT right after registering.
@@ -24,7 +24,7 @@ fn request_worker_exit(code: i32, stopper: &OnceLock<Stopper>) {
     }
 }
 
-/// Jitter avoids lockstep recycling; entropy mixes pid + time because a seed inherited from the pre-fork master is identical in every child.
+/// Jitter avoids lockstep recycling. The hash mixes in the pid because every child inherits the same seed from the pre-fork master.
 fn effective_quota(max_requests: u64) -> u64 {
     if max_requests == 0 {
         return 0;
@@ -33,12 +33,6 @@ fn effective_quota(max_requests: u64) -> u64 {
     use std::hash::{BuildHasher, Hasher};
     let mut h = std::collections::hash_map::RandomState::new().build_hasher();
     h.write_u32(std::process::id());
-    h.write_u128(
-        std::time::UNIX_EPOCH
-            .elapsed()
-            .map(|d| d.as_nanos())
-            .unwrap_or(0),
-    );
     max_requests.saturating_add(1 + (h.finish() % grace))
 }
 

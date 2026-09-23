@@ -8,12 +8,12 @@ fn worker_mode_answers_worker_for_every_job() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("mode/worker.php")))?;
     let h = r.handle();
     for job in 0..2 {
-        let resp = drain_resp(h.handle_blocking(req("/", "mode/worker.php"))?);
+        let resp = drain_resp(tests::submit(&h, req("/", "mode/worker.php"))?);
         assert_eq!(resp.status(), 200, "job {job}");
         assert_eq!(resp.body_string(), "Worker:case:same:unbacked", "job {job}");
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -25,7 +25,7 @@ fn dispatcher_mode_answers_dispatcher() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(Mode::Dispatcher(fixture("mode/dispatcher.php")))?;
-    r.shutdown();
+    drop(r);
 
     let records: Vec<(String, String)> = captured()
         .iter()
@@ -51,9 +51,9 @@ fn classic_mode_answers_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let (status, body) = drain(h.handle_blocking(req("/", "mode/classic.php"))?);
+    let (status, body) = drain(tests::submit(&h, req("/", "mode/classic.php"))?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200, "the script must run clean (body: {body:?})");
     assert_eq!(body, "Classic:case:done");

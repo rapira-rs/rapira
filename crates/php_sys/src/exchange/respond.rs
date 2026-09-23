@@ -1,11 +1,10 @@
-use super::headers::{forbidden_trailer, split_framing, strip_framing, walk_head_table};
+use super::headers::{forbidden_trailer, split_framing, walk_head_table};
 use super::*;
 
 /// Cores return these instead of throwing: no owned state may be live when `zend_throw_*` bailouts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Verb {
     Ok,
-    Interim,
     Finalized,
     HeadWritten,
     Overflow,
@@ -21,7 +20,7 @@ pub(super) enum Verb {
 pub(super) unsafe fn throw_verb(v: Verb) {
     unsafe {
         match v {
-            Verb::Ok | Verb::Interim => {}
+            Verb::Ok => {}
             Verb::Finalized => zend::throw_exception(
                 rapira_ce_already_finalized_error,
                 c"the response already ended",
@@ -57,7 +56,6 @@ pub(super) struct Closed;
 /// # Safety
 /// Engine active on this thread.
 pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
-    let consumed = st.armed_at.elapsed();
     let (result, parked) = {
         let Some(tx) = st.job.ctx.sender.as_ref() else {
             return Err(Closed);
@@ -66,6 +64,7 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
             Ok(()) => (Ok(()), false),
             Err(TrySendError::Closed(_)) => (Err(Closed), false),
             Err(TrySendError::Full(frame)) => unsafe {
+                let consumed = st.armed_at.elapsed();
                 let saved = (*rapira_eg()).timeout_seconds;
                 if saved > 0 {
                     zend_unset_timeout();
@@ -115,9 +114,9 @@ pub(super) unsafe fn emit_head(
     if st.head_sent {
         return Ok(());
     }
-    let (status, headers, body_coded) = match st.pending.take() {
-        Some(p) => (p.status, p.headers, p.body_coded),
-        None => (200, Vec::new(), false),
+    let (status, headers) = match st.pending.take() {
+        Some(p) => (p.status, p.headers),
+        None => (200, HeaderMap::new()),
     };
     if st.stage == Stage::Open {
         st.stage = Stage::HeadCommitted;
@@ -135,7 +134,6 @@ pub(super) unsafe fn emit_head(
                 head: ResponseHead { status, headers },
                 content_length,
                 bodiless: st.bodiless,
-                body_coded,
             },
         )
     }
@@ -153,15 +151,10 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
             p.upload.file.unlink();
         }
     }
-    update(|c| {
-        if let Unit::Handling(p) = c.unit {
-            c.unit = Unit::Sealed(p);
-        }
-    });
     sb_update(Event::Handled(true));
     if let Some(tx) = st.job.ctx.sender.take() {
         let _ = tx.try_send(Frame::End {
-            trailers: Vec::new(),
+            trailers: HeaderMap::new(),
             truncated: true,
         });
     }
@@ -169,7 +162,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
 
 /// # Safety
 /// As `send_frame`.
-pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: FieldLines) -> Verb {
+pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: HeaderMap) -> Verb {
     if st.host_closed() {
         discard_unit(st);
         return Verb::Discarded;
@@ -184,7 +177,11 @@ pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: Field
         discard_unit(st);
         return Verb::Discarded;
     }
-    let trailers = if st.bodiless { Vec::new() } else { trailers };
+    let trailers = if st.bodiless {
+        HeaderMap::new()
+    } else {
+        trailers
+    };
     unsafe {
         seal(st, /*truncated=*/ false, trailers)
     };
@@ -199,8 +196,8 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
     trailers: *mut HashTable,
 ) -> bool {
     guard(false, || unsafe {
-        let flat = match walk_head_table(trailers) {
-            Ok(flat) => flat,
+        let map = match walk_head_table(trailers) {
+            Ok(map) => map,
             Err(_) => {
                 zend::throw_value_error(
                     c"a trailer name or value is not representable on the wire",
@@ -208,16 +205,16 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
                 return false;
             }
         };
-        if flat.iter().any(|(n, _)| forbidden_trailer(n)) {
-            drop(flat);
+        if map.keys().any(|n| forbidden_trailer(n.as_str())) {
+            drop(map);
             zend::throw_value_error(
                 c"the field may not travel in a trailer section: framing, routing, authentication, request modifiers, response controls and content format stay in the head",
             );
             return false;
         }
         let st = &mut *job.cast::<ExchangeState>();
-        match write_trailers_core(st, flat) {
-            Verb::Ok | Verb::Interim => true,
+        match write_trailers_core(st, map) {
+            Verb::Ok => true,
             v => {
                 throw_verb(v);
                 false
@@ -231,7 +228,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
 pub(super) unsafe fn write_head_core(
     st: &mut ExchangeState,
     status: u16,
-    headers: FieldLines,
+    headers: HeaderMap,
 ) -> Verb {
     if st.host_closed() {
         discard_unit(st);
@@ -241,12 +238,9 @@ pub(super) unsafe fn write_head_core(
         return Verb::HeadWritten;
     }
     if status != 101 && (100..200).contains(&status) {
-        let head = ResponseHead {
-            status,
-            headers: strip_framing(headers),
-        };
+        let head = ResponseHead { status, headers };
         return match unsafe { send_frame(st, Frame::Interim(head)) } {
-            Ok(()) => Verb::Interim,
+            Ok(()) => Verb::Ok,
             Err(Closed) => {
                 discard_unit(st);
                 Verb::Discarded
@@ -261,7 +255,6 @@ pub(super) unsafe fn write_head_core(
     st.pending = Some(PendingHead {
         status,
         headers: split.headers,
-        body_coded: split.body_coded,
     });
     // 1xx carries no body either (RFC 9112 §6.3), so a committed 101 drops chunks like 204/304.
     if matches!(status, 204 | 304 | 101) {
@@ -288,15 +281,15 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_head(
             );
             return false;
         }
-        let flat = match walk_head_table(headers) {
-            Ok(flat) => flat,
+        let map = match walk_head_table(headers) {
+            Ok(map) => map,
             Err(msg) => {
                 zend::throw_value_error(msg);
                 return false;
             }
         };
-        match write_head_core(st, status as u16, flat) {
-            Verb::Ok | Verb::Interim => true,
+        match write_head_core(st, status as u16, map) {
+            Verb::Ok => true,
             v => {
                 throw_verb(v);
                 false
@@ -330,7 +323,7 @@ pub(super) unsafe fn write_body_core(
         );
         let _ = unsafe { emit_head(st, None) };
         unsafe {
-            seal(st, /*truncated=*/ true, Vec::new())
+            seal(st, /*truncated=*/ true, HeaderMap::new())
         };
         return Verb::Overflow;
     }
@@ -346,7 +339,7 @@ pub(super) unsafe fn write_body_core(
         }
         st.sent_body = cl;
         unsafe {
-            seal(st, /*truncated=*/ false, Vec::new())
+            seal(st, /*truncated=*/ false, HeaderMap::new())
         };
         return Verb::ContentLengthExceeded;
     }
@@ -366,7 +359,7 @@ pub(super) unsafe fn write_body_core(
     }
     if eos {
         unsafe {
-            seal(st, /*truncated=*/ false, Vec::new())
+            seal(st, /*truncated=*/ false, HeaderMap::new())
         };
     }
     Verb::Ok
@@ -384,7 +377,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
     guard(false, || unsafe {
         let st = &mut *job.cast::<ExchangeState>();
         match write_body_core(st, p, len, eos) {
-            Verb::Ok | Verb::Interim => true,
+            Verb::Ok => true,
             v => {
                 throw_verb(v);
                 false
@@ -395,19 +388,14 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
 
 /// # Safety
 /// As `send_frame`.
-pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: FieldLines) {
+pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: HeaderMap) {
     if let BodyState::Multipart { files, .. } = &mut st.body {
         for p in files {
             p.upload.file.unlink();
         }
     }
     st.stage = Stage::Finalized;
-    update(|c| {
-        if let Unit::Handling(p) = c.unit {
-            c.unit = Unit::Sealed(p);
-        }
-        c.served = true;
-    });
+    update(|c| c.served = true);
     sb_update(Event::Handled(truncated));
     let _ = unsafe {
         send_frame(
@@ -442,7 +430,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_flush(job: *mut c_void) -> bool {
             }
         };
         match v {
-            Verb::Ok | Verb::Interim => true,
+            Verb::Ok => true,
             v => {
                 throw_verb(v);
                 false
@@ -473,17 +461,14 @@ pub unsafe extern "C" fn rapira_rs_exchange_is_cancelled(job: *const c_void) -> 
 
 /// Reclaims the Box on free_obj; a unit lost to a bailout (fatal, timeout) skips the failure frames, so the host's deadline reports the worker death instead.
 /// # Safety
-/// `job` is NULL or a pointer produced by `Box::into_raw` in receive.
+/// `job` is a non-null pointer produced by `Box::into_raw` in receive; free_obj checks for NULL before the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
     guard((), || {
-        if job.is_null() {
-            return;
-        }
         let ptr: *mut ExchangeState = job.cast();
         update(|c| {
-            if matches!(c.unit, Unit::Handling(p) | Unit::Sealed(p) if p == ptr) {
-                c.unit = Unit::Idle;
+            if c.unit == Some(ptr) {
+                c.unit = None;
             }
         });
         let mut st = unsafe { Box::from_raw(ptr) };
@@ -500,23 +485,22 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
             if let Some(tx) = st.job.ctx.sender.take() {
                 if st.head_sent {
                     let _ = tx.try_send(Frame::End {
-                        trailers: Vec::new(),
+                        trailers: HeaderMap::new(),
                         truncated: true,
                     });
                 } else if tx
                     .try_send(Frame::Head {
                         head: ResponseHead {
                             status: 500,
-                            headers: Vec::new(),
+                            headers: HeaderMap::new(),
                         },
                         content_length: (!st.bodiless).then_some(0),
                         bodiless: st.bodiless,
-                        body_coded: false,
                     })
                     .is_ok()
                 {
                     let _ = tx.try_send(Frame::End {
-                        trailers: Vec::new(),
+                        trailers: HeaderMap::new(),
                         truncated: false,
                     });
                 }

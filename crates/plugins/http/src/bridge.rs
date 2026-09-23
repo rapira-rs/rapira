@@ -185,14 +185,6 @@ impl http_body::Body for ReplyBody {
             }
         }
     }
-
-    fn is_end_stream(&self) -> bool {
-        false
-    }
-
-    fn size_hint(&self) -> http_body::SizeHint {
-        http_body::SizeHint::default()
-    }
 }
 
 impl Drop for ReplyBody {
@@ -201,14 +193,8 @@ impl Drop for ReplyBody {
         if self.declared_cl == Some(self.sent)
             && !matches!(self.staged, Some(ReplyEvent::End { .. }))
             && self.guard.end_flush.get().is_some()
-            && let Some(mut reply) = self.reply.take()
+            && let Some(reply) = self.reply.take()
         {
-            // A buffered reply queues End behind the last chunk, so consume it here.
-            // Anything else goes to the drain task.
-            let mut cx = Context::from_waker(std::task::Waker::noop());
-            if let Poll::Ready(Some(ReplyEvent::End { .. }) | None) = reply.poll_next(&mut cx) {
-                return;
-            }
             spawn_drain(reply, self.closed.clone(), Arc::clone(&self.guard));
         }
     }
@@ -221,6 +207,11 @@ pub(crate) fn spawn_drain(
     mut closed: watch::Receiver<ConnectionState>,
     guard: Arc<InflightReqCount>,
 ) {
+    // A buffered reply queues End behind the head or the last chunk, so consume it here.
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    if let Poll::Ready(Some(ReplyEvent::End { .. }) | None) = reply.poll_next(&mut cx) {
+        return;
+    }
     tokio::spawn(async move {
         let flushed = |s: &ConnectionState| guard.end_flush.get().is_some_and(|&f| s.flushes > f);
         tokio::select! {
@@ -319,7 +310,11 @@ impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<T> {
         let poll = Pin::new(&mut this.io).poll_flush(cx);
         let poll = this.gate(cx, poll);
         if matches!(poll, Poll::Ready(Ok(()))) {
-            this.state.send_modify(|s| s.flushes += 1);
+            // The drain reads the count when the close wakes it, so a flush sends no notification.
+            this.state.send_if_modified(|s| {
+                s.flushes += 1;
+                false
+            });
         }
         poll
     }
@@ -418,7 +413,7 @@ mod tests {
 
     fn end(truncated: bool) -> ReplyEvent {
         ReplyEvent::End {
-            trailers: Vec::new(),
+            trailers: http::HeaderMap::new(),
             truncated,
         }
     }
@@ -734,6 +729,29 @@ mod tests {
         );
     }
 
+    /// A bodiless reply with End already queued behind the head is consumed in place.
+    #[tokio::test]
+    async fn queued_end_is_consumed_without_a_drain_task() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let reply = Reply::new(Box::new(Script {
+            events: vec![end(false)].into(),
+            dropped: Some(Arc::clone(&dropped)),
+            hang: true,
+        }));
+        let metrics = tokio::runtime::Handle::current().metrics();
+        let tasks = metrics.num_alive_tasks();
+        spawn_drain(reply, watch::channel(ConnectionState::default()).1, guard());
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "the reply must drop at once"
+        );
+        assert_eq!(
+            metrics.num_alive_tasks(),
+            tasks,
+            "a queued End must not cost a drain task"
+        );
+    }
+
     /// A reply that has not sent End yet is still pending at drop, so the drain task takes it.
     #[tokio::test(start_paused = true)]
     async fn pending_reply_goes_to_the_drain_task() {
@@ -782,7 +800,8 @@ mod tests {
     async fn file_event_streams_the_slice_in_chunks() {
         use std::io::Write;
         let mut f = tempfile::tempfile().unwrap();
-        let payload = vec![7u8; 100 * 1024];
+        // A prime period, so a read at a wrong offset returns other bytes.
+        let payload: Vec<u8> = (0..100 * 1024).map(|i| (i % 251) as u8).collect();
         f.write_all(&payload).unwrap();
         let mut b = body(
             vec![
@@ -796,11 +815,14 @@ mod tests {
             None,
         );
         let mut got: Vec<u8> = Vec::new();
+        let mut frames = Vec::new();
         while let Some(r) = data(&mut b).await {
-            got.extend_from_slice(&r.unwrap());
+            let bytes = r.unwrap();
+            frames.push(bytes.len());
+            got.extend_from_slice(&bytes);
         }
-        assert_eq!(got.len(), 80 * 1024);
-        assert!(got.iter().all(|&x| x == 7));
+        assert_eq!(frames, [64 * 1024, 16 * 1024]);
+        assert!(got == payload[1024..1024 + 80 * 1024], "wrong slice bytes");
     }
 
     /// A file that shrank below the promised slice aborts instead of faking a clean end.

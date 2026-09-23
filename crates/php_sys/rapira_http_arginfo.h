@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 23315c4f2e41581ec36229ca4cccb0dc2f114b23 */
+ * Stub hash: ea35ffe9b86137d42720daeeb8e3a05752eeef06 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_Tls___construct, 0, 0, 7)
 	ZEND_ARG_TYPE_INFO(0, version, IS_STRING, 0)
@@ -120,8 +120,6 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_Rapira_Internal_Http_Exchange_flush arginfo_class_Rapira_Http_Exchange_flush
 
-#define arginfo_class_Rapira_Internal_Http_Exchange___destruct arginfo_class_Rapira_Internal_Http_Dispatcher___construct
-
 ZEND_METHOD(Rapira_Http_Tls, __construct);
 ZEND_METHOD(Rapira_Http_FormField, __construct);
 ZEND_METHOD(Rapira_Http_UploadedFile, __construct);
@@ -144,7 +142,6 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeBody);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, sendFile);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, writeTrailers);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, flush);
-ZEND_METHOD(Rapira_Internal_Http_Exchange, __destruct);
 
 static const zend_function_entry class_Rapira_Http_Tls_methods[] = {
 	ZEND_ME(Rapira_Http_Tls, __construct, arginfo_class_Rapira_Http_Tls___construct, ZEND_ACC_PUBLIC)
@@ -214,7 +211,6 @@ static const zend_function_entry class_Rapira_Internal_Http_Exchange_methods[] =
 	ZEND_ME(Rapira_Internal_Http_Exchange, sendFile, arginfo_class_Rapira_Internal_Http_Exchange_sendFile, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Http_Exchange, writeTrailers, arginfo_class_Rapira_Internal_Http_Exchange_writeTrailers, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Http_Exchange, flush, arginfo_class_Rapira_Internal_Http_Exchange_flush, ZEND_ACC_PUBLIC)
-	ZEND_ME(Rapira_Internal_Http_Exchange, __destruct, arginfo_class_Rapira_Internal_Http_Exchange___destruct, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 

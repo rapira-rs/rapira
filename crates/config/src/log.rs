@@ -46,7 +46,7 @@ pub struct LogSettings {
 pub(crate) struct LogSection {
     level: Option<LogLevel>,
     format: Option<LogFormat>,
-    /// Open-ended target keys, so `deny_unknown_fields` cannot apply: shape is validated in `resolve_log`.
+    /// Target names are free-form keys; `resolve_log` checks their shape.
     #[serde(default)]
     targets: BTreeMap<String, LogLevel>,
 }

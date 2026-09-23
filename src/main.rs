@@ -10,7 +10,6 @@ use rapira_http::{
 };
 use rapira_master::PoolConfig;
 use rapira_runtime::ExtensionRuntime;
-use rapira_scoreboard::Scoreboard;
 use std::{
     fs::{File, OpenOptions, read_dir, remove_file},
     os::fd::RawFd,
@@ -231,7 +230,7 @@ fn http_pool(
     // ---------------------------------------------------------------------
 
     let mut host: ExtensionRuntime = ExtensionRuntime::new();
-    host.register::<HttpServer>(http_cfg)?;
+    host.register::<HttpServer>(http_cfg);
     let listeners: Vec<RawFd> = prepare_pool(&mut host, prepare)?;
 
     Ok((
@@ -270,7 +269,7 @@ fn http_pool(
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let settings: Settings = rapira_config::resolve(&args.config)?;
 
-    logging::init(&settings.log)?;
+    logging::init(&settings.log);
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
     // One context for every pool, kept alive past `run` so the master keeps its listener dups.
@@ -292,10 +291,9 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         process_control_timeout: settings.supervisor.process_control_timeout,
         pidfile: settings.supervisor.pidfile,
     };
-    let scoreboard: Scoreboard = Scoreboard::create(cfg.scoreboard_slots()?)?;
 
     let stop: Result<rapira_master::StopReason, anyhow::Error> =
-        rapira_master::run(cfg, scoreboard, move |env: rapira_master::WorkerEnv| {
+        rapira_master::run(cfg, move |env: rapira_master::WorkerEnv| {
             let pool: &mut PoolRun = &mut pools[env.pool];
             let host: ExtensionRuntime = pool.host.take().expect("fresh child owns the host copy");
             worker::worker_body(env, host, pool.args.clone())
@@ -326,8 +324,7 @@ mod tests {
         host.register::<HttpServer>(HttpConfig {
             listen: ListenAddr::Tcp("127.0.0.1:0".parse().expect("loopback addr")),
             ..HttpConfig::default()
-        })
-        .expect("register the http extension");
+        });
         host
     }
 

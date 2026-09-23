@@ -2,11 +2,12 @@ use extension_api::{Peer, Request};
 
 use crate::Config;
 
+/// Moves the header map out of `parts`.
 pub(crate) fn build(
-    parts: &http::request::Parts,
+    parts: &mut http::request::Parts,
     authority: Option<Vec<u8>>,
     body: Vec<u8>,
-    peer: &Peer,
+    peer: Peer,
     cfg: &Config,
 ) -> Request {
     let protocol = match parts.version {
@@ -25,22 +26,22 @@ pub(crate) fn build(
             .path_and_query()
             .map(|pq| pq.to_string())
             .unwrap_or_else(|| "/".to_owned()),
-        // Reconstructed request-target. hyper hands out only the parsed Uri, not the raw bytes.
-        target: Some(parts.uri.to_string().into_bytes()),
+        // Reconstructed request-target for the absolute and authority forms. hyper hands out only the parsed Uri, not the raw bytes.
+        // For the origin and asterisk forms the target equals `uri`, which PHP uses when this is None.
+        target: parts
+            .uri
+            .authority()
+            .map(|_| parts.uri.to_string().into_bytes()),
         authority,
         https: peer.https,
         protocol,
-        remote: peer.remote.clone(),
-        server: peer.server.clone(),
+        remote: peer.remote,
+        server: peer.server,
         server_name: cfg.server_name.clone(),
         server_port: cfg.server_port,
         tls: None,
         received_at: Some(peer.received_at),
-        headers: parts
-            .headers
-            .iter()
-            .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_vec()))
-            .collect(),
+        headers: std::mem::take(&mut parts.headers),
         body,
     }
 }
@@ -59,9 +60,8 @@ mod tests {
         }
     }
 
-    /// One FieldLines entry per field line, values in per-name wire order, names lowercase.
     #[test]
-    fn headers_arrive_per_line_in_per_name_order() {
+    fn headers_keep_the_per_name_wire_order() {
         let req = http::Request::builder()
             .method("GET")
             .uri("/a/b?x=1")
@@ -70,23 +70,18 @@ mod tests {
             .header("x-probe", "two")
             .body(())
             .unwrap();
-        let (parts, ()) = req.into_parts();
+        let (mut parts, ()) = req.into_parts();
         let built = build(
-            &parts,
+            &mut parts,
             Some(b"e2e".to_vec()),
             Vec::new(),
-            &peer(),
+            peer(),
             &Config::default(),
         );
-        let probes: Vec<_> = built
-            .headers
-            .iter()
-            .filter(|(n, _)| n == "x-probe")
-            .map(|(_, v)| v.as_slice())
-            .collect();
-        assert_eq!(probes, [b"one".as_slice(), b"two".as_slice()]);
+        let probes: Vec<_> = built.headers.get_all("x-probe").iter().collect();
+        assert_eq!(probes, ["one", "two"]);
         assert_eq!(built.uri, "/a/b?x=1");
-        assert_eq!(built.target.as_deref(), Some(&b"/a/b?x=1"[..]));
+        assert_eq!(built.target, None);
         assert_eq!(built.protocol, "HTTP/1.1");
         assert_eq!(built.authority.as_deref(), Some(&b"e2e"[..]));
         assert_eq!(built.received_at, Some(1.5));
@@ -98,8 +93,8 @@ mod tests {
             .uri(uri)
             .body(())
             .unwrap();
-        let (parts, ()) = req.into_parts();
-        build(&parts, None, Vec::new(), &peer(), &Config::default())
+        let (mut parts, ()) = req.into_parts();
+        build(&mut parts, None, Vec::new(), peer(), &Config::default())
     }
 
     /// RFC 9112 §3.2.2 absolute-form: PHP gets the origin-form view; the target keeps the full form.
@@ -126,6 +121,6 @@ mod tests {
     fn asterisk_form_is_preserved() {
         let b = built("*", "OPTIONS");
         assert_eq!(b.uri, "*");
-        assert_eq!(b.target.as_deref(), Some(&b"*"[..]));
+        assert_eq!(b.target, None);
     }
 }

@@ -18,5 +18,5 @@ http-body-util = { workspace = true }
 socket2 = "0.6"
 
 [dev-dependencies]
-libc = "0.2"
+libc = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }

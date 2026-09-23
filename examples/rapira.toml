@@ -1,5 +1,5 @@
 # Example rapira.toml. Every key except http.pool.entrypoint is optional.
-# Commented keys show their defaults. Run it with: rapira serve examples/rapira.toml
+# Commented keys show defaults or example values. Run it with: rapira serve examples/rapira.toml
 
 [http]
 listen = "127.0.0.1:8000"    # host:port, ":port" (all interfaces), or "unix:/path"
@@ -47,7 +47,7 @@ processes = 16               # defaults to the CPU count; max_children for dynam
 # process_control_timeout_secs = 30   # graceful-stop budget before QUIT -> TERM -> KILL
 
 [log]
-level = "trace"                # error | warn | info | debug | trace (default: error)
+# level = "error"             # error | warn | info | debug | trace
 # format = "plain"            # or "json"
 # [log.targets]               # per-target overrides; RUST_LOG replaces the whole filter
 # php = "warn"                # surfaces PHP diagnostics even under a quieter level

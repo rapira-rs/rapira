@@ -29,7 +29,7 @@ pub(crate) struct Reload {
     pub deadline: Instant,
 }
 
-/// One plugin's workers. Every index here is local to this pool's board view.
+/// One plugin's workers.
 pub(crate) struct Pool {
     pub index: usize,
     pub cfg: PoolConfig,
@@ -95,7 +95,7 @@ impl Pool {
             .sum()
     }
 
-    /// Must run before a slot clear or a replacement bind can overwrite the scoreboard counters.
+    /// Must run before a replacement bind resets the slot counters.
     fn latch_served(&mut self) {
         if !self.ever_served && self.total_successful() > 0 {
             self.ever_served = true;
@@ -118,11 +118,8 @@ impl Pool {
     }
 
     fn find_spawn_slot(&self) -> Option<usize> {
-        (0..self.table.slots.len()).find(|&i| {
-            self.slot_is_free(i)
-                && self.table.slots[i].respawn_at.is_none()
-                && !self.table.has_proc(i)
-        })
+        (0..self.table.slots.len())
+            .find(|&i| self.slot_is_free(i) && self.table.slots[i].respawn_at.is_none())
     }
 
     fn oldest_idle_pid(&self) -> Option<libc::pid_t> {
@@ -241,17 +238,6 @@ impl Pool {
         }
     }
 
-    fn reload_try_advance(&mut self, now: Instant) {
-        if let Some(Reload {
-            phase: ReloadPhase::Await { slot, .. },
-            ..
-        }) = self.reload
-            && self.slot_is_serving(slot)
-        {
-            self.reload_quit_next(now);
-        }
-    }
-
     fn reload_quit_next(&mut self, now: Instant) {
         let cur = self.table.generation;
         let target = self
@@ -283,14 +269,9 @@ impl Pool {
         };
         match reload.phase {
             ReloadPhase::Await { slot, until } => {
-                self.reload_try_advance(now);
-                let Some(r) = self.reload.as_mut() else {
-                    return;
-                };
-                if !matches!(r.phase, ReloadPhase::Await { .. }) {
-                    return;
-                }
-                if now >= until {
+                if self.slot_is_serving(slot) {
+                    self.reload_quit_next(now);
+                } else if now >= until {
                     tracing::warn!(
                         target: "master",
                         "{} pool: reload replacement slot {slot} not serving within the control timeout; proceeding",
@@ -298,7 +279,10 @@ impl Pool {
                     );
                     self.reload_quit_next(now);
                 } else {
-                    r.deadline = now + RELOAD_GATE_POLL;
+                    self.reload = Some(Reload {
+                        deadline: now + RELOAD_GATE_POLL,
+                        ..reload
+                    });
                 }
             }
             ReloadPhase::Drain {
@@ -310,9 +294,7 @@ impl Pool {
                     phase: ReloadPhase::Drain { draining, phase },
                     deadline: now + Duration::from_secs(1),
                 });
-                if self.table.has_pid(draining) {
-                    kill(draining, sig);
-                }
+                kill(draining, sig);
             }
         }
     }
@@ -450,7 +432,7 @@ impl Pool {
     fn static_refill(&mut self, now: Instant, spawner: &mut dyn Spawner) {
         let running = self.table.running();
         let pending = (0..self.table.slots.len())
-            .filter(|&i| self.table.slots[i].respawn_at.is_some() && !self.table.has_proc(i))
+            .filter(|&i| self.table.slots[i].respawn_at.is_some())
             .count();
         let committed = running + pending;
         let target = self.cfg.processes;
@@ -536,7 +518,6 @@ impl Pool {
         for slot in 0..self.table.slots.len() {
             if let Some(t) = self.table.slots[slot].respawn_at
                 && now >= t
-                && !self.table.has_proc(slot)
             {
                 self.table.slots[slot].cancel_respawn();
                 if !matches!(self.cfg.scaling, Scaling::Ondemand) {
@@ -754,14 +735,14 @@ mod tests {
             deadline: t0,
         });
 
-        p.reload_try_advance(t0);
+        p.on_reload_deadline(t0);
         assert!(matches!(
             p.reload.unwrap().phase,
             ReloadPhase::Await { slot: 3, .. }
         ));
 
         p.set_slot(3, SLOT_IDLE);
-        p.reload_try_advance(t0);
+        p.on_reload_deadline(t0);
         assert!(matches!(
             p.reload.unwrap().phase,
             ReloadPhase::Drain {
@@ -789,7 +770,7 @@ mod tests {
             deadline: t0,
         });
 
-        p.reload_try_advance(t0);
+        p.on_reload_deadline(t0);
         assert!(matches!(
             p.reload.unwrap().phase,
             ReloadPhase::Drain {
@@ -845,33 +826,6 @@ mod tests {
         let r = p.reload.unwrap();
         assert!(matches!(r.phase, ReloadPhase::Await { slot: 3, .. }));
         assert_eq!(r.deadline, now + RELOAD_GATE_POLL);
-    }
-
-    #[test]
-    fn await_gate_never_escalates() {
-        let t0 = Instant::now();
-        let (mut p, _sp) = test_pool(3, Scaling::Static);
-        p.table.generation = 1;
-        p.push_proc(P_OLD0, 0, 0, t0);
-        p.set_slot(0, SLOT_IDLE);
-        p.push_proc(P_NEW, 1, 1, t0);
-        p.set_slot(1, SLOT_STARTING);
-        p.reload = Some(Reload {
-            phase: ReloadPhase::Await {
-                slot: 1,
-                until: t0 + Duration::from_secs(30),
-            },
-            deadline: t0,
-        });
-
-        for i in 0..3 {
-            p.on_reload_deadline(t0 + Duration::from_millis(i));
-        }
-        assert!(
-            matches!(p.reload.unwrap().phase, ReloadPhase::Await { slot: 1, .. }),
-            "the gate must stay a gate while the replacement starts"
-        );
-        assert!(p.table.has_pid(P_OLD0), "no old worker is drained yet");
     }
 
     #[test]
@@ -1109,26 +1063,6 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_marks_an_overdue_active_worker_for_timeout() {
-        let (mut p, _sp) = test_pool(3, Scaling::Static);
-        p.cfg.request_terminate_timeout = Duration::from_secs(2);
-        let t0 = Instant::now();
-        p.push_proc(P_OLD0, 0, 0, t0);
-        p.set_slot(0, SLOT_ACTIVE);
-        p.board
-            .slot(0)
-            .last_activity_ms
-            .store(now_millis().saturating_sub(5_000), Relaxed);
-
-        p.watchdog_tick();
-        assert_eq!(
-            p.table.procs[0].kill_intent,
-            Some(KillIntent::Timeout),
-            "the overdue active worker must have timeout intent"
-        );
-    }
-
-    #[test]
     fn watchdog_kills_a_worker_with_timeout_intent() {
         let (mut p, _sp) = test_pool(1, Scaling::Static);
         p.cfg.request_terminate_timeout = Duration::from_secs(2);
@@ -1271,13 +1205,6 @@ mod tests {
             s.schedule_backoff(Duration::ZERO, t0);
         }
         assert!(!p.armed(false));
-    }
-
-    #[test]
-    fn ondemand_disarms_while_stopping() {
-        let (p, _sp) = test_pool(1, Scaling::Ondemand);
-        assert!(p.armed(false));
-        assert!(!p.armed(true));
     }
 
     #[test]

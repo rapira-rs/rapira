@@ -631,13 +631,7 @@ pub fn php_extension(name: &str) -> Option<PathBuf> {
     {
         return p.clone().into();
     }
-    if let Ok(required) = std::env::var("RAPIRA_REQUIRE_EXTS") {
-        let stem = name.trim_end_matches(".so");
-        assert!(
-            !required.split(',').any(|e| e.trim() == stem),
-            "RAPIRA_REQUIRE_EXTS demands {stem}, but {name} is not at {p:?}"
-        );
-    }
+    tests::assert_skip_allowed(name);
     None
 }
 
@@ -863,34 +857,6 @@ impl Conn {
         let rest = self.unread().to_vec();
         self.consumed = self.buf.len();
         Ok(rest)
-    }
-}
-
-/// Decode a chunked body into `(chunks, trailer-section bytes)`; a missing terminating zero chunk is the truncation signal.
-pub fn decode_chunked(mut raw: &[u8]) -> io::Result<(Vec<Vec<u8>>, Vec<u8>)> {
-    let mut chunks = Vec::new();
-    loop {
-        let line_end = raw
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .ok_or_else(|| io::Error::new(io::ErrorKind::UnexpectedEof, "no chunk-size line"))?;
-        let size = usize::from_str_radix(
-            std::str::from_utf8(&raw[..line_end])
-                .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad chunk size"))?
-                .trim(),
-            16,
-        )
-        .map_err(|_| io::Error::new(io::ErrorKind::InvalidData, "bad chunk size"))?;
-        raw = &raw[line_end + 2..];
-        if size == 0 {
-            let trailer = raw.strip_suffix(b"\r\n").unwrap_or(raw).to_vec();
-            return Ok((chunks, trailer));
-        }
-        if raw.len() < size + 2 {
-            return Err(io::Error::new(io::ErrorKind::UnexpectedEof, "short chunk"));
-        }
-        chunks.push(raw[..size].to_vec());
-        raw = &raw[size + 2..];
     }
 }
 
