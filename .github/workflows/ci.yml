@@ -192,7 +192,6 @@ jobs:
                   if echo "$deps" | grep -q '^tokio '; then
                     echo "::error::rapira_master must not depend on tokio (it forks)"; exit 1
                   fi
-            - run: cargo build --workspace
             # On Linux a skip in a gated suite means a broken install, not a pass.
             - run: cargo test --workspace
               env:

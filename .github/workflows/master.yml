@@ -120,6 +120,5 @@ jobs:
                   workspaces: core
                   cache-on-failure: true
 
-            - run: cargo build --workspace
             - run: cargo test --workspace
             - run: cargo build -p rapira_core --bin rapira && cargo test -p tests --test e2e --features e2e -- --test-threads=1
