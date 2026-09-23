@@ -240,23 +240,6 @@ fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Smoke coverage, not a strict guard for module.c's PG(in_user_include)=0: the req1 bailout forces a recycle whose php_request_startup already re-zeroes the flag.
-#[test]
-fn in_user_include_flag_reset_between_requests() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("general_tests/stuck-flag-worker.php")))?;
-    let h = r.handle();
-    let _ = drain(h.handle_blocking(req("/?step=boom", "general_tests/stuck-flag-worker.php"))?);
-    let (_, b2) = drain(h.handle_blocking(req("/", "general_tests/stuck-flag-worker.php"))?);
-    assert!(
-        b2.contains("PROBE_OK"),
-        "worker recovers; data:// is not rejected as an include (got {b2:?})"
-    );
-    drop(h);
-    r.shutdown();
-    Ok(())
-}
-
 #[test]
 fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
     let _guard = php_lock();

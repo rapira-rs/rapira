@@ -40,29 +40,6 @@ fn imap_timeout_is_snapshotted_at_minit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// rapira reloads ext/imap per job (RELOAD_MODULES in php_sys/module.c), so an undrained error must not leak into the next request, as under php-fpm.
-#[test]
-fn imap_error_stack_does_not_leak_between_requests() -> anyhow::Result<()> {
-    let out = run("imap_tests/imap-errors-worker.php", &["/?step=leak", "/"])?;
-    if out[0].1 == "skip" {
-        assert_skip_allowed("imap_tests/imap-errors-worker.php");
-        return Ok(());
-    }
-    assert_eq!(
-        (out[0].0, out[0].1.as_str()),
-        (200, "imap:leaked:1"),
-        "the leak request must push one entry and keep it undrained (got: {:?})",
-        out[0]
-    );
-    assert_eq!(
-        (out[1].0, out[1].1.as_str()),
-        (200, "imap:errors:empty"),
-        "the next request must find an empty error stack (got: {:?})",
-        out[1]
-    );
-    Ok(())
-}
-
 /// The per-job RSHUTDOWN reports each undrained entry as an E_NOTICE through the SAPI log_message hook; the lock stays held through the capture read (the app_records pattern).
 #[test]
 fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {

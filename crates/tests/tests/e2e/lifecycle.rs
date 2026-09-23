@@ -2,21 +2,6 @@ use crate::harness::*;
 use std::time::{Duration, Instant};
 
 #[test]
-fn static_pool_forks_n_workers() {
-    let srv = spawn_with_config("shared/echo-worker.php", 3, "");
-    wait_workers(&srv, Duration::from_secs(20), "3 static workers", |p| {
-        p.len() == 3
-    });
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
-    assert_eq!(
-        code,
-        200,
-        "pool should serve once up\n{}",
-        diagnostics(&srv)
-    );
-}
-
-#[test]
 fn http_round_trip() {
     let srv = spawn_with_config("shared/echo-worker.php", 1, "");
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);

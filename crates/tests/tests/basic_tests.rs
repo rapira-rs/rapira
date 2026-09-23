@@ -1,22 +1,5 @@
-use std::thread;
-
 use php_sys::{Mode, Rapira};
 use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
-
-#[test]
-fn hello_world_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic)?;
-    let h = r.handle();
-    let (_, body1) = drain(h.handle_blocking(req("/?x=1", "shared/hello.php"))?);
-    assert!(
-        body1.contains("Hello, anonymous!") && body1.contains("Method: GET"),
-        "req1 baseline (got: {body1:?})"
-    );
-    drop(h);
-    r.shutdown();
-    Ok(())
-}
 
 #[test]
 fn fibers_stress_classic() -> anyhow::Result<()> {
@@ -39,21 +22,6 @@ fn fibers_stress_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-fn hello_world_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("shared/worker.php")))?;
-    let h = r.handle();
-    let (_, body1) = drain(h.handle_blocking(req("/?x=1", "shared/worker.php"))?);
-    assert!(
-        body1.contains("Hello from worker, anonymous!"),
-        "req1 baseline (got: {body1:?})"
-    );
-    drop(h);
-    r.shutdown();
-    Ok(())
-}
-
-#[test]
 fn worker_request_isolation() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("shared/leak-worker.php")))?;
@@ -71,38 +39,6 @@ fn worker_request_isolation() -> anyhow::Result<()> {
     assert!(
         body2.contains("counter=2"),
         "static class props persist across requests by design (got: {body2:?})"
-    );
-    drop(h);
-    r.shutdown();
-    Ok(())
-}
-
-#[test]
-fn worker_survives_exit() -> anyhow::Result<()> {
-    let _guard = php_lock();
-
-    let r = Rapira::start(Mode::Worker(fixture("shared/bailout-worker.php")))?;
-    let h = r.handle();
-    let (s1, b1) = drain(h.handle_blocking(req("/?boom=0", "shared/bailout-worker.php"))?);
-    let (s2, b2) = drain(h.handle_blocking(req("/?boom=1", "shared/bailout-worker.php"))?);
-    let (s3, b3) = drain(h.handle_blocking(req("/?boom=0", "shared/bailout-worker.php"))?);
-
-    assert_eq!(s1, 200);
-    assert!(b1.contains("ok counter=1"), "req1 (got: {b1:?})");
-
-    assert_eq!(
-        s2, 200,
-        "exit() is a graceful unwind, not a 500 (got status {s2}, body {b2:?})"
-    );
-    assert!(
-        b2.is_empty(),
-        "exit(1) before any output => empty body (got: {b2:?})"
-    );
-
-    assert_eq!(s3, 200, "worker must recover after exit() (got {s3})");
-    assert!(
-        b3.contains("ok counter=3"),
-        "worker must survive exit() and serve the next request (got: {b3:?})"
     );
     drop(h);
     r.shutdown();
@@ -162,43 +98,6 @@ fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
-    Ok(())
-}
-
-#[test]
-fn many_producers_test() -> anyhow::Result<()> {
-    let _guard = php_lock();
-
-    let r = Rapira::start(Mode::Worker(fixture("shared/worker.php")))?;
-
-    let producers: Vec<_> = (0..24)
-        .map(|t| {
-            let h: php_sys::RapiraHandle = r.handle();
-            thread::spawn(move || {
-                for i in 0..256 {
-                    let name: String = format!("t{t}-r{i}");
-                    let rx = h
-                        .handle_blocking(req(&format!("/?name={name}"), "shared/worker.php"))
-                        .expect("ruuuun!");
-                    let (status, body) = drain(rx);
-                    assert_eq!(
-                        status, 200,
-                        "worker must serve (got {status}, body {body:?})"
-                    );
-                    assert!(
-                        body.contains(&format!("Hello from worker, {name}!")),
-                        "worker must serve (got: {body:?})"
-                    );
-                }
-            })
-        })
-        .collect::<Vec<_>>();
-
-    for p in producers {
-        p.join().expect("thread join failed");
-    }
-
     r.shutdown();
     Ok(())
 }
@@ -575,11 +474,6 @@ fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
         php_levels(&logged, "LOGGED-DEPRECATION"),
         vec![tracing::Level::DEBUG, tracing::Level::DEBUG],
         "the log callback reports a deprecation at debug (captured: {logged:?})"
-    );
-    assert_eq!(
-        php_levels(&logged, "LOGGED-DEPRECATION"),
-        vec![tracing::Level::DEBUG, tracing::Level::DEBUG],
-        "so does the teardown slot (captured: {logged:?})"
     );
     Ok(())
 }

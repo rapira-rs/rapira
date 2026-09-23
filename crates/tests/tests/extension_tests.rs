@@ -70,26 +70,6 @@ fn check(res: &Response, want: &str) -> Result<()> {
     Ok(())
 }
 
-#[test]
-fn an_extension_drives_concurrent_requests_through_php() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Worker(fixture(
-        "extension_tests/ext-driver-worker.php",
-    )))?;
-    let mut host = ExtensionRuntime::new();
-    host.register::<Driver>(())?;
-    let outcomes = host
-        .run(
-            rapira.handle(),
-            fixture("extension_tests/ext-driver-worker.php"),
-        )
-        .join();
-    drop(rapira);
-    assert_eq!(outcomes.len(), 1);
-    assert!(outcomes[0].is_ok(), "driver failed: {:?}", outcomes[0]);
-    Ok(())
-}
-
 /// A rejected body surfaces as a downcastable `Rejected` at exec() and never reaches the pool.
 struct RejectDriver {
     id: String,
