@@ -800,7 +800,8 @@ mod tests {
     async fn file_event_streams_the_slice_in_chunks() {
         use std::io::Write;
         let mut f = tempfile::tempfile().unwrap();
-        let payload = vec![7u8; 100 * 1024];
+        // A prime period, so a read at a wrong offset returns other bytes.
+        let payload: Vec<u8> = (0..100 * 1024).map(|i| (i % 251) as u8).collect();
         f.write_all(&payload).unwrap();
         let mut b = body(
             vec![
@@ -814,11 +815,14 @@ mod tests {
             None,
         );
         let mut got: Vec<u8> = Vec::new();
+        let mut frames = Vec::new();
         while let Some(r) = data(&mut b).await {
-            got.extend_from_slice(&r.unwrap());
+            let bytes = r.unwrap();
+            frames.push(bytes.len());
+            got.extend_from_slice(&bytes);
         }
-        assert_eq!(got.len(), 80 * 1024);
-        assert!(got.iter().all(|&x| x == 7));
+        assert_eq!(frames, [64 * 1024, 16 * 1024]);
+        assert!(got == payload[1024..1024 + 80 * 1024], "wrong slice bytes");
     }
 
     /// A file that shrank below the promised slice aborts instead of faking a clean end.

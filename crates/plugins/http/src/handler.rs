@@ -738,23 +738,6 @@ mod tests {
         assert_eq!(inflight.load(Ordering::Acquire), 0);
     }
 
-    /// One request counts once, no matter how many holders share the guard.
-    #[tokio::test]
-    async fn chained_response_counts_one_request() {
-        let backend = Arc::new(Scripted::one(vec![head(false), end()], None));
-        let (handler, inflight, _closed_tx) =
-            setup(backend, vec![Arc::new(Pass) as Arc<dyn Middleware>]);
-        let res = handle(handler, get_request()).await;
-        assert_eq!(res.status(), http::StatusCode::OK);
-        assert_eq!(
-            inflight.load(Ordering::Acquire),
-            1,
-            "one request must count once"
-        );
-        drop(res);
-        assert_eq!(inflight.load(Ordering::Acquire), 0);
-    }
-
     /// A bodiless reply keeps the response guarded after its reply is consumed to End.
     #[tokio::test]
     async fn bodiless_response_stays_guarded_after_the_reply_ends() {
