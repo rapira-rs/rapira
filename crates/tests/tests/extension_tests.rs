@@ -1,15 +1,15 @@
-use extension_api::{Extension, Php, Request, Response, Result};
+use extension_api::{Extension, Php, Request, Result};
 use php_sys::{Mode, Rapira};
 use rapira_runtime::ExtensionRuntime;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::{Duration, Instant};
-use tests::{fixture, php_lock};
+use tests::{Response, collect, fixture, php_lock};
 
 /// Distinct ids so the same type can be registered many times (dup-name check).
 static NEXT_ID: AtomicUsize = AtomicUsize::new(0);
 
 async fn exec_full(php: &Php, req: Request) -> Result<Response> {
-    php.exec(req).await?.collect().await
+    collect(php.exec(req).await?).await
 }
 
 fn get_request(uri: &str) -> Request {

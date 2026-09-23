@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 anyhow = "1"
+extension_api = { workspace = true }
 php_sys = { path = "../php_sys" }
 tokio = { version = "1", features = ["rt", "sync", "time"] }
 tracing = "0.1"
@@ -16,7 +17,6 @@ tracing = "0.1"
 tracing-subscriber = "0.3"
 
 [dev-dependencies]
-extension_api = { workspace = true }
 http-body-util = { workspace = true }
 rapira_http = { workspace = true }
 rapira_runtime = { path = "../runtime" }

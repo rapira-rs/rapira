@@ -1,3 +1,4 @@
+use extension_api::{Reply, ReplyEvent};
 use php_sys::{Frame, HandleError, Mode, Rapira, RapiraHandle, Request};
 use std::env::set_var;
 use std::path::{Path, PathBuf};
@@ -183,6 +184,58 @@ fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Ve
     }
     out.truncate(done);
     Ok(out)
+}
+
+/// A reply stream collected to its `End`.
+#[derive(Debug)]
+pub struct Response {
+    pub status: u16,
+    pub headers: extension_api::FieldLines,
+    pub body: Vec<u8>,
+}
+
+/// Drains `reply` to its `End`; a missing head, a missing `End` or a truncated `End` is an error.
+pub async fn collect(mut reply: Reply) -> anyhow::Result<Response> {
+    let mut response: Option<Response> = None;
+    let mut end: Option<bool> = None;
+    while let Some(ev) = reply.next().await {
+        match ev {
+            ReplyEvent::Interim { .. } => {}
+            ReplyEvent::Head {
+                status, headers, ..
+            } => {
+                response = Some(Response {
+                    status,
+                    headers,
+                    body: Vec::new(),
+                });
+            }
+            ReplyEvent::Chunk(b) => {
+                if let Some(r) = response.as_mut() {
+                    r.body.extend_from_slice(&b);
+                }
+            }
+            ReplyEvent::File { file, offset, len } => {
+                if let Some(r) = response.as_mut() {
+                    r.body.extend_from_slice(&read_slice(&file, offset, len)?);
+                }
+            }
+            ReplyEvent::End { truncated, .. } => {
+                end = Some(truncated);
+                break;
+            }
+        }
+    }
+    match (response, end) {
+        (None, None) => Err(anyhow::anyhow!(
+            "php worker died mid-response (channel closed without a response)"
+        )),
+        (Some(_), None) | (_, Some(true)) => {
+            Err(anyhow::anyhow!("php crashed mid-response; body truncated"))
+        }
+        (None, Some(false)) => Err(anyhow::anyhow!("php produced no response head")),
+        (Some(r), Some(false)) => Ok(r),
+    }
 }
 
 /// Poll for a first frame until `deadline`: None = nothing arrived in time, a producer that died with no frames yields `Resp::default()`.
@@ -397,4 +450,80 @@ pub fn init_log_capture() {
         use tracing_subscriber::util::SubscriberInitExt;
         let _ = tracing_subscriber::registry().with(CaptureLayer).try_init();
     });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use extension_api::ReplySource;
+
+    struct VecSource(std::collections::VecDeque<ReplyEvent>);
+
+    impl ReplySource for VecSource {
+        fn poll_next(
+            &mut self,
+            _cx: &mut std::task::Context<'_>,
+        ) -> std::task::Poll<Option<ReplyEvent>> {
+            std::task::Poll::Ready(self.0.pop_front())
+        }
+    }
+
+    fn reply(events: Vec<ReplyEvent>) -> Reply {
+        Reply::new(Box::new(VecSource(events.into())))
+    }
+
+    fn head() -> ReplyEvent {
+        ReplyEvent::Head {
+            status: 200,
+            headers: vec![("x-a".into(), b"1".to_vec())],
+            content_length: None,
+            bodiless: false,
+        }
+    }
+
+    fn end(truncated: bool) -> ReplyEvent {
+        ReplyEvent::End {
+            trailers: Vec::new(),
+            truncated,
+        }
+    }
+
+    /// The four stream outcomes map to the three documented errors and Ok.
+    #[tokio::test]
+    async fn collect_maps_stream_outcomes() {
+        let died = collect(reply(Vec::new())).await.unwrap_err();
+        assert!(died.to_string().contains("died mid-response"), "{died:#}");
+
+        let cut = collect(reply(vec![head()])).await.unwrap_err();
+        assert!(cut.to_string().contains("truncated"), "{cut:#}");
+
+        let cut = collect(reply(vec![head(), end(true)])).await.unwrap_err();
+        assert!(cut.to_string().contains("truncated"), "{cut:#}");
+
+        let headless = collect(reply(vec![end(false)])).await.unwrap_err();
+        assert!(
+            headless.to_string().contains("no response head"),
+            "{headless:#}"
+        );
+    }
+
+    /// Chunks concatenate in order; interim heads are dropped.
+    #[tokio::test]
+    async fn collect_concatenates_the_stream() {
+        let r = collect(reply(vec![
+            ReplyEvent::Interim {
+                status: 103,
+                headers: Vec::new(),
+            },
+            head(),
+            ReplyEvent::Chunk(b"one,"[..].into()),
+            ReplyEvent::Chunk(b"two"[..].into()),
+            end(false),
+        ]))
+        .await
+        .unwrap();
+        assert_eq!(r.status, 200);
+        assert_eq!(r.headers, vec![("x-a".to_string(), b"1".to_vec())]);
+        assert_eq!(r.body, b"one,two");
+    }
 }

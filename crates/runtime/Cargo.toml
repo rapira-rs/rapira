@@ -19,6 +19,3 @@ libc = "0.2"
 memchr = "2"
 httparse = "1"
 tempfile = "3"
-
-[dev-dependencies]
-bytes = { workspace = true }

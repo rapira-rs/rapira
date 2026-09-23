@@ -737,7 +737,6 @@ name = "rapira_runtime"
 version = "0.8.1"
 dependencies = [
  "anyhow",
- "bytes",
  "extension_api",
  "httparse",
  "libc",
