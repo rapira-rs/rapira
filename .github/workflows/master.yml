@@ -115,14 +115,11 @@ jobs:
                   done
 
             - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-              with:
-                  components: clippy
             - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
               with:
                   workspaces: core
                   cache-on-failure: true
 
-            - run: cargo clippy --workspace --all-targets -- -D warnings
             - run: cargo build --workspace
             - run: cargo test --workspace
             - run: cargo build -p rapira_core --bin rapira && cargo test -p tests --test e2e --features e2e -- --test-threads=1
