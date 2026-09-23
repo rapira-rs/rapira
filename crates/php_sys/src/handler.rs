@@ -57,19 +57,19 @@ fn now_unix_f64() -> f64 {
         .unwrap_or(0.0)
 }
 
-struct PendingGuard(Option<Arc<AtomicUsize>>);
+struct PendingGuard<'a>(Option<&'a AtomicUsize>);
 
-impl PendingGuard {
-    fn arm(pending: &Arc<AtomicUsize>) -> Self {
+impl<'a> PendingGuard<'a> {
+    fn arm(pending: &'a AtomicUsize) -> Self {
         pending.fetch_add(1, Ordering::Relaxed);
-        Self(Some(pending.clone()))
+        Self(Some(pending))
     }
     fn disarm(mut self) {
         self.0 = None;
     }
 }
 
-impl Drop for PendingGuard {
+impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
         if let Some(pending) = self.0.take() {
             pending.fetch_sub(1, Ordering::Relaxed);

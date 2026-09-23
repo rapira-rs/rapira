@@ -173,9 +173,10 @@ fn log_survives_a_throwing_json_serializer() {
 #[test]
 fn log_preserves_exit_from_a_serializer() {
     use php_sys::{Mode, Rapira};
-    use tests::{drain, php_lock, req};
+    use tests::{drain, init_log_capture, php_lock, req};
 
     let _guard = php_lock();
+    init_log_capture();
     let r = Rapira::start(Mode::Classic).expect("classic boot");
     let h = r.handle();
     let (status, body) = drain(

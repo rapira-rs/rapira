@@ -1,11 +1,12 @@
 use std::path::PathBuf;
-use std::sync::Mutex;
+use std::sync::OnceLock;
 
 use super::respond::{Verb, discard_unit, emit_head, seal, send_frame, throw_verb};
 use super::*;
 
-static SENDFILE_ROOT: Mutex<Option<PathBuf>> = Mutex::new(None);
+static SENDFILE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
+/// The first call sets the root for the process; a later call changes nothing.
 pub fn set_sendfile_root(root: PathBuf) {
     let canonical = std::fs::canonicalize(&root).unwrap_or_else(|e| {
         tracing::warn!(
@@ -15,16 +16,7 @@ pub fn set_sendfile_root(root: PathBuf) {
         );
         root
     });
-    *SENDFILE_ROOT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(canonical);
-}
-
-fn sendfile_root() -> Option<PathBuf> {
-    SENDFILE_ROOT
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
-        .clone()
+    let _ = SENDFILE_ROOT.set(canonical);
 }
 
 fn open_send_file(
@@ -35,10 +27,10 @@ fn open_send_file(
     use std::os::unix::ffi::OsStrExt;
     let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
     let canonical = std::fs::canonicalize(path).map_err(|_| c"no readable file at the path")?;
-    let Some(root) = sendfile_root() else {
+    let Some(root) = SENDFILE_ROOT.get() else {
         return Err(c"no sendfile root is configured");
     };
-    if !canonical.starts_with(&root) {
+    if !canonical.starts_with(root) {
         return Err(c"the path is outside the configured sendfile root");
     }
     let file = std::fs::File::open(&canonical).map_err(|_| c"no readable file at the path")?;

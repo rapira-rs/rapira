@@ -3,7 +3,7 @@ use std::{
     ptr::null_mut,
 };
 
-use tracing::event;
+use tracing::{Level, event, level_filters::LevelFilter};
 
 use crate::{
     HashPosition, HashTable, IS_OBJECT, PHP_JSON_PARTIAL_OUTPUT_ON_ERROR, add_assoc_stringl_ex,
@@ -32,7 +32,7 @@ pub unsafe extern "C" fn rapira_rs_version(len: *mut usize) -> *const c_char {
     })
 }
 
-fn emit(level: c_int, message: &[u8], context: &[u8]) {
+fn emit(level: Level, message: &[u8], context: &[u8]) {
     let message = String::from_utf8_lossy(message);
     let context = String::from_utf8_lossy(context);
 
@@ -46,25 +46,25 @@ fn emit(level: c_int, message: &[u8], context: &[u8]) {
         };
     }
     match level {
-        0 => log_at!(tracing::Level::ERROR),
-        1 => log_at!(tracing::Level::WARN),
-        3 => log_at!(tracing::Level::DEBUG),
-        4 => log_at!(tracing::Level::TRACE),
-        _ => log_at!(tracing::Level::INFO),
+        Level::ERROR => log_at!(Level::ERROR),
+        Level::WARN => log_at!(Level::WARN),
+        Level::INFO => log_at!(Level::INFO),
+        Level::DEBUG => log_at!(Level::DEBUG),
+        _ => log_at!(Level::TRACE),
     }
 }
 
 /// An enum case's name is its first property slot (`zend_enum_fetch_case_name`, Zend/zend_enum.h).
-unsafe fn level_from_case(level: *mut zend_object) -> c_int {
+unsafe fn level_from_case(level: *mut zend_object) -> Level {
     unsafe {
         let name_zv = (*level).properties_table.as_ptr();
         match zend::zstr_bytes((*name_zv).value.str_) {
-            b"Error" => 0,
-            b"Warning" => 1,
-            b"Info" => 2,
-            b"Debug" => 3,
-            b"Trace" => 4,
-            _ => 0,
+            b"Error" => Level::ERROR,
+            b"Warning" => Level::WARN,
+            b"Info" => Level::INFO,
+            b"Debug" => Level::DEBUG,
+            b"Trace" => Level::TRACE,
+            _ => Level::ERROR,
         }
     }
 }
@@ -186,10 +186,14 @@ pub unsafe extern "C" fn rapira_rs_log_call(
 ) {
     guard((), || unsafe {
         let lvl = if level.is_null() {
-            2
+            Level::INFO
         } else {
             level_from_case(level)
         };
+        // A level above every enabled level skips the context encode and any user jsonSerialize().
+        if lvl > LevelFilter::current() {
+            return;
+        }
         let json = if context.is_null() || (*context).nNumOfElements == 0 {
             Vec::new()
         } else {

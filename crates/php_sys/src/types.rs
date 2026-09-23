@@ -4,7 +4,7 @@ use std::ffi::CString;
 use std::io::Read;
 use std::os::raw::c_int;
 use std::path::PathBuf;
-use tokio::sync::mpsc::Sender;
+use tokio::sync::mpsc::{Sender, error::TrySendError};
 
 pub type FieldLines = Vec<(String, Vec<u8>)>;
 
@@ -341,20 +341,33 @@ impl Context {
                 .iter()
                 .any(|(n, _)| n.eq_ignore_ascii_case("content-encoding"));
             let content_length = (!bodiless && !truncated).then_some(body.len() as u64);
-            let _ = tx.blocking_send(Frame::Head {
-                head,
-                content_length,
-                bodiless,
-                body_coded,
-            });
+            send(
+                &tx,
+                Frame::Head {
+                    head,
+                    content_length,
+                    bodiless,
+                    body_coded,
+                },
+            );
             if !body.is_empty() {
-                let _ = tx.blocking_send(Frame::Chunk(body.into()));
+                send(&tx, Frame::Chunk(body.into()));
             }
         }
-        let _ = tx.blocking_send(Frame::End {
-            trailers: Vec::new(),
-            truncated,
-        });
+        send(
+            &tx,
+            Frame::End {
+                trailers: Vec::new(),
+                truncated,
+            },
+        );
+    }
+}
+
+/// Blocks only on a full channel: `blocking_send` runs a `block_on` on every call.
+fn send(tx: &Sender<Frame>, frame: Frame) {
+    if let Err(TrySendError::Full(frame)) = tx.try_send(frame) {
+        let _ = tx.blocking_send(frame);
     }
 }
 

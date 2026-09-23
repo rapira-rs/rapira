@@ -57,7 +57,6 @@ pub(super) struct Closed;
 /// # Safety
 /// Engine active on this thread.
 pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
-    let consumed = st.armed_at.elapsed();
     let (result, parked) = {
         let Some(tx) = st.job.ctx.sender.as_ref() else {
             return Err(Closed);
@@ -66,6 +65,7 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
             Ok(()) => (Ok(()), false),
             Err(TrySendError::Closed(_)) => (Err(Closed), false),
             Err(TrySendError::Full(frame)) => unsafe {
+                let consumed = st.armed_at.elapsed();
                 let saved = (*rapira_eg()).timeout_seconds;
                 if saved > 0 {
                     zend_unset_timeout();
