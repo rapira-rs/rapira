@@ -47,7 +47,6 @@ pub enum ReplyEvent {
         headers: FieldLines,
         content_length: Option<u64>,
         bodiless: bool,
-        body_coded: bool,
     },
     Chunk(bytes::Bytes),
     File {

@@ -114,9 +114,9 @@ pub(super) unsafe fn emit_head(
     if st.head_sent {
         return Ok(());
     }
-    let (status, headers, body_coded) = match st.pending.take() {
-        Some(p) => (p.status, p.headers, p.body_coded),
-        None => (200, Vec::new(), false),
+    let (status, headers) = match st.pending.take() {
+        Some(p) => (p.status, p.headers),
+        None => (200, Vec::new()),
     };
     if st.stage == Stage::Open {
         st.stage = Stage::HeadCommitted;
@@ -134,7 +134,6 @@ pub(super) unsafe fn emit_head(
                 head: ResponseHead { status, headers },
                 content_length,
                 bodiless: st.bodiless,
-                body_coded,
             },
         )
     }
@@ -252,7 +251,6 @@ pub(super) unsafe fn write_head_core(
     st.pending = Some(PendingHead {
         status,
         headers: split.headers,
-        body_coded: split.body_coded,
     });
     // 1xx carries no body either (RFC 9112 §6.3), so a committed 101 drops chunks like 204/304.
     if matches!(status, 204 | 304 | 101) {
@@ -494,7 +492,6 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
                         },
                         content_length: (!st.bodiless).then_some(0),
                         bodiless: st.bodiless,
-                        body_coded: false,
                     })
                     .is_ok()
                 {

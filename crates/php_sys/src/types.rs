@@ -43,7 +43,6 @@ pub enum Frame {
         content_length: Option<u64>,
         /// 204, 304, 1xx or a HEAD request: no body bytes and no framing fields on the wire.
         bodiless: bool,
-        body_coded: bool,
     },
     Chunk(Bytes),
     File {
@@ -331,10 +330,6 @@ impl Context {
             let bodiless = matches!(head.status, 204 | 304)
                 || (100..200).contains(&head.status)
                 || self.req.method.eq_ignore_ascii_case("HEAD");
-            let body_coded = head
-                .headers
-                .iter()
-                .any(|(n, _)| n.eq_ignore_ascii_case("content-encoding"));
             let content_length = (!bodiless && !truncated).then_some(body.len() as u64);
             send(
                 &tx,
@@ -342,7 +337,6 @@ impl Context {
                     head,
                     content_length,
                     bodiless,
-                    body_coded,
                 },
             );
             if !body.is_empty() {

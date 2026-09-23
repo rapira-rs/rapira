@@ -555,7 +555,6 @@ mod tests {
             headers: Vec::new(),
             content_length: None,
             bodiless,
-            body_coded: false,
         }
     }
 
@@ -565,7 +564,6 @@ mod tests {
             headers: Vec::new(),
             content_length: Some(content_length),
             bodiless: false,
-            body_coded: false,
         }
     }
 

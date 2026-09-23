@@ -53,14 +53,12 @@ pub(super) fn forbidden_trailer(name: &str) -> bool {
 pub(super) struct SplitHead {
     pub(super) headers: FieldLines,
     pub(super) declared_cl: Option<u64>,
-    pub(super) body_coded: bool,
 }
 
 /// Takes content-length out as the declared length; the front drops the hop-by-hop fields.
 pub(super) fn split_framing(headers: FieldLines) -> Result<SplitHead, &'static CStr> {
     let mut declared_cl: Option<u64> = None;
     let mut cl_lines = 0usize;
-    let mut body_coded = false;
     let mut out = Vec::with_capacity(headers.len());
     for (n, v) in headers {
         if n.eq_ignore_ascii_case("content-length") {
@@ -71,15 +69,11 @@ pub(super) fn split_framing(headers: FieldLines) -> Result<SplitHead, &'static C
             declared_cl = parse_content_length(&v);
             continue;
         }
-        if n.eq_ignore_ascii_case("content-encoding") {
-            body_coded = true;
-        }
         out.push((n, v));
     }
     Ok(SplitHead {
         headers: out,
         declared_cl,
-        body_coded,
     })
 }
 

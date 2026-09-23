@@ -290,13 +290,11 @@ impl extension_api::ReplySource for FrameSource {
                     head,
                     content_length,
                     bodiless,
-                    body_coded,
                 } => extension_api::ReplyEvent::Head {
                     status: head.status,
                     headers: head.headers,
                     content_length,
                     bodiless,
-                    body_coded,
                 },
                 php_sys::Frame::Chunk(b) => extension_api::ReplyEvent::Chunk(b),
                 php_sys::Frame::File { file, offset, len } => {
@@ -463,7 +461,6 @@ mod tests {
             headers: vec![("x-a".into(), b"1".to_vec())],
             content_length: None,
             bodiless: false,
-            body_coded: false,
         }
     }
 

@@ -123,7 +123,6 @@ enum Stage {
 struct PendingHead {
     status: u16,
     headers: FieldLines,
-    body_coded: bool,
 }
 
 enum BodyState {
