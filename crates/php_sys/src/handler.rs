@@ -113,21 +113,4 @@ impl RapiraHandle {
             }
         }
     }
-
-    pub fn handle_blocking(&self, mut req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
-        req.received_at.get_or_insert_with(now_unix_f64);
-        let (tx, rx) = mpsc::channel::<Frame>(FRAME_CAP);
-        let pending = PendingGuard::arm(&self.pending);
-        if self
-            .intake
-            .send(Box::new(Job {
-                ctx: Context::new(req, tx, !self.dispatcher),
-            }))
-            .is_err()
-        {
-            return Err(HandleError::Stopped);
-        }
-        pending.disarm();
-        Ok(rx)
-    }
 }

@@ -49,7 +49,7 @@ pub fn run_worker(
         out.push(drain(submit(&h, req(uri, name))?));
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(out)
 }
 
@@ -340,7 +340,7 @@ pub fn app_records(script: &str) -> (Vec<AppRecord>, Vec<String>) {
     let h = r.handle();
     let (status, body) = drain(submit(&h, req("/", script)).expect("dispatch"));
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200, "{script} must run clean (body: {body:?})");
     assert!(body.contains("logged"), "{script} ran to the end: {body:?}");

@@ -23,7 +23,7 @@ fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
     )?);
     if probe.contains("skip") {
         drop(h);
-        r.shutdown();
+        drop(r);
         return Ok(());
     }
 
@@ -56,6 +56,6 @@ fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }

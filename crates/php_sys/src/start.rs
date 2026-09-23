@@ -152,8 +152,6 @@ impl Rapira {
         Ok(rapira)
     }
 
-    pub fn shutdown(self) {}
-
     /// The slot of the private one-slot board. It is `None` when the master owns the slot.
     pub fn scoreboard(&self) -> Option<rapira_scoreboard::SlotSnapshot> {
         self.board?.snapshot_slots().pop()

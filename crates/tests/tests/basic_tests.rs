@@ -8,7 +8,7 @@ fn fibers_stress_classic() -> anyhow::Result<()> {
     let h = r.handle();
     let (status, body) = drain(tests::submit(&h, req("/", "basic_tests/fibers.php"))?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(
         status, 200,
@@ -41,7 +41,7 @@ fn worker_request_isolation() -> anyhow::Result<()> {
         "static class props persist across requests by design (got: {body2:?})"
     );
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -53,7 +53,7 @@ fn fibers_stress_worker() -> anyhow::Result<()> {
     let h = r.handle();
     let (status, body) = drain(tests::submit(&h, req("/", "shared/fibers-worker.php"))?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(
         status, 200,
@@ -107,7 +107,7 @@ fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -127,7 +127,7 @@ fn worker_basic_auth() -> anyhow::Result<()> {
     let (s_none, b_none) = drain(tests::submit(&h, req("/", "shared/auth-worker.php"))?);
 
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(s_auth, 200);
     assert!(
@@ -165,7 +165,7 @@ fn server_variables() -> anyhow::Result<()> {
 
     let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200);
     for expected in [
@@ -222,7 +222,7 @@ fn worker_finish_request() -> anyhow::Result<()> {
     )?);
 
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(s1, 200);
     assert!(
@@ -257,7 +257,7 @@ fn getenv_classic() -> anyhow::Result<()> {
     let h = r.handle();
     let (status, body) = drain(tests::submit(&h, req("/", "basic_tests/env.php"))?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!(status, 200);
     assert!(body.contains("BAR"), "expected FOO=BAR (got: {body:?})");
     Ok(())
@@ -273,7 +273,7 @@ fn getenv_worker() -> anyhow::Result<()> {
     let h = r.handle();
     let (status, body) = drain(tests::submit(&h, req("/", "shared/env-worker.php"))?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!(status, 200);
     assert!(body.contains("BAR"), "expected FOO=BAR (got: {body:?})");
     Ok(())
@@ -286,7 +286,7 @@ fn failboot_classic() -> anyhow::Result<()> {
     let h = r.handle();
     let (status, body) = drain(tests::submit(&h, req("/", "basic_tests/failboot.php"))?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!(status, 200);
     assert!(
         body.contains("syntax error, unexpected end of file, expecting variable or"),
@@ -314,7 +314,7 @@ fn scoreboard_counts_worker() -> anyhow::Result<()> {
     )?);
     drop(h);
     let snap = r.scoreboard().expect("private scoreboard slot");
-    r.shutdown();
+    drop(r);
 
     assert_eq!(snap.handled, 3, "3 requests handled");
     assert_eq!(snap.errors, 1, "one engine error (uncaught throw)");
@@ -336,7 +336,7 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
     )?);
     drop(h);
     let snap = r.scoreboard().expect("private scoreboard slot");
-    r.shutdown();
+    drop(r);
 
     assert_eq!(s2, 200, "worker recovers after the recycle");
     assert_eq!(snap.handled, 2, "both jobs handled");
@@ -358,7 +358,7 @@ fn scoreboard_counts_classic() -> anyhow::Result<()> {
     let _ = drain(tests::submit(&h, req("/", "basic_tests/failboot.php"))?);
     drop(h);
     let snap = r.scoreboard().expect("private scoreboard slot");
-    r.shutdown();
+    drop(r);
 
     assert_eq!(snap.handled, 3, "3 requests handled");
     assert_eq!(
@@ -376,7 +376,7 @@ fn worker_session_isolation() -> anyhow::Result<()> {
     let (s1, b1) = drain(tests::submit(&h, req("/", "shared/session-worker.php"))?);
     let (s2, b2) = drain(tests::submit(&h, req("/", "shared/session-worker.php"))?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(s1, 200);
     assert_eq!(s2, 200);
@@ -410,7 +410,7 @@ fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
         req("/", "basic_tests/boot-output-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200, "worker still serves after no-context output");
     let logged = captured();
@@ -447,7 +447,7 @@ fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
         )?);
     }
     drop(h);
-    r.shutdown();
+    drop(r);
 
     let logged = captured();
     assert_eq!(
@@ -482,7 +482,7 @@ fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
         req("/?step=silent-fatal", "basic_tests/error-levels-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     let logged = captured();
     assert_eq!(
@@ -507,7 +507,7 @@ fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
         req("/?step=logged", "basic_tests/error-levels-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200);
     let logged = captured();
@@ -526,7 +526,7 @@ fn sapi_ini_entries_applied() -> anyhow::Result<()> {
     let h = r.handle();
     let (status, body) = drain(tests::submit(&h, req("/", "basic_tests/ini.php"))?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200);
     assert!(
@@ -550,7 +550,7 @@ fn status_code_does_not_leak_worker() -> anyhow::Result<()> {
         req("/", "basic_tests/status-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(s1, 404, "explicit http_response_code(404)");
     assert_eq!(
@@ -568,7 +568,7 @@ fn status_code_does_not_leak_classic() -> anyhow::Result<()> {
     let (s1, _) = drain(tests::submit(&h, req("/", "basic_tests/status-404.php"))?);
     let (s2, _) = drain(tests::submit(&h, req("/", "shared/hello.php"))?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(s1, 404);
     assert_eq!(
@@ -590,7 +590,7 @@ fn worker_finish_request_header_only() -> anyhow::Result<()> {
         req("/", "basic_tests/finish-request-headers-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!(status, 302);
     assert!(body.is_empty());
     Ok(())
@@ -618,7 +618,7 @@ fn teardown_bailout_does_not_leave_gc_protected() -> anyhow::Result<()> {
         "worker recovers from a teardown bailout with GC unprotected (got {b2:?})"
     );
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -641,7 +641,7 @@ fn error_get_last_cleared_between_worker_requests() -> anyhow::Result<()> {
         "error_get_last() must reset between jobs (got {b2:?})"
     );
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -667,7 +667,7 @@ fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() ->
         "first-call teardown bailout must recycle + re-bootstrap, not serve in cycle 1 (got {body:?})"
     );
     drop(h);
-    r.shutdown();
+    drop(r);
     let _ = std::fs::remove_file(&sentinel);
     let _ = std::fs::remove_file(&boot);
     Ok(())
@@ -687,7 +687,7 @@ fn worker_error_after_loop_exits_cleanly() -> anyhow::Result<()> {
     )?);
     assert_eq!((status, body.as_str()), (200, "ok"));
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -708,7 +708,7 @@ fn filter_raw_input_does_not_accumulate() -> anyhow::Result<()> {
     )?);
     if first.trim() == "skip" {
         drop(h);
-        r.shutdown();
+        drop(r);
         return Ok(());
     }
     for i in 0..5 {
@@ -739,7 +739,7 @@ fn filter_raw_input_does_not_accumulate() -> anyhow::Result<()> {
         "raw input copies must not accumulate across jobs; {leaked} bytes grown (~90KB pre-fix)"
     );
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -763,7 +763,7 @@ fn worker_finish_request_flush_bailout_recycles() -> anyhow::Result<()> {
         req("/?boom=0", "basic_tests/finish-request-bailout-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(s1, 200);
     assert!(b1.contains("ok counter=1"), "req1 baseline (got: {b1:?})");
@@ -797,7 +797,7 @@ fn classic_finish_request() -> anyhow::Result<()> {
         req("/", "shared/finish-request-classic.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200);
     assert!(

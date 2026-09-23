@@ -9,7 +9,7 @@ fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
     let h = r.handle();
     let (status, body) = drain(tests::submit(&h, req("/", "http_values/construct.php"))?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200, "construction must succeed (body: {body:?})");
     for line in [

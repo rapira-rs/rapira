@@ -51,7 +51,7 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
         }
         let unhealthy = r.scoreboard().expect("private scoreboard slot").unhealthy;
         drop(h);
-        r.shutdown();
+        drop(r);
         let _ = done_tx.send((unhealthy, statuses));
         Ok(())
     });

@@ -30,7 +30,7 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
         req("/?probe=1", "general_tests/abort-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(s2, 200, "worker must survive the aborted request");
     assert!(
@@ -66,7 +66,7 @@ fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     send(&h)?;
     let fourth = send(&h)?;
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(
         first, fourth,
@@ -84,7 +84,7 @@ fn https_server_vars() -> anyhow::Result<()> {
     request.https = true;
     let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200);
     assert!(
@@ -116,7 +116,7 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     )?);
     drop(h);
     let snap = r.scoreboard().expect("private scoreboard slot");
-    r.shutdown();
+    drop(r);
 
     assert_eq!(s1, 200);
     assert!(
@@ -146,7 +146,7 @@ fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
         req("/", "general_tests/throw-quiet-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert!(resp.ended, "worker must seal a response");
     assert_eq!(
@@ -176,7 +176,7 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
         req("/", "shared/session-bailout-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     let sid = |b: &str| {
         b.split_whitespace()
@@ -215,7 +215,7 @@ fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
         "worker must survive and serve req2 (got {s2})"
     );
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -255,7 +255,7 @@ fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
         "fatal backtrace must be freed between jobs; {leaked} bytes still pinned (~20MB pre-fix)"
     );
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -273,7 +273,7 @@ fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
         req("/", "shared/shutdown-fatal-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert!(b1.contains("ok counter=1"), "req1 baseline (got: {b1:?})");
     assert_eq!(s2, 200, "worker must survive (got {s2})");
     assert!(
@@ -300,7 +300,7 @@ fn client_disconnect_respects_ignore_user_abort() -> anyhow::Result<()> {
         req("/?probe=1", "general_tests/abort-ignore-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!(s2, 200, "worker must survive the ignored abort");
     assert!(
         b2.contains("reached=1"),

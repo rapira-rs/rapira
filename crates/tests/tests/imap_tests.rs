@@ -53,7 +53,7 @@ fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
     let (s1, b1) = drain(tests::submit(&h, req("/?step=leak", name))?);
     if b1 == "skip" {
         drop(h);
-        r.shutdown();
+        drop(r);
         assert_skip_allowed(name);
         return Ok(());
     }
@@ -69,7 +69,7 @@ fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
         "the follow-up must see a reset stack"
     );
     drop(h);
-    r.shutdown();
+    drop(r);
 
     let seen = captured()
         .iter()

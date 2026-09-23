@@ -184,7 +184,7 @@ fn log_preserves_exit_from_a_serializer() {
             .expect("dispatch"),
     );
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200);
     assert!(body.contains("quitting"), "got: {body:?}");

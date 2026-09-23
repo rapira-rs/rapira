@@ -12,7 +12,7 @@ fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
         req("/", "dispatcher/not-in-dispatcher-mode.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(
         status, 200,
@@ -37,7 +37,7 @@ fn worker_singleton() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/worker-singleton.php")))?;
-    r.shutdown();
+    drop(r);
 
     let records: Vec<(String, String)> = captured()
         .iter()
@@ -71,7 +71,7 @@ fn host_created_only() -> anyhow::Result<()> {
         req("/", "dispatcher/host-created-only.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200, "the refusal must be caught (body: {body:?})");
     assert!(

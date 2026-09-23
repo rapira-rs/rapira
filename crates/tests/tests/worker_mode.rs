@@ -30,7 +30,7 @@ fn worker_serves_with_per_job_superglobals() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -48,7 +48,7 @@ fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
         assert_eq!(resp.body_string(), want, "resident state must accumulate");
     }
     drop(h);
-    r.shutdown();
+    drop(r);
 
     let exited = captured()
         .iter()
@@ -66,7 +66,7 @@ fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
     let h = r.handle();
     let (status, body) = drain(tests::submit(&h, req("/", "worker/gate-classic.php"))?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200, "every throw must be caught (body: {body:?})");
     for line in [
@@ -101,7 +101,7 @@ fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
         "the unit must survive the refusal"
     );
     drop(h);
-    r.shutdown();
+    drop(r);
 
     let gated = captured()
         .iter()
@@ -135,7 +135,7 @@ fn exit_in_a_handler_survives_the_worker() -> anyhow::Result<()> {
     assert_eq!(resp.body_string(), "n=2", "the loop and its state survive");
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -154,7 +154,7 @@ fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
         assert_eq!(resp.body_string(), "once");
     }
     drop(h);
-    r.shutdown();
+    drop(r);
 
     let turns = captured()
         .iter()
@@ -178,7 +178,7 @@ fn never_looping_script_sheds_503() -> anyhow::Result<()> {
     .expect("the shed 503 never arrived");
     assert_eq!(resp.status(), 503, "a never-serving bootstrap must shed");
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -193,7 +193,7 @@ fn bootstrap_env_survives_late_compilation() -> anyhow::Result<()> {
         assert_eq!(resp.body_string(), "set-at-boot", "job {job}");
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -212,7 +212,7 @@ fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
     let resp = drain_resp(tests::submit(&h, req("/", "worker/location-worker.php"))?);
     assert_eq!(resp.status(), 302);
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -227,7 +227,7 @@ fn post_location_redirects_303_in_classic_mode() -> anyhow::Result<()> {
     let resp = drain_resp(tests::submit(&h, rq)?);
     assert_eq!(resp.status(), 303);
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -252,7 +252,7 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     )?);
     assert_eq!(resp.body_string(), "runs=1");
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -276,6 +276,6 @@ fn nested_handle_request_is_refused() -> anyhow::Result<()> {
         resp.body_string()
     );
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }

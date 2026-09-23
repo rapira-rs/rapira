@@ -33,6 +33,6 @@ fn module_startup_failure_then_clean_restart() -> anyhow::Result<()> {
         200
     );
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }

@@ -35,7 +35,7 @@ fn post_superglobals_classic() -> anyhow::Result<()> {
     );
     let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200);
     for expected in [
@@ -79,7 +79,7 @@ fn post_superglobals_worker() -> anyhow::Result<()> {
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(s1, 200);
     assert!(
@@ -114,7 +114,7 @@ fn request_merge_classic() -> anyhow::Result<()> {
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200);
     assert!(
@@ -151,7 +151,7 @@ fn request_merge_worker() -> anyhow::Result<()> {
         );
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -193,7 +193,7 @@ fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
         }
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -216,7 +216,7 @@ fn cookies_refresh_worker() -> anyhow::Result<()> {
         );
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -233,7 +233,7 @@ fn malformed_cookies_classic() -> anyhow::Result<()> {
     ));
     let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200);
     for expected in [
@@ -290,7 +290,7 @@ fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
         .push(("Cookie".into(), format!("PHPSESSID={sid}").into_bytes()));
     let r2 = drain_resp(tests::submit(&h, request)?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(r2.status(), 200);
     assert_eq!(
@@ -337,7 +337,7 @@ fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(s1, 200);
     assert!(
@@ -386,7 +386,7 @@ fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!((s1, s2, s3), (200, 200, 200));
     assert!(
@@ -438,7 +438,7 @@ fn response_header_edges_worker() -> anyhow::Result<()> {
         assert_eq!(resp.body_string(), "Hello");
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -475,7 +475,7 @@ fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_headers_list_response(&resp, 1);
     Ok(())
 }
@@ -499,7 +499,7 @@ fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
         assert_headers_list_response(&resp, i);
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -528,7 +528,7 @@ fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
         assert!(!resp.truncated, "clean completion is not truncated");
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -543,7 +543,7 @@ fn raw_status_line_204_classic() -> anyhow::Result<()> {
         req("/only-headers.php", "ported_tests/only-headers.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.heads, 1);
     assert_eq!(resp.status(), 204);
@@ -582,7 +582,7 @@ fn large_post_body_worker() -> anyhow::Result<()> {
         assert_eq!(body, "Request body size: 6048576");
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -636,7 +636,7 @@ fn multipart_upload_classic() -> anyhow::Result<()> {
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_upload_and_cleanup(status, &body);
     Ok(())
 }
@@ -659,7 +659,7 @@ fn multipart_upload_worker() -> anyhow::Result<()> {
         assert_upload_and_cleanup(status, &body);
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -694,7 +694,7 @@ fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<(
         "TRACK_VARS_FILES must reset; req2 must not see req1's upload (got {b2:?})"
     );
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -723,7 +723,7 @@ fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
         );
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -750,7 +750,7 @@ fn no_destructor_sweep_between_jobs_worker() -> anyhow::Result<()> {
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!((s1, s2), (200, 200));
     assert!(b1.contains("write=ok dtors=0"), "req1 (got {b1:?})");
@@ -790,7 +790,7 @@ fn throwing_destructor_after_job_stays_contained_worker() -> anyhow::Result<()> 
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!((s1, b1.as_str()), (200, "served=1"));
     assert_eq!(
@@ -834,7 +834,7 @@ fn boot_shutdown_function_fires_once_at_worker_exit() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!(
         app_messages("boot-shutdown fired="),
         vec!["boot-shutdown fired=1".to_owned()],
@@ -876,7 +876,7 @@ fn job_shutdown_function_fires_at_end_of_its_job() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!(
         app_messages("job-fixture "),
         vec![
@@ -917,7 +917,7 @@ fn late_shutdown_function_runs_after_boot_entries() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!(
         app_messages("sd "),
         vec![
@@ -951,7 +951,7 @@ fn fatal_in_boot_shutdown_function_exits_clean() -> anyhow::Result<()> {
     assert_eq!((status, body.as_str()), (200, "ok"));
 
     drop(h);
-    r.shutdown();
+    drop(r);
     assert!(
         captured()
             .iter()
@@ -991,7 +991,7 @@ fn boot_global_object_survives_requests() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!(
         app_messages("boot-kernel destructed").len(),
         1,
@@ -1014,7 +1014,7 @@ fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert!(resp.truncated, "uncaught throw after output must truncate");
     assert_eq!(resp.content_length, None, "got: {:?}", resp.content_length);
@@ -1035,7 +1035,7 @@ fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.body_string(), "complete page");
@@ -1058,7 +1058,7 @@ fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.status(), 200, "the echo committed the head");
     assert!(resp.truncated, "uncaught throw after output must truncate");
@@ -1087,7 +1087,7 @@ fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
         );
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -1103,7 +1103,7 @@ fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
         req("/", "shared/error-keeps-headers-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!(resp.heads, 1);
     assert_eq!(
         resp.status(),
@@ -1127,7 +1127,7 @@ fn multi_cookie_headers_classic() -> anyhow::Result<()> {
     request.headers.push(("Cookie".into(), "a=1; b=2".into()));
     let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!((status, body.as_str()), (200, "1,2,a=1; b=2"));
     Ok(())
 }
@@ -1151,7 +1151,7 @@ fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
     }
     let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!(
         (status, body.as_str()),
         (200, "1,2,a=1; b=2,1.2.3.4, 5.6.7.8,Bearer one")
@@ -1169,7 +1169,7 @@ fn latin1_header_value_passes_through() -> anyhow::Result<()> {
         req("/", "ported_tests/latin1-header.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
     let v = resp
         .head
         .as_ref()
@@ -1193,7 +1193,7 @@ fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
         req("/error-keeps-headers.php", "shared/error-keeps-headers.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_eq!(resp.heads, 1, "exactly one head");
     assert_eq!(
         resp.status(),
@@ -1226,7 +1226,7 @@ fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     request.content_type = Some(ctype);
     let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
-    r.shutdown();
+    drop(r);
     assert_upload_and_cleanup(status, &body);
     Ok(())
 }
@@ -1245,7 +1245,7 @@ fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.heads, 1, "a head must still be produced");
     assert_eq!(resp.status(), 201);

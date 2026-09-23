@@ -32,7 +32,7 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -67,7 +67,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -116,6 +116,6 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }

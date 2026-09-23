@@ -13,7 +13,7 @@ fn verbs_probe(query: &str) -> anyhow::Result<(u16, String)> {
         req(query, "dispatcher/verbs-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(out)
 }
 
@@ -47,7 +47,7 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     assert_eq!(resp.body_string(), "method=GET body=two");
 
     drop(h);
-    r.shutdown();
+    drop(r);
 
     let drained = captured()
         .iter()
@@ -72,7 +72,7 @@ fn recv_probes_on_an_empty_channel() -> anyhow::Result<()> {
     )))?;
 
     wait_app_record("recv-probes");
-    r.shutdown();
+    drop(r);
 
     let contexts: Vec<String> = captured()
         .iter()
@@ -119,7 +119,7 @@ fn double_finalize_throws_already_finalized() -> anyhow::Result<()> {
     assert_eq!((status, body.as_str()), (200, "first"));
 
     drop(h);
-    r.shutdown();
+    drop(r);
 
     let records: Vec<String> = captured()
         .iter()
@@ -181,7 +181,7 @@ fn verb_edges_throw_their_documented_classes() -> anyhow::Result<()> {
     )?);
     assert_eq!((status, body.as_str()), (200, "try-busy;neg-timeout"));
     drop(h);
-    r.shutdown();
+    drop(r);
 
     let records: Vec<String> = captured()
         .iter()
@@ -229,7 +229,7 @@ fn try_and_timed_receive_serve_units() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -244,7 +244,7 @@ fn interim_head_is_emitted_before_the_final_head() -> anyhow::Result<()> {
         req("/?probe=interim", "dispatcher/verbs-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.interim.len(), 1, "the 103 must reach the stream");
     assert_eq!(resp.interim[0].status, 103);
@@ -270,7 +270,7 @@ fn writehead_101_commits_as_final() -> anyhow::Result<()> {
         req("/?probe=upgrade", "dispatcher/verbs-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.status(), 101);
     assert!(resp.bodiless, "the Head frame marks a 1xx bodiless");
@@ -319,7 +319,7 @@ fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
     assert_eq!(resp.header("x-vref").as_deref(), Some("c1"));
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -365,7 +365,7 @@ fn abandoned_exchange_fails_that_unit_only() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -394,7 +394,7 @@ fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -417,7 +417,7 @@ fn abandoned_mid_stream_exchange_truncates() -> anyhow::Result<()> {
     assert_eq!((status, body.as_str()), (200, "state=false"));
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -456,7 +456,7 @@ fn abandoned_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -481,7 +481,7 @@ fn exit_after_serving_recycles_the_worker() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -509,7 +509,7 @@ fn head_and_204_drop_the_body() -> anyhow::Result<()> {
     assert_eq!((status, body.as_str()), (204, ""));
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -582,7 +582,7 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -608,7 +608,7 @@ fn plugin_stamped_fields_pass_through() -> anyhow::Result<()> {
     }
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -635,7 +635,7 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
     }
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -668,7 +668,7 @@ fn uri_synthesis_covers_https_and_asterisk_form() -> anyhow::Result<()> {
     }
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -714,7 +714,7 @@ fn tls_view_reaches_php() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -770,7 +770,7 @@ fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -826,7 +826,7 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     assert!(!spool_a.exists() && !spool_b.exists(), "seal unlinks both");
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -910,7 +910,7 @@ fn flush_puts_the_head_on_the_wire_before_eos() -> anyhow::Result<()> {
     assert_eq!(body, b"after");
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -921,7 +921,7 @@ fn streamed_chunks_arrive_in_order() -> anyhow::Result<()> {
     let (r, h, rx) = stream_probe("/?probe=chunks")?;
     let resp = drain_resp(rx);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.content_length, None);
@@ -957,7 +957,7 @@ fn content_length_exceeded_sends_the_fitting_prefix() -> anyhow::Result<()> {
     );
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -989,7 +989,7 @@ fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
     assert_eq!(resp.body_string(), "one,two,three");
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -1000,7 +1000,7 @@ fn declared_content_length_rides_the_head_frame() -> anyhow::Result<()> {
     let (r, h, rx) = stream_probe("/?probe=declared-cl")?;
     let resp = drain_resp(rx);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.content_length, Some(10));
     assert_eq!(resp.body_string(), "abc");
@@ -1039,7 +1039,7 @@ fn sendfile_one_shot_carries_the_file_length() -> anyhow::Result<()> {
         with_path_header("/?probe=sendfile", &path),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
     std::fs::remove_file(&path).ok();
 
     assert_eq!(resp.status(), 200);
@@ -1061,7 +1061,7 @@ fn sendfile_slice_serves_the_named_bytes() -> anyhow::Result<()> {
         with_path_header("/?probe=sendfile-slice", &path),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
     std::fs::remove_file(&path).ok();
 
     assert_eq!(resp.status(), 206);
@@ -1082,7 +1082,7 @@ fn sendfile_missing_file_still_answers_404() -> anyhow::Result<()> {
         req("/?probe=sendfile-missing", "dispatcher/stream-worker.php"),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.status(), 404);
     assert_eq!(resp.body_string(), "nope");
@@ -1104,7 +1104,7 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
         ),
     )?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.status(), 403);
     assert_eq!(resp.body_string(), "denied");
@@ -1120,7 +1120,7 @@ fn trailers_ride_the_end_frame() -> anyhow::Result<()> {
     let (r, h, rx) = stream_probe("/?probe=trailers")?;
     let resp = drain_resp(rx);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.body_string(), "chunk,");
@@ -1139,7 +1139,7 @@ fn trailers_only_response_keeps_length_framing() -> anyhow::Result<()> {
     let (r, h, rx) = stream_probe("/?probe=trailers-only")?;
     let resp = drain_resp(rx);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.content_length, Some(0));
@@ -1166,7 +1166,7 @@ fn trailers_before_a_head_throw_head_not_written() -> anyhow::Result<()> {
     assert!(ctx.contains("HeadNotWrittenError"), "wrong class in {ctx}");
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -1177,7 +1177,7 @@ fn forbidden_trailer_field_is_rejected() -> anyhow::Result<()> {
     let (r, h, rx) = stream_probe("/?probe=trailers-forbidden")?;
     let resp = drain_resp(rx);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.body_string(), "rejected");

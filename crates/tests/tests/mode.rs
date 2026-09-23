@@ -13,7 +13,7 @@ fn worker_mode_answers_worker_for_every_job() -> anyhow::Result<()> {
         assert_eq!(resp.body_string(), "Worker:case:same:unbacked", "job {job}");
     }
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
 
@@ -25,7 +25,7 @@ fn dispatcher_mode_answers_dispatcher() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(Mode::Dispatcher(fixture("mode/dispatcher.php")))?;
-    r.shutdown();
+    drop(r);
 
     let records: Vec<(String, String)> = captured()
         .iter()
@@ -53,7 +53,7 @@ fn classic_mode_answers_classic() -> anyhow::Result<()> {
     let h = r.handle();
     let (status, body) = drain(tests::submit(&h, req("/", "mode/classic.php"))?);
     drop(h);
-    r.shutdown();
+    drop(r);
 
     assert_eq!(status, 200, "the script must run clean (body: {body:?})");
     assert_eq!(body, "Classic:case:done");

@@ -25,6 +25,6 @@ fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()
     }
 
     drop(h);
-    r.shutdown();
+    drop(r);
     Ok(())
 }
