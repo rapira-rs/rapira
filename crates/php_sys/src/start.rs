@@ -10,7 +10,7 @@ use types::Job;
 
 use crate::quota::{self, WorkerHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
-use crate::scoreboard::{Event, ScoreboardSnapshot, sb_set, sb_update};
+use crate::scoreboard::{Event, sb_set, sb_update};
 use crate::{classic_worker::classic_worker, types::Mode, *};
 
 thread_local! {
@@ -154,11 +154,9 @@ impl Rapira {
 
     pub fn shutdown(self) {}
 
-    pub fn scoreboard(&self) -> ScoreboardSnapshot {
-        match &self.board {
-            Some(board) => crate::scoreboard::snapshot(board),
-            None => ScoreboardSnapshot::default(),
-        }
+    /// The slot of the private one-slot board. It is `None` when the master owns the slot.
+    pub fn scoreboard(&self) -> Option<rapira_scoreboard::SlotSnapshot> {
+        self.board?.snapshot_slots().pop()
     }
 }
 

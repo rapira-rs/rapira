@@ -289,14 +289,11 @@ fn scoreboard_counts_worker() -> anyhow::Result<()> {
     let _ = drain(h.handle_blocking(req("/?boom=0", "shared/throw-worker.php"))?);
     let _ = drain(h.handle_blocking(req("/?boom=1", "shared/throw-worker.php"))?);
     drop(h);
-    let snap = r.scoreboard();
+    let snap = r.scoreboard().expect("private scoreboard slot");
     r.shutdown();
 
     assert_eq!(snap.handled, 3, "3 requests handled");
     assert_eq!(snap.errors, 1, "one engine error (uncaught throw)");
-    assert_eq!(snap.workers.len(), 1);
-    assert_eq!(snap.workers[0].handled, 3);
-    assert_eq!(snap.workers[0].errors, 1);
     Ok(())
 }
 
@@ -308,7 +305,7 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
     let _ = drain(h.handle_blocking(req("/?boom=1", "shared/shutdown-fatal-worker.php"))?);
     let (s2, _) = drain(h.handle_blocking(req("/", "shared/shutdown-fatal-worker.php"))?);
     drop(h);
-    let snap = r.scoreboard();
+    let snap = r.scoreboard().expect("private scoreboard slot");
     r.shutdown();
 
     assert_eq!(s2, 200, "worker recovers after the recycle");
@@ -317,11 +314,6 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
         snap.recycles >= 1,
         "the shutdown-fn fatal must recycle the worker (recycles={})",
         snap.recycles
-    );
-    assert_eq!(snap.workers.len(), 1);
-    assert!(
-        snap.workers[0].recycles >= 1,
-        "the recycle must be attributed to the worker"
     );
     Ok(())
 }
@@ -335,7 +327,7 @@ fn scoreboard_counts_classic() -> anyhow::Result<()> {
     let _ = drain(h.handle_blocking(req("/", "shared/hello.php"))?);
     let _ = drain(h.handle_blocking(req("/", "basic_tests/failboot.php"))?);
     drop(h);
-    let snap = r.scoreboard();
+    let snap = r.scoreboard().expect("private scoreboard slot");
     r.shutdown();
 
     assert_eq!(snap.handled, 3, "3 requests handled");
@@ -343,9 +335,6 @@ fn scoreboard_counts_classic() -> anyhow::Result<()> {
         snap.errors, 1,
         "one PHP error (failboot.php fails to compile)"
     );
-    assert_eq!(snap.workers.len(), 1);
-    assert_eq!(snap.workers[0].handled, 3);
-    assert_eq!(snap.workers[0].errors, 1);
     Ok(())
 }
 

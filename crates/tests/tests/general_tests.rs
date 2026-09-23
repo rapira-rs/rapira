@@ -106,7 +106,7 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     let (s2, b2) =
         drain(h.handle_blocking(req("/", "general_tests/exception-handler-worker.php"))?);
     drop(h);
-    let snap = r.scoreboard();
+    let snap = r.scoreboard().expect("private scoreboard slot");
     r.shutdown();
 
     assert_eq!(s1, 200);

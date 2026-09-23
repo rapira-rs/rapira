@@ -3,8 +3,6 @@ use std::sync::atomic::Ordering::{Relaxed, Release};
 
 use rapira_scoreboard::{SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SharedSlot, now_millis};
 
-pub use rapira_scoreboard::SlotSnapshot;
-
 thread_local! {
     pub static SB: Cell<Option<&'static SharedSlot>> = const { Cell::new(None) };
     static DRAINING: Cell<bool> = const { Cell::new(false) };
@@ -62,25 +60,5 @@ pub fn sb_update(event: Event) {
             s.state.store(SLOT_ACTIVE, Release);
         }
         Event::Draining => DRAINING.set(true),
-    }
-}
-
-#[derive(Debug, Default, Clone)]
-pub struct ScoreboardSnapshot {
-    pub handled: u64,
-    pub errors: u64,
-    pub recycles: u64,
-    pub unhealthy: usize,
-    pub workers: Vec<SlotSnapshot>,
-}
-
-pub(crate) fn snapshot(board: &rapira_scoreboard::Scoreboard) -> ScoreboardSnapshot {
-    let workers = board.snapshot_slots();
-    ScoreboardSnapshot {
-        handled: workers.iter().map(|w| w.handled).sum(),
-        errors: workers.iter().map(|w| w.errors).sum(),
-        recycles: workers.iter().map(|w| w.recycles).sum(),
-        unhealthy: workers.iter().filter(|w| w.unhealthy).count(),
-        workers,
     }
 }
