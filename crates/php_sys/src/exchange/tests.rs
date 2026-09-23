@@ -247,7 +247,7 @@ fn interim_head_emits_without_framing_fields() {
             ],
         )
     };
-    assert_eq!(v, Verb::Interim);
+    assert_eq!(v, Verb::Ok);
     let Ok(Frame::Interim(head)) = rx.try_recv() else {
         panic!("interim head must be on the stream");
     };

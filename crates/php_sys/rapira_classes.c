@@ -14,9 +14,6 @@
 
 zend_class_entry *rapira_ce_log_level;
 zend_class_entry *rapira_ce_mode;
-zend_class_entry *rapira_ce_work;
-zend_class_entry *rapira_ce_dispatcher_info;
-zend_class_entry *rapira_ce_dispatcher;
 
 zend_class_entry *rapira_ce_closed_exception;
 zend_class_entry *rapira_ce_timeout_exception;
@@ -103,9 +100,9 @@ void rapira_register_classes(void) {
 
     rapira_ce_log_level = register_class_Rapira_LogLevel();
     rapira_ce_mode = register_class_Rapira_Mode();
-    rapira_ce_work = register_class_Rapira_Work();
-    rapira_ce_dispatcher_info = register_class_Rapira_DispatcherInfo();
-    rapira_ce_dispatcher = register_class_Rapira_Dispatcher();
+    zend_class_entry *work = register_class_Rapira_Work();
+    zend_class_entry *dispatcher_info = register_class_Rapira_DispatcherInfo();
+    zend_class_entry *dispatcher = register_class_Rapira_Dispatcher();
 
     rapira_ce_inet_address = register_class_Rapira_InetAddress();
     rapira_ce_unix_address = register_class_Rapira_UnixAddress();
@@ -115,12 +112,11 @@ void rapira_register_classes(void) {
     rapira_ce_http_multipart = register_class_Rapira_Http_Multipart();
     rapira_ce_http_request = register_class_Rapira_Http_Request();
 
-    zend_class_entry *http_info = register_class_Rapira_Http_HttpDispatcherInfo(
-        rapira_ce_dispatcher_info);
-    zend_class_entry *http_exchange =
-        register_class_Rapira_Http_Exchange(rapira_ce_work);
+    zend_class_entry *http_info =
+        register_class_Rapira_Http_HttpDispatcherInfo(dispatcher_info);
+    zend_class_entry *http_exchange = register_class_Rapira_Http_Exchange(work);
     zend_class_entry *http_dispatcher =
-        register_class_Rapira_Http_HttpDispatcher(rapira_ce_dispatcher);
+        register_class_Rapira_Http_HttpDispatcher(dispatcher);
 
     rapira_ce_http_content_length_exceeded_error =
         register_class_Rapira_Http_Exception_ContentLengthExceededError(

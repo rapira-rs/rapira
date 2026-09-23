@@ -53,9 +53,9 @@ fn php_series(id: u32) -> (u32, u32) {
 
 /// Zend structs are bound by bindgen at build time, so a libphp from another PHP minor is an ABI mismatch (`sapi_startup` handed a differently shaped struct), not a load error.
 fn check_linked_php() -> anyhow::Result<()> {
-    // SAFETY: both accessors read a compile-time constant and touch no engine state, so this is valid pre-startup.
-    let (headers, linked) = unsafe { (rapira_headers_php_version_id(), php_version_id()) };
-    let (want, got) = (php_series(headers), php_series(linked));
+    // SAFETY: php_version_id() returns a compile-time constant and touches no engine state, so this is valid pre-startup.
+    let linked = unsafe { php_version_id() };
+    let (want, got) = (php_series(PHP_VERSION_ID), php_series(linked));
     anyhow::ensure!(
         want == got,
         "linked libphp is PHP {}.{}, but this rapira was built against PHP {}.{}. \
@@ -75,9 +75,7 @@ impl Rapira {
         let started: bool = unsafe {
             rapira_process_init();
             sapi_startup(&mut module);
-            module
-                .startup
-                .is_some_and(|start| start(&mut module) == SUCCESS)
+            php_module_startup(&mut module, &raw mut rapira_module_entry) == SUCCESS
         };
 
         if !started {

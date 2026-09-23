@@ -3,12 +3,12 @@ bind! {
     sapi_globals_struct, zend_executor_globals, php_core_globals, zend_compiler_globals,
     zend_file_handle, zend_module_entry, zend_string, zval, HashTable, zend_long,
     zend_fcall_info, zend_fcall_info_cache,
-    sapi_startup, sapi_shutdown, php_module_startup, php_module_shutdown, php_request_startup, php_request_shutdown,
+    sapi_startup, sapi_shutdown, php_module_startup, php_module_shutdown, php_request_startup,
     php_execute_script, zend_error, zend_stream_init_filename, zend_destroy_file_handle,
     php_register_variable_safe, rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER,
     RAPIRA_MODE_DISPATCHER,
     // the two halves of the linked-libphp version check
-    rapira_headers_php_version_id, php_version_id,
+    PHP_VERSION_ID, php_version_id,
     // the embedded-object layouts; wrapper.h is the source of truth
     rapira_exchange_obj, rapira_dispatcher_info_obj,
     // MINIT-written class-entry globals the Rust builder reads (static mut)

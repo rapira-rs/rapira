@@ -2,10 +2,6 @@
 
 #include <Zend/zend_smart_str.h>
 
-unsigned int rapira_headers_php_version_id(void) {
-    return PHP_VERSION_ID;
-}
-
 sapi_globals_struct *rapira_sg(void) {
     return &sapi_globals;
 }

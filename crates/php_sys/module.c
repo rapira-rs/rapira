@@ -3,11 +3,6 @@
 #include "wrapper.h"
 #include "zend_types.h"
 
-// injected by build.rs
-#ifndef RAPIRA_VERSION
-#define RAPIRA_VERSION "0.0.0-dev"
-#endif
-
 extern void rapira_rs_finish_response(void);
 
 // php_handle_aborted_connection (main.c:2722) longjmps past Rust's catch_unwind
@@ -25,7 +20,6 @@ size_t rapira_ub_write(const char *str, size_t len) {
 enum {
     OK = 0,
     BAILOUT = 1,
-    EXIT = 2,
     THROW = 3,
 };
 
@@ -294,7 +288,6 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
         if (EG(exception)) {
             if (zend_is_unwind_exit(EG(exception)) ||
                 zend_is_graceful_exit(EG(exception))) {
-                outcome = EXIT;
                 zend_clear_exception();
             } else {
                 // the zend_try contains a bailout from the userland handler

@@ -5,7 +5,6 @@ use super::*;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(super) enum Verb {
     Ok,
-    Interim,
     Finalized,
     HeadWritten,
     Overflow,
@@ -21,7 +20,7 @@ pub(super) enum Verb {
 pub(super) unsafe fn throw_verb(v: Verb) {
     unsafe {
         match v {
-            Verb::Ok | Verb::Interim => {}
+            Verb::Ok => {}
             Verb::Finalized => zend::throw_exception(
                 rapira_ce_already_finalized_error,
                 c"the response already ended",
@@ -217,7 +216,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
         }
         let st = &mut *job.cast::<ExchangeState>();
         match write_trailers_core(st, flat) {
-            Verb::Ok | Verb::Interim => true,
+            Verb::Ok => true,
             v => {
                 throw_verb(v);
                 false
@@ -246,7 +245,7 @@ pub(super) unsafe fn write_head_core(
             headers: strip_framing(headers),
         };
         return match unsafe { send_frame(st, Frame::Interim(head)) } {
-            Ok(()) => Verb::Interim,
+            Ok(()) => Verb::Ok,
             Err(Closed) => {
                 discard_unit(st);
                 Verb::Discarded
@@ -296,7 +295,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_head(
             }
         };
         match write_head_core(st, status as u16, flat) {
-            Verb::Ok | Verb::Interim => true,
+            Verb::Ok => true,
             v => {
                 throw_verb(v);
                 false
@@ -384,7 +383,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
     guard(false, || unsafe {
         let st = &mut *job.cast::<ExchangeState>();
         match write_body_core(st, p, len, eos) {
-            Verb::Ok | Verb::Interim => true,
+            Verb::Ok => true,
             v => {
                 throw_verb(v);
                 false
@@ -442,7 +441,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_flush(job: *mut c_void) -> bool {
             }
         };
         match v {
-            Verb::Ok | Verb::Interim => true,
+            Verb::Ok => true,
             v => {
                 throw_verb(v);
                 false
@@ -473,13 +472,10 @@ pub unsafe extern "C" fn rapira_rs_exchange_is_cancelled(job: *const c_void) -> 
 
 /// Reclaims the Box on free_obj; a unit lost to a bailout (fatal, timeout) skips the failure frames, so the host's deadline reports the worker death instead.
 /// # Safety
-/// `job` is NULL or a pointer produced by `Box::into_raw` in receive.
+/// `job` is a non-null pointer produced by `Box::into_raw` in receive; free_obj checks for NULL before the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
     guard((), || {
-        if job.is_null() {
-            return;
-        }
         let ptr: *mut ExchangeState = job.cast();
         update(|c| {
             if matches!(c.unit, Unit::Handling(p) | Unit::Sealed(p) if p == ptr) {

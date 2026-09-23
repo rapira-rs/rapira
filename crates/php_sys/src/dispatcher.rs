@@ -14,24 +14,6 @@ use crate::{
     zend_read_property, zend_string, zval, zval_add_ref, zval_ptr_dtor,
 };
 
-/// # Safety
-/// `len` must be a writable `usize`; the returned pointer is `'static`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_version(len: *mut usize) -> *const c_char {
-    const VERSION: &CStr =
-        match CStr::from_bytes_with_nul(concat!(env!("CARGO_PKG_VERSION"), "\0").as_bytes()) {
-            Ok(v) => v,
-            Err(_) => c"unknown",
-        };
-
-    guard(null_mut(), || {
-        unsafe {
-            len.write(VERSION.count_bytes());
-        };
-        VERSION.as_ptr()
-    })
-}
-
 fn emit(level: Level, message: &[u8], context: &[u8]) {
     let message = String::from_utf8_lossy(message);
     let context = String::from_utf8_lossy(context);

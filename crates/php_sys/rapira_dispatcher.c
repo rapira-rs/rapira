@@ -7,7 +7,6 @@
 #include "zend_exceptions.h"
 
 // rust glue; the verbs throw from Rust and report false with the throw pending
-extern const char *rapira_rs_version(size_t *len);
 extern void rapira_rs_log_call(zend_string *message, zend_object *level,
                                HashTable *context);
 extern bool rapira_rs_receive(int64_t timeout_us, zval *return_value);
@@ -21,10 +20,7 @@ int rapira_mode = RAPIRA_MODE_CLASSIC;
 
 ZEND_FUNCTION(Rapira_get_version) {
     ZEND_PARSE_PARAMETERS_NONE();
-
-    size_t len = 0;
-    const char *version = rapira_rs_version(&len);
-    RETURN_STRINGL(version, len);
+    RETURN_STRINGL(RAPIRA_VERSION, sizeof(RAPIRA_VERSION) - 1);
 }
 
 // rapira_mode is set once before the PHP thread starts (start.rs), so the case is stable for the process

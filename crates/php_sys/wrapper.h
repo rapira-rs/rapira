@@ -27,17 +27,11 @@
 #include <main/php_memory_streams.h>
 #include <main/php_streams.h>
 
-sapi_globals_struct *rapira_sg(void);
-zend_executor_globals *rapira_eg(void);
-zend_compiler_globals *rapira_cg(void);
-php_core_globals *rapira_pg(void);
-void rapira_init_call_stack(void);
-void rapira_process_init(void);
-void rapira_release_temporary_streams(void);
-void rapira_stash_boot_shutdown_functions(void);
-int rapira_request_activate(void);
-int rapira_request_shutdown(void);
-size_t rapira_ub_write(const char *str, size_t len);
+// injected by build.rs
+#ifndef RAPIRA_VERSION
+#define RAPIRA_VERSION "0.0.0-dev"
+#endif
+
 // array_init_size and smart_str_free are macro/inline-only; shims for Rust
 void rapira_array_init(zval *zv, uint32_t size);
 void rapira_smart_str_free(smart_str *s);
@@ -93,11 +87,5 @@ extern zend_class_entry *rapira_ce_http_file_not_sendable_exception;
 extern zend_class_entry *rapira_ce_http_form_field;
 extern zend_class_entry *rapira_ce_http_uploaded_file;
 extern zend_class_entry *rapira_ce_http_request;
-
-// PHP_VERSION_ID from the headers this binary compiled against; differs from the linked libphp's php_version_id() when the library was swapped out.
-unsigned int rapira_headers_php_version_id(void);
-
-void rapira_receive_untimed(void);
-void rapira_receive_timed(void);
 
 #endif

@@ -6,7 +6,7 @@ use core::slice;
 use std::borrow::Cow;
 use std::ffi::{CStr, CString};
 use std::mem::ManuallyDrop;
-use std::os::raw::{c_char, c_int, c_void};
+use std::os::raw::{c_char, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::null_mut;
 
@@ -132,16 +132,6 @@ fn cgi_header_vars<'a>(
     ManuallyDrop::new(pairs)
 }
 
-pub(crate) unsafe extern "C" fn sapi_startup_cb(sapi_module: *mut sapi_module_struct) -> c_int {
-    unsafe { php_module_startup(sapi_module, &raw mut rapira_module_entry) }
-}
-pub(crate) unsafe extern "C" fn sapi_shutdown_cb(_sapi_module: *mut sapi_module_struct) -> c_int {
-    unsafe {
-        php_module_shutdown();
-    }
-    SUCCESS
-}
-
 /// # Safety
 /// `buf` must point at `len` readable bytes and `aborted` at a writable `bool`
 #[unsafe(no_mangle)]
@@ -226,8 +216,6 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
         SAPI_HEADER_SENT_SUCCESSFULLY as c_int
     })
 }
-
-pub(crate) unsafe extern "C" fn flush(_sc: *mut c_void) {}
 
 pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usize {
     with_ctx(0, |ctx| {

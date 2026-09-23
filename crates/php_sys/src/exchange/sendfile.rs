@@ -144,7 +144,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_send_file(
         let path = std::slice::from_raw_parts(path.cast::<u8>(), path_len);
         let length = (!length_is_null).then_some(length as u64);
         match send_file_core(st, path, offset as u64, length, eos) {
-            Verb::Ok | Verb::Interim => true,
+            Verb::Ok => true,
             v => {
                 throw_verb(v);
                 false

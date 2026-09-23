@@ -20,7 +20,6 @@ pub enum Mode {
 pub enum Outcome {
     Ok = 0,
     Bailout = 1,
-    Exit = 2,
     Throw = 3,
 }
 
@@ -29,7 +28,6 @@ impl Outcome {
         match v {
             0 => Self::Ok,
             1 => Self::Bailout,
-            2 => Self::Exit,
             3 => Self::Throw,
             _ => Self::Bailout,
         }

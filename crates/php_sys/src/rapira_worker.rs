@@ -91,26 +91,9 @@ fn run_cycle(script: &Path) -> Cycle {
         return Cycle::Restart;
     }
 
-    classify(CycleEnd {
-        closed: crate::exchange::closed_seen(),
-        recycle,
-        served: crate::exchange::served_any(),
-        received: crate::exchange::received_any(),
-    })
-}
-
-struct CycleEnd {
-    closed: bool,
-    recycle: bool,
-    served: bool,
-    received: bool,
-}
-
-/// Restart (a shutdown bailout) is decided before this runs.
-fn classify(end: CycleEnd) -> Cycle {
-    if end.closed {
+    if crate::exchange::closed_seen() {
         Cycle::Stop
-    } else if end.recycle || end.served || end.received {
+    } else if recycle || crate::exchange::received_any() {
         Cycle::Recycle
     } else {
         Cycle::Failed
