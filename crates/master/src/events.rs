@@ -45,8 +45,6 @@ pub(crate) struct Master<S: Spawner> {
     pctl: Pctl,
     control_timeout: Duration,
     next_tick: Instant,
-    /// Stopping escalation (QUIT, TERM, KILL against every pool).
-    stop_deadline: Option<Instant>,
 }
 
 impl<S: Spawner> Master<S> {
@@ -72,14 +70,13 @@ impl<S: Spawner> Master<S> {
             pctl: Pctl::default(),
             control_timeout,
             next_tick: now + Duration::from_secs(1),
-            stop_deadline: None,
         }
     }
 
     /// `Some(reason)` means the loop must return now: forced stop, or a stop with nothing left to drain.
     fn handle_signal(&mut self, byte: u8, now: Instant) -> Option<StopReason> {
-        match self.pctl.on_signal(byte) {
-            SignalAction::Stop => self.begin_stop(now),
+        match self.pctl.on_signal(byte, now + self.control_timeout) {
+            SignalAction::Stop => self.begin_stop(),
             SignalAction::Forced => {
                 self.force_stop();
                 Some(StopReason::Forced)
@@ -99,11 +96,10 @@ impl<S: Spawner> Master<S> {
         }
     }
 
-    fn begin_stop(&mut self, now: Instant) -> Option<StopReason> {
+    fn begin_stop(&mut self) -> Option<StopReason> {
         for p in &mut self.pools {
             p.begin_stop();
         }
-        self.stop_deadline = Some(now + self.control_timeout);
         if self.drained() {
             return Some(StopReason::Drained);
         }
@@ -117,11 +113,9 @@ impl<S: Spawner> Master<S> {
     }
 
     fn escalate_stop(&mut self, now: Instant) {
-        if let Some(sig) = self.pctl.escalate() {
-            for p in &self.pools {
-                p.signal_all(sig);
-            }
-            self.stop_deadline = Some(now + Duration::from_secs(1));
+        let sig = self.pctl.escalate(now);
+        for p in &self.pools {
+            p.signal_all(sig);
         }
     }
 
@@ -160,9 +154,7 @@ impl<S: Spawner> Master<S> {
     }
 
     fn fire_due_deadlines(&mut self, now: Instant) {
-        if let Some(t) = self.stop_deadline
-            && now >= t
-        {
+        if self.pctl.stop_deadline().is_some_and(|t| now >= t) {
             self.escalate_stop(now);
         }
         for p in &mut self.pools {
@@ -183,7 +175,7 @@ impl<S: Spawner> Master<S> {
             .pools
             .iter()
             .filter_map(|p| p.next_deadline())
-            .chain(self.stop_deadline)
+            .chain(self.pctl.stop_deadline())
         {
             next = next.min(d);
         }
@@ -207,15 +199,10 @@ impl<S: Spawner> Master<S> {
         (fds, owners)
     }
 
-    /// Re-checks arming: this iteration's signals and reaps can disarm a pool after `poll` returned its listener readable.
+    /// Re-checks arming: this iteration's signals and reaps can disarm a pool after `poll` returned its listener readable, and a fork disarms its own pool.
     fn fork_readable(&mut self, readable: &[usize], now: Instant) {
         let stopping = self.pctl.is_stopping();
-        let mut last: Option<usize> = None;
         for &i in readable {
-            if last == Some(i) {
-                continue;
-            }
-            last = Some(i);
             if self.pools[i].armed(stopping) {
                 self.pools[i].ondemand_fork_one(now, &mut self.spawner);
             }
@@ -499,7 +486,7 @@ mod tests {
         assert_eq!(m.handle_signal(SIG_TERM, t0), None);
 
         assert!(m.pctl.is_stopping());
-        assert_eq!(m.stop_deadline, Some(t0 + Duration::from_secs(30)));
+        assert_eq!(m.pctl.stop_deadline(), Some(t0 + Duration::from_secs(30)));
         for p in &m.pools {
             assert!(p.reload.is_none(), "{} kept a reload chain", p.cfg.name);
             assert!(p.table.slots.iter().all(|s| s.respawn_at.is_none()));
@@ -526,10 +513,10 @@ mod tests {
             children.push(child);
         }
 
-        m.pctl.on_signal(SIG_TERM);
+        m.pctl.on_signal(SIG_TERM, t0);
         m.escalate_stop(t0);
 
-        assert_eq!(m.stop_deadline, Some(t0 + Duration::from_secs(1)));
+        assert_eq!(m.pctl.stop_deadline(), Some(t0 + Duration::from_secs(1)));
         for child in &mut children {
             assert_eq!(wait_signal(child), Some(libc::SIGTERM));
         }
@@ -572,7 +559,7 @@ mod tests {
         m.pools[1].set_slot(0, SLOT_FREE);
         assert_eq!(m.poll_set().1, vec![0, 1]);
 
-        m.pctl.on_signal(SIG_TERM);
+        m.pctl.on_signal(SIG_TERM, Instant::now());
         assert!(m.poll_set().1.is_empty(), "a stopping master polls nothing");
     }
 
@@ -586,7 +573,7 @@ mod tests {
         }
         assert_eq!(m.poll_set().1, vec![0, 1], "both pools poll their listener");
 
-        m.pctl.on_signal(SIG_TERM);
+        m.pctl.on_signal(SIG_TERM, Instant::now());
         m.fork_readable(&[0, 1], t0);
         assert!(
             m.spawner.calls.is_empty(),
@@ -691,7 +678,7 @@ mod tests {
         });
         assert_eq!(m.next_deadline(), t0 + Duration::from_millis(200));
 
-        m.stop_deadline = Some(t0 + Duration::from_millis(100));
+        m.pctl.on_signal(SIG_TERM, t0 + Duration::from_millis(100));
         assert_eq!(m.next_deadline(), t0 + Duration::from_millis(100));
     }
 }
