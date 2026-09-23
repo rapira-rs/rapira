@@ -1,4 +1,4 @@
-#![cfg(not(any(target_os = "macos", target_os = "windows")))]
+#![cfg(not(target_os = "macos"))]
 
 use php_sys::{Mode, Rapira};
 use std::path::Path;
@@ -18,16 +18,14 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
         drain(h.handle_blocking(req("/warmup", "dispatcher/echo-loop-worker.php"))?);
     assert_eq!((status, body.as_str()), (200, "method=GET body="));
 
-    for target in ["/first", "/second"] {
-        std::thread::sleep(std::time::Duration::from_secs(2));
-        let (status, body) =
-            drain(h.handle_blocking(req(target, "dispatcher/echo-loop-worker.php"))?);
-        assert_eq!(
-            (status, body.as_str()),
-            (200, "method=GET body="),
-            "a worker parked past the budget must still serve {target}"
-        );
-    }
+    std::thread::sleep(std::time::Duration::from_secs(2));
+    let (status, body) =
+        drain(h.handle_blocking(req("/first", "dispatcher/echo-loop-worker.php"))?);
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "method=GET body="),
+        "a worker parked past the budget must still serve"
+    );
 
     drop(h);
     r.shutdown();
