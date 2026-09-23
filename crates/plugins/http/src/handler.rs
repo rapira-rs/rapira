@@ -755,9 +755,9 @@ mod tests {
         assert_eq!(inflight.load(Ordering::Acquire), 0);
     }
 
-    /// A bodiless reply keeps the response guarded after the drain task finishes.
+    /// A bodiless reply keeps the response guarded after its reply is consumed to End.
     #[tokio::test]
-    async fn bodiless_response_stays_guarded_after_the_drain_ends() {
+    async fn bodiless_response_stays_guarded_after_the_reply_ends() {
         let dropped = Arc::new(AtomicBool::new(false));
         let backend = Arc::new(Scripted::one(
             vec![head(true), end()],
@@ -772,7 +772,7 @@ mod tests {
             }
         })
         .await
-        .expect("drain must run to End");
+        .expect("the reply must be consumed to End");
         assert_eq!(
             inflight.load(Ordering::Acquire),
             1,

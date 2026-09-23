@@ -201,14 +201,8 @@ impl Drop for ReplyBody {
         if self.declared_cl == Some(self.sent)
             && !matches!(self.staged, Some(ReplyEvent::End { .. }))
             && self.guard.end_flush.get().is_some()
-            && let Some(mut reply) = self.reply.take()
+            && let Some(reply) = self.reply.take()
         {
-            // A buffered reply queues End behind the last chunk, so consume it here.
-            // Anything else goes to the drain task.
-            let mut cx = Context::from_waker(std::task::Waker::noop());
-            if let Poll::Ready(Some(ReplyEvent::End { .. }) | None) = reply.poll_next(&mut cx) {
-                return;
-            }
             spawn_drain(reply, self.closed.clone(), Arc::clone(&self.guard));
         }
     }
@@ -221,6 +215,11 @@ pub(crate) fn spawn_drain(
     mut closed: watch::Receiver<ConnectionState>,
     guard: Arc<InflightReqCount>,
 ) {
+    // A buffered reply queues End behind the head or the last chunk, so consume it here.
+    let mut cx = Context::from_waker(std::task::Waker::noop());
+    if let Poll::Ready(Some(ReplyEvent::End { .. }) | None) = reply.poll_next(&mut cx) {
+        return;
+    }
     tokio::spawn(async move {
         let flushed = |s: &ConnectionState| guard.end_flush.get().is_some_and(|&f| s.flushes > f);
         tokio::select! {
@@ -730,6 +729,29 @@ mod tests {
         assert!(
             pending.try_recv().is_err(),
             "drop must consume the queued End in place"
+        );
+        assert_eq!(
+            metrics.num_alive_tasks(),
+            tasks,
+            "a queued End must not cost a drain task"
+        );
+    }
+
+    /// A bodiless reply with End already queued behind the head is consumed in place.
+    #[tokio::test]
+    async fn queued_end_is_consumed_without_a_drain_task() {
+        let dropped = Arc::new(AtomicBool::new(false));
+        let reply = Reply::new(Box::new(Script {
+            events: vec![end(false)].into(),
+            dropped: Some(Arc::clone(&dropped)),
+            hang: true,
+        }));
+        let metrics = tokio::runtime::Handle::current().metrics();
+        let tasks = metrics.num_alive_tasks();
+        spawn_drain(reply, watch::channel(ConnectionState::default()).1, guard());
+        assert!(
+            dropped.load(Ordering::Acquire),
+            "the reply must drop at once"
         );
         assert_eq!(
             metrics.num_alive_tasks(),
