@@ -1,7 +1,7 @@
 use std::{ops::Deref, path::Path};
 
-use php_sys::{Frame, Mode, Rapira, Request};
-use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
+use php_sys::{Mode, Rapira, Request};
+use tests::{Resp, captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
 fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u8>) -> Request {
     let mut r: Request = req(&format!("/{fixture_name}?{query}"), fixture_name);
@@ -10,49 +10,6 @@ fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u
     r.content_length = body.len() as i64;
     r.body = php_sys::types::Body::Raw(Box::new(std::io::Cursor::new(body)));
     r
-}
-
-/// Like `drain`, but keeps the head and the truncation flag.
-struct Resp {
-    heads: u32,
-    status: u16,
-    headers: Vec<(String, Vec<u8>)>,
-    body: String,
-    truncated: bool,
-}
-
-fn recv_all(mut rx: tokio::sync::mpsc::Receiver<Frame>) -> Resp {
-    let (mut heads, mut status, mut headers, mut raw, mut truncated) =
-        (0u32, 0u16, Vec::new(), Vec::new(), false);
-    while let Some(frame) = rx.blocking_recv() {
-        match frame {
-            Frame::Interim(_) | Frame::File { .. } => {}
-            Frame::Head { head, .. } => {
-                heads += 1;
-                status = head.status;
-                headers = head.headers;
-            }
-            Frame::Chunk(b) => raw.extend_from_slice(&b),
-            Frame::End { truncated: t, .. } => {
-                truncated = t;
-                break;
-            }
-        }
-    }
-    Resp {
-        heads,
-        status,
-        headers,
-        body: String::from_utf8_lossy(&raw).into_owned(),
-        truncated,
-    }
-}
-
-fn header_value(r: &Resp, name: &str) -> Option<String> {
-    r.headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case(name))
-        .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
 }
 
 /// The captured `app`-target messages starting with `prefix`, in order.
@@ -288,10 +245,17 @@ fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
     let r = Rapira::start(mode)?;
     let h = r.handle();
 
-    let r1 = recv_all(h.handle_blocking(req(&format!("/{fixture_name}"), fixture_name))?);
-    assert_eq!(r1.status, 200);
-    assert_eq!(r1.body, "Count: 0\n", "fresh session starts at zero");
+    let r1 = drain_resp(h.handle_blocking(req(&format!("/{fixture_name}"), fixture_name))?);
+    assert_eq!(r1.status(), 200);
+    assert_eq!(
+        r1.body_string(),
+        "Count: 0\n",
+        "fresh session starts at zero"
+    );
     let sid = r1
+        .head
+        .as_ref()
+        .expect("head")
         .headers
         .iter()
         .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
@@ -306,13 +270,14 @@ fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
     request
         .headers
         .push(("Cookie".into(), format!("PHPSESSID={sid}").into_bytes()));
-    let r2 = recv_all(h.handle_blocking(request)?);
+    let r2 = drain_resp(h.handle_blocking(request)?);
     drop(h);
     r.shutdown();
 
-    assert_eq!(r2.status, 200);
+    assert_eq!(r2.status(), 200);
     assert_eq!(
-        r2.body, "Count: 1\n",
+        r2.body_string(),
+        "Count: 1\n",
         "returned cookie must resume the same session"
     );
     Ok(())
@@ -413,30 +378,28 @@ fn response_header_edges_worker() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("ported_tests/headers-worker.php")))?;
     let h = r.handle();
     for i in [42, 43] {
-        let resp = recv_all(h.handle_blocking(req(
+        let resp = drain_resp(h.handle_blocking(req(
             &format!("/headers-worker.php?i={i}"),
             "ported_tests/headers-worker.php",
         ))?);
         assert_eq!(
-            resp.status, 201,
+            resp.status(),
+            201,
             "http_response_code(201) must reach the head"
         );
-        assert_eq!(header_value(&resp, "Foo").as_deref(), Some("bar"));
-        assert_eq!(header_value(&resp, "Foo2").as_deref(), Some("bar2"));
+        assert_eq!(resp.header("Foo").as_deref(), Some("bar"));
+        assert_eq!(resp.header("Foo2").as_deref(), Some("bar2"));
         assert_eq!(
-            header_value(&resp, "Foo3").as_deref(),
+            resp.header("Foo3").as_deref(),
             Some("bar3"),
             "no-space colon must trim"
         );
-        assert_eq!(
-            header_value(&resp, "I").as_deref(),
-            Some(format!("{i}").deref())
-        );
+        assert_eq!(resp.header("I").as_deref(), Some(format!("{i}").deref()));
         assert!(
-            header_value(&resp, "Invalid").is_none(),
+            resp.header("Invalid").is_none(),
             "colon-less header line must not become a response header"
         );
-        assert_eq!(resp.body, "Hello");
+        assert_eq!(resp.body_string(), "Hello");
     }
     drop(h);
     r.shutdown();
@@ -444,26 +407,23 @@ fn response_header_edges_worker() -> anyhow::Result<()> {
 }
 
 fn assert_headers_list_response(resp: &Resp, i: u16) {
-    assert_eq!(resp.status, 200 + i);
+    assert_eq!(resp.status(), 200 + i);
+    let body = resp.body_string();
     for expected in ["X-Powered-By: PHP/", "Foo: bar", "Foo2: bar2", "Invalid"] {
         assert!(
-            resp.body.contains(expected),
-            "missing {expected:?} (got: {:?})",
-            resp.body
+            body.contains(expected),
+            "missing {expected:?} (got: {body:?})"
         );
     }
+    assert!(body.contains(&format!("I: {i}")), "got: {body:?}");
+    assert_eq!(resp.header("Foo").as_deref(), Some("bar"));
     assert!(
-        resp.body.contains(&format!("I: {i}")),
-        "got: {:?}",
-        resp.body
-    );
-    assert_eq!(header_value(resp, "Foo").as_deref(), Some("bar"));
-    assert!(
-        header_value(resp, "X-Powered-By").is_some_and(|v| v.starts_with("PHP/")),
+        resp.header("X-Powered-By")
+            .is_some_and(|v| v.starts_with("PHP/")),
         "X-Powered-By must be a response header (headers: {:?})",
-        resp.headers
+        resp.head.as_ref().expect("head").headers
     );
-    assert!(header_value(resp, "Invalid").is_none());
+    assert!(resp.header("Invalid").is_none());
 }
 
 #[test]
@@ -471,7 +431,7 @@ fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let resp = recv_all(h.handle_blocking(req(
+    let resp = drain_resp(h.handle_blocking(req(
         "/response-headers.php?i=1",
         "ported_tests/response-headers.php",
     ))?);
@@ -490,7 +450,7 @@ fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
     )))?;
     let h = r.handle();
     for i in [1u16, 2] {
-        let resp = recv_all(h.handle_blocking(req(
+        let resp = drain_resp(h.handle_blocking(req(
             &format!("/response-headers-worker.php?i={i}"),
             "ported_tests/response-headers-worker.php",
         ))?);
@@ -512,11 +472,11 @@ fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
             &format!("/flush-worker.php?i={i}"),
             "ported_tests/flush-worker.php",
         ))?;
-        let resp = recv_all(rx);
+        let resp = drain_resp(rx);
         assert_eq!(resp.heads, 1, "exactly one head per response");
-        assert_eq!(resp.status, 200);
+        assert_eq!(resp.status(), 200);
         assert_eq!(
-            resp.body,
+            resp.body_string(),
             format!("Hello {i}"),
             "flushed chunks arrive whole and in order"
         );
@@ -534,22 +494,22 @@ fn raw_status_line_204_classic() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
     let resp =
-        recv_all(h.handle_blocking(req("/only-headers.php", "ported_tests/only-headers.php"))?);
+        drain_resp(h.handle_blocking(req("/only-headers.php", "ported_tests/only-headers.php"))?);
     drop(h);
     r.shutdown();
 
     assert_eq!(resp.heads, 1);
-    assert_eq!(resp.status, 204);
+    assert_eq!(resp.status(), 204);
     assert_eq!(
-        header_value(&resp, "Content-Type").as_deref(),
+        resp.header("Content-Type").as_deref(),
         Some("application/json")
     );
+    let headers = &resp.head.as_ref().expect("head").headers;
     assert!(
-        !resp.headers.iter().any(|(k, _)| k.starts_with("HTTP/")),
-        "the raw status line must not appear as a header (headers: {:?})",
-        resp.headers
+        !headers.iter().any(|(k, _)| k.starts_with("HTTP/")),
+        "the raw status line must not appear as a header (headers: {headers:?})"
     );
-    assert_eq!(resp.body, r#"{"status": "test"}"#);
+    assert_eq!(resp.body_string(), r#"{"status": "test"}"#);
     Ok(())
 }
 
@@ -684,18 +644,18 @@ fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("shared/output-then-throw-worker.php")))?;
     let h = r.handle();
     for i in [1, 2] {
-        let resp = recv_all(h.handle_blocking(req(
+        let resp = drain_resp(h.handle_blocking(req(
             &format!("/output-then-throw-worker.php?i={i}"),
             "shared/output-then-throw-worker.php",
         ))?);
         assert_eq!(resp.heads, 1, "exactly one head frame (got {})", resp.heads);
-        assert_eq!(resp.status, 200, "headers were committed by the echo");
-        let hello = resp.body.find("hello");
-        let uncaught = resp.body.find(&format!("Uncaught Exception: request {i}"));
+        assert_eq!(resp.status(), 200, "headers were committed by the echo");
+        let body = resp.body_string();
+        let hello = body.find("hello");
+        let uncaught = body.find(&format!("Uncaught Exception: request {i}"));
         assert!(
             hello.is_some() && uncaught.is_some() && hello < uncaught,
-            "echo output must precede the fatal text (got: {:?})",
-            resp.body
+            "echo output must precede the fatal text (got: {body:?})"
         );
     }
     drop(h);
@@ -955,7 +915,7 @@ fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("shared/output-then-throw-worker.php")))?;
     let h = r.handle();
-    let resp = tests::drain_resp(h.handle_blocking(req(
+    let resp = drain_resp(h.handle_blocking(req(
         "/output-then-throw-worker.php?i=1",
         "shared/output-then-throw-worker.php",
     ))?);
@@ -973,7 +933,7 @@ fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let resp = tests::drain_resp(h.handle_blocking(req(
+    let resp = drain_resp(h.handle_blocking(req(
         "/exit-after-output-classic.php",
         "ported_tests/exit-after-output-classic.php",
     ))?);
@@ -993,7 +953,7 @@ fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let resp = tests::drain_resp(h.handle_blocking(req(
+    let resp = drain_resp(h.handle_blocking(req(
         "/throw-after-output-classic.php",
         "ported_tests/throw-after-output-classic.php",
     ))?);
@@ -1035,18 +995,17 @@ fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
         "shared/error-keeps-headers-worker.php",
     )))?;
     let h = r.handle();
-    let resp = recv_all(h.handle_blocking(req("/", "shared/error-keeps-headers-worker.php"))?);
+    let resp = drain_resp(h.handle_blocking(req("/", "shared/error-keeps-headers-worker.php"))?);
     drop(h);
     r.shutdown();
     assert_eq!(resp.heads, 1);
     assert_eq!(
-        resp.status, 404,
+        resp.status(),
+        404,
         "script status must survive the fatal, not force 500"
     );
     assert!(
-        resp.headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("set-cookie")),
+        resp.header("set-cookie").is_some(),
         "Set-Cookie must survive"
     );
     Ok(())
@@ -1099,10 +1058,13 @@ fn latin1_header_value_passes_through() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let resp = recv_all(h.handle_blocking(req("/", "ported_tests/latin1-header.php"))?);
+    let resp = drain_resp(h.handle_blocking(req("/", "ported_tests/latin1-header.php"))?);
     drop(h);
     r.shutdown();
     let v = resp
+        .head
+        .as_ref()
+        .expect("head")
         .headers
         .iter()
         .find(|(k, _)| k.eq_ignore_ascii_case("X-Filename"))
@@ -1117,7 +1079,7 @@ fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
-    let resp = recv_all(h.handle_blocking(req(
+    let resp = drain_resp(h.handle_blocking(req(
         "/error-keeps-headers.php",
         "shared/error-keeps-headers.php",
     ))?);
@@ -1125,15 +1087,14 @@ fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
     r.shutdown();
     assert_eq!(resp.heads, 1, "exactly one head");
     assert_eq!(
-        resp.status, 404,
+        resp.status(),
+        404,
         "script status must survive the fatal, not force 500"
     );
     assert!(
-        resp.headers
-            .iter()
-            .any(|(k, _)| k.eq_ignore_ascii_case("set-cookie")),
+        resp.header("set-cookie").is_some(),
         "session Set-Cookie must reach the client (headers: {:?})",
-        resp.headers
+        resp.head.as_ref().expect("head").headers
     );
     Ok(())
 }
@@ -1167,7 +1128,7 @@ fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<
     let _guard = php_lock();
     let r = Rapira::start(Mode::Worker(fixture("ported_tests/bad-header-worker.php")))?;
     let h = r.handle();
-    let resp = recv_all(h.handle_blocking(req(
+    let resp = drain_resp(h.handle_blocking(req(
         "/bad-header-worker.php",
         "ported_tests/bad-header-worker.php",
     ))?);
@@ -1175,10 +1136,10 @@ fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<
     r.shutdown();
 
     assert_eq!(resp.heads, 1, "a head must still be produced");
-    assert_eq!(resp.status, 201);
-    assert_eq!(resp.body, "body");
-    assert_eq!(header_value(&resp, "X-Keep").as_deref(), Some("kept"));
-    assert!(header_value(&resp, "Content Type").is_none());
-    assert!(header_value(&resp, "X-Ctl").is_none());
+    assert_eq!(resp.status(), 201);
+    assert_eq!(resp.body_string(), "body");
+    assert_eq!(resp.header("X-Keep").as_deref(), Some("kept"));
+    assert!(resp.header("Content Type").is_none());
+    assert!(resp.header("X-Ctl").is_none());
     Ok(())
 }
