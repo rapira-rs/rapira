@@ -54,7 +54,7 @@ jobs:
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-master-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v9-${{ hashFiles('core/.github/php-configure-flags.txt', 'core/.github/workflows/master.yml') }}
+                  key: php-master-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-${{ hashFiles('core/.github/php-configure-flags.txt', 'core/.github/workflows/master.yml') }}
 
             - name: Build NTS+debug PHP (embed SAPI) from php-src master
               if: steps.php.outputs.cache-hit != 'true'
@@ -92,7 +92,7 @@ jobs:
               uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-master-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-embed-signals-v9-${{ hashFiles('core/.github/php-configure-flags.txt', 'core/.github/workflows/master.yml') }}
+                  key: php-master-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-${{ hashFiles('core/.github/php-configure-flags.txt', 'core/.github/workflows/master.yml') }}
 
             - name: Expose PHP to build + tests
               run: |

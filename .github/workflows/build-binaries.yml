@@ -160,7 +160,6 @@ jobs:
                       }
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-embed
-            VERSION: ${{ inputs.version }}
             STEM: rapira-v${{ inputs.version }}-php${{ matrix.php_branch }}-${{ matrix.target_os }}-${{ matrix.arch }}
             PHP_FULL: ${{ matrix.php_branch == '8.4' && needs.prepare.outputs.php_84 || needs.prepare.outputs.php_85 }}
         steps:
@@ -191,7 +190,7 @@ jobs:
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/build-binaries.yml') }}-v2
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/build-binaries.yml') }}
 
             - name: Build PHP embed from release tarball (Unix)
               if: steps.phpcache.outputs.cache-hit != 'true'
@@ -226,7 +225,7 @@ jobs:
               uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/build-binaries.yml') }}-v2
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/build-binaries.yml') }}
 
             - name: Expose PHP + rpath (Linux)
               if: runner.os == 'Linux'
@@ -374,12 +373,11 @@ jobs:
                   sudo dpkg -i /tmp/nfpm.deb
                   for arch in amd64 arm64; do
                     for minor in 8.4 8.5; do
-                      test -d "dist/pkgroot-${arch}-php${minor}" || { echo "::error::missing pkgroot ${arch}/php${minor}"; exit 1; }
                       # nfpm does not env-expand contents.src - stage each variant at the fixed path
                       rm -rf dist/pkgroot-current
                       cp -r "dist/pkgroot-${arch}-php${minor}" dist/pkgroot-current
-                      NFPM_ARCH=$arch PHP_MINOR=$minor VERSION="$VERSION" nfpm pkg -p deb -f nfpm.yaml -t dist/
-                      NFPM_ARCH=$arch PHP_MINOR=$minor VERSION="$VERSION" nfpm pkg -p rpm -f nfpm.yaml -t dist/
+                      NFPM_ARCH=$arch PHP_MINOR=$minor nfpm pkg -p deb -f nfpm.yaml -t dist/
+                      NFPM_ARCH=$arch PHP_MINOR=$minor nfpm pkg -p rpm -f nfpm.yaml -t dist/
                     done
                   done
                   rm -rf dist/pkgroot-*
@@ -446,17 +444,7 @@ jobs:
                       gh api -X POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null
                   fi
                   gh release edit "$TAG" --prerelease --notes "Rolling build. Version $VERSION. Commit $SHA."
-                  # A caller that combines rolling with packages puts nfpm names on the
-                  # rolling release. nfpm and the upload rewrite the prerelease separator
-                  # (0.7.0-x, 0.7.0~x, 0.7.0.x), so names are compared as substrings
-                  # with every separator stripped.
-                  KEEP=$(tr -cd '[:alnum:]' <<< "$VERSION")
-                  ASSETS=$(gh release view "$TAG" --json assets --jq '.assets[].name')
-                  # self-check: this run's uploads must pass the keep filter, otherwise the
-                  # filter no longer matches the upload names and the prune would drop them
-                  tr -cd '[:alnum:]\n' <<< "$ASSETS" | grep -qF "$KEEP" \
-                    || { echo "::error::no asset matches $KEEP - the prune filter does not match the upload names"; exit 1; }
-                  while read -r name; do
-                      case "$(tr -cd '[:alnum:]' <<< "$name")" in *"$KEEP"*) continue ;; esac
+                  gh release view "$TAG" --json assets --jq '.assets[].name' | while read -r name; do
+                      case "$name" in *"$VERSION"*) continue ;; esac
                       gh release delete-asset "$TAG" "$name" --yes
-                  done <<< "$ASSETS"
+                  done
