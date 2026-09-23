@@ -6,12 +6,13 @@ pub(crate) use std::{
 };
 
 pub(crate) use bytes::Bytes;
+pub(crate) use http::header::{HeaderMap, HeaderName, HeaderValue};
 pub(crate) use tokio::sync::mpsc::{Sender, error::TrySendError};
 
 pub(crate) use crate::{
     HashPosition, HashTable, IS_ARRAY, IS_STRING, RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
     add_next_index_object,
-    callbacks::{MAX_BUFFERED_BODY, guard, is_field_value_byte, is_tchar},
+    callbacks::{MAX_BUFFERED_BODY, guard},
     object_init_ex, rapira_array_init, rapira_ce_already_finalized_error,
     rapira_ce_closed_exception, rapira_ce_http_content_length_exceeded_error,
     rapira_ce_http_file_not_sendable_exception, rapira_ce_http_form_field,
@@ -24,9 +25,7 @@ pub(crate) use crate::{
     rapira_receive_timed, rapira_receive_untimed,
     scoreboard::{Event, sb_update},
     start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
-    types::{
-        Addr, Body, FieldLines, FormField, Frame, Job, Request, ResponseHead, TlsView, UploadedFile,
-    },
+    types::{Addr, Body, FormField, Frame, Job, Request, ResponseHead, TlsView, UploadedFile},
     zend, zend_class_entry, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_set_timeout,
     zend_string, zend_unset_timeout, zval, zval_add_ref, zval_ptr_dtor,
@@ -122,7 +121,7 @@ enum Stage {
 /// A committed head, not yet on the wire: the bytes leave with the first body-touching verb.
 struct PendingHead {
     status: u16,
-    headers: FieldLines,
+    headers: HeaderMap,
 }
 
 enum BodyState {
@@ -171,7 +170,7 @@ impl AddrOwned {
     }
 }
 
-/// Keys are CStrings: the symtable prefilter in add_assoc_zval_ex reads one byte past a leading `-`, which the terminator covers.
+/// Multipart part headers, one entry per name. Keys are CStrings: the symtable prefilter in add_assoc_zval_ex reads one byte past a leading `-`, which the terminator covers.
 struct Grouped(Vec<(CString, Vec<Vec<u8>>)>);
 
 impl Grouped {
@@ -205,7 +204,6 @@ fn protocol_php(protocol: &str) -> &str {
 
 /// Owned values of the `Request` object. The builder keeps them in the state because a Zend OOM bailout longjmps through its frame, so that frame holds no values with Drop glue.
 struct RequestView {
-    headers: Grouped,
     uri_abs: String,
     remote: AddrOwned,
     server: AddrOwned,
@@ -227,7 +225,6 @@ impl RequestView {
             "/"
         };
         Self {
-            headers: Grouped::new(&req.headers),
             uri_abs: format!("{scheme}://{host}{path}"),
             remote: AddrOwned::new(&req.remote),
             server: AddrOwned::new(&req.server),

@@ -1,5 +1,8 @@
-use extension_api::{FieldLines, HttpResponse, empty_body};
-use http::header::{CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue};
+use extension_api::{HttpResponse, empty_body};
+use http::header::{
+    CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, TE, TRAILER,
+    TRANSFER_ENCODING, UPGRADE,
+};
 
 pub(crate) fn error_response(status: http::StatusCode) -> HttpResponse {
     let mut res = http::Response::new(empty_body());
@@ -11,72 +14,48 @@ pub(crate) fn error_response(status: http::StatusCode) -> HttpResponse {
     res
 }
 
-fn skip_response_header(name: &str) -> bool {
-    [
-        "content-length",
-        "transfer-encoding",
-        "connection",
-        "keep-alive",
-        "upgrade",
-        "trailer",
-        "te",
-        "proxy-connection",
-    ]
-    .iter()
-    .any(|h| name.eq_ignore_ascii_case(h))
-}
+/// Framing and hop-by-hop fields: hyper frames the response and owns the connection.
+static HOP_BY_HOP: [HeaderName; 8] = [
+    CONTENT_LENGTH,
+    TRANSFER_ENCODING,
+    CONNECTION,
+    HeaderName::from_static("keep-alive"),
+    UPGRADE,
+    TRAILER,
+    TE,
+    HeaderName::from_static("proxy-connection"),
+];
 
-fn connection_named_headers(value: &[u8], out: &mut Vec<String>) {
-    for tok in value.split(|&b| b == b',') {
-        let tok = String::from_utf8_lossy(tok).trim().to_ascii_lowercase();
-        if !tok.is_empty() {
-            out.push(tok);
-        }
-    }
-}
-
-pub(crate) fn response_headers(headers: FieldLines, content_length: Option<u64>) -> HeaderMap {
-    let mut map = HeaderMap::with_capacity(headers.len() + 1);
-    let mut conn_named: Vec<String> = Vec::new();
-    for (name, value) in headers {
-        if name.eq_ignore_ascii_case("connection") {
-            connection_named_headers(&value, &mut conn_named);
-            continue;
-        }
-        if skip_response_header(&name) {
-            continue;
-        }
-        match (
-            HeaderName::try_from(name.as_str()),
-            HeaderValue::from_bytes(&value),
-        ) {
-            (Ok(n), Ok(v)) => {
-                map.append(n, v);
-            }
-            _ => {
-                tracing::debug!(target: "http", "dropped response header {name}: unrepresentable name or value")
-            }
-        }
-    }
-    for tok in &conn_named {
-        if let Ok(name) = HeaderName::try_from(tok.as_str()) {
-            map.remove(name);
-        }
+/// Removes the hop-by-hop fields and the fields that a Connection value names, then sets the declared content-length.
+pub(crate) fn response_headers(mut headers: HeaderMap, content_length: Option<u64>) -> HeaderMap {
+    let named: Vec<HeaderName> = headers
+        .get_all(CONNECTION)
+        .iter()
+        .flat_map(|v| v.as_bytes().split(|&b| b == b','))
+        .filter_map(|token| HeaderName::from_bytes(token.trim_ascii()).ok())
+        .collect();
+    for name in named.iter().chain(&HOP_BY_HOP) {
+        headers.remove(name);
     }
     if let Some(n) = content_length {
-        map.insert(CONTENT_LENGTH, HeaderValue::from(n));
+        headers.insert(CONTENT_LENGTH, HeaderValue::from(n));
     }
-    map
+    headers
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    fn hdrs(pairs: &[(&str, &str)]) -> FieldLines {
+    fn hdrs(pairs: &[(&str, &str)]) -> HeaderMap {
         pairs
             .iter()
-            .map(|(k, v)| ((*k).to_owned(), v.as_bytes().to_vec()))
+            .map(|(k, v)| {
+                (
+                    HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    HeaderValue::from_str(v).unwrap(),
+                )
+            })
             .collect()
     }
 
@@ -98,32 +77,6 @@ mod tests {
         assert!(map.get("proxy-connection").is_none());
         assert_eq!(map.get("content-type").unwrap().as_bytes(), b"text/plain");
         assert!(map.get("connection").is_none());
-    }
-
-    /// A space is not a tchar, so no front can put this name on the wire; dropping the field must not cost the rest of the response.
-    #[test]
-    fn unrepresentable_header_is_dropped_not_fatal() {
-        let map = response_headers(
-            hdrs(&[("Content Type", "text/html"), ("X-Keep", "2")]),
-            Some(3),
-        );
-        assert!(map.get("content type").is_none());
-        assert_eq!(map.get("x-keep").unwrap().as_bytes(), b"2");
-        assert_eq!(map.get("content-length").unwrap().as_bytes(), b"3");
-    }
-
-    /// An unrepresentable value (control byte) drops the field the same way an unrepresentable name does.
-    #[test]
-    fn unrepresentable_value_is_dropped_not_fatal() {
-        let map = response_headers(
-            vec![
-                ("X-Ctl".to_owned(), b"\x01".to_vec()),
-                ("X-Keep".to_owned(), b"ok".to_vec()),
-            ],
-            None,
-        );
-        assert!(map.get("x-ctl").is_none());
-        assert_eq!(map.get("x-keep").unwrap().as_bytes(), b"ok");
     }
 
     #[test]

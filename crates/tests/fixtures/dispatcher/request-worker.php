@@ -9,12 +9,6 @@ try {
         $req = $ex->getRequest();
         // the memo: repeated calls hand back the same instance
         $again = $ex->getRequest();
-        $caseKeys = [];
-        foreach ($req->headers as $k => $v) {
-            if (strcasecmp((string)$k, 'x-case') === 0) {
-                $caseKeys[] = $k;
-            }
-        }
         $lines = [
             'method=' . $req->method,
             'uri=' . $req->uri,
@@ -23,8 +17,6 @@ try {
             'protocol=' . $req->protocol,
             // repeats stay separate list entries, wire order
             'x-probe=' . implode('|', $req->headers['x-probe'] ?? []),
-            // same name in two casings = two keys (byte-exact grouping)
-            'x-case-keys=' . implode('|', $caseKeys),
             // an all-digit field name must land as an integer key (symtable)
             'h123=' . implode(',', $req->headers[123] ?? []),
             // a single-letter name must stay a string key

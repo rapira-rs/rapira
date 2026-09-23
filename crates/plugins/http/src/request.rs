@@ -2,8 +2,9 @@ use extension_api::{Peer, Request};
 
 use crate::Config;
 
+/// Moves the header map out of `parts`.
 pub(crate) fn build(
-    parts: &http::request::Parts,
+    parts: &mut http::request::Parts,
     authority: Option<Vec<u8>>,
     body: Vec<u8>,
     peer: Peer,
@@ -40,11 +41,7 @@ pub(crate) fn build(
         server_port: cfg.server_port,
         tls: None,
         received_at: Some(peer.received_at),
-        headers: parts
-            .headers
-            .iter()
-            .map(|(n, v)| (n.as_str().to_owned(), v.as_bytes().to_vec()))
-            .collect(),
+        headers: std::mem::take(&mut parts.headers),
         body,
     }
 }
@@ -63,9 +60,8 @@ mod tests {
         }
     }
 
-    /// One FieldLines entry per field line, values in per-name wire order, names lowercase.
     #[test]
-    fn headers_arrive_per_line_in_per_name_order() {
+    fn headers_keep_the_per_name_wire_order() {
         let req = http::Request::builder()
             .method("GET")
             .uri("/a/b?x=1")
@@ -74,21 +70,16 @@ mod tests {
             .header("x-probe", "two")
             .body(())
             .unwrap();
-        let (parts, ()) = req.into_parts();
+        let (mut parts, ()) = req.into_parts();
         let built = build(
-            &parts,
+            &mut parts,
             Some(b"e2e".to_vec()),
             Vec::new(),
             peer(),
             &Config::default(),
         );
-        let probes: Vec<_> = built
-            .headers
-            .iter()
-            .filter(|(n, _)| n == "x-probe")
-            .map(|(_, v)| v.as_slice())
-            .collect();
-        assert_eq!(probes, [b"one".as_slice(), b"two".as_slice()]);
+        let probes: Vec<_> = built.headers.get_all("x-probe").iter().collect();
+        assert_eq!(probes, ["one", "two"]);
         assert_eq!(built.uri, "/a/b?x=1");
         assert_eq!(built.target, None);
         assert_eq!(built.protocol, "HTTP/1.1");
@@ -102,8 +93,8 @@ mod tests {
             .uri(uri)
             .body(())
             .unwrap();
-        let (parts, ()) = req.into_parts();
-        build(&parts, None, Vec::new(), peer(), &Config::default())
+        let (mut parts, ()) = req.into_parts();
+        build(&mut parts, None, Vec::new(), peer(), &Config::default())
     }
 
     /// RFC 9112 §3.2.2 absolute-form: PHP gets the origin-form view; the target keeps the full form.

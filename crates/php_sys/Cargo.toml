@@ -13,6 +13,7 @@ tracing = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 rapira_scoreboard = { workspace = true }
 bytes = { workspace = true }
+http = { workspace = true }
 
 [build-dependencies]
 anyhow = { workspace = true }

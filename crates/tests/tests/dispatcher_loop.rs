@@ -1,3 +1,4 @@
+use http::{HeaderMap, HeaderName, HeaderValue};
 use php_sys::{Frame, Mode, Rapira};
 use std::io::Cursor;
 use tests::{
@@ -249,7 +250,7 @@ fn interim_head_is_emitted_before_the_final_head() -> anyhow::Result<()> {
     assert_eq!(resp.interim.len(), 1, "the 103 must reach the stream");
     assert_eq!(resp.interim[0].status, 103);
     assert!(
-        resp.interim[0].headers.iter().any(|(k, _)| k == "link"),
+        resp.interim[0].headers.contains_key("link"),
         "interim fields travel with it"
     );
     assert_eq!(resp.status(), 200);
@@ -308,12 +309,7 @@ fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
     )?);
     let head = resp.head.as_ref().expect("head committed");
     assert_eq!(head.status, 200);
-    let multi: Vec<String> = head
-        .headers
-        .iter()
-        .filter(|(k, _)| k == "x-multi")
-        .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
-        .collect();
+    let multi: Vec<&HeaderValue> = head.headers.get_all("x-multi").iter().collect();
     assert_eq!(multi, ["a", "b"], "one field line per list value, in order");
     assert_eq!(resp.header("x-ref").as_deref(), Some("r1"));
     assert_eq!(resp.header("x-vref").as_deref(), Some("c1"));
@@ -521,16 +517,22 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
     let h = r.handle();
 
     let mut rq = req("/path?x=1", "dispatcher/request-worker.php");
-    rq.headers = vec![
-        ("x-probe".into(), b"alpha".to_vec()),
-        ("X-Case".into(), b"one".to_vec()),
-        ("x-probe".into(), b"beta".to_vec()),
-        ("x-case".into(), b"two".to_vec()),
-        ("123".into(), b"numeric".to_vec()),
-        ("a".into(), b"solo".to_vec()),
-        ("-".into(), b"dash".to_vec()),
-        ("-1".into(), b"neg".to_vec()),
-    ];
+    rq.headers = [
+        ("x-probe", "alpha"),
+        ("x-probe", "beta"),
+        ("123", "numeric"),
+        ("a", "solo"),
+        ("-", "dash"),
+        ("-1", "neg"),
+    ]
+    .into_iter()
+    .map(|(k, v)| {
+        (
+            HeaderName::from_bytes(k.as_bytes()).unwrap(),
+            HeaderValue::from_static(v),
+        )
+    })
+    .collect();
     rq.authority = Some(b"example.test".to_vec());
     rq.target = Some(b"/path%2Fa?x=1\xe9".to_vec());
     rq.body = php_sys::types::Body::Raw(Cursor::new(b"hello".to_vec()));
@@ -554,7 +556,6 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
         "authority='example.test'",
         "protocol=HTTP/1.1",
         "x-probe=alpha|beta",
-        "x-case-keys=X-Case|x-case",
         "h123=numeric",
         "h-single=solo",
         "h-dash=dash",
@@ -1020,10 +1021,10 @@ fn sendfile_setup(name: &str) -> std::path::PathBuf {
 
 fn with_path_header(query: &str, path: &std::path::Path) -> php_sys::Request {
     let mut rq = req(query, "dispatcher/stream-worker.php");
-    rq.headers.push((
-        "x-path".into(),
-        path.to_string_lossy().into_owned().into_bytes(),
-    ));
+    rq.headers.append(
+        "x-path",
+        HeaderValue::try_from(path.to_string_lossy().into_owned()).unwrap(),
+    );
     rq
 }
 
@@ -1126,7 +1127,10 @@ fn trailers_ride_the_end_frame() -> anyhow::Result<()> {
     assert_eq!(resp.body_string(), "chunk,");
     assert_eq!(
         resp.trailers,
-        vec![("x-checksum".to_string(), b"abc123".to_vec())]
+        HeaderMap::from_iter([(
+            HeaderName::from_static("x-checksum"),
+            HeaderValue::from_static("abc123")
+        )])
     );
     assert!(resp.ended && !resp.truncated);
     Ok(())
@@ -1146,7 +1150,10 @@ fn trailers_only_response_keeps_length_framing() -> anyhow::Result<()> {
     assert!(resp.body.is_empty());
     assert_eq!(
         resp.trailers,
-        vec![("x-checksum".to_string(), b"empty".to_vec())]
+        HeaderMap::from_iter([(
+            HeaderName::from_static("x-checksum"),
+            HeaderValue::from_static("empty")
+        )])
     );
     Ok(())
 }

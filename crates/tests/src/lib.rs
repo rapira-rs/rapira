@@ -1,4 +1,5 @@
 use extension_api::{Reply, ReplyEvent};
+use http::HeaderMap;
 use php_sys::{Frame, HandleError, Mode, Rapira, RapiraHandle, Request};
 use std::env::set_var;
 use std::path::{Path, PathBuf};
@@ -93,7 +94,7 @@ pub fn req(uri: &str, fixture_name: &str) -> Request {
         server: php_sys::types::Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server_name: "localhost".into(),
         server_port: 8080,
-        headers: vec![],
+        headers: HeaderMap::new(),
         content_type: None,
         content_length: 0,
         body: php_sys::types::Body::Raw(std::io::Cursor::new(Vec::new())),
@@ -110,7 +111,7 @@ pub struct Resp {
     pub content_length: Option<u64>,
     pub bodiless: bool,
     pub body: Vec<u8>,
-    pub trailers: Vec<(String, Vec<u8>)>,
+    pub trailers: HeaderMap,
     pub truncated: bool,
     /// An `End` frame arrived; false = the producer died first.
     pub ended: bool,
@@ -125,12 +126,8 @@ impl Resp {
     }
 
     pub fn header(&self, name: &str) -> Option<String> {
-        self.head
-            .as_ref()?
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case(name))
-            .map(|(_, v)| String::from_utf8_lossy(v).into_owned())
+        let value = self.head.as_ref()?.headers.get(name)?;
+        Some(String::from_utf8_lossy(value.as_bytes()).into_owned())
     }
 
     pub fn body_string(&self) -> String {
@@ -190,7 +187,7 @@ fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Ve
 #[derive(Debug)]
 pub struct Response {
     pub status: u16,
-    pub headers: extension_api::FieldLines,
+    pub headers: HeaderMap,
     pub body: Vec<u8>,
 }
 
@@ -472,10 +469,17 @@ mod tests {
         Reply::new(Box::new(VecSource(events.into())))
     }
 
+    fn fields() -> HeaderMap {
+        HeaderMap::from_iter([(
+            http::HeaderName::from_static("x-a"),
+            http::HeaderValue::from_static("1"),
+        )])
+    }
+
     fn head() -> ReplyEvent {
         ReplyEvent::Head {
             status: 200,
-            headers: vec![("x-a".into(), b"1".to_vec())],
+            headers: fields(),
             content_length: None,
             bodiless: false,
         }
@@ -483,7 +487,7 @@ mod tests {
 
     fn end(truncated: bool) -> ReplyEvent {
         ReplyEvent::End {
-            trailers: Vec::new(),
+            trailers: HeaderMap::new(),
             truncated,
         }
     }
@@ -513,7 +517,7 @@ mod tests {
         let r = collect(reply(vec![
             ReplyEvent::Interim {
                 status: 103,
-                headers: Vec::new(),
+                headers: HeaderMap::new(),
             },
             head(),
             ReplyEvent::Chunk(b"one,"[..].into()),
@@ -523,7 +527,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(r.status, 200);
-        assert_eq!(r.headers, vec![("x-a".to_string(), b"1".to_vec())]);
+        assert_eq!(r.headers, fields());
         assert_eq!(r.body, b"one,two");
     }
 }

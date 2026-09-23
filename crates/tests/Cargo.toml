@@ -10,6 +10,7 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 extension_api = { workspace = true }
+http = { workspace = true }
 php_sys = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time"] }
 tracing = { workspace = true }

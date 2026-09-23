@@ -1,5 +1,6 @@
 use std::{ops::Deref, path::Path};
 
+use http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE};
 use php_sys::{Mode, Rapira, Request};
 use tests::{Resp, captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
@@ -205,9 +206,10 @@ fn cookies_refresh_worker() -> anyhow::Result<()> {
     let h = r.handle();
     for i in 0..3 {
         let mut request = req("/cookies-worker.php", "ported_tests/cookies-worker.php");
-        request
-            .headers
-            .push(("Cookie".into(), format!("foo=bar; i={i}").into_bytes()));
+        request.headers.append(
+            COOKIE,
+            HeaderValue::try_from(format!("foo=bar; i={i}")).unwrap(),
+        );
         let (status, body) = drain(tests::submit(&h, request)?);
         assert_eq!(status, 200);
         assert!(
@@ -227,10 +229,12 @@ fn malformed_cookies_classic() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
     let mut request = req("/cookies.php", "ported_tests/cookies.php");
-    request.headers.push((
-        "Cookie".into(),
-        "foo =bar; ===;;==;  .dot.=val  ; PHPSESSID=1234; dup=first; dup=second".into(),
-    ));
+    request.headers.append(
+        COOKIE,
+        HeaderValue::from_static(
+            "foo =bar; ===;;==;  .dot.=val  ; PHPSESSID=1234; dup=first; dup=second",
+        ),
+    );
     let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
     drop(r);
@@ -275,19 +279,20 @@ fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
         .as_ref()
         .expect("head")
         .headers
+        .get_all(SET_COOKIE)
         .iter()
-        .filter(|(k, _)| k.eq_ignore_ascii_case("set-cookie"))
-        .find_map(|(_, v)| {
-            let s = String::from_utf8_lossy(v);
+        .find_map(|v| {
+            let s = String::from_utf8_lossy(v.as_bytes());
             s.strip_prefix("PHPSESSID=")
                 .map(|rest| rest.split(';').next().unwrap_or(rest).trim().to_string())
         })
         .expect("session cookie must be issued");
 
     let mut request = req(&format!("/{fixture_name}"), fixture_name);
-    request
-        .headers
-        .push(("Cookie".into(), format!("PHPSESSID={sid}").into_bytes()));
+    request.headers.append(
+        COOKIE,
+        HeaderValue::try_from(format!("PHPSESSID={sid}")).unwrap(),
+    );
     let r2 = drain_resp(tests::submit(&h, request)?);
     drop(h);
     drop(r);
@@ -550,11 +555,6 @@ fn raw_status_line_204_classic() -> anyhow::Result<()> {
     assert_eq!(
         resp.header("Content-Type").as_deref(),
         Some("application/json")
-    );
-    let headers = &resp.head.as_ref().expect("head").headers;
-    assert!(
-        !headers.iter().any(|(k, _)| k.starts_with("HTTP/")),
-        "the raw status line must not appear as a header (headers: {headers:?})"
     );
     assert_eq!(resp.body_string(), r#"{"status": "test"}"#);
     Ok(())
@@ -1117,14 +1117,16 @@ fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A pre-joined single Cookie line passes through the fold unchanged.
+/// A pre-joined single Cookie line passes through the join unchanged.
 #[test]
 fn multi_cookie_headers_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
     let mut request = req("/multi-cookie.php", "ported_tests/multi-cookie.php");
-    request.headers.push(("Cookie".into(), "a=1; b=2".into()));
+    request
+        .headers
+        .append(COOKIE, HeaderValue::from_static("a=1; b=2"));
     let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
     drop(r);
@@ -1132,22 +1134,25 @@ fn multi_cookie_headers_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// ReqC::build folds per-line repeats into `$_SERVER`: list fields join on their separators (Cookie on `; `, X-Forwarded-For on `, `), a singleton field keeps its first line.
+/// Per-line repeats join for the superglobals: list fields join on their separators (Cookie on `; `, X-Forwarded-For on `, `), a singleton field keeps its first line.
 #[test]
 fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(Mode::Classic)?;
     let h = r.handle();
     let mut request = req("/fold-check.php", "ported_tests/fold-check.php");
+    let forwarded_for = http::HeaderName::from_static("x-forwarded-for");
     for (name, value) in [
-        ("Cookie", "a=1"),
-        ("X-Forwarded-For", "1.2.3.4"),
-        ("Authorization", "Bearer one"),
-        ("cookie", "b=2"),
-        ("x-forwarded-for", "5.6.7.8"),
-        ("authorization", "Bearer two"),
+        (COOKIE, "a=1"),
+        (forwarded_for.clone(), "1.2.3.4"),
+        (AUTHORIZATION, "Bearer one"),
+        (COOKIE, "b=2"),
+        (forwarded_for, "5.6.7.8"),
+        (AUTHORIZATION, "Bearer two"),
     ] {
-        request.headers.push((name.into(), value.into()));
+        request
+            .headers
+            .append(name, HeaderValue::from_static(value));
     }
     let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);
@@ -1175,11 +1180,10 @@ fn latin1_header_value_passes_through() -> anyhow::Result<()> {
         .as_ref()
         .expect("head")
         .headers
-        .iter()
-        .find(|(k, _)| k.eq_ignore_ascii_case("X-Filename"))
-        .map(|(_, v)| v.clone())
-        .unwrap();
-    assert_eq!(v, b"caf\xE9.pdf".to_vec(), "0xE9 must not become U+FFFD");
+        .get("x-filename")
+        .unwrap()
+        .as_bytes();
+    assert_eq!(v, b"caf\xE9.pdf", "0xE9 must not become U+FFFD");
     Ok(())
 }
 

@@ -116,7 +116,7 @@ pub(super) unsafe fn emit_head(
     }
     let (status, headers) = match st.pending.take() {
         Some(p) => (p.status, p.headers),
-        None => (200, Vec::new()),
+        None => (200, HeaderMap::new()),
     };
     if st.stage == Stage::Open {
         st.stage = Stage::HeadCommitted;
@@ -154,7 +154,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
     sb_update(Event::Handled(true));
     if let Some(tx) = st.job.ctx.sender.take() {
         let _ = tx.try_send(Frame::End {
-            trailers: Vec::new(),
+            trailers: HeaderMap::new(),
             truncated: true,
         });
     }
@@ -162,7 +162,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
 
 /// # Safety
 /// As `send_frame`.
-pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: FieldLines) -> Verb {
+pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: HeaderMap) -> Verb {
     if st.host_closed() {
         discard_unit(st);
         return Verb::Discarded;
@@ -177,7 +177,11 @@ pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: Field
         discard_unit(st);
         return Verb::Discarded;
     }
-    let trailers = if st.bodiless { Vec::new() } else { trailers };
+    let trailers = if st.bodiless {
+        HeaderMap::new()
+    } else {
+        trailers
+    };
     unsafe {
         seal(st, /*truncated=*/ false, trailers)
     };
@@ -192,8 +196,8 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
     trailers: *mut HashTable,
 ) -> bool {
     guard(false, || unsafe {
-        let flat = match walk_head_table(trailers) {
-            Ok(flat) => flat,
+        let map = match walk_head_table(trailers) {
+            Ok(map) => map,
             Err(_) => {
                 zend::throw_value_error(
                     c"a trailer name or value is not representable on the wire",
@@ -201,15 +205,15 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
                 return false;
             }
         };
-        if flat.iter().any(|(n, _)| forbidden_trailer(n)) {
-            drop(flat);
+        if map.keys().any(|n| forbidden_trailer(n.as_str())) {
+            drop(map);
             zend::throw_value_error(
                 c"the field may not travel in a trailer section: framing, routing, authentication, request modifiers, response controls and content format stay in the head",
             );
             return false;
         }
         let st = &mut *job.cast::<ExchangeState>();
-        match write_trailers_core(st, flat) {
+        match write_trailers_core(st, map) {
             Verb::Ok => true,
             v => {
                 throw_verb(v);
@@ -224,7 +228,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
 pub(super) unsafe fn write_head_core(
     st: &mut ExchangeState,
     status: u16,
-    headers: FieldLines,
+    headers: HeaderMap,
 ) -> Verb {
     if st.host_closed() {
         discard_unit(st);
@@ -277,14 +281,14 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_head(
             );
             return false;
         }
-        let flat = match walk_head_table(headers) {
-            Ok(flat) => flat,
+        let map = match walk_head_table(headers) {
+            Ok(map) => map,
             Err(msg) => {
                 zend::throw_value_error(msg);
                 return false;
             }
         };
-        match write_head_core(st, status as u16, flat) {
+        match write_head_core(st, status as u16, map) {
             Verb::Ok => true,
             v => {
                 throw_verb(v);
@@ -319,7 +323,7 @@ pub(super) unsafe fn write_body_core(
         );
         let _ = unsafe { emit_head(st, None) };
         unsafe {
-            seal(st, /*truncated=*/ true, Vec::new())
+            seal(st, /*truncated=*/ true, HeaderMap::new())
         };
         return Verb::Overflow;
     }
@@ -335,7 +339,7 @@ pub(super) unsafe fn write_body_core(
         }
         st.sent_body = cl;
         unsafe {
-            seal(st, /*truncated=*/ false, Vec::new())
+            seal(st, /*truncated=*/ false, HeaderMap::new())
         };
         return Verb::ContentLengthExceeded;
     }
@@ -355,7 +359,7 @@ pub(super) unsafe fn write_body_core(
     }
     if eos {
         unsafe {
-            seal(st, /*truncated=*/ false, Vec::new())
+            seal(st, /*truncated=*/ false, HeaderMap::new())
         };
     }
     Verb::Ok
@@ -384,7 +388,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
 
 /// # Safety
 /// As `send_frame`.
-pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: FieldLines) {
+pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: HeaderMap) {
     if let BodyState::Multipart { files, .. } = &mut st.body {
         for p in files {
             p.upload.file.unlink();
@@ -481,14 +485,14 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
             if let Some(tx) = st.job.ctx.sender.take() {
                 if st.head_sent {
                     let _ = tx.try_send(Frame::End {
-                        trailers: Vec::new(),
+                        trailers: HeaderMap::new(),
                         truncated: true,
                     });
                 } else if tx
                     .try_send(Frame::Head {
                         head: ResponseHead {
                             status: 500,
-                            headers: Vec::new(),
+                            headers: HeaderMap::new(),
                         },
                         content_length: (!st.bodiless).then_some(0),
                         bodiless: st.bodiless,
@@ -496,7 +500,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
                     .is_ok()
                 {
                     let _ = tx.try_send(Frame::End {
-                        trailers: Vec::new(),
+                        trailers: HeaderMap::new(),
                         truncated: false,
                     });
                 }

@@ -413,7 +413,7 @@ mod tests {
 
     fn end(truncated: bool) -> ReplyEvent {
         ReplyEvent::End {
-            trailers: Vec::new(),
+            trailers: http::HeaderMap::new(),
             truncated,
         }
     }

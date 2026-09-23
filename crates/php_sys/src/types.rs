@@ -1,10 +1,9 @@
 use bytes::Bytes;
+use http::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderName};
 use std::ffi::CString;
 use std::os::raw::c_int;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
-
-pub type FieldLines = Vec<(String, Vec<u8>)>;
 
 #[derive(Debug, Clone)]
 pub enum Mode {
@@ -50,7 +49,7 @@ pub enum Frame {
         len: u64,
     },
     End {
-        trailers: FieldLines,
+        trailers: HeaderMap,
         truncated: bool,
     },
 }
@@ -110,7 +109,7 @@ impl Drop for SpooledFile {
 pub struct FormField {
     pub name: Vec<u8>,
     pub value: Vec<u8>,
-    pub headers: FieldLines,
+    pub headers: Vec<(String, Vec<u8>)>,
 }
 
 pub struct UploadedFile {
@@ -118,7 +117,7 @@ pub struct UploadedFile {
     pub client_filename: Vec<u8>,
     /// content-type verbatim; an empty or OWS-only value maps to None upstream.
     pub client_media_type: Option<Vec<u8>>,
-    pub headers: FieldLines,
+    pub headers: Vec<(String, Vec<u8>)>,
     pub file: SpooledFile,
     /// Bytes written to disk; a 64-bit zend_long is assumed at the FFI edge.
     pub size: u64,
@@ -149,7 +148,7 @@ pub struct Request {
     /// Configured CGI SERVER_NAME/SERVER_PORT, also the $uri synthesis fallback.
     pub server_name: String,
     pub server_port: u16,
-    pub headers: FieldLines,
+    pub headers: HeaderMap,
     /// First content-type field line, raw bytes.
     pub content_type: Option<Vec<u8>>,
     /// Wire byte count, never re-derived from parsed parts; -1 if unknown.
@@ -162,8 +161,12 @@ pub struct Request {
 
 pub struct ResponseHead {
     pub status: u16,
-    pub headers: FieldLines,
+    pub headers: HeaderMap,
 }
+
+/// CGI `Status` pseudo-field: php-src passes it as a plain header line.
+/// https://www.rfc-editor.org/rfc/rfc3875#section-6.3.3
+static STATUS: HeaderName = HeaderName::from_static("status");
 
 fn status_field_code(value: &[u8]) -> Option<u16> {
     let digits: &[u8] = value
@@ -205,22 +208,17 @@ fn cgi_cstring(field: &str, bytes: &[u8]) -> CString {
 }
 
 impl ReqC {
-    /// Folds `r.headers` to one value per name for the `HTTP_*` mapping (crate::fold).
     /// Cookie repeats rejoin on "; ", the cookie-string form php-src's parser expects.
-    pub fn build(r: &mut Request) -> Self {
-        crate::fold::fold_field_lines(&mut r.headers);
-
-        let cookie: Option<CString> = r
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
-            .map(|(_, v)| cgi_cstring("Cookie", v));
+    pub fn build(r: &Request) -> Self {
+        let mut joined = Vec::new();
+        let cookie: Option<CString> =
+            crate::callbacks::joined_field(&r.headers, &COOKIE, &mut joined)
+                .map(|v| cgi_cstring("Cookie", v));
 
         let authorization: Option<CString> = r
             .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-            .map(|(_, v)| cgi_cstring("Authorization", v));
+            .get(AUTHORIZATION)
+            .map(|v| cgi_cstring("Authorization", v.as_bytes()));
 
         let (remote_addr, remote_port) = cgi_addr_strings(&r.remote);
 
@@ -268,8 +266,8 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(mut req: Request, sender: Sender<Frame>, superglobals: bool) -> Self {
-        let c = superglobals.then(|| ReqC::build(&mut req));
+    pub fn new(req: Request, sender: Sender<Frame>, superglobals: bool) -> Self {
+        let c = superglobals.then(|| ReqC::build(&req));
         Self {
             req,
             c,
@@ -285,21 +283,18 @@ impl Context {
         errored && self.stream == StreamState::BodyStreamed
     }
 
-    pub fn commit_head(&mut self, mut status: u16, mut headers: FieldLines) {
-        headers.retain(|(name, value)| {
-            if !name.eq_ignore_ascii_case("status") {
-                return true;
-            }
-            match status_field_code(value) {
+    pub fn commit_head(&mut self, mut status: u16, mut headers: HeaderMap) {
+        for value in headers.get_all(&STATUS) {
+            match status_field_code(value.as_bytes()) {
                 Some(code) => status = code,
                 None => tracing::warn!(
                     target: "php",
                     "ignored malformed Status field {:?}; status stays {status}",
-                    String::from_utf8_lossy(value)
+                    String::from_utf8_lossy(value.as_bytes())
                 ),
             }
-            false
-        });
+        }
+        headers.remove(&STATUS);
         self.head = Some(ResponseHead { status, headers });
         self.stream = StreamState::HeadSent;
     }
@@ -330,7 +325,7 @@ impl Context {
         send(
             &tx,
             Frame::End {
-                trailers: Vec::new(),
+                trailers: HeaderMap::new(),
                 truncated,
             },
         );
@@ -378,7 +373,7 @@ mod tests {
                 server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
                 server_name: String::new(),
                 server_port: 8080,
-                headers: Vec::new(),
+                headers: HeaderMap::new(),
                 content_type: None,
                 content_length: -1,
                 body: Body::Raw(std::io::Cursor::new(Vec::new())),
@@ -394,7 +389,12 @@ mod tests {
         };
         let headers = headers
             .iter()
-            .map(|(k, v)| ((*k).to_owned(), v.as_bytes().to_vec()))
+            .map(|(k, v)| {
+                (
+                    HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    http::HeaderValue::from_str(v).unwrap(),
+                )
+            })
             .collect();
         ctx.commit_head(status, headers);
         ctx.head.expect("commit_head records a head")
@@ -406,7 +406,7 @@ mod tests {
         let head = head_of(200, &[("status", "404 Not Found"), ("X-Keep", "kept")]);
         assert_eq!(head.status, 404);
         assert_eq!(head.headers.len(), 1);
-        assert_eq!(head.headers[0].0, "X-Keep");
+        assert!(head.headers.contains_key("x-keep"));
     }
 
     /// An unparseable `Status:` is still consumed (forwarding it would put a literal `Status:` field on the wire) without inventing a code.

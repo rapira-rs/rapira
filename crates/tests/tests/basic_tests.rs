@@ -1,3 +1,4 @@
+use http::header::{AUTHORIZATION, HeaderValue};
 use php_sys::{Mode, Rapira};
 use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 
@@ -119,9 +120,10 @@ fn worker_basic_auth() -> anyhow::Result<()> {
     let h = r.handle();
 
     let mut with_auth = req("/", "shared/auth-worker.php");
-    with_auth
-        .headers
-        .push(("Authorization".into(), "Basic dXNlcjpwYXNz".into()));
+    with_auth.headers.append(
+        AUTHORIZATION,
+        HeaderValue::from_static("Basic dXNlcjpwYXNz"),
+    );
     let (s_auth, b_auth) = drain(tests::submit(&h, with_auth)?);
 
     let (s_none, b_none) = drain(tests::submit(&h, req("/", "shared/auth-worker.php"))?);
@@ -159,9 +161,10 @@ fn server_variables() -> anyhow::Result<()> {
     request.content_type = Some("text/plain".into());
     request.content_length = 3;
     request.body = php_sys::types::Body::Raw(std::io::Cursor::new(b"foo".to_vec()));
-    request
-        .headers
-        .push(("Authorization".into(), "Basic dmFsZXJ5OnBhc3N3b3Jk".into()));
+    request.headers.append(
+        AUTHORIZATION,
+        HeaderValue::from_static("Basic dmFsZXJ5OnBhc3N3b3Jk"),
+    );
 
     let (status, body) = drain(tests::submit(&h, request)?);
     drop(h);

@@ -12,6 +12,7 @@ anyhow = { workspace = true }
 tracing = { workspace = true }
 php_sys = { workspace = true }
 extension_api = { workspace = true }
+http = { workspace = true }
 # A shared multi-thread runtime drives all extension tasks.
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "macros"] }
 libc = { workspace = true }

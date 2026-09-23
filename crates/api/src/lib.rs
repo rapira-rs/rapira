@@ -12,7 +12,6 @@ pub use middleware::{
 pub use prepare::{ListenAddr, PrepareCtx, PreparedListener};
 
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
-pub type FieldLines = Vec<(String, Vec<u8>)>;
 
 /// Lifecycle: `init` → `prepare` (master-side, pre-fork) → `run` → `shutdown`; the host drops the in-flight `run` future before it calls `shutdown`.
 pub trait Extension: Send + 'static {
@@ -40,11 +39,11 @@ pub trait Backend: Send + Sync + 'static {
 pub enum ReplyEvent {
     Interim {
         status: u16,
-        headers: FieldLines,
+        headers: http::HeaderMap,
     },
     Head {
         status: u16,
-        headers: FieldLines,
+        headers: http::HeaderMap,
         content_length: Option<u64>,
         bodiless: bool,
     },
@@ -56,7 +55,7 @@ pub enum ReplyEvent {
         len: u64,
     },
     End {
-        trailers: FieldLines,
+        trailers: http::HeaderMap,
         truncated: bool,
     },
 }
@@ -154,6 +153,6 @@ pub struct Request {
     pub server_port: u16,
     pub tls: Option<Tls>,
     pub received_at: Option<f64>,
-    pub headers: FieldLines,
+    pub headers: http::HeaderMap,
     pub body: Vec<u8>,
 }

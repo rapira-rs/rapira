@@ -51,28 +51,21 @@ pub(super) fn forbidden_trailer(name: &str) -> bool {
 }
 
 pub(super) struct SplitHead {
-    pub(super) headers: FieldLines,
+    pub(super) headers: HeaderMap,
     pub(super) declared_cl: Option<u64>,
 }
 
 /// Takes content-length out as the declared length; the front drops the hop-by-hop fields.
-pub(super) fn split_framing(headers: FieldLines) -> Result<SplitHead, &'static CStr> {
-    let mut declared_cl: Option<u64> = None;
-    let mut cl_lines = 0usize;
-    let mut out = Vec::with_capacity(headers.len());
-    for (n, v) in headers {
-        if n.eq_ignore_ascii_case("content-length") {
-            cl_lines += 1;
-            if cl_lines > 1 {
-                return Err(c"content-length may not repeat");
-            }
-            declared_cl = parse_content_length(&v);
-            continue;
-        }
-        out.push((n, v));
+pub(super) fn split_framing(mut headers: HeaderMap) -> Result<SplitHead, &'static CStr> {
+    let mut lines = headers.get_all(http::header::CONTENT_LENGTH).iter();
+    let first = lines.next();
+    if lines.next().is_some() {
+        return Err(c"content-length may not repeat");
     }
+    let declared_cl = first.and_then(|v| parse_content_length(v.as_bytes()));
+    headers.remove(http::header::CONTENT_LENGTH);
     Ok(SplitHead {
-        headers: out,
+        headers,
         declared_cl,
     })
 }
@@ -85,27 +78,16 @@ pub(super) fn parse_content_length(v: &[u8]) -> Option<u64> {
     s.parse().ok()
 }
 
-/// RFC 9110 §5.6.2 tchar: a non-token name raises ValueError here, because the front drops it silently.
+/// A name outside the RFC 9110 `tchar` set or a value byte outside the field-value set is an error. `HeaderName::from_bytes` and `HeaderValue::from_bytes` apply these sets, as on the classic path.
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2
-pub(super) fn wire_token(name: &[u8]) -> bool {
-    !name.is_empty() && name.iter().all(|&b| is_tchar(b))
-}
-
-/// RFC 9110 §5.5 field-value bytes: the same set the classic path enforces, so a value the front would drop raises ValueError here.
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.5
-pub(super) fn wire_value(value: &[u8]) -> bool {
-    value.iter().all(|&b| is_field_value_byte(b))
-}
-
 /// `&raw mut pos`: the pos parameter is *mut on PHP 8.4 and *const on 8.5.
 /// # Safety
 /// `ht` NULL or a live array; entries stay ZPP-owned.
-pub(super) unsafe fn walk_head_table(
-    ht: *mut HashTable,
-) -> Result<Vec<(String, Vec<u8>)>, &'static std::ffi::CStr> {
-    let mut flat = Vec::new();
+pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<HeaderMap, &'static CStr> {
+    let mut map = HeaderMap::new();
     if ht.is_null() {
-        return Ok(flat);
+        return Ok(map);
     }
     unsafe {
         let mut pos: HashPosition = 0;
@@ -121,10 +103,9 @@ pub(super) unsafe fn walk_head_table(
             if i64::from(kt) != crate::HASH_KEY_IS_STRING || str_key.is_null() {
                 return Err(c"header name is not representable on the wire");
             }
-            let name = zend::zstr_bytes(str_key);
-            if !wire_token(name) {
+            let Ok(name) = HeaderName::from_bytes(zend::zstr_bytes(str_key)) else {
                 return Err(c"header name is not representable on the wire");
-            }
+            };
             let list = zend::deref(entry);
             if zend::zval_type(list) != IS_ARRAY {
                 return Err(c"each header entry must be a list of strings");
@@ -141,15 +122,15 @@ pub(super) unsafe fn walk_head_table(
                 if zend::zval_type(item) != IS_STRING {
                     return Err(c"header value is not representable on the wire");
                 }
-                let value = zend::zstr_bytes((*item).value.str_);
-                if !wire_value(value) {
+                let Ok(value) = HeaderValue::from_bytes(zend::zstr_bytes((*item).value.str_))
+                else {
                     return Err(c"header value is not representable on the wire");
-                }
-                flat.push((String::from_utf8_lossy(name).into_owned(), value.to_vec()));
+                };
+                map.append(&name, value);
                 zend_hash_move_forward_ex(inner, &mut ipos);
             }
             zend_hash_move_forward_ex(ht, &mut pos);
         }
     }
-    Ok(flat)
+    Ok(map)
 }

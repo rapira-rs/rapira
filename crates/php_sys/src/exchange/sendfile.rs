@@ -94,7 +94,7 @@ pub(super) unsafe fn send_file_core(
         }
         st.sent_body = cl;
         unsafe {
-            seal(st, /*truncated=*/ false, Vec::new())
+            seal(st, /*truncated=*/ false, HeaderMap::new())
         };
         return Verb::ContentLengthExceeded;
     }
@@ -113,7 +113,7 @@ pub(super) unsafe fn send_file_core(
     }
     if eos {
         unsafe {
-            seal(st, /*truncated=*/ false, Vec::new())
+            seal(st, /*truncated=*/ false, HeaderMap::new())
         };
     }
     Verb::Ok

@@ -1,4 +1,5 @@
 use extension_api::{Extension, Php, PrepareCtx};
+use http::header::CONTENT_TYPE;
 use php_sys::RapiraHandle;
 use std::future::Future;
 use std::io::Cursor;
@@ -174,25 +175,16 @@ impl RapiraBackend {
         &self,
         mut req: extension_api::Request,
     ) -> anyhow::Result<php_sys::Request> {
-        let content_type = req
-            .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("content-type"))
-            .map(|(_, v)| v.clone());
+        let content_type = req.headers.get(CONTENT_TYPE).map(|v| v.as_bytes().to_vec());
         let content_length = req.body.len() as i64;
 
         // Content-type is a singleton field per RFC 9110 §8.3: with repeated lines the host and a PHP consumer could split the body on different boundaries.
         // https://www.rfc-editor.org/rfc/rfc9110#section-8.3
         if self.rapira.dispatcher() && !req.body.is_empty() {
-            let mut ct_lines = 0usize;
-            let mut any_multipart = false;
-            for (k, v) in &req.headers {
-                if k.eq_ignore_ascii_case("content-type") {
-                    ct_lines += 1;
-                    any_multipart = any_multipart || multipart::is_multipart(v);
-                }
-            }
-            if ct_lines > 1 && any_multipart {
+            let lines = req.headers.get_all(CONTENT_TYPE);
+            if lines.iter().nth(1).is_some()
+                && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
+            {
                 return Err(anyhow::Error::new(extension_api::Rejected {
                     status: 400,
                     reason: "repeated content-type field lines with a multipart body".into(),

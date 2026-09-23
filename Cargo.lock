@@ -629,6 +629,7 @@ dependencies = [
  "bindgen",
  "bytes",
  "cc",
+ "http",
  "rapira_scoreboard",
  "tokio",
  "tracing",
@@ -737,6 +738,7 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "extension_api",
+ "http",
  "httparse",
  "libc",
  "memchr",
@@ -959,6 +961,7 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "extension_api",
+ "http",
  "http-body-util",
  "libc",
  "php_sys",

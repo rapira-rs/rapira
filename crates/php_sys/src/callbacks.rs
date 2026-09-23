@@ -3,6 +3,10 @@ use crate::diagnostics::syslog_to_level;
 use crate::types::{Context, StreamState};
 use crate::*;
 use core::slice;
+use http::header::{
+    AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, FROM, HeaderMap, HeaderName, HeaderValue,
+    PROXY_AUTHORIZATION, REFERER,
+};
 use std::ffi::CStr;
 use std::io::Read;
 use std::mem::ManuallyDrop;
@@ -51,7 +55,7 @@ impl SapiHeaders {
 struct SapiHeader(*const sapi_header_struct);
 
 impl SapiHeader {
-    fn name_value(&self) -> Option<(String, Vec<u8>)> {
+    fn name_value(&self) -> Option<(HeaderName, HeaderValue)> {
         let sh = unsafe { &*self.0 };
         if sh.header.is_null() || sh.header_len == 0 {
             return None;
@@ -69,29 +73,55 @@ impl SapiHeader {
     }
 }
 
-/// Returns true for an RFC 9110 `tchar`, the byte set of `field-name = token`.
+/// `HeaderName::from_bytes` accepts only the RFC 9110 `tchar` set and `HeaderValue::from_bytes` only the field-value bytes.
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2
-pub(crate) fn is_tchar(b: u8) -> bool {
-    b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
-}
-
-/// Returns true for a byte that RFC 9110 permits in a field value.
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.5
-pub(crate) fn is_field_value_byte(b: u8) -> bool {
-    (b >= 0x20 && b != 0x7f) || b == b'\t'
+fn split_header_line(line: &[u8]) -> Option<(HeaderName, HeaderValue)> {
+    let i: usize = line.iter().position(|&b| b == b':')?;
+    let name = HeaderName::from_bytes(line[..i].trim_ascii()).ok()?;
+    let value = HeaderValue::from_bytes(line[i + 1..].trim_ascii()).ok()?;
+    Some((name, value))
 }
 
-fn split_header_line(line: &[u8]) -> Option<(String, Vec<u8>)> {
-    let i: usize = line.iter().position(|&b| b == b':')?;
-    let name: &[u8] = line[..i].trim_ascii();
-    let value: &[u8] = line[i + 1..].trim_ascii();
-    if name.is_empty() || !name.iter().all(|&b| is_tchar(b)) {
-        return None;
+/// Separator joining repeats of `name`; `None` marks a singleton field, where the first line wins and the rest are dropped.
+/// Combining is legal only for comma-list fields: https://www.rfc-editor.org/rfc/rfc9110#section-5.3
+/// `Cookie` rejoins on `"; "`: https://www.rfc-editor.org/rfc/rfc6265#section-4.2.1
+fn field_line_separator(name: &HeaderName) -> Option<&'static [u8]> {
+    static SINGLETON: [HeaderName; 6] = [
+        AUTHORIZATION,
+        PROXY_AUTHORIZATION,
+        CONTENT_TYPE,
+        CONTENT_LENGTH,
+        REFERER,
+        FROM,
+    ];
+    if SINGLETON.contains(name) {
+        None
+    } else if name == COOKIE {
+        Some(b"; ")
+    } else {
+        Some(b", ")
     }
-    if !value.iter().all(|&b| is_field_value_byte(b)) {
-        return None;
+}
+
+/// Returns the one CGI value of `name`. Repeated lines join into `buf` on the field separator; a single line or a singleton field returns the first line and leaves `buf` unchanged.
+pub(crate) fn joined_field<'a>(
+    headers: &'a HeaderMap,
+    name: &HeaderName,
+    buf: &'a mut Vec<u8>,
+) -> Option<&'a [u8]> {
+    let mut values = headers.get_all(name).iter().map(HeaderValue::as_bytes);
+    let first = values.next()?;
+    let (Some(sep), Some(second)) = (field_line_separator(name), values.next()) else {
+        return Some(first);
+    };
+    buf.clear();
+    buf.extend_from_slice(first);
+    for value in std::iter::once(second).chain(values) {
+        buf.extend_from_slice(sep);
+        buf.extend_from_slice(value);
     }
-    Some((std::str::from_utf8(name).ok()?.to_owned(), value.to_vec()))
+    Some(buf)
 }
 
 /// Writes the NUL-terminated `HTTP_` meta-variable name of `field` into `buf`.
@@ -111,21 +141,22 @@ fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
 }
 
 /// php_register_variable_safe is last-write-wins, so the call order is the precedence rule: CONTENT_LENGTH, then HTTP_*.
+/// Each name registers once, with its repeats joined.
 /// Owned buffers stay in ManuallyDrop because `put` can bail out over this frame.
-fn cgi_header_vars(
-    headers: &[(String, Vec<u8>)],
-    content_length: i64,
-    mut put: impl FnMut(&CStr, &[u8]),
-) {
+fn cgi_header_vars(headers: &HeaderMap, content_length: i64, mut put: impl FnMut(&CStr, &[u8])) {
     if content_length >= 0 {
         let len = ManuallyDrop::new(content_length.to_string());
         put(c"CONTENT_LENGTH", len.as_bytes());
         drop(ManuallyDrop::into_inner(len));
     }
     let mut name = ManuallyDrop::new(Vec::new());
-    for (field, value) in headers {
-        put(cgi_header_name(&mut name, field), value);
+    let mut joined = ManuallyDrop::new(Vec::new());
+    for field in headers.keys() {
+        if let Some(value) = joined_field(headers, field, &mut joined) {
+            put(cgi_header_name(&mut name, field.as_str()), value);
+        }
     }
+    drop(ManuallyDrop::into_inner(joined));
     drop(ManuallyDrop::into_inner(name));
 }
 
@@ -151,7 +182,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
 
             if ctx.stream == StreamState::NotSent {
                 let status = unsafe { SapiHeaders(&mut (*rapira_sg()).sapi_headers).status() };
-                ctx.commit_head(status, vec![]);
+                ctx.commit_head(status, HeaderMap::new());
             }
 
             if let Some(tx) = &ctx.sender {
@@ -205,7 +236,7 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
         };
 
         let h = SapiHeaders(h);
-        let headers: Vec<(String, Vec<u8>)> = h
+        let headers: HeaderMap = h
             .lines()
             .filter_map(|l: SapiHeader| l.name_value())
             .collect();
@@ -279,9 +310,12 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         let auth_type: &[u8] = ctx
             .req
             .headers
-            .iter()
-            .find(|(k, _)| k.eq_ignore_ascii_case("authorization"))
-            .and_then(|(_, v)| v.split(|b| b.is_ascii_whitespace()).find(|s| !s.is_empty()))
+            .get(AUTHORIZATION)
+            .and_then(|v| {
+                v.as_bytes()
+                    .split(|b| b.is_ascii_whitespace())
+                    .find(|s| !s.is_empty())
+            })
             .unwrap_or(b"");
         put_bytes(c"AUTH_TYPE", auth_type);
 
@@ -312,7 +346,7 @@ pub(crate) fn send_error_head(c: &mut Context, status: u16) {
     if c.stream != StreamState::NotSent {
         return;
     }
-    c.commit_head(status, vec![]);
+    c.commit_head(status, HeaderMap::new());
 }
 
 pub(crate) fn finalize_response(c: &mut Context, errored: bool) -> bool {
@@ -337,8 +371,8 @@ mod tests {
     #[test]
     fn header_line_trims_both_halves() {
         let (name, value) = split_header_line(b"X-Trace :  hello  ").unwrap();
-        assert_eq!(name, "X-Trace");
-        assert_eq!(value, b"hello");
+        assert_eq!(name, "x-trace");
+        assert_eq!(value, "hello");
     }
 
     /// sapi_header_op screens only CR, LF and NUL, so these still arrive here.
@@ -352,10 +386,116 @@ mod tests {
     #[test]
     fn obs_text_and_underscores_stay_legal() {
         assert_eq!(
-            split_header_line(b"X-Bin: \xff\xfe").unwrap().1,
+            split_header_line(b"X-Bin: \xff\xfe").unwrap().1.as_bytes(),
             b"\xff\xfe"
         );
-        assert_eq!(split_header_line(b"X_Custom: 1").unwrap().0, "X_Custom");
+        assert_eq!(split_header_line(b"X_Custom: 1").unwrap().0, "x_custom");
+    }
+
+    fn map(lines: &[(&str, &str)]) -> HeaderMap {
+        lines
+            .iter()
+            .map(|(k, v)| {
+                (
+                    HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    HeaderValue::from_str(v).unwrap(),
+                )
+            })
+            .collect()
+    }
+
+    /// List fields join on ", ", Cookie on "; ", and a singleton field keeps its first line.
+    #[test]
+    fn repeated_field_lines_join_per_field() {
+        struct Case {
+            name: &'static str,
+            lines: &'static [(&'static str, &'static str)],
+            field: &'static str,
+            want: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "cookie joins on a semicolon",
+                lines: &[
+                    ("cookie", "a=1"),
+                    ("x-forwarded-for", "1.2.3.4"),
+                    ("Cookie", "b=2"),
+                ],
+                field: "cookie",
+                want: Some("a=1; b=2"),
+            },
+            Case {
+                name: "list field joins on a comma",
+                lines: &[
+                    ("x-forwarded-for", "1.2.3.4"),
+                    ("accept", "text/*"),
+                    ("X-Forwarded-For", "5.6.7.8"),
+                ],
+                field: "x-forwarded-for",
+                want: Some("1.2.3.4, 5.6.7.8"),
+            },
+            Case {
+                name: "single line passes through",
+                lines: &[("accept", "text/*")],
+                field: "accept",
+                want: Some("text/*"),
+            },
+            Case {
+                name: "authorization keeps the first line",
+                lines: &[
+                    ("authorization", "Bearer one"),
+                    ("Authorization", "Bearer two"),
+                ],
+                field: "authorization",
+                want: Some("Bearer one"),
+            },
+            Case {
+                name: "content-type keeps the first line",
+                lines: &[
+                    ("content-type", "text/plain"),
+                    ("content-type", "text/html"),
+                ],
+                field: "content-type",
+                want: Some("text/plain"),
+            },
+            Case {
+                name: "absent field has no value",
+                lines: &[("accept", "text/*")],
+                field: "referer",
+                want: None,
+            },
+        ];
+        for case in cases {
+            let headers = map(case.lines);
+            let mut buf = Vec::new();
+            let got = joined_field(&headers, &HeaderName::from_static(case.field), &mut buf);
+            assert_eq!(got, case.want.map(str::as_bytes), "{}", case.name);
+        }
+    }
+
+    /// `HTTP_*` registration is last-write-wins: each name registers once, after CONTENT_LENGTH, in the order of its first line.
+    #[test]
+    fn cgi_header_vars_register_each_name_once() {
+        let headers = map(&[
+            ("x-forwarded-for", "1.2.3.4"),
+            ("cookie", "a=1"),
+            ("x-forwarded-for", "5.6.7.8"),
+            ("cookie", "b=2"),
+        ]);
+        let mut got = Vec::new();
+        cgi_header_vars(&headers, 5, |name, value| {
+            got.push((
+                name.to_str().unwrap().to_owned(),
+                String::from_utf8(value.to_vec()).unwrap(),
+            ));
+        });
+        let want = [
+            ("CONTENT_LENGTH", "5"),
+            ("HTTP_X_FORWARDED_FOR", "1.2.3.4, 5.6.7.8"),
+            ("HTTP_COOKIE", "a=1; b=2"),
+        ]
+        .map(|(n, v)| (n.to_owned(), v.to_owned()));
+        assert_eq!(got, want);
     }
 
     /// The front screens field names against `[A-Za-z0-9-]`; that screen is complete only while this mapper rewrites nothing but `-`.

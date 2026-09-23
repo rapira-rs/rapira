@@ -60,6 +60,10 @@ pub(crate) struct RespBody {
     transport: Option<(u64, tokio::sync::watch::Receiver<bridge::ConnectionState>)>,
 }
 
+#[expect(
+    clippy::large_enum_variant,
+    reason = "one value per response; a Box would cost an allocation per response"
+)]
 enum BodyKind {
     Reply(bridge::ReplyBody),
     Empty,
@@ -227,7 +231,7 @@ where
             &handler.closed,
             authority,
             reqs_counter,
-            &parts,
+            &mut parts,
             incoming,
             peer,
         )
@@ -284,7 +288,7 @@ impl Conn {
             &self.closed,
             state.authority,
             state.guard,
-            &parts,
+            &mut parts,
             body,
             peer,
         )
@@ -298,7 +302,7 @@ async fn serve_php<B>(
     closed: &tokio::sync::watch::Receiver<bridge::ConnectionState>,
     authority: Option<Vec<u8>>,
     guard: Arc<InflightReqCount>,
-    parts: &http::request::Parts,
+    parts: &mut http::request::Parts,
     body: B,
     peer: Peer,
 ) -> http::Response<RespBody>
@@ -552,7 +556,7 @@ mod tests {
     fn head(bodiless: bool) -> ReplyEvent {
         ReplyEvent::Head {
             status: 200,
-            headers: Vec::new(),
+            headers: http::HeaderMap::new(),
             content_length: None,
             bodiless,
         }
@@ -561,7 +565,7 @@ mod tests {
     fn head_cl(content_length: u64) -> ReplyEvent {
         ReplyEvent::Head {
             status: 200,
-            headers: Vec::new(),
+            headers: http::HeaderMap::new(),
             content_length: Some(content_length),
             bodiless: false,
         }
@@ -573,7 +577,7 @@ mod tests {
 
     fn end() -> ReplyEvent {
         ReplyEvent::End {
-            trailers: Vec::new(),
+            trailers: http::HeaderMap::new(),
             truncated: false,
         }
     }

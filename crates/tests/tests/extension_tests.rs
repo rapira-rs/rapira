@@ -1,4 +1,5 @@
 use extension_api::{Extension, Php, Request, Result};
+use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue, SET_COOKIE};
 use php_sys::{Mode, Rapira};
 use rapira_runtime::ExtensionRuntime;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -23,7 +24,7 @@ fn get_request(uri: &str) -> Request {
         server_port: 80,
         tls: None,
         received_at: None,
-        headers: Vec::new(),
+        headers: HeaderMap::new(),
         body: Vec::new(),
     }
 }
@@ -81,10 +82,10 @@ impl Extension for RejectDriver {
         let multipart_post = |body: Vec<u8>| {
             let mut r = get_request("/?from=a");
             r.method = "POST".into();
-            r.headers = vec![(
-                "content-type".into(),
-                b"multipart/form-data; boundary=B".to_vec(),
-            )];
+            r.headers = HeaderMap::from_iter([(
+                CONTENT_TYPE,
+                HeaderValue::from_static("multipart/form-data; boundary=B"),
+            )]);
             r.body = body;
             r
         };
@@ -121,17 +122,13 @@ impl Extension for RejectDriver {
             rejected.status
         );
 
-        let plain_line = || ("content-type".to_string(), b"text/plain".to_vec());
-        let multipart_line = || {
-            (
-                "content-type".to_string(),
-                b"multipart/form-data; boundary=EVIL".to_vec(),
-            )
-        };
-        for headers in [
-            vec![plain_line(), multipart_line()],
-            vec![multipart_line(), plain_line()],
+        let plain_line = HeaderValue::from_static("text/plain");
+        let multipart_line = HeaderValue::from_static("multipart/form-data; boundary=EVIL");
+        for lines in [
+            [plain_line.clone(), multipart_line.clone()],
+            [multipart_line.clone(), plain_line.clone()],
         ] {
+            let headers = HeaderMap::from_iter(lines.map(|v| (CONTENT_TYPE, v)));
             let mut smuggle = multipart_post(
                 b"--EVIL\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--EVIL--".to_vec(),
             );
@@ -155,7 +152,7 @@ impl Extension for RejectDriver {
             "method=POST body=",
         )?;
         let mut plain = multipart_post(b"--B\r\nnot really\r\n--B--".to_vec());
-        plain.headers = vec![("content-type".into(), b"text/plain".to_vec())];
+        plain.headers = HeaderMap::from_iter([(CONTENT_TYPE, plain_line)]);
         check(
             &exec_full(&php, plain).await?,
             "method=POST body=--B\r\nnot really\r\n--B--",
@@ -234,9 +231,7 @@ impl Extension for ErrorPathDriver {
         let resp = exec_full(&php, get_request("/")).await?;
         anyhow::ensure!(resp.status == 404, "expected 404, got {}", resp.status);
         anyhow::ensure!(
-            resp.headers
-                .iter()
-                .any(|(k, _)| k.eq_ignore_ascii_case("set-cookie")),
+            resp.headers.contains_key(SET_COOKIE),
             "the session Set-Cookie must survive the buffered error path"
         );
         Ok(())
