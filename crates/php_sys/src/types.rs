@@ -186,8 +186,6 @@ pub struct ReqC {
     pub cookie: Option<CString>,
     pub authorization: Option<CString>,
     pub env: HashMap<Box<[u8]>, CString>,
-    /// One deterministic value per name for the `HTTP_*` mapping (crate::fold).
-    pub folded_headers: FieldLines,
     pub remote_addr: String,
     pub remote_port: String,
     pub server_port: String,
@@ -211,11 +209,13 @@ fn cgi_cstring(field: &str, bytes: &[u8]) -> CString {
 }
 
 impl ReqC {
+    /// Folds `r.headers` to one value per name for the `HTTP_*` mapping (crate::fold).
     /// Cookie repeats rejoin on "; ", the cookie-string form php-src's parser expects.
-    pub fn build(r: &Request) -> Self {
-        let folded_headers = crate::fold::fold_field_lines(&r.headers);
+    pub fn build(r: &mut Request) -> Self {
+        crate::fold::fold_field_lines(&mut r.headers);
 
-        let cookie: Option<CString> = folded_headers
+        let cookie: Option<CString> = r
+            .headers
             .iter()
             .find(|(k, _)| k.eq_ignore_ascii_case("cookie"))
             .map(|(_, v)| cgi_cstring("Cookie", v));
@@ -258,7 +258,6 @@ impl ReqC {
                 .as_deref()
                 .map(|s| cgi_cstring("CONTENT_TYPE", s)),
             env,
-            folded_headers,
             remote_addr,
             remote_port,
             server_port: r.server_port.to_string(),
@@ -286,8 +285,8 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(req: Request, sender: Sender<Frame>, superglobals: bool) -> Self {
-        let c = superglobals.then(|| ReqC::build(&req));
+    pub fn new(mut req: Request, sender: Sender<Frame>, superglobals: bool) -> Self {
+        let c = superglobals.then(|| ReqC::build(&mut req));
         Self {
             req,
             c,

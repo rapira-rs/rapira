@@ -3,7 +3,6 @@ use crate::diagnostics::syslog_to_level;
 use crate::types::{Context, StreamState};
 use crate::*;
 use core::slice;
-use std::borrow::Cow;
 use std::ffi::{CStr, CString};
 use std::io::Read;
 use std::mem::ManuallyDrop;
@@ -93,44 +92,45 @@ fn split_header_line(line: &[u8]) -> Option<(String, Vec<u8>)> {
     Some((std::str::from_utf8(name).ok()?.to_owned(), value.to_vec()))
 }
 
+/// Writes the NUL-terminated `HTTP_` name of `field` into `buf`.
 /// (RFC 3875 §4.1.18, https://www.rfc-editor.org/rfc/rfc3875#section-4.1.18)
-fn cgi_header_name(field: &str) -> CString {
-    let mut name: Vec<u8> = Vec::with_capacity(b"HTTP_".len() + field.len() + 1);
-    name.extend_from_slice(b"HTTP_");
+fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
+    buf.clear();
+    buf.extend_from_slice(b"HTTP_");
     for &b in field.as_bytes() {
-        name.push(if b == b'-' {
+        buf.push(if b == b'-' {
             b'_'
         } else {
             b.to_ascii_uppercase()
         });
     }
-    CString::new(name).unwrap_or_default()
+    buf.push(0);
+    CStr::from_bytes_until_nul(buf).unwrap_or_default()
 }
 
-fn cgi_header_vars<'a>(
-    headers: &'a [(String, Vec<u8>)],
+/// php_register_variable_safe is last-write-wins, so the call order is the precedence rule: CONTENT_LENGTH, then HTTP_*, then host-supplied server vars.
+/// Owned buffers stay in ManuallyDrop because `put` can bail out over this frame.
+fn cgi_header_vars(
+    headers: &[(String, Vec<u8>)],
     content_length: i64,
-    server_vars: &'a [(String, String)],
-) -> ManuallyDrop<Vec<(CString, Cow<'a, [u8]>)>> {
-    let mut pairs: Vec<(CString, Cow<'a, [u8]>)> =
-        Vec::with_capacity(1 + headers.len() + server_vars.len());
-
+    server_vars: &[(String, String)],
+    mut put: impl FnMut(&CStr, &[u8]),
+) {
     if content_length >= 0 {
-        pairs.push((
-            c"CONTENT_LENGTH".to_owned(),
-            Cow::Owned(content_length.to_string().into_bytes()),
-        ));
+        let len = ManuallyDrop::new(content_length.to_string());
+        put(c"CONTENT_LENGTH", len.as_bytes());
+        drop(ManuallyDrop::into_inner(len));
     }
+    let mut name = ManuallyDrop::new(Vec::new());
     for (field, value) in headers {
-        pairs.push((cgi_header_name(field), Cow::Borrowed(value.as_slice())));
+        put(cgi_header_name(&mut name, field), value);
     }
+    drop(ManuallyDrop::into_inner(name));
     for (name, value) in server_vars {
-        pairs.push((
-            CString::new(name.as_str()).unwrap_or_default(),
-            Cow::Borrowed(value.as_bytes()),
-        ));
+        let name = ManuallyDrop::new(CString::new(name.as_str()).unwrap_or_default());
+        put(&name, value.as_bytes());
+        drop(ManuallyDrop::into_inner(name));
     }
-    ManuallyDrop::new(pairs)
 }
 
 /// # Safety
@@ -299,15 +299,12 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             put_bytes(c"CONTENT_TYPE", ct);
         }
 
-        let pairs = cgi_header_vars(
-            &reqc.folded_headers,
+        cgi_header_vars(
+            &ctx.req.headers,
             ctx.req.content_length,
             &ctx.req.server_vars,
+            put_bytes,
         );
-        for (name, val) in pairs.iter() {
-            put_bytes(name, &val[..]);
-        }
-        drop(ManuallyDrop::into_inner(pairs));
     })
 }
 pub(crate) unsafe extern "C" fn getenv_cb(name: *const c_char, name_len: usize) -> *mut c_char {
@@ -359,13 +356,6 @@ mod tests {
             .collect()
     }
 
-    fn names(pairs: &[(CString, Cow<[u8]>)]) -> Vec<String> {
-        pairs
-            .iter()
-            .map(|(n, _)| n.to_string_lossy().into_owned())
-            .collect()
-    }
-
     #[test]
     fn header_line_needs_a_colon_and_a_name() {
         assert!(split_header_line(b"no colon here").is_none());
@@ -398,25 +388,41 @@ mod tests {
     }
 
     /// The front screens field names against `[A-Za-z0-9-]`; that screen is complete only while this mapper rewrites nothing but `-`.
+    /// One buffer serves every name of a request, so a shorter name after a longer one must not keep the old tail.
     #[test]
     fn cgi_header_name_rewrites_only_dash() {
-        assert_eq!(cgi_header_name("x-foo").to_bytes(), b"HTTP_X_FOO");
-        assert_eq!(cgi_header_name("x_foo").to_bytes(), b"HTTP_X_FOO");
-        assert_eq!(cgi_header_name("x.foo").to_bytes(), b"HTTP_X.FOO");
-        assert_eq!(cgi_header_name("x~foo").to_bytes(), b"HTTP_X~FOO");
+        let mut buf = Vec::new();
+        assert_eq!(cgi_header_name(&mut buf, "x-foo").to_bytes(), b"HTTP_X_FOO");
+        assert_eq!(cgi_header_name(&mut buf, "x_foo").to_bytes(), b"HTTP_X_FOO");
+        assert_eq!(cgi_header_name(&mut buf, "x.foo").to_bytes(), b"HTTP_X.FOO");
+        assert_eq!(cgi_header_name(&mut buf, "x~foo").to_bytes(), b"HTTP_X~FOO");
+        assert_eq!(
+            cgi_header_name(&mut buf, "accept-language").to_bytes(),
+            b"HTTP_ACCEPT_LANGUAGE"
+        );
+        assert_eq!(
+            cgi_header_name(&mut buf, "accept").to_bytes(),
+            b"HTTP_ACCEPT"
+        );
     }
 
-    /// php_register_variable_safe is last-write-wins, so batch order is the precedence rule: CONTENT_LENGTH, then HTTP_*, then host-supplied server vars.
+    /// A shorter name after a longer one checks that the reused name buffer keeps no stale bytes.
     #[test]
     fn registration_order_gives_server_vars_precedence() {
-        let headers = hdrs(&[("accept", "text/*")]);
+        let headers = hdrs(&[("accept-language", "en"), ("accept", "text/*")]);
         let server_vars = [("HTTP_ACCEPT".to_owned(), "override".to_owned())];
-        let pairs = ManuallyDrop::into_inner(cgi_header_vars(&headers, 12, &server_vars));
+        let mut pairs: Vec<(String, Vec<u8>)> = Vec::new();
+        cgi_header_vars(&headers, 12, &server_vars, |n, v| {
+            pairs.push((n.to_string_lossy().into_owned(), v.to_vec()))
+        });
         assert_eq!(
-            names(&pairs),
-            ["CONTENT_LENGTH", "HTTP_ACCEPT", "HTTP_ACCEPT"]
+            pairs,
+            hdrs(&[
+                ("CONTENT_LENGTH", "12"),
+                ("HTTP_ACCEPT_LANGUAGE", "en"),
+                ("HTTP_ACCEPT", "text/*"),
+                ("HTTP_ACCEPT", "override"),
+            ])
         );
-        assert_eq!(pairs[0].1.as_ref(), b"12");
-        assert_eq!(pairs[2].1.as_ref(), b"override");
     }
 }

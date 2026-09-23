@@ -20,14 +20,20 @@ pub(crate) fn field_line_separator(name: &str) -> Option<&'static [u8]> {
 }
 
 /// `HTTP_*` registration is last-write-wins, so repeats must be folded to one entry per name here.
-pub(crate) fn fold_field_lines(headers: &[(String, Vec<u8>)]) -> Vec<(String, Vec<u8>)> {
-    let mut folded: Vec<(String, Vec<u8>)> = Vec::with_capacity(headers.len());
-    for (name, value) in headers {
-        match folded
+/// Folds in place: each name keeps the position of its first line.
+pub(crate) fn fold_field_lines(headers: &mut Vec<(String, Vec<u8>)>) {
+    let mut kept = 0;
+    for i in 0..headers.len() {
+        let (head, tail) = headers.split_at_mut(i);
+        let (name, value) = &tail[0];
+        match head[..kept]
             .iter_mut()
             .find(|(n, _)| n.eq_ignore_ascii_case(name))
         {
-            None => folded.push((name.clone(), value.clone())),
+            None => {
+                headers.swap(kept, i);
+                kept += 1;
+            }
             Some((n, joined)) => {
                 if let Some(sep) = field_line_separator(n) {
                     joined.extend_from_slice(sep);
@@ -36,7 +42,7 @@ pub(crate) fn fold_field_lines(headers: &[(String, Vec<u8>)]) -> Vec<(String, Ve
             }
         }
     }
-    folded
+    headers.truncate(kept);
 }
 
 #[cfg(test)]
@@ -52,28 +58,32 @@ mod tests {
 
     #[test]
     fn repeated_field_lines_fold_on_their_separator() {
-        let folded = fold_field_lines(&hdrs(&[
+        let mut folded = hdrs(&[
             ("cookie", "a=1"),
             ("x-forwarded-for", "1.2.3.4"),
             ("Cookie", "b=2"),
             ("x-forwarded-for", "5.6.7.8"),
-        ]));
+            ("accept", "text/*"),
+        ]);
+        fold_field_lines(&mut folded);
         assert_eq!(
             folded,
             hdrs(&[
                 ("cookie", "a=1; b=2"),
                 ("x-forwarded-for", "1.2.3.4, 5.6.7.8"),
+                ("accept", "text/*"),
             ])
         );
     }
 
     #[test]
     fn repeated_singleton_field_lines_keep_only_the_first() {
-        let folded = fold_field_lines(&hdrs(&[
+        let mut folded = hdrs(&[
             ("authorization", "Bearer one"),
             ("Authorization", "Bearer two"),
             ("content-type", "text/plain"),
-        ]));
+        ]);
+        fold_field_lines(&mut folded);
         assert_eq!(
             folded,
             hdrs(&[
