@@ -229,7 +229,7 @@ where
             reqs_counter,
             &parts,
             incoming,
-            &peer,
+            peer,
         )
         .await;
     }
@@ -286,7 +286,7 @@ impl Conn {
             state.guard,
             &parts,
             body,
-            &peer,
+            peer,
         )
         .await
         .map(BodyExt::boxed_unsync)
@@ -300,7 +300,7 @@ async fn serve_php<B>(
     guard: Arc<InflightReqCount>,
     parts: &http::request::Parts,
     body: B,
-    peer: &Peer,
+    peer: Peer,
 ) -> http::Response<RespBody>
 where
     B: Body<Data = bytes::Bytes> + Unpin,
@@ -308,7 +308,7 @@ where
 {
     let cfg = &shared.cfg;
     let mut body = body;
-    let mut collected: Vec<u8> = Vec::new();
+    let mut collected: Vec<u8> = Vec::with_capacity(body.size_hint().lower() as usize);
     loop {
         // hyper only times the head read, so each body frame gets its own progress bound here.
         let frame = match tokio::time::timeout(cfg.keepalive_timeout, body.frame()).await {
