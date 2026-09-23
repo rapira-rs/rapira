@@ -312,7 +312,9 @@ where
 {
     let cfg = &shared.cfg;
     let mut body = body;
-    let mut collected: Vec<u8> = Vec::with_capacity(body.size_hint().lower() as usize);
+    // The direct path bounds the hint through the content-length check; a middleware body can report any lower bound.
+    let reserve = body.size_hint().lower().min(cfg.max_body_size as u64) as usize;
+    let mut collected: Vec<u8> = Vec::with_capacity(reserve);
     loop {
         // hyper only times the head read, so each body frame gets its own progress bound here.
         let frame = match tokio::time::timeout(cfg.keepalive_timeout, body.frame()).await {
