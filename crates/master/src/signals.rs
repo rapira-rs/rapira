@@ -6,8 +6,6 @@ use libc::c_int;
 
 /// Write end of the self-pipe; `-1` until install, set once before handlers are armed.
 static SELF_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
-/// Master pid captured at install; the handler refuses to write from any other process.
-static MASTER_PID: AtomicI32 = AtomicI32::new(0);
 
 /// Control bytes emitted by the handler, consumed by the poll loop.
 pub(crate) const SIG_TERM: u8 = b'T';
@@ -62,12 +60,8 @@ fn errno_set(v: c_int) {
     unsafe { *errno_location() = v }
 }
 
-/// Async-signal-safe (`getpid`, `write`, errno save/restore); the pid guard keeps a child that took a signal inside the fork window out of the master's pipe.
+/// Async-signal-safe (`write`, errno save/restore).
 extern "C" fn master_sig_handler(signo: c_int) {
-    // SAFETY: getpid is async-signal-safe.
-    if unsafe { libc::getpid() } != MASTER_PID.load(Ordering::Relaxed) {
-        return;
-    }
     let byte: u8 = match signo {
         libc::SIGTERM => SIG_TERM,
         libc::SIGINT => SIG_INT,
@@ -160,8 +154,6 @@ pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
         set_cloexec(fd)?;
     }
 
-    // SAFETY: getpid is always safe.
-    MASTER_PID.store(unsafe { libc::getpid() }, Ordering::Relaxed);
     SELF_PIPE_WR.store(sp[1], Ordering::Relaxed);
 
     // SAFETY: act is fully initialized, mask is a live sigset_t, null old-action pointer discards the previous handler.
@@ -189,11 +181,6 @@ pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
         rd: unsafe { OwnedFd::from_raw_fd(sp[0]) },
         wr: unsafe { OwnedFd::from_raw_fd(sp[1]) },
     })
-}
-
-#[cfg(target_os = "linux")]
-pub(crate) fn master_pid() -> c_int {
-    MASTER_PID.load(Ordering::Relaxed)
 }
 
 #[cfg(test)]

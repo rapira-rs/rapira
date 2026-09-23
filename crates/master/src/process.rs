@@ -7,8 +7,6 @@ use libc::c_int;
 
 use crate::WorkerEnv;
 use crate::lifeline::Lifeline;
-#[cfg(target_os = "linux")]
-use crate::signals::master_pid;
 use crate::signals::{MASTER_SIGNALS, SelfPipe, sigset};
 use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY};
 use rapira_scoreboard::SharedSlot;
@@ -242,13 +240,7 @@ fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
                 libc::sigaction(libc::SIGUSR2, &ign, std::ptr::null_mut());
 
                 #[cfg(target_os = "linux")]
-                {
-                    libc::prctl(libc::PR_SET_PDEATHSIG, libc::SIGQUIT);
-                    libc::prctl(libc::PR_SET_NAME, c"rapira-worker".as_ptr());
-                    if libc::getppid() != master_pid() {
-                        libc::kill(libc::getpid(), libc::SIGQUIT);
-                    }
-                }
+                libc::prctl(libc::PR_SET_NAME, c"rapira-worker".as_ptr());
 
                 let hold = sigset(&[libc::SIGQUIT, libc::SIGINT]);
                 libc::sigprocmask(libc::SIG_SETMASK, &hold, std::ptr::null_mut());
