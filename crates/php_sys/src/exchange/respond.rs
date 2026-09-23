@@ -1,4 +1,4 @@
-use super::headers::{forbidden_trailer, split_framing, strip_framing, walk_head_table};
+use super::headers::{forbidden_trailer, split_framing, walk_head_table};
 use super::*;
 
 /// Cores return these instead of throwing: no owned state may be live when `zend_throw_*` bailouts.
@@ -152,11 +152,6 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
             p.upload.file.unlink();
         }
     }
-    update(|c| {
-        if let Unit::Handling(p) = c.unit {
-            c.unit = Unit::Sealed(p);
-        }
-    });
     sb_update(Event::Handled(true));
     if let Some(tx) = st.job.ctx.sender.take() {
         let _ = tx.try_send(Frame::End {
@@ -240,10 +235,7 @@ pub(super) unsafe fn write_head_core(
         return Verb::HeadWritten;
     }
     if status != 101 && (100..200).contains(&status) {
-        let head = ResponseHead {
-            status,
-            headers: strip_framing(headers),
-        };
+        let head = ResponseHead { status, headers };
         return match unsafe { send_frame(st, Frame::Interim(head)) } {
             Ok(()) => Verb::Ok,
             Err(Closed) => {
@@ -401,12 +393,7 @@ pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: Fie
         }
     }
     st.stage = Stage::Finalized;
-    update(|c| {
-        if let Unit::Handling(p) = c.unit {
-            c.unit = Unit::Sealed(p);
-        }
-        c.served = true;
-    });
+    update(|c| c.served = true);
     sb_update(Event::Handled(truncated));
     let _ = unsafe {
         send_frame(
@@ -478,8 +465,8 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
     guard((), || {
         let ptr: *mut ExchangeState = job.cast();
         update(|c| {
-            if matches!(c.unit, Unit::Handling(p) | Unit::Sealed(p) if p == ptr) {
-                c.unit = Unit::Idle;
+            if c.unit == Some(ptr) {
+                c.unit = None;
             }
         });
         let mut st = unsafe { Box::from_raw(ptr) };

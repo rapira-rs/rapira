@@ -148,7 +148,7 @@ void rapira_register_classes(void) {
     memcpy(&rapira_exchange_handlers, &std_object_handlers,
            sizeof(rapira_exchange_handlers));
     rapira_exchange_handlers.clone_obj = NULL;
-    rapira_exchange_handlers.offset = RAPIRA_STD_OFFSET(rapira_exchange_obj);
+    rapira_exchange_handlers.offset = offsetof(rapira_exchange_obj, std);
     rapira_exchange_handlers.free_obj = rapira_exchange_free;
     rapira_ce_internal_http_exchange->create_object = rapira_exchange_create;
     rapira_ce_internal_http_exchange->default_object_handlers =
@@ -157,7 +157,7 @@ void rapira_register_classes(void) {
     memcpy(&rapira_info_handlers, &std_object_handlers,
            sizeof(rapira_info_handlers));
     rapira_info_handlers.clone_obj = NULL;
-    rapira_info_handlers.offset = RAPIRA_STD_OFFSET(rapira_dispatcher_info_obj);
+    rapira_info_handlers.offset = offsetof(rapira_dispatcher_info_obj, std);
     rapira_ce_internal_http_dispatcher_info->create_object =
         rapira_dispatcher_info_create;
     rapira_ce_internal_http_dispatcher_info->default_object_handlers =

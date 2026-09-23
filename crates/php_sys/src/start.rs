@@ -73,6 +73,7 @@ impl Rapira {
         check_linked_php()?;
         let mut module: _sapi_module_struct = module::build_sapi_module();
         let started: bool = unsafe {
+            // The Rust runtime sets SIGPIPE to SIG_IGN before main, so a write to a closed peer returns EPIPE: https://doc.rust-lang.org/beta/unstable-book/compiler-flags/on-broken-pipe.html
             rapira_process_init();
             sapi_startup(&mut module);
             php_module_startup(&mut module, &raw mut rapira_module_entry) == SUCCESS

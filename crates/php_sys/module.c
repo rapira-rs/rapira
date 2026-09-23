@@ -266,12 +266,9 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     int outcome = OK;
     zval retval;
     ZVAL_UNDEF(&retval);
-    fci->size = sizeof *fci;
     // fci does not outlive this frame
     // cppcheck-suppress autoVariables
     fci->retval = &retval;
-    fci->param_count = 0;
-    fci->named_params = NULL;
 
     // only _zend_bailout sets it mid-request (zend.c:1264): 0->1 proves bailout
     bool unclean_at_entry = CG(unclean_shutdown);
@@ -426,14 +423,6 @@ void rapira_clear_last_error(void) {
 void rapira_process_init(void) {
     // ext_functions[] is file-static, so wire it up before php_module_startup
     rapira_module_entry.functions = rapira_php_functions();
-
-#if defined(SIGPIPE) && defined(SIG_IGN)
-    // Ignore SIGPIPE so writes to a hung-up client return EPIPE, not a signal.
-    if (signal(SIGPIPE, SIG_IGN) == SIG_ERR) {
-        perror("rapira: signal(SIGPIPE, SIG_IGN)");
-        abort();
-    }
-#endif
     zend_signal_startup();
 }
 

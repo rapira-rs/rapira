@@ -10,13 +10,16 @@ enum RecvMode {
 /// `return_value` writable; engine active on this thread.
 unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
-        if let Unit::Handling(ptr) = CYCLE.get().unit
+        if let Some(ptr) = CYCLE.get().unit
+            && (*ptr).stage != Stage::Finalized
             && (*ptr).host_closed()
         {
             tracing::debug!(target: "rapira", "receive() discarded an unfinalized exchange whose client left");
             super::respond::discard_unit(&mut *ptr);
         }
-        if matches!(CYCLE.get().unit, Unit::Handling(_)) {
+        if let Some(ptr) = CYCLE.get().unit
+            && (*ptr).stage != Stage::Finalized
+        {
             zend::throw_error(
                 c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first",
             );
@@ -48,7 +51,7 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                     }
                     let ptr = Box::into_raw(Box::new(st));
                     update(|c| {
-                        c.unit = Unit::Handling(ptr);
+                        c.unit = Some(ptr);
                         c.received = true;
                     });
                     (*exchange_from(obj.value.obj)).job = ptr.cast();
@@ -115,7 +118,12 @@ pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> b
         let _ = object_init_ex(return_value, rapira_ce_internal_http_dispatcher_info);
         let info = info_from((*return_value).value.obj);
         (*info).pending = pending_depth() as i64;
-        (*info).active = i64::from(matches!(CYCLE.get().unit, Unit::Handling(_)));
+        (*info).active = i64::from(
+            CYCLE
+                .get()
+                .unit
+                .is_some_and(|p| (*p).stage != Stage::Finalized),
+        );
         true
     })
 }

@@ -17,13 +17,6 @@ void rapira_register_classes(void);
 // ext_functions[] - needs const initialization
 const zend_function_entry *rapira_php_functions(void);
 
-// XtOffsetOf pre-8.6; offsetof from 8.6: https://github.com/php/php-src/blob/7114314c5a96c362b95663f7e7c9184586721f58/UPGRADING.INTERNALS#L99-L100
-#if PHP_VERSION_ID >= 80600
-#define RAPIRA_STD_OFFSET(type) offsetof(type, std)
-#else
-#define RAPIRA_STD_OFFSET(type) XtOffsetOf(type, std)
-#endif
-
 static zend_always_inline void rapira_throw_or_backstop(const char *what) {
     if (!EG(exception)) {
         zend_throw_error(NULL, "%s failed", what);
@@ -35,14 +28,14 @@ static zend_always_inline rapira_exchange_obj *
 rapira_exchange_from(zend_object *obj) {
     // std is embedded in the enclosing struct; step back by its offset to reach the C fields
     return (rapira_exchange_obj *)((char *)obj -
-                                   RAPIRA_STD_OFFSET(rapira_exchange_obj));
+                                   offsetof(rapira_exchange_obj, std));
 }
 
 static zend_always_inline rapira_dispatcher_info_obj *
 rapira_dispatcher_info_from(zend_object *obj) {
     return (rapira_dispatcher_info_obj *)((char *)obj -
-                                          RAPIRA_STD_OFFSET(
-                                              rapira_dispatcher_info_obj));
+                                          offsetof(rapira_dispatcher_info_obj,
+                                                   std));
 }
 
 #endif // RAPIRA_CLASSES_H

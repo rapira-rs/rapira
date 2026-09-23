@@ -50,33 +50,13 @@ pub(super) fn forbidden_trailer(name: &str) -> bool {
         .any(|f| name.eq_ignore_ascii_case(f))
 }
 
-pub(super) fn is_hop_by_hop(name: &str) -> bool {
-    // RFC 9110 §7.6.1 remove set plus proxy-connection; `trailer` is not hop-by-hop.
-    // https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1
-    [
-        "transfer-encoding",
-        "connection",
-        "keep-alive",
-        "upgrade",
-        "te",
-        "proxy-connection",
-    ]
-    .iter()
-    .any(|h| name.eq_ignore_ascii_case(h))
-}
-
-pub(super) fn strip_framing(mut headers: FieldLines) -> FieldLines {
-    headers.retain(|(n, _)| !is_hop_by_hop(n) && !n.eq_ignore_ascii_case("content-length"));
-    headers
-}
-
 pub(super) struct SplitHead {
     pub(super) headers: FieldLines,
     pub(super) declared_cl: Option<u64>,
     pub(super) body_coded: bool,
 }
 
-/// The host frames the response, so hop-by-hop fields drop silently here.
+/// Takes content-length out as the declared length; the front drops the hop-by-hop fields.
 pub(super) fn split_framing(headers: FieldLines) -> Result<SplitHead, &'static CStr> {
     let mut declared_cl: Option<u64> = None;
     let mut cl_lines = 0usize;
@@ -89,9 +69,6 @@ pub(super) fn split_framing(headers: FieldLines) -> Result<SplitHead, &'static C
                 return Err(c"content-length may not repeat");
             }
             declared_cl = parse_content_length(&v);
-            continue;
-        }
-        if is_hop_by_hop(&n) {
             continue;
         }
         if n.eq_ignore_ascii_case("content-encoding") {

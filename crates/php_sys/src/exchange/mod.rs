@@ -41,17 +41,10 @@ mod tests;
 
 pub use sendfile::set_sendfile_root;
 
-/// Live variants carry the Box pointer so paths where free_obj never runs (bailout) can still reclaim the unit.
-#[derive(Clone, Copy)]
-enum Unit {
-    Idle,
-    Handling(*mut ExchangeState),
-    Sealed(*mut ExchangeState),
-}
-
 #[derive(Clone, Copy)]
 struct CycleState {
-    unit: Unit,
+    /// The Box pointer of the unit handed out last, so paths where free_obj never runs (bailout) can still reclaim it.
+    unit: Option<*mut ExchangeState>,
     closed_seen: bool,
     served: bool,
     /// A unit was handed out this cycle: a fatal after that is an app failure, not a boot failure.
@@ -59,7 +52,7 @@ struct CycleState {
 }
 
 const CYCLE_IDLE: CycleState = CycleState {
-    unit: Unit::Idle,
+    unit: None,
     closed_seen: false,
     served: false,
     received: false,
@@ -82,8 +75,8 @@ pub(crate) fn cycle_reset() {
 
 /// Reclaim a unit free_obj never saw (shutdown bailout / allocation bailout).
 pub(crate) fn reclaim_current() {
-    if let Unit::Handling(ptr) | Unit::Sealed(ptr) = CYCLE.get().unit {
-        update(|c| c.unit = Unit::Idle);
+    if let Some(ptr) = CYCLE.get().unit {
+        update(|c| c.unit = None);
         // SAFETY: the pointer came from Box::into_raw in finish_pull, and exchange_drop untracks before reclaiming.
         let st = unsafe { Box::from_raw(ptr) };
         if st.stage != Stage::Finalized {

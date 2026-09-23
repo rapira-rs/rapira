@@ -84,7 +84,7 @@ fn state() -> (
     state_of(base_req())
 }
 
-/// An unsealed overflow would leave the unit in Handling and wedge every later receive() on the single-flight check.
+/// An unsealed overflow would leave the unit unfinalized and wedge every later receive() on the single-flight check.
 #[test]
 fn overflow_seals_the_unit_truncated() {
     let (mut st, mut rx) = state();
@@ -231,34 +231,23 @@ fn repeated_content_length_is_a_bad_field() {
     assert_eq!(st.stage, Stage::Open, "a rejected head commits nothing");
 }
 
-/// An interim head emits at once minus framing fields and leaves the final-head slot open.
+/// An interim head emits at once with its fields as written (the front frames the wire) and leaves the final-head slot open.
 #[test]
-fn interim_head_emits_without_framing_fields() {
+fn interim_head_emits_its_fields_and_leaves_the_final_head_open() {
     use crate::types::Frame;
     let (mut st, mut rx) = state();
-    let v = unsafe {
-        write_head_core(
-            &mut st,
-            103,
-            vec![
-                ("link".into(), b"</a.css>; rel=preload".to_vec()),
-                ("content-length".into(), b"5".to_vec()),
-                ("connection".into(), b"close".to_vec()),
-            ],
-        )
-    };
+    let fields: FieldLines = vec![
+        ("link".into(), b"</a.css>; rel=preload".to_vec()),
+        ("content-length".into(), b"5".to_vec()),
+        ("connection".into(), b"close".to_vec()),
+    ];
+    let v = unsafe { write_head_core(&mut st, 103, fields.clone()) };
     assert_eq!(v, Verb::Ok);
     let Ok(Frame::Interim(head)) = rx.try_recv() else {
         panic!("interim head must be on the stream");
     };
     assert_eq!(head.status, 103);
-    assert_eq!(
-        head.headers.len(),
-        1,
-        "framing fields stripped: {:?}",
-        head.headers
-    );
-    assert_eq!(head.headers[0].0, "link");
+    assert_eq!(head.headers, fields);
     let v = unsafe { write_head_core(&mut st, 200, Vec::new()) };
     assert_eq!(v, Verb::Ok, "the final-head slot stays open");
 }
