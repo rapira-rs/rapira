@@ -164,7 +164,7 @@ jobs:
             STEM: rapira-v${{ inputs.version }}-php${{ matrix.php_branch }}-${{ matrix.target_os }}-${{ matrix.arch }}
             PHP_FULL: ${{ matrix.php_branch == '8.4' && needs.prepare.outputs.php_84 || needs.prepare.outputs.php_85 }}
         steps:
-            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
                   ref: ${{ inputs.ref }}
                   persist-credentials: false
@@ -346,7 +346,7 @@ jobs:
             NFPM_SHA256: "3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97"
         steps:
             # Only nfpm reads the working tree here.
-            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v4
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               if: inputs.packages
               with:
                   ref: ${{ inputs.ref }}
