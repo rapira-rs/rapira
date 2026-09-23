@@ -9,7 +9,7 @@ pub use middleware::{
     Body, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer,
     Protocol, empty_body,
 };
-pub use prepare::{LISTEN_BACKLOG, ListenAddr, PrepareCtx, PreparedListener};
+pub use prepare::{ListenAddr, PrepareCtx, PreparedListener};
 
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 pub type FieldLines = Vec<(String, Vec<u8>)>;
