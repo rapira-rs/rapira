@@ -256,14 +256,15 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             );
         };
         let put = |name: &CStr, val: &str| put_bytes(name, val.as_bytes());
-        put(c"PHP_SELF", &ctx.req.script_name);
-        let doc_uri = ctx
+        let script = crate::context::script();
+        put(c"PHP_SELF", script.script_name);
+        let (doc_uri, query) = ctx
             .req
             .uri
             .split_once('?')
-            .map_or(ctx.req.uri.as_str(), |(p, _)| p);
+            .unwrap_or((ctx.req.uri.as_str(), ""));
         put(c"DOCUMENT_URI", doc_uri);
-        put(c"DOCUMENT_ROOT", &ctx.req.document_root);
+        put(c"DOCUMENT_ROOT", script.document_root);
         put(
             c"REQUEST_SCHEME",
             if ctx.req.https { "https" } else { "http" },
@@ -276,9 +277,9 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put(c"REMOTE_IDENT", "");
         put(c"REQUEST_METHOD", &ctx.req.method);
         put(c"REQUEST_URI", &ctx.req.uri);
-        put(c"QUERY_STRING", &ctx.req.query);
+        put(c"QUERY_STRING", query);
         put_bytes(c"SCRIPT_FILENAME", reqc.script.to_bytes());
-        put(c"SCRIPT_NAME", &ctx.req.script_name);
+        put(c"SCRIPT_NAME", script.script_name);
         put(c"SERVER_PROTOCOL", &ctx.req.protocol);
         put(c"SERVER_SOFTWARE", "Rapira");
         put(c"SERVER_NAME", &ctx.req.server_name);

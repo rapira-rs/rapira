@@ -2,8 +2,44 @@ use crate::{callbacks::guard, types::Context, *};
 use std::{
     ffi::c_char,
     os::raw::c_void,
+    path::Path,
     ptr::{null, null_mut},
+    sync::{PoisonError, RwLock},
 };
+
+/// The script paths of this worker process, the same for every request.
+#[derive(Clone, Copy)]
+pub(crate) struct ScriptPaths {
+    pub(crate) filename: &'static str,
+    pub(crate) script_name: &'static str,
+    pub(crate) document_root: &'static str,
+}
+
+static SCRIPT: RwLock<ScriptPaths> = RwLock::new(ScriptPaths {
+    filename: "",
+    script_name: "",
+    document_root: "",
+});
+
+/// Sets the script paths for all later requests. Each call leaks the new strings: a worker process sets them once.
+pub fn set_script(filename: &Path) {
+    let document_root = filename
+        .parent()
+        .map(|p| p.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    let script_name = filename
+        .file_name()
+        .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
+    *SCRIPT.write().unwrap_or_else(PoisonError::into_inner) = ScriptPaths {
+        filename: filename.to_string_lossy().into_owned().leak(),
+        script_name: script_name.leak(),
+        document_root: document_root.leak(),
+    };
+}
+
+pub(crate) fn script() -> ScriptPaths {
+    *SCRIPT.read().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// # Safety
 /// Aliases per-thread `SG(server_context)`; sound only while a worker services one request at a time, and the reference must not be held across another `ctx()` call.

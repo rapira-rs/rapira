@@ -5,7 +5,7 @@ use extension_api::{Extension, Php, PrepareCtx};
 use php_sys::RapiraHandle;
 use std::future::Future;
 use std::io::Cursor;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::Arc;
 use std::time::Duration;
@@ -90,7 +90,7 @@ impl ExtensionRuntime {
         opts: RuntimeOptions,
     ) -> Running {
         let grace = opts.grace;
-        let php = Php::new(Arc::new(RapiraBackend::new(rapira, script, opts)));
+        let php = Php::new(Arc::new(RapiraBackend::new(rapira, &script, opts)));
         let (stop_tx, stop_rx) = watch::channel(false);
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
@@ -137,9 +137,6 @@ impl Default for RuntimeOptions {
 
 struct RapiraBackend {
     rapira: RapiraHandle,
-    filename: PathBuf,
-    document_root: String,
-    script_name: String,
     dispatcher: bool,
     uploads: Arc<multipart::Limits>,
 }
@@ -173,20 +170,11 @@ fn parse_err(e: multipart::ParseError) -> anyhow::Error {
 }
 
 impl RapiraBackend {
-    fn new(rapira: RapiraHandle, filename: PathBuf, opts: RuntimeOptions) -> Self {
-        let document_root = filename
-            .parent()
-            .map(|p| p.to_string_lossy().into_owned())
-            .unwrap_or_default();
-        let script_name = filename
-            .file_name()
-            .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
+    fn new(rapira: RapiraHandle, filename: &Path, opts: RuntimeOptions) -> Self {
+        php_sys::set_script(filename);
         let dispatcher = rapira.dispatcher();
         Self {
             rapira,
-            filename,
-            document_root,
-            script_name,
             dispatcher,
             uploads: opts.uploads,
         }
@@ -197,7 +185,6 @@ impl RapiraBackend {
         &self,
         mut req: extension_api::Request,
     ) -> anyhow::Result<php_sys::Request> {
-        let query = req.uri.split_once('?').map_or("", |(_, q)| q).to_string();
         let content_type = req
             .headers
             .iter()
@@ -244,7 +231,6 @@ impl RapiraBackend {
         Ok(php_sys::Request {
             method: req.method,
             https: req.https,
-            query,
             protocol: req.protocol,
             target: req.target.filter(|t| !t.is_empty()),
             authority: req.authority.filter(|a| !a.is_empty()),
@@ -252,9 +238,6 @@ impl RapiraBackend {
             server: map_addr(req.server),
             server_name: req.server_name,
             server_port: req.server_port,
-            script_name: self.script_name.clone(),
-            document_root: self.document_root.clone(),
-            script_filename: self.filename.clone(),
             content_type,
             content_length,
             body,

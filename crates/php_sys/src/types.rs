@@ -145,7 +145,6 @@ pub struct Request {
     /// Byte-for-byte as the client named it; None = the client named none.
     pub authority: Option<Vec<u8>>,
     pub https: bool,
-    pub query: String,
     /// Wire/CGI spelling ("HTTP/2.0"); mapped to the contract spelling at the exchange view.
     pub protocol: String,
     pub remote: Addr,
@@ -153,9 +152,6 @@ pub struct Request {
     /// Configured CGI SERVER_NAME/SERVER_PORT, also the $uri synthesis fallback.
     pub server_name: String,
     pub server_port: u16,
-    pub script_name: String,
-    pub document_root: String,
-    pub script_filename: PathBuf,
     pub headers: FieldLines,
     pub server_vars: Vec<(String, String)>,
     /// First content-type field line, raw bytes.
@@ -247,11 +243,14 @@ impl ReqC {
 
         Self {
             method: cgi_cstring("REQUEST_METHOD", r.method.as_bytes()),
-            query: cgi_cstring("QUERY_STRING", r.query.as_bytes()),
+            query: cgi_cstring(
+                "QUERY_STRING",
+                r.uri.split_once('?').map_or("", |(_, q)| q).as_bytes(),
+            ),
             uri: cgi_cstring("REQUEST_URI", r.uri.as_bytes()),
             script: cgi_cstring(
                 "SCRIPT_FILENAME",
-                r.script_filename.to_string_lossy().as_bytes(),
+                crate::context::script().filename.as_bytes(),
             ),
             cookie,
             authorization,
@@ -398,15 +397,11 @@ mod tests {
                 target: None,
                 authority: None,
                 https: false,
-                query: String::new(),
                 protocol: String::new(),
                 remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
                 server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
                 server_name: String::new(),
                 server_port: 8080,
-                script_name: String::new(),
-                document_root: String::new(),
-                script_filename: PathBuf::new(),
                 headers: Vec::new(),
                 server_vars: Vec::new(),
                 content_type: None,

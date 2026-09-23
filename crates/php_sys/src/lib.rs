@@ -21,6 +21,7 @@ pub(crate) mod zend;
 use std::ffi::c_int;
 
 pub use bindings::*;
+pub use context::set_script;
 pub use exchange::set_sendfile_root;
 pub use handler::{HandleError, RapiraHandle};
 pub use quota::WorkerHooks;

@@ -29,7 +29,7 @@ fn classic_executor(job: &mut Job) -> (Event, bool) {
         }
         crate::context::apply_proto_num(&job.ctx);
 
-        let failed = !run_script(&job.ctx.req.script_filename);
+        let failed = !run_script(std::path::Path::new(crate::context::script().filename));
         let pg = rapira_pg();
         let exec_err: bool = failed
             && ((*rapira_cg()).unclean_shutdown

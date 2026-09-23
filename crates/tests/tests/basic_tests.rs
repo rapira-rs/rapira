@@ -179,6 +179,20 @@ fn server_variables() -> anyhow::Result<()> {
             "$_SERVER missing {expected:?} (got: {body:?})"
         );
     }
+    for expected in [
+        format!(
+            "[SCRIPT_FILENAME] => {}\n",
+            fixture("shared/server-variables.php").display()
+        ),
+        format!("[DOCUMENT_ROOT] => {}\n", fixture("shared").display()),
+        "[SCRIPT_NAME] => /server-variables.php\n".into(),
+        "[PHP_SELF] => /server-variables.php\n".into(),
+    ] {
+        assert!(
+            body.contains(&expected),
+            "$_SERVER missing {expected:?} (got: {body:?})"
+        );
+    }
     Ok(())
 }
 
