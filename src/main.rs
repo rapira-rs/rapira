@@ -269,7 +269,7 @@ fn http_pool(
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let settings: Settings = rapira_config::resolve(&args.config)?;
 
-    logging::init(&settings.log)?;
+    logging::init(&settings.log);
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
     // One context for every pool, kept alive past `run` so the master keeps its listener dups.

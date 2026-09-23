@@ -1,4 +1,3 @@
-use anyhow::Context;
 use rapira_config::{LogFormat, LogSettings};
 use std::io::{self, IsTerminal};
 use tracing_subscriber::fmt::time::ChronoUtc;
@@ -8,8 +7,8 @@ use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{EnvFilter, Layer};
 
-pub fn init(log: &LogSettings) -> anyhow::Result<()> {
-    let filter = build_filter(std::env::var("RUST_LOG").ok().as_deref(), log)?;
+pub fn init(log: &LogSettings) {
+    let filter = build_filter(std::env::var("RUST_LOG").ok().as_deref(), log);
     let ansi = ansi_enabled(
         io::stderr().is_terminal(),
         std::env::var_os("NO_COLOR").as_deref(),
@@ -18,16 +17,15 @@ pub fn init(log: &LogSettings) -> anyhow::Result<()> {
         .with(filter)
         .with(make_layer(log.format, ansi, io::stderr))
         .init();
-    Ok(())
 }
 
 fn ansi_enabled(stderr_is_tty: bool, no_color: Option<&std::ffi::OsStr>) -> bool {
     stderr_is_tty && no_color.is_none_or(|v| v.is_empty())
 }
 
-fn build_filter(rust_log: Option<&str>, log: &LogSettings) -> anyhow::Result<EnvFilter> {
+fn build_filter(rust_log: Option<&str>, log: &LogSettings) -> EnvFilter {
     match rust_log {
-        Some(s) if !s.trim().is_empty() => Ok(EnvFilter::new(s)),
+        Some(s) if !s.trim().is_empty() => EnvFilter::new(s),
         _ => {
             let mut spec = log.level.as_str().to_owned();
             for (target, level) in &log.targets {
@@ -35,7 +33,7 @@ fn build_filter(rust_log: Option<&str>, log: &LogSettings) -> anyhow::Result<Env
             }
             EnvFilter::builder()
                 .parse(&spec)
-                .with_context(|| format!("log filter `{spec}`"))
+                .expect("resolve_log validated every target")
         }
     }
 }
@@ -48,12 +46,9 @@ where
     match format {
         LogFormat::Json => tracing_subscriber::fmt::layer()
             .json()
-            .flatten_event(false)
             .with_current_span(false)
             .with_span_list(false)
             .with_timer(ChronoUtc::new("%Y-%m-%dT%H:%M:%S%.3fZ".into()))
-            .with_file(false)
-            .with_line_number(false)
             .with_writer(writer)
             .boxed(),
         LogFormat::Plain => tracing_subscriber::fmt::layer()
@@ -131,7 +126,7 @@ mod tests {
     #[test]
     fn config_spec_filters_by_level_and_target_prefix() {
         let log = settings(LogLevel::Error, &[("php", LogLevel::Warn)]);
-        let out = captured(build_filter(None, &log).unwrap(), emit_probe_events);
+        let out = captured(build_filter(None, &log), emit_probe_events);
         assert!(out.contains("rapira-error-mark"));
         assert!(
             out.contains("php-warn-mark"),
@@ -148,7 +143,7 @@ mod tests {
     #[test]
     fn rust_log_replaces_the_config_spec_wholesale() {
         let log = settings(LogLevel::Error, &[("php", LogLevel::Warn)]);
-        let out = captured(build_filter(Some("info"), &log).unwrap(), emit_probe_events);
+        let out = captured(build_filter(Some("info"), &log), emit_probe_events);
         assert!(
             out.contains("php-info-mark"),
             "config directive survived:\n{out}"
@@ -159,7 +154,7 @@ mod tests {
     #[test]
     fn blank_rust_log_falls_back_to_the_config_spec() {
         let log = settings(LogLevel::Error, &[("php", LogLevel::Warn)]);
-        let out = captured(build_filter(Some("  "), &log).unwrap(), emit_probe_events);
+        let out = captured(build_filter(Some("  "), &log), emit_probe_events);
         assert!(out.contains("php-warn-mark"));
         assert!(!out.contains("php-info-mark"));
     }
@@ -167,7 +162,7 @@ mod tests {
     #[test]
     fn invalid_rust_log_drops_the_bad_directive_and_keeps_the_rest() {
         let log = settings(LogLevel::Trace, &[]);
-        let filter = build_filter(Some("!!!,warn"), &log).expect("lossy, never an error");
+        let filter = build_filter(Some("!!!,warn"), &log);
         let out = captured(filter, emit_probe_events);
         assert!(
             out.contains("php-warn-mark"),
@@ -180,13 +175,6 @@ mod tests {
     }
 
     #[test]
-    fn config_target_that_breaks_the_grammar_fails_loudly() {
-        let log = settings(LogLevel::Error, &[(".php", LogLevel::Warn)]);
-        let err = build_filter(None, &log).unwrap_err();
-        assert!(err.to_string().contains("error,.php=warn"), "{err:#}");
-    }
-
-    #[test]
     fn config_levels_are_valid_filter_directives() {
         for level in [
             LogLevel::Error,
@@ -195,7 +183,7 @@ mod tests {
             LogLevel::Debug,
             LogLevel::Trace,
         ] {
-            let filter = build_filter(None, &settings(level, &[])).unwrap();
+            let filter = build_filter(None, &settings(level, &[]));
             assert_eq!(filter.to_string(), level.as_str());
         }
     }
