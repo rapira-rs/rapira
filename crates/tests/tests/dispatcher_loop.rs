@@ -372,14 +372,6 @@ fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An explicit `Work::__destruct()` call on a live unit does nothing.
-#[test]
-fn explicit_destruct_call_is_a_noop() -> anyhow::Result<()> {
-    let (status, body) = verbs_probe("/?probe=destruct-explicit")?;
-    assert_eq!((status, body.as_str()), (200, "explicit-destruct-ok"));
-    Ok(())
-}
-
 /// An Exchange abandoned after the head reached the wire cannot become a 500: the host ends the stream truncated so the client detects it.
 #[test]
 fn abandoned_mid_stream_exchange_truncates() -> anyhow::Result<()> {

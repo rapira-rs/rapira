@@ -144,12 +144,6 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
     }
 }
 
-// body is empty: the reporting runs in free_obj when the last reference drops
-ZEND_METHOD(Rapira_Internal_Http_Exchange, __destruct) {
-    (void)return_value;
-    ZEND_PARSE_PARAMETERS_NONE();
-}
-
 // the request graph builder lives in Rust (exchange.rs); this shell owns the macro layer
 ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest) {
     ZEND_PARSE_PARAMETERS_NONE();

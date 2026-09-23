@@ -31,20 +31,14 @@ namespace Rapira {
 
     /**
      * A unit of work from a dispatcher. Host-created; the finalizing verbs live on the
-     * concrete type.
+     * concrete type. Dropping the last reference to an unfinalized unit reports the loss
+     * to the host, which fails it.
      */
     interface Work
     {
         public function isFinalized(): bool;
 
         public function isCancelled(): bool;
-
-        /**
-         * Safety net: dropping the last reference to an unfinalized unit
-         * reports the loss to the host, which fails it. Does nothing when the
-         * unit is finalized, discarded, or still held.
-         */
-        public function __destruct();
     }
 
     /** Immutable counter snapshot. Observability only. */
