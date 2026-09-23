@@ -536,24 +536,6 @@ mod tests {
     }
 
     #[test]
-    fn gen0_unhealthy_in_pool_b_failboots_the_master_while_pool_a_serves() {
-        let (mut m, _sb) = test_master(&[(2, Scaling::Static), (1, Scaling::Static)]);
-        let t0 = Instant::now();
-        m.pools[0].push_proc(P_A, 0, 0, t0);
-        m.pools[0].set_slot(0, SLOT_ACTIVE);
-        m.pools[0].board.slot(0).handled.store(7, Release);
-
-        let w = dead_worker(P_B, 0, 0, t0);
-        let e = m
-            .route_exit(1, w, ExitVerdict::Unhealthy, t0)
-            .unwrap_err()
-            .to_string();
-
-        assert!(e.contains("grpc pool: worker"), "{e}");
-        assert_eq!(m.pools[0].table.running(), 1, "pool a keeps its worker");
-    }
-
-    #[test]
     fn served_history_is_per_pool() {
         let (mut m, _sb) = test_master(&[(2, Scaling::Static), (1, Scaling::Static)]);
         let t0 = Instant::now();

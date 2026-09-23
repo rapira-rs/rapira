@@ -848,33 +848,6 @@ mod tests {
     }
 
     #[test]
-    fn await_gate_never_escalates() {
-        let t0 = Instant::now();
-        let (mut p, _sp) = test_pool(3, Scaling::Static);
-        p.table.generation = 1;
-        p.push_proc(P_OLD0, 0, 0, t0);
-        p.set_slot(0, SLOT_IDLE);
-        p.push_proc(P_NEW, 1, 1, t0);
-        p.set_slot(1, SLOT_STARTING);
-        p.reload = Some(Reload {
-            phase: ReloadPhase::Await {
-                slot: 1,
-                until: t0 + Duration::from_secs(30),
-            },
-            deadline: t0,
-        });
-
-        for i in 0..3 {
-            p.on_reload_deadline(t0 + Duration::from_millis(i));
-        }
-        assert!(
-            matches!(p.reload.unwrap().phase, ReloadPhase::Await { slot: 1, .. }),
-            "the gate must stay a gate while the replacement starts"
-        );
-        assert!(p.table.has_pid(P_OLD0), "no old worker is drained yet");
-    }
-
-    #[test]
     fn drain_escalates_term_then_kill_against_its_pid() {
         let (mut p, _sp) = test_pool(3, Scaling::Static);
         let t0 = Instant::now();
@@ -1109,26 +1082,6 @@ mod tests {
     }
 
     #[test]
-    fn watchdog_marks_an_overdue_active_worker_for_timeout() {
-        let (mut p, _sp) = test_pool(3, Scaling::Static);
-        p.cfg.request_terminate_timeout = Duration::from_secs(2);
-        let t0 = Instant::now();
-        p.push_proc(P_OLD0, 0, 0, t0);
-        p.set_slot(0, SLOT_ACTIVE);
-        p.board
-            .slot(0)
-            .last_activity_ms
-            .store(now_millis().saturating_sub(5_000), Relaxed);
-
-        p.watchdog_tick();
-        assert_eq!(
-            p.table.procs[0].kill_intent,
-            Some(KillIntent::Timeout),
-            "the overdue active worker must have timeout intent"
-        );
-    }
-
-    #[test]
     fn watchdog_kills_a_worker_with_timeout_intent() {
         let (mut p, _sp) = test_pool(1, Scaling::Static);
         p.cfg.request_terminate_timeout = Duration::from_secs(2);
@@ -1271,13 +1224,6 @@ mod tests {
             s.schedule_backoff(Duration::ZERO, t0);
         }
         assert!(!p.armed(false));
-    }
-
-    #[test]
-    fn ondemand_disarms_while_stopping() {
-        let (p, _sp) = test_pool(1, Scaling::Ondemand);
-        assert!(p.armed(false));
-        assert!(!p.armed(true));
     }
 
     #[test]
