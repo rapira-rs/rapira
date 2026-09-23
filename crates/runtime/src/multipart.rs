@@ -225,20 +225,6 @@ fn split_head(part: &[u8]) -> Result<(&[u8], &[u8]), ParseError> {
     Err(bad("part without a header/body separator"))
 }
 
-/// httparse parses CRLF line endings only.
-fn normalize_crlf(head: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(head.len() + 8);
-    let mut prev = 0u8;
-    for &b in head {
-        if b == b'\n' && prev != b'\r' {
-            out.push(b'\r');
-        }
-        out.push(b);
-        prev = b;
-    }
-    out
-}
-
 /// (name, filename) from a content-disposition value.
 type Disposition = (Option<Vec<u8>>, Option<Vec<u8>>);
 
@@ -321,10 +307,9 @@ fn parse_part(
     files: &mut Vec<UploadedFile>,
 ) -> Result<(), ParseError> {
     let (head, body) = split_head(part)?;
-    let head = normalize_crlf(head);
 
     let mut hbuf = vec![httparse::EMPTY_HEADER; limits.max_part_headers];
-    let parsed = match httparse::parse_headers(&head, &mut hbuf) {
+    let parsed = match httparse::parse_headers(head, &mut hbuf) {
         Ok(httparse::Status::Complete((_, headers))) => headers,
         Ok(httparse::Status::Partial) => return Err(bad("truncated part header section")),
         Err(httparse::Error::TooManyHeaders) => {
@@ -336,25 +321,22 @@ fn parse_part(
 
     let mut headers: Vec<(String, Vec<u8>)> = Vec::with_capacity(parsed.len());
     let mut disposition: Option<&[u8]> = None;
-    let mut dispositions = 0usize;
     let mut media_type: Option<&[u8]> = None;
     for h in parsed {
         if h.name.eq_ignore_ascii_case("content-disposition") {
-            dispositions += 1;
-            disposition = Some(h.value);
+            if disposition.replace(h.value).is_some() {
+                return Err(bad("duplicated content-disposition in a part"));
+            }
         } else if h.name.eq_ignore_ascii_case("content-type") && media_type.is_none() {
             media_type = Some(h.value);
         }
         headers.push((h.name.to_owned(), h.value.to_vec()));
     }
-    if dispositions == 0 {
+    let Some(disposition) = disposition else {
         return Err(bad("part without content-disposition"));
-    }
-    if dispositions > 1 {
-        return Err(bad("duplicated content-disposition in a part"));
-    }
+    };
 
-    let (name, filename) = disposition_params(disposition.unwrap_or_default())?;
+    let (name, filename) = disposition_params(disposition)?;
     let Some(name) = name.filter(|n| !n.is_empty()) else {
         return Err(bad(
             "content-disposition without a non-empty name parameter",
