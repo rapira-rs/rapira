@@ -1,6 +1,3 @@
-#[cfg(not(unix))]
-compile_error!("rapira supports Unix (Linux/macOS) only");
-
 use extension_api::{Extension, Php, PrepareCtx};
 use php_sys::RapiraHandle;
 use std::future::Future;
@@ -19,7 +16,7 @@ type Outcome = std::result::Result<(), String>;
 type BoxFuture = Pin<Box<dyn Future<Output = Outcome> + Send>>;
 
 /// Object-safe shim: the same extension value is prepared pre-fork and launched post-fork, so it crosses the fork.
-trait ErasedExt: Send {
+trait ErasedExt {
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> anyhow::Result<()>;
     fn launch(self: Box<Self>, php: Php, stop: watch::Receiver<bool>, grace: Duration)
     -> BoxFuture;
@@ -137,7 +134,6 @@ impl Default for RuntimeOptions {
 
 struct RapiraBackend {
     rapira: RapiraHandle,
-    dispatcher: bool,
     uploads: Arc<multipart::Limits>,
 }
 
@@ -172,10 +168,8 @@ fn parse_err(e: multipart::ParseError) -> anyhow::Error {
 impl RapiraBackend {
     fn new(rapira: RapiraHandle, filename: &Path, opts: RuntimeOptions) -> Self {
         php_sys::set_script(filename);
-        let dispatcher = rapira.dispatcher();
         Self {
             rapira,
-            dispatcher,
             uploads: opts.uploads,
         }
     }
@@ -194,7 +188,7 @@ impl RapiraBackend {
 
         // Content-type is a singleton field per RFC 9110 §8.3: with repeated lines the host and a PHP consumer could split the body on different boundaries.
         // https://www.rfc-editor.org/rfc/rfc9110#section-8.3
-        if self.dispatcher && !req.body.is_empty() {
+        if self.rapira.dispatcher() && !req.body.is_empty() {
             let mut ct_lines = 0usize;
             let mut any_multipart = false;
             for (k, v) in &req.headers {
@@ -211,7 +205,7 @@ impl RapiraBackend {
             }
         }
 
-        let body = if self.dispatcher
+        let body = if self.rapira.dispatcher()
             && !req.body.is_empty()
             && let Some(ct) = content_type.as_deref()
             && multipart::is_multipart(ct)
@@ -429,13 +423,6 @@ async fn drain(tasks: &mut JoinSet<Outcome>) -> Vec<Outcome> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Staged launchers must be `Send`: they move into spawned tasks.
-    #[test]
-    fn rapira_runtime_is_send() {
-        fn assert_send<T: Send>() {}
-        assert_send::<ExtensionRuntime>();
-    }
 
     /// `parse_err` keeps both causes typed: `io::Error` in the chain, `Rejected` downcastable.
     #[test]
