@@ -1,10 +1,13 @@
 use extension_api::{Reply, ReplyEvent};
 use http::HeaderMap;
-use php_sys::{Frame, GrpcMethod, GrpcService, HandleError, Mode, Rapira, RapiraHandle, Request};
+use php_sys::{
+    Frame, GrpcMethod, GrpcOutcome, GrpcProtocol, GrpcRequest, GrpcService, HandleError, Mode,
+    Rapira, RapiraHandle, Request,
+};
 use std::env::set_var;
 use std::path::{Path, PathBuf};
 use std::sync::{self, Mutex, Once, OnceLock, PoisonError};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 static PHP_LOCK: Mutex<()> = Mutex::new(());
 static PHP_ENV: Once = Once::new();
@@ -55,8 +58,7 @@ pub fn run_worker(
     Ok(out)
 }
 
-/// Submits `req` through the async intake of `h` and blocks until the job is queued.
-pub fn submit(h: &RapiraHandle, req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
+fn runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_current_thread()
@@ -64,7 +66,41 @@ pub fn submit(h: &RapiraHandle, req: Request) -> Result<mpsc::Receiver<Frame>, H
             .build()
             .expect("tokio runtime")
     })
-    .block_on(h.handle(req))
+}
+
+/// Submits `req` through the async intake of `h` and blocks until the job is queued.
+pub fn submit(h: &RapiraHandle, req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
+    runtime().block_on(h.handle(req))
+}
+
+/// A unary call to `rapira.test.v1.EchoService/Echo` from a gRPC client on 127.0.0.1, with `message` as the request bytes.
+pub fn grpc_request(message: &str) -> GrpcRequest {
+    GrpcRequest {
+        method: "rapira.test.v1.EchoService/Echo".into(),
+        protocol: GrpcProtocol::Grpc,
+        metadata: HeaderMap::new(),
+        deadline: None,
+        remote: php_sys::types::Addr::Inet(([127, 0, 0, 1], 50051).into()),
+        message: message.as_bytes().to_vec().into(),
+    }
+}
+
+/// Submits `req` through the async intake of `h` and blocks until the call is queued.
+pub fn call(
+    h: &RapiraHandle,
+    req: GrpcRequest,
+) -> Result<oneshot::Receiver<GrpcOutcome>, HandleError> {
+    runtime().block_on(h.call(req))
+}
+
+/// Waits at most 10 s for the outcome of a call. None means that the call was lost: PHP dropped it unfinalized.
+pub fn outcome(rx: oneshot::Receiver<GrpcOutcome>) -> Option<GrpcOutcome> {
+    runtime().block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+            .await
+            .expect("no outcome within 10 s")
+            .ok()
+    })
 }
 
 /// Panics when RAPIRA_REQUIRE_EXTS names an extension this fixture covers: a skip where CI installs the extension is a broken install.

@@ -407,4 +407,62 @@ namespace Rapira\Internal\Grpc {
         /** @implementation-alias Rapira\Internal\Http\DispatcherInfo::activeCount */
         public function activeCount(): int {}
     }
+
+    /**
+     * The extension's implementation of \Rapira\Grpc\UnaryCall. Host-created.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final class UnaryCall implements \Rapira\Grpc\UnaryCall
+    {
+        /**
+         * Host-created.
+         *
+         * @implementation-alias Rapira\Internal\Http\Exchange::__construct
+         */
+        private function __construct() {}
+
+        public function isFinalized(): bool {}
+
+        public function isCancelled(): bool {}
+
+        public function getContext(): \Rapira\Grpc\Call\Context {}
+
+        public function getMessage(): string {}
+
+        public function getResponseMetadata(): \Rapira\Grpc\Responder\ResponseMetadata {}
+
+        public function respond(string $message): void {}
+
+        public function fail(\Rapira\Grpc\Status $status): void {}
+    }
+
+    /**
+     * The response headers and trailers of one UnaryCall. It lives as long as its call.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final class ResponseMetadata implements \Rapira\Grpc\Responder\ResponseMetadata
+    {
+        /**
+         * Host-created.
+         *
+         * @implementation-alias Rapira\Internal\Http\Exchange::__construct
+         */
+        private function __construct() {}
+
+        public function addHeader(string $name, string $value): void {}
+
+        public function addBinaryHeader(string $name, string $bytes): void {}
+
+        public function addTrailer(string $name, string $value): void {}
+
+        public function addBinaryTrailer(string $name, string $bytes): void {}
+
+        public function headers(): \Rapira\Grpc\Metadata {}
+
+        public function trailers(): \Rapira\Grpc\Metadata {}
+    }
 }

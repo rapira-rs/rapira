@@ -3,11 +3,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
 
 use crate::{
     start::Rapira,
-    types::{Context, Frame, Job, Request, Unit},
+    types::{Context, Frame, GrpcJob, GrpcOutcome, GrpcRequest, Job, Request, Unit},
 };
 
 // cap 4 lets a buffered Head+Chunk+End trio, plus a stray interim head, queue without parking the PHP thread
@@ -89,6 +89,21 @@ impl RapiraHandle {
             ctx: Context::new(req, tx, !self.dispatcher),
         });
         self.enqueue(Unit::Http(job)).await?;
+        Ok(rx)
+    }
+
+    /// Queues one unary gRPC call. A dropped sender means that PHP lost the call; dropping the receiver closes the call for PHP.
+    pub async fn call(
+        &self,
+        req: GrpcRequest,
+    ) -> Result<oneshot::Receiver<GrpcOutcome>, HandleError> {
+        let (reply, rx) = oneshot::channel();
+        let job = Box::new(GrpcJob {
+            req,
+            received_at: now_unix_f64(),
+            reply,
+        });
+        self.enqueue(Unit::Grpc(job)).await?;
         Ok(rx)
     }
 

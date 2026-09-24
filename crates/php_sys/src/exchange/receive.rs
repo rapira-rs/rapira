@@ -10,6 +10,7 @@ enum RecvMode {
 /// `return_value` writable; engine active on this thread.
 unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
+        let grpc = grpc::serving();
         if let Some(ptr) = CYCLE.get().unit
             && !(*ptr).finalized()
             && (*ptr).host_closed()
@@ -20,13 +21,20 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
         if let Some(ptr) = CYCLE.get().unit
             && !(*ptr).finalized()
         {
-            zend::throw_error(
-                c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first",
-            );
+            zend::throw_error(if grpc {
+                c"receive() while a Rapira\\Grpc\\UnaryCall is unfinalized; finalize it first"
+            } else {
+                c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first"
+            });
             return false;
         }
+        let ce = if grpc {
+            rapira_ce_internal_grpc_unary_call
+        } else {
+            rapira_ce_internal_http_exchange
+        };
         let mut obj: zval = std::mem::zeroed();
-        let _ = object_init_ex(&mut obj, rapira_ce_internal_http_exchange);
+        let _ = object_init_ex(&mut obj, ce);
         // SAFETY: plain zend timer bookkeeping on this thread; no bailout path.
         rapira_receive_untimed();
         loop {
@@ -36,7 +44,7 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                 RecvMode::Wait(t) => pull_job_wait(Some(Duration::from_micros(t as u64))),
             };
             match pulled {
-                Pulled::Job(Unit::Http(job)) => {
+                Pulled::Job(Unit::Http(job)) if !grpc => {
                     let st = ExchangeState::new(job);
                     if st.job.ctx.sender.as_ref().is_some_and(Sender::is_closed) {
                         sb_update(Event::Handled(true));
@@ -54,6 +62,23 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                     *return_value = obj;
                     return true;
                 }
+                Pulled::Job(Unit::Grpc(job)) if grpc => {
+                    if job.reply.is_closed() {
+                        sb_update(Event::Handled(true));
+                        continue;
+                    }
+                    let ptr = Box::into_raw(Box::new(GrpcState::new(job)));
+                    update(|c| {
+                        c.unit = Some(ptr);
+                        c.received = true;
+                    });
+                    (*grpc::grpc_call_from(obj.value.obj)).state = ptr.cast();
+                    // SAFETY: plain zend timer bookkeeping; no bailout path.
+                    rapira_receive_timed();
+                    *return_value = obj;
+                    return true;
+                }
+                Pulled::Job(_) => unreachable!("the unit kind does not match the pool"),
                 Pulled::Closed => {
                     update(|c| c.closed_seen = true);
                     zval_ptr_dtor(&mut obj);

@@ -19,11 +19,12 @@ pub(crate) use crate::{
     rapira_ce_http_head_already_written_error, rapira_ce_http_head_not_written_error,
     rapira_ce_http_multipart, rapira_ce_http_request, rapira_ce_http_uploaded_file,
     rapira_ce_inet_address, rapira_ce_internal_grpc_dispatcher,
-    rapira_ce_internal_grpc_dispatcher_info, rapira_ce_internal_http_dispatcher,
-    rapira_ce_internal_http_dispatcher_info, rapira_ce_internal_http_exchange,
-    rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_tls,
-    rapira_ce_unix_address, rapira_ce_work_discarded_exception, rapira_dispatcher_info_obj,
-    rapira_eg, rapira_exchange_obj, rapira_receive_timed, rapira_receive_untimed,
+    rapira_ce_internal_grpc_dispatcher_info, rapira_ce_internal_grpc_unary_call,
+    rapira_ce_internal_http_dispatcher, rapira_ce_internal_http_dispatcher_info,
+    rapira_ce_internal_http_exchange, rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception,
+    rapira_ce_tls, rapira_ce_unix_address, rapira_ce_work_discarded_exception,
+    rapira_dispatcher_info_obj, rapira_eg, rapira_exchange_obj, rapira_receive_timed,
+    rapira_receive_untimed,
     scoreboard::{Event, sb_update},
     start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
     types::{
@@ -43,6 +44,7 @@ mod sendfile;
 #[cfg(test)]
 mod tests;
 
+use grpc::GrpcState;
 pub(crate) use grpc::serve_grpc;
 pub use sendfile::set_sendfile_root;
 

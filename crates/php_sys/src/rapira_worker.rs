@@ -1,3 +1,4 @@
+use http::HeaderMap;
 use tracing::error;
 
 use crate::{
@@ -16,7 +17,7 @@ use crate::{
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
     executor::run_script,
     php_request_startup, rapira_eg, rapira_pg, rapira_run_handler,
-    types::{Job, Unit},
+    types::{GrpcOutcome, GrpcStatus, Job, Unit},
     zend_fcall_info, zend_fcall_info_cache, *,
 };
 
@@ -25,6 +26,9 @@ thread_local! {
 }
 
 const UNHEALTHY_AFTER: u32 = 5;
+
+/// The gRPC status of a boot-failed worker's shed call: https://github.com/grpc/grpc/blob/master/doc/statuscodes.md
+const GRPC_UNAVAILABLE: u32 = 14;
 
 enum Cycle {
     Stop,
@@ -129,6 +133,18 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                         job.ctx.finish(false);
                         sb_update(scoreboard::Event::Shed);
                     }
+                    Some(Unit::Grpc(job)) => {
+                        let _ = job.reply.send(GrpcOutcome {
+                            headers: HeaderMap::new(),
+                            trailers: HeaderMap::new(),
+                            result: Err(GrpcStatus {
+                                code: GRPC_UNAVAILABLE,
+                                message: "the worker failed to boot".into(),
+                                details: Vec::new(),
+                            }),
+                        });
+                        sb_update(scoreboard::Event::Shed);
+                    }
                 }
             }
         }
@@ -225,6 +241,9 @@ fn next_job() -> Option<Box<Job>> {
                     }
                     crate::exchange::note_received();
                     return Some(job);
+                }
+                Some(Unit::Grpc(_)) => {
+                    unreachable!("gRPC units go to dispatcher-mode workers only")
                 }
                 None => {
                     crate::exchange::note_closed();

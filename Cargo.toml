@@ -33,6 +33,7 @@ members = [
 
 [workspace.dependencies]
 anyhow = "1"
+base64 = "0.22"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 php_sys = { path = "crates/php_sys" }
 rapira_runtime = { path = "crates/runtime" }

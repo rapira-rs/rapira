@@ -30,6 +30,21 @@ extern bool rapira_rs_grpc_kind_streams(const char *value, size_t len,
 
 // rust glue (src/exchange/grpc.rs): false means a PHP exception is pending
 extern bool rapira_rs_grpc_services(zval *rv);
+extern bool rapira_rs_grpc_is_finalized(const void *state);
+extern bool rapira_rs_grpc_is_cancelled(const void *state);
+extern const char *rapira_rs_grpc_message(const void *state, size_t *len);
+extern bool rapira_rs_grpc_context(rapira_grpc_call_obj *call, zval *rv);
+extern bool rapira_rs_grpc_response_metadata(rapira_grpc_call_obj *call,
+                                             zval *rv);
+extern bool rapira_rs_grpc_respond(void *state, const char *message,
+                                   size_t len);
+extern bool rapira_rs_grpc_fail(void *state, zend_long code,
+                                const char *message, size_t message_len,
+                                HashTable *details);
+extern bool rapira_rs_grpc_add(void *state, bool trailer, bool binary,
+                               const char *name, size_t name_len,
+                               const char *value, size_t value_len);
+extern bool rapira_rs_grpc_snapshot(const void *state, bool trailer, zval *rv);
 
 // $entries is property slot 0 and the constructor always sets it. An instance
 // from ReflectionClass::newInstanceWithoutConstructor() is not supported.
@@ -225,4 +240,133 @@ ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, getServices) {
         rapira_throw_or_backstop("getServices");
         RETURN_THROWS();
     }
+}
+
+// receive() sets state before PHP code can reach the object
+static void *grpc_call_state(zval *this_ptr) {
+    void *state = rapira_grpc_call_from(Z_OBJ_P(this_ptr))->state;
+    ZEND_ASSERT(state != NULL);
+    return state;
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, isFinalized) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_BOOL(rapira_rs_grpc_is_finalized(grpc_call_state(ZEND_THIS)));
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, isCancelled) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_BOOL(rapira_rs_grpc_is_cancelled(grpc_call_state(ZEND_THIS)));
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getMessage) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    size_t len = 0;
+    const char *message =
+        rapira_rs_grpc_message(grpc_call_state(ZEND_THIS), &len);
+    RETURN_STRINGL(message, len);
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getContext) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    if (!rapira_rs_grpc_context(rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS)),
+                                return_value)) {
+        rapira_throw_or_backstop("getContext");
+        RETURN_THROWS();
+    }
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getResponseMetadata) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    if (!rapira_rs_grpc_response_metadata(
+            rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS)), return_value)) {
+        rapira_throw_or_backstop("getResponseMetadata");
+        RETURN_THROWS();
+    }
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, respond) {
+    zend_string *message;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+    Z_PARAM_STR(message)
+    ZEND_PARSE_PARAMETERS_END();
+
+    if (!rapira_rs_grpc_respond(grpc_call_state(ZEND_THIS), ZSTR_VAL(message),
+                                ZSTR_LEN(message))) {
+        rapira_throw_or_backstop("respond");
+        RETURN_THROWS();
+    }
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, fail) {
+    zval *status;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+    Z_PARAM_OBJECT_OF_CLASS(status, rapira_ce_grpc_status)
+    ZEND_PARSE_PARAMETERS_END();
+
+    // $code, $message and $details are property slots 0 to 2 and the
+    // constructor always sets them. An instance from
+    // ReflectionClass::newInstanceWithoutConstructor() is not supported.
+    zend_object *obj = Z_OBJ_P(status);
+    zval *code = zend_enum_fetch_case_value(Z_OBJ_P(OBJ_PROP_NUM(obj, 0)));
+    zend_string *message = Z_STR_P(OBJ_PROP_NUM(obj, 1));
+    if (!rapira_rs_grpc_fail(grpc_call_state(ZEND_THIS), Z_LVAL_P(code),
+                             ZSTR_VAL(message), ZSTR_LEN(message),
+                             Z_ARRVAL_P(OBJ_PROP_NUM(obj, 2)))) {
+        rapira_throw_or_backstop("fail");
+        RETURN_THROWS();
+    }
+}
+
+// state is NULL after the call object is gone; Rust then throws
+// AlreadyFinalizedError
+static void grpc_add(INTERNAL_FUNCTION_PARAMETERS, bool trailer, bool binary,
+                     const char *what) {
+    zend_string *name, *value;
+    ZEND_PARSE_PARAMETERS_START(2, 2)
+    Z_PARAM_STR(name)
+    Z_PARAM_STR(value)
+    ZEND_PARSE_PARAMETERS_END();
+
+    void *state = rapira_grpc_metadata_from(Z_OBJ_P(ZEND_THIS))->state;
+    if (!rapira_rs_grpc_add(state, trailer, binary, ZSTR_VAL(name),
+                            ZSTR_LEN(name), ZSTR_VAL(value), ZSTR_LEN(value))) {
+        rapira_throw_or_backstop(what);
+        RETURN_THROWS();
+    }
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addHeader) {
+    grpc_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, false, false, "addHeader");
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addBinaryHeader) {
+    grpc_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, false, true, "addBinaryHeader");
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addTrailer) {
+    grpc_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, true, false, "addTrailer");
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addBinaryTrailer) {
+    grpc_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, true, true, "addBinaryTrailer");
+}
+
+// state is NULL after the call object is gone; the snapshot is then empty
+static void grpc_snapshot(INTERNAL_FUNCTION_PARAMETERS, bool trailer,
+                          const char *what) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    void *state = rapira_grpc_metadata_from(Z_OBJ_P(ZEND_THIS))->state;
+    if (!rapira_rs_grpc_snapshot(state, trailer, return_value)) {
+        rapira_throw_or_backstop(what);
+        RETURN_THROWS();
+    }
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, headers) {
+    grpc_snapshot(INTERNAL_FUNCTION_PARAM_PASSTHRU, false, "headers");
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, trailers) {
+    grpc_snapshot(INTERNAL_FUNCTION_PARAM_PASSTHRU, true, "trailers");
 }

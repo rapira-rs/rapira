@@ -84,6 +84,53 @@ pub struct Job {
 /// One unit of work on the worker intake.
 pub(crate) enum Unit {
     Http(Box<Job>),
+    Grpc(Box<GrpcJob>),
+}
+
+/// The protocol that the client of a gRPC call used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrpcProtocol {
+    Grpc,
+    GrpcWeb,
+    Connect,
+}
+
+/// One unary gRPC call for PHP.
+pub struct GrpcRequest {
+    /// The full method name, `package.Service/Method`.
+    pub method: String,
+    pub protocol: GrpcProtocol,
+    /// The request metadata as it arrived. PHP gets the application keys only, with `-bin` values decoded.
+    pub metadata: HeaderMap,
+    /// Unix timestamp after which the outcome is no longer wanted.
+    pub deadline: Option<f64>,
+    pub remote: Addr,
+    /// The binary protobuf encoding of the input message.
+    pub message: Bytes,
+}
+
+/// The one outcome of a unary call. The metadata is in wire form: `-bin` values are base64 without padding.
+#[derive(Debug, PartialEq)]
+pub struct GrpcOutcome {
+    pub headers: HeaderMap,
+    pub trailers: HeaderMap,
+    /// The output message, or the status the call failed with.
+    pub result: Result<Bytes, GrpcStatus>,
+}
+
+/// The `google.rpc.Status` triple. `details` holds `google.protobuf.Any` pairs: the type URL and the packed bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrpcStatus {
+    pub code: u32,
+    pub message: String,
+    pub details: Vec<(String, Bytes)>,
+}
+
+pub(crate) struct GrpcJob {
+    pub(crate) req: GrpcRequest,
+    /// Unix timestamp of the enqueue.
+    pub(crate) received_at: f64,
+    pub(crate) reply: tokio::sync::oneshot::Sender<GrpcOutcome>,
 }
 
 /// Mirror of `extension_api::Addr`: php_sys does not depend on extension_api, the runtime maps between them.

@@ -10,7 +10,8 @@ bind! {
     // the two halves of the linked-libphp version check
     PHP_VERSION_ID, php_version_id,
     // the embedded-object layouts; wrapper.h is the source of truth
-    rapira_exchange_obj, rapira_dispatcher_info_obj,
+    rapira_exchange_obj, rapira_dispatcher_info_obj, rapira_grpc_call_obj,
+    rapira_grpc_metadata_obj,
     // MINIT-written class-entry globals the Rust builder reads (static mut)
     rapira_ce_http_request, rapira_ce_http_multipart, rapira_ce_http_form_field,
     rapira_ce_http_uploaded_file, rapira_ce_tls, rapira_ce_inet_address,
@@ -21,6 +22,9 @@ bind! {
     rapira_ce_no_dispatcher_error, rapira_ce_grpc_status, rapira_ce_grpc_exception,
     rapira_ce_grpc_method_kind, rapira_ce_grpc_method_info, rapira_ce_grpc_service_info,
     rapira_ce_internal_grpc_dispatcher, rapira_ce_internal_grpc_dispatcher_info,
+    rapira_ce_internal_grpc_unary_call, rapira_ce_internal_grpc_response_metadata,
+    rapira_ce_grpc_context, rapira_ce_grpc_metadata, rapira_ce_grpc_protocol,
+    rapira_ce_grpc_error_detail,
     zend_argument_value_error, zend_argument_type_error,
     rapira_ce_work_discarded_exception, rapira_ce_http_content_length_exceeded_error,
     rapira_ce_http_head_not_written_error, rapira_ce_http_file_not_sendable_exception,

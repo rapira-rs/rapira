@@ -10,7 +10,9 @@ use crate::{
 
 pub(crate) fn classic_worker() {
     while let Some(unit) = pull_job() {
-        let Unit::Http(mut job) = unit;
+        let Unit::Http(mut job) = unit else {
+            unreachable!("gRPC units go to dispatcher-mode workers only");
+        };
         let (event, truncated) = classic_executor(&mut job);
         sb_update(event);
         job.ctx.finish(truncated);
