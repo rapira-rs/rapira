@@ -30,3 +30,6 @@ http = { workspace = true }
 hyper = { version = "1", features = ["client", "http1", "http2"] }
 hyper-util = { version = "0.1", features = ["tokio"] }
 http-body-util = { workspace = true }
+rapira_config = { workspace = true }
+libc = { workspace = true }
+mimalloc = "0.1"
