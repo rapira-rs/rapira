@@ -11,14 +11,14 @@ enum RecvMode {
 unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
         if let Some(ptr) = CYCLE.get().unit
-            && (*ptr).stage != Stage::Finalized
+            && !(*ptr).finalized()
             && (*ptr).host_closed()
         {
             tracing::debug!(target: "rapira", "receive() discarded an unfinalized exchange whose client left");
-            super::respond::discard_unit(&mut *ptr);
+            (*ptr).discard();
         }
         if let Some(ptr) = CYCLE.get().unit
-            && (*ptr).stage != Stage::Finalized
+            && !(*ptr).finalized()
         {
             zend::throw_error(
                 c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first",
@@ -36,7 +36,7 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                 RecvMode::Wait(t) => pull_job_wait(Some(Duration::from_micros(t as u64))),
             };
             match pulled {
-                Pulled::Job(job) => {
+                Pulled::Job(Unit::Http(job)) => {
                     let st = ExchangeState::new(job);
                     if st.job.ctx.sender.as_ref().is_some_and(Sender::is_closed) {
                         sb_update(Event::Handled(true));
@@ -111,12 +111,7 @@ pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> b
         let _ = object_init_ex(return_value, rapira_ce_internal_http_dispatcher_info);
         let info = info_from((*return_value).value.obj);
         (*info).pending = pending_depth() as i64;
-        (*info).active = i64::from(
-            CYCLE
-                .get()
-                .unit
-                .is_some_and(|p| (*p).stage != Stage::Finalized),
-        );
+        (*info).active = i64::from(CYCLE.get().unit.is_some_and(|p| !(*p).finalized()));
         true
     })
 }

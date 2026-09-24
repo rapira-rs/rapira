@@ -467,7 +467,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
     guard((), || {
         let ptr: *mut ExchangeState = job.cast();
         update(|c| {
-            if c.unit == Some(ptr) {
+            if c.unit.is_some_and(|u| std::ptr::addr_eq(u, ptr)) {
                 c.unit = None;
             }
         });

@@ -16,7 +16,7 @@ use crate::{
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
     executor::run_script,
     php_request_startup, rapira_eg, rapira_pg, rapira_run_handler,
-    types::Job,
+    types::{Job, Unit},
     zend_fcall_info, zend_fcall_info_cache, *,
 };
 
@@ -124,7 +124,7 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                 }
                 match pull_job() {
                     None => break WorkerExit::Closed,
-                    Some(mut job) => {
+                    Some(Unit::Http(mut job)) => {
                         send_error_head(&mut job.ctx, 503);
                         job.ctx.finish(false);
                         sb_update(scoreboard::Event::Shed);
@@ -218,7 +218,7 @@ fn next_job() -> Option<Box<Job>> {
         log_and_clear_last_error();
         loop {
             match pull_job() {
-                Some(job) => {
+                Some(Unit::Http(job)) => {
                     if job.ctx.sender.as_ref().is_some_and(|s| s.is_closed()) {
                         sb_update(scoreboard::Event::Handled(true));
                         continue;

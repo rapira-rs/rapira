@@ -25,7 +25,9 @@ pub(crate) use crate::{
     rapira_eg, rapira_exchange_obj, rapira_receive_timed, rapira_receive_untimed,
     scoreboard::{Event, sb_update},
     start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
-    types::{Addr, Body, FormField, Frame, Job, Request, ResponseHead, TlsView, UploadedFile},
+    types::{
+        Addr, Body, FormField, Frame, Job, Request, ResponseHead, TlsView, Unit, UploadedFile,
+    },
     zend, zend_class_entry, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_set_timeout,
     zend_string, zend_unset_timeout, zval, zval_add_ref, zval_ptr_dtor,
@@ -41,10 +43,17 @@ mod tests;
 
 pub use sendfile::set_sendfile_root;
 
+/// The cycle bookkeeping view of a unit that receive() handed out.
+pub(crate) trait Held {
+    fn finalized(&self) -> bool;
+    fn host_closed(&self) -> bool;
+    fn discard(&mut self);
+}
+
 #[derive(Clone, Copy)]
 struct CycleState {
     /// The Box pointer of the unit handed out last, so paths where free_obj never runs (bailout) can still reclaim it.
-    unit: Option<*mut ExchangeState>,
+    unit: Option<*mut dyn Held>,
     closed_seen: bool,
     served: bool,
     /// A unit was handed out this cycle: a fatal after that is an app failure, not a boot failure.
@@ -79,7 +88,7 @@ pub(crate) fn reclaim_current() {
         update(|c| c.unit = None);
         // SAFETY: the pointer came from Box::into_raw in receive, and rapira_rs_exchange_drop clears the unit before it reclaims.
         let st = unsafe { Box::from_raw(ptr) };
-        if st.stage != Stage::Finalized {
+        if !st.finalized() {
             sb_update(Event::Handled(true));
         }
         drop(st);
@@ -295,11 +304,21 @@ impl ExchangeState {
             armed_at: Instant::now(),
         }
     }
+}
+
+impl Held for ExchangeState {
+    fn finalized(&self) -> bool {
+        self.stage == Stage::Finalized
+    }
 
     fn host_closed(&self) -> bool {
         self.discarded
             || (self.stage != Stage::Finalized
                 && self.job.ctx.sender.as_ref().is_some_and(Sender::is_closed))
+    }
+
+    fn discard(&mut self) {
+        respond::discard_unit(self);
     }
 }
 

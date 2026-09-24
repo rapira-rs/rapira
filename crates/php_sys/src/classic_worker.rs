@@ -4,12 +4,13 @@ use crate::{
     executor::run_script,
     scoreboard::{Event, sb_update},
     start::pull_job,
-    types::Job,
+    types::{Job, Unit},
     *,
 };
 
 pub(crate) fn classic_worker() {
-    while let Some(mut job) = pull_job() {
+    while let Some(unit) = pull_job() {
+        let Unit::Http(mut job) = unit;
         let (event, truncated) = classic_executor(&mut job);
         sb_update(event);
         job.ctx.finish(truncated);

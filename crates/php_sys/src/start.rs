@@ -6,7 +6,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::{error, info, trace};
-use types::Job;
+use types::Unit;
 
 use crate::quota::{self, WorkerHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
@@ -18,12 +18,12 @@ thread_local! {
 }
 
 pub(crate) struct Intake {
-    pub(crate) tx: SyncSender<Box<Job>>,
+    pub(crate) tx: SyncSender<Unit>,
     pub(crate) pending: Arc<AtomicUsize>,
 }
 
 struct JobRx {
-    rx: Receiver<Box<Job>>,
+    rx: Receiver<Unit>,
     pending: Arc<AtomicUsize>,
 }
 
@@ -106,7 +106,7 @@ impl Rapira {
         };
         slot.bind(std::process::id());
         let pending = Arc::new(AtomicUsize::new(0));
-        let (intake_tx, intake_rx) = sync_channel::<Box<Job>>(1024);
+        let (intake_tx, intake_rx) = sync_channel::<Unit>(1024);
         let intake = Intake {
             tx: intake_tx,
             pending: pending.clone(),
@@ -205,7 +205,7 @@ fn worker_main(mode: Mode, rx: JobRx) {
     }
 }
 
-pub(crate) fn pull_job() -> Option<Box<Job>> {
+pub(crate) fn pull_job() -> Option<Unit> {
     match pull_job_wait(None) {
         Pulled::Job(job) => Some(job),
         _ => None,
@@ -213,7 +213,7 @@ pub(crate) fn pull_job() -> Option<Box<Job>> {
 }
 
 pub(crate) enum Pulled {
-    Job(Box<Job>),
+    Job(Unit),
     Timeout,
     Empty,
     Closed,

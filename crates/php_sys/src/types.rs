@@ -58,6 +58,11 @@ pub struct Job {
     pub ctx: Context,
 }
 
+/// One unit of work on the worker intake.
+pub(crate) enum Unit {
+    Http(Box<Job>),
+}
+
 /// Mirror of `extension_api::Addr`: php_sys does not depend on extension_api, the runtime maps between them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Addr {
