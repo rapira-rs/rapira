@@ -47,6 +47,14 @@ const CASES: &[Case] = &[
         expected: "TypeError",
     },
     Case {
+        name: "metadata rejects a map of values",
+        expected: "TypeError",
+    },
+    Case {
+        name: "metadata rejects a sparse list",
+        expected: "TypeError",
+    },
+    Case {
         name: "values() is case-insensitive and ordered",
         expected: r#"["1","2"]"#,
     },

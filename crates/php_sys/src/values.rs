@@ -233,19 +233,28 @@ pub unsafe extern "C" fn rapira_rs_ctor_grpc_status(
     })
 }
 
-/// Throws and returns false on the first value that breaks the Metadata rules: each value is a string, and a text value is printable ASCII (0x20-0x7E).
+/// Throws and returns false on the first value that breaks the Metadata rules: the keys are 0, 1, 2, ... in order, each value is a string, and a text value is printable ASCII (0x20-0x7E).
 /// `&raw mut pos`: the pos parameter is *mut on PHP 8.4 and *const on 8.5.
 /// # Safety
 /// `list` a live array; entries stay ZPP-owned.
 unsafe fn metadata_values_valid(list: *mut HashTable, binary: bool) -> bool {
     unsafe {
         let mut pos: HashPosition = 0;
+        let mut index = 0;
         zend_hash_internal_pointer_reset_ex(list, &mut pos);
         loop {
             let item = zend_hash_get_current_data_ex(list, &raw mut pos);
             if item.is_null() {
                 return true;
             }
+            let mut str_key: *mut zend_string = null_mut();
+            let mut num_key = 0;
+            let kt = zend_hash_get_current_key_ex(list, &mut str_key, &mut num_key, &pos);
+            if i64::from(kt) == HASH_KEY_IS_STRING || num_key != index {
+                zend_argument_type_error(1, c"must map each key to a list of strings".as_ptr());
+                return false;
+            }
+            index += 1;
             let item = zend::deref(item);
             if zend::zval_type(item) != IS_STRING {
                 zend_argument_type_error(

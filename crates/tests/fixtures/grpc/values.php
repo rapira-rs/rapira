@@ -36,6 +36,8 @@ $cases = [
     ],
     ['name' => 'metadata rejects an entry that is not a list', 'run' => fn () => new Metadata(['x-a' => 'v'])],
     ['name' => 'metadata rejects a value that is not a string', 'run' => fn () => new Metadata(['x-a' => [1]])],
+    ['name' => 'metadata rejects a map of values', 'run' => fn () => new Metadata(['x-a' => ['k' => 'v']])],
+    ['name' => 'metadata rejects a sparse list', 'run' => fn () => new Metadata(['x-a' => [1 => 'v']])],
     ['name' => 'values() is case-insensitive and ordered', 'run' => fn () => json_encode($sample()->values('X-A'))],
     ['name' => 'values() of an absent key', 'run' => fn () => json_encode($sample()->values('x-c'))],
     ['name' => 'values() finds a numeric key', 'run' => fn () => json_encode((new Metadata(['123' => ['a']]))->values('123'))],
