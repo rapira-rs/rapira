@@ -4,34 +4,6 @@
 
 namespace Rapira\Http {
     /**
-     * What the handshake settled. The cert fields describe the client's certificate and
-     * are null unless one was presented.
-     *
-     * @strict-properties
-     * @not-serializable
-     */
-    final readonly class Tls
-    {
-        public string $version;
-        public string $cipher;
-        public ?string $negotiatedProtocol;
-        public ?string $requestedServerName;
-        public ?string $certSerial;
-        public ?string $certOrganization;
-        public ?string $certFingerprint;
-
-        public function __construct(
-            string $version,
-            string $cipher,
-            ?string $negotiatedProtocol,
-            ?string $requestedServerName,
-            ?string $certSerial,
-            ?string $certOrganization,
-            ?string $certFingerprint,
-        ) {}
-    }
-
-    /**
      * A field part of a multipart/form-data body: no `filename` in content-disposition.
      * Buffered in memory.
      *
@@ -109,7 +81,7 @@ namespace Rapira\Http {
         public string|Multipart $body;
         public \Rapira\InetAddress|\Rapira\UnixAddress $remote;
         public \Rapira\InetAddress|\Rapira\UnixAddress $server;
-        public ?Tls $tls;
+        public ?\Rapira\Tls $tls;
         public float $receivedAt;
 
         public function __construct(
@@ -122,7 +94,7 @@ namespace Rapira\Http {
             string|Multipart $body,
             \Rapira\InetAddress|\Rapira\UnixAddress $remote,
             \Rapira\InetAddress|\Rapira\UnixAddress $server,
-            ?Tls $tls,
+            ?\Rapira\Tls $tls,
             float $receivedAt,
         ) {}
     }

@@ -13,7 +13,7 @@ bind! {
     rapira_exchange_obj, rapira_dispatcher_info_obj,
     // MINIT-written class-entry globals the Rust builder reads (static mut)
     rapira_ce_http_request, rapira_ce_http_multipart, rapira_ce_http_form_field,
-    rapira_ce_http_uploaded_file, rapira_ce_http_tls, rapira_ce_inet_address,
+    rapira_ce_http_uploaded_file, rapira_ce_tls, rapira_ce_inet_address,
     rapira_ce_unix_address, rapira_ce_already_finalized_error,
     rapira_ce_http_head_already_written_error, rapira_ce_internal_http_exchange,
     rapira_ce_internal_http_dispatcher, rapira_ce_internal_http_dispatcher_info,

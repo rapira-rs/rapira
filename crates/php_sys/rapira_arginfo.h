@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 4aaf13f3f053c54a92666b2fbe4ecc8680c40f94 */
+ * Stub hash: c65356517d7632038be3cebdacb97a2f7b30efc7 */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_rapira_finish_request, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
@@ -53,6 +53,16 @@ ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_UnixAddress___construct, 0, 0, 1)
 	ZEND_ARG_TYPE_INFO(0, path, IS_STRING, 1)
 ZEND_END_ARG_INFO()
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Tls___construct, 0, 0, 7)
+	ZEND_ARG_TYPE_INFO(0, version, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, cipher, IS_STRING, 0)
+	ZEND_ARG_TYPE_INFO(0, negotiatedProtocol, IS_STRING, 1)
+	ZEND_ARG_TYPE_INFO(0, requestedServerName, IS_STRING, 1)
+	ZEND_ARG_TYPE_INFO(0, certSerial, IS_STRING, 1)
+	ZEND_ARG_TYPE_INFO(0, certOrganization, IS_STRING, 1)
+	ZEND_ARG_TYPE_INFO(0, certFingerprint, IS_STRING, 1)
+ZEND_END_ARG_INFO()
+
 ZEND_FUNCTION(rapira_finish_request);
 ZEND_FUNCTION(Rapira_get_mode);
 ZEND_FUNCTION(Rapira_get_dispatcher);
@@ -61,6 +71,7 @@ ZEND_FUNCTION(Rapira_get_version);
 ZEND_FUNCTION(Rapira_log);
 ZEND_METHOD(Rapira_InetAddress, __construct);
 ZEND_METHOD(Rapira_UnixAddress, __construct);
+ZEND_METHOD(Rapira_Tls, __construct);
 
 static const zend_function_entry ext_functions[] = {
 	ZEND_FE(rapira_finish_request, arginfo_rapira_finish_request)
@@ -99,6 +110,11 @@ static const zend_function_entry class_Rapira_InetAddress_methods[] = {
 
 static const zend_function_entry class_Rapira_UnixAddress_methods[] = {
 	ZEND_ME(Rapira_UnixAddress, __construct, arginfo_class_Rapira_UnixAddress___construct, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Rapira_Tls_methods[] = {
+	ZEND_ME(Rapira_Tls, __construct, arginfo_class_Rapira_Tls___construct, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -192,6 +208,58 @@ static zend_class_entry *register_class_Rapira_UnixAddress(void)
 	zval property_path_default_value;
 	ZVAL_UNDEF(&property_path_default_value);
 	zend_declare_typed_property(class_entry, ZSTR_KNOWN(ZEND_STR_PATH), &property_path_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Rapira_Tls(void)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Rapira", "Tls", class_Rapira_Tls_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE|ZEND_ACC_READONLY_CLASS);
+
+	zval property_version_default_value;
+	ZVAL_UNDEF(&property_version_default_value);
+	zend_string *property_version_name = zend_string_init("version", sizeof("version") - 1, 1);
+	zend_declare_typed_property(class_entry, property_version_name, &property_version_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING));
+	zend_string_release(property_version_name);
+
+	zval property_cipher_default_value;
+	ZVAL_UNDEF(&property_cipher_default_value);
+	zend_string *property_cipher_name = zend_string_init("cipher", sizeof("cipher") - 1, 1);
+	zend_declare_typed_property(class_entry, property_cipher_name, &property_cipher_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING));
+	zend_string_release(property_cipher_name);
+
+	zval property_negotiatedProtocol_default_value;
+	ZVAL_UNDEF(&property_negotiatedProtocol_default_value);
+	zend_string *property_negotiatedProtocol_name = zend_string_init("negotiatedProtocol", sizeof("negotiatedProtocol") - 1, 1);
+	zend_declare_typed_property(class_entry, property_negotiatedProtocol_name, &property_negotiatedProtocol_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
+	zend_string_release(property_negotiatedProtocol_name);
+
+	zval property_requestedServerName_default_value;
+	ZVAL_UNDEF(&property_requestedServerName_default_value);
+	zend_string *property_requestedServerName_name = zend_string_init("requestedServerName", sizeof("requestedServerName") - 1, 1);
+	zend_declare_typed_property(class_entry, property_requestedServerName_name, &property_requestedServerName_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
+	zend_string_release(property_requestedServerName_name);
+
+	zval property_certSerial_default_value;
+	ZVAL_UNDEF(&property_certSerial_default_value);
+	zend_string *property_certSerial_name = zend_string_init("certSerial", sizeof("certSerial") - 1, 1);
+	zend_declare_typed_property(class_entry, property_certSerial_name, &property_certSerial_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
+	zend_string_release(property_certSerial_name);
+
+	zval property_certOrganization_default_value;
+	ZVAL_UNDEF(&property_certOrganization_default_value);
+	zend_string *property_certOrganization_name = zend_string_init("certOrganization", sizeof("certOrganization") - 1, 1);
+	zend_declare_typed_property(class_entry, property_certOrganization_name, &property_certOrganization_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
+	zend_string_release(property_certOrganization_name);
+
+	zval property_certFingerprint_default_value;
+	ZVAL_UNDEF(&property_certFingerprint_default_value);
+	zend_string *property_certFingerprint_name = zend_string_init("certFingerprint", sizeof("certFingerprint") - 1, 1);
+	zend_declare_typed_property(class_entry, property_certFingerprint_name, &property_certFingerprint_default_value, ZEND_ACC_PUBLIC|ZEND_ACC_READONLY, NULL, (zend_type) ZEND_TYPE_INIT_MASK(MAY_BE_STRING|MAY_BE_NULL));
+	zend_string_release(property_certFingerprint_name);
 
 	return class_entry;
 }

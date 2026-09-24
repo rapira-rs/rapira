@@ -80,7 +80,7 @@ extern zend_class_entry *rapira_ce_work_discarded_exception;
 extern zend_class_entry *rapira_ce_no_dispatcher_error;
 extern zend_class_entry *rapira_ce_not_in_worker_mode_error;
 extern zend_class_entry *rapira_ce_already_finalized_error;
-extern zend_class_entry *rapira_ce_http_tls;
+extern zend_class_entry *rapira_ce_tls;
 extern zend_class_entry *rapira_ce_http_multipart;
 extern zend_class_entry *rapira_ce_internal_http_dispatcher;
 extern zend_class_entry *rapira_ce_inet_address;

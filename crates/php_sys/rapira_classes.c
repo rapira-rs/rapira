@@ -24,7 +24,7 @@ zend_class_entry *rapira_ce_already_finalized_error;
 
 zend_class_entry *rapira_ce_inet_address;
 zend_class_entry *rapira_ce_unix_address;
-zend_class_entry *rapira_ce_http_tls;
+zend_class_entry *rapira_ce_tls;
 zend_class_entry *rapira_ce_http_multipart;
 zend_class_entry *rapira_ce_internal_http_dispatcher;
 zend_class_entry *rapira_ce_http_form_field;
@@ -106,7 +106,7 @@ void rapira_register_classes(void) {
 
     rapira_ce_inet_address = register_class_Rapira_InetAddress();
     rapira_ce_unix_address = register_class_Rapira_UnixAddress();
-    rapira_ce_http_tls = register_class_Rapira_Http_Tls();
+    rapira_ce_tls = register_class_Rapira_Tls();
     rapira_ce_http_form_field = register_class_Rapira_Http_FormField();
     rapira_ce_http_uploaded_file = register_class_Rapira_Http_UploadedFile();
     rapira_ce_http_multipart = register_class_Rapira_Http_Multipart();
