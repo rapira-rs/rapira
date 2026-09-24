@@ -8,6 +8,11 @@
 - New host logic in Rust via ZEND_API if that is reasonable. C only for ZPP shells, longjmp isolation, macro shims.
 - Pre 1.0 - do not preserve backwards compatibility.
 
+## PHP contract
+
+- The PHP contract ([rapira-rs/contract](https://github.com/rapira-rs/contract), local checkout `../contract`; update it before you read it) comes first. Read it before you plan, design or change anything that PHP can see: stubs, classes, functions, exceptions, messages and behavior.
+- The extension follows the contract. To improve the contract or deviate from it, ask first.
+
 ## Comments
 
 - `make stubs` generates each `crates/php_sys/*_arginfo.h` header from its `*.stub.php`.
