@@ -439,7 +439,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_api::{Backend, Reply, ReplySource, Request};
+    use extension_api::{Backend, Reply, ReplySource, Request, UnaryCall, UnaryReply};
     use std::collections::VecDeque;
     use std::future::Future;
     use std::sync::Mutex;
@@ -453,6 +453,14 @@ mod tests {
             _req: Request,
         ) -> Pin<Box<dyn Future<Output = extension_api::Result<Reply>> + Send + '_>> {
             unreachable!("the middleware answers before PHP")
+        }
+
+        fn unary(
+            &self,
+            _call: UnaryCall,
+        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Option<UnaryReply>>> + Send + '_>>
+        {
+            unreachable!("the HTTP handler sends no call")
         }
     }
 
@@ -552,6 +560,14 @@ mod tests {
                     gate,
                 })))
             })
+        }
+
+        fn unary(
+            &self,
+            _call: UnaryCall,
+        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Option<UnaryReply>>> + Send + '_>>
+        {
+            unreachable!("the HTTP handler sends no call")
         }
     }
 

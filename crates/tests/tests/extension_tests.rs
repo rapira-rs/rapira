@@ -1,10 +1,10 @@
-use extension_api::{Extension, Php, Request, Result};
-use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue, SET_COOKIE};
+use extension_api::{Extension, Php, Request, Result, RpcProtocol, RpcStatus, UnaryCall};
+use http::header::{CONTENT_TYPE, HeaderMap, HeaderName, HeaderValue, SET_COOKIE};
 use php_sys::{Mode, Rapira};
 use rapira_runtime::ExtensionRuntime;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tests::{Response, collect, fixture, php_lock};
+use tests::{Response, collect, echo_services, fixture, php_lock};
 
 async fn exec_full(php: &Php, req: Request) -> Result<Response> {
     collect(php.exec(req).await?).await
@@ -188,6 +188,145 @@ fn rejected_bodies_never_reach_the_pool() -> anyhow::Result<()> {
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
     assert!(outcomes[0].is_ok(), "driver failed: {:?}", outcomes[0]);
+    Ok(())
+}
+
+type Fields = &'static [(&'static str, &'static str)];
+
+/// A unary reply as headers, trailers, and the output message or the status. None: the call was lost.
+type Parts = Option<(
+    HeaderMap,
+    HeaderMap,
+    std::result::Result<Vec<u8>, RpcStatus>,
+)>;
+
+#[derive(Debug)]
+enum Want {
+    /// The response headers, the trailers and the output message.
+    Reply(Fields, Fields, &'static str),
+    /// The status triple, with no response metadata.
+    Status(u32, &'static str, &'static [(&'static str, &'static [u8])]),
+    Lost,
+}
+
+impl Want {
+    fn parts(&self) -> Parts {
+        let fields = |lines: Fields| -> HeaderMap {
+            lines
+                .iter()
+                .map(|&(k, v)| (HeaderName::from_static(k), HeaderValue::from_static(v)))
+                .collect()
+        };
+        match self {
+            Self::Reply(headers, trailers, message) => Some((
+                fields(headers),
+                fields(trailers),
+                Ok(message.as_bytes().to_vec()),
+            )),
+            Self::Status(code, message, details) => Some((
+                HeaderMap::new(),
+                HeaderMap::new(),
+                Err(RpcStatus {
+                    code: *code,
+                    message: (*message).to_owned(),
+                    details: details
+                        .iter()
+                        .map(|&(url, value)| (url.to_owned(), value.into()))
+                        .collect(),
+                }),
+            )),
+            Self::Lost => None,
+        }
+    }
+}
+
+struct UnaryCase {
+    name: &'static str,
+    message: &'static str,
+    expected: Want,
+}
+
+// Expected values: the probes of grpc/unary-worker.php, fixed by grpc_dispatcher.rs, and RFC 4648: 01 02 is `AQI`.
+const UNARY_CASES: &[UnaryCase] = &[
+    UnaryCase {
+        name: "echo",
+        message: "echo:hi",
+        expected: Want::Reply(&[], &[], "hi"),
+    },
+    UnaryCase {
+        name: "status",
+        message: "fail",
+        expected: Want::Status(
+            5,
+            "no invoice",
+            &[("type.googleapis.com/google.rpc.ErrorInfo", b"\x0a\x01x")],
+        ),
+    },
+    UnaryCase {
+        name: "metadata",
+        message: "meta",
+        expected: Want::Reply(&[("x-h", "v"), ("x-b-bin", "AQI")], &[("x-t", "w")], "meta"),
+    },
+    UnaryCase {
+        name: "lost",
+        message: "drop",
+        expected: Want::Lost,
+    },
+];
+
+/// Sends each case through `Php::unary`.
+struct UnaryDriver;
+
+impl Extension for UnaryDriver {
+    type Config = ();
+
+    fn init(_config: ()) -> Self {
+        UnaryDriver
+    }
+
+    fn name(&self) -> &str {
+        "unary-driver"
+    }
+
+    async fn run(&mut self, php: Php) -> Result<()> {
+        let mut mismatches = Vec::new();
+        for c in UNARY_CASES {
+            let call = UnaryCall {
+                method: "rapira.test.v1.EchoService/Echo".into(),
+                protocol: RpcProtocol::Connect,
+                metadata: HeaderMap::new(),
+                deadline: None,
+                remote: extension_api::Addr::Inet(([127, 0, 0, 1], 44123).into()),
+                message: c.message.as_bytes().to_vec().into(),
+            };
+            let got: Parts = php
+                .unary(call)
+                .await?
+                .map(|r| (r.headers, r.trailers, r.outcome.map(|m| m.to_vec())));
+            let expected = c.expected.parts();
+            if got != expected {
+                mismatches.push(format!("{}: expected {expected:?}, got {got:?}", c.name));
+            }
+        }
+        anyhow::ensure!(mismatches.is_empty(), "{mismatches:#?}");
+        Ok(())
+    }
+}
+
+#[test]
+fn unary_calls_cross_the_extension_api() -> anyhow::Result<()> {
+    let _guard = php_lock();
+    let script = fixture("grpc/unary-worker.php");
+    let rapira = Rapira::start(Mode::GrpcDispatcher {
+        script: script.clone(),
+        services: echo_services(),
+    })?;
+    let mut host = ExtensionRuntime::new();
+    host.register::<UnaryDriver>(());
+    let outcomes = host.run(rapira.handle(), script).join();
+    drop(rapira);
+    assert_eq!(outcomes.len(), 1);
+    assert!(outcomes[0].is_ok(), "{:?}", outcomes[0]);
     Ok(())
 }
 

@@ -135,7 +135,7 @@ mod tests {
     use std::pin::Pin;
     use std::task::Poll;
 
-    use extension_api::{Backend, Reply, Request};
+    use extension_api::{Backend, Reply, Request, UnaryCall, UnaryReply};
 
     use super::*;
 
@@ -144,6 +144,13 @@ mod tests {
     impl Backend for UnusedBackend {
         fn exec(&self, _req: Request) -> Pin<Box<dyn Future<Output = Result<Reply>> + Send + '_>> {
             unreachable!("the lifecycle test does not send a request")
+        }
+
+        fn unary(
+            &self,
+            _call: UnaryCall,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<UnaryReply>>> + Send + '_>> {
+            unreachable!("the lifecycle test does not send a call")
         }
     }
 
