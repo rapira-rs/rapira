@@ -5,7 +5,10 @@ PHP_ENV = PHP_CONFIG=$(PHP_CONFIG) LD_LIBRARY_PATH="$$PHPLIB:$$LIBDIR" DYLD_LIBR
 GEN_STUB ?= $(shell $(PHP_CONFIG) --prefix)/lib/php/build/gen_stub.php
 PHP_BIN ?= $(shell $(PHP_CONFIG) --prefix)/bin/php
 
-.PHONY: test test_nts test_e2e coverage stubs php php-macos
+BUF_VERSION ?= v1.73.0
+BUF ?= go run github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
+
+.PHONY: test test_nts test_e2e coverage stubs grpc_fixtures php php-macos
 
 stubs:
 	@test -f "$(GEN_STUB)" || { echo "gen_stub.php not found at $(GEN_STUB); set GEN_STUB=/path/to/gen_stub.php"; exit 1; }
@@ -15,6 +18,11 @@ stubs:
 	@for stub in crates/php_sys/*.stub.php; do \
 		$(PHP_BIN) target/stubgen/gen_stub.php "$$stub" || exit 1; \
 	done
+
+grpc_fixtures:
+	@cd crates/plugins/grpc && \
+	$(BUF) build testdata --as-file-descriptor-set -o testdata/echo.binpb && \
+	$(BUF) build testdata --as-file-descriptor-set --exclude-imports -o testdata/echo-no-imports.binpb
 
 test:
 	@$(MAKE) test_nts

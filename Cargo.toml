@@ -29,6 +29,7 @@ members = [
     "crates/scoreboard",
     "crates/net",
     "crates/plugins/http",
+    "crates/plugins/grpc",
 ]
 
 [workspace.dependencies]
@@ -41,6 +42,7 @@ rapira_config = { path = "crates/config" }
 extension_api = { path = "crates/api" }
 rapira_static_files = { path = "crates/middleware/static_files" }
 rapira_http = { path = "crates/plugins/http" }
+rapira_grpc = { path = "crates/plugins/grpc" }
 rapira_net = { path = "crates/net" }
 rapira_master = { path = "crates/master" }
 rapira_scoreboard = { path = "crates/scoreboard" }
@@ -49,6 +51,9 @@ bytes = "1"
 http = "1"
 http-body-util = "0.1"
 libc = "0.2"
+buffa = { version = "0.9.2", default-features = false, features = ["std"] }
+buffa-descriptor = { version = "0.9.2", features = ["reflect", "json"] }
+connectrpc = { git = "https://github.com/connectrpc/connect-rust", rev = "0bb21af9736dac7b82065a4252405a8eb65f27ee", default-features = false, features = ["server", "json", "gzip"] }
 
 [workspace.lints.clippy]
 all = "warn"

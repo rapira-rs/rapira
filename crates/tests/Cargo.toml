@@ -20,8 +20,13 @@ tracing-subscriber = "0.3"
 [dev-dependencies]
 http-body-util = { workspace = true }
 rapira_http = { workspace = true }
+rapira_grpc = { workspace = true }
 rapira_runtime = { workspace = true }
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "net"] }
+# gRPC clients (tests/e2e/grpc.rs).
+hyper = { version = "1", features = ["client", "http1", "http2"] }
+hyper-util = { version = "0.1", features = ["tokio"] }
+base64 = { workspace = true }
 # E2E harness (tests/e2e): process control for the spawned rapira binary.
 libc = { workspace = true }
 # E2E log-format assertions (tests/e2e/logging.rs).

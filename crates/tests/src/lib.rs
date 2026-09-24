@@ -139,6 +139,11 @@ pub fn req(uri: &str, fixture_name: &str) -> Request {
     }
 }
 
+/// The FileDescriptorSet of `crates/plugins/grpc/testdata/echo.proto`.
+pub fn echo_descriptor_set() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("../plugins/grpc/testdata/echo.binpb")
+}
+
 /// The services of `crates/plugins/grpc/testdata/echo.proto`, in descriptor order.
 pub fn echo_services() -> Vec<GrpcService> {
     let method = |name: &str, server_streaming: bool| GrpcMethod {
