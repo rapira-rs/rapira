@@ -42,7 +42,7 @@ The payload includes `bcmath`, `intl`, `pdo_pgsql`, `pgsql`, `igbinary`, and `re
 
 ## Usage
 
-Each example listens on `127.0.0.1:8000`. After it starts, run `curl http://127.0.0.1:8000/` in another terminal. Relative paths in `rapira.toml` resolve against its directory; the classic example's `entrypoint` is `public/index.php`, one directory below the file.
+Each HTTP example listens on `127.0.0.1:8000`. After it starts, run `curl http://127.0.0.1:8000/` in another terminal. Relative paths in `rapira.toml` resolve against its directory; the classic example's `entrypoint` is `public/index.php`, one directory below the file.
 
 ### Classic
 
@@ -143,6 +143,83 @@ rapira serve rapira.toml
 ```
 
 See [examples](examples/) for routing, streaming, and asynchronous dispatch.
+
+### gRPC
+
+The [gRPC plugin](crates/plugins/grpc/README.md) serves unary RPCs from PHP over gRPC, gRPC-Web and Connect. A gRPC pool runs in dispatcher mode. This example listens on `127.0.0.1:50051`, not on port 8000. Save this as `echo.proto`:
+
+```proto
+syntax = "proto3";
+
+package echo.v1;
+
+message EchoMessage {
+  string text = 1;
+}
+
+service EchoService {
+  rpc Echo(EchoMessage) returns (EchoMessage);
+}
+```
+
+Build the descriptor set with [buf](https://buf.build/docs/reference/cli/buf/build/):
+
+```sh
+buf build --as-file-descriptor-set -o echo.binpb
+```
+
+Save this as `grpc.php`. The method takes and returns `EchoMessage`, so the script answers with the request bytes. An empty message means that `text` is not set. A real service decodes the message with the classes that `protoc --php_out` generates.
+
+```php
+<?php
+use Rapira\Exception\ClosedException;
+use Rapira\Exception\WorkDiscardedException;
+use Rapira\Grpc\Status;
+use Rapira\Grpc\StatusCode;
+use Rapira\Grpc\UnaryCall;
+
+$dispatcher = \Rapira\get_dispatcher();
+
+try {
+    while (true) {
+        $call = $dispatcher->receive();
+
+        try {
+            if (!$call instanceof UnaryCall) {
+                $call->fail(new Status(StatusCode::Unimplemented));
+            } elseif ($call->getMessage() === '') {
+                $call->fail(new Status(StatusCode::InvalidArgument, 'text is required'));
+            } else {
+                $call->respond($call->getMessage());
+            }
+        } catch (WorkDiscardedException) {
+        }
+    }
+} catch (ClosedException) {
+}
+```
+
+Save this as `rapira.toml`:
+
+```toml
+[grpc]
+listen = "127.0.0.1:50051"
+descriptor_set = "echo.binpb"
+services = ["echo.v1.EchoService"]
+
+[grpc.pool]
+entrypoint = "grpc.php"
+```
+
+```sh
+rapira serve rapira.toml
+```
+
+Call the method with Connect JSON. The answer is `{"text":"hi"}`.
+
+```sh
+curl -H 'Content-Type: application/json' -d '{"text":"hi"}' http://127.0.0.1:50051/echo.v1.EchoService/Echo
+```
 
 ## Contributing
 
