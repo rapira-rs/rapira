@@ -1,0 +1,20 @@
+[package]
+name = "rapira_net"
+version = "0.8.1"
+edition.workspace = true
+publish = false
+license = "MIT"
+description = "Accept loop for rapira plugins - serves the listener that the master prepared"
+
+[lints]
+workspace = true
+
+[dependencies]
+extension_api = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+libc = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "time", "macros"] }
+
+[dev-dependencies]
+tempfile = "3"

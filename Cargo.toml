@@ -27,6 +27,7 @@ members = [
     "crates/middleware/static_files",
     "crates/php_sys",
     "crates/scoreboard",
+    "crates/net",
     "crates/plugins/http",
 ]
 
@@ -39,6 +40,7 @@ rapira_config = { path = "crates/config" }
 extension_api = { path = "crates/api" }
 rapira_static_files = { path = "crates/middleware/static_files" }
 rapira_http = { path = "crates/plugins/http" }
+rapira_net = { path = "crates/net" }
 rapira_master = { path = "crates/master" }
 rapira_scoreboard = { path = "crates/scoreboard" }
 tokio = { version = "1", features = ["sync"] }

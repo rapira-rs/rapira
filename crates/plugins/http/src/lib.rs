@@ -1,13 +1,11 @@
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::anyhow;
 use extension_api::{Extension, ListenAddr, Middleware, Php, PrepareCtx, PreparedListener, Result};
+use rapira_net::{Stop, join_thread};
 use tokio::runtime::Builder;
 
-#[cfg(target_os = "linux")]
-mod accept_linux;
 mod bridge;
 mod check;
 mod handler;
@@ -55,7 +53,7 @@ impl Default for Config {
 pub struct Server {
     config: Config,
     prepared: Option<PreparedListener>,
-    stop: Option<serve::Stop>,
+    stop: Option<Stop>,
     join: Option<tokio::task::JoinHandle<Result<()>>>,
 }
 
@@ -95,7 +93,7 @@ impl Extension for Server {
         let Some(prepared) = self.prepared.take() else {
             return Err(anyhow!("http listener was not prepared"));
         };
-        let stop = serve::Stop::new().map_err(|e| anyhow!("creating the http stop handle: {e}"))?;
+        let stop = Stop::new().map_err(|e| anyhow!("creating the http stop handle: {e}"))?;
         let handle = stop.handle();
 
         let thread = std::thread::Builder::new()
@@ -107,20 +105,13 @@ impl Extension for Server {
                     .thread_name("rapira-http-io")
                     .build()
                     .map_err(|e| anyhow!("building the http runtime: {e}"))?;
-                #[cfg(target_os = "linux")]
-                {
-                    serve::serve(php, config, prepared, handle, &rt)
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    rt.block_on(serve::serve(php, config, prepared, handle))
-                }
+                serve::serve(php, config, prepared, handle, &rt)
             })?;
 
         self.stop = Some(stop);
-        let join = self
-            .join
-            .insert(tokio::task::spawn_blocking(move || join_thread(thread)));
+        let join = self.join.insert(tokio::task::spawn_blocking(move || {
+            join_thread(thread, "http")
+        }));
         let result = join.await;
         self.join = None;
         result.map_err(|e| anyhow!("http join task failed: {e}"))?
@@ -136,17 +127,6 @@ impl Extension for Server {
         }
         Ok(())
     }
-}
-
-fn join_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
-    thread.join().map_err(|payload| {
-        let msg = payload
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("unknown panic");
-        anyhow!("http server thread panicked: {msg}")
-    })?
 }
 
 #[cfg(test)]

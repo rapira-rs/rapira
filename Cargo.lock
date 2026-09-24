@@ -716,7 +716,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
- "libc",
+ "rapira_net",
  "tempfile",
  "tokio",
  "tracing",
@@ -729,6 +729,18 @@ dependencies = [
  "anyhow",
  "libc",
  "rapira_scoreboard",
+ "tracing",
+]
+
+[[package]]
+name = "rapira_net"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "extension_api",
+ "libc",
+ "tempfile",
+ "tokio",
  "tracing",
 ]
 

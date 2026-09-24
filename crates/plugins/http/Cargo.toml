@@ -11,12 +11,12 @@ workspace = true
 
 [dependencies]
 extension_api = { workspace = true }
+rapira_net = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
-libc = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros"] }
 hyper = { version = "1", features = ["http1", "server"] }
 hyper-util = { version = "0.1", features = ["tokio", "server", "http1", "server-graceful"] }
