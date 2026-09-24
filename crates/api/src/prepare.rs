@@ -15,6 +15,15 @@ pub enum ListenAddr {
     Unix(PathBuf),
 }
 
+impl std::fmt::Display for ListenAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tcp(a) => write!(f, "{a}"),
+            Self::Unix(p) => write!(f, "unix:{}", p.display()),
+        }
+    }
+}
+
 /// Exactly one closer per process: the master holds its copy for its whole life so respawned workers keep inheriting it, a worker hands its copy to the adopter.
 #[derive(Debug)]
 pub struct PreparedListener {

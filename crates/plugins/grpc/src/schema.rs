@@ -62,6 +62,10 @@ impl Schema {
                     path.display()
                 )
             })?;
+            let full_name = service.full_name();
+            if listed.iter().any(|s: &ServiceInfo| s.name == full_name) {
+                return Err(anyhow!("grpc.services lists `{full_name}` twice"));
+            }
             let mut infos = Vec::with_capacity(service.methods().len());
             for m in service.methods() {
                 let route = format!("{}/{}", service.full_name(), m.name());
@@ -112,7 +116,7 @@ impl Schema {
         self.methods.get(path)
     }
 
-    /// Unknown fields are dropped, as connect-go does.
+    /// Unknown fields are dropped. An unknown enum value name fails the decode.
     pub(crate) fn json_to_proto(&self, m: &Method, json: &[u8]) -> anyhow::Result<Vec<u8>> {
         let json = std::str::from_utf8(json)?;
         let msg =
@@ -121,7 +125,10 @@ impl Schema {
     }
 
     pub(crate) fn proto_to_json(&self, m: &Method, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-        let msg = DynamicMessage::decode(Arc::clone(&self.pool), m.output, bytes)?;
+        // The application produces the reply, so the element memory limit for untrusted input does not apply.
+        let opts = buffa::DecodeOptions::new().with_element_memory_limit(usize::MAX);
+        let msg =
+            DynamicMessage::decode_with_options(Arc::clone(&self.pool), m.output, bytes, &opts)?;
         Ok(msg.to_json()?.into_bytes())
     }
 }
@@ -257,19 +264,57 @@ mod tests {
         }
     }
 
+    /// buffa resolves a name with a leading dot to the same service.
+    #[test]
+    fn load_rejects_a_service_listed_twice() {
+        struct Case {
+            name: &'static str,
+            services: [&'static str; 2],
+        }
+        let cases = [
+            Case {
+                name: "exact duplicate",
+                services: [ECHO, ECHO],
+            },
+            Case {
+                name: "leading-dot alias",
+                services: [ECHO, ".rapira.test.v1.EchoService"],
+            },
+        ];
+        for case in cases {
+            let services = case.services.map(str::to_owned);
+            let Err(err) = Schema::load(&testdata("echo.binpb"), &services) else {
+                panic!("{}: the set loaded", case.name);
+            };
+            let err = err.to_string();
+            assert!(
+                err.contains("grpc.services lists `rapira.test.v1.EchoService` twice"),
+                "{}: {err}",
+                case.name
+            );
+        }
+    }
+
     /// Expected bytes follow the protobuf encoding spec: field 1 string "hi"
     /// is 0a 02 68 69, field 2 Timestamp{seconds: 1} is 12 02 08 01.
+    /// Field 3 packed repeated int32 is 1a, the varint length, then one varint per element.
+    /// The proto3 JSON mapping writes a repeated int32 as an array of numbers.
     #[test]
     fn json_transcodes_by_descriptor() {
+        // buffa charges the size of its Value type, at least 64 bytes, per element against a 32 MiB budget, so at most 524,288 elements fit.
+        const IDS: usize = 600_000;
+        let mut many_ids = vec![0x1a, 0xc0, 0xcf, 0x24];
+        many_ids.resize(many_ids.len() + IDS, 0x01);
+        let many_ids_json = format!(r#"{{"ids":[{}1]}}"#, "1,".repeat(IDS - 1));
         enum Way {
             ToProto,
             ToJson,
         }
-        struct Case {
+        struct Case<'a> {
             name: &'static str,
             way: Way,
-            input: &'static [u8],
-            output: Option<&'static [u8]>,
+            input: &'a [u8],
+            output: Option<&'a [u8]>,
         }
         let cases = [
             Case {
@@ -331,6 +376,12 @@ mod tests {
                 way: Way::ToJson,
                 input: &[0xff],
                 output: None,
+            },
+            Case {
+                name: "reply above the untrusted-input element budget",
+                way: Way::ToJson,
+                input: &many_ids,
+                output: Some(many_ids_json.as_bytes()),
             },
         ];
         let schema = echo();

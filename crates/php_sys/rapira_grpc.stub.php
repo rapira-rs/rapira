@@ -313,14 +313,14 @@ namespace Rapira\Grpc\Responder {
         /**
          * @throws \Rapira\Grpc\Exception\HeadersAlreadyCommittedError
          * @throws \Rapira\Exception\AlreadyFinalizedError
-         * @throws \ValueError The name is reserved or has the `-bin` suffix, or the value is not printable ASCII.
+         * @throws \ValueError The name is reserved, has the `-bin` suffix or has a character other than 0-9 a-z _ - . after lower-casing, or the value is not printable ASCII.
          */
         public function addHeader(string $name, string $value): void;
 
         /**
          * @throws \Rapira\Grpc\Exception\HeadersAlreadyCommittedError
          * @throws \Rapira\Exception\AlreadyFinalizedError
-         * @throws \ValueError The name is reserved or does not have the `-bin` suffix.
+         * @throws \ValueError The name is reserved, does not have the `-bin` suffix or has a character other than 0-9 a-z _ - . after lower-casing.
          */
         public function addBinaryHeader(string $name, string $bytes): void;
 

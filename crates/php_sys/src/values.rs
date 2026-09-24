@@ -354,8 +354,10 @@ pub unsafe extern "C" fn rapira_rs_grpc_metadata_values(
     guard(false, || unsafe {
         // the key buffer is freed before the calls that can bail out
         let found = {
-            let key = std::slice::from_raw_parts(name.cast::<u8>(), len).to_ascii_lowercase();
-            rapira_symtable_str_find(entries, zend::ptr_or_empty(&key), key.len())
+            let mut key = std::slice::from_raw_parts(name.cast::<u8>(), len).to_ascii_lowercase();
+            // the numeric-key check of the symtable reads the byte after a leading '-' before it checks the length
+            key.push(0);
+            rapira_symtable_str_find(entries, key.as_ptr().cast(), len)
         };
         if found.is_null() {
             rapira_array_init(rv, 0);

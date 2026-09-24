@@ -10,10 +10,11 @@ use super::request::{add_list, build_address, header_key};
 use super::respond::{Verb, throw_verb};
 use super::*;
 use crate::{
-    IS_OBJECT, rapira_ce_grpc_context, rapira_ce_grpc_error_detail, rapira_ce_grpc_metadata,
-    rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind, rapira_ce_grpc_protocol,
-    rapira_ce_grpc_service_info, rapira_ce_internal_grpc_response_metadata, rapira_grpc_call_obj,
-    rapira_grpc_metadata_obj, rapira_zval_enum_case,
+    IS_OBJECT, rapira_ce_already_finalized_error, rapira_ce_grpc_context,
+    rapira_ce_grpc_error_detail, rapira_ce_grpc_metadata, rapira_ce_grpc_method_info,
+    rapira_ce_grpc_method_kind, rapira_ce_grpc_protocol, rapira_ce_grpc_service_info,
+    rapira_ce_internal_grpc_response_metadata, rapira_ce_work_discarded_exception,
+    rapira_grpc_call_obj, rapira_grpc_metadata_obj, rapira_zval_enum_case,
     types::{GrpcJob, GrpcMethod, GrpcOutcome, GrpcProtocol, GrpcRequest, GrpcService, GrpcStatus},
     zend_argument_type_error, zend_read_property, zend_zval_value_name,
 };
@@ -121,7 +122,14 @@ fn reserved(name: &str) -> bool {
     PREFIXES.iter().any(|p| name.starts_with(p)) || NAMES.contains(&name)
 }
 
-/// `Context::$metadata`: the application keys, with `-bin` values decoded. An undecodable value is dropped, and a key with no values left is absent.
+/// The Metadata rule for a text value: printable ASCII, 0x20 to 0x7E.
+fn printable(value: &[u8]) -> bool {
+    value.iter().all(|b| (0x20..=0x7e).contains(b))
+}
+
+/// `Context::$metadata`: the application keys, with `-bin` values decoded. A text value that is not printable or an undecodable `-bin` value is dropped, and a key with no values left is absent.
+/// A `-bin` value is split on "," first: "Implementations must split Binary-Headers on "," before decoding the Base64-encoded values." https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
+/// The optional whitespace around "," follows the HTTP list rule. https://www.rfc-editor.org/rfc/rfc9110#section-5.6.1
 fn context_metadata(headers: &HeaderMap) -> Fields {
     let mut out = Fields::new();
     for name in headers.keys() {
@@ -129,21 +137,30 @@ fn context_metadata(headers: &HeaderMap) -> Fields {
             continue;
         }
         let binary = name.as_str().ends_with("-bin");
-        let values: Vec<Vec<u8>> = headers
-            .get_all(name)
-            .iter()
-            .filter_map(|v| {
-                if !binary {
-                    return Some(v.as_bytes().to_vec());
+        let mut values: Vec<Vec<u8>> = Vec::new();
+        for v in headers.get_all(name) {
+            let v = v.as_bytes();
+            if !binary {
+                if printable(v) {
+                    values.push(v.to_vec());
+                } else {
+                    tracing::debug!(target: "rapira", "dropped a non-printable {name} value");
                 }
-                BIN_DECODE
-                    .decode(v.as_bytes())
-                    .inspect_err(|e| {
+                continue;
+            }
+            for piece in v
+                .split(|&b| b == b',')
+                .map(<[u8]>::trim_ascii)
+                .filter(|p| !p.is_empty())
+            {
+                match BIN_DECODE.decode(piece) {
+                    Ok(decoded) => values.push(decoded),
+                    Err(e) => {
                         tracing::debug!(target: "rapira", "dropped an undecodable {name} value: {e}");
-                    })
-                    .ok()
-            })
-            .collect();
+                    }
+                }
+            }
+        }
         if !values.is_empty() {
             out.push((name.clone(), values));
         }
@@ -255,6 +272,14 @@ fn add_core(
     let Ok(name) = HeaderName::from_bytes(name) else {
         return Verb::BadField(c"the metadata name is not a valid header name");
     };
+    // Header-Name: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
+    if !name
+        .as_str()
+        .bytes()
+        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'z' | b'_' | b'-' | b'.'))
+    {
+        return Verb::BadField(c"a metadata name must use only 0-9 a-z _ - .");
+    }
     if reserved(name.as_str()) {
         return Verb::BadField(c"the metadata name is reserved for the transport");
     }
@@ -269,13 +294,14 @@ fn add_core(
         }
         _ => {}
     }
-    if !binary && !value.iter().all(|b| (0x20..=0x7e).contains(b)) {
+    if !binary && !printable(value) {
         return Verb::BadField(c"a text metadata value must be printable ASCII");
     }
     let Some(st) = st else {
         return Verb::Finalized;
     };
-    if st.is_finalized() {
+    // a call that the host closed keeps the entry, and finish() gives WorkDiscardedException
+    if st.finalized {
         return Verb::Finalized;
     }
     let half = if trailer {
@@ -321,16 +347,25 @@ fn finish(st: &mut GrpcState, result: Result<Bytes, GrpcStatus>) -> Verb {
     }
 }
 
+/// The messages of the two finalize errors name the call, as the Responder.php `@throws` lines do.
 /// # Safety
 /// Engine active; can bailout on OOM.
 unsafe fn thrown(v: Verb) -> bool {
-    match v {
-        Verb::Ok => true,
-        v => {
-            unsafe { throw_verb(v) };
-            false
+    unsafe {
+        match v {
+            Verb::Ok => return true,
+            Verb::Finalized => zend::throw_exception(
+                rapira_ce_already_finalized_error,
+                c"the call was already finalized",
+            ),
+            Verb::Discarded => zend::throw_exception(
+                rapira_ce_work_discarded_exception,
+                c"the host closed the call first",
+            ),
+            v => throw_verb(v),
         }
     }
+    false
 }
 
 /// Recovers the enclosing C struct: the C fields sit before `std` (wrapper.h layout).
@@ -728,10 +763,14 @@ mod tests {
         (GrpcState::new(job), rx)
     }
 
+    /// `from_bytes` takes the obs-text bytes that a client can send.
     fn map(lines: &[(&'static str, &'static str)]) -> HeaderMap {
         lines
             .iter()
-            .map(|&(k, v)| (HeaderName::from_static(k), HeaderValue::from_static(v)))
+            .map(|&(k, v)| {
+                let value = HeaderValue::from_bytes(v.as_bytes()).expect("a valid field value");
+                (HeaderName::from_static(k), value)
+            })
             .collect()
     }
 
@@ -866,7 +905,7 @@ mod tests {
             headers: &'static [(&'static str, &'static str)],
             expected: &'static [(&'static str, &'static [&'static [u8]])],
         }
-        // Expected values: Call/Context.php (application keys only), PROTOCOL-HTTP2 Requests (accept padded and unpadded -bin values) and RFC 4648 section 4 (`AP8` is 00 ff).
+        // Expected values: Call/Context.php (application keys only), the printable ASCII rule of Metadata for text values, PROTOCOL-HTTP2 Requests (accept padded and unpadded -bin values, split -bin values on ","), RFC 9110 section 5.6.1 (optional whitespace around the "," of a list, https://www.rfc-editor.org/rfc/rfc9110#section-5.6.1) and RFC 4648 section 4 (`AP8` is 00 ff, `AQI` is 01 02).
         const CASES: &[Case] = &[
             Case {
                 name: "application key kept",
@@ -891,6 +930,31 @@ mod tests {
             Case {
                 name: "undecodable -bin dropped",
                 headers: &[("x-bad-bin", "!!")],
+                expected: &[],
+            },
+            Case {
+                name: "comma-separated -bin values split",
+                headers: &[("x-trace-bin", "AP8,AQI")],
+                expected: &[("x-trace-bin", &[b"\x00\xff", b"\x01\x02"])],
+            },
+            Case {
+                name: "comma-separated -bin values with a space split",
+                headers: &[("x-trace-bin", "AP8, AQI")],
+                expected: &[("x-trace-bin", &[b"\x00\xff", b"\x01\x02"])],
+            },
+            Case {
+                name: "non-ASCII text value dropped",
+                headers: &[("x-user", "a"), ("x-user", "\u{e9}")],
+                expected: &[("x-user", &[b"a"])],
+            },
+            Case {
+                name: "text value with a tab dropped",
+                headers: &[("x-user", "a\tb"), ("x-user", "c")],
+                expected: &[("x-user", &[b"c"])],
+            },
+            Case {
+                name: "key with only a non-printable value absent",
+                headers: &[("x-user", "\u{e9}")],
                 expected: &[],
             },
             Case {
@@ -941,6 +1005,7 @@ mod tests {
     enum Want {
         Stored(&'static str, &'static [u8]),
         Bad,
+        BadField(&'static CStr),
         Finalized,
     }
 
@@ -955,7 +1020,7 @@ mod tests {
             value: &'static [u8],
             want: Want,
         }
-        // Expected values: ResponseMetadata.php (lower-case names, reserved names, the -bin rule, AlreadyFinalizedError), the approved printable ASCII rule for text values (empty allowed), and the HTTP error order (the ValueError first).
+        // Expected values: ResponseMetadata.php (lower-case names, reserved names, the -bin rule, AlreadyFinalizedError), AlreadyFinalizedError.php (a host-first closure does not give that error), PROTOCOL-HTTP2 Header-Name (0-9 a-z _ - .), the approved printable ASCII rule for text values (empty allowed), and the HTTP error order (the ValueError first).
         const CASES: &[Case] = &[
             Case {
                 name: "text header lower-cases",
@@ -1075,6 +1140,24 @@ mod tests {
                 want: Want::Stored("x-a", b""),
             },
             Case {
+                name: "plus in the name",
+                setup: Setup::Open,
+                trailer: false,
+                binary: false,
+                key: b"x+debug",
+                value: b"a",
+                want: Want::BadField(c"a metadata name must use only 0-9 a-z _ - ."),
+            },
+            Case {
+                name: "exclamation mark in the name",
+                setup: Setup::Open,
+                trailer: true,
+                binary: false,
+                key: b"x!a",
+                value: b"a",
+                want: Want::BadField(c"a metadata name must use only 0-9 a-z _ - ."),
+            },
+            Case {
                 name: "empty name",
                 setup: Setup::Open,
                 trailer: false,
@@ -1108,7 +1191,7 @@ mod tests {
                 binary: false,
                 key: b"x-a",
                 value: b"a",
-                want: Want::Finalized,
+                want: Want::Stored("x-a", b"a"),
             },
             Case {
                 name: "detached accumulator",
@@ -1145,6 +1228,7 @@ mod tests {
                     assert_eq!(named(half), owned(&[(name, &[value])]), "{}", c.name);
                 }
                 Want::Bad => assert!(matches!(v, Verb::BadField(_)), "{}: {v:?}", c.name),
+                Want::BadField(msg) => assert_eq!(v, Verb::BadField(msg), "{}", c.name),
                 Want::Finalized => assert_eq!(v, Verb::Finalized, "{}", c.name),
             }
         }

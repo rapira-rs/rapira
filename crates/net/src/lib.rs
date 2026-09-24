@@ -53,6 +53,7 @@ pub trait Serve {
 /// The listening socket of one worker.
 pub struct Acceptor {
     socket: Socket,
+    addr: ListenAddr,
     #[cfg(not(target_os = "linux"))]
     stop: StopHandle,
 }
@@ -69,7 +70,8 @@ impl Acceptor {
         rt: &Runtime,
     ) -> std::io::Result<Self> {
         use std::os::fd::{FromRawFd, IntoRawFd};
-        let tcp: bool = matches!(prepared.addr(), ListenAddr::Tcp(_));
+        let addr = prepared.addr().clone();
+        let tcp: bool = matches!(addr, ListenAddr::Tcp(_));
         // On other OSes from_std registers the tokio listener with the reactor of rt.
         let _guard = rt.enter();
         // SAFETY: into_raw_fd transfers sole ownership of a listening socket.
@@ -92,6 +94,7 @@ impl Acceptor {
         };
         Ok(Self {
             socket,
+            addr,
             #[cfg(not(target_os = "linux"))]
             stop,
         })
@@ -114,10 +117,10 @@ impl Acceptor {
                     break;
                 }
                 Err(e) if is_skipped_accept(&e) => {
-                    tracing::debug!(target: "net", "accept skipped: {e}");
+                    tracing::debug!(target: "net", "accept skipped on {}: {e}", self.addr);
                 }
                 Err(e) => {
-                    tracing::warn!(target: "net", "accept failed: {e}");
+                    tracing::warn!(target: "net", "accept failed on {}: {e}", self.addr);
                     std::thread::sleep(Duration::from_millis(100));
                 }
             }
@@ -129,7 +132,11 @@ impl Acceptor {
     /// failure, if any. The listener is closed when this returns.
     #[cfg(not(target_os = "linux"))]
     pub fn run(self, rt: &Runtime, serve: &impl Serve) -> Option<anyhow::Error> {
-        let Self { socket, mut stop } = self;
+        let Self {
+            socket,
+            addr,
+            mut stop,
+        } = self;
         let mut fatal: Option<anyhow::Error> = None;
         rt.block_on(async {
             loop {
@@ -143,10 +150,10 @@ impl Acceptor {
                             break;
                         }
                         Err(e) if is_skipped_accept(&e) => {
-                            tracing::debug!(target: "net", "accept skipped: {e}");
+                            tracing::debug!(target: "net", "accept skipped on {addr}: {e}");
                         }
                         Err(e) => {
-                            tracing::warn!(target: "net", "accept failed: {e}");
+                            tracing::warn!(target: "net", "accept failed on {addr}: {e}");
                             tokio::time::sleep(Duration::from_millis(100)).await;
                         }
                     }

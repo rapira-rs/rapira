@@ -163,7 +163,7 @@ struct OutcomeCase {
     log: Option<(&'static str, &'static str)>,
 }
 
-// Expected values: Work.php (finalize once, loss), Responder.php and Status.php (the status triple), the gRPC README (an uncaught throwable is INTERNAL, the worker recycles), and the single-flight receive().
+// Expected values: Work.php (finalize once, loss), Responder.php and Status.php (the status triple, the exception messages), the gRPC README (an uncaught throwable is INTERNAL, the worker recycles), and the single-flight receive().
 const OUTCOME_CASES: &[OutcomeCase] = &[
     OutcomeCase {
         name: "respond echoes the message",
@@ -190,7 +190,10 @@ const OUTCOME_CASES: &[OutcomeCase] = &[
     OutcomeCase {
         name: "finalizing twice",
         steps: &[("twice", Want::Ok("a"))],
-        log: Some(("twice", "Rapira\\Exception\\AlreadyFinalizedError")),
+        log: Some((
+            "twice",
+            "Rapira\\Exception\\AlreadyFinalizedError: the call was already finalized",
+        )),
     },
     OutcomeCase {
         name: "receive while a call is open",
@@ -468,7 +471,7 @@ fn response_metadata_is_call_scoped() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A dropped receiver is the host closing the call: Work.php (cancelled, finalized) and UnaryResponder.php (WorkDiscardedException).
+/// A dropped receiver is the host closing the call: Work.php (cancelled, finalized) and Responder.php (WorkDiscardedException, "The host closed the call first").
 #[test]
 fn cancel_is_visible_to_php() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -487,7 +490,7 @@ fn cancel_is_visible_to_php() -> anyhow::Result<()> {
         json!({
             "cancelled": true,
             "finalized": true,
-            "respond": "Rapira\\Exception\\WorkDiscardedException",
+            "respond": "Rapira\\Exception\\WorkDiscardedException: the host closed the call first",
         })
     );
     Ok(())

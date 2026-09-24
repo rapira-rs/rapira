@@ -21,7 +21,7 @@ connect-rust handles the framing, the compression, the timeout headers and the e
 
 ## Schemas
 
-The host reads one descriptor set at boot: a binary `google.protobuf.FileDescriptorSet` that contains every imported file. The host routes and transcodes with these descriptors. A new method needs a new descriptor set and a restart, not a new `rapira` binary.
+The host reads one descriptor set at boot: a binary `google.protobuf.FileDescriptorSet` that contains every imported file. The host routes and transcodes with these descriptors. A changed descriptor set needs a stop and a start of rapira, not a new `rapira` binary. A reload (SIGHUP or SIGUSR2) forks new workers from the master and keeps the old descriptor set.
 
 Build the set with `buf build`. https://buf.build/docs/reference/cli/buf/build/
 
@@ -37,7 +37,7 @@ protoc --include_imports --descriptor_set_out=api.binpb -I proto proto/billing/v
 
 `buf build` includes the imported files by default. `protoc` includes them only with `--include_imports`. A set without its imports stops the boot, for example with `unresolved type name ".google.protobuf.Timestamp"`.
 
-Each `services` entry is a fully qualified service name, for example `billing.v1.InvoiceService`. An entry that is not in the set stops the boot. A set that rapira cannot read or decode also stops the boot. The master loads the set before the fork, so a bad set fails the boot once, with exit code 1.
+Each `services` entry is a fully qualified service name, for example `billing.v1.InvoiceService`. An entry that is not in the set stops the boot. A service that is listed twice stops the boot, also when one entry has a leading dot. A set that rapira cannot read or decode also stops the boot. The master loads the set before the fork, so a bad set fails the boot once, with exit code 1.
 
 ## The PHP side
 
@@ -46,7 +46,7 @@ The pool runs in dispatcher mode only. `\Rapira\get_dispatcher()` returns a `Rap
 - `getMessage()` returns the request message. `respond($bytes)` sends the response message. `fail(new Status(StatusCode::NotFound, 'no invoice', $details))` sends an error status.
 - `getServices()` lists each configured service with all its methods, streaming methods included.
 - A worker holds one call at a time. `receive()` throws `\Error` while the current call is not finalized.
-- `getContext()` returns a `Rapira\Grpc\Call\Context`. `$method` is `package.Service/Method`. `$protocol` is `Grpc`, `GrpcWeb` or `Connect`. `$remote` is an `InetAddress`, or a `UnixAddress` on a unix socket. `$tls` is always null. `$receivedAt` is the time when the host queued the call.
+- `getContext()` returns a `Rapira\Grpc\Call\Context`. `$method` is `package.Service/Method`. `$protocol` is `Grpc`, `GrpcWeb` or `Connect`. `$remote` is an `InetAddress`, or a `UnixAddress` on a unix socket. `$tls` is always null. `$receivedAt` is the time when the host has read the whole request message, before it queues the call.
 
 ### Metadata
 
@@ -56,6 +56,7 @@ The pool runs in dispatcher mode only. `\Rapira\get_dispatcher()` returns a `Rap
 - `getResponseMetadata()` returns the response headers and trailers of the call. `addHeader()` and `addTrailer()` take a text value: printable ASCII (0x20 to 0x7E). An empty value is permitted.
 - `addBinaryHeader()` and `addBinaryTrailer()` take raw bytes and need a name with the `-bin` suffix. The text methods refuse a name with this suffix. The host sends a `-bin` value as base64 without padding.
 - A reserved name, an invalid name or a bad value throws `\ValueError`. A repeated name adds a value.
+- A metadata name uses only `0-9`, `a-z`, `_`, `-` and `.`. A request metadata text value that is not printable ASCII is dropped, and a `-bin` value is split on `,` before decoding.
 - `respond()` and `fail()` send both halves. For gRPC, the trailers are HTTP/2 trailers. For gRPC-Web, they are in the trailer frame. For Connect, each trailer is a header with the `trailer-` prefix.
 
 ### Outcomes
@@ -77,7 +78,7 @@ The host cannot stop PHP code, so PHP continues to run the call. A later `respon
 
 The host serves the gRPC health checking protocol (`grpc.health.v1.Health`) from Rust in each worker. `Check` and `Watch` report SERVING for the empty name `""` and for each configured service. Health does not check PHP: a worker whose PHP boot failed reports SERVING, and its calls get UNAVAILABLE. https://github.com/grpc/grpc/blob/master/doc/health-checking.md
 
-With `reflection = true`, the host also serves server reflection, `grpc.reflection.v1` and `grpc.reflection.v1alpha`. `ListServices` returns the configured services. Each file and symbol of the descriptor set stays resolvable. Reflection is off by default. When it is on, each client can read the full descriptor set. https://github.com/grpc/grpc/blob/master/doc/server-reflection.md
+With `reflection = true`, the host also serves server reflection, `grpc.reflection.v1` and `grpc.reflection.v1alpha`. `ListServices` returns the configured services. Each file and symbol of the descriptor set stays resolvable. Reflection is off by default. When it is on, each client can read the full descriptor set. `ListServices` does not list the host's own `grpc.health.v1.Health` service, and the descriptor set does not describe it unless it includes `health.proto`, so a reflection tool needs a protoset (https://github.com/fullstorydev/grpcurl#protoset-files) for `Health/Check`. A Connect JSON `POST` to `/grpc.health.v1.Health/Check` works without one. https://github.com/grpc/grpc/blob/master/doc/server-reflection.md
 
 ```sh
 grpcurl -plaintext 127.0.0.1:50051 list
@@ -85,13 +86,16 @@ grpcurl -plaintext 127.0.0.1:50051 list
 
 ## Shutdown
 
-On the stop signal the accept loop ends, health reports NOT_SERVING, and open `Watch` streams end. Calls in flight drain within `drain_grace`. Connections that are open after `drain_grace` are cut, and the shutdown reports an error.
+On the stop signal the accept loop ends, health reports NOT_SERVING, and open `Watch` streams end. Calls in flight drain within `drain_grace`. Connections that are open after `drain_grace` are cut, and the shutdown reports an error. An open reflection stream, for example an Evans REPL session (https://github.com/ktr0731/evans), holds its connection until `drain_grace` ends.
+
+The listener sends an HTTP/2 keepalive PING to an idle connection every 10 seconds and closes the connection when the peer does not answer within 10 seconds.
 
 ## Limits
 
 - One worker process serves each connection, and a PHP worker runs one call at a time. A gRPC client usually sends all calls of a channel on one HTTP/2 connection. Such a client gets the throughput of one worker, for all pool sizes. The other calls wait in the intake of that worker. To use more workers, open several connections, or use an L7 load balancer that spreads the calls over several connections.
 - The message size limit is 4 MiB, and no key changes it. A larger request answers RESOURCE_EXHAUSTED.
 - The listener does not terminate TLS. `Context::$tls` is always null. Put a TLS proxy in front of the listener when clients need TLS.
+- The JSON decoder has no element memory limit. A 4 MiB JSON request with many small elements can use several hundred MiB of memory for repeated or map fields, and more than 1 GiB of memory and more than 1 s of CPU for `Struct` or `ListValue` fields, in the worker process. The 4 MiB limit applies after decompression, so a proxy in front of a listener that faces untrusted clients must limit the decompressed request size.
 
 ## Configuration
 

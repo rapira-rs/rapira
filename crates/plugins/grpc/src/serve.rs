@@ -51,7 +51,10 @@ impl Serving {
             .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
         Self {
             service,
-            connection: ConnectionConfig::new(),
+            // A peer that is gone without a FIN sends no PING ACK, so its connection closes within 20 s and does not hold a later drain.
+            connection: ConnectionConfig::new()
+                .with_http2_keepalive_interval(Duration::from_secs(10))
+                .with_http2_keepalive_timeout(Duration::from_secs(10)),
             health,
             shutdown: watch::Sender::new(false),
         }
@@ -141,6 +144,7 @@ mod tests {
 
     use extension_api::Extension as _;
     use http::Method;
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
     use super::*;
     use crate::testing::{
@@ -528,6 +532,27 @@ mod tests {
             php.dropped.load(Ordering::Acquire),
             "the call must be dropped"
         );
+        running.server.shutdown().await.unwrap();
+    }
+
+    /// Source: RFC 9113, the client preface and an empty SETTINGS frame (https://www.rfc-editor.org/rfc/rfc9113#section-3.4). The peer then sends no more frames and no PING ACK.
+    #[tokio::test]
+    async fn a_silent_peer_loses_its_connection() {
+        let mut running = start(config(tcp()), FakePhp::new(Answer::Echo)).await;
+        let ListenAddr::Tcp(addr) = running.listen else {
+            unreachable!("tcp() listens on TCP")
+        };
+        let mut stream = tokio::net::TcpStream::connect(addr).await.unwrap();
+        stream
+            .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0")
+            .await
+            .unwrap();
+        let closed = tokio::time::timeout(Duration::from_secs(25), async {
+            let mut buf = [0; 1024];
+            while matches!(stream.read(&mut buf).await, Ok(n) if n > 0) {}
+        })
+        .await;
+        assert!(closed.is_ok(), "the connection is open after 25 s");
         running.server.shutdown().await.unwrap();
     }
 

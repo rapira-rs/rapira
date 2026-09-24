@@ -64,7 +64,7 @@ function serve(GrpcDispatcher $d, UnaryCall $call): void
             try {
                 $call->respond('b');
             } catch (AlreadyFinalizedError $e) {
-                \Rapira\log('twice', context: ['result' => $e::class]);
+                \Rapira\log('twice', context: ['result' => $e::class . ': ' . $e->getMessage()]);
             }
             return;
         case 'busy':
@@ -139,7 +139,7 @@ function serve(GrpcDispatcher $d, UnaryCall $call): void
                 $call->respond('late');
                 $state['respond'] = 'none';
             } catch (WorkDiscardedException $e) {
-                $state['respond'] = $e::class;
+                $state['respond'] = $e::class . ': ' . $e->getMessage();
             }
             \Rapira\log('cancel', context: $state);
             return;
