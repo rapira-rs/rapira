@@ -2,6 +2,9 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
+use connectrpc::Router;
+use connectrpc_health::StaticChecker;
+use connectrpc_reflection::Reflector;
 use extension_api::{Extension, ListenAddr, Php, PrepareCtx, PreparedListener, Result};
 use rapira_net::{Stop, join_thread};
 use tokio::runtime::Builder;
@@ -18,6 +21,8 @@ pub use schema::{MethodInfo, Schema, ServiceInfo};
 pub struct Config {
     pub listen: ListenAddr,
     pub schema: Arc<Schema>,
+    /// Serve `grpc.reflection.v1` and `v1alpha` for the configured services.
+    pub reflection: bool,
     /// The timeout of a call whose client sets no deadline.
     pub default_timeout: Option<Duration>,
     /// The longest timeout that a client can set.
@@ -28,6 +33,8 @@ pub struct Config {
 pub struct Server {
     config: Config,
     prepared: Option<PreparedListener>,
+    /// The health and reflection routes that the host answers without PHP.
+    host: Option<(Router, Arc<StaticChecker>)>,
     stop: Option<Stop>,
     join: Option<tokio::task::JoinHandle<Result<()>>>,
 }
@@ -39,6 +46,7 @@ impl Extension for Server {
         Self {
             config,
             prepared: None,
+            host: None,
             stop: None,
             join: None,
         }
@@ -60,12 +68,29 @@ impl Extension for Server {
             }
         }
         self.prepared = Some(prepared);
+
+        let names: Vec<String> = self
+            .config
+            .schema
+            .services()
+            .iter()
+            .map(|s| s.name.clone())
+            .collect();
+        let (mut router, health) = connectrpc_health::install_static(Router::new(), names.clone());
+        if self.config.reflection {
+            let reflector = Reflector::from_descriptor_pool(Arc::clone(self.config.schema.pool()))
+                .map_err(|e| anyhow!("building grpc reflection: {e}"))?
+                .with_services(names);
+            router = connectrpc_reflection::install(router, reflector);
+        }
+        self.host = Some((router, health));
         Ok(())
     }
 
     async fn run(&mut self, php: Php) -> Result<()> {
         let config = self.config.clone();
-        let Some(prepared) = self.prepared.take() else {
+        let (Some(prepared), Some((router, health))) = (self.prepared.take(), self.host.take())
+        else {
             return Err(anyhow!("grpc listener was not prepared"));
         };
         let stop = Stop::new().map_err(|e| anyhow!("creating the grpc stop handle: {e}"))?;
@@ -80,7 +105,7 @@ impl Extension for Server {
                     .thread_name("rapira-grpc-io")
                     .build()
                     .map_err(|e| anyhow!("building the grpc runtime: {e}"))?;
-                serve::serve(php, config, prepared, handle, &rt)
+                serve::serve(php, config, prepared, router, health, handle, &rt)
             })?;
 
         self.stop = Some(stop);
@@ -108,10 +133,15 @@ impl Extension for Server {
 mod tests {
     use std::future::Future as _;
     use std::task::Poll;
+    use std::time::Instant;
+
+    use http::Method;
+    use http_body_util::BodyExt;
 
     use super::*;
     use crate::testing::{
-        Answer, Conn, FakePhp, HI_FRAME, Wire, config, grpc_status, start, tcp, wait_until,
+        Answer, Conn, FakePhp, HI_FRAME, Wire, config, envelope, grpc_status, start, tcp,
+        wait_until,
     };
 
     /// Mirrors the HTTP plugin: the host drops `run`, then `shutdown` joins the thread and frees every `Php` clone.
@@ -192,5 +222,44 @@ mod tests {
                 ),
             }
         }
+    }
+
+    /// Source: the `StaticChecker` docs: `shutdown` only sets NOT_SERVING, and a `Watch` stream ends when its service is removed.
+    #[tokio::test]
+    async fn drain_ends_health_watch_streams() {
+        let grace = Duration::from_secs(2);
+        let config = Config {
+            drain_grace: grace,
+            ..config(tcp())
+        };
+        let mut running = start(config, FakePhp::new(Answer::Echo)).await;
+        let mut conn = Conn::open(&running.listen, Wire::H2).await;
+        let watch = conn
+            .request(
+                Method::POST,
+                "/grpc.health.v1.Health/Watch",
+                &[("content-type", "application/grpc"), ("te", "trailers")],
+                &envelope(b""),
+            )
+            .await
+            .unwrap();
+        let mut body = watch.into_body();
+        let first = body.frame().await.unwrap().unwrap().into_data().unwrap();
+        assert_eq!(&first[..], b"\x00\x00\x00\x00\x02\x08\x01", "SERVING first");
+
+        let started = Instant::now();
+        let (shutdown, rest) = tokio::join!(running.server.shutdown(), body.collect());
+        assert!(shutdown.is_ok(), "{shutdown:?}");
+        assert!(
+            started.elapsed() < grace / 2,
+            "took {:?}",
+            started.elapsed()
+        );
+        let trailers = rest.unwrap().trailers().cloned().unwrap_or_default();
+        assert_eq!(
+            trailers.get("grpc-status").map(|v| v.as_bytes()),
+            Some(&b"0"[..]),
+            "{trailers:?}"
+        );
     }
 }

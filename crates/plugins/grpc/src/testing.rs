@@ -48,6 +48,7 @@ pub(crate) fn config(listen: ListenAddr) -> Config {
     Config {
         listen,
         schema: schema(),
+        reflection: false,
         default_timeout: None,
         max_timeout: None,
         drain_grace: Duration::from_secs(5),
@@ -154,6 +155,15 @@ pub(crate) struct Running {
     pub(crate) listen: ListenAddr,
 }
 
+/// A test that panics before `shutdown` still stops the thread. Otherwise the test runtime waits for the join task forever.
+impl Drop for Running {
+    fn drop(&mut self) {
+        if let Some(stop) = self.server.stop.take() {
+            stop.stop();
+        }
+    }
+}
+
 pub(crate) async fn start(config: Config, backend: Arc<dyn Backend>) -> Running {
     let mut server = Server::init(config);
     server.prepare(&mut PrepareCtx::new()).expect("bind");
@@ -250,6 +260,28 @@ impl Conn {
         headers: &[(&str, &str)],
         body: &[u8],
     ) -> anyhow::Result<Response> {
+        let (parts, body) = self
+            .request(method, path, headers, body)
+            .await?
+            .into_parts();
+        let collected = body.collect().await?;
+        let trailers = collected.trailers().cloned().unwrap_or_default();
+        Ok(Response {
+            status: parts.status.as_u16(),
+            headers: parts.headers,
+            body: collected.to_bytes(),
+            trailers,
+        })
+    }
+
+    /// Sends a request and returns when the response head arrives. The body streams.
+    pub(crate) async fn request(
+        &mut self,
+        method: Method,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: &[u8],
+    ) -> anyhow::Result<http::Response<hyper::body::Incoming>> {
         let uri = match self.sender {
             Sender::H2(_) => format!("http://localhost{path}"),
             Sender::Http1(_) => path.to_owned(),
@@ -262,18 +294,9 @@ impl Conn {
             req = req.header(k, v);
         }
         let req = req.body(Full::new(Bytes::copy_from_slice(body)))?;
-        let resp = match &mut self.sender {
+        Ok(match &mut self.sender {
             Sender::H2(send) => send.send_request(req).await?,
             Sender::Http1(send) => send.send_request(req).await?,
-        };
-        let (parts, body) = resp.into_parts();
-        let collected = body.collect().await?;
-        let trailers = collected.trailers().cloned().unwrap_or_default();
-        Ok(Response {
-            status: parts.status.as_u16(),
-            headers: parts.headers,
-            body: collected.to_bytes(),
-            trailers,
         })
     }
 
@@ -288,6 +311,14 @@ impl Conn {
         all.extend_from_slice(headers);
         self.send(Method::POST, path, &all, body).await
     }
+}
+
+/// `message` in an uncompressed gRPC envelope.
+pub(crate) fn envelope(message: &[u8]) -> Vec<u8> {
+    let mut out = vec![0];
+    out.extend_from_slice(&(message.len() as u32).to_be_bytes());
+    out.extend_from_slice(message);
+    out
 }
 
 /// The `grpc-status` trailer, or the header of a trailers-only response.

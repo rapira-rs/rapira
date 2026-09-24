@@ -54,6 +54,8 @@ libc = "0.2"
 buffa = { version = "0.9.2", default-features = false, features = ["std"] }
 buffa-descriptor = { version = "0.9.2", features = ["reflect", "json"] }
 connectrpc = { git = "https://github.com/connectrpc/connect-rust", rev = "0bb21af9736dac7b82065a4252405a8eb65f27ee", default-features = false, features = ["server", "json", "gzip"] }
+connectrpc-health = { git = "https://github.com/connectrpc/connect-rust", rev = "0bb21af9736dac7b82065a4252405a8eb65f27ee", default-features = false }
+connectrpc-reflection = { git = "https://github.com/connectrpc/connect-rust", rev = "0bb21af9736dac7b82065a4252405a8eb65f27ee", default-features = false }
 
 [workspace.lints.clippy]
 all = "warn"

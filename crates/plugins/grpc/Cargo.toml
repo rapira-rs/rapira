@@ -17,6 +17,8 @@ tracing = { workspace = true }
 buffa = { workspace = true }
 buffa-descriptor = { workspace = true }
 connectrpc = { workspace = true }
+connectrpc-health = { workspace = true }
+connectrpc-reflection = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "sync"] }
 bytes = { workspace = true }
 base64 = { workspace = true }

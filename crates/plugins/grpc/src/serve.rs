@@ -4,9 +4,10 @@ use std::time::Duration;
 use anyhow::anyhow;
 use connectrpc::server::serve_connection;
 use connectrpc::{
-    CompressionRegistry, ConnectRpcService, ConnectionConfig, ConnectionInfo, DeadlinePolicy,
-    GzipProvider,
+    Chain, CompressionRegistry, ConnectRpcService, ConnectionConfig, ConnectionInfo,
+    DeadlinePolicy, GzipProvider, Router,
 };
+use connectrpc_health::StaticChecker;
 use extension_api::{Addr, ListenAddr, Php, PreparedListener, Result};
 use rapira_net::{Acceptor, Serve, StopHandle};
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -17,14 +18,15 @@ use crate::dispatch::PhpDispatcher;
 
 /// Everything the accept loop hands to a connection, and the drain that follows it.
 struct Serving {
-    service: ConnectRpcService<PhpDispatcher>,
+    service: ConnectRpcService<Chain<Router, PhpDispatcher>>,
     connection: ConnectionConfig,
+    health: Arc<StaticChecker>,
     /// Each connection holds a receiver until it ends, so `closed()` resolves when the last connection is gone.
     shutdown: watch::Sender<bool>,
 }
 
 impl Serving {
-    fn start(php: Php, config: &Config) -> Self {
+    fn start(php: Php, config: &Config, router: Router, health: Arc<StaticChecker>) -> Self {
         match &config.listen {
             ListenAddr::Tcp(a) => tracing::info!(target: "grpc", "listening on {a}"),
             ListenAddr::Unix(p) => {
@@ -42,13 +44,15 @@ impl Serving {
             schema: Arc::clone(&config.schema),
             php,
         };
-        let service = ConnectRpcService::new(dispatcher)
+        // The host routes come first, so a configured service cannot hide health or reflection.
+        let service = ConnectRpcService::new(Chain(router, dispatcher))
             .with_deadline_policy(deadlines)
             // The default registry offers every codec that the build compiles, zstd included.
             .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
         Self {
             service,
             connection: ConnectionConfig::new(),
+            health,
             shutdown: watch::Sender::new(false),
         }
     }
@@ -78,6 +82,11 @@ impl Serving {
 
     /// Waits out the connections in flight. The acceptor is already gone.
     async fn drain(self, fatal: Option<anyhow::Error>, grace: Duration) -> Result<()> {
+        // `StaticChecker::shutdown` only sets NOT_SERVING. A `Watch` stream ends only when its service is removed, and an open stream holds its connection until the grace ends.
+        self.health.shutdown();
+        for name in self.health.services() {
+            self.health.remove_service(&name);
+        }
         self.shutdown.send_replace(true);
         let drained = tokio::time::timeout(grace, self.shutdown.closed())
             .await
@@ -115,11 +124,13 @@ pub(crate) fn serve(
     php: Php,
     config: Config,
     prepared: PreparedListener,
+    router: Router,
+    health: Arc<StaticChecker>,
     stop: StopHandle,
     rt: &tokio::runtime::Runtime,
 ) -> Result<()> {
     let acceptor = Acceptor::adopt(prepared, stop, rt)?;
-    let serving = Serving::start(php, &config);
+    let serving = Serving::start(php, &config, router, health);
     let fatal = acceptor.run(rt, &serving);
     rt.block_on(serving.drain(fatal, config.drain_grace))
 }
@@ -133,8 +144,8 @@ mod tests {
 
     use super::*;
     use crate::testing::{
-        Answer, Conn, FakePhp, Fields, HI, HI_FRAME, Wire, config, fields, grpc_status, start,
-        status_details, tcp, web_trailers,
+        Answer, Conn, FakePhp, Fields, HI, HI_FRAME, Wire, config, envelope, fields, grpc_status,
+        start, status_details, tcp, web_trailers,
     };
 
     #[derive(Clone, Copy)]
@@ -518,5 +529,89 @@ mod tests {
             "the call must be dropped"
         );
         running.server.shutdown().await.unwrap();
+    }
+
+    /// Sources: `grpc/health/v1/health.proto` (`HealthCheckRequest.service` and `HealthCheckResponse.status` are field 1, SERVING is 1), `grpc/reflection/v1/reflection.proto` (`list_services` is field 7), and PROTOCOL-HTTP2 (12 for an unknown method).
+    #[tokio::test]
+    async fn health_and_reflection_answer_from_the_host() {
+        struct Case {
+            name: &'static str,
+            reflection: bool,
+            path: &'static str,
+            message: &'static [u8],
+            grpc_status: &'static str,
+            /// Bytes that the response body contains.
+            reply: &'static [u8],
+        }
+        const REFLECTION: &str = "/grpc.reflection.v1.ServerReflection/ServerReflectionInfo";
+        let cases = [
+            Case {
+                name: "health check, whole server",
+                reflection: false,
+                path: "/grpc.health.v1.Health/Check",
+                message: b"",
+                grpc_status: "0",
+                reply: b"\x00\x00\x00\x00\x02\x08\x01",
+            },
+            Case {
+                name: "health check, configured service",
+                reflection: false,
+                path: "/grpc.health.v1.Health/Check",
+                message: b"\x0a\x1arapira.test.v1.EchoService",
+                grpc_status: "0",
+                reply: b"\x00\x00\x00\x00\x02\x08\x01",
+            },
+            Case {
+                name: "reflection off",
+                reflection: false,
+                path: REFLECTION,
+                message: b"\x3a\x00",
+                grpc_status: "12",
+                reply: b"",
+            },
+            Case {
+                name: "reflection on",
+                reflection: true,
+                path: REFLECTION,
+                message: b"\x3a\x00",
+                grpc_status: "0",
+                reply: b"rapira.test.v1.EchoService",
+            },
+        ];
+
+        let php = FakePhp::new(Answer::Echo);
+        let mut plain = start(config(tcp()), php.clone()).await;
+        let reflecting = Config {
+            reflection: true,
+            ..config(tcp())
+        };
+        let mut reflecting = start(reflecting, php.clone()).await;
+        for case in cases {
+            let listen = if case.reflection {
+                &reflecting.listen
+            } else {
+                &plain.listen
+            };
+            let mut conn = Conn::open(listen, Wire::H2).await;
+            let got = conn
+                .grpc(case.path, &[], &envelope(case.message))
+                .await
+                .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
+            assert_eq!(
+                grpc_status(&got),
+                Some(case.grpc_status),
+                "{}: {got:?}",
+                case.name
+            );
+            assert!(
+                case.reply.is_empty()
+                    || got.body.windows(case.reply.len()).any(|w| w == case.reply),
+                "{}: {got:?}",
+                case.name
+            );
+        }
+        assert_eq!(php.seen(), 0, "the host answers without PHP");
+        plain.server.shutdown().await.unwrap();
+        reflecting.server.shutdown().await.unwrap();
     }
 }

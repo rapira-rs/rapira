@@ -103,6 +103,10 @@ impl Schema {
         &self.services
     }
 
+    pub(crate) fn pool(&self) -> &Arc<DescriptorPool> {
+        &self.pool
+    }
+
     /// The route for `path` (`package.Service/Method`). Streaming and unlisted methods have none.
     pub(crate) fn method(&self, path: &str) -> Option<&Method> {
         self.methods.get(path)

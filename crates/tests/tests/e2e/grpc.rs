@@ -64,6 +64,7 @@ impl Host {
         let config = |listen| rapira_grpc::Config {
             listen,
             schema: Arc::clone(&schema),
+            reflection: false,
             default_timeout: None,
             max_timeout: None,
             drain_grace: Duration::from_secs(5),
