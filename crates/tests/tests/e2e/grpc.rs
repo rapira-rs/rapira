@@ -15,7 +15,11 @@ use php_sys::{Mode, Rapira};
 use rapira_runtime::ExtensionRuntime;
 use serde_json::Value;
 
-use crate::harness::{fixture_path, scratch_dir};
+use crate::harness::{
+    BOOT, ECHO_SERVICE, MASTER_EXIT_OK, STOP_BUDGET, assert_exit_code, diagnostics, fixture_path,
+    http_get, scratch_dir, signal, spawn_grpc, spawn_grpc_boot_failure, spawn_grpc_with_http,
+    wait_log_contains, wait_workers,
+};
 
 type Fields = &'static [(&'static str, &'static str)];
 
@@ -431,4 +435,135 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
     drop(rt);
     let stopped = host.stop();
     result.and(stopped)
+}
+
+/// A Connect unary call with a JSON body over HTTP/1.1. The server may send the reply chunked, so hyper reads it.
+fn connect_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<(u16, String)> {
+    let req = http::Request::post(path)
+        .header("host", "localhost")
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(body.to_owned())))?;
+    let call = async {
+        let io = TokioIo::new(tokio::net::TcpStream::connect(addr).await?);
+        let (mut send, conn) = hyper::client::conn::http1::handshake(io).await?;
+        tokio::spawn(conn);
+        let resp = send.send_request(req).await?;
+        let status = resp.status().as_u16();
+        let reply = resp.into_body().collect().await?.to_bytes();
+        anyhow::Ok((status, String::from_utf8_lossy(&reply).into_owned()))
+    };
+    runtime().block_on(async { tokio::time::timeout(BOOT, call).await })?
+}
+
+/// Sources: the Connect protocol (a unary call posts the message as proto3 JSON) and `grpc/health/v1/health.proto`.
+#[test]
+fn grpc_pool_serves_from_rapira_toml() {
+    struct Case {
+        name: &'static str,
+        path: &'static str,
+        body: &'static str,
+        reply: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "php echoes",
+            path: ECHO,
+            body: r#"{"text":"hi"}"#,
+            reply: r#"{"text":"hi"}"#,
+        },
+        Case {
+            name: "the host answers health",
+            path: "/grpc.health.v1.Health/Check",
+            body: "{}",
+            reply: r#"{"status":"SERVING"}"#,
+        },
+    ];
+    let srv = spawn_grpc(2);
+    wait_workers(&srv, BOOT, "2 grpc workers", |p| p.len() == 2);
+    for case in cases {
+        let got = connect_json(srv.addr, case.path, case.body);
+        assert!(
+            matches!(&got, Ok((200, reply)) if reply == case.reply),
+            "{}: {got:?}\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+    }
+}
+
+/// Each worker gets the dispatcher of its own pool: `echo-worker.php` answers HTTP, `grpc-worker.php` answers gRPC.
+#[test]
+fn http_and_grpc_pools_run_side_by_side() {
+    let (srv, http) = spawn_grpc_with_http("shared/echo-worker.php");
+    wait_workers(&srv, BOOT, "1 http and 1 grpc worker", |p| p.len() == 2);
+
+    let (code, body) =
+        http_get(http, "/", BOOT).unwrap_or_else(|e| panic!("GET /: {e}\n{}", diagnostics(&srv)));
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    assert!(
+        body.starts_with(b"ok:"),
+        "{:?}\n{}",
+        String::from_utf8_lossy(&body),
+        diagnostics(&srv)
+    );
+
+    let got = connect_json(srv.addr, ECHO, r#"{"text":"hi"}"#);
+    assert!(
+        matches!(&got, Ok((200, reply)) if reply == r#"{"text":"hi"}"#),
+        "{got:?}\n{}",
+        diagnostics(&srv)
+    );
+}
+
+/// The master loads the schema before the fork. `main` returns the error, so the process exits 1.
+#[test]
+fn grpc_boot_fails_before_the_fork() {
+    struct Case {
+        name: &'static str,
+        descriptor_set: &'static str,
+        service: &'static str,
+        log: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "unknown service",
+            descriptor_set: "echo.binpb",
+            service: "rapira.test.v1.Missing",
+            log: "grpc.services entry `rapira.test.v1.Missing` is not in",
+        },
+        Case {
+            name: "unreadable descriptor set",
+            descriptor_set: "missing.binpb",
+            service: ECHO_SERVICE,
+            log: "reading grpc.descriptor_set",
+        },
+    ];
+    for case in cases {
+        let (status, log) = spawn_grpc_boot_failure(case.descriptor_set, case.service);
+        assert_eq!(status.code(), Some(1), "{}: {log}", case.name);
+        assert!(log.contains(case.log), "{}: {log}", case.name);
+    }
+}
+
+/// SIGQUIT is a graceful stop: the worker finishes the call it holds, then the master exits clean.
+#[test]
+fn sigquit_drains_an_in_flight_grpc_call() {
+    let mut srv = spawn_grpc(1);
+    let addr = srv.addr;
+    let call = std::thread::spawn(move || connect_json(addr, ECHO, r#"{"text":"slow-ok"}"#));
+    assert!(
+        wait_log_contains(&srv, "slow started", BOOT),
+        "\n{}",
+        diagnostics(&srv)
+    );
+    signal(srv.pid(), libc::SIGQUIT);
+
+    let got = call.join().expect("the client thread");
+    assert!(
+        matches!(&got, Ok((200, reply)) if reply == r#"{"text":"slow-ok"}"#),
+        "{got:?}\n{}",
+        diagnostics(&srv)
+    );
+    let status = srv.wait_exit(STOP_BUDGET);
+    assert_exit_code(status, MASTER_EXIT_OK, &srv);
 }

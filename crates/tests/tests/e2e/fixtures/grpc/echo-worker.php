@@ -38,6 +38,10 @@ function serve(UnaryCall $call): void
             }
             \Rapira\log('slow', context: ['cancelled' => $cancelled, 'respond' => $respond]);
             return;
+        case 'slow-ok':
+            \Rapira\log('slow started');
+            usleep(500_000);
+            break;
         case 'meta':
             $in = $call->getContext()->metadata;
             \Rapira\log('meta', context: ['keys' => array_keys($in->entries)]);

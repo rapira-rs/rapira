@@ -17,6 +17,9 @@ pub const MASTER_EXIT_OK: i32 = 0;
 /// Master forced stop (a second signal arrived while draining).
 pub const MASTER_EXIT_FORCED: i32 = 130;
 
+/// Must outlast supervisor.process_control_timeout (30s): after it the master escalates a stuck worker QUIT/TERM/KILL and still exits 0.
+pub const STOP_BUDGET: Duration = Duration::from_secs(45);
+
 /// A running master and the scratch dir holding its config and log.
 pub struct Server {
     pub child: Child,
@@ -146,17 +149,20 @@ fn spawn_with_extras(
     if let Some(ini) = &cwd_ini {
         std::fs::write(dir.join("php.ini"), ini.contents).expect("write php.ini");
     }
+    let render = |port| render_config(port, processes, &entrypoint, http_extra, extra_toml);
+    spawn_ready(dir, &render, rust_log, cwd_ini.as_ref())
+}
+
+/// Spawns until the port that `render` gets accepts a connection, on a fresh port each time.
+fn spawn_ready(
+    dir: PathBuf,
+    render: &dyn Fn(u16) -> String,
+    rust_log: Option<&str>,
+    cwd_ini: Option<&CwdIni<'_>>,
+) -> Server {
     let mut last_log = String::new();
     for _ in 0..3 {
-        let (mut child, addr) = spawn_attempt(
-            &dir,
-            processes,
-            &entrypoint,
-            http_extra,
-            extra_toml,
-            rust_log,
-            cwd_ini.as_ref(),
-        );
+        let (mut child, addr) = spawn_attempt(&dir, render, rust_log, cwd_ini);
         if wait_for_port(&addr, &mut child, BOOT) {
             return Server { child, addr, dir };
         }
@@ -180,23 +186,16 @@ fn stage_fixture(fixture: &str) -> (PathBuf, String) {
     (dir, entrypoint)
 }
 
-/// One spawn on a fresh port; the caller decides how to wait.
+/// One spawn on a fresh port; `render` writes the config for that port, and the caller decides how to wait.
 fn spawn_attempt(
     dir: &Path,
-    processes: usize,
-    entrypoint: &str,
-    http_extra: &str,
-    extra_toml: &str,
+    render: &dyn Fn(u16) -> String,
     rust_log: Option<&str>,
     cwd_ini: Option<&CwdIni<'_>>,
 ) -> (Child, SocketAddr) {
     let port = free_port();
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
-    std::fs::write(
-        dir.join("rapira.toml"),
-        render_config(port, processes, entrypoint, http_extra, extra_toml),
-    )
-    .expect("write config");
+    std::fs::write(dir.join("rapira.toml"), render(port)).expect("write config");
     let log = File::create(dir.join("server.log")).expect("create server.log");
     let mut cmd = Command::new(rapira_bin());
     cmd.arg("serve").arg(dir.join("rapira.toml"));
@@ -234,7 +233,13 @@ pub fn spawn_boot_failure_with_entrypoint(entrypoint: &str) -> (ExitStatus, Stri
 }
 
 fn boot_failure(dir: PathBuf, entrypoint: &str, http_extra: &str) -> (ExitStatus, String) {
-    let (child, addr) = spawn_attempt(&dir, 1, entrypoint, http_extra, "", Some("info"), None);
+    let render = |port| render_config(port, 1, entrypoint, http_extra, "");
+    exit_of(dir, &render)
+}
+
+/// One spawn that must exit: returns the status with the whole log.
+fn exit_of(dir: PathBuf, render: &dyn Fn(u16) -> String) -> (ExitStatus, String) {
+    let (child, addr) = spawn_attempt(&dir, render, Some("info"), None);
     let mut srv = Server { child, addr, dir };
     let Some(status) = srv.wait_exit(BOOT) else {
         panic!("rapira did not exit");
@@ -256,6 +261,57 @@ fn render_config(
     format!(
         "[http.pool]\nprocesses = {processes}\nentrypoint = \"{fixture}\"\n{extra}\n[http]\nlisten = \"127.0.0.1:{port}\"\n{http_extra}"
     )
+}
+
+pub const ECHO_SERVICE: &str = "rapira.test.v1.EchoService";
+
+/// Copies `grpc/echo-worker.php` and its descriptor set into `dir` as `grpc-worker.php` and `echo.binpb`.
+fn stage_grpc(dir: &Path) {
+    std::fs::copy(
+        fixture_path("grpc/echo-worker.php"),
+        dir.join("grpc-worker.php"),
+    )
+    .expect("copy the grpc fixture");
+    std::fs::copy(tests::echo_descriptor_set(), dir.join("echo.binpb")).expect("copy echo.binpb");
+}
+
+/// A `[grpc]` pool over the staged echo fixture; `descriptor_set` and `service` go into the file verbatim.
+fn render_grpc(port: u16, processes: usize, descriptor_set: &str, service: &str) -> String {
+    format!(
+        "[grpc]\nlisten = \"127.0.0.1:{port}\"\ndescriptor_set = \"{descriptor_set}\"\nservices = [\"{service}\"]\n\
+         [grpc.pool]\nprocesses = {processes}\nentrypoint = \"grpc-worker.php\"\n"
+    )
+}
+
+/// A master with only a `[grpc]` pool over the echo fixture; `addr` is the gRPC listener.
+pub fn spawn_grpc(processes: usize) -> Server {
+    let dir = scratch_dir();
+    stage_grpc(&dir);
+    let render = |port| render_grpc(port, processes, "echo.binpb", ECHO_SERVICE);
+    spawn_ready(dir, &render, Some("info"), None)
+}
+
+/// A master with an `[http]` pool over `http_fixture` and a `[grpc]` pool over the echo fixture, one process each.
+/// Returns the master, whose `addr` is the gRPC listener, and the HTTP listener.
+pub fn spawn_grpc_with_http(http_fixture: &str) -> (Server, SocketAddr) {
+    let (dir, entrypoint) = stage_fixture(http_fixture);
+    stage_grpc(&dir);
+    let http_port = std::cell::Cell::new(0);
+    let render = |port| {
+        http_port.set(free_port());
+        render_config(http_port.get(), 1, &entrypoint, "", "")
+            + &render_grpc(port, 1, "echo.binpb", ECHO_SERVICE)
+    };
+    let srv = spawn_ready(dir, &render, Some("info"), None);
+    (srv, SocketAddr::from(([127, 0, 0, 1], http_port.get())))
+}
+
+/// Boots a `[grpc]`-only config that must fail: returns the status with the whole log.
+pub fn spawn_grpc_boot_failure(descriptor_set: &str, service: &str) -> (ExitStatus, String) {
+    let dir = scratch_dir();
+    stage_grpc(&dir);
+    let render = |port| render_grpc(port, 1, descriptor_set, service);
+    exit_of(dir, &render)
 }
 
 /// Connect-only readiness: the master binds the listen socket before forking, so a successful connect means it booted far enough to serve.

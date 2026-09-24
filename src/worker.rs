@@ -42,10 +42,17 @@ pub struct PoolArgs {
     pub mode: Mode,
     pub entrypoint: PathBuf,
     pub max_requests: u64,
+    pub grace: Duration,
+    /// None for a gRPC pool.
+    pub http: Option<HttpArgs>,
+}
+
+/// The worker settings of an http pool.
+#[derive(Clone)]
+pub struct HttpArgs {
     pub uploads: rapira_runtime::multipart::Limits,
     /// sendFile() containment root, canonicalized per worker.
     pub sendfile_root: PathBuf,
-    pub grace: Duration,
 }
 
 /// Returns the process exit code for the master's fork bracket; never runs PHP module teardown, MSHUTDOWN stays with the master.
@@ -54,9 +61,8 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         mode,
         entrypoint,
         max_requests,
-        mut uploads,
-        sendfile_root,
         grace,
+        http,
     } = args;
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { php_sys::rapira_child_init() };
@@ -72,7 +78,16 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         );
         return WORKER_EXIT_UNHEALTHY;
     }
-    php_sys::set_sendfile_root(sendfile_root);
+    let mut uploads = match http {
+        Some(HttpArgs {
+            uploads,
+            sendfile_root,
+        }) => {
+            php_sys::set_sendfile_root(sendfile_root);
+            uploads
+        }
+        None => rapira_runtime::multipart::Limits::default(),
+    };
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
     let hooks: WorkerHooks = WorkerHooks {
         max_requests: effective_quota(max_requests),

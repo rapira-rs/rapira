@@ -1,10 +1,11 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use extension_api::{ListenAddr, Middleware, PrepareCtx};
-use php_sys::{Mode, Rapira};
+use php_sys::{GrpcMethod, GrpcService, Mode, Rapira};
 use rapira_config::{
-    HttpSettings, Listen, MiddlewareSettings, RunMode, Scaling, Settings, SupervisorSettings,
-    UnsafeFieldNames,
+    GrpcSettings, HttpSettings, Listen, MiddlewareSettings, PoolSettings, RunMode, Scaling,
+    Settings, SupervisorSettings, UnsafeFieldNames,
 };
+use rapira_grpc::{Config as GrpcConfig, Schema as GrpcSchema, Server as GrpcServer};
 use rapira_http::{
     Config as HttpConfig, Server as HttpServer, UnsafeFieldNames as HttpUnsafeFieldNames,
 };
@@ -122,28 +123,63 @@ fn prepare_pool(
     Ok(fds.split_off(before))
 }
 
+/// `table` is the pool table that names the entrypoint, for the error text.
+fn check_entrypoint(table: &str, entrypoint: &Path) -> anyhow::Result<()> {
+    // The entrypoint is fixed for the pool's lifetime, so one open at boot covers every request.
+    // The open proves read permission; the metadata check rejects a directory.
+    let meta = File::open(entrypoint)
+        .and_then(|f| f.metadata())
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "{table}.entrypoint {} is not readable: {e}",
+                entrypoint.display()
+            )
+        })?;
+    anyhow::ensure!(
+        meta.is_file(),
+        "{table}.entrypoint {} is not a regular file",
+        entrypoint.display()
+    );
+    Ok(())
+}
+
+fn listen_addr(listen: Listen) -> ListenAddr {
+    match listen {
+        Listen::Tcp(addr) => ListenAddr::Tcp(addr),
+        Listen::Unix(path) => ListenAddr::Unix(path),
+    }
+}
+
+/// The supervision config the master needs for one pool.
+fn pool_config(name: &'static str, pool: &PoolSettings, listeners: Vec<RawFd>) -> PoolConfig {
+    PoolConfig {
+        name,
+        processes: pool.processes,
+        scaling: match pool.scaling {
+            Scaling::Static => rapira_master::Scaling::Static,
+            Scaling::Dynamic {
+                min_spare,
+                max_spare,
+            } => rapira_master::Scaling::Dynamic {
+                min_spare,
+                max_spare,
+            },
+            Scaling::Ondemand => rapira_master::Scaling::Ondemand,
+        },
+        process_idle_timeout: pool.process_idle_timeout,
+        request_terminate_timeout: pool.request_terminate_timeout,
+        listeners,
+    }
+}
+
 /// Builds the http pool: its extension host, its listeners, and the supervision config the master needs.
 fn http_pool(
     http: HttpSettings,
     supervisor: &SupervisorSettings,
     prepare: &mut PrepareCtx,
 ) -> anyhow::Result<(PoolRun, PoolConfig)> {
-    let entrypoint: PathBuf = http.pool.entrypoint;
-    // The entrypoint is fixed for the pool's lifetime, so one open at boot covers every request.
-    // The open proves read permission; the metadata check rejects a directory.
-    let meta = File::open(&entrypoint)
-        .and_then(|f| f.metadata())
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "http.pool.entrypoint {} is not readable: {e}",
-                entrypoint.display()
-            )
-        })?;
-    anyhow::ensure!(
-        meta.is_file(),
-        "http.pool.entrypoint {} is not a regular file",
-        entrypoint.display()
-    );
+    let entrypoint: PathBuf = http.pool.entrypoint.clone();
+    check_entrypoint("http.pool", &entrypoint)?;
     let mode: Mode = match http.pool.mode {
         RunMode::Classic => Mode::Classic,
         RunMode::Worker => Mode::Worker(entrypoint.clone()),
@@ -196,10 +232,7 @@ fn http_pool(
 
     // parse HTTP configuration -------------------------------------
     let http_cfg: HttpConfig = HttpConfig {
-        listen: match http.listen {
-            Listen::Tcp(addr) => ListenAddr::Tcp(addr),
-            Listen::Unix(path) => ListenAddr::Unix(path),
-        },
+        listen: listen_addr(http.listen),
         server_name: http.server_name,
         server_port: http.server_port,
         max_body_size: http.max_body_size,
@@ -240,29 +273,71 @@ fn http_pool(
                 mode,
                 entrypoint,
                 max_requests: http.pool.max_requests,
-                uploads,
-                sendfile_root: http.sendfile_root,
                 grace: supervisor.process_control_timeout,
+                http: Some(worker::HttpArgs {
+                    uploads,
+                    sendfile_root: http.sendfile_root,
+                }),
             },
         },
-        PoolConfig {
-            name: "http",
-            processes: http.pool.processes,
-            scaling: match http.pool.scaling {
-                Scaling::Static => rapira_master::Scaling::Static,
-                Scaling::Dynamic {
-                    min_spare,
-                    max_spare,
-                } => rapira_master::Scaling::Dynamic {
-                    min_spare,
-                    max_spare,
+        pool_config("http", &http.pool, listeners),
+    ))
+}
+
+/// Builds the grpc pool. The schema loads here, in the master, so a bad descriptor set or service name stops the boot before the fork.
+fn grpc_pool(
+    grpc: GrpcSettings,
+    supervisor: &SupervisorSettings,
+    prepare: &mut PrepareCtx,
+) -> anyhow::Result<(PoolRun, PoolConfig)> {
+    let entrypoint: PathBuf = grpc.pool.entrypoint.clone();
+    check_entrypoint("grpc.pool", &entrypoint)?;
+    let schema = Arc::new(GrpcSchema::load(&grpc.descriptor_set, &grpc.services)?);
+    let services: Vec<GrpcService> = schema
+        .services()
+        .iter()
+        .map(|s| GrpcService {
+            name: s.name.clone(),
+            methods: s
+                .methods
+                .iter()
+                .map(|m| GrpcMethod {
+                    name: m.name.clone(),
+                    input_type: m.input_type.clone(),
+                    output_type: m.output_type.clone(),
+                    client_streaming: m.client_streaming,
+                    server_streaming: m.server_streaming,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let mut host: ExtensionRuntime = ExtensionRuntime::new();
+    host.register::<GrpcServer>(GrpcConfig {
+        listen: listen_addr(grpc.listen),
+        schema,
+        reflection: grpc.reflection,
+        default_timeout: grpc.default_timeout,
+        max_timeout: grpc.max_timeout,
+        drain_grace: supervisor.drain_grace(),
+    });
+    let listeners: Vec<RawFd> = prepare_pool(&mut host, prepare)?;
+
+    Ok((
+        PoolRun {
+            host: Some(host),
+            args: worker::PoolArgs {
+                mode: Mode::GrpcDispatcher {
+                    script: entrypoint.clone(),
+                    services,
                 },
-                Scaling::Ondemand => rapira_master::Scaling::Ondemand,
+                entrypoint,
+                max_requests: grpc.pool.max_requests,
+                grace: supervisor.process_control_timeout,
+                http: None,
             },
-            process_idle_timeout: http.pool.process_idle_timeout,
-            request_terminate_timeout: http.pool.request_terminate_timeout,
-            listeners,
         },
+        pool_config("grpc", &grpc.pool, listeners),
     ))
 }
 
@@ -274,13 +349,17 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // One context for every pool, kept alive past `run` so the master keeps its listener dups.
     let mut prepare: PrepareCtx = PrepareCtx::new();
-    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = [http_pool(
-        settings.http,
-        &settings.supervisor,
-        &mut prepare,
-    )?]
-    .into_iter()
-    .unzip();
+    let http: Option<(PoolRun, PoolConfig)> = settings
+        .http
+        .map(|http| http_pool(http, &settings.supervisor, &mut prepare))
+        .transpose()?;
+    let grpc: Option<(PoolRun, PoolConfig)> = settings
+        .grpc
+        .map(|grpc| grpc_pool(grpc, &settings.supervisor, &mut prepare))
+        .transpose()?;
+    // `WorkerEnv::pool` indexes both lists, so they keep one order.
+    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) =
+        http.into_iter().chain(grpc).unzip();
 
     // MINIT once, after every pool bound its listeners.
     let module: php_sys::PhpModule = Rapira::boot_master()?;
