@@ -38,9 +38,10 @@
 #define RAPIRA_VERSION "0.0.0-dev"
 #endif
 
-// array_init_size and smart_str_free are macro/inline-only; shims for Rust
+// array_init_size, smart_str_free and zend_symtable_str_find are macro/inline-only; shims for Rust
 void rapira_array_init(zval *zv, uint32_t size);
 void rapira_smart_str_free(smart_str *s);
+zval *rapira_symtable_str_find(HashTable *ht, const char *str, size_t len);
 
 // Mode in types.rs, mapped in start.rs (start_worker) - keep in sync
 enum {
@@ -70,8 +71,8 @@ typedef struct {
     zend_object std;
 } rapira_dispatcher_info_obj;
 
-// Class entries for the three stubs; rapira_register_classes assigns them in MINIT, before any object of these classes can exist.
-// Rust binds them as static muts, except the C-only log_level, mode and not_in_worker_mode_error entries.
+// Class entries for the four stubs; rapira_register_classes assigns them in MINIT, before any object of these classes can exist.
+// Rust binds the entries it reads as static muts (allowed_bindings.rs); the others are C-only.
 extern zend_class_entry *rapira_ce_log_level;
 extern zend_class_entry *rapira_ce_mode;
 extern zend_class_entry *rapira_ce_closed_exception;
@@ -94,5 +95,11 @@ extern zend_class_entry *rapira_ce_http_file_not_sendable_exception;
 extern zend_class_entry *rapira_ce_http_form_field;
 extern zend_class_entry *rapira_ce_http_uploaded_file;
 extern zend_class_entry *rapira_ce_http_request;
+extern zend_class_entry *rapira_ce_grpc_status_code;
+extern zend_class_entry *rapira_ce_grpc_method_kind;
+extern zend_class_entry *rapira_ce_grpc_protocol;
+extern zend_class_entry *rapira_ce_grpc_status;
+extern zend_class_entry *rapira_ce_grpc_metadata;
+extern zend_class_entry *rapira_ce_grpc_exception;
 
 #endif

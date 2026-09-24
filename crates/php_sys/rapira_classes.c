@@ -2,6 +2,7 @@
 #include "ext/spl/spl_exceptions.h"
 #include "rapira_arginfo.h"
 #include "rapira_exception_arginfo.h"
+#include "rapira_grpc_arginfo.h"
 #include "rapira_http_arginfo.h"
 #include "zend_API.h"
 #include "zend_exceptions.h"
@@ -36,6 +37,13 @@ zend_class_entry *rapira_ce_http_head_already_written_error;
 zend_class_entry *rapira_ce_http_head_not_written_error;
 zend_class_entry *rapira_ce_http_content_length_exceeded_error;
 zend_class_entry *rapira_ce_http_file_not_sendable_exception;
+
+zend_class_entry *rapira_ce_grpc_status_code;
+zend_class_entry *rapira_ce_grpc_method_kind;
+zend_class_entry *rapira_ce_grpc_protocol;
+zend_class_entry *rapira_ce_grpc_status;
+zend_class_entry *rapira_ce_grpc_metadata;
+zend_class_entry *rapira_ce_grpc_exception;
 
 const zend_function_entry *rapira_php_functions(void) { return ext_functions; }
 
@@ -137,6 +145,47 @@ void rapira_register_classes(void) {
         register_class_Rapira_Internal_Http_DispatcherInfo(http_info);
     rapira_ce_internal_http_exchange =
         register_class_Rapira_Internal_Http_Exchange(http_exchange);
+
+    rapira_ce_grpc_status_code = register_class_Rapira_Grpc_StatusCode();
+    rapira_ce_grpc_method_kind = register_class_Rapira_Grpc_MethodKind();
+    rapira_ce_grpc_protocol = register_class_Rapira_Grpc_Call_Protocol();
+    register_class_Rapira_Grpc_ErrorDetail();
+    rapira_ce_grpc_status = register_class_Rapira_Grpc_Status();
+    rapira_ce_grpc_metadata = register_class_Rapira_Grpc_Metadata(
+        zend_ce_countable, zend_ce_aggregate);
+    register_class_Rapira_Grpc_MethodInfo();
+    register_class_Rapira_Grpc_ServiceInfo();
+    register_class_Rapira_Grpc_Call_Context();
+
+    zend_class_entry *grpc_call = register_class_Rapira_Grpc_Call(work);
+    zend_class_entry *grpc_responder =
+        register_class_Rapira_Grpc_Responder(work);
+    zend_class_entry *grpc_unary_request =
+        register_class_Rapira_Grpc_UnaryRequest(grpc_call);
+    zend_class_entry *grpc_streaming_request =
+        register_class_Rapira_Grpc_StreamingRequest(grpc_call);
+    zend_class_entry *grpc_unary_responder =
+        register_class_Rapira_Grpc_UnaryResponder(grpc_responder);
+    zend_class_entry *grpc_streaming_responder =
+        register_class_Rapira_Grpc_StreamingResponder(grpc_responder);
+    register_class_Rapira_Grpc_UnaryCall(grpc_unary_request,
+                                         grpc_unary_responder);
+    register_class_Rapira_Grpc_ServerStreamingCall(grpc_unary_request,
+                                                   grpc_streaming_responder);
+    register_class_Rapira_Grpc_ClientStreamingCall(grpc_streaming_request,
+                                                   grpc_unary_responder);
+    register_class_Rapira_Grpc_BidiStreamingCall(grpc_streaming_request,
+                                                 grpc_streaming_responder);
+    register_class_Rapira_Grpc_Call_MessageStream(zend_ce_aggregate);
+    register_class_Rapira_Grpc_Responder_ResponseMetadata();
+    register_class_Rapira_Grpc_GrpcDispatcherInfo(dispatcher_info);
+    register_class_Rapira_Grpc_GrpcDispatcher(dispatcher);
+
+    rapira_ce_grpc_exception =
+        register_class_Rapira_Grpc_Exception_GrpcException(
+            spl_ce_RuntimeException, throwable);
+    register_class_Rapira_Grpc_Exception_HeadersAlreadyCommittedError(
+        zend_ce_error, throwable);
 
     // clone_obj = NULL: engine throws on clone (Zend/zend_vm_def.h:6050-6056)
     memcpy(&rapira_host_handlers, &std_object_handlers,

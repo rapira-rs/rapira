@@ -10,7 +10,7 @@
 
 ## Comments
 
-- `make stubs` generates the three `crates/php_sys/*_arginfo.h` headers from the three stubs.
+- `make stubs` generates each `crates/php_sys/*_arginfo.h` header from its `*.stub.php`.
 - Joke comments (`Rustttt`, "trust me, I'm a developer") are intentional. Do not flag them.
 
 ## Tests
