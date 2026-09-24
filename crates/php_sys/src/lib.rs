@@ -25,7 +25,7 @@ pub use exchange::set_sendfile_root;
 pub use handler::{HandleError, RapiraHandle};
 pub use quota::WorkerHooks;
 pub use start::{PhpModule, Rapira};
-pub use types::{Frame, Mode, Request, ResponseHead};
+pub use types::{Frame, GrpcMethod, GrpcService, Mode, Request, ResponseHead};
 
 // bindgen names the Zend SUCCESS/FAILURE constants differently across php-src versions, so the values are hardcoded.
 pub const SUCCESS: c_int = 0;

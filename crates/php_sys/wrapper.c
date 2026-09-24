@@ -30,6 +30,10 @@ zval *rapira_symtable_str_find(HashTable *ht, const char *str, size_t len) {
     return zend_symtable_str_find(ht, str, len);
 }
 
+void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name) {
+    ZVAL_OBJ_COPY(dst, zend_enum_get_case_cstr(ce, name));
+}
+
 void rapira_init_call_stack(void) {
 #ifdef ZEND_CHECK_STACK_LIMIT
     zend_call_stack_init();

@@ -357,3 +357,54 @@ namespace Rapira\Grpc\Exception {
     {
     }
 }
+
+namespace Rapira\Internal\Grpc {
+    /**
+     * The extension's implementation of \Rapira\Grpc\GrpcDispatcher. Host-created.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final class Dispatcher implements \Rapira\Grpc\GrpcDispatcher
+    {
+        /**
+         * Host-created: obtain it from \Rapira\get_dispatcher().
+         *
+         * @implementation-alias Rapira\Internal\Http\Dispatcher::__construct
+         */
+        private function __construct() {}
+
+        public function name(): string {}
+
+        /** @implementation-alias Rapira\Internal\Http\Dispatcher::tryReceive */
+        public function tryReceive(): \Rapira\Grpc\UnaryCall|\Rapira\Grpc\ServerStreamingCall|\Rapira\Grpc\ClientStreamingCall|\Rapira\Grpc\BidiStreamingCall|null {}
+
+        /** @implementation-alias Rapira\Internal\Http\Dispatcher::receive */
+        public function receive(int $timeout = -1): \Rapira\Grpc\UnaryCall|\Rapira\Grpc\ServerStreamingCall|\Rapira\Grpc\ClientStreamingCall|\Rapira\Grpc\BidiStreamingCall {}
+
+        /** @implementation-alias Rapira\Internal\Http\Dispatcher::getInfo */
+        public function getInfo(): \Rapira\Grpc\GrpcDispatcherInfo {}
+
+        public function getServices(): array {}
+    }
+
+    /**
+     * @strict-properties
+     * @not-serializable
+     */
+    final class DispatcherInfo implements \Rapira\Grpc\GrpcDispatcherInfo
+    {
+        /**
+         * Host-created.
+         *
+         * @implementation-alias Rapira\Internal\Http\DispatcherInfo::__construct
+         */
+        private function __construct() {}
+
+        /** @implementation-alias Rapira\Internal\Http\DispatcherInfo::pendingCount */
+        public function pendingCount(): int {}
+
+        /** @implementation-alias Rapira\Internal\Http\DispatcherInfo::activeCount */
+        public function activeCount(): int {}
+    }
+}

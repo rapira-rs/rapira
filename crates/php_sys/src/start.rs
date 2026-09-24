@@ -112,13 +112,13 @@ impl Rapira {
             pending: pending.clone(),
         };
 
-        let dispatcher = matches!(mode, Mode::Dispatcher(_));
+        let dispatcher = matches!(mode, Mode::Dispatcher(_) | Mode::GrpcDispatcher { .. });
         // SAFETY: safe, trust me, I'm a developer
         unsafe {
             crate::rapira_mode = match &mode {
                 Mode::Classic => RAPIRA_MODE_CLASSIC,
                 Mode::Worker(_) => RAPIRA_MODE_WORKER,
-                Mode::Dispatcher(_) => RAPIRA_MODE_DISPATCHER,
+                Mode::Dispatcher(_) | Mode::GrpcDispatcher { .. } => RAPIRA_MODE_DISPATCHER,
             } as c_int;
         };
 
@@ -188,6 +188,9 @@ impl Drop for Rapira {
 /// NTS inits module and request on different threads, so the call stack is re-initialized on this thread: https://github.com/php/php-src/pull/9104
 fn worker_main(mode: Mode, rx: JobRx) {
     JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
+    if let Mode::GrpcDispatcher { services, .. } = &mode {
+        crate::exchange::serve_grpc(services.clone());
+    }
     loop {
         unsafe {
             rapira_init_call_stack();
@@ -197,7 +200,9 @@ fn worker_main(mode: Mode, rx: JobRx) {
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker(script) | Mode::Dispatcher(script) => rapira_worker(script.clone()),
+            Mode::Worker(script)
+            | Mode::Dispatcher(script)
+            | Mode::GrpcDispatcher { script, .. } => rapira_worker(script.clone()),
         };
         if matches!(exit, WorkerExit::Closed) {
             break;

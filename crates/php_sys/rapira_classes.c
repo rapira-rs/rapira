@@ -43,7 +43,11 @@ zend_class_entry *rapira_ce_grpc_method_kind;
 zend_class_entry *rapira_ce_grpc_protocol;
 zend_class_entry *rapira_ce_grpc_status;
 zend_class_entry *rapira_ce_grpc_metadata;
+zend_class_entry *rapira_ce_grpc_method_info;
+zend_class_entry *rapira_ce_grpc_service_info;
 zend_class_entry *rapira_ce_grpc_exception;
+zend_class_entry *rapira_ce_internal_grpc_dispatcher;
+zend_class_entry *rapira_ce_internal_grpc_dispatcher_info;
 
 const zend_function_entry *rapira_php_functions(void) { return ext_functions; }
 
@@ -153,8 +157,8 @@ void rapira_register_classes(void) {
     rapira_ce_grpc_status = register_class_Rapira_Grpc_Status();
     rapira_ce_grpc_metadata = register_class_Rapira_Grpc_Metadata(
         zend_ce_countable, zend_ce_aggregate);
-    register_class_Rapira_Grpc_MethodInfo();
-    register_class_Rapira_Grpc_ServiceInfo();
+    rapira_ce_grpc_method_info = register_class_Rapira_Grpc_MethodInfo();
+    rapira_ce_grpc_service_info = register_class_Rapira_Grpc_ServiceInfo();
     register_class_Rapira_Grpc_Call_Context();
 
     zend_class_entry *grpc_call = register_class_Rapira_Grpc_Call(work);
@@ -178,8 +182,10 @@ void rapira_register_classes(void) {
                                                  grpc_streaming_responder);
     register_class_Rapira_Grpc_Call_MessageStream(zend_ce_aggregate);
     register_class_Rapira_Grpc_Responder_ResponseMetadata();
-    register_class_Rapira_Grpc_GrpcDispatcherInfo(dispatcher_info);
-    register_class_Rapira_Grpc_GrpcDispatcher(dispatcher);
+    zend_class_entry *grpc_info =
+        register_class_Rapira_Grpc_GrpcDispatcherInfo(dispatcher_info);
+    zend_class_entry *grpc_dispatcher =
+        register_class_Rapira_Grpc_GrpcDispatcher(dispatcher);
 
     rapira_ce_grpc_exception =
         register_class_Rapira_Grpc_Exception_GrpcException(
@@ -187,11 +193,18 @@ void rapira_register_classes(void) {
     register_class_Rapira_Grpc_Exception_HeadersAlreadyCommittedError(
         zend_ce_error, throwable);
 
+    rapira_ce_internal_grpc_dispatcher =
+        register_class_Rapira_Internal_Grpc_Dispatcher(grpc_dispatcher);
+    rapira_ce_internal_grpc_dispatcher_info =
+        register_class_Rapira_Internal_Grpc_DispatcherInfo(grpc_info);
+
     // clone_obj = NULL: engine throws on clone (Zend/zend_vm_def.h:6050-6056)
     memcpy(&rapira_host_handlers, &std_object_handlers,
            sizeof(rapira_host_handlers));
     rapira_host_handlers.clone_obj = NULL;
     rapira_ce_internal_http_dispatcher->default_object_handlers =
+        &rapira_host_handlers;
+    rapira_ce_internal_grpc_dispatcher->default_object_handlers =
         &rapira_host_handlers;
 
     memcpy(&rapira_exchange_handlers, &std_object_handlers,
@@ -210,5 +223,9 @@ void rapira_register_classes(void) {
     rapira_ce_internal_http_dispatcher_info->create_object =
         rapira_dispatcher_info_create;
     rapira_ce_internal_http_dispatcher_info->default_object_handlers =
+        &rapira_info_handlers;
+    rapira_ce_internal_grpc_dispatcher_info->create_object =
+        rapira_dispatcher_info_create;
+    rapira_ce_internal_grpc_dispatcher_info->default_object_handlers =
         &rapira_info_handlers;
 }

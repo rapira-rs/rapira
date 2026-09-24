@@ -42,6 +42,8 @@
 void rapira_array_init(zval *zv, uint32_t size);
 void rapira_smart_str_free(smart_str *s);
 zval *rapira_symtable_str_find(HashTable *ht, const char *str, size_t len);
+// ZVAL_OBJ_COPY is a macro; the shim writes the case `name` of the enum `ce` into `dst` with a new reference
+void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name);
 
 // Mode in types.rs, mapped in start.rs (start_worker) - keep in sync
 enum {
@@ -100,6 +102,10 @@ extern zend_class_entry *rapira_ce_grpc_method_kind;
 extern zend_class_entry *rapira_ce_grpc_protocol;
 extern zend_class_entry *rapira_ce_grpc_status;
 extern zend_class_entry *rapira_ce_grpc_metadata;
+extern zend_class_entry *rapira_ce_grpc_method_info;
+extern zend_class_entry *rapira_ce_grpc_service_info;
 extern zend_class_entry *rapira_ce_grpc_exception;
+extern zend_class_entry *rapira_ce_internal_grpc_dispatcher;
+extern zend_class_entry *rapira_ce_internal_grpc_dispatcher_info;
 
 #endif

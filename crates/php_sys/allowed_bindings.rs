@@ -19,6 +19,8 @@ bind! {
     rapira_ce_internal_http_dispatcher, rapira_ce_internal_http_dispatcher_info,
     rapira_ce_timeout_exception, rapira_ce_closed_exception,
     rapira_ce_no_dispatcher_error, rapira_ce_grpc_status, rapira_ce_grpc_exception,
+    rapira_ce_grpc_method_kind, rapira_ce_grpc_method_info, rapira_ce_grpc_service_info,
+    rapira_ce_internal_grpc_dispatcher, rapira_ce_internal_grpc_dispatcher_info,
     zend_argument_value_error, zend_argument_type_error,
     rapira_ce_work_discarded_exception, rapira_ce_http_content_length_exceeded_error,
     rapira_ce_http_head_not_written_error, rapira_ce_http_file_not_sendable_exception,
@@ -43,6 +45,8 @@ bind! {
     rapira_array_init,
     // zend_symtable_str_find is inline -> rapira_symtable_str_find shim in wrapper.c
     rapira_symtable_str_find,
+    // ZVAL_OBJ_COPY is a macro -> rapira_zval_enum_case shim in wrapper.c
+    rapira_zval_enum_case,
     // zend_symtable_str_update is inline; add_assoc_zval_ex is its exported caller (zend_API.c)
     add_assoc_zval_ex, add_next_index_stringl, add_next_index_object,
     zval_add_ref,

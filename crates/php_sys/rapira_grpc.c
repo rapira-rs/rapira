@@ -28,6 +28,9 @@ extern bool rapira_rs_ctor_grpc_exception(zend_object *obj, zval *code,
 extern bool rapira_rs_grpc_kind_streams(const char *value, size_t len,
                                         bool request);
 
+// rust glue (src/exchange/grpc.rs): false means a PHP exception is pending
+extern bool rapira_rs_grpc_services(zval *rv);
+
 // $entries is property slot 0 and the constructor always sets it. An instance
 // from ReflectionClass::newInstanceWithoutConstructor() is not supported.
 static zend_always_inline zval *
@@ -206,6 +209,20 @@ ZEND_METHOD(Rapira_Grpc_Exception_GrpcException, __construct) {
     if (!rapira_rs_ctor_grpc_exception(Z_OBJ_P(ZEND_THIS), code, message,
                                        details)) {
         rapira_throw_or_backstop("GrpcException construction");
+        RETURN_THROWS();
+    }
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, name) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    // the plugin's root TOML section
+    RETURN_STRING("grpc");
+}
+
+ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, getServices) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    if (!rapira_rs_grpc_services(return_value)) {
+        rapira_throw_or_backstop("getServices");
         RETURN_THROWS();
     }
 }

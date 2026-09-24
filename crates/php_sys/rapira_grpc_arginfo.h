@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: eb0d1a5d517fee8d69c0736bb49a21c3e863e335 */
+ * Stub hash: 4daf16b72c435896658320dad43e0f70f4987393 */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Grpc_MethodKind_isStreamingRequest, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
@@ -121,6 +121,25 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_Rapira_Grpc_Exception_GrpcException___construct arginfo_class_Rapira_Grpc_Status___construct
 
+ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Internal_Grpc_Dispatcher___construct, 0, 0, 0)
+ZEND_END_ARG_INFO()
+
+#define arginfo_class_Rapira_Internal_Grpc_Dispatcher_name arginfo_class_Rapira_Grpc_UnaryRequest_getMessage
+
+#define arginfo_class_Rapira_Internal_Grpc_Dispatcher_tryReceive arginfo_class_Rapira_Grpc_GrpcDispatcher_tryReceive
+
+#define arginfo_class_Rapira_Internal_Grpc_Dispatcher_receive arginfo_class_Rapira_Grpc_GrpcDispatcher_receive
+
+#define arginfo_class_Rapira_Internal_Grpc_Dispatcher_getInfo arginfo_class_Rapira_Grpc_GrpcDispatcher_getInfo
+
+#define arginfo_class_Rapira_Internal_Grpc_Dispatcher_getServices arginfo_class_Rapira_Grpc_GrpcDispatcher_getServices
+
+#define arginfo_class_Rapira_Internal_Grpc_DispatcherInfo___construct arginfo_class_Rapira_Internal_Grpc_Dispatcher___construct
+
+#define arginfo_class_Rapira_Internal_Grpc_DispatcherInfo_pendingCount arginfo_class_Rapira_Grpc_Metadata_count
+
+#define arginfo_class_Rapira_Internal_Grpc_DispatcherInfo_activeCount arginfo_class_Rapira_Grpc_Metadata_count
+
 ZEND_METHOD(Rapira_Grpc_MethodKind, isStreamingRequest);
 ZEND_METHOD(Rapira_Grpc_MethodKind, isStreamingResponse);
 ZEND_METHOD(Rapira_Grpc_ErrorDetail, __construct);
@@ -133,6 +152,15 @@ ZEND_METHOD(Rapira_Grpc_MethodInfo, __construct);
 ZEND_METHOD(Rapira_Grpc_ServiceInfo, __construct);
 ZEND_METHOD(Rapira_Grpc_Call_Context, __construct);
 ZEND_METHOD(Rapira_Grpc_Exception_GrpcException, __construct);
+ZEND_METHOD(Rapira_Internal_Http_Dispatcher, __construct);
+ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, name);
+ZEND_METHOD(Rapira_Internal_Http_Dispatcher, tryReceive);
+ZEND_METHOD(Rapira_Internal_Http_Dispatcher, receive);
+ZEND_METHOD(Rapira_Internal_Http_Dispatcher, getInfo);
+ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, getServices);
+ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, __construct);
+ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, pendingCount);
+ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, activeCount);
 
 static const zend_function_entry class_Rapira_Grpc_MethodKind_methods[] = {
 	ZEND_ME(Rapira_Grpc_MethodKind, isStreamingRequest, arginfo_class_Rapira_Grpc_MethodKind_isStreamingRequest, ZEND_ACC_PUBLIC)
@@ -231,6 +259,23 @@ static const zend_function_entry class_Rapira_Grpc_Responder_ResponseMetadata_me
 
 static const zend_function_entry class_Rapira_Grpc_Exception_GrpcException_methods[] = {
 	ZEND_ME(Rapira_Grpc_Exception_GrpcException, __construct, arginfo_class_Rapira_Grpc_Exception_GrpcException___construct, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Rapira_Internal_Grpc_Dispatcher_methods[] = {
+	ZEND_RAW_FENTRY("__construct", zim_Rapira_Internal_Http_Dispatcher___construct, arginfo_class_Rapira_Internal_Grpc_Dispatcher___construct, ZEND_ACC_PRIVATE, NULL, NULL)
+	ZEND_ME(Rapira_Internal_Grpc_Dispatcher, name, arginfo_class_Rapira_Internal_Grpc_Dispatcher_name, ZEND_ACC_PUBLIC)
+	ZEND_RAW_FENTRY("tryReceive", zim_Rapira_Internal_Http_Dispatcher_tryReceive, arginfo_class_Rapira_Internal_Grpc_Dispatcher_tryReceive, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("receive", zim_Rapira_Internal_Http_Dispatcher_receive, arginfo_class_Rapira_Internal_Grpc_Dispatcher_receive, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("getInfo", zim_Rapira_Internal_Http_Dispatcher_getInfo, arginfo_class_Rapira_Internal_Grpc_Dispatcher_getInfo, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_ME(Rapira_Internal_Grpc_Dispatcher, getServices, arginfo_class_Rapira_Internal_Grpc_Dispatcher_getServices, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Rapira_Internal_Grpc_DispatcherInfo_methods[] = {
+	ZEND_RAW_FENTRY("__construct", zim_Rapira_Internal_Http_DispatcherInfo___construct, arginfo_class_Rapira_Internal_Grpc_DispatcherInfo___construct, ZEND_ACC_PRIVATE, NULL, NULL)
+	ZEND_RAW_FENTRY("pendingCount", zim_Rapira_Internal_Http_DispatcherInfo_pendingCount, arginfo_class_Rapira_Internal_Grpc_DispatcherInfo_pendingCount, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("activeCount", zim_Rapira_Internal_Http_DispatcherInfo_activeCount, arginfo_class_Rapira_Internal_Grpc_DispatcherInfo_activeCount, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_FE_END
 };
 
@@ -714,6 +759,28 @@ static zend_class_entry *register_class_Rapira_Grpc_Exception_HeadersAlreadyComm
 	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Grpc\\Exception", "HeadersAlreadyCommittedError", NULL);
 	class_entry = zend_register_internal_class_with_flags(&ce, class_entry_Error, 0);
 	zend_class_implements(class_entry, 1, class_entry_Rapira_Exception_RapiraThrowable);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Rapira_Internal_Grpc_Dispatcher(zend_class_entry *class_entry_Rapira_Grpc_GrpcDispatcher)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Internal\\Grpc", "Dispatcher", class_Rapira_Internal_Grpc_Dispatcher_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE);
+	zend_class_implements(class_entry, 1, class_entry_Rapira_Grpc_GrpcDispatcher);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Rapira_Internal_Grpc_DispatcherInfo(zend_class_entry *class_entry_Rapira_Grpc_GrpcDispatcherInfo)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Internal\\Grpc", "DispatcherInfo", class_Rapira_Internal_Grpc_DispatcherInfo_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE);
+	zend_class_implements(class_entry, 1, class_entry_Rapira_Grpc_GrpcDispatcherInfo);
 
 	return class_entry;
 }

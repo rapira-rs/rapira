@@ -108,7 +108,12 @@ pub unsafe extern "C" fn rapira_rs_try_receive(return_value: *mut zval) -> bool 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> bool {
     guard(false, || unsafe {
-        let _ = object_init_ex(return_value, rapira_ce_internal_http_dispatcher_info);
+        let ce = if grpc::serving() {
+            rapira_ce_internal_grpc_dispatcher_info
+        } else {
+            rapira_ce_internal_http_dispatcher_info
+        };
+        let _ = object_init_ex(return_value, ce);
         let info = info_from((*return_value).value.obj);
         (*info).pending = pending_depth() as i64;
         (*info).active = i64::from(CYCLE.get().unit.is_some_and(|p| !(*p).finalized()));
@@ -135,8 +140,13 @@ pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bo
         let inst = DISPATCHER.with(|d| match d.get() {
             Some(zv) => zv,
             None => {
+                let ce = if grpc::serving() {
+                    rapira_ce_internal_grpc_dispatcher
+                } else {
+                    rapira_ce_internal_http_dispatcher
+                };
                 let mut zv: zval = std::mem::zeroed();
-                let _ = object_init_ex(&mut zv, rapira_ce_internal_http_dispatcher);
+                let _ = object_init_ex(&mut zv, ce);
                 d.set(Some(zv));
                 zv
             }

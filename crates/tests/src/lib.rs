@@ -1,6 +1,6 @@
 use extension_api::{Reply, ReplyEvent};
 use http::HeaderMap;
-use php_sys::{Frame, HandleError, Mode, Rapira, RapiraHandle, Request};
+use php_sys::{Frame, GrpcMethod, GrpcService, HandleError, Mode, Rapira, RapiraHandle, Request};
 use std::env::set_var;
 use std::path::{Path, PathBuf};
 use std::sync::{self, Mutex, Once, OnceLock, PoisonError};
@@ -101,6 +101,25 @@ pub fn req(uri: &str, fixture_name: &str) -> Request {
         received_at: None,
         tls: None,
     }
+}
+
+/// The services of `crates/plugins/grpc/testdata/echo.proto`, in descriptor order.
+pub fn echo_services() -> Vec<GrpcService> {
+    let method = |name: &str, server_streaming: bool| GrpcMethod {
+        name: name.into(),
+        input_type: "rapira.test.v1.EchoRequest".into(),
+        output_type: "rapira.test.v1.EchoResponse".into(),
+        client_streaming: false,
+        server_streaming,
+    };
+    vec![GrpcService {
+        name: "rapira.test.v1.EchoService".into(),
+        methods: vec![
+            method("Echo", false),
+            method("Get", false),
+            method("Watch", true),
+        ],
+    }]
 }
 
 /// A response stream collected to its `End` (or to the producer dying).

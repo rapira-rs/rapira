@@ -18,7 +18,8 @@ pub(crate) use crate::{
     rapira_ce_http_file_not_sendable_exception, rapira_ce_http_form_field,
     rapira_ce_http_head_already_written_error, rapira_ce_http_head_not_written_error,
     rapira_ce_http_multipart, rapira_ce_http_request, rapira_ce_http_uploaded_file,
-    rapira_ce_inet_address, rapira_ce_internal_http_dispatcher,
+    rapira_ce_inet_address, rapira_ce_internal_grpc_dispatcher,
+    rapira_ce_internal_grpc_dispatcher_info, rapira_ce_internal_http_dispatcher,
     rapira_ce_internal_http_dispatcher_info, rapira_ce_internal_http_exchange,
     rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_tls,
     rapira_ce_unix_address, rapira_ce_work_discarded_exception, rapira_dispatcher_info_obj,
@@ -33,6 +34,7 @@ pub(crate) use crate::{
     zend_string, zend_unset_timeout, zval, zval_add_ref, zval_ptr_dtor,
 };
 
+mod grpc;
 mod headers;
 mod receive;
 mod request;
@@ -41,6 +43,7 @@ mod sendfile;
 #[cfg(test)]
 mod tests;
 
+pub(crate) use grpc::serve_grpc;
 pub use sendfile::set_sendfile_root;
 
 /// The cycle bookkeeping view of a unit that receive() handed out.

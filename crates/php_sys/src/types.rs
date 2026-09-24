@@ -10,6 +10,29 @@ pub enum Mode {
     Classic,
     Worker(PathBuf),
     Dispatcher(PathBuf),
+    /// Dispatcher mode for a gRPC pool: `get_dispatcher()` gives the gRPC dispatcher.
+    GrpcDispatcher {
+        script: PathBuf,
+        services: Vec<GrpcService>,
+    },
+}
+
+/// One service of a gRPC pool. `name` is fully qualified.
+#[derive(Debug, Clone)]
+pub struct GrpcService {
+    pub name: String,
+    /// In descriptor order.
+    pub methods: Vec<GrpcMethod>,
+}
+
+/// One method of a `GrpcService`. `name` is the bare method name; the two types are fully qualified message names.
+#[derive(Debug, Clone)]
+pub struct GrpcMethod {
+    pub name: String,
+    pub input_type: String,
+    pub output_type: String,
+    pub client_streaming: bool,
+    pub server_streaming: bool,
 }
 
 #[repr(C)]
