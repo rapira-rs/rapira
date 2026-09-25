@@ -1,0 +1,28 @@
+# It starts the bench workflow of rapira-rs/benchmarks after a successful Nightly run.
+# BENCH_DISPATCH_TOKEN is a fine-grained token with "Actions: read and write" on rapira-rs/benchmarks only.
+name: Bench dispatch
+on:
+    workflow_run:
+        workflows: [Nightly]
+        types: [completed]
+        branches: [main]
+
+permissions:
+    contents: read
+
+jobs:
+    dispatch:
+        if: github.event.workflow_run.conclusion == 'success'
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        steps:
+            - shell: bash
+              env:
+                  GH_TOKEN: ${{ secrets.BENCH_DISPATCH_TOKEN }}
+                  REPO_TOKEN: ${{ github.token }}
+                  SHA: ${{ github.event.workflow_run.head_sha }}
+              run: |
+                  set -euo pipefail
+                  # The same version string as the guard job of nightly.yml.
+                  CARGO_VER=$(GH_TOKEN="$REPO_TOKEN" gh api -H "Accept: application/vnd.github.raw+json" "repos/${GITHUB_REPOSITORY}/contents/.release-please-manifest.json?ref=${SHA}" | jq -er '.["."]')
+                  gh workflow run bench.yml -R rapira-rs/benchmarks -f sha="$SHA" -f version="${CARGO_VER}-nightly.${SHA:0:7}"
