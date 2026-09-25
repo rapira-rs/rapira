@@ -37,7 +37,7 @@ protoc --include_imports --descriptor_set_out=api.binpb -I proto proto/billing/v
 
 `buf build` includes the imported files by default. `protoc` includes them only with `--include_imports`.
 
-By default, the pool serves the services of the files that no other file of the set imports, in descriptor order. A file that another file imports is a dependency, for example `google/longrunning/operations.proto`, so its services are not served. The host answers `grpc.health.v1.Health` and the reflection services itself, so the pool never serves them. `services` sets the list of fully qualified names, for example `["billing.v1.InvoiceService"]`. Use it when one set feeds several pools, or to serve a service of an imported file. The master loads the set before the fork, so each of these fails the boot once, with exit code 1:
+By default, the pool serves the services of the files that no other file of the set imports, in descriptor order. A file that another file imports is a dependency, for example `google/longrunning/operations.proto`, so its services are not served. The host answers `grpc.health.v1.Health` and the reflection services itself, so the pool never serves them. `services` sets the list of fully qualified names, for example `["billing.v1.InvoiceService"]`. Use it when several rapira instances share one set, or to serve a service of an imported file. The master loads the set before the fork, so each of these fails the boot once, with exit code 1:
 
 - a set that rapira cannot read or decode;
 - a set without its imports, for example with `unresolved type name ".google.protobuf.Timestamp"`;
