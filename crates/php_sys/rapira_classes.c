@@ -9,7 +9,6 @@
 #include "zend_object_handlers.h"
 #include "zend_objects.h"
 #include "zend_objects_API.h"
-#include "zend_portability.h"
 #include "zend_property_hooks.h"
 #include "zend_types.h"
 

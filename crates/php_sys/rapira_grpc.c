@@ -204,7 +204,7 @@ ZEND_METHOD(Rapira_Grpc_Call_Context, __construct) {
     ZEND_PARSE_PARAMETERS_END();
 
     if (!rapira_rs_ctor_grpc_context(Z_OBJ_P(ZEND_THIS), method, metadata,
-                                     deadline_null ? NULL : &deadline, remote,
+                                     !deadline_null ? &deadline : NULL, remote,
                                      tls, protocol, received_at)) {
         rapira_throw_or_backstop("Context construction");
         RETURN_THROWS();
