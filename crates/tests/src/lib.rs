@@ -573,9 +573,13 @@ pub fn case_results() -> HashMap<String, String> {
 
 /// One `case` record per (name, expected result) row, and no stray one; every mismatch is listed at once.
 pub fn assert_case_records(cases: &[(&str, &str)]) {
+    let records = captured()
+        .iter()
+        .filter(|c| c.target == "app" && c.message == "case")
+        .count();
     let results = case_results();
     assert_eq!(
-        results.len(),
+        records,
         cases.len(),
         "one record per case (got {results:?})"
     );
@@ -675,5 +679,22 @@ mod tests {
         assert_eq!(r.status, 200);
         assert_eq!(r.headers, fields(&[("x-a", "1")]));
         assert_eq!(r.body, b"one,two");
+    }
+
+    /// A repeated name is a stray record, even when it repeats the expected result.
+    #[test]
+    #[should_panic(expected = "one record per case")]
+    fn case_records_reject_a_repeated_name() {
+        let record = || Captured {
+            level: tracing::Level::INFO,
+            target: "app".to_owned(),
+            message: "case".to_owned(),
+            context: r#"{"name":"a","result":"ok"}"#.to_owned(),
+        };
+        let mut records = captured();
+        records.clear();
+        records.extend([record(), record()]);
+        drop(records);
+        assert_case_records(&[("a", "ok")]);
     }
 }
