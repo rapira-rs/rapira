@@ -164,10 +164,15 @@ Both chains are `Vec<BoxLayer>` over `http::Request<Body>` and `http::Response<B
 
 Each commit builds and passes `make test`.
 
-1. `refactor(sapi)!: fold extension_api and rapira_runtime into rapira_sapi` and delete the mirror types and mappers.
-2. `refactor(net): own the listener types and drop the second runtime` with one runtime per worker in the worker entry.
-3. `refactor(sapi)!: replace Extension, ExtensionRuntime and Backend with Plugin, Work and Intake`.
-4. `feat(build): add rapira_php_build and let each plugin own its PHP surface` with the MINIT registry and the stub glob in the Makefile.
-5. `refactor(config)!: let each plugin own its config section`.
-6. `feat(http,grpc)!: tower layers for [http].middleware and [grpc].interceptors`.
-7. `docs: describe the plugin crate layout`.
+1. `refactor(sapi)!: rename php_sys to rapira_sapi and move the listener types to net`.
+2. `refactor(sapi)!: fold extension_api and rapira_runtime into rapira_sapi and delete the mirror types`.
+3. `refactor(sapi): carry work units through one intake and set the dispatcher classes per worker`.
+4. `refactor(sapi)!: replace Extension, ExtensionRuntime and Backend with Plugin, Work and Intake`.
+5. `feat(build): add rapira_php_build and register plugin classes through a MINIT registry`.
+6. `refactor(http)!: own the Rapira\Http PHP surface in the http plugin crate`.
+7. `refactor(grpc)!: own the Rapira\Grpc PHP surface in the grpc plugin crate`.
+8. `refactor(config)!: let each plugin own its config section`.
+9. `feat(http,grpc)!: run [http].middleware and [grpc].interceptors as tower layers`.
+10. `docs: describe the plugin crate layout`.
+
+The implementation plan is `docs/superpowers/plans/2026-09-26-plugin-crates.md`.
