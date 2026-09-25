@@ -4,12 +4,14 @@ use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
+mod grpc;
 mod http;
 mod listen;
 mod log;
 mod pool;
 mod supervisor;
 
+pub use grpc::GrpcSettings;
 pub use http::{
     HttpSettings, MiddlewareSettings, StaticSettings, UnsafeFieldNames, UploadSettings,
 };
@@ -18,6 +20,7 @@ pub use log::{LogFormat, LogLevel, LogSettings};
 pub use pool::{PoolSettings, RunMode, Scaling};
 pub use supervisor::SupervisorSettings;
 
+use grpc::{GrpcSection, resolve_grpc};
 use http::{HttpSection, resolve_middleware, resolve_static, resolve_uploads};
 use log::{LogSection, resolve_log};
 use pool::resolve_pool;
@@ -25,24 +28,39 @@ use supervisor::{SupervisorSection, resolve_supervisor};
 
 #[derive(Debug)]
 pub struct Settings {
-    pub http: HttpSettings,
+    pub http: Option<HttpSettings>,
+    pub grpc: Option<GrpcSettings>,
     pub supervisor: SupervisorSettings,
     pub log: LogSettings,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct FileConfig {
-    #[serde(default)]
-    http: HttpSection,
+    http: Option<HttpSection>,
+    grpc: Option<GrpcSection>,
     #[serde(default)]
     supervisor: SupervisorSection,
     #[serde(default)]
     log: LogSection,
 }
 
-fn default_listen() -> Listen {
-    Listen::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 8000)))
+/// `{table}.listen`, or `default` when the key is absent.
+fn parse_listen(table: &str, raw: Option<&str>, default: Listen) -> anyhow::Result<Listen> {
+    match raw {
+        Some(s) => s
+            .parse::<Listen>()
+            .with_context(|| format!("invalid {table}.listen `{s}`")),
+        None => Ok(default),
+    }
+}
+
+/// A `_secs` key that must be at least 1 and at most `MAX_TIMEOUT_SECS`.
+fn nonzero_timeout(table: &str, key: &str, secs: u64) -> anyhow::Result<Duration> {
+    if secs == 0 {
+        bail!("{table}.{key} must be at least 1");
+    }
+    capped_timeout(table, key, secs)
 }
 
 pub fn resolve(path: &Path) -> anyhow::Result<Settings> {
@@ -58,14 +76,36 @@ fn load_str(text: &str) -> anyhow::Result<FileConfig> {
 }
 
 fn merge(file: FileConfig, config_dir: Option<&Path>) -> anyhow::Result<Settings> {
-    let listen = match file.http.listen.as_deref() {
-        Some(s) => s
-            .parse::<Listen>()
-            .with_context(|| format!("invalid http.listen `{s}`"))?,
-        None => default_listen(),
-    };
+    if file.http.is_none() && file.grpc.is_none() {
+        bail!("no plugin configured: add an [http] or a [grpc] table");
+    }
+    let http = file
+        .http
+        .map(|section| resolve_http(section, config_dir))
+        .transpose()?;
+    let grpc = file
+        .grpc
+        .map(|section| resolve_grpc(section, config_dir))
+        .transpose()?;
+    let supervisor = resolve_supervisor(file.supervisor, config_dir)?;
+    let log = resolve_log(file.log)?;
 
-    let server_port = match file.http.server_port {
+    Ok(Settings {
+        http,
+        grpc,
+        supervisor,
+        log,
+    })
+}
+
+fn resolve_http(section: HttpSection, config_dir: Option<&Path>) -> anyhow::Result<HttpSettings> {
+    let listen = parse_listen(
+        "http",
+        section.listen.as_deref(),
+        Listen::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 8000))),
+    )?;
+
+    let server_port = match section.server_port {
         Some(p) => p,
         None => match &listen {
             Listen::Tcp(addr) => addr.port(),
@@ -73,7 +113,7 @@ fn merge(file: FileConfig, config_dir: Option<&Path>) -> anyhow::Result<Settings
         },
     };
 
-    let max_body_size_mb = file.http.max_body_size_mb.unwrap_or(8);
+    let max_body_size_mb = section.max_body_size_mb.unwrap_or(8);
     if max_body_size_mb == 0 {
         bail!("http.max_body_size_mb must be at least 1");
     }
@@ -81,29 +121,27 @@ fn merge(file: FileConfig, config_dir: Option<&Path>) -> anyhow::Result<Settings
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow::anyhow!("http.max_body_size_mb {max_body_size_mb} is too large"))?;
 
-    let write_timeout_secs = file.http.write_timeout_secs.unwrap_or(30);
-    if write_timeout_secs == 0 {
-        bail!("http.write_timeout_secs must be at least 1");
-    }
-    let write_timeout = capped_timeout("http", "write_timeout_secs", write_timeout_secs)?;
+    let write_timeout = nonzero_timeout(
+        "http",
+        "write_timeout_secs",
+        section.write_timeout_secs.unwrap_or(30),
+    )?;
+    let keepalive_timeout = nonzero_timeout(
+        "http",
+        "keepalive_timeout_secs",
+        section.keepalive_timeout_secs.unwrap_or(60),
+    )?;
 
-    let keepalive_timeout_secs = file.http.keepalive_timeout_secs.unwrap_or(60);
-    if keepalive_timeout_secs == 0 {
-        bail!("http.keepalive_timeout_secs must be at least 1");
-    }
-    let keepalive_timeout =
-        capped_timeout("http", "keepalive_timeout_secs", keepalive_timeout_secs)?;
-
-    let pool = resolve_pool(file.http.pool, "http.pool", config_dir)?;
-    if file.http.uploads.is_some() && pool.mode != RunMode::Dispatcher {
+    let pool = resolve_pool(section.pool, "http.pool", config_dir)?;
+    if section.uploads.is_some() && pool.mode != RunMode::Dispatcher {
         bail!(
             "http.uploads applies to dispatcher mode only (http.pool.mode = \"{}\")",
             pool.mode.as_str()
         );
     }
-    let uploads = resolve_uploads(file.http.uploads.unwrap_or_default(), config_dir)?;
+    let uploads = resolve_uploads(section.uploads.unwrap_or_default(), config_dir)?;
 
-    let sendfile_root = match file.http.sendfile.root.filter(|r| !r.is_empty()) {
+    let sendfile_root = match section.sendfile.root.filter(|r| !r.is_empty()) {
         Some(r) => config_relative(config_dir, &r)?,
         None => pool
             .entrypoint
@@ -112,34 +150,26 @@ fn merge(file: FileConfig, config_dir: Option<&Path>) -> anyhow::Result<Settings
             .to_path_buf(),
     };
 
-    let static_files = file
-        .http
+    let static_files = section
         .r#static
         .map(|s| resolve_static(s, config_dir))
         .transpose()?;
-    let middleware = resolve_middleware(file.http.middleware, static_files)?;
-    let supervisor = resolve_supervisor(file.supervisor, config_dir)?;
-    let log = resolve_log(file.log)?;
+    let middleware = resolve_middleware(section.middleware, static_files)?;
 
-    Ok(Settings {
-        http: HttpSettings {
-            listen,
-            server_name: file
-                .http
-                .server_name
-                .unwrap_or_else(|| "localhost".to_owned()),
-            server_port,
-            max_body_size,
-            write_timeout,
-            keepalive_timeout,
-            unsafe_field_names: file.http.unsafe_field_names.unwrap_or_default(),
-            uploads,
-            sendfile_root,
-            middleware,
-            pool,
-        },
-        supervisor,
-        log,
+    Ok(HttpSettings {
+        listen,
+        server_name: section
+            .server_name
+            .unwrap_or_else(|| "localhost".to_owned()),
+        server_port,
+        max_body_size,
+        write_timeout,
+        keepalive_timeout,
+        unsafe_field_names: section.unsafe_field_names.unwrap_or_default(),
+        uploads,
+        sendfile_root,
+        middleware,
+        pool,
     })
 }
 
@@ -161,9 +191,15 @@ fn config_relative(config_dir: Option<&Path>, value: &str) -> std::io::Result<Pa
 mod tests {
     use super::*;
 
+    /// The `[http]` settings of `toml`, resolved against `dir`.
+    fn http_of(toml: &str, dir: &str) -> HttpSettings {
+        let file = load_str(toml).unwrap();
+        merge(file, Some(Path::new(dir))).unwrap().http.unwrap()
+    }
+
     #[test]
     fn http_pool_resolves_from_file() {
-        let file = load_str(
+        let http = http_of(
             r#"
             [http]
             listen = "0.0.0.0:9000"
@@ -171,12 +207,11 @@ mod tests {
             processes = 2
             entrypoint = "app.php"
         "#,
-        )
-        .unwrap();
-        let s = merge(file, Some(Path::new("/etc/rapira"))).unwrap();
-        assert_eq!(s.http.listen.to_string(), "0.0.0.0:9000");
-        assert_eq!(s.http.pool.processes, 2);
-        assert_eq!(s.http.pool.entrypoint, Path::new("/etc/rapira/app.php"));
+            "/etc/rapira",
+        );
+        assert_eq!(http.listen.to_string(), "0.0.0.0:9000");
+        assert_eq!(http.pool.processes, 2);
+        assert_eq!(http.pool.entrypoint, Path::new("/etc/rapira/app.php"));
     }
 
     /// The pool belongs to its plugin. A top-level table names no plugin, so it must fail at parse time.
@@ -200,29 +235,28 @@ mod tests {
         )
         .unwrap();
         let s = merge(file, Some(Path::new("/w"))).unwrap();
-        assert_eq!(s.http.pool.processes, 3);
-        assert_eq!(s.http.listen.to_string(), "127.0.0.1:7000");
+        let http = s.http.unwrap();
+        assert_eq!(http.pool.processes, 3);
+        assert_eq!(http.listen.to_string(), "127.0.0.1:7000");
         assert_eq!(s.log.level, LogLevel::Debug);
-        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+        let MiddlewareSettings::Static(st) = &http.middleware[0];
         assert_eq!(st.root, Path::new("/w/public"));
     }
 
     #[test]
     fn server_port_derives_from_listen_and_mb_converts() {
-        let file = load_str(
+        let http = http_of(
             "[http]\nlisten = \":9000\"\nmax_body_size_mb = 2\n[http.pool]\nentrypoint = \"a.php\"\n",
-        )
-        .unwrap();
-        let s = merge(file, Some(Path::new("/w"))).unwrap();
-        assert_eq!(s.http.server_port, 9000);
-        assert_eq!(s.http.max_body_size, 2 * 1024 * 1024);
+            "/w",
+        );
+        assert_eq!(http.server_port, 9000);
+        assert_eq!(http.max_body_size, 2 * 1024 * 1024);
 
-        let file = load_str(
+        let http = http_of(
             "[http]\nlisten = \"unix:/run/r.sock\"\n[http.pool]\nentrypoint = \"a.php\"\n",
-        )
-        .unwrap();
-        let s = merge(file, Some(Path::new("/w"))).unwrap();
-        assert_eq!(s.http.server_port, 80);
+            "/w",
+        );
+        assert_eq!(http.server_port, 80);
     }
 
     #[test]
@@ -231,17 +265,17 @@ mod tests {
             ("drop", UnsafeFieldNames::Drop),
             ("reject", UnsafeFieldNames::Reject),
         ] {
-            let file = load_str(&format!(
-                "[http]\nunsafe_field_names = \"{text}\"\n[http.pool]\nentrypoint = \"a.php\"\n"
-            ))
-            .unwrap();
-            let s = merge(file, Some(Path::new("/w"))).unwrap();
-            assert_eq!(s.http.unsafe_field_names, want, "{text}");
+            let http = http_of(
+                &format!(
+                    "[http]\nunsafe_field_names = \"{text}\"\n[http.pool]\nentrypoint = \"a.php\"\n"
+                ),
+                "/w",
+            );
+            assert_eq!(http.unsafe_field_names, want, "{text}");
         }
 
-        let file = load_str("[http.pool]\nentrypoint = \"a.php\"\n").unwrap();
-        let s = merge(file, Some(Path::new("/w"))).unwrap();
-        assert_eq!(s.http.unsafe_field_names, UnsafeFieldNames::Drop);
+        let http = http_of("[http.pool]\nentrypoint = \"a.php\"\n", "/w");
+        assert_eq!(http.unsafe_field_names, UnsafeFieldNames::Drop);
     }
 
     /// `allow` is rejected too: there is no off-switch, so asking for one must fail loudly.
@@ -260,19 +294,18 @@ mod tests {
 
     #[test]
     fn file_entrypoint_is_config_dir_relative() {
-        let file = load_str("[http.pool]\nentrypoint = \"public/index.php\"\n").unwrap();
-        let s = merge(file, Some(Path::new("/srv/app"))).unwrap();
+        let http = http_of(
+            "[http.pool]\nentrypoint = \"public/index.php\"\n",
+            "/srv/app",
+        );
         assert_eq!(
-            s.http.pool.entrypoint,
+            http.pool.entrypoint,
             std::path::absolute("/srv/app/public/index.php").unwrap()
         );
     }
 
     #[test]
     fn entrypoint_is_required() {
-        let err = merge(FileConfig::default(), None).unwrap_err().to_string();
-        assert!(err.contains("http.pool.entrypoint is required"), "{err}");
-
         let file = load_str("[http.pool]\nentrypoint = \"\"\n").unwrap();
         let err = merge(file, Some(Path::new("/srv/app")))
             .unwrap_err()
@@ -289,31 +322,31 @@ mod tests {
     /// The root resolves config-relative; without the key it follows the entrypoint.
     #[test]
     fn http_sendfile_root_defaults_to_the_entrypoint_dir() {
-        let file = load_str("[http.pool]\nentrypoint = \"public/index.php\"\n").unwrap();
-        let s = merge(file, Some(Path::new("/srv/app"))).unwrap();
-        assert_eq!(s.http.sendfile_root, Path::new("/srv/app/public"));
+        let http = http_of(
+            "[http.pool]\nentrypoint = \"public/index.php\"\n",
+            "/srv/app",
+        );
+        assert_eq!(http.sendfile_root, Path::new("/srv/app/public"));
 
-        let file = load_str(
+        let http = http_of(
             "[http.pool]\nentrypoint = \"public/index.php\"\n[http.sendfile]\nroot = \"assets\"\n",
-        )
-        .unwrap();
-        let s = merge(file, Some(Path::new("/srv/app"))).unwrap();
-        assert_eq!(s.http.sendfile_root, Path::new("/srv/app/assets"));
+            "/srv/app",
+        );
+        assert_eq!(http.sendfile_root, Path::new("/srv/app/assets"));
     }
 
     /// The shipped example is the file users copy, so it must resolve and keep its documented values.
     #[test]
     fn shipped_example_config_resolves() {
-        let file = load_str(include_str!("../../../examples/rapira.toml")).unwrap();
-        let s = merge(file, Some(Path::new("/srv/app"))).unwrap();
-        assert_eq!(s.http.listen.to_string(), "127.0.0.1:8000");
-        assert_eq!(s.http.server_port, 8000);
+        let http = http_of(include_str!("../../../examples/rapira.toml"), "/srv/app");
+        assert_eq!(http.listen.to_string(), "127.0.0.1:8000");
+        assert_eq!(http.server_port, 8000);
         assert_eq!(
-            s.http.pool.entrypoint,
+            http.pool.entrypoint,
             Path::new("/srv/app/dispatcher-sync.php")
         );
-        assert_eq!(s.http.pool.mode, RunMode::Dispatcher);
-        assert_eq!(s.http.sendfile_root, Path::new("/srv/app"));
+        assert_eq!(http.pool.mode, RunMode::Dispatcher);
+        assert_eq!(http.sendfile_root, Path::new("/srv/app"));
     }
 
     #[test]
@@ -365,6 +398,10 @@ mod tests {
                 "[http]\nkeepalive_timeout_secs = 100000\n[http.pool]\nentrypoint = \"a.php\"\n",
                 "http.keepalive_timeout_secs",
             ),
+            (
+                "[grpc]\ndescriptor_set = \"a.binpb\"\nservices = [\"p.S\"]\nmax_timeout_secs = 100000\n[grpc.pool]\nentrypoint = \"g.php\"\n",
+                "grpc.max_timeout_secs",
+            ),
         ] {
             let err = merge(load_str(toml).unwrap(), Some(Path::new("/w")))
                 .unwrap_err()
@@ -408,14 +445,13 @@ mod tests {
     /// Every knob resolves with unit conversion and a config-relative dir; a zero max_files would 413 every file part while booting clean.
     #[test]
     fn http_uploads_resolve_and_reject_zero_files() {
-        let file = load_str(
+        let http = http_of(
             "[http.pool]\nentrypoint = \"a.php\"\n[http.uploads]\ndir = \"spool\"\n\
              max_file_size_mb = 3\nmax_field_size_kb = 7\nmax_files = 4\n\
              max_parts = 9\nmax_part_headers = 5\n",
-        )
-        .unwrap();
-        let s = merge(file, Some(Path::new("/w"))).unwrap();
-        let u = &s.http.uploads;
+            "/w",
+        );
+        let u = &http.uploads;
         assert_eq!(u.dir, Path::new("/w/spool"));
         assert_eq!(u.max_file_size, 3 * 1024 * 1024);
         assert_eq!(u.max_field_size, 7 * 1024);
@@ -436,12 +472,11 @@ mod tests {
     #[test]
     fn pool_ondemand_and_static_scaling_resolve() {
         for (key, want) in [("ondemand", Scaling::Ondemand), ("static", Scaling::Static)] {
-            let file = load_str(&format!(
-                "[http.pool]\nentrypoint = \"a.php\"\nscaling = \"{key}\"\n"
-            ))
-            .unwrap();
-            let s = merge(file, Some(Path::new("/w"))).unwrap();
-            assert_eq!(s.http.pool.scaling, want, "{key}");
+            let http = http_of(
+                &format!("[http.pool]\nentrypoint = \"a.php\"\nscaling = \"{key}\"\n"),
+                "/w",
+            );
+            assert_eq!(http.pool.scaling, want, "{key}");
         }
 
         let file = load_str(
@@ -459,17 +494,15 @@ mod tests {
             ("worker", RunMode::Worker),
             ("dispatcher", RunMode::Dispatcher),
         ] {
-            let file = load_str(&format!(
-                "[http.pool]\nentrypoint = \"a.php\"\nmode = \"{key}\"\n"
-            ))
-            .unwrap();
-            let s = merge(file, Some(Path::new("/w"))).unwrap();
-            assert_eq!(s.http.pool.mode, want, "{key}");
+            let http = http_of(
+                &format!("[http.pool]\nentrypoint = \"a.php\"\nmode = \"{key}\"\n"),
+                "/w",
+            );
+            assert_eq!(http.pool.mode, want, "{key}");
         }
 
-        let file = load_str("[http.pool]\nentrypoint = \"a.php\"\n").unwrap();
-        let s = merge(file, Some(Path::new("/w"))).unwrap();
-        assert_eq!(s.http.pool.mode, RunMode::Dispatcher);
+        let http = http_of("[http.pool]\nentrypoint = \"a.php\"\n", "/w");
+        assert_eq!(http.pool.mode, RunMode::Dispatcher);
 
         assert!(load_str("[http.pool]\nentrypoint = \"a.php\"\nmode = \"async\"\n").is_err());
     }
@@ -527,16 +560,19 @@ mod tests {
             .to_string();
         assert!(err.contains("only valid with http.pool.scaling"), "{err}");
 
-        let s = merged("scaling = \"dynamic\"\nmin_spare = 1\nmax_spare = 3\nmax_requests = 500\n")
-            .unwrap();
+        let http =
+            merged("scaling = \"dynamic\"\nmin_spare = 1\nmax_spare = 3\nmax_requests = 500\n")
+                .unwrap()
+                .http
+                .unwrap();
         assert_eq!(
-            s.http.pool.scaling,
+            http.pool.scaling,
             Scaling::Dynamic {
                 min_spare: 1,
                 max_spare: 3
             }
         );
-        assert_eq!(s.http.pool.max_requests, 500);
+        assert_eq!(http.pool.max_requests, 500);
     }
 
     #[test]
@@ -555,25 +591,22 @@ mod tests {
     /// The root resolves config-relative like every other path key; forbid defaults to the PHP source guard.
     #[test]
     fn http_static_resolves_with_defaults() {
-        let file = load_str(
+        let http = http_of(
             "[http.pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"public\"\n",
-        )
-        .unwrap();
-        let s = merge(file, Some(Path::new("/w"))).unwrap();
-        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+            "/w",
+        );
+        let MiddlewareSettings::Static(st) = &http.middleware[0];
         assert_eq!(st.root, Path::new("/w/public"));
         assert_eq!(st.forbid, vec![".php".to_owned()]);
 
-        let file = load_str("[http.pool]\nentrypoint = \"a.php\"\n").unwrap();
-        let s = merge(file, Some(Path::new("/w"))).unwrap();
-        assert!(s.http.middleware.is_empty());
+        let http = http_of("[http.pool]\nentrypoint = \"a.php\"\n", "/w");
+        assert!(http.middleware.is_empty());
 
-        let file = load_str(
+        let http = http_of(
             "[http.pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"/srv/pub\"\n",
-        )
-        .unwrap();
-        let s = merge(file, Some(Path::new("/w"))).unwrap();
-        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+            "/w",
+        );
+        let MiddlewareSettings::Static(st) = &http.middleware[0];
         assert_eq!(st.root, Path::new("/srv/pub"));
     }
 
@@ -617,20 +650,18 @@ mod tests {
     /// The resolver validates shape only. The middleware constructor normalizes the case.
     #[test]
     fn http_static_forbid_validates() {
-        let file = load_str(
+        let http = http_of(
             "[http.pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"p\"\nforbid = [\".PHP\", \".Phtml\"]\n",
-        )
-        .unwrap();
-        let s = merge(file, Some(Path::new("/w"))).unwrap();
-        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+            "/w",
+        );
+        let MiddlewareSettings::Static(st) = &http.middleware[0];
         assert_eq!(st.forbid, vec![".PHP".to_owned(), ".Phtml".to_owned()]);
 
-        let file = load_str(
+        let http = http_of(
             "[http.pool]\nentrypoint = \"a.php\"\n[http]\nmiddleware = [\"static\"]\n[http.static]\nroot = \"p\"\nforbid = []\n",
-        )
-        .unwrap();
-        let s = merge(file, Some(Path::new("/w"))).unwrap();
-        let MiddlewareSettings::Static(st) = &s.http.middleware[0];
+            "/w",
+        );
+        let MiddlewareSettings::Static(st) = &http.middleware[0];
         assert!(st.forbid.is_empty());
 
         for entry in ["php", "", ".", ".php ", "./php"] {

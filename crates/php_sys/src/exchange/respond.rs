@@ -444,8 +444,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_flush(job: *mut c_void) -> bool {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_is_finalized(job: *const c_void) -> bool {
     guard(false, || unsafe {
-        let st = &*job.cast::<ExchangeState>();
-        st.stage == Stage::Finalized || st.job.ctx.sender.as_ref().is_some_and(Sender::is_closed)
+        (*job.cast::<ExchangeState>()).is_finalized()
     })
 }
 
@@ -465,17 +464,8 @@ pub unsafe extern "C" fn rapira_rs_exchange_is_cancelled(job: *const c_void) -> 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
     guard((), || {
-        let ptr: *mut ExchangeState = job.cast();
-        update(|c| {
-            if c.unit == Some(ptr) {
-                c.unit = None;
-            }
-        });
-        let mut st = unsafe { Box::from_raw(ptr) };
+        let mut st = unsafe { release(job.cast::<ExchangeState>()) };
         let cycle_died = unsafe { (*crate::rapira_cg()).unclean_shutdown };
-        if st.stage != Stage::Finalized {
-            sb_update(Event::Handled(true));
-        }
         if st.stage != Stage::Finalized && !cycle_died {
             if let BodyState::Multipart { files, .. } = &mut st.body {
                 for p in files {

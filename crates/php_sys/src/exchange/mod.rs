@@ -17,20 +17,25 @@ pub(crate) use crate::{
     rapira_ce_closed_exception, rapira_ce_http_content_length_exceeded_error,
     rapira_ce_http_file_not_sendable_exception, rapira_ce_http_form_field,
     rapira_ce_http_head_already_written_error, rapira_ce_http_head_not_written_error,
-    rapira_ce_http_multipart, rapira_ce_http_request, rapira_ce_http_tls,
-    rapira_ce_http_uploaded_file, rapira_ce_inet_address, rapira_ce_internal_http_dispatcher,
-    rapira_ce_internal_http_dispatcher_info, rapira_ce_internal_http_exchange,
-    rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
-    rapira_ce_work_discarded_exception, rapira_dispatcher_info_obj, rapira_eg, rapira_exchange_obj,
-    rapira_receive_timed, rapira_receive_untimed,
+    rapira_ce_http_multipart, rapira_ce_http_request, rapira_ce_http_uploaded_file,
+    rapira_ce_inet_address, rapira_ce_internal_grpc_dispatcher,
+    rapira_ce_internal_grpc_dispatcher_info, rapira_ce_internal_grpc_unary_call,
+    rapira_ce_internal_http_dispatcher, rapira_ce_internal_http_dispatcher_info,
+    rapira_ce_internal_http_exchange, rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception,
+    rapira_ce_tls, rapira_ce_unix_address, rapira_ce_work_discarded_exception,
+    rapira_dispatcher_info_obj, rapira_eg, rapira_exchange_obj, rapira_receive_timed,
+    rapira_receive_untimed,
     scoreboard::{Event, sb_update},
     start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
-    types::{Addr, Body, FormField, Frame, Job, Request, ResponseHead, TlsView, UploadedFile},
+    types::{
+        Addr, Body, FormField, Frame, Job, Request, ResponseHead, TlsView, Unit, UploadedFile,
+    },
     zend, zend_class_entry, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_set_timeout,
     zend_string, zend_unset_timeout, zval, zval_add_ref, zval_ptr_dtor,
 };
 
+mod grpc;
 mod headers;
 mod receive;
 mod request;
@@ -39,12 +44,112 @@ mod sendfile;
 #[cfg(test)]
 mod tests;
 
+use grpc::GrpcState;
+pub(crate) use grpc::{is_binary, printable};
 pub use sendfile::set_sendfile_root;
+
+/// The protocol a worker thread serves, fixed at boot. It picks the dispatcher, its info and its unit classes.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum Front {
+    Http,
+    Grpc,
+}
+
+impl Front {
+    /// # Safety
+    /// MINIT ran: the class entries are assigned.
+    unsafe fn dispatcher_ce(self) -> *mut zend_class_entry {
+        unsafe {
+            match self {
+                Self::Http => rapira_ce_internal_http_dispatcher,
+                Self::Grpc => rapira_ce_internal_grpc_dispatcher,
+            }
+        }
+    }
+
+    /// # Safety
+    /// As `dispatcher_ce`.
+    unsafe fn info_ce(self) -> *mut zend_class_entry {
+        unsafe {
+            match self {
+                Self::Http => rapira_ce_internal_http_dispatcher_info,
+                Self::Grpc => rapira_ce_internal_grpc_dispatcher_info,
+            }
+        }
+    }
+
+    /// # Safety
+    /// As `dispatcher_ce`.
+    unsafe fn unit_ce(self) -> *mut zend_class_entry {
+        unsafe {
+            match self {
+                Self::Http => rapira_ce_internal_http_exchange,
+                Self::Grpc => rapira_ce_internal_grpc_unary_call,
+            }
+        }
+    }
+
+    /// The receive() error while a unit is unfinalized.
+    fn busy(self) -> &'static CStr {
+        match self {
+            Self::Http => {
+                c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first"
+            }
+            Self::Grpc => {
+                c"receive() while a Rapira\\Grpc\\UnaryCall is unfinalized; finalize it first"
+            }
+        }
+    }
+}
+
+thread_local! {
+    static FRONT: Cell<Front> = const { Cell::new(Front::Http) };
+}
+
+pub(crate) fn front() -> Front {
+    FRONT.get()
+}
+
+/// Makes this PHP thread serve a gRPC pool with `services`.
+pub(crate) fn serve_grpc(services: Vec<crate::types::GrpcService>) {
+    FRONT.set(Front::Grpc);
+    grpc::set_services(services);
+}
+
+/// The cycle bookkeeping view of a unit that receive() handed out.
+pub(crate) trait Held {
+    /// The worker committed the outcome, or discarded the unit.
+    fn finalized(&self) -> bool;
+    /// The host no longer takes an outcome: Work::isCancelled().
+    fn host_closed(&self) -> bool;
+    fn discard(&mut self);
+
+    /// Work::isFinalized().
+    fn is_finalized(&self) -> bool {
+        self.finalized() || self.host_closed()
+    }
+}
+
+/// Reclaims the Box that receive() handed out: clears the cycle slot if it still points here, and counts an unfinalized unit as handled.
+/// # Safety
+/// `ptr` came from `Box::into_raw` in receive and was not reclaimed before.
+pub(crate) unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
+    update(|c| {
+        if c.unit.is_some_and(|u| std::ptr::addr_eq(u, ptr)) {
+            c.unit = None;
+        }
+    });
+    let st = unsafe { Box::from_raw(ptr) };
+    if !st.finalized() {
+        sb_update(Event::Handled(true));
+    }
+    st
+}
 
 #[derive(Clone, Copy)]
 struct CycleState {
     /// The Box pointer of the unit handed out last, so paths where free_obj never runs (bailout) can still reclaim it.
-    unit: Option<*mut ExchangeState>,
+    unit: Option<*mut dyn Held>,
     closed_seen: bool,
     served: bool,
     /// A unit was handed out this cycle: a fatal after that is an app failure, not a boot failure.
@@ -76,13 +181,8 @@ pub(crate) fn cycle_reset() {
 /// Reclaim a unit free_obj never saw (shutdown bailout / allocation bailout).
 pub(crate) fn reclaim_current() {
     if let Some(ptr) = CYCLE.get().unit {
-        update(|c| c.unit = None);
         // SAFETY: the pointer came from Box::into_raw in receive, and rapira_rs_exchange_drop clears the unit before it reclaims.
-        let st = unsafe { Box::from_raw(ptr) };
-        if st.stage != Stage::Finalized {
-            sb_update(Event::Handled(true));
-        }
-        drop(st);
+        drop(unsafe { release(ptr) });
     }
 }
 
@@ -295,25 +395,33 @@ impl ExchangeState {
             armed_at: Instant::now(),
         }
     }
+}
+
+impl Held for ExchangeState {
+    fn finalized(&self) -> bool {
+        self.stage == Stage::Finalized
+    }
 
     fn host_closed(&self) -> bool {
         self.discarded
             || (self.stage != Stage::Finalized
                 && self.job.ctx.sender.as_ref().is_some_and(Sender::is_closed))
     }
-}
 
-/// Recovers the enclosing C struct: the C fields sit before `std` (wrapper.h layout).
-unsafe fn exchange_from(obj: *mut zend_object) -> *mut rapira_exchange_obj {
-    unsafe {
-        obj.byte_sub(std::mem::offset_of!(rapira_exchange_obj, std))
-            .cast()
+    fn discard(&mut self) {
+        respond::discard_unit(self);
     }
 }
 
-unsafe fn info_from(obj: *mut zend_object) -> *mut rapira_dispatcher_info_obj {
-    unsafe {
-        obj.byte_sub(std::mem::offset_of!(rapira_dispatcher_info_obj, std))
-            .cast()
-    }
+/// `fn $name(obj) -> *mut $t` recovers the enclosing C struct: the C fields sit before `std` (wrapper.h layout).
+macro_rules! container_of {
+    ($vis:vis $name:ident, $t:ty) => {
+        $vis unsafe fn $name(obj: *mut zend_object) -> *mut $t {
+            unsafe { obj.byte_sub(std::mem::offset_of!($t, std)).cast() }
+        }
+    };
 }
+pub(crate) use container_of;
+
+container_of!(exchange_from, rapira_exchange_obj);
+container_of!(info_from, rapira_dispatcher_info_obj);

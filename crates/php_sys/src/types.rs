@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use http::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderName};
-use std::ffi::CString;
+use std::ffi::{CStr, CString};
 use std::os::raw::c_int;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -10,6 +10,77 @@ pub enum Mode {
     Classic,
     Worker(PathBuf),
     Dispatcher(PathBuf),
+    /// Dispatcher mode for a gRPC pool: `get_dispatcher()` gives the gRPC dispatcher.
+    GrpcDispatcher {
+        script: PathBuf,
+        services: Vec<GrpcService>,
+    },
+}
+
+/// One service of a gRPC pool. `name` is fully qualified.
+#[derive(Debug, Clone)]
+pub struct GrpcService {
+    pub name: String,
+    /// In descriptor order.
+    pub methods: Vec<GrpcMethod>,
+}
+
+/// One method of a `GrpcService`. `name` is the bare method name; the two types are fully qualified message names.
+#[derive(Debug, Clone)]
+pub struct GrpcMethod {
+    pub name: String,
+    pub input_type: String,
+    pub output_type: String,
+    pub client_streaming: bool,
+    pub server_streaming: bool,
+}
+
+/// `Rapira\Grpc\MethodKind`: client streaming streams the request, server streaming streams the response.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum MethodKind {
+    Unary,
+    ServerStreaming,
+    ClientStreaming,
+    BidiStreaming,
+}
+
+impl MethodKind {
+    pub(crate) fn of(m: &GrpcMethod) -> Self {
+        match (m.client_streaming, m.server_streaming) {
+            (false, false) => Self::Unary,
+            (false, true) => Self::ServerStreaming,
+            (true, false) => Self::ClientStreaming,
+            (true, true) => Self::BidiStreaming,
+        }
+    }
+
+    /// From the backing value of a case.
+    pub(crate) fn from_value(value: &[u8]) -> Option<Self> {
+        Some(match value {
+            b"unary" => Self::Unary,
+            b"server-streaming" => Self::ServerStreaming,
+            b"client-streaming" => Self::ClientStreaming,
+            b"bidi-streaming" => Self::BidiStreaming,
+            _ => return None,
+        })
+    }
+
+    pub(crate) fn case(self) -> &'static CStr {
+        match self {
+            Self::Unary => c"Unary",
+            Self::ServerStreaming => c"ServerStreaming",
+            Self::ClientStreaming => c"ClientStreaming",
+            Self::BidiStreaming => c"BidiStreaming",
+        }
+    }
+
+    pub(crate) fn streams_request(self) -> bool {
+        matches!(self, Self::ClientStreaming | Self::BidiStreaming)
+    }
+
+    pub(crate) fn streams_response(self) -> bool {
+        matches!(self, Self::ServerStreaming | Self::BidiStreaming)
+    }
 }
 
 #[repr(C)]
@@ -56,6 +127,107 @@ pub enum Frame {
 
 pub struct Job {
     pub ctx: Context,
+}
+
+/// One unit of work on the worker intake.
+pub(crate) enum Unit {
+    Http(Box<Job>),
+    Grpc(Box<GrpcJob>),
+}
+
+/// The gRPC status of a boot-failed worker's shed call: https://github.com/grpc/grpc/blob/master/doc/statuscodes.md
+const GRPC_UNAVAILABLE: u32 = 14;
+
+impl Unit {
+    pub(crate) fn front(&self) -> crate::exchange::Front {
+        match self {
+            Self::Http(_) => crate::exchange::Front::Http,
+            Self::Grpc(_) => crate::exchange::Front::Grpc,
+        }
+    }
+
+    /// The client left while the unit was queued.
+    pub(crate) fn is_closed(&self) -> bool {
+        match self {
+            Self::Http(job) => job.ctx.sender.as_ref().is_some_and(Sender::is_closed),
+            Self::Grpc(job) => job.reply.is_closed(),
+        }
+    }
+
+    /// Answers for a worker that cannot serve: 503 or UNAVAILABLE.
+    pub(crate) fn shed(self) {
+        match self {
+            Self::Http(mut job) => {
+                crate::callbacks::send_error_head(&mut job.ctx, 503);
+                job.ctx.finish(false);
+            }
+            Self::Grpc(job) => {
+                let _ = job.reply.send(GrpcOutcome {
+                    headers: HeaderMap::new(),
+                    trailers: HeaderMap::new(),
+                    result: Err(GrpcStatus {
+                        code: GRPC_UNAVAILABLE,
+                        message: "the worker failed to boot".into(),
+                        details: Vec::new(),
+                    }),
+                });
+            }
+        }
+    }
+
+    /// The HTTP job, for the modes that serve nothing else.
+    pub(crate) fn into_http(self) -> Option<Box<Job>> {
+        match self {
+            Self::Http(job) => Some(job),
+            Self::Grpc(_) => None,
+        }
+    }
+}
+
+/// The protocol that the client of a gRPC call used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum GrpcProtocol {
+    Grpc,
+    GrpcWeb,
+    Connect,
+}
+
+/// One unary gRPC call for PHP.
+pub struct GrpcRequest {
+    /// The full method name, `package.Service/Method`.
+    pub method: String,
+    pub protocol: GrpcProtocol,
+    /// The request metadata as it arrived. PHP gets the application keys only, with `-bin` values decoded.
+    pub metadata: HeaderMap,
+    /// Unix timestamp after which the outcome is no longer wanted.
+    pub deadline: Option<f64>,
+    pub remote: Addr,
+    /// The binary protobuf encoding of the input message.
+    pub message: Bytes,
+}
+
+/// The one outcome of a unary call. The metadata is in wire form: `-bin` values are base64 without padding.
+#[derive(Debug, PartialEq)]
+pub struct GrpcOutcome {
+    pub headers: HeaderMap,
+    pub trailers: HeaderMap,
+    /// The output message, or the status the call failed with.
+    pub result: Result<Bytes, GrpcStatus>,
+}
+
+/// The `google.rpc.Status` triple. `details` holds `google.protobuf.Any` pairs: the type URL and the packed bytes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GrpcStatus {
+    pub code: u32,
+    pub message: String,
+    pub details: Vec<(String, Bytes)>,
+}
+
+pub(crate) struct GrpcJob {
+    pub(crate) req: GrpcRequest,
+    /// Unix timestamp of the enqueue.
+    pub(crate) received_at: f64,
+    pub(crate) reply: tokio::sync::oneshot::Sender<GrpcOutcome>,
 }
 
 /// Mirror of `extension_api::Addr`: php_sys does not depend on extension_api, the runtime maps between them.

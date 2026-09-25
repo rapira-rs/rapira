@@ -1,0 +1,10 @@
+// echo.proto imports this file, so its service stands for a dependency's service, such as google.longrunning.Operations.
+syntax = "proto3";
+
+package rapira.test.dep.v1;
+
+message PingRequest {}
+
+service DepService {
+  rpc Ping(PingRequest) returns (PingRequest);
+}

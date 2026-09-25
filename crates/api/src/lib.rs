@@ -34,6 +34,10 @@ pub trait Extension: Send + 'static {
 #[doc(hidden)]
 pub trait Backend: Send + Sync + 'static {
     fn exec(&self, req: Request) -> Pin<Box<dyn Future<Output = Result<Reply>> + Send + '_>>;
+    fn unary(
+        &self,
+        call: UnaryCall,
+    ) -> Pin<Box<dyn Future<Output = Result<Option<UnaryReply>>> + Send + '_>>;
 }
 
 pub enum ReplyEvent {
@@ -99,6 +103,11 @@ impl Php {
     pub async fn exec(&self, req: Request) -> Result<Reply> {
         self.backend.exec(req).await
     }
+
+    /// `Err` is a refusal before dispatch: PHP never saw the call. `Ok(None)` means the worker dropped the call without an outcome. Dropping the future cancels the call.
+    pub async fn unary(&self, call: UnaryCall) -> Result<Option<UnaryReply>> {
+        self.backend.unary(call).await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -155,4 +164,41 @@ pub struct Request {
     pub received_at: Option<f64>,
     pub headers: http::HeaderMap,
     pub body: Vec<u8>,
+}
+
+/// One unary RPC. `message` is the binary protobuf encoding of the method's input message.
+pub struct UnaryCall {
+    /// `package.Service/Method`, without a leading slash.
+    pub method: String,
+    pub protocol: RpcProtocol,
+    /// The request headers as received. php_sys drops the transport names and decodes `-bin` values when it builds `Context::$metadata`.
+    pub metadata: http::HeaderMap,
+    /// Unix seconds.
+    pub deadline: Option<f64>,
+    pub remote: Addr,
+    pub message: bytes::Bytes,
+}
+
+/// The protocol that the client of an RPC used.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RpcProtocol {
+    Grpc,
+    GrpcWeb,
+    Connect,
+}
+
+/// The outcome of a unary RPC. The metadata is in wire form: `-bin` values are unpadded base64.
+pub struct UnaryReply {
+    pub headers: http::HeaderMap,
+    pub trailers: http::HeaderMap,
+    /// The output message, or the status the call failed with.
+    pub outcome: std::result::Result<bytes::Bytes, RpcStatus>,
+}
+
+/// `google.rpc.Status`. `code` is 1..=16. Each detail is a (type URL, packed message) pair. https://github.com/googleapis/googleapis/blob/master/google/rpc/status.proto
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RpcStatus {
+    pub code: u32,
+    pub message: String,
+    pub details: Vec<(String, bytes::Bytes)>,
 }

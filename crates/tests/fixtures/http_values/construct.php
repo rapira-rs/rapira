@@ -3,14 +3,15 @@
 use Rapira\Http\FormField;
 use Rapira\Http\Multipart;
 use Rapira\Http\Request;
-use Rapira\Http\Tls;
 use Rapira\Http\UploadedFile;
 use Rapira\InetAddress;
+use Rapira\Tls;
 use Rapira\UnixAddress;
 
 $remote = new InetAddress('203.0.113.7', 44123);
 $server = new UnixAddress(null);
 $tls = new Tls('TLSv1.3', 'TLS_AES_128_GCM_SHA256', 'h2', 'example.test', null, null, null);
+echo 'tls-class: ', $tls::class, "\n";
 $field = new FormField('note', 'hello', ['content-type' => ['text/plain']]);
 $file = new UploadedFile('avatar', 'me.png', 'image/png', [], '/tmp/spool-1', 512);
 $body = new Multipart([$field], [$file]);

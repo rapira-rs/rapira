@@ -8,14 +8,19 @@
 - New host logic in Rust via ZEND_API if that is reasonable. C only for ZPP shells, longjmp isolation, macro shims.
 - Pre 1.0 - do not preserve backwards compatibility.
 
+## PHP contract
+
+- The PHP contract ([rapira-rs/contract](https://github.com/rapira-rs/contract), local checkout `../contract`; update it before you read it) comes first. Read it before you plan, design or change anything that PHP can see: stubs, classes, functions, exceptions, messages and behavior.
+- The extension follows the contract. To improve the contract or deviate from it, ask first.
+
 ## Comments
 
-- `make stubs` generates the three `crates/php_sys/*_arginfo.h` headers from the three stubs.
+- `make stubs` generates each `crates/php_sys/*_arginfo.h` header from its `*.stub.php`.
 - Joke comments (`Rustttt`, "trust me, I'm a developer") are intentional. Do not flag them.
 
 ## Tests
 
-- Unit tests in-crate under `#[cfg(test)]`. Integration and e2e in `crates/tests`, never the root package's `tests/`.
+- Unit tests in-crate under `#[cfg(test)]`: only tests that need no fixture, no test double and no socket. Everything else is an integration test and goes to `crates/tests`: the test file under `crates/tests/tests/`, shared harness code (fakes, wire clients) under `crates/tests/src/`, fixtures and descriptor sets under `crates/tests/fixtures/`. No `testing.rs`, `testdata/` or harness `[dev-dependencies]` in a plugin crate. Never the root package's `tests/`.
 - E2E lives in `crates/tests/tests/e2e/` behind the `e2e` feature, so a workspace run skips it.
 - New tests use worker or dispatcher mode, not classic.
 - Check PHP behavior against php-src or a short script rather than guessing.

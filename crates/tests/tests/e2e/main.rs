@@ -2,6 +2,7 @@ mod apm;
 mod classic;
 mod concurrency;
 mod extensions;
+mod grpc;
 mod harness;
 mod ini;
 mod lifecycle;

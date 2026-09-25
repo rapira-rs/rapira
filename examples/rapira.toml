@@ -42,6 +42,22 @@ processes = 16               # defaults to the CPU count; max_children for dynam
 # process_idle_timeout_secs = 10      # ondemand: idle worker lifetime
 # request_terminate_timeout_secs = 0  # kill + replace a worker whose request runs longer; 0 = off
 
+# The gRPC listener: unary calls over gRPC, gRPC-Web and Connect (crates/plugins/grpc/README.md).
+# With a [grpc] table, grpc.descriptor_set and grpc.pool.entrypoint are required.
+# [grpc]
+# listen = "127.0.0.1:50051"   # host:port, ":port" (all interfaces), or "unix:/path"
+# descriptor_set = "api.binpb" # relative to this file's directory; build it with its imports: buf build --as-file-descriptor-set -o api.binpb
+# services = ["billing.v1.InvoiceService"] # serve only these (fully qualified, each in descriptor_set); unset = the services of the files that no other file imports
+# reflection = false           # serve grpc.reflection.v1 and v1alpha
+# default_timeout_secs = 30    # deadline of a call without a client timeout; unset (the default) = no deadline
+# max_timeout_secs = 60        # upper limit for a client timeout; unset (the default) = no limit
+
+# The worker pool behind the grpc listener. It takes the keys of [http.pool].
+# [grpc.pool]
+# entrypoint = "grpc.php"      # relative paths resolve against this file's directory
+# mode = "dispatcher"          # the only mode for a grpc pool
+# processes = 16               # defaults to the CPU count
+
 # [supervisor]
 # pidfile = "rapira.pid"      # relative to this file's directory
 # process_control_timeout_secs = 30   # graceful-stop budget before QUIT -> TERM -> KILL

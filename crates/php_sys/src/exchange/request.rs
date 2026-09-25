@@ -1,7 +1,7 @@
 use super::*;
 
 /// add_assoc_zval_ex moves the list ref in: the hash-update family never addrefs.
-unsafe fn add_list<'v>(
+pub(super) unsafe fn add_list<'v>(
     dst: *mut zval,
     key: *const c_char,
     key_len: usize,
@@ -31,25 +31,29 @@ unsafe fn emit_headers(dst: *mut zval, g: &Grouped) {
     }
 }
 
-/// One entry per name, with its values in field line order.
+/// The key pointer of a header name for add_assoc_zval_ex.
 /// The symtable prefilter in add_assoc_zval_ex reads the byte after a leading `-`. For the name "-" that byte is past the name, so a NUL-terminated copy replaces it.
+pub(super) fn header_key(name: &str) -> *const c_char {
+    if name == "-" {
+        c"-".as_ptr()
+    } else {
+        name.as_ptr().cast()
+    }
+}
+
+/// One entry per name, with its values in field line order.
 unsafe fn emit_header_map(dst: *mut zval, headers: &HeaderMap) {
     unsafe {
         rapira_array_init(dst, headers.keys_len() as u32);
         for name in headers.keys() {
             let key = name.as_str();
-            let ptr = if key == "-" {
-                c"-".as_ptr()
-            } else {
-                key.as_ptr().cast()
-            };
             let values = headers.get_all(name).iter().map(HeaderValue::as_bytes);
-            add_list(dst, ptr, key.len(), values);
+            add_list(dst, header_key(key), key.len(), values);
         }
     }
 }
 
-unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
+pub(super) unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
     unsafe {
         match addr {
             AddrOwned::Inet { ip, port } => {
@@ -70,7 +74,7 @@ unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
 
 unsafe fn build_tls(dst: *mut zval, t: &TlsView) {
     unsafe {
-        let ce = rapira_ce_http_tls;
+        let ce = rapira_ce_tls;
         let _ = object_init_ex(dst, ce);
         let o = (*dst).value.obj;
         zend::prop_stringl(ce, o, c"version", t.version.as_bytes());

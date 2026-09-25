@@ -7,6 +7,7 @@
 
 // rust glue
 extern void rapira_rs_exchange_drop(void *job);
+extern void rapira_rs_grpc_drop(void *state);
 extern void rapira_rs_dispatcher_release(void);
 
 // Class-entry externs and object layouts live in wrapper.h, the bindgen input.
@@ -36,6 +37,19 @@ rapira_dispatcher_info_from(zend_object *obj) {
     return (rapira_dispatcher_info_obj *)((char *)obj -
                                           offsetof(rapira_dispatcher_info_obj,
                                                    std));
+}
+
+static zend_always_inline rapira_grpc_call_obj *
+rapira_grpc_call_from(zend_object *obj) {
+    return (rapira_grpc_call_obj *)((char *)obj -
+                                    offsetof(rapira_grpc_call_obj, std));
+}
+
+static zend_always_inline rapira_grpc_metadata_obj *
+rapira_grpc_metadata_from(zend_object *obj) {
+    return (
+        rapira_grpc_metadata_obj *)((char *)obj -
+                                    offsetof(rapira_grpc_metadata_obj, std));
 }
 
 #endif // RAPIRA_CLASSES_H

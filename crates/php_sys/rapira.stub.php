@@ -5,8 +5,8 @@
 namespace {
     /**
      * Classic and worker modes. Flush the response to the client early; the script may
-     * keep working after it. In dispatcher mode the Exchange verbs finalize instead,
-     * so the call throws.
+     * keep working after it. In dispatcher mode the unit that receive() returned
+     * finalizes instead, so the call throws.
      */
     function rapira_finish_request(): bool {}
 }
@@ -21,7 +21,7 @@ namespace Rapira {
         case Trace;
     }
 
-    /** The mode the host launched this process in: the `[http.pool] mode` of rapira.toml. */
+    /** The mode the host launched this process in: the `mode` key of the plugin's pool table. */
     enum Mode
     {
         case Classic;
@@ -99,6 +99,34 @@ namespace Rapira {
         public ?string $path;
 
         public function __construct(?string $path) {}
+    }
+
+    /**
+     * What the handshake settled. The cert fields describe the client's certificate and
+     * are null unless one was presented.
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final readonly class Tls
+    {
+        public string $version;
+        public string $cipher;
+        public ?string $negotiatedProtocol;
+        public ?string $requestedServerName;
+        public ?string $certSerial;
+        public ?string $certOrganization;
+        public ?string $certFingerprint;
+
+        public function __construct(
+            string $version,
+            string $cipher,
+            ?string $negotiatedProtocol,
+            ?string $requestedServerName,
+            ?string $certSerial,
+            ?string $certOrganization,
+            ?string $certFingerprint,
+        ) {}
     }
 
     /** The mode of this process. The same case for the life of the process. */

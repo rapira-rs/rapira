@@ -12,20 +12,26 @@ anyhow = { workspace = true }
 extension_api = { workspace = true }
 http = { workspace = true }
 php_sys = { workspace = true }
-tokio = { workspace = true, features = ["rt", "time"] }
+tokio = { workspace = true, features = ["rt", "time", "net"] }
 tracing = { workspace = true }
 # Capture layer (init_log_capture).
 tracing-subscriber = "0.3"
+# App-record helpers (case_results, dispatcher_record).
+serde_json = "1"
+# The gRPC harness (src/grpc.rs): a fake PHP behind rapira_grpc, and hyper clients for gRPC, gRPC-Web and Connect.
+rapira_grpc = { workspace = true }
+bytes = { workspace = true }
+base64 = { workspace = true }
+http-body-util = { workspace = true }
+hyper = { workspace = true, features = ["client", "http1", "http2"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
-http-body-util = { workspace = true }
 rapira_http = { workspace = true }
 rapira_runtime = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # E2E harness (tests/e2e): process control for the spawned rapira binary.
 libc = { workspace = true }
-# E2E log-format assertions (tests/e2e/logging.rs).
-serde_json = "1"
 
 # The spawn-the-binary E2E suite forks worker processes and runs request storms;
 # gated behind a feature so `cargo test --workspace` skips it. Run it isolated

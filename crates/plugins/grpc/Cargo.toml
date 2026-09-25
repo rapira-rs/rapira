@@ -1,0 +1,25 @@
+[package]
+name = "rapira_grpc"
+version = "0.8.1"
+edition.workspace = true
+publish = false
+license = "MIT"
+description = "gRPC front for rapira - serves unary gRPC, gRPC-Web and Connect calls from PHP"
+
+[lints]
+workspace = true
+
+[dependencies]
+extension_api = { workspace = true }
+rapira_net = { workspace = true }
+anyhow = { workspace = true }
+tracing = { workspace = true }
+buffa = { workspace = true }
+buffa-descriptor = { workspace = true }
+connectrpc = { workspace = true }
+connectrpc-health = { workspace = true }
+connectrpc-reflection = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "sync"] }
+bytes = { workspace = true }
+base64 = { workspace = true }
+

@@ -1,10 +1,17 @@
 use extension_api::{Reply, ReplyEvent};
-use http::HeaderMap;
-use php_sys::{Frame, HandleError, Mode, Rapira, RapiraHandle, Request};
+use http::{HeaderMap, HeaderName, HeaderValue};
+use php_sys::{
+    Frame, GrpcMethod, GrpcOutcome, GrpcProtocol, GrpcRequest, GrpcService, HandleError, Mode,
+    Rapira, RapiraHandle, Request,
+};
+use serde_json::Value;
+use std::collections::HashMap;
 use std::env::set_var;
 use std::path::{Path, PathBuf};
 use std::sync::{self, Mutex, Once, OnceLock, PoisonError};
-use tokio::sync::mpsc;
+use tokio::sync::{mpsc, oneshot};
+
+pub mod grpc;
 
 static PHP_LOCK: Mutex<()> = Mutex::new(());
 static PHP_ENV: Once = Once::new();
@@ -15,6 +22,16 @@ pub fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures")
         .join(name)
+}
+
+pub type Fields = &'static [(&'static str, &'static str)];
+
+/// A header map from static (name, value) lines.
+pub fn fields(lines: Fields) -> HeaderMap {
+    lines
+        .iter()
+        .map(|&(k, v)| (HeaderName::from_static(k), HeaderValue::from_static(v)))
+        .collect()
 }
 
 pub fn php_lock() -> sync::MutexGuard<'static, ()> {
@@ -55,8 +72,7 @@ pub fn run_worker(
     Ok(out)
 }
 
-/// Submits `req` through the async intake of `h` and blocks until the job is queued.
-pub fn submit(h: &RapiraHandle, req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
+fn runtime() -> &'static tokio::runtime::Runtime {
     static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
     RT.get_or_init(|| {
         tokio::runtime::Builder::new_current_thread()
@@ -64,7 +80,41 @@ pub fn submit(h: &RapiraHandle, req: Request) -> Result<mpsc::Receiver<Frame>, H
             .build()
             .expect("tokio runtime")
     })
-    .block_on(h.handle(req))
+}
+
+/// Submits `req` through the async intake of `h` and blocks until the job is queued.
+pub fn submit(h: &RapiraHandle, req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
+    runtime().block_on(h.handle(req))
+}
+
+/// A unary call to `rapira.test.v1.EchoService/Echo` from a gRPC client on 127.0.0.1, with `message` as the request bytes.
+pub fn grpc_request(message: &str) -> GrpcRequest {
+    GrpcRequest {
+        method: "rapira.test.v1.EchoService/Echo".into(),
+        protocol: GrpcProtocol::Grpc,
+        metadata: HeaderMap::new(),
+        deadline: None,
+        remote: php_sys::types::Addr::Inet(([127, 0, 0, 1], 50051).into()),
+        message: message.as_bytes().to_vec().into(),
+    }
+}
+
+/// Submits `req` through the async intake of `h` and blocks until the call is queued.
+pub fn call(
+    h: &RapiraHandle,
+    req: GrpcRequest,
+) -> Result<oneshot::Receiver<GrpcOutcome>, HandleError> {
+    runtime().block_on(h.call(req))
+}
+
+/// Waits at most 10 s for the outcome of a call. None means that the call was lost: PHP dropped it unfinalized.
+pub fn outcome(rx: oneshot::Receiver<GrpcOutcome>) -> Option<GrpcOutcome> {
+    runtime().block_on(async {
+        tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+            .await
+            .expect("no outcome within 10 s")
+            .ok()
+    })
 }
 
 /// Panics when RAPIRA_REQUIRE_EXTS names an extension this fixture covers: a skip where CI installs the extension is a broken install.
@@ -101,6 +151,30 @@ pub fn req(uri: &str, fixture_name: &str) -> Request {
         received_at: None,
         tls: None,
     }
+}
+
+/// The FileDescriptorSet of `fixtures/grpc/echo.proto`.
+pub fn echo_descriptor_set() -> PathBuf {
+    fixture("grpc/echo.binpb")
+}
+
+/// The services of `fixtures/grpc/echo.proto`, in descriptor order.
+pub fn echo_services() -> Vec<GrpcService> {
+    let method = |name: &str, server_streaming: bool| GrpcMethod {
+        name: name.into(),
+        input_type: "rapira.test.v1.EchoRequest".into(),
+        output_type: "rapira.test.v1.EchoResponse".into(),
+        client_streaming: false,
+        server_streaming,
+    };
+    vec![GrpcService {
+        name: "rapira.test.v1.EchoService".into(),
+        methods: vec![
+            method("Echo", false),
+            method("Get", false),
+            method("Watch", true),
+        ],
+    }]
 }
 
 /// A response stream collected to its `End` (or to the producer dying).
@@ -439,6 +513,85 @@ pub fn wait_app_record(message: &str) -> String {
     }
 }
 
+/// Boots `mode`, runs the worker to its end and returns the context of its one `dispatcher` app record. The caller holds the PHP lock.
+pub fn dispatcher_record(mode: Mode) -> anyhow::Result<Value> {
+    init_log_capture();
+    captured().clear();
+
+    let r = Rapira::start(mode)?;
+    drop(r);
+
+    let all = captured();
+    let records: Vec<&str> = all
+        .iter()
+        .filter(|c| c.target == "app" && c.message == "dispatcher")
+        .map(|c| c.context.as_str())
+        .collect();
+    let php: Vec<&str> = all
+        .iter()
+        .filter(|c| c.target == "php")
+        .map(|c| c.message.as_str())
+        .collect();
+    assert_eq!(
+        records.len(),
+        1,
+        "one dispatcher record (got {records:?}, php: {php:?})"
+    );
+    Ok(serde_json::from_str(records[0])?)
+}
+
+/// The `result` field of a record's context as text; a JSON string stays bare.
+fn result_text(ctx: &Value) -> String {
+    match &ctx["result"] {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
+
+/// The `result` field of each app record named `message`, in log order.
+pub fn app_results(message: &str) -> Vec<String> {
+    captured()
+        .iter()
+        .filter(|c| c.target == "app" && c.message == message)
+        .filter_map(|c| serde_json::from_str::<Value>(&c.context).ok())
+        .map(|ctx| result_text(&ctx))
+        .collect()
+}
+
+/// A fixture that probes one case at a time logs `case {name, result}`; this is name to result.
+pub fn case_results() -> HashMap<String, String> {
+    captured()
+        .iter()
+        .filter(|c| c.target == "app" && c.message == "case")
+        .filter_map(|c| serde_json::from_str::<Value>(&c.context).ok())
+        .map(|ctx| {
+            let name = ctx["name"].as_str().unwrap_or_default().to_owned();
+            (name, result_text(&ctx))
+        })
+        .collect()
+}
+
+/// One `case` record per (name, expected result) row, and no stray one; every mismatch is listed at once.
+pub fn assert_case_records(cases: &[(&str, &str)]) {
+    let results = case_results();
+    assert_eq!(
+        results.len(),
+        cases.len(),
+        "one record per case (got {results:?})"
+    );
+    let mismatches: Vec<String> = cases
+        .iter()
+        .filter(|(name, expected)| results.get(*name).map(String::as_str) != Some(*expected))
+        .map(|(name, expected)| {
+            format!(
+                "{name}: expected {expected:?}, got {:?}",
+                results.get(*name)
+            )
+        })
+        .collect();
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
 /// Installs the capturing subscriber once, unfiltered, so even trace-level records reach `LOG_CAPTURE`.
 pub fn init_log_capture() {
     static ONCE: Once = Once::new();
@@ -469,17 +622,10 @@ mod tests {
         Reply::new(Box::new(VecSource(events.into())))
     }
 
-    fn fields() -> HeaderMap {
-        HeaderMap::from_iter([(
-            http::HeaderName::from_static("x-a"),
-            http::HeaderValue::from_static("1"),
-        )])
-    }
-
     fn head() -> ReplyEvent {
         ReplyEvent::Head {
             status: 200,
-            headers: fields(),
+            headers: fields(&[("x-a", "1")]),
             content_length: None,
             bodiless: false,
         }
@@ -527,7 +673,7 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(r.status, 200);
-        assert_eq!(r.headers, fields());
+        assert_eq!(r.headers, fields(&[("x-a", "1")]));
         assert_eq!(r.body, b"one,two");
     }
 }

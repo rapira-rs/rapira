@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
+base64 = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["time"] }
 rapira_scoreboard = { workspace = true }

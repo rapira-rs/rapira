@@ -42,10 +42,18 @@ pub struct PoolArgs {
     pub mode: Mode,
     pub entrypoint: PathBuf,
     pub max_requests: u64,
-    pub uploads: rapira_runtime::multipart::Limits,
+    pub grace: Duration,
+    /// None for a gRPC pool.
+    pub http: Option<HttpArgs>,
+}
+
+/// The worker settings of an http pool.
+#[derive(Clone)]
+pub struct HttpArgs {
+    /// Multipart limits, with a per-worker spool dir under `dir`; None outside dispatcher mode, which parses no uploads.
+    pub uploads: Option<rapira_runtime::multipart::Limits>,
     /// sendFile() containment root, canonicalized per worker.
     pub sendfile_root: PathBuf,
-    pub grace: Duration,
 }
 
 /// Returns the process exit code for the master's fork bracket; never runs PHP module teardown, MSHUTDOWN stays with the master.
@@ -54,9 +62,8 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         mode,
         entrypoint,
         max_requests,
-        mut uploads,
-        sendfile_root,
         grace,
+        http,
     } = args;
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { php_sys::rapira_child_init() };
@@ -72,7 +79,10 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         );
         return WORKER_EXIT_UNHEALTHY;
     }
-    php_sys::set_sendfile_root(sendfile_root);
+    let mut uploads: Option<rapira_runtime::multipart::Limits> = http.and_then(|http| {
+        php_sys::set_sendfile_root(http.sendfile_root);
+        http.uploads
+    });
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
     let hooks: WorkerHooks = WorkerHooks {
         max_requests: effective_quota(max_requests),
@@ -87,7 +97,6 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         slot: Some(env.slot_view),
     };
 
-    let dispatcher = matches!(mode, Mode::Dispatcher(_));
     let rapira = match Rapira::start_worker(mode, hooks) {
         Ok(r) => r,
         Err(e) => {
@@ -99,7 +108,8 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
-    let spool_dir: Option<PathBuf> = if dispatcher {
+    let mut spool_dir: Option<PathBuf> = None;
+    if let Some(uploads) = uploads.as_mut() {
         uploads.dir = uploads
             .dir
             .join(format!("rapira-spool-{}", std::process::id()));
@@ -114,15 +124,13 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
             );
             return WORKER_EXIT_UNHEALTHY;
         }
-        Some(uploads.dir.clone())
-    } else {
-        None
-    };
+        spool_dir = Some(uploads.dir.clone());
+    }
     let running: rapira_runtime::Running = host.run_with_options(
         handle,
         entrypoint,
         rapira_runtime::RuntimeOptions {
-            uploads: Arc::new(uploads),
+            uploads: Arc::new(uploads.unwrap_or_default()),
             grace,
         },
     );

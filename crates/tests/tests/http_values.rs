@@ -13,6 +13,7 @@ fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
 
     assert_eq!(status, 200, "construction must succeed (body: {body:?})");
     for line in [
+        "tls-class: Rapira\\Tls",
         "POST /upload?x=1 HTTP/2",
         "203.0.113.7:44123",
         "server-path=NULL",

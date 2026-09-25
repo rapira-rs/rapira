@@ -2,8 +2,8 @@ use std::io;
 use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::sync::Arc;
 
-pub(super) type TcpListener = Listener<std::net::TcpListener>;
-pub(super) type UnixListener = Listener<std::os::unix::net::UnixListener>;
+pub(crate) type TcpListener = Listener<std::net::TcpListener>;
+pub(crate) type UnixListener = Listener<std::os::unix::net::UnixListener>;
 
 // epoll_event.u64 tags, one per registered descriptor.
 const LISTENER_TAG: u64 = 0;
@@ -12,16 +12,16 @@ const WAKE_TAG: u64 = 1;
 /// Stops the accept loop of one worker. The loop waits on the same eventfd that every
 /// holder of this handle writes.
 #[derive(Clone)]
-pub(super) struct Wake(Arc<OwnedFd>);
+pub struct Wake(Arc<OwnedFd>);
 
-pub(super) struct Listener<L> {
+pub(crate) struct Listener<L> {
     epoll: OwnedFd,
     listener: L,
     wake: Wake,
 }
 
 impl Wake {
-    pub(super) fn new() -> io::Result<Self> {
+    pub fn new() -> io::Result<Self> {
         // SAFETY: eventfd takes no pointers and returns a new descriptor.
         let fd = unsafe { libc::eventfd(0, libc::EFD_CLOEXEC | libc::EFD_NONBLOCK) };
         if fd < 0 {
@@ -31,12 +31,12 @@ impl Wake {
         Ok(Self(Arc::new(unsafe { OwnedFd::from_raw_fd(fd) })))
     }
 
-    pub(super) fn handle(&self) -> Self {
+    pub fn handle(&self) -> Self {
         self.clone()
     }
 
     /// Makes the current or next [`Listener::accept_blocking`] return `None`.
-    pub(super) fn stop(&self) {
+    pub fn stop(&self) {
         let value: u64 = 1;
         // SAFETY: an eventfd write reads exactly the eight bytes of value.
         let written = unsafe { libc::write(self.0.as_raw_fd(), (&raw const value).cast(), 8) };
@@ -47,7 +47,7 @@ impl Wake {
 }
 
 impl<L: AsRawFd> Listener<L> {
-    pub(super) fn from_std(listener: L, wake: Wake) -> io::Result<Self> {
+    pub(crate) fn from_std(listener: L, wake: Wake) -> io::Result<Self> {
         // SAFETY: epoll_create1 returns a new descriptor and takes no pointers.
         let fd = unsafe { libc::epoll_create1(libc::EPOLL_CLOEXEC) };
         if fd < 0 {
@@ -148,7 +148,7 @@ impl<L: AsRawFd> Listener<L> {
 }
 
 impl TcpListener {
-    pub(super) fn accept_blocking(
+    pub(crate) fn accept_blocking(
         &self,
     ) -> io::Result<Option<(std::net::TcpStream, std::net::SocketAddr)>> {
         self.accept_blocking_with(|listener| {
@@ -160,7 +160,7 @@ impl TcpListener {
 }
 
 impl UnixListener {
-    pub(super) fn accept_blocking(
+    pub(crate) fn accept_blocking(
         &self,
     ) -> io::Result<
         Option<(

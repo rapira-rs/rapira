@@ -7,7 +7,7 @@ use crate::{
     zend_value_error, zval,
 };
 
-fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
+pub(crate) fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
     if bytes.is_empty() {
         c"".as_ptr()
     } else {

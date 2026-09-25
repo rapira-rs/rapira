@@ -154,6 +154,17 @@ fn map_tls(t: extension_api::Tls) -> php_sys::types::TlsView {
     }
 }
 
+/// A refusal before dispatch: PHP never saw the work.
+fn refused(e: php_sys::HandleError) -> anyhow::Error {
+    anyhow::Error::new(extension_api::Rejected {
+        status: match e {
+            php_sys::HandleError::Saturated => 503,
+            php_sys::HandleError::Stopped => 500,
+        },
+        reason: e.to_string(),
+    })
+}
+
 fn parse_err(e: multipart::ParseError) -> anyhow::Error {
     match e {
         multipart::ParseError::Rejected(r) => anyhow::Error::new(r),
@@ -239,16 +250,45 @@ impl extension_api::Backend for RapiraBackend {
     {
         Box::pin(async move {
             let req = self.to_request(req).await?;
-            let rx = self.rapira.handle(req).await.map_err(|e| {
-                anyhow::Error::new(extension_api::Rejected {
-                    status: match e {
-                        php_sys::HandleError::Saturated => 503,
-                        php_sys::HandleError::Stopped => 500,
-                    },
-                    reason: e.to_string(),
-                })
-            })?;
+            let rx = self.rapira.handle(req).await.map_err(refused)?;
             Ok(extension_api::Reply::new(Box::new(FrameSource(rx))))
+        })
+    }
+
+    fn unary(
+        &self,
+        call: extension_api::UnaryCall,
+    ) -> Pin<
+        Box<
+            dyn Future<Output = extension_api::Result<Option<extension_api::UnaryReply>>>
+                + Send
+                + '_,
+        >,
+    > {
+        Box::pin(async move {
+            let req = php_sys::GrpcRequest {
+                method: call.method,
+                protocol: match call.protocol {
+                    extension_api::RpcProtocol::Grpc => php_sys::GrpcProtocol::Grpc,
+                    extension_api::RpcProtocol::GrpcWeb => php_sys::GrpcProtocol::GrpcWeb,
+                    extension_api::RpcProtocol::Connect => php_sys::GrpcProtocol::Connect,
+                },
+                metadata: call.metadata,
+                deadline: call.deadline,
+                remote: map_addr(call.remote),
+                message: call.message,
+            };
+            let rx = self.rapira.call(req).await.map_err(refused)?;
+            // A closed channel means that PHP lost the call.
+            Ok(rx.await.ok().map(|o| extension_api::UnaryReply {
+                headers: o.headers,
+                trailers: o.trailers,
+                outcome: o.result.map_err(|s| extension_api::RpcStatus {
+                    code: s.code,
+                    message: s.message,
+                    details: s.details,
+                }),
+            }))
         })
     }
 }
