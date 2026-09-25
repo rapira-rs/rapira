@@ -106,6 +106,12 @@ fn load_rejects_a_set_it_cannot_serve() {
             service: ECHO_SERVICE,
             error: "--include_imports",
         },
+        Case {
+            name: "set without an import that supplies only an option",
+            path: tests::fixture("grpc_options/ping-no-imports.binpb"),
+            service: "rapira.test.options.v1.PingService",
+            error: "--include_imports",
+        },
     ];
     for case in cases {
         let Err(err) = load(&case.path, Some(&[case.service])) else {

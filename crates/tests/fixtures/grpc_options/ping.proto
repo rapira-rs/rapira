@@ -1,0 +1,15 @@
+// `make grpc_fixtures`, from crates/tests: go run github.com/bufbuild/buf/cmd/buf@v1.73.0 build fixtures/grpc_options --as-file-descriptor-set --path fixtures/grpc_options/ping.proto --exclude-imports -o fixtures/grpc_options/ping-no-imports.binpb
+// The set holds this file only: it imports route.proto for an option and uses no type of it.
+syntax = "proto3";
+
+package rapira.test.options.v1;
+
+import "route.proto";
+
+message PingRequest {}
+
+service PingService {
+  rpc Ping(PingRequest) returns (PingRequest) {
+    option (route) = "/v1/ping";
+  }
+}

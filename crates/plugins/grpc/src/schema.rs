@@ -59,6 +59,20 @@ impl Schema {
                 path.display()
             )
         })?;
+        // The pool resolves types only, so a missing import that supplies only options still decodes. A reflection client needs every import. An edition 2024 `import option` goes to `option_dependency` and may be absent.
+        for file in pool.files() {
+            if let Some(import) = file
+                .dependency
+                .iter()
+                .find(|name| pool.file_by_name(name).is_none())
+            {
+                return Err(anyhow!(
+                    "grpc.descriptor_set {}: {} imports {import}, which the set does not contain; build it with `buf build --as-file-descriptor-set` or `protoc --include_imports`",
+                    path.display(),
+                    file.name.as_deref().unwrap_or_default()
+                ));
+            }
+        }
 
         let selected: Vec<&ServiceDescriptor> = match services {
             Some(names) => {
