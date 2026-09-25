@@ -178,7 +178,7 @@ impl Schema {
     }
 
     pub(crate) fn proto_to_json(&self, m: &Method, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-        // The application produces the reply, so the element memory limit for untrusted input does not apply.
+        // The application produces the reply, so the element memory limit for untrusted input does not apply. `to_json` decodes an `Any` payload again under the default limit.
         let opts = buffa::DecodeOptions::new().with_element_memory_limit(usize::MAX);
         let msg =
             DynamicMessage::decode_with_options(Arc::clone(&self.pool), m.output, bytes, &opts)?;

@@ -101,6 +101,7 @@ The listener sends an HTTP/2 keepalive PING to an idle connection every `keepali
 - The message size limit is 4 MiB, and no key changes it. A larger request answers RESOURCE_EXHAUSTED.
 - The listener does not terminate TLS. `Context::$tls` is always null. Put a TLS proxy in front of the listener when clients need TLS.
 - The JSON decoder has no element memory limit. A 4 MiB JSON request with many small elements can use several hundred MiB of memory for repeated or map fields, and more than 1 GiB of memory and more than 1 s of CPU for `Struct` or `ListValue` fields, in the worker process. The 4 MiB limit applies after decompression, so a proxy in front of a listener that faces untrusted clients must limit the decompressed request size.
+- A JSON reply decodes the payload of each `google.protobuf.Any` again, under the default element memory limit of buffa (32 MiB). This limit holds about 524,000 repeated elements or 381,000 map entries in one payload. A larger payload answers INTERNAL to a JSON client, and the log names the limit. A proto client is not affected.
 
 ## Configuration
 
