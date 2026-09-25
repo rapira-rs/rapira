@@ -6,7 +6,7 @@ use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::{error, info, trace};
-use types::Job;
+use types::Unit;
 
 use crate::quota::{self, WorkerHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
@@ -18,12 +18,12 @@ thread_local! {
 }
 
 pub(crate) struct Intake {
-    pub(crate) tx: SyncSender<Box<Job>>,
+    pub(crate) tx: SyncSender<Unit>,
     pub(crate) pending: Arc<AtomicUsize>,
 }
 
 struct JobRx {
-    rx: Receiver<Box<Job>>,
+    rx: Receiver<Unit>,
     pending: Arc<AtomicUsize>,
 }
 
@@ -106,19 +106,19 @@ impl Rapira {
         };
         slot.bind(std::process::id());
         let pending = Arc::new(AtomicUsize::new(0));
-        let (intake_tx, intake_rx) = sync_channel::<Box<Job>>(1024);
+        let (intake_tx, intake_rx) = sync_channel::<Unit>(1024);
         let intake = Intake {
             tx: intake_tx,
             pending: pending.clone(),
         };
 
-        let dispatcher = matches!(mode, Mode::Dispatcher(_));
+        let dispatcher = matches!(mode, Mode::Dispatcher(_) | Mode::GrpcDispatcher { .. });
         // SAFETY: safe, trust me, I'm a developer
         unsafe {
             crate::rapira_mode = match &mode {
                 Mode::Classic => RAPIRA_MODE_CLASSIC,
                 Mode::Worker(_) => RAPIRA_MODE_WORKER,
-                Mode::Dispatcher(_) => RAPIRA_MODE_DISPATCHER,
+                Mode::Dispatcher(_) | Mode::GrpcDispatcher { .. } => RAPIRA_MODE_DISPATCHER,
             } as c_int;
         };
 
@@ -188,6 +188,9 @@ impl Drop for Rapira {
 /// NTS inits module and request on different threads, so the call stack is re-initialized on this thread: https://github.com/php/php-src/pull/9104
 fn worker_main(mode: Mode, rx: JobRx) {
     JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
+    if let Mode::GrpcDispatcher { services, .. } = &mode {
+        crate::exchange::serve_grpc(services.clone());
+    }
     loop {
         unsafe {
             rapira_init_call_stack();
@@ -197,7 +200,9 @@ fn worker_main(mode: Mode, rx: JobRx) {
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker(script) | Mode::Dispatcher(script) => rapira_worker(script.clone()),
+            Mode::Worker(script)
+            | Mode::Dispatcher(script)
+            | Mode::GrpcDispatcher { script, .. } => rapira_worker(script.clone()),
         };
         if matches!(exit, WorkerExit::Closed) {
             break;
@@ -205,7 +210,7 @@ fn worker_main(mode: Mode, rx: JobRx) {
     }
 }
 
-pub(crate) fn pull_job() -> Option<Box<Job>> {
+pub(crate) fn pull_job() -> Option<Unit> {
     match pull_job_wait(None) {
         Pulled::Job(job) => Some(job),
         _ => None,
@@ -213,7 +218,7 @@ pub(crate) fn pull_job() -> Option<Box<Job>> {
 }
 
 pub(crate) enum Pulled {
-    Job(Box<Job>),
+    Job(Unit),
     Timeout,
     Empty,
     Closed,

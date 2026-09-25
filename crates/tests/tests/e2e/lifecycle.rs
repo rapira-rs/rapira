@@ -96,9 +96,6 @@ fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
     }
 }
 
-// Must outlast supervisor.process_control_timeout (30s): after it the master escalates a stuck worker QUIT/TERM/KILL and still exits 0.
-const STOP_BUDGET: Duration = Duration::from_secs(45);
-
 #[test]
 fn sigquit_master_graceful() {
     let mut srv = spawn_with_config("shared/echo-worker.php", 2, "");
@@ -363,7 +360,7 @@ fn abandoned_exchange_is_discarded_by_next_receive() {
         diagnostics(&srv)
     );
     assert!(
-        wait_log_contains(&srv, "discarded an unfinalized exchange", BOOT),
+        wait_log_contains(&srv, "discarded an unfinalized unit", BOOT),
         "the discard must be logged\n{}",
         diagnostics(&srv)
     );

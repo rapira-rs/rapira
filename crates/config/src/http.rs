@@ -50,7 +50,7 @@ pub enum UnsafeFieldNames {
     Reject,
 }
 
-#[derive(Debug, Default, Deserialize)]
+#[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct HttpSection {
     pub(crate) listen: Option<String>,

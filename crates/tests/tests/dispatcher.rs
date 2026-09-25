@@ -1,5 +1,6 @@
 use php_sys::{Mode, Rapira};
-use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
+use serde_json::json;
+use tests::{dispatcher_record, drain, fixture, php_lock, req};
 
 /// Outside dispatcher mode the call throws `NoDispatcherError`, catchable by its own name and by its stock parent.
 #[test]
@@ -33,29 +34,16 @@ fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
 #[test]
 fn worker_singleton() -> anyhow::Result<()> {
     let _guard = php_lock();
-    init_log_capture();
-    captured().clear();
-
-    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/worker-singleton.php")))?;
-    drop(r);
-
-    let records: Vec<(String, String)> = captured()
-        .iter()
-        .filter(|c| c.target == "app")
-        .map(|c| (c.message.clone(), c.context.clone()))
-        .collect();
-    assert_eq!(records.len(), 1, "one dispatcher record (got {records:?})");
-    let (msg, ctx) = &records[0];
-    assert_eq!(msg, "dispatcher");
-    for fragment in [
-        r#""class":"Rapira\\Internal\\Http\\Dispatcher""#,
-        r#""name":"http""#,
-        r#""same":true"#,
-        r#""http":true"#,
-        r#""base":true"#,
-        r#""clone":"blocked""#,
+    let ctx = dispatcher_record(Mode::Dispatcher(fixture("dispatcher/worker-singleton.php")))?;
+    for (key, want) in [
+        ("class", json!("Rapira\\Internal\\Http\\Dispatcher")),
+        ("name", json!("http")),
+        ("same", json!(true)),
+        ("http", json!(true)),
+        ("base", json!(true)),
+        ("clone", json!("blocked")),
     ] {
-        assert!(ctx.contains(fragment), "missing {fragment} in {ctx:?}");
+        assert_eq!(ctx[key], want, "{key} in {ctx}");
     }
     Ok(())
 }

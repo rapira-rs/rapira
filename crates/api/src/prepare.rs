@@ -15,6 +15,15 @@ pub enum ListenAddr {
     Unix(PathBuf),
 }
 
+impl std::fmt::Display for ListenAddr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Tcp(a) => write!(f, "{a}"),
+            Self::Unix(p) => write!(f, "unix:{}", p.display()),
+        }
+    }
+}
+
 /// Exactly one closer per process: the master holds its copy for its whole life so respawned workers keep inheriting it, a worker hands its copy to the adopter.
 #[derive(Debug)]
 pub struct PreparedListener {
@@ -51,6 +60,13 @@ impl PrepareCtx {
     }
 
     /// Sets O_NONBLOCK: tokio's `from_std` requires it, and the Linux acceptor needs `accept` to return WouldBlock when another worker takes the connection.
+    pub fn bind(&mut self, addr: &ListenAddr) -> anyhow::Result<PreparedListener> {
+        match addr {
+            ListenAddr::Tcp(addr) => self.bind_tcp(*addr),
+            ListenAddr::Unix(path) => self.bind_unix(path),
+        }
+    }
+
     pub fn bind_tcp(&mut self, addr: SocketAddr) -> anyhow::Result<PreparedListener> {
         let socket = Socket::new(Domain::for_address(addr), Type::STREAM, Some(Protocol::TCP))
             .with_context(|| format!("socket for {addr}"))?;

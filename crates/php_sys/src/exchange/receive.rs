@@ -10,23 +10,22 @@ enum RecvMode {
 /// `return_value` writable; engine active on this thread.
 unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
+        let front = front();
         if let Some(ptr) = CYCLE.get().unit
-            && (*ptr).stage != Stage::Finalized
+            && !(*ptr).finalized()
             && (*ptr).host_closed()
         {
-            tracing::debug!(target: "rapira", "receive() discarded an unfinalized exchange whose client left");
-            super::respond::discard_unit(&mut *ptr);
+            tracing::debug!(target: "rapira", "receive() discarded an unfinalized unit whose client left");
+            (*ptr).discard();
         }
         if let Some(ptr) = CYCLE.get().unit
-            && (*ptr).stage != Stage::Finalized
+            && !(*ptr).finalized()
         {
-            zend::throw_error(
-                c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first",
-            );
+            zend::throw_error(front.busy());
             return false;
         }
         let mut obj: zval = std::mem::zeroed();
-        let _ = object_init_ex(&mut obj, rapira_ce_internal_http_exchange);
+        let _ = object_init_ex(&mut obj, front.unit_ce());
         // SAFETY: plain zend timer bookkeeping on this thread; no bailout path.
         rapira_receive_untimed();
         loop {
@@ -36,21 +35,31 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                 RecvMode::Wait(t) => pull_job_wait(Some(Duration::from_micros(t as u64))),
             };
             match pulled {
-                Pulled::Job(job) => {
-                    let st = ExchangeState::new(job);
-                    if st.job.ctx.sender.as_ref().is_some_and(Sender::is_closed) {
+                Pulled::Job(unit) => {
+                    if unit.is_closed() {
                         sb_update(Event::Handled(true));
                         continue;
                     }
-                    let ptr = Box::into_raw(Box::new(st));
+                    assert_eq!(unit.front(), front, "the unit kind does not match the pool");
+                    // SAFETY: plain zend timer bookkeeping; no bailout path.
+                    rapira_receive_timed();
+                    let ptr: *mut dyn Held = match unit {
+                        Unit::Http(job) => {
+                            let ptr = Box::into_raw(Box::new(ExchangeState::new(job)));
+                            (*exchange_from(obj.value.obj)).job = ptr.cast();
+                            (*ptr).armed_at = Instant::now();
+                            ptr
+                        }
+                        Unit::Grpc(job) => {
+                            let ptr = Box::into_raw(Box::new(GrpcState::new(job)));
+                            (*grpc::grpc_call_from(obj.value.obj)).state = ptr.cast();
+                            ptr
+                        }
+                    };
                     update(|c| {
                         c.unit = Some(ptr);
                         c.received = true;
                     });
-                    (*exchange_from(obj.value.obj)).job = ptr.cast();
-                    // SAFETY: plain zend timer bookkeeping; no bailout path.
-                    rapira_receive_timed();
-                    (*ptr).armed_at = Instant::now();
                     *return_value = obj;
                     return true;
                 }
@@ -108,15 +117,10 @@ pub unsafe extern "C" fn rapira_rs_try_receive(return_value: *mut zval) -> bool 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> bool {
     guard(false, || unsafe {
-        let _ = object_init_ex(return_value, rapira_ce_internal_http_dispatcher_info);
+        let _ = object_init_ex(return_value, front().info_ce());
         let info = info_from((*return_value).value.obj);
         (*info).pending = pending_depth() as i64;
-        (*info).active = i64::from(
-            CYCLE
-                .get()
-                .unit
-                .is_some_and(|p| (*p).stage != Stage::Finalized),
-        );
+        (*info).active = i64::from(CYCLE.get().unit.is_some_and(|p| !(*p).finalized()));
         true
     })
 }
@@ -141,7 +145,7 @@ pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bo
             Some(zv) => zv,
             None => {
                 let mut zv: zval = std::mem::zeroed();
-                let _ = object_init_ex(&mut zv, rapira_ce_internal_http_dispatcher);
+                let _ = object_init_ex(&mut zv, front().dispatcher_ce());
                 d.set(Some(zv));
                 zv
             }

@@ -35,9 +35,9 @@ make test   # runs test_nts, then test_e2e - sequentially on purpose
 - `make test_nts` - the in-process unit and integration suites (`cargo test --workspace`; the e2e suite is feature-gated off here).
 - `make test_e2e` - the spawn-the-binary end-to-end suite (`crates/tests`, `--features e2e`): forks workers, binds ports, drives real HTTP, asserts signal/reload/scaling behavior. Single-threaded on purpose; never run it concurrently with `test_nts`.
 - `make coverage` - needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
-- `make stubs` - maintainers only: regenerates the three `crates/php_sys/*_arginfo.h` headers from the three `crates/php_sys/*.stub.php` stubs with PHP's `gen_stub.php`. Never edit the generated headers by hand.
+- `make stubs` - maintainers only: regenerates each `crates/php_sys/*_arginfo.h` header from its `crates/php_sys/*.stub.php` stub with PHP's `gen_stub.php`. Never edit the generated headers by hand.
 
-Test placement: unit tests live inside their crate; integration tests in `crates/tests`; end-to-end tests under `crates/tests/tests/e2e/` behind the `e2e` feature.
+Test placement: unit tests live inside their crate; integration tests, their harness (`crates/tests/src/`) and their fixtures (`crates/tests/fixtures/`) in `crates/tests`; end-to-end tests under `crates/tests/tests/e2e/` behind the `e2e` feature.
 
 ## Lint and format
 
@@ -60,7 +60,9 @@ C sources (`crates/php_sys/*.c`, `*.h`) follow `.clang-format`.
 | `crates/config`        | `rapira.toml` configuration                                                         |
 | `crates/api`           | the native extension contract                                                       |
 | `crates/scoreboard`    | shared per-worker counters                                                          |
+| `crates/net`           | the accept loop that the HTTP and gRPC fronts share                                 |
 | `crates/plugins/http`  | the HTTP front                                                                      |
+| `crates/plugins/grpc`  | the gRPC front: gRPC, gRPC-Web and Connect                                          |
 | `crates/middleware`    | built-in HTTP middleware, one crate per middleware                                  |
 | `crates/tests`         | integration and e2e suites                                                          |
 

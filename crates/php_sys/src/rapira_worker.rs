@@ -124,9 +124,8 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                 }
                 match pull_job() {
                     None => break WorkerExit::Closed,
-                    Some(mut job) => {
-                        send_error_head(&mut job.ctx, 503);
-                        job.ctx.finish(false);
+                    Some(unit) => {
+                        unit.shed();
                         sb_update(scoreboard::Event::Shed);
                     }
                 }
@@ -218,13 +217,15 @@ fn next_job() -> Option<Box<Job>> {
         log_and_clear_last_error();
         loop {
             match pull_job() {
-                Some(job) => {
-                    if job.ctx.sender.as_ref().is_some_and(|s| s.is_closed()) {
+                Some(unit) => {
+                    if unit.is_closed() {
                         sb_update(scoreboard::Event::Handled(true));
                         continue;
                     }
                     crate::exchange::note_received();
-                    return Some(job);
+                    return unit
+                        .into_http()
+                        .or_else(|| unreachable!("gRPC units go to dispatcher-mode workers only"));
                 }
                 None => {
                     crate::exchange::note_closed();

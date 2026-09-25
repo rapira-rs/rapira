@@ -56,7 +56,7 @@ PHP_FUNCTION(rapira_finish_request) {
         // ungated it would tear down userland ob buffers into the log
         zend_throw_error(
             NULL, "rapira_finish_request() is not available in dispatcher "
-                  "mode; finalize through the Exchange");
+                  "mode; finalize the unit that receive() returned");
         RETURN_THROWS();
     }
     if (rapira_finish_output() != OK) {

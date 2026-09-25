@@ -1,13 +1,10 @@
 use std::sync::Arc;
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::anyhow;
 use extension_api::{Extension, ListenAddr, Middleware, Php, PrepareCtx, PreparedListener, Result};
-use tokio::runtime::Builder;
+use rapira_net::ServerThread;
 
-#[cfg(target_os = "linux")]
-mod accept_linux;
 mod bridge;
 mod check;
 mod handler;
@@ -55,8 +52,7 @@ impl Default for Config {
 pub struct Server {
     config: Config,
     prepared: Option<PreparedListener>,
-    stop: Option<serve::Stop>,
-    join: Option<tokio::task::JoinHandle<Result<()>>>,
+    thread: ServerThread,
 }
 
 impl Extension for Server {
@@ -66,8 +62,7 @@ impl Extension for Server {
         Self {
             config,
             prepared: None,
-            stop: None,
-            join: None,
+            thread: ServerThread::default(),
         }
     }
 
@@ -76,16 +71,8 @@ impl Extension for Server {
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
-        let prepared = match &self.config.listen {
-            ListenAddr::Tcp(addr) => ctx.bind_tcp(*addr)?,
-            ListenAddr::Unix(path) => ctx.bind_unix(path)?,
-        };
-        match prepared.addr() {
-            ListenAddr::Tcp(a) => tracing::info!(target: "http", "prepared listener on {a}"),
-            ListenAddr::Unix(p) => {
-                tracing::info!(target: "http", "prepared listener on {}", p.display());
-            }
-        }
+        let prepared = ctx.bind(&self.config.listen)?;
+        tracing::info!(target: "http", "prepared listener on {}", prepared.addr());
         self.prepared = Some(prepared);
         Ok(())
     }
@@ -95,58 +82,16 @@ impl Extension for Server {
         let Some(prepared) = self.prepared.take() else {
             return Err(anyhow!("http listener was not prepared"));
         };
-        let stop = serve::Stop::new().map_err(|e| anyhow!("creating the http stop handle: {e}"))?;
-        let handle = stop.handle();
-
-        let thread = std::thread::Builder::new()
-            .name("rapira-http".into())
-            .spawn(move || {
-                let rt = Builder::new_multi_thread()
-                    .enable_all()
-                    .worker_threads(2)
-                    .thread_name("rapira-http-io")
-                    .build()
-                    .map_err(|e| anyhow!("building the http runtime: {e}"))?;
-                #[cfg(target_os = "linux")]
-                {
-                    serve::serve(php, config, prepared, handle, &rt)
-                }
-                #[cfg(not(target_os = "linux"))]
-                {
-                    rt.block_on(serve::serve(php, config, prepared, handle))
-                }
-            })?;
-
-        self.stop = Some(stop);
-        let join = self
-            .join
-            .insert(tokio::task::spawn_blocking(move || join_thread(thread)));
-        let result = join.await;
-        self.join = None;
-        result.map_err(|e| anyhow!("http join task failed: {e}"))?
+        self.thread
+            .run("http", move |stop, rt| {
+                serve::serve(php, config, prepared, stop, rt)
+            })
+            .await
     }
 
     async fn shutdown(&mut self) -> Result<()> {
-        if let Some(stop) = self.stop.take() {
-            stop.stop();
-        }
-        if let Some(join) = self.join.take() {
-            join.await
-                .map_err(|e| anyhow!("http join task failed: {e}"))??;
-        }
-        Ok(())
+        self.thread.shutdown().await
     }
-}
-
-fn join_thread(thread: JoinHandle<Result<()>>) -> Result<()> {
-    thread.join().map_err(|payload| {
-        let msg = payload
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("unknown panic");
-        anyhow!("http server thread panicked: {msg}")
-    })?
 }
 
 #[cfg(test)]
@@ -155,7 +100,7 @@ mod tests {
     use std::pin::Pin;
     use std::task::Poll;
 
-    use extension_api::{Backend, Reply, Request};
+    use extension_api::{Backend, Reply, Request, UnaryCall, UnaryReply};
 
     use super::*;
 
@@ -164,6 +109,13 @@ mod tests {
     impl Backend for UnusedBackend {
         fn exec(&self, _req: Request) -> Pin<Box<dyn Future<Output = Result<Reply>> + Send + '_>> {
             unreachable!("the lifecycle test does not send a request")
+        }
+
+        fn unary(
+            &self,
+            _call: UnaryCall,
+        ) -> Pin<Box<dyn Future<Output = Result<Option<UnaryReply>>> + Send + '_>> {
+            unreachable!("the lifecycle test does not send a call")
         }
     }
 
@@ -182,9 +134,9 @@ mod tests {
         assert!(std::future::poll_fn(|cx| Poll::Ready(run.as_mut().poll(cx).is_pending())).await);
         drop(run);
 
-        assert!(server.join.is_some());
+        assert!(server.thread.is_running());
         server.shutdown().await.unwrap();
-        assert!(server.join.is_none());
+        assert!(!server.thread.is_running());
         assert_eq!(Arc::strong_count(&backend), 1);
     }
 }

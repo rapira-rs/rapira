@@ -1,0 +1,10 @@
+// A file that supplies only an option, such as google/api/annotations.proto.
+syntax = "proto3";
+
+package rapira.test.options.v1;
+
+import "google/protobuf/descriptor.proto";
+
+extend google.protobuf.MethodOptions {
+  string route = 50000;
+}
