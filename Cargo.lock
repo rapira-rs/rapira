@@ -970,8 +970,10 @@ dependencies = [
  "connectrpc-health",
  "connectrpc-reflection",
  "extension_api",
+ "http",
  "rapira_net",
  "tokio",
+ "tower",
  "tracing",
 ]
 

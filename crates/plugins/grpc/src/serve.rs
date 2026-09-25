@@ -4,14 +4,15 @@ use std::time::Duration;
 use anyhow::anyhow;
 use connectrpc::server::serve_connection;
 use connectrpc::{
-    Chain, CompressionRegistry, ConnectRpcService, ConnectionConfig, ConnectionInfo,
-    DeadlinePolicy, GzipProvider, Router,
+    Chain, CompressionRegistry, ConnectRpcBody, ConnectRpcService, ConnectionConfig,
+    ConnectionInfo, DeadlinePolicy, GzipProvider, Router,
 };
 use connectrpc_health::StaticChecker;
 use extension_api::{Addr, Php, Result};
 use rapira_net::{Acceptor, Serve, StopHandle};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
+use tower::util::MapResponse;
 
 use crate::dispatch::PhpDispatcher;
 use crate::{Config, Prepared};
@@ -63,7 +64,7 @@ impl Serving {
         let connection = serve_connection(
             io,
             info,
-            self.service.clone(),
+            MapResponse::new(self.service.clone(), status_in_trailers),
             self.connection.clone(),
             async move {
                 let _ = stop.wait_for(|stop| *stop).await;
@@ -114,6 +115,16 @@ impl Serve for Serving {
             .insert(Addr::Unix(peer.map(Into::into)));
         self.spawn(stream, info);
     }
+}
+
+/// A gRPC error carries its whole status in the trailers. connectrpc also copies the code and the message into the head, and a client that takes the status from the head, such as tonic, then drops the details and the trailers: https://github.com/connectrpc/connect-rust/issues/286. Only that copy puts these fields in a head, because PHP cannot set a `grpc-` field.
+fn status_in_trailers(
+    mut response: http::Response<ConnectRpcBody>,
+) -> http::Response<ConnectRpcBody> {
+    let headers = response.headers_mut();
+    headers.remove("grpc-status");
+    headers.remove("grpc-message");
+    response
 }
 
 /// Runs the accept loop on the calling thread, then drains the connections.

@@ -265,7 +265,7 @@ async fn each_protocol_reaches_php_over_the_wire() {
     let _ = std::fs::remove_dir_all(dir);
 }
 
-/// Sources: PROTOCOL-HTTP2 and PROTOCOL-WEB (the status fields, `grpc-status-details-bin`), the Connect protocol (error codes, unpadded base64 detail values, `trailer-` fields of a unary response). connectrpc adds `type.googleapis.com/` to a bare name, so gRPC keeps a type URL whole and Connect sends the bare name.
+/// Sources: PROTOCOL-HTTP2 and PROTOCOL-WEB (the status fields, `grpc-status-details-bin`, Response-Headers without a status field), the Connect protocol (error codes, unpadded base64 detail values, `trailer-` fields of a unary response). connectrpc adds `type.googleapis.com/` to a bare name, so gRPC keeps a type URL whole and Connect sends the bare name.
 #[tokio::test]
 async fn statuses_and_metadata_encode_per_protocol() {
     struct Case {
@@ -427,6 +427,13 @@ async fn statuses_and_metadata_encode_per_protocol() {
                 got.headers.get(name),
                 Some(want),
                 "{}: {name}: {got:?}",
+                case.name
+            );
+        }
+        for name in ["grpc-status", "grpc-message"] {
+            assert!(
+                !got.headers.contains_key(name),
+                "{}: {name} in the head: {got:?}",
                 case.name
             );
         }
