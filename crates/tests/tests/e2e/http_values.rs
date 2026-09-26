@@ -1,20 +1,14 @@
-use rapira_sapi::{Mode, Rapira};
-use tests::{drain, fixture, php_lock, req};
+use rapira_sapi::Mode;
+use tests::wire::submit;
+use tests::{drain, fixture, req};
+
+use crate::harness::Spawn;
 
 /// Pins that Http value objects construct and refuse readonly reassignment, wrong arity, and a bad address union.
 #[test]
 fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("http_values/construct.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let (status, body) = drain(tests::submit(&h, req("/"))?);
-    drop(h);
-    drop(r);
+    let srv = Spawn::http(Mode::Classic, fixture("http_values/construct.php")).spawn();
+    let (status, body) = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(status, 200, "construction must succeed (body: {body:?})");
     for line in [
