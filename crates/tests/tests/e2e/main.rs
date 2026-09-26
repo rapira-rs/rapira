@@ -1,4 +1,5 @@
 mod apm;
+mod basic_tests;
 mod classic;
 mod concurrency;
 mod extensions;
