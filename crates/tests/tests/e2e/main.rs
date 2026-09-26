@@ -1,5 +1,6 @@
 mod apm;
 mod app_logger;
+mod async_tests;
 mod basic_tests;
 mod classic;
 mod concurrency;
