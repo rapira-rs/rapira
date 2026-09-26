@@ -2,11 +2,11 @@ use crate::context::{ctx, with_ctx};
 use crate::diagnostics::syslog_to_level;
 use crate::types::{Context, StreamState};
 use crate::*;
-use core::slice;
-use http::header::{
+use ::http::header::{
     AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, FROM, HeaderMap, HeaderName, HeaderValue,
     PROXY_AUTHORIZATION, REFERER,
 };
+use core::slice;
 use std::ffi::CStr;
 use std::io::Read;
 use std::mem::ManuallyDrop;

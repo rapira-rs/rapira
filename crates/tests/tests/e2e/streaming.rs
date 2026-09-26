@@ -281,8 +281,11 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
     // SAFETY: prepared owns the descriptor for the lifetime of this borrow.
     let listener = unsafe { BorrowedFd::borrow_raw(prepared.listener_fds()[0]) };
     let addr = TcpListener::from(listener.try_clone_to_owned()?).local_addr()?;
-    let rapira = Rapira::start(Mode::Dispatcher(script.clone()))?;
-    let running = host.run(rapira.handle(), script);
+    let rapira = Rapira::start(
+        Mode::Dispatcher(script.clone()),
+        Some(rapira_sapi::http::DISPATCHER_CLASSES),
+    )?;
+    let running = host.run(&rapira, script);
 
     let streamed = (|| -> anyhow::Result<()> {
         let mut client = Conn::open(addr, T)?;

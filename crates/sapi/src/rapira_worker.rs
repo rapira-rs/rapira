@@ -16,7 +16,7 @@ use crate::{
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
     executor::run_script,
     php_request_startup, rapira_eg, rapira_pg, rapira_run_handler,
-    types::Job,
+    types::Context,
     zend_fcall_info, zend_fcall_info_cache, *,
 };
 
@@ -151,7 +151,7 @@ pub extern "C" fn rapira_rs_handle_request(
 
 /// Flushes before rapira_request_teardown: the real head (status, cookies, php_error_cb's 500) lives in SG(sapi_headers), which teardown destroys.
 fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> HandleAction {
-    let Some(mut job) = next_job() else {
+    let Some(mut ctx) = next_job() else {
         return if worker_recycle() {
             HandleAction::Recycle
         } else {
@@ -159,21 +159,21 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
         };
     };
 
-    bind_server_context(&mut job.ctx);
+    bind_server_context(&mut ctx);
     unsafe {
-        populate_request_context(&mut job.ctx);
+        populate_request_context(&mut ctx);
         rapira_release_temporary_streams();
     }
 
     let mut outcome = Outcome::from_c(unsafe { rapira_request_activate() });
     if outcome != Outcome::Bailout {
         unsafe {
-            crate::context::apply_proto_num(&job.ctx);
+            crate::context::apply_proto_num(&ctx);
             outcome = Outcome::from_c(rapira_run_handler(fci, fcc));
         }
     }
 
-    job.ctx.tearing_down = true;
+    ctx.tearing_down = true;
     let flushed = match outcome {
         Outcome::Bailout | Outcome::Throw => Outcome::from_c(unsafe { rapira_finish_output() }),
         _ => Outcome::Ok,
@@ -182,7 +182,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 
     let recycle: bool = [outcome, flushed, teardown].contains(&Outcome::Bailout);
     let errored: bool = recycle || outcome == Outcome::Throw;
-    let truncated: bool = finalize_response(&mut job.ctx, errored);
+    let truncated: bool = finalize_response(&mut ctx, errored);
 
     log_and_clear_last_error();
     unbind_server_context();
@@ -190,7 +190,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     if recycle {
         set_worker_recycle();
     }
-    job.ctx.finish(truncated);
+    ctx.finish(truncated);
     crate::exchange::note_served();
     if recycle {
         HandleAction::Recycle
@@ -200,7 +200,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 }
 
 /// The first call tears down the bootstrap request php_request_startup() left behind, before any job is served.
-fn next_job() -> Option<Box<Job>> {
+fn next_job() -> Option<Context> {
     WORKER.with_borrow_mut(|w| {
         let wc = w.as_mut()?;
         if std::mem::take(&mut wc.first_call) {
@@ -218,14 +218,15 @@ fn next_job() -> Option<Box<Job>> {
         loop {
             match pull_job() {
                 Some(unit) => {
-                    if unit.is_closed() {
+                    if unit.cancelled() {
                         sb_update(scoreboard::Event::Handled(true));
                         continue;
                     }
                     crate::exchange::note_received();
-                    return unit
-                        .into_http()
-                        .or_else(|| unreachable!("gRPC units go to dispatcher-mode workers only"));
+                    let Some(ctx) = unit.into_cgi() else {
+                        unreachable!("a unit with no CGI form goes to dispatcher-mode workers only");
+                    };
+                    return Some(ctx);
                 }
                 None => {
                     crate::exchange::note_closed();

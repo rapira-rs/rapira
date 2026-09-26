@@ -48,8 +48,8 @@ fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
     init_log_capture();
     captured().clear();
 
-    let r = Rapira::start(Mode::Worker(fixture(name)))?;
-    let h = r.handle();
+    let r = Rapira::start(Mode::Worker(fixture(name)), None)?;
+    let h = r.sink();
     let (s1, b1) = drain(tests::submit(&h, req("/?step=leak", name))?);
     if b1 == "skip" {
         drop(h);

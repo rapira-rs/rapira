@@ -57,7 +57,7 @@ pub(super) struct Closed;
 /// Engine active on this thread.
 pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
     let (result, parked) = {
-        let Some(tx) = st.job.ctx.sender.as_ref() else {
+        let Some(tx) = st.ctx.sender.as_ref() else {
             return Err(Closed);
         };
         match tx.try_send(frame) {
@@ -152,7 +152,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
         }
     }
     sb_update(Event::Handled(true));
-    if let Some(tx) = st.job.ctx.sender.take() {
+    if let Some(tx) = st.ctx.sender.take() {
         let _ = tx.try_send(Frame::End {
             trailers: HeaderMap::new(),
             truncated: true,
@@ -406,7 +406,7 @@ pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: Hea
             },
         )
     };
-    st.job.ctx.sender = None;
+    st.ctx.sender = None;
 }
 
 /// # Safety
@@ -472,7 +472,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
                     p.upload.file.unlink();
                 }
             }
-            if let Some(tx) = st.job.ctx.sender.take() {
+            if let Some(tx) = st.ctx.sender.take() {
                 if st.head_sent {
                     let _ = tx.try_send(Frame::End {
                         trailers: HeaderMap::new(),

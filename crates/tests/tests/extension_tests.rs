@@ -4,7 +4,7 @@ use rapira_sapi::runtime::ExtensionRuntime;
 use rapira_sapi::{Mode, Rapira};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
-use tests::{Fields, Response, collect, echo_services, fields, fixture, php_lock};
+use tests::{Fields, Response, collect, fields, fixture, php_lock};
 
 async fn exec_full(php: &Php, req: Request) -> Result<Response> {
     collect(php.exec(req).await?).await
@@ -168,7 +168,10 @@ impl Extension for RejectDriver {
 #[test]
 fn rejected_bodies_never_reach_the_pool() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
+    let rapira = Rapira::start(
+        Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")),
+        Some(rapira_sapi::http::DISPATCHER_CLASSES),
+    )?;
     let mut host = ExtensionRuntime::new();
     host.register::<RejectDriver>(());
     let limits = rapira_sapi::multipart::Limits {
@@ -177,7 +180,7 @@ fn rejected_bodies_never_reach_the_pool() -> anyhow::Result<()> {
     };
     let outcomes = host
         .run_with_options(
-            rapira.handle(),
+            &rapira,
             fixture("dispatcher/echo-loop-worker.php"),
             rapira_sapi::runtime::RuntimeOptions {
                 uploads: std::sync::Arc::new(limits),
@@ -304,13 +307,10 @@ impl Extension for UnaryDriver {
 fn unary_calls_cross_the_api() -> anyhow::Result<()> {
     let _guard = php_lock();
     let script = fixture("grpc/unary-worker.php");
-    let rapira = Rapira::start(Mode::GrpcDispatcher {
-        script: script.clone(),
-        services: echo_services(),
-    })?;
+    let rapira = tests::start_grpc(script.clone())?;
     let mut host = ExtensionRuntime::new();
     host.register::<UnaryDriver>(());
-    let outcomes = host.run(rapira.handle(), script).join();
+    let outcomes = host.run(&rapira, script).join();
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
     assert!(outcomes[0].is_ok(), "{:?}", outcomes[0]);
@@ -320,14 +320,11 @@ fn unary_calls_cross_the_api() -> anyhow::Result<()> {
 #[test]
 fn classic_mode_serves_exec() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Classic)?;
+    let rapira = Rapira::start(Mode::Classic, None)?;
     let mut host = ExtensionRuntime::new();
     host.register::<Driver>(());
     let outcomes = host
-        .run(
-            rapira.handle(),
-            fixture("extension_tests/ext-driver-classic.php"),
-        )
+        .run(&rapira, fixture("extension_tests/ext-driver-classic.php"))
         .join();
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
@@ -367,16 +364,14 @@ impl Extension for ErrorPathDriver {
 #[test]
 fn exec_delivers_buffered_error_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Worker(fixture(
-        "shared/error-keeps-headers-worker.php",
-    )))?;
+    let rapira = Rapira::start(
+        Mode::Worker(fixture("shared/error-keeps-headers-worker.php")),
+        None,
+    )?;
     let mut host = ExtensionRuntime::new();
     host.register::<ErrorPathDriver>(());
     let outcomes = host
-        .run(
-            rapira.handle(),
-            fixture("shared/error-keeps-headers-worker.php"),
-        )
+        .run(&rapira, fixture("shared/error-keeps-headers-worker.php"))
         .join();
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
@@ -422,14 +417,14 @@ impl Extension for TruncatedDriver {
 #[test]
 fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Worker(fixture("shared/output-then-throw-worker.php")))?;
+    let rapira = Rapira::start(
+        Mode::Worker(fixture("shared/output-then-throw-worker.php")),
+        None,
+    )?;
     let mut host = ExtensionRuntime::new();
     host.register::<TruncatedDriver>(());
     let outcomes = host
-        .run(
-            rapira.handle(),
-            fixture("shared/output-then-throw-worker.php"),
-        )
+        .run(&rapira, fixture("shared/output-then-throw-worker.php"))
         .join();
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
@@ -444,11 +439,11 @@ fn exec_rejects_truncated_response_worker() -> anyhow::Result<()> {
 #[test]
 fn exec_delivers_buffered_error_response_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Classic)?;
+    let rapira = Rapira::start(Mode::Classic, None)?;
     let mut host = ExtensionRuntime::new();
     host.register::<ErrorPathDriver>(());
     let outcomes = host
-        .run(rapira.handle(), fixture("shared/error-keeps-headers.php"))
+        .run(&rapira, fixture("shared/error-keeps-headers.php"))
         .join();
     drop(rapira);
     assert_eq!(outcomes.len(), 1);
@@ -490,13 +485,10 @@ impl Extension for Resident {
 fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
     let _guard = php_lock();
     RESIDENT_SHUTDOWN.store(false, Ordering::Relaxed);
-    let rapira = Rapira::start(Mode::Classic)?;
+    let rapira = Rapira::start(Mode::Classic, None)?;
     let mut host = ExtensionRuntime::new();
     host.register::<Resident>(());
-    let running = host.run(
-        rapira.handle(),
-        fixture("extension_tests/ext-driver-classic.php"),
-    );
+    let running = host.run(&rapira, fixture("extension_tests/ext-driver-classic.php"));
 
     let start = Instant::now();
     drop(running);
@@ -516,18 +508,16 @@ fn teardown_cancels_run_and_drives_shutdown() -> anyhow::Result<()> {
 fn many_extensions_run() -> anyhow::Result<()> {
     let _guard = php_lock();
     const N: usize = 12;
-    let rapira = Rapira::start(Mode::Worker(fixture(
-        "extension_tests/ext-driver-worker.php",
-    )))?;
+    let rapira = Rapira::start(
+        Mode::Worker(fixture("extension_tests/ext-driver-worker.php")),
+        None,
+    )?;
     let mut host = ExtensionRuntime::new();
     for _ in 0..N {
         host.register::<Driver>(());
     }
     let outcomes = host
-        .run(
-            rapira.handle(),
-            fixture("extension_tests/ext-driver-worker.php"),
-        )
+        .run(&rapira, fixture("extension_tests/ext-driver-worker.php"))
         .join();
     drop(rapira);
     assert_eq!(outcomes.len(), N);
@@ -540,14 +530,11 @@ fn many_extensions_run() -> anyhow::Result<()> {
 
 fn run_one<E: Extension<Config = ()>>() -> anyhow::Result<Vec<Result<(), String>>> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Classic)?;
+    let rapira = Rapira::start(Mode::Classic, None)?;
     let mut host = ExtensionRuntime::new();
     host.register::<E>(());
     let outcomes = host
-        .run(
-            rapira.handle(),
-            fixture("extension_tests/ext-driver-classic.php"),
-        )
+        .run(&rapira, fixture("extension_tests/ext-driver-classic.php"))
         .join();
     drop(rapira);
     Ok(outcomes)
@@ -638,11 +625,11 @@ impl Extension for SlowShutdown {
 #[test]
 fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let rapira = Rapira::start(Mode::Classic)?;
+    let rapira = Rapira::start(Mode::Classic, None)?;
     let mut host = ExtensionRuntime::new();
     host.register::<SlowShutdown>(());
     let running = host.run_with_options(
-        rapira.handle(),
+        &rapira,
         fixture("extension_tests/ext-driver-classic.php"),
         rapira_sapi::runtime::RuntimeOptions {
             grace: Duration::from_millis(100),

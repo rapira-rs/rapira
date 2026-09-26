@@ -1,9 +1,9 @@
 use std::net::SocketAddr;
 
 use http::Method;
+use rapira_sapi::Rapira;
 use rapira_sapi::api::{ListenAddr, PrepareCtx};
 use rapira_sapi::runtime::ExtensionRuntime;
-use rapira_sapi::{Mode, Rapira};
 use serde_json::Value;
 use tests::grpc::{Conn, ECHO_PATH as ECHO, Fields, Wire, config, envelope, fields, tcp_addr};
 
@@ -37,11 +37,8 @@ impl Host {
         let tcp = ListenAddr::Tcp(tcp_addr(&prepared, 0));
 
         let script = fixture_path("grpc/echo-worker.php");
-        let rapira = Rapira::start(Mode::GrpcDispatcher {
-            script: script.clone(),
-            services: tests::echo_services(),
-        })?;
-        let running = host.run(rapira.handle(), script);
+        let rapira = tests::start_grpc(script.clone())?;
+        let running = host.run(&rapira, script);
         Ok(Host {
             rapira,
             running,

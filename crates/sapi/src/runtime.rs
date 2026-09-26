@@ -1,5 +1,8 @@
-use crate::RapiraHandle;
+use crate::Rapira;
 use crate::api::{Extension, Php, PrepareCtx};
+use crate::grpc::Call;
+use crate::http::Exchange;
+use crate::work::{Intake, Refused};
 use http::header::CONTENT_TYPE;
 use std::future::Future;
 use std::io::Cursor;
@@ -71,14 +74,14 @@ impl ExtensionRuntime {
         Ok(())
     }
 
-    pub fn run(self, rapira: RapiraHandle, script: PathBuf) -> Running {
+    pub fn run(self, rapira: &Rapira, script: PathBuf) -> Running {
         self.run_with_options(rapira, script, RuntimeOptions::default())
     }
 
     /// One worker thread: this runtime drives only the `drive` future of each extension, and it exists in every forked worker process.
     pub fn run_with_options(
         self,
-        rapira: RapiraHandle,
+        rapira: &Rapira,
         script: PathBuf,
         opts: RuntimeOptions,
     ) -> Running {
@@ -129,16 +132,18 @@ impl Default for RuntimeOptions {
 }
 
 struct RapiraBackend {
-    rapira: RapiraHandle,
+    exchanges: Intake<Exchange>,
+    calls: Intake<Call>,
+    dispatcher: bool,
     uploads: Arc<multipart::Limits>,
 }
 
 /// A refusal before dispatch: PHP never saw the work.
-fn refused(e: crate::HandleError) -> anyhow::Error {
+fn refused(e: Refused) -> anyhow::Error {
     anyhow::Error::new(crate::api::Rejected {
         status: match e {
-            crate::HandleError::Saturated => 503,
-            crate::HandleError::Stopped => 500,
+            Refused::Saturated => 503,
+            Refused::Stopped => 500,
         },
         reason: e.to_string(),
     })
@@ -152,10 +157,13 @@ fn parse_err(e: multipart::ParseError) -> anyhow::Error {
 }
 
 impl RapiraBackend {
-    fn new(rapira: RapiraHandle, filename: &Path, opts: RuntimeOptions) -> Self {
+    fn new(rapira: &Rapira, filename: &Path, opts: RuntimeOptions) -> Self {
         crate::set_script(filename);
+        let sink = rapira.sink();
         Self {
-            rapira,
+            exchanges: Intake::new(sink.clone()),
+            calls: Intake::new(sink),
+            dispatcher: rapira.dispatcher,
             uploads: opts.uploads,
         }
     }
@@ -167,7 +175,7 @@ impl RapiraBackend {
 
         // Content-type is a singleton field per RFC 9110 §8.3: with repeated lines the host and a PHP consumer could split the body on different boundaries.
         // https://www.rfc-editor.org/rfc/rfc9110#section-8.3
-        if self.rapira.dispatcher() && !req.body.is_empty() {
+        if self.dispatcher && !req.body.is_empty() {
             let lines = req.headers.get_all(CONTENT_TYPE);
             if lines.iter().nth(1).is_some()
                 && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
@@ -179,7 +187,7 @@ impl RapiraBackend {
             }
         }
 
-        let body = if self.rapira.dispatcher()
+        let body = if self.dispatcher
             && !req.body.is_empty()
             && let Some(ct) = content_type.as_deref()
             && multipart::is_multipart(ct)
@@ -224,8 +232,8 @@ impl crate::api::Backend for RapiraBackend {
         req: crate::api::Request,
     ) -> Pin<Box<dyn Future<Output = crate::api::Result<crate::api::Reply>> + Send + '_>> {
         Box::pin(async move {
-            let req = self.to_request(req).await?;
-            let rx = self.rapira.handle(req).await.map_err(refused)?;
+            let (exchange, rx) = Exchange::new(self.to_request(req).await?);
+            self.exchanges.submit(exchange).await.map_err(refused)?;
             Ok(crate::api::Reply::new(rx))
         })
     }
@@ -236,7 +244,8 @@ impl crate::api::Backend for RapiraBackend {
     ) -> Pin<Box<dyn Future<Output = crate::api::Result<Option<crate::api::UnaryReply>>> + Send + '_>>
     {
         Box::pin(async move {
-            let rx = self.rapira.call(call).await.map_err(refused)?;
+            let (call, rx) = Call::new(call);
+            self.calls.submit(call).await.map_err(refused)?;
             // A closed channel means that PHP lost the call.
             Ok(rx.await.ok())
         })

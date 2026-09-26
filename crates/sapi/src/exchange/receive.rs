@@ -10,7 +10,7 @@ enum RecvMode {
 /// `return_value` writable; engine active on this thread.
 unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
-        let front = front();
+        let classes = classes();
         if let Some(ptr) = CYCLE.get().unit
             && !(*ptr).finalized()
             && (*ptr).host_closed()
@@ -21,11 +21,11 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
         if let Some(ptr) = CYCLE.get().unit
             && !(*ptr).finalized()
         {
-            zend::throw_error(front.busy());
+            zend::throw_error(classes.busy);
             return false;
         }
         let mut obj: zval = std::mem::zeroed();
-        let _ = object_init_ex(&mut obj, front.unit_ce());
+        let _ = object_init_ex(&mut obj, (classes.unit)());
         // SAFETY: plain zend timer bookkeeping on this thread; no bailout path.
         rapira_receive_untimed();
         loop {
@@ -36,26 +36,14 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
             };
             match pulled {
                 Pulled::Job(unit) => {
-                    if unit.is_closed() {
+                    if unit.cancelled() {
                         sb_update(Event::Handled(true));
                         continue;
                     }
-                    assert_eq!(unit.front(), front, "the unit kind does not match the pool");
                     // SAFETY: plain zend timer bookkeeping; no bailout path.
                     rapira_receive_timed();
-                    let ptr: *mut dyn Held = match unit {
-                        Unit::Http(job) => {
-                            let ptr = Box::into_raw(Box::new(ExchangeState::new(job)));
-                            (*exchange_from(obj.value.obj)).job = ptr.cast();
-                            (*ptr).armed_at = Instant::now();
-                            ptr
-                        }
-                        Unit::Grpc(job) => {
-                            let ptr = Box::into_raw(Box::new(GrpcState::new(job)));
-                            (*grpc::grpc_call_from(obj.value.obj)).state = ptr.cast();
-                            ptr
-                        }
-                    };
+                    // SAFETY: obj is a live object of classes.unit, allocated above on this thread.
+                    let ptr: *mut dyn Held = unit.attach(obj.value.obj);
                     update(|c| {
                         c.unit = Some(ptr);
                         c.received = true;
@@ -117,7 +105,7 @@ pub unsafe extern "C" fn rapira_rs_try_receive(return_value: *mut zval) -> bool 
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> bool {
     guard(false, || unsafe {
-        let _ = object_init_ex(return_value, front().info_ce());
+        let _ = object_init_ex(return_value, (classes().info)());
         let info = info_from((*return_value).value.obj);
         (*info).pending = pending_depth() as i64;
         (*info).active = i64::from(CYCLE.get().unit.is_some_and(|p| !(*p).finalized()));
@@ -145,7 +133,7 @@ pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bo
             Some(zv) => zv,
             None => {
                 let mut zv: zval = std::mem::zeroed();
-                let _ = object_init_ex(&mut zv, front().dispatcher_ce());
+                let _ = object_init_ex(&mut zv, (classes().dispatcher)());
                 d.set(Some(zv));
                 zv
             }

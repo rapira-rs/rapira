@@ -11,8 +11,11 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
-    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
-    let h = r.handle();
+    let r = Rapira::start(
+        Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")),
+        Some(rapira_sapi::http::DISPATCHER_CLASSES),
+    )?;
+    let h = r.sink();
 
     let (status, body) = drain(tests::submit(
         &h,
@@ -43,8 +46,11 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
-    let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")))?;
-    let h = r.handle();
+    let r = Rapira::start(
+        Mode::Dispatcher(fixture("dispatcher/verbs-worker.php")),
+        Some(rapira_sapi::http::DISPATCHER_CLASSES),
+    )?;
+    let h = r.sink();
 
     let (status, body) = drain(tests::submit(&h, req("/", "dispatcher/verbs-worker.php"))?);
     assert_eq!((status, body.as_str()), (200, "state=false"));
@@ -78,8 +84,11 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
         env!("CARGO_MANIFEST_DIR"),
         "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
-    let r = Rapira::start(Mode::Worker(fixture("timeout_tests/timeout-worker.php")))?;
-    let h = r.handle();
+    let r = Rapira::start(
+        Mode::Worker(fixture("timeout_tests/timeout-worker.php")),
+        None,
+    )?;
+    let h = r.sink();
 
     let (status, body) = drain(tests::submit(
         &h,

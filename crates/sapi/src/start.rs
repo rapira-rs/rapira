@@ -1,29 +1,24 @@
 use std::cell::RefCell;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::{error, info, trace};
-use types::Unit;
 
 use crate::quota::{self, WorkerHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
+use crate::work::{DispatcherClasses, Sink, Work};
 use crate::{classic_worker::classic_worker, types::Mode, *};
 
 thread_local! {
     static JOB_RX: RefCell<Option<JobRx>> = const { RefCell::new(None) };
 }
 
-pub(crate) struct Intake {
-    pub(crate) tx: SyncSender<Unit>,
-    pub(crate) pending: Arc<AtomicUsize>,
-}
-
 struct JobRx {
-    rx: Receiver<Unit>,
+    rx: Receiver<Box<dyn Work>>,
     pending: Arc<AtomicUsize>,
 }
 
@@ -39,7 +34,7 @@ impl Drop for PhpModule {
 }
 
 pub struct Rapira {
-    pub(crate) intake: Option<Intake>,
+    sink: Option<Sink>,
     pub(crate) dispatcher: bool,
     worker: Option<JoinHandle<()>>,
     board: Option<rapira_scoreboard::Scoreboard>,
@@ -90,12 +85,18 @@ impl Rapira {
         Ok(PhpModule {})
     }
 
-    pub fn start_worker(mode: Mode, hooks: WorkerHooks) -> anyhow::Result<Self> {
+    /// `classes`: the dispatcher surface receive() serves; None for the classic and worker modes.
+    pub fn start_worker(
+        mode: Mode,
+        hooks: WorkerHooks,
+        classes: Option<DispatcherClasses>,
+    ) -> anyhow::Result<Self> {
         let WorkerHooks {
             max_requests,
             on_quota,
             on_unhealthy,
             slot,
+            on_thread_start,
         } = hooks;
         let (board, slot) = match slot {
             Some(s) => (None, s),
@@ -106,19 +107,16 @@ impl Rapira {
         };
         slot.bind(std::process::id());
         let pending = Arc::new(AtomicUsize::new(0));
-        let (intake_tx, intake_rx) = sync_channel::<Unit>(1024);
-        let intake = Intake {
-            tx: intake_tx,
-            pending: pending.clone(),
-        };
+        let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
+        let sink = Sink::new(intake_tx, pending.clone());
 
-        let dispatcher = matches!(mode, Mode::Dispatcher(_) | Mode::GrpcDispatcher { .. });
+        let dispatcher = matches!(mode, Mode::Dispatcher(_));
         // SAFETY: safe, trust me, I'm a developer
         unsafe {
             crate::rapira_mode = match &mode {
                 Mode::Classic => RAPIRA_MODE_CLASSIC,
                 Mode::Worker(_) => RAPIRA_MODE_WORKER,
-                Mode::Dispatcher(_) | Mode::GrpcDispatcher { .. } => RAPIRA_MODE_DISPATCHER,
+                Mode::Dispatcher(_) => RAPIRA_MODE_DISPATCHER,
             } as c_int;
         };
 
@@ -132,11 +130,13 @@ impl Rapira {
                     rx: intake_rx,
                     pending,
                 },
+                classes,
+                on_thread_start,
             )
         });
 
         Ok(Self {
-            intake: Some(intake),
+            sink: Some(sink),
             dispatcher,
             worker: Some(worker),
             board,
@@ -144,12 +144,26 @@ impl Rapira {
         })
     }
 
-    pub fn start(mode: Mode) -> anyhow::Result<Self> {
+    pub fn start(mode: Mode, classes: Option<DispatcherClasses>) -> anyhow::Result<Self> {
+        Self::start_with_hooks(mode, WorkerHooks::default(), classes)
+    }
+
+    /// Boots the master and one worker in this process.
+    pub fn start_with_hooks(
+        mode: Mode,
+        hooks: WorkerHooks,
+        classes: Option<DispatcherClasses>,
+    ) -> anyhow::Result<Self> {
         info!(target: "rapira", "booting with mode: {mode:?}");
         let module = Self::boot_master()?;
-        let mut rapira = Self::start_worker(mode, WorkerHooks::default())?;
+        let mut rapira = Self::start_worker(mode, hooks, classes)?;
         rapira.module = Some(module);
         Ok(rapira)
+    }
+
+    /// The intake of this worker. The PHP thread sees the intake closed once `Rapira` and every clone are dropped.
+    pub fn sink(&self) -> Sink {
+        self.sink.clone().expect("the sink lives until Drop")
     }
 
     /// The slot of the private one-slot board. It is `None` when the master owns the slot.
@@ -161,7 +175,7 @@ impl Rapira {
 impl Drop for Rapira {
     fn drop(&mut self) {
         info!(target: "rapira", "shutting down, dropping");
-        self.intake = None;
+        self.sink = None;
         let Some(worker) = self.worker.take() else {
             std::mem::forget(self.module.take());
             return;
@@ -186,10 +200,16 @@ impl Drop for Rapira {
 }
 
 /// NTS inits module and request on different threads, so the call stack is re-initialized on this thread: https://github.com/php/php-src/pull/9104
-fn worker_main(mode: Mode, rx: JobRx) {
+fn worker_main(
+    mode: Mode,
+    rx: JobRx,
+    classes: Option<DispatcherClasses>,
+    on_thread_start: Option<Box<dyn FnOnce() + Send>>,
+) {
     JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
-    if let Mode::GrpcDispatcher { services, .. } = &mode {
-        crate::exchange::serve_grpc(services.clone());
+    crate::exchange::set_classes(classes);
+    if let Some(f) = on_thread_start {
+        f();
     }
     loop {
         unsafe {
@@ -200,9 +220,7 @@ fn worker_main(mode: Mode, rx: JobRx) {
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker(script)
-            | Mode::Dispatcher(script)
-            | Mode::GrpcDispatcher { script, .. } => rapira_worker(script.clone()),
+            Mode::Worker(script) | Mode::Dispatcher(script) => rapira_worker(script.clone()),
         };
         if matches!(exit, WorkerExit::Closed) {
             break;
@@ -210,7 +228,7 @@ fn worker_main(mode: Mode, rx: JobRx) {
     }
 }
 
-pub(crate) fn pull_job() -> Option<Unit> {
+pub(crate) fn pull_job() -> Option<Box<dyn Work>> {
     match pull_job_wait(None) {
         Pulled::Job(job) => Some(job),
         _ => None,
@@ -218,7 +236,7 @@ pub(crate) fn pull_job() -> Option<Unit> {
 }
 
 pub(crate) enum Pulled {
-    Job(Unit),
+    Job(Box<dyn Work>),
     Timeout,
     Empty,
     Closed,

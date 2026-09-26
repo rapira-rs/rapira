@@ -2,7 +2,7 @@ use super::headers::*;
 use super::respond::*;
 use super::sendfile::*;
 use super::*;
-use crate::types::{Context, Request};
+use crate::types::Request;
 use std::path::PathBuf;
 
 fn base_req() -> Request {
@@ -70,10 +70,7 @@ fn state_of(
     tokio::sync::mpsc::Receiver<crate::types::Frame>,
 ) {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
-    let job = Box::new(Job {
-        ctx: Context::new(req, tx, /*superglobals=*/ false),
-    });
-    (ExchangeState::new(job), rx)
+    (ExchangeState::new(req, tx), rx)
 }
 
 fn state() -> (

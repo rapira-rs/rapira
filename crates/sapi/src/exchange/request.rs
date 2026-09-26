@@ -213,7 +213,7 @@ unsafe fn build_request_impl(ex: *mut rapira_exchange_obj, return_value: *mut zv
         }
         let ce: *mut zend_class_entry = rapira_ce_http_request;
         let st = &mut *(*ex).job.cast::<ExchangeState>();
-        let req = &st.job.ctx.req;
+        let req = &st.ctx.req;
         let view = st.view.get_or_insert_with(|| RequestView::new(req));
 
         let mut headers: zval = std::mem::zeroed();

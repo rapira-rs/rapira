@@ -12,6 +12,8 @@ pub struct WorkerHooks {
     pub on_unhealthy: Option<Box<dyn FnOnce() + Send>>,
     /// None: report into a private single-slot board.
     pub slot: Option<&'static rapira_scoreboard::SharedSlot>,
+    /// Runs on the PHP thread before the first cycle.
+    pub on_thread_start: Option<Box<dyn FnOnce() + Send>>,
 }
 
 #[derive(Default)]

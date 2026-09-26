@@ -1,5 +1,3 @@
-use std::cell::RefCell;
-
 use base64::Engine as _;
 use base64::alphabet;
 use base64::engine::DecodePaddingMode;
@@ -12,23 +10,15 @@ use super::*;
 use crate::{
     IS_OBJECT,
     api::{RpcProtocol, RpcStatus, UnaryCall, UnaryReply},
+    grpc::Call,
     rapira_ce_already_finalized_error, rapira_ce_grpc_context, rapira_ce_grpc_error_detail,
     rapira_ce_grpc_metadata, rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind,
     rapira_ce_grpc_protocol, rapira_ce_grpc_service_info, rapira_ce_grpc_status,
     rapira_ce_internal_grpc_response_metadata, rapira_ce_work_discarded_exception,
     rapira_grpc_call_obj, rapira_grpc_metadata_obj, rapira_zval_enum_case,
-    types::{GrpcJob, GrpcMethod, GrpcService, MethodKind},
+    types::{GrpcMethod, MethodKind},
     zend_argument_type_error, zend_read_property, zend_zval_value_name,
 };
-
-thread_local! {
-    /// The services of the gRPC pool this PHP thread serves.
-    static SERVICES: RefCell<Option<Vec<GrpcService>>> = const { RefCell::new(None) };
-}
-
-pub(super) fn set_services(services: Vec<GrpcService>) {
-    SERVICES.set(Some(services));
-}
 
 /// # Safety
 /// `dst` writable; engine active on this thread.
@@ -57,7 +47,7 @@ unsafe fn method_info(dst: *mut zval, m: &GrpcMethod) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_services(rv: *mut zval) -> bool {
     guard(false, || unsafe {
-        SERVICES.with_borrow(|services| {
+        crate::grpc::SERVICES.with_borrow(|services| {
             let services = services.as_deref().unwrap_or_default();
             rapira_array_init(rv, services.len() as u32);
             for s in services {
@@ -196,12 +186,12 @@ pub(crate) struct GrpcState {
 }
 
 impl GrpcState {
-    pub(super) fn new(job: Box<GrpcJob>) -> Self {
-        let GrpcJob {
-            req,
+    pub(crate) fn new(call: Call) -> Self {
+        let Call {
+            call: req,
             received_at,
             reply,
-        } = *job;
+        } = call;
         Self {
             req,
             received_at,
@@ -342,7 +332,7 @@ unsafe fn thrown(v: Verb) -> bool {
     false
 }
 
-container_of!(pub(super) grpc_call_from, rapira_grpc_call_obj);
+container_of!(pub(crate) grpc_call_from, rapira_grpc_call_obj);
 container_of!(metadata_from, rapira_grpc_metadata_obj);
 
 /// A `Rapira\Grpc\Metadata` object over `fields`.
@@ -656,7 +646,6 @@ mod tests {
     use super::*;
 
     fn state() -> (GrpcState, oneshot::Receiver<UnaryReply>) {
-        let (reply, rx) = oneshot::channel();
         let req = UnaryCall {
             method: "rapira.test.v1.EchoService/Echo".into(),
             protocol: RpcProtocol::Grpc,
@@ -665,12 +654,8 @@ mod tests {
             remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
             message: Bytes::new(),
         };
-        let job = Box::new(GrpcJob {
-            req,
-            received_at: 0.0,
-            reply,
-        });
-        (GrpcState::new(job), rx)
+        let (call, rx) = Call::new(req);
+        (GrpcState::new(call), rx)
     }
 
     /// `from_bytes` takes the obs-text bytes that a client can send.

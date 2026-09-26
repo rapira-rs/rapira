@@ -15,7 +15,7 @@ fn module_startup_failure_then_clean_restart() -> anyhow::Result<()> {
         )),
     );
     assert!(
-        Rapira::start(Mode::Classic).is_err(),
+        Rapira::start(Mode::Classic, None).is_err(),
         "removed-directive ini must fail startup"
     );
 
@@ -26,8 +26,8 @@ fn module_startup_failure_then_clean_restart() -> anyhow::Result<()> {
             "/fixtures/ini/shared/php.ini"
         )),
     );
-    let r = Rapira::start(Mode::Classic)?;
-    let h = r.handle();
+    let r = Rapira::start(Mode::Classic, None)?;
+    let h = r.sink();
     assert_eq!(
         drain(tests::submit(&h, req("/", "shared/hello.php"))?).0,
         200
