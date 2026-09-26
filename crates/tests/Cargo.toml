@@ -32,6 +32,8 @@ hyper-util = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # E2E harness (tests/e2e): process control for the spawned rapira binary.
 libc = { workspace = true }
+# The e2e middleware layer (tests/e2e/streaming.rs).
+tower = { workspace = true }
 
 # The spawn-the-binary E2E suite forks worker processes and runs request storms;
 # gated behind a feature so `cargo test --workspace` skips it. Run it isolated

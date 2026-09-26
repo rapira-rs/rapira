@@ -1,4 +1,6 @@
+use std::convert::Infallible;
 use std::path::PathBuf;
+use std::pin::Pin;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -7,6 +9,7 @@ use anyhow::{Result, anyhow};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
+use hyper_util::service::TowerToHyperService;
 use rapira_net::{Acceptor, ListenAddr, PreparedListener, Serve, Stop};
 use rapira_sapi::Addr;
 use rapira_sapi::plugin::{Mode, Worker};
@@ -14,7 +17,7 @@ use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch::channel;
 
-use crate::handler::{RapiraService, Shared};
+use crate::handler::{Conn, RapiraService, Shared, respond};
 use crate::{Config, Exchange, multipart};
 
 /// Everything the accept loop hands to a connection, and the drain that follows it.
@@ -34,12 +37,10 @@ impl Serving {
             ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
             unix => tracing::info!(target: "http", "listening on {unix}"),
         }
-        let chain: Arc<[_]> = config.middleware.clone().into();
         let shared = Arc::new(Shared {
             cfg: config,
             intake,
             uploads,
-            chain,
             inflight: Arc::new(AtomicUsize::new(0)),
         });
         let mut builder = http1::Builder::new();
@@ -58,14 +59,13 @@ impl Serving {
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
         let (closed_tx, closed_rx) = channel(crate::bridge::ConnectionState::default());
-        let svc = RapiraService::new(Arc::clone(&self.shared), remote, server, closed_rx);
+        let handler = Conn::new(Arc::clone(&self.shared), remote, server, closed_rx);
         let io = crate::bridge::TimedIo::new(
             TokioIo::new(stream),
             self.shared.cfg.write_timeout,
             closed_tx.clone(),
         );
-        let connection = self.builder.serve_connection(io, svc);
-        let watched = self.graceful.watch(connection);
+        let watched = connection(&self.builder, &self.graceful, io, handler);
         tokio::spawn(async move {
             if let Err(e) = watched.await {
                 tracing::debug!(target: "http", "connection ended with error: {e}");
@@ -129,6 +129,28 @@ impl Serve for Serving {
     }
 }
 
+/// Serves one connection under `graceful`. Without middleware, hyper serves [`RapiraService`].
+/// With middleware, hyper serves the chain of the connection through `TowerToHyperService`.
+pub(crate) fn connection<I>(
+    builder: &http1::Builder,
+    graceful: &GracefulShutdown,
+    io: I,
+    handler: Arc<Conn>,
+) -> Pin<Box<dyn Future<Output = hyper::Result<()>> + Send>>
+where
+    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
+{
+    let Some(chain) = handler.chain() else {
+        return Box::pin(graceful.watch(builder.serve_connection(io, RapiraService { handler })));
+    };
+    let service = tower::service_fn(move |req| {
+        let handler = Arc::clone(&handler);
+        let chain = chain.clone();
+        async move { Ok::<_, Infallible>(respond(handler, Some(chain), req).await) }
+    });
+    Box::pin(graceful.watch(builder.serve_connection(io, TowerToHyperService::new(service))))
+}
+
 /// Runs the accept loop on the calling thread until the stop flag, then drains the connections.
 pub(crate) fn serve(
     intake: Intake<Exchange>,
@@ -160,7 +182,7 @@ pub(crate) fn serve(
     let serving = Serving::start(intake, uploads, config);
     let fatal = acceptor.run(&worker.handle, &serving);
     let drained = worker.handle.block_on(serving.drain(fatal));
-    // The contract keeps a spooled file only until its exchange finalizes, so the dir goes after the drain.
+    // The dir goes when the plugin drain ends. A spooled file of an exchange that still runs past the drain is lost with it.
     if let Some(dir) = &spool_dir
         && let Err(e) = std::fs::remove_dir_all(dir)
     {

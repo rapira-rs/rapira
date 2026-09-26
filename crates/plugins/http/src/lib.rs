@@ -1,10 +1,8 @@
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
-use rapira_sapi::middleware::Middleware;
 use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
 use rapira_sapi::work::Intake;
 
@@ -13,6 +11,7 @@ mod check;
 pub mod config;
 mod exchange;
 mod handler;
+pub mod middleware;
 pub mod multipart;
 mod php;
 mod request;
@@ -33,7 +32,8 @@ pub struct Config {
     pub write_timeout: Duration,
     pub drain_grace: Duration,
     pub keepalive_timeout: Duration,
-    pub middleware: Vec<Arc<dyn Middleware>>,
+    /// `[http].middleware` in config order, the first listed outermost.
+    pub middleware: Vec<middleware::Layer>,
     /// Multipart limits of a dispatcher pool. Each worker spools in its own dir under `dir`, which `serve` creates. None: the default limits.
     pub uploads: Option<multipart::Limits>,
     /// sendFile() containment root.

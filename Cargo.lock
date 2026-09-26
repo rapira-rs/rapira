@@ -618,6 +618,7 @@ dependencies = [
  "hyper",
  "pin-project-lite",
  "tokio",
+ "tower-service",
 ]
 
 [[package]]
@@ -942,6 +943,7 @@ dependencies = [
  "connectrpc-health",
  "connectrpc-reflection",
  "http",
+ "hyper",
  "rapira_config",
  "rapira_net",
  "rapira_php_build",
@@ -976,6 +978,7 @@ dependencies = [
  "tempfile",
  "tokio",
  "toml",
+ "tower",
  "tracing",
 ]
 
@@ -1019,7 +1022,6 @@ dependencies = [
  "bindgen",
  "bytes",
  "http",
- "http-body-util",
  "libc",
  "rapira_config",
  "rapira_net",
@@ -1047,10 +1049,10 @@ dependencies = [
  "http-body-util",
  "percent-encoding",
  "rapira_config",
- "rapira_sapi",
  "serde",
  "tempfile",
  "tokio",
+ "tower",
  "tower-http 0.7.1",
  "tracing",
 ]
@@ -1278,6 +1280,7 @@ dependencies = [
  "rapira_sapi",
  "serde_json",
  "tokio",
+ "tower",
  "tracing",
  "tracing-subscriber",
 ]

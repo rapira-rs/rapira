@@ -51,6 +51,7 @@ processes = 16               # defaults to the CPU count; max_children for dynam
 # reflection = false           # serve grpc.reflection.v1 and v1alpha
 # default_timeout_secs = 30    # deadline of a call without a client timeout; unset (the default) = no deadline
 # max_timeout_secs = 60        # upper limit for a client timeout; unset (the default) = no limit
+# interceptors = []            # applied in list order; no interceptor ships yet, so any name fails the boot
 
 # The worker pool behind the grpc listener. It takes the keys of [http.pool].
 # [grpc.pool]

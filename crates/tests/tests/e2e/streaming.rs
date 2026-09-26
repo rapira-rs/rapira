@@ -216,49 +216,42 @@ fn assert_completed_response_finalizes(path: &str, contents: &[u8]) {
 fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
     use std::net::TcpListener;
     use std::os::fd::BorrowedFd;
-    use std::sync::Arc;
 
     use http_body_util::BodyExt;
+    use rapira_http::middleware::{Layer, Response};
     use rapira_net::{ListenAddr, PrepareCtx};
     use rapira_sapi::Rapira;
-    use rapira_sapi::middleware::{BoxFuture, HttpRequest, HttpResponse, Middleware, Next};
     use rapira_sapi::plugin::{Mode, Plugin as _, run_plugin};
 
-    struct PrefixBody;
-
-    impl Middleware for PrefixBody {
-        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async move {
-                let (mut parts, body) = next.run(req).await.into_parts();
-                let Some(length) = parts
-                    .headers
-                    .get("content-length")
-                    .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
-                else {
-                    return HttpResponse::from_parts(parts, body);
-                };
-                parts
-                    .headers
-                    .insert("content-length", (length + 4).to_string().parse().unwrap());
-                let mut prefix = Some(b"pre:".to_vec());
-                let body = body
-                    .map_frame(move |frame| {
-                        frame.map_data(|data| {
-                            if data.is_empty() {
-                                return data;
-                            }
-                            if let Some(mut prefix) = prefix.take() {
-                                prefix.extend_from_slice(&data);
-                                prefix.into()
-                            } else {
-                                data
-                            }
-                        })
-                    })
-                    .boxed_unsync();
-                HttpResponse::from_parts(parts, body)
+    fn prefix_body(res: Response) -> Response {
+        let (mut parts, body) = res.into_parts();
+        let Some(length) = parts
+            .headers
+            .get("content-length")
+            .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
+        else {
+            return Response::from_parts(parts, body);
+        };
+        parts
+            .headers
+            .insert("content-length", (length + 4).to_string().parse().unwrap());
+        let mut prefix = Some(b"pre:".to_vec());
+        let body = body
+            .map_frame(move |frame| {
+                frame.map_data(|data| {
+                    if data.is_empty() {
+                        return data;
+                    }
+                    if let Some(mut prefix) = prefix.take() {
+                        prefix.extend_from_slice(&data);
+                        prefix.into()
+                    } else {
+                        data
+                    }
+                })
             })
-        }
+            .boxed_unsync();
+        Response::from_parts(parts, body)
     }
 
     let _php = tests::php_lock();
@@ -271,7 +264,7 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
     let mut server = rapira_http::Server::init(rapira_http::Config {
         listen: ListenAddr::Tcp(([127, 0, 0, 1], 0).into()),
         superglobals: false,
-        middleware: vec![Arc::new(PrefixBody)],
+        middleware: vec![Layer::new(tower::util::MapResponseLayer::new(prefix_body))],
         ..rapira_http::Config::default()
     });
     let mut prepared = PrepareCtx::new();
