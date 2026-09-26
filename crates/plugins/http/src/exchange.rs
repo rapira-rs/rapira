@@ -12,35 +12,41 @@ const FRAME_CAP: usize = 4;
 
 /// One HTTP request on the intake.
 pub struct Exchange {
-    req: Request,
-    tx: Sender<Frame>,
+    /// The request, the frame sender, and the CGI view when `new` built one.
+    ctx: Context,
 }
 
 impl Exchange {
     /// `rx` is the reply the transport reads. Stamps received_at when the transport left it None.
-    pub fn new(mut req: Request) -> (Self, mpsc::Receiver<Frame>) {
+    /// `superglobals` builds the CGI view here, on the transport thread: true in the classic and worker modes.
+    pub fn new(mut req: Request, superglobals: bool) -> (Self, mpsc::Receiver<Frame>) {
         req.received_at.get_or_insert_with(now_unix_f64);
         let (tx, rx) = mpsc::channel(FRAME_CAP);
-        (Self { req, tx }, rx)
+        let ctx = Context::new(req, tx, superglobals);
+        (Self { ctx }, rx)
     }
 
     pub fn request(&self) -> &Request {
-        &self.req
+        &self.ctx.req
     }
 
     /// The frame sender PHP writes the reply to.
     pub fn reply_sender(&self) -> Sender<Frame> {
-        self.tx.clone()
+        self.ctx
+            .sender
+            .clone()
+            .expect("a queued exchange holds its sender")
     }
 }
 
 impl Work for Exchange {
     fn cancelled(&self) -> bool {
-        self.tx.is_closed()
+        self.ctx.sender.as_ref().is_some_and(Sender::is_closed)
     }
 
     unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held {
-        let Self { req, tx } = *self;
+        let Context { req, sender, .. } = self.ctx;
+        let tx = sender.expect("a queued exchange holds its sender");
         let ptr = Box::into_raw(Box::new(ExchangeState::new(req, tx)));
         // SAFETY: the caller passes a live Rapira\Internal\Http\Exchange object.
         unsafe { (*exchange_from(obj)).job = ptr.cast() };
@@ -48,11 +54,11 @@ impl Work for Exchange {
     }
 
     fn into_cgi(self: Box<Self>) -> Option<Context> {
-        Some(Context::new(self.req, self.tx, true))
+        Some(self.ctx)
     }
 
     fn shed(self: Box<Self>) {
-        let mut ctx = Context::new(self.req, self.tx, false);
+        let mut ctx = self.ctx;
         send_error_head(&mut ctx, 503);
         ctx.finish(false);
     }

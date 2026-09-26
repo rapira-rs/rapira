@@ -16,7 +16,7 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch::{Sender, channel};
 
 use crate::bridge::ConnectionState;
-use crate::handler::{Conn, RapiraService, Shared, respond};
+use crate::handler::{Conn, Shared, respond};
 use crate::{Config, Exchange, multipart};
 
 /// Everything the accept loop hands to a connection, and the drain that follows it.
@@ -121,7 +121,6 @@ impl Serve for Serving {
 }
 
 /// Serves one connection under `graceful` on its own task and marks `closed_tx` closed when it ends.
-/// Without middleware, hyper serves [`RapiraService`]. With middleware, hyper serves the chain of the connection.
 pub(crate) fn spawn_connection<I>(
     builder: &http1::Builder,
     graceful: &GracefulShutdown,
@@ -131,15 +130,12 @@ pub(crate) fn spawn_connection<I>(
 ) where
     I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
 {
-    let Some(chain) = handler.chain() else {
-        let connection = builder.serve_connection(io, RapiraService { handler });
-        return spawn_watched(graceful.watch(connection), closed_tx);
-    };
+    let chain = handler.chain();
     // `BoxCloneService` polls and calls through `&mut`, so each request takes its own clone.
     let service = hyper::service::service_fn(move |req| {
         let handler = Arc::clone(&handler);
         let chain = chain.clone();
-        async move { Ok::<_, Infallible>(respond(handler, Some(chain), req).await) }
+        async move { Ok::<_, Infallible>(respond(handler, chain, req).await) }
     });
     spawn_watched(
         graceful.watch(builder.serve_connection(io, service)),

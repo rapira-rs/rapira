@@ -90,9 +90,9 @@ pub fn submit(h: &Sink, req: Request) -> Result<mpsc::Receiver<Frame>, Refused> 
     runtime().block_on(submit_async(h, req))
 }
 
-/// Submits `req` through the async intake of `h`.
+/// Submits `req` through the async intake of `h`. The exchange carries the CGI view in every mode: dispatcher mode drops it at attach.
 pub async fn submit_async(h: &Sink, req: Request) -> Result<mpsc::Receiver<Frame>, Refused> {
-    let (exchange, rx) = Exchange::new(req);
+    let (exchange, rx) = Exchange::new(req, true);
     Intake::new(h.clone()).submit(exchange).await?;
     Ok(rx)
 }

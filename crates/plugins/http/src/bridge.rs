@@ -526,7 +526,7 @@ mod tests {
     }
 
     impl Drain {
-        /// Records the watermark after the drain started, as `RapiraService::call` does for a bodiless reply.
+        /// Records the watermark after the drain started, as `respond` does for a bodiless reply.
         fn mark(&self, flush: u64) {
             let guard = self.guard.upgrade().expect("the drain must hold the guard");
             guard.end_flush.set(flush).unwrap();
