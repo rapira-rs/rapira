@@ -24,7 +24,7 @@ fn wire_worker() -> PathBuf {
 }
 
 /// The gRPC listener of `srv`.
-fn listen(srv: &Server) -> ListenAddr {
+pub(crate) fn listen(srv: &Server) -> ListenAddr {
     ListenAddr::Tcp(srv.grpc.expect("the config has a [grpc] pool"))
 }
 
@@ -59,7 +59,7 @@ pub(crate) fn calls(srv: &Server) -> Vec<Value> {
 }
 
 /// The `remote` that PHP reports for a client at `peer`. `Conn::open` connects from an unnamed unix socket, which PHP reports as `unix:NULL`.
-fn logged_remote(peer: &Addr) -> String {
+pub(crate) fn logged_remote(peer: &Addr) -> String {
     match peer {
         Addr::Inet(addr) => addr.to_string(),
         Addr::Unix(_) => "unix:NULL".to_owned(),
