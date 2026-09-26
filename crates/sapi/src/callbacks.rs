@@ -18,7 +18,7 @@ use std::ptr::null_mut;
 // recycled worker instead of a process abort. The build enforces the strategy.
 // https://doc.rust-lang.org/reference/conditional-compilation.html#panic
 #[cfg(panic = "abort")]
-compile_error!("php_sys needs panic = \"unwind\": callbacks::guard relies on catch_unwind");
+compile_error!("rapira_sapi needs panic = \"unwind\": callbacks::guard relies on catch_unwind");
 
 pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     catch_unwind(AssertUnwindSafe(f)).unwrap_or_else(|_| {

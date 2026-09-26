@@ -1,11 +1,11 @@
 # Contributing to Rapira
 
-This repository contains the server: the SAPI core (`crates/php_sys`), the extension runtime, the pre-fork master and the `rapira` binary. The documentation site is a separate repository, [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io) - docs changes go there (see [contributing to the docs](https://rapira.rs/docs/contributing)).
+This repository contains the server: the SAPI core (`crates/sapi`), the extension runtime, the pre-fork master and the `rapira` binary. The documentation site is a separate repository, [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io) - docs changes go there (see [contributing to the docs](https://rapira.rs/docs/contributing)).
 
 ## Prerequisites
 
 - Rust stable - `rust-toolchain.toml` selects the exact channel for you
-- A C compiler (the build compiles `crates/php_sys/*.c` against the PHP headers)
+- A C compiler (the build compiles `crates/sapi/*.c` against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
 - PHP 8.4 or 8.5, **NTS**, built with the embed SAPI (`--enable-embed=shared`). ZTS builds are rejected at compile time.
 
@@ -35,7 +35,7 @@ make test   # runs test_nts, then test_e2e - sequentially on purpose
 - `make test_nts` - the in-process unit and integration suites (`cargo test --workspace`; the e2e suite is feature-gated off here).
 - `make test_e2e` - the spawn-the-binary end-to-end suite (`crates/tests`, `--features e2e`): forks workers, binds ports, drives real HTTP, asserts signal/reload/scaling behavior. Single-threaded on purpose; never run it concurrently with `test_nts`.
 - `make coverage` - needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
-- `make stubs` - maintainers only: regenerates each `crates/php_sys/*_arginfo.h` header from its `crates/php_sys/*.stub.php` stub with PHP's `gen_stub.php`. Never edit the generated headers by hand.
+- `make stubs` - maintainers only: regenerates each `crates/sapi/*_arginfo.h` header from its `crates/sapi/*.stub.php` stub with PHP's `gen_stub.php`. Never edit the generated headers by hand.
 
 Test placement: unit tests live inside their crate; integration tests, their harness (`crates/tests/src/`) and their fixtures (`crates/tests/fixtures/`) in `crates/tests`; end-to-end tests under `crates/tests/tests/e2e/` behind the `e2e` feature.
 
@@ -47,14 +47,14 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p tests --features e2e --tests -- -D warnings
 ```
 
-C sources (`crates/php_sys/*.c`, `*.h`) follow `.clang-format`.
+C sources (`crates/sapi/*.c`, `*.h`) follow `.clang-format`.
 
 ## Repository layout
 
 | Path                   | What it is                                                                          |
 | ---------------------- | ----------------------------------------------------------------------------------- |
 | `src/`                 | the `rapira` binary: CLI and boot                                                   |
-| `crates/php_sys`       | the SAPI: C glue, bindgen bindings, worker/classic request loops, `rapira.stub.php` |
+| `crates/sapi`          | the SAPI: C glue, bindgen bindings, worker/classic request loops, `rapira.stub.php` |
 | `crates/runtime`       | the extension runtime that drives PHP                                               |
 | `crates/master`        | the pre-fork supervisor: forking, reaping, scaling, signals, reload                 |
 | `crates/config`        | `rapira.toml` configuration                                                         |

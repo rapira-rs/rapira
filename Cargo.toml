@@ -25,7 +25,7 @@ members = [
     "crates/tests",
     "crates/master",
     "crates/middleware/static_files",
-    "crates/php_sys",
+    "crates/sapi",
     "crates/scoreboard",
     "crates/net",
     "crates/plugins/http",
@@ -36,7 +36,7 @@ members = [
 anyhow = "1"
 base64 = "0.22"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
-php_sys = { path = "crates/php_sys" }
+rapira_sapi = { path = "crates/sapi" }
 rapira_runtime = { path = "crates/runtime" }
 rapira_config = { path = "crates/config" }
 extension_api = { path = "crates/api" }
@@ -73,7 +73,7 @@ clap = { version = "4", features = ["derive"] }
 extension_api = { workspace = true }
 rapira_master = { workspace = true }
 rapira_runtime = { workspace = true }
-php_sys = { workspace = true }
+rapira_sapi = { workspace = true }
 rapira_config = { workspace = true }
 rapira_static_files = { workspace = true }
 rapira_http = { workspace = true }

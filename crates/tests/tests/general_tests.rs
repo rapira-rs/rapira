@@ -1,4 +1,4 @@
-use php_sys::{Mode, Rapira, Request};
+use rapira_sapi::{Mode, Rapira, Request};
 use tests::{
     captured, drain, drain_resp, fixture, init_log_capture, php_lock, req, wait_app_record,
 };
@@ -8,7 +8,7 @@ fn post(fixture_name: &str, body: Vec<u8>) -> Request {
     r.method = "POST".into();
     r.content_type = Some("text/plain".into());
     r.content_length = body.len() as i64;
-    r.body = php_sys::types::Body::Raw(std::io::Cursor::new(body));
+    r.body = rapira_sapi::types::Body::Raw(std::io::Cursor::new(body));
     r
 }
 
@@ -51,7 +51,7 @@ fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     let r = Rapira::start(Mode::Worker(fixture("general_tests/resources-worker.php")))?;
     let h = r.handle();
 
-    let send = |h: &php_sys::RapiraHandle| -> anyhow::Result<i64> {
+    let send = |h: &rapira_sapi::RapiraHandle| -> anyhow::Result<i64> {
         let (_, b) = drain(tests::submit(
             h,
             post("general_tests/resources-worker.php", b"x=1".to_vec()),

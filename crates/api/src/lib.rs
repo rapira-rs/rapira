@@ -4,12 +4,11 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 mod middleware;
-mod prepare;
 pub use middleware::{
     Body, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer,
     Protocol, empty_body,
 };
-pub use prepare::{ListenAddr, PrepareCtx, PreparedListener};
+pub use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
 
 pub type Result<T = (), E = anyhow::Error> = std::result::Result<T, E>;
 
@@ -171,7 +170,7 @@ pub struct UnaryCall {
     /// `package.Service/Method`, without a leading slash.
     pub method: String,
     pub protocol: RpcProtocol,
-    /// The request headers as received. php_sys drops the transport names and decodes `-bin` values when it builds `Context::$metadata`.
+    /// The request headers as received. rapira_sapi drops the transport names and decodes `-bin` values when it builds `Context::$metadata`.
     pub metadata: http::HeaderMap,
     /// Unix seconds.
     pub deadline: Option<f64>,

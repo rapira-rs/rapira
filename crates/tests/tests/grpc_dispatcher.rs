@@ -1,7 +1,7 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use php_sys::types::Addr;
-use php_sys::{GrpcOutcome, GrpcProtocol, GrpcStatus, Mode, Rapira};
+use rapira_sapi::types::Addr;
+use rapira_sapi::{GrpcOutcome, GrpcProtocol, GrpcStatus, Mode, Rapira};
 use serde_json::{Value, json};
 use tests::{
     Fields, app_results, assert_case_records, call, captured, dispatcher_record, echo_services,

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use php_sys::{Mode, Rapira};
+use rapira_sapi::{Mode, Rapira};
 use tests::{drain, fixture, php_lock_with_ini, req};
 
 /// Teardown must close observer frames the save-handler bailout longjmp skipped, or the cycle-end walk hits freed VM-stack slots.

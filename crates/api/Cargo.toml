@@ -14,9 +14,7 @@ anyhow = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
-# Master-side pre-fork socket binding (sync syscalls; keeps this crate tokio-free).
-socket2 = "0.6"
+rapira_net = { workspace = true }
 
 [dev-dependencies]
-libc = { workspace = true }
 tokio = { workspace = true, features = ["rt", "macros"] }

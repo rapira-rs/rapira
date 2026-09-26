@@ -362,8 +362,7 @@ dependencies = [
  "bytes",
  "http",
  "http-body-util",
- "libc",
- "socket2",
+ "rapira_net",
  "tokio",
 ]
 
@@ -847,21 +846,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "php_sys"
-version = "0.8.1"
-dependencies = [
- "anyhow",
- "base64",
- "bindgen",
- "bytes",
- "cc",
- "http",
- "rapira_scoreboard",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -945,12 +929,12 @@ dependencies = [
  "extension_api",
  "libc",
  "mimalloc",
- "php_sys",
  "rapira_config",
  "rapira_grpc",
  "rapira_http",
  "rapira_master",
  "rapira_runtime",
+ "rapira_sapi",
  "rapira_static_files",
  "serde_json",
  "tracing",
@@ -1010,8 +994,8 @@ name = "rapira_net"
 version = "0.8.1"
 dependencies = [
  "anyhow",
- "extension_api",
  "libc",
+ "socket2",
  "tempfile",
  "tokio",
  "tracing",
@@ -1027,8 +1011,23 @@ dependencies = [
  "httparse",
  "libc",
  "memchr",
- "php_sys",
+ "rapira_sapi",
  "tempfile",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rapira_sapi"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "base64",
+ "bindgen",
+ "bytes",
+ "cc",
+ "http",
+ "rapira_scoreboard",
  "tokio",
  "tracing",
 ]
@@ -1274,10 +1273,10 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
- "php_sys",
  "rapira_grpc",
  "rapira_http",
  "rapira_runtime",
+ "rapira_sapi",
  "serde_json",
  "tokio",
  "tracing",

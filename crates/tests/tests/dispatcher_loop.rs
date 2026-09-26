@@ -1,5 +1,5 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
-use php_sys::{Frame, Mode, Rapira};
+use rapira_sapi::{Frame, Mode, Rapira};
 use std::io::Cursor;
 use tests::{
     captured, drain, drain_resp, fixture, init_log_capture, php_lock, req, wait_app_record,
@@ -41,7 +41,7 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     );
 
     let mut rq2 = req("/second", "dispatcher/echo-loop-worker.php");
-    rq2.body = php_sys::types::Body::Raw(Cursor::new(b"two".to_vec()));
+    rq2.body = rapira_sapi::types::Body::Raw(Cursor::new(b"two".to_vec()));
     rq2.content_length = 3;
     let resp = drain_resp(tests::submit(&h, rq2)?);
     assert_eq!(resp.header("x-rapira-target").as_deref(), Some("/second"));
@@ -427,14 +427,14 @@ fn abandoned_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
     let spool = std::env::temp_dir().join(format!("rapira-test-abandon-{}", std::process::id()));
     std::fs::write(&spool, b"PAYLOAD")?;
     let mut rq = req("/?probe=abandon", "dispatcher/verbs-worker.php");
-    rq.body = php_sys::types::Body::Multipart(php_sys::types::MultipartBody {
+    rq.body = rapira_sapi::types::Body::Multipart(rapira_sapi::types::MultipartBody {
         fields: vec![],
-        files: vec![php_sys::types::UploadedFile {
+        files: vec![rapira_sapi::types::UploadedFile {
             name: b"f".to_vec(),
             client_filename: b"a.bin".to_vec(),
             client_media_type: None,
             headers: vec![],
-            file: php_sys::types::SpooledFile {
+            file: rapira_sapi::types::SpooledFile {
                 path: spool.clone(),
             },
             size: 7,
@@ -535,7 +535,7 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
     .collect();
     rq.authority = Some(b"example.test".to_vec());
     rq.target = Some(b"/path%2Fa?x=1\xe9".to_vec());
-    rq.body = php_sys::types::Body::Raw(Cursor::new(b"hello".to_vec()));
+    rq.body = rapira_sapi::types::Body::Raw(Cursor::new(b"hello".to_vec()));
     rq.content_length = 5;
     let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(status, 200);
@@ -621,8 +621,8 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
     let h = r.handle();
 
     let mut rq = req("/", "dispatcher/request-worker.php");
-    rq.remote = php_sys::types::Addr::Unix(None);
-    rq.server = php_sys::types::Addr::Unix(Some("/run/rapira.sock".into()));
+    rq.remote = rapira_sapi::types::Addr::Unix(None);
+    rq.server = rapira_sapi::types::Addr::Unix(Some("/run/rapira.sock".into()));
     let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(status, 200);
     for line in [
@@ -681,12 +681,12 @@ fn tls_view_reaches_php() -> anyhow::Result<()> {
     let h = r.handle();
 
     let mut rq = req("/", "dispatcher/request-worker.php");
-    rq.tls = Some(php_sys::types::TlsView {
+    rq.tls = Some(rapira_sapi::types::TlsView {
         version: "TLSv1.3".into(),
         cipher: "TLS_AES_256_GCM_SHA384".into(),
         alpn: Some("h2".into()),
         server_name: Some("sni.example".into()),
-        cert: Some(php_sys::types::ClientCertView {
+        cert: Some(rapira_sapi::types::ClientCertView {
             serial: "0AB1".into(),
             organization: None,
             fingerprint: "abcd".into(),
@@ -700,7 +700,7 @@ fn tls_view_reaches_php() -> anyhow::Result<()> {
     );
 
     let mut rq = req("/", "dispatcher/request-worker.php");
-    rq.tls = Some(php_sys::types::TlsView {
+    rq.tls = Some(rapira_sapi::types::TlsView {
         version: "TLSv1.2".into(),
         cipher: "X".into(),
         alpn: None,
@@ -730,8 +730,8 @@ fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
     std::fs::write(&spool, b"PAYLOAD")?;
 
     let mut rq = req("/", "dispatcher/multipart-worker.php");
-    rq.body = php_sys::types::Body::Multipart(php_sys::types::MultipartBody {
-        fields: vec![php_sys::types::FormField {
+    rq.body = rapira_sapi::types::Body::Multipart(rapira_sapi::types::MultipartBody {
+        fields: vec![rapira_sapi::types::FormField {
             name: b"note".to_vec(),
             value: b"hello".to_vec(),
             headers: vec![(
@@ -739,7 +739,7 @@ fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
                 b"form-data; name=\"note\"".to_vec(),
             )],
         }],
-        files: vec![php_sys::types::UploadedFile {
+        files: vec![rapira_sapi::types::UploadedFile {
             name: b"f".to_vec(),
             client_filename: b"a.bin".to_vec(),
             client_media_type: Some(b"application/octet-stream".to_vec()),
@@ -747,7 +747,7 @@ fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
                 "content-disposition".into(),
                 b"form-data; name=\"f\"; filename=\"a.bin\"".to_vec(),
             )],
-            file: php_sys::types::SpooledFile {
+            file: rapira_sapi::types::SpooledFile {
                 path: spool.clone(),
             },
             size: 7,
@@ -789,24 +789,24 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     std::fs::write(&spool_b, b"BBBBB")?;
 
     let file = |name: &[u8], filename: &[u8], path: &std::path::Path, size: u64| {
-        php_sys::types::UploadedFile {
+        rapira_sapi::types::UploadedFile {
             name: name.to_vec(),
             client_filename: filename.to_vec(),
             client_media_type: None,
             headers: vec![],
-            file: php_sys::types::SpooledFile {
+            file: rapira_sapi::types::SpooledFile {
                 path: path.to_path_buf(),
             },
             size,
         }
     };
-    let field = |name: &[u8], value: &[u8]| php_sys::types::FormField {
+    let field = |name: &[u8], value: &[u8]| rapira_sapi::types::FormField {
         name: name.to_vec(),
         value: value.to_vec(),
         headers: vec![("content-disposition".into(), b"form-data".to_vec())],
     };
     let mut rq = req("/", "dispatcher/multipart-worker.php");
-    rq.body = php_sys::types::Body::Multipart(php_sys::types::MultipartBody {
+    rq.body = rapira_sapi::types::Body::Multipart(rapira_sapi::types::MultipartBody {
         fields: vec![field(b"one", b"1"), field(b"two", b"22")],
         files: vec![
             file(b"fa", b"a.bin", &spool_a, 3),
@@ -845,7 +845,7 @@ fn stream_probe(
     query: &str,
 ) -> anyhow::Result<(
     Rapira,
-    php_sys::RapiraHandle,
+    rapira_sapi::RapiraHandle,
     tokio::sync::mpsc::Receiver<Frame>,
 )> {
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
@@ -1013,13 +1013,13 @@ fn declared_content_length_rides_the_head_frame() -> anyhow::Result<()> {
 
 /// Write a temp payload and point the sendfile root at the temp dir.
 fn sendfile_setup(name: &str) -> std::path::PathBuf {
-    php_sys::set_sendfile_root(std::env::temp_dir());
+    rapira_sapi::set_sendfile_root(std::env::temp_dir());
     let path = std::env::temp_dir().join(format!("rapira-test-{name}-{}", std::process::id()));
     std::fs::write(&path, b"abcdefghijklmnopqrstuvwxyz").expect("write payload");
     path
 }
 
-fn with_path_header(query: &str, path: &std::path::Path) -> php_sys::Request {
+fn with_path_header(query: &str, path: &std::path::Path) -> rapira_sapi::Request {
     let mut rq = req(query, "dispatcher/stream-worker.php");
     rq.headers.append(
         "x-path",
@@ -1075,7 +1075,7 @@ fn sendfile_slice_serves_the_named_bytes() -> anyhow::Result<()> {
 #[test]
 fn sendfile_missing_file_still_answers_404() -> anyhow::Result<()> {
     let _guard = php_lock();
-    php_sys::set_sendfile_root(std::env::temp_dir());
+    rapira_sapi::set_sendfile_root(std::env::temp_dir());
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
     let h = r.handle();
     let resp = drain_resp(tests::submit(
@@ -1094,7 +1094,7 @@ fn sendfile_missing_file_still_answers_404() -> anyhow::Result<()> {
 #[test]
 fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
     let _guard = php_lock();
-    php_sys::set_sendfile_root(std::env::temp_dir());
+    rapira_sapi::set_sendfile_root(std::env::temp_dir());
     let r = Rapira::start(Mode::Dispatcher(fixture("dispatcher/stream-worker.php")))?;
     let h = r.handle();
     let resp = drain_resp(tests::submit(

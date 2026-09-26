@@ -5,7 +5,7 @@ use std::path::PathBuf;
 
 use extension_api::Rejected;
 use memchr::memmem;
-use php_sys::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
+use rapira_sapi::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
 
 #[derive(Debug, Clone)]
 pub struct Limits {

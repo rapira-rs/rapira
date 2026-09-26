@@ -2,7 +2,6 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use extension_api::{ListenAddr, PreparedListener};
 #[cfg(not(target_os = "linux"))]
 use tokio::net::{TcpListener, UnixListener};
 use tokio::runtime::{Builder, Runtime};
@@ -11,6 +10,9 @@ use tokio::sync::watch;
 
 #[cfg(target_os = "linux")]
 mod accept_linux;
+
+pub mod listen;
+pub use listen::{ListenAddr, PrepareCtx, PreparedListener};
 
 #[cfg(target_os = "linux")]
 use accept_linux::{TcpListener, UnixListener};

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use php_sys::{Mode, Rapira};
+use rapira_sapi::{Mode, Rapira};
 use tests::{drain, php_lock, req, set_phprc};
 
 /// Pins that a start after a module-startup failure still runs a full module startup, not the early-return path.

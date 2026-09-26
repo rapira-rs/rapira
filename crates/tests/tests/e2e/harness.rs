@@ -671,7 +671,7 @@ pub fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// `extension_dir` of the linked PHP, from the same `php-config` the build script uses (crates/php_sys/build.rs).
+/// `extension_dir` of the linked PHP, from the same `php-config` the build script uses (crates/sapi/build.rs).
 fn php_extension_dir() -> Option<PathBuf> {
     let bin = std::env::var("PHP_CONFIG").unwrap_or_else(|_| "php-config".into());
     let out = Command::new(bin).arg("--extension-dir").output().ok()?;

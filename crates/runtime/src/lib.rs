@@ -1,6 +1,6 @@
 use extension_api::{Extension, Php, PrepareCtx};
 use http::header::CONTENT_TYPE;
-use php_sys::RapiraHandle;
+use rapira_sapi::RapiraHandle;
 use std::future::Future;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -133,20 +133,20 @@ struct RapiraBackend {
     uploads: Arc<multipart::Limits>,
 }
 
-fn map_addr(a: extension_api::Addr) -> php_sys::types::Addr {
+fn map_addr(a: extension_api::Addr) -> rapira_sapi::types::Addr {
     match a {
-        extension_api::Addr::Inet(sa) => php_sys::types::Addr::Inet(sa),
-        extension_api::Addr::Unix(p) => php_sys::types::Addr::Unix(p),
+        extension_api::Addr::Inet(sa) => rapira_sapi::types::Addr::Inet(sa),
+        extension_api::Addr::Unix(p) => rapira_sapi::types::Addr::Unix(p),
     }
 }
 
-fn map_tls(t: extension_api::Tls) -> php_sys::types::TlsView {
-    php_sys::types::TlsView {
+fn map_tls(t: extension_api::Tls) -> rapira_sapi::types::TlsView {
+    rapira_sapi::types::TlsView {
         version: t.version,
         cipher: t.cipher,
         alpn: t.alpn,
         server_name: t.server_name,
-        cert: t.cert.map(|c| php_sys::types::ClientCertView {
+        cert: t.cert.map(|c| rapira_sapi::types::ClientCertView {
             serial: c.serial,
             organization: c.organization,
             fingerprint: c.fingerprint,
@@ -155,11 +155,11 @@ fn map_tls(t: extension_api::Tls) -> php_sys::types::TlsView {
 }
 
 /// A refusal before dispatch: PHP never saw the work.
-fn refused(e: php_sys::HandleError) -> anyhow::Error {
+fn refused(e: rapira_sapi::HandleError) -> anyhow::Error {
     anyhow::Error::new(extension_api::Rejected {
         status: match e {
-            php_sys::HandleError::Saturated => 503,
-            php_sys::HandleError::Stopped => 500,
+            rapira_sapi::HandleError::Saturated => 503,
+            rapira_sapi::HandleError::Stopped => 500,
         },
         reason: e.to_string(),
     })
@@ -174,7 +174,7 @@ fn parse_err(e: multipart::ParseError) -> anyhow::Error {
 
 impl RapiraBackend {
     fn new(rapira: RapiraHandle, filename: &Path, opts: RuntimeOptions) -> Self {
-        php_sys::set_script(filename);
+        rapira_sapi::set_script(filename);
         Self {
             rapira,
             uploads: opts.uploads,
@@ -185,7 +185,7 @@ impl RapiraBackend {
     async fn to_request(
         &self,
         mut req: extension_api::Request,
-    ) -> anyhow::Result<php_sys::Request> {
+    ) -> anyhow::Result<rapira_sapi::Request> {
         let content_type = req.headers.get(CONTENT_TYPE).map(|v| v.as_bytes().to_vec());
         let content_length = req.body.len() as i64;
 
@@ -215,12 +215,12 @@ impl RapiraBackend {
                 tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
                     .await
                     .map_err(|e| anyhow::anyhow!("multipart parse task failed: {e}"))?;
-            php_sys::types::Body::Multipart(parsed.map_err(parse_err)?)
+            rapira_sapi::types::Body::Multipart(parsed.map_err(parse_err)?)
         } else {
-            php_sys::types::Body::Raw(Cursor::new(std::mem::take(&mut req.body)))
+            rapira_sapi::types::Body::Raw(Cursor::new(std::mem::take(&mut req.body)))
         };
 
-        Ok(php_sys::Request {
+        Ok(rapira_sapi::Request {
             method: req.method,
             https: req.https,
             protocol: req.protocol,
@@ -266,12 +266,12 @@ impl extension_api::Backend for RapiraBackend {
         >,
     > {
         Box::pin(async move {
-            let req = php_sys::GrpcRequest {
+            let req = rapira_sapi::GrpcRequest {
                 method: call.method,
                 protocol: match call.protocol {
-                    extension_api::RpcProtocol::Grpc => php_sys::GrpcProtocol::Grpc,
-                    extension_api::RpcProtocol::GrpcWeb => php_sys::GrpcProtocol::GrpcWeb,
-                    extension_api::RpcProtocol::Connect => php_sys::GrpcProtocol::Connect,
+                    extension_api::RpcProtocol::Grpc => rapira_sapi::GrpcProtocol::Grpc,
+                    extension_api::RpcProtocol::GrpcWeb => rapira_sapi::GrpcProtocol::GrpcWeb,
+                    extension_api::RpcProtocol::Connect => rapira_sapi::GrpcProtocol::Connect,
                 },
                 metadata: call.metadata,
                 deadline: call.deadline,
@@ -293,7 +293,7 @@ impl extension_api::Backend for RapiraBackend {
     }
 }
 
-struct FrameSource(tokio::sync::mpsc::Receiver<php_sys::Frame>);
+struct FrameSource(tokio::sync::mpsc::Receiver<rapira_sapi::Frame>);
 
 impl extension_api::ReplySource for FrameSource {
     fn poll_next(
@@ -302,11 +302,11 @@ impl extension_api::ReplySource for FrameSource {
     ) -> std::task::Poll<Option<extension_api::ReplyEvent>> {
         self.0.poll_recv(cx).map(|opt| {
             opt.map(|frame| match frame {
-                php_sys::Frame::Interim(h) => extension_api::ReplyEvent::Interim {
+                rapira_sapi::Frame::Interim(h) => extension_api::ReplyEvent::Interim {
                     status: h.status,
                     headers: h.headers,
                 },
-                php_sys::Frame::Head {
+                rapira_sapi::Frame::Head {
                     head,
                     content_length,
                     bodiless,
@@ -316,11 +316,11 @@ impl extension_api::ReplySource for FrameSource {
                     content_length,
                     bodiless,
                 },
-                php_sys::Frame::Chunk(b) => extension_api::ReplyEvent::Chunk(b),
-                php_sys::Frame::File { file, offset, len } => {
+                rapira_sapi::Frame::Chunk(b) => extension_api::ReplyEvent::Chunk(b),
+                rapira_sapi::Frame::File { file, offset, len } => {
                     extension_api::ReplyEvent::File { file, offset, len }
                 }
-                php_sys::Frame::End {
+                rapira_sapi::Frame::End {
                     trailers,
                     truncated,
                 } => extension_api::ReplyEvent::End {

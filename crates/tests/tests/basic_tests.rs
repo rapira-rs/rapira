@@ -1,5 +1,5 @@
 use http::header::{AUTHORIZATION, HeaderValue};
-use php_sys::{Mode, Rapira};
+use rapira_sapi::{Mode, Rapira};
 use tests::{captured, drain, fixture, init_log_capture, php_lock, req};
 
 #[test]
@@ -151,16 +151,16 @@ fn server_variables() -> anyhow::Result<()> {
     let _guard = php_lock();
 
     let r: Rapira = Rapira::start(Mode::Worker(fixture("shared/server-variables.php")))?;
-    let h: php_sys::RapiraHandle = r.handle();
+    let h: rapira_sapi::RapiraHandle = r.handle();
 
-    let mut request: php_sys::Request = req(
+    let mut request: rapira_sapi::Request = req(
         "/server-variables.php?foo=a&bar=b",
         "shared/server-variables.php",
     );
     request.method = "POST".into();
     request.content_type = Some("text/plain".into());
     request.content_length = 3;
-    request.body = php_sys::types::Body::Raw(std::io::Cursor::new(b"foo".to_vec()));
+    request.body = rapira_sapi::types::Body::Raw(std::io::Cursor::new(b"foo".to_vec()));
     request.headers.append(
         AUTHORIZATION,
         HeaderValue::from_static("Basic dmFsZXJ5OnBhc3N3b3Jk"),

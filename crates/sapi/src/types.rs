@@ -230,7 +230,7 @@ pub(crate) struct GrpcJob {
     pub(crate) reply: tokio::sync::oneshot::Sender<GrpcOutcome>,
 }
 
-/// Mirror of `extension_api::Addr`: php_sys does not depend on extension_api, the runtime maps between them.
+/// Mirror of `extension_api::Addr`: rapira_sapi does not depend on extension_api, the runtime maps between them.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Addr {
     Inet(std::net::SocketAddr),

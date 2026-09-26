@@ -20,5 +20,5 @@ Checks: >
   -misc-include-cleaner,
   -misc-use-internal-linkage
 WarningsAsErrors: 'bugprone-*,cert-*,clang-analyzer-*,concurrency-*'
-HeaderFilterRegex: 'crates/php_sys/.*\.h$'
+HeaderFilterRegex: 'crates/sapi/.*\.h$'
 FormatStyle: file
