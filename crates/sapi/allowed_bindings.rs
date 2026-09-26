@@ -39,6 +39,8 @@ bind! {
     rapira_array_init,
     // zend_symtable_str_find is inline -> rapira_symtable_str_find shim in wrapper.c
     rapira_symtable_str_find,
+    // zend_array_is_list is inline -> rapira_array_is_list shim in wrapper.c
+    rapira_array_is_list,
     // ZVAL_OBJ_COPY is a macro -> rapira_zval_enum_case shim in wrapper.c
     rapira_zval_enum_case,
     // zend_hash_str_find_ptr is inline; prop_offset (zend.rs) calls its exported half

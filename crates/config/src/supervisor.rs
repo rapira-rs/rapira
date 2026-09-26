@@ -1,9 +1,8 @@
-use anyhow::bail;
 use serde::Deserialize;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::{ConfigCtx, capped_timeout};
+use crate::{ConfigCtx, nonzero_timeout};
 
 #[derive(Debug)]
 pub struct SupervisorSettings {
@@ -39,16 +38,11 @@ pub fn resolve_supervisor(
         .map(|p| ctx.resolve_path(p))
         .transpose()?;
 
-    let control_secs = section.process_control_timeout_secs.unwrap_or(30);
-    if control_secs == 0 {
-        bail!("supervisor.process_control_timeout_secs must be at least 1");
-    }
-
     Ok(SupervisorSettings {
-        process_control_timeout: capped_timeout(
+        process_control_timeout: nonzero_timeout(
             "supervisor",
             "process_control_timeout_secs",
-            control_secs,
+            section.process_control_timeout_secs.unwrap_or(30),
         )?,
         pidfile,
     })

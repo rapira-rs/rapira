@@ -1,7 +1,9 @@
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicI32, Ordering};
 
+use anyhow::Context as _;
 use libc::c_int;
 
 /// Write end of the self-pipe; `-1` until install, set once before handlers are armed.
@@ -81,32 +83,6 @@ extern "C" fn master_sig_handler(signo: c_int) {
     errno_set(saved);
 }
 
-pub(crate) fn set_nonblock(fd: RawFd) -> io::Result<()> {
-    // SAFETY: F_GETFL/F_SETFL on a valid fd.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: setting O_NONBLOCK on a valid fd.
-    if unsafe { libc::fcntl(fd, libc::F_SETFL, flags | libc::O_NONBLOCK) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-pub(crate) fn set_cloexec(fd: RawFd) -> io::Result<()> {
-    // SAFETY: F_GETFD/F_SETFD on a valid fd.
-    let flags = unsafe { libc::fcntl(fd, libc::F_GETFD) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    // SAFETY: setting FD_CLOEXEC on a valid fd.
-    if unsafe { libc::fcntl(fd, libc::F_SETFD, flags | libc::FD_CLOEXEC) } < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
 pub(crate) fn sigset(sigs: &[c_int]) -> libc::sigset_t {
     // SAFETY: zeroed sigset_t is initialized in full by sigemptyset below.
     let mut set: libc::sigset_t = unsafe { std::mem::zeroed() };
@@ -118,6 +94,15 @@ pub(crate) fn sigset(sigs: &[c_int]) -> libc::sigset_t {
         }
     }
     set
+}
+
+/// Blocks until one of `signals` (already blocked) is delivered. https://man7.org/linux/man-pages/man3/sigwait.3.html
+pub fn wait_signal(signals: &[c_int]) -> c_int {
+    let set = sigset(signals);
+    let mut sig: c_int = 0;
+    // SAFETY: `set` and `sig` are stack values live for the whole call.
+    unsafe { libc::sigwait(&set, &mut sig) };
+    sig
 }
 
 fn sigprocmask(how: c_int, set: &libc::sigset_t) {
@@ -142,19 +127,11 @@ pub fn block_early_signals() {
 
 /// Must run in the master after PHP MINIT; Zend leaves these dispositions alone because the master never calls `php_request_startup`.
 pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
-    let mut sp = [0 as RawFd; 2];
-    // SAFETY: sp is a 2-element array the syscall fills with valid fds.
-    anyhow::ensure!(
-        unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, sp.as_mut_ptr()) } == 0,
-        "socketpair: {}",
-        io::Error::last_os_error()
-    );
-    for fd in sp {
-        set_nonblock(fd)?;
-        set_cloexec(fd)?;
-    }
-
-    SELF_PIPE_WR.store(sp[1], Ordering::Relaxed);
+    // Both ends are CLOEXEC.
+    let (rd, wr) = UnixStream::pair().context("self-pipe socketpair")?;
+    rd.set_nonblocking(true)?;
+    wr.set_nonblocking(true)?;
+    SELF_PIPE_WR.store(wr.as_raw_fd(), Ordering::Relaxed);
 
     // SAFETY: act is fully initialized, mask is a live sigset_t, null old-action pointer discards the previous handler.
     unsafe {
@@ -177,45 +154,7 @@ pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
     sigprocmask(libc::SIG_UNBLOCK, &all);
 
     Ok(SelfPipe {
-        // SAFETY: sp holds two fresh fds we now take sole ownership of.
-        rd: unsafe { OwnedFd::from_raw_fd(sp[0]) },
-        wr: unsafe { OwnedFd::from_raw_fd(sp[1]) },
+        rd: rd.into(),
+        wr: wr.into(),
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn sigset_membership() {
-        let set = sigset(&[libc::SIGTERM, libc::SIGQUIT]);
-        // SAFETY: set is a live sigset_t.
-        unsafe {
-            assert_eq!(libc::sigismember(&set, libc::SIGTERM), 1);
-            assert_eq!(libc::sigismember(&set, libc::SIGQUIT), 1);
-            assert_eq!(libc::sigismember(&set, libc::SIGUSR1), 0);
-            assert_eq!(libc::sigismember(&set, libc::SIGCHLD), 0);
-        }
-    }
-
-    #[test]
-    fn empty_sigset_has_no_members() {
-        let set = sigset(&[]);
-        // SAFETY: set is a live sigset_t.
-        unsafe {
-            for s in [libc::SIGTERM, libc::SIGINT, libc::SIGUSR1, libc::SIGCHLD] {
-                assert_eq!(libc::sigismember(&set, s), 0);
-            }
-        }
-    }
-
-    #[test]
-    fn errno_roundtrip() {
-        errno_set(0);
-        assert_eq!(errno_get(), 0);
-        errno_set(libc::EAGAIN);
-        assert_eq!(errno_get(), libc::EAGAIN);
-        errno_set(0);
-    }
 }

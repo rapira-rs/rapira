@@ -286,14 +286,14 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         };
         let put = |name: &CStr, val: &str| put_bytes(name, val.as_bytes());
         let script = crate::context::script();
-        put(c"PHP_SELF", script.script_name);
+        put(c"PHP_SELF", &script.script_name);
         let (doc_uri, query) = ctx
             .req
             .uri
             .split_once('?')
             .unwrap_or((ctx.req.uri.as_str(), ""));
         put(c"DOCUMENT_URI", doc_uri);
-        put(c"DOCUMENT_ROOT", script.document_root);
+        put(c"DOCUMENT_ROOT", &script.document_root);
         put(
             c"REQUEST_SCHEME",
             if ctx.req.https { "https" } else { "http" },
@@ -308,7 +308,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put(c"REQUEST_URI", &ctx.req.uri);
         put(c"QUERY_STRING", query);
         put_bytes(c"SCRIPT_FILENAME", reqc.script.to_bytes());
-        put(c"SCRIPT_NAME", script.script_name);
+        put(c"SCRIPT_NAME", &script.script_name);
         put(c"SERVER_PROTOCOL", &ctx.req.protocol);
         put(c"SERVER_SOFTWARE", "Rapira");
         put(c"SERVER_NAME", &ctx.req.server_name);
@@ -349,7 +349,7 @@ pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type:
         }
 
         let s = unsafe { CStr::from_ptr(message).to_string_lossy() };
-        crate::diagnostics::php_log!(syslog_to_level(syslog_type), "{s}");
+        crate::diagnostics::event_at!("php", syslog_to_level(syslog_type), "{s}");
     })
 }
 pub fn send_error_head(c: &mut Context, status: u16) {

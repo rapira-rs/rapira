@@ -34,7 +34,7 @@ pub(crate) struct Config {
     pub keepalive_timeout: Duration,
     /// `[http].middleware` in config order, the first listed outermost.
     pub middleware: Vec<middleware::Layer>,
-    /// Multipart limits of a dispatcher pool. Each worker spools in its own dir under `dir`, which `serve` creates. None: the default limits.
+    /// Multipart limits of a dispatcher pool; None in the other modes, which feed php-src's own rfc1867 through read_post. Each worker spools in its own dir under `dir`, which `serve` creates.
     pub uploads: Option<multipart::Limits>,
     /// sendFile() containment root.
     pub sendfile_root: PathBuf,
@@ -72,8 +72,8 @@ impl Plugin for Server {
         &[Mode::Classic, Mode::Worker, Mode::Dispatcher]
     }
 
-    fn php(&self) -> Option<PhpPart> {
-        Some(PHP_PART)
+    fn php(&self) -> PhpPart {
+        PHP_PART
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {

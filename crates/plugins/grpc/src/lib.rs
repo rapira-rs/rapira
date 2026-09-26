@@ -65,8 +65,8 @@ impl Plugin for Server {
         &[Mode::Dispatcher]
     }
 
-    fn php(&self) -> Option<PhpPart> {
-        Some(PHP_PART)
+    fn php(&self) -> PhpPart {
+        PHP_PART
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {

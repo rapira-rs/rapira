@@ -7,7 +7,7 @@ use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STAN
 use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::guard;
-use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key, note_served};
+use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};
 use rapira_sapi::work::{Held, release};
 use rapira_sapi::{
@@ -315,7 +315,6 @@ fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
         .take()
         .is_some_and(|reply| reply.send(outcome).is_ok())
     {
-        note_served();
         sb_update(Event::Handled(false));
         Verb::Ok
     } else {

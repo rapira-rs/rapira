@@ -589,6 +589,18 @@ mod tests {
         want: Option<Limits>,
     }
 
+    /// The documented `[http.uploads]` defaults.
+    fn default_limits() -> Limits {
+        Limits {
+            dir: std::env::temp_dir(),
+            max_file_size: 2 * 1024 * 1024,
+            max_field_size: 256 * 1024,
+            max_files: 20,
+            max_parts: 1024,
+            max_part_headers: 32,
+        }
+    }
+
     /// Every knob resolves with unit conversion and a config-relative dir.
     #[test]
     fn uploads_resolve_in_dispatcher_mode_only() {
@@ -610,12 +622,12 @@ mod tests {
             UploadsCase {
                 name: "an empty table keeps the defaults",
                 toml: "[pool]\nentrypoint = \"a.php\"\n[uploads]\n",
-                want: Some(Limits::default()),
+                want: Some(default_limits()),
             },
             UploadsCase {
                 name: "no table in dispatcher mode",
                 toml: "[pool]\nentrypoint = \"a.php\"\n",
-                want: Some(Limits::default()),
+                want: Some(default_limits()),
             },
             UploadsCase {
                 name: "no table in classic mode",

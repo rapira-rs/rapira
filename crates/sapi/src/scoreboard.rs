@@ -13,7 +13,6 @@ pub enum Event {
     Shed,
     Recycled,
     Unhealthy,
-    Healthy,
     Idle,
     Active,
     Draining,
@@ -41,11 +40,7 @@ pub fn sb_update(event: Event) {
         Event::Recycled => {
             s.recycles.fetch_add(1, Relaxed);
         }
-        Event::Unhealthy => {
-            s.unhealthy.store(1, Relaxed);
-            crate::quota::fire_unhealthy();
-        }
-        Event::Healthy => s.unhealthy.store(0, Relaxed),
+        Event::Unhealthy => crate::quota::fire_unhealthy(),
         Event::Idle => {
             let state = if DRAINING.get() {
                 SLOT_DRAINING

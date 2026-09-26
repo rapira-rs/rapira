@@ -29,8 +29,8 @@ thread_local! {
     static CLASSES: Cell<Option<DispatcherClasses>> = const { Cell::new(None) };
 }
 
-pub(crate) fn set_classes(classes: Option<DispatcherClasses>) {
-    CLASSES.set(classes);
+pub(crate) fn set_classes(classes: DispatcherClasses) {
+    CLASSES.set(Some(classes));
 }
 
 fn classes() -> DispatcherClasses {
@@ -53,7 +53,6 @@ struct CycleState {
     /// The Box pointer of the unit handed out last, so paths where free_obj never runs (bailout) can still reclaim it.
     unit: Option<*mut dyn Held>,
     closed_seen: bool,
-    served: bool,
     /// A unit was handed out this cycle: a fatal after that is an app failure, not a boot failure.
     received: bool,
 }
@@ -61,7 +60,6 @@ struct CycleState {
 const CYCLE_IDLE: CycleState = CycleState {
     unit: None,
     closed_seen: false,
-    served: false,
     received: false,
 };
 
@@ -98,14 +96,6 @@ pub(crate) fn note_closed() {
 
 pub(crate) fn note_received() {
     update(|c| c.received = true);
-}
-
-pub fn note_served() {
-    update(|c| c.served = true);
-}
-
-pub(crate) fn served_any() -> bool {
-    CYCLE.get().served
 }
 
 pub(crate) fn received_any() -> bool {

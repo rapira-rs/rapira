@@ -253,7 +253,7 @@ unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> b
         } else {
             zend::slot_null(o, tls_slot);
         }
-        zend::slot_double(o, received_at_slot, req.received_at.unwrap_or(0.0));
+        zend::slot_double(o, received_at_slot, req.received_at);
 
         (*ex).request = reqz;
         *return_value = reqz;

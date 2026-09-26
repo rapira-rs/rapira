@@ -80,10 +80,6 @@ fn run_cycle(script: &Path) -> Cycle {
         })
     });
 
-    if crate::exchange::served_any() {
-        sb_update(scoreboard::Event::Healthy);
-    }
-
     log_and_clear_last_error();
     if Outcome::from_c(unsafe { rapira_request_shutdown() }) == Outcome::Bailout {
         error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
@@ -190,7 +186,6 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
         set_worker_recycle();
     }
     ctx.finish(truncated);
-    crate::exchange::note_served();
     if recycle {
         HandleAction::Recycle
     } else {
@@ -211,7 +206,6 @@ fn next_job() -> Option<Context> {
             }
             // hide boot registrations from the per-job shutdown pass; they run at cycle end
             unsafe { rapira_stash_boot_shutdown_functions() };
-            sb_update(scoreboard::Event::Healthy);
         }
         log_and_clear_last_error();
         loop {
@@ -255,7 +249,8 @@ fn log_and_clear_last_error() {
         if !msg.is_null() {
             let (level, label) =
                 error_type_to_level((*pg).last_error_type, (*rapira_eg()).error_reporting);
-            crate::diagnostics::php_log!(
+            crate::diagnostics::event_at!(
+                "php",
                 level,
                 "{label}: {} in {}:{}",
                 zstr_lossy(&*msg),

@@ -15,12 +15,13 @@ pub(super) enum Verb {
     HeadNotWritten,
 }
 
+/// Throws the exception of `v`. True for `Verb::Ok`, which throws nothing.
 /// # Safety
 /// Engine active; can bailout on OOM.
-pub(super) unsafe fn throw_verb(v: Verb) {
+pub(super) unsafe fn throw_verb(v: Verb) -> bool {
     unsafe {
         match v {
-            Verb::Ok => {}
+            Verb::Ok => return true,
             Verb::Finalized => zend::throw_exception(
                 rapira_ce_already_finalized_error,
                 c"the response already ended",
@@ -48,6 +49,7 @@ pub(super) unsafe fn throw_verb(v: Verb) {
             }
         }
     }
+    false
 }
 
 pub(super) struct Closed;
@@ -69,7 +71,8 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
                 if saved > 0 {
                     zend_unset_timeout();
                 }
-                let r = park_send(tx, frame);
+                // Only `Closed` ends the park: a slow consumer is backpressure, not cancellation.
+                let r = tx.blocking_send(frame).map_err(|_| Closed);
                 if saved > 0 {
                     let remaining = (saved as u64).saturating_sub(consumed.as_secs()).max(1);
                     zend_set_timeout(remaining as rapira_sapi::zend_long, false);
@@ -82,26 +85,6 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
         st.armed_at = Instant::now();
     }
     result
-}
-
-/// Only `Closed` ends the park: a slow consumer is backpressure, not cancellation.
-pub(super) fn park_send(tx: &Sender<Frame>, mut frame: Frame) -> Result<(), Closed> {
-    let mut spins = 0u32;
-    loop {
-        match tx.try_send(frame) {
-            Ok(()) => return Ok(()),
-            Err(TrySendError::Closed(_)) => return Err(Closed),
-            Err(TrySendError::Full(f)) => {
-                frame = f;
-                if spins < 64 {
-                    std::thread::yield_now();
-                } else {
-                    std::thread::sleep(Duration::from_micros(100));
-                }
-                spins = spins.saturating_add(1);
-            }
-        }
-    }
 }
 
 /// `finalizing_len` is the one-shot body length used only when nothing streamed before: a declared content-length wins, and a bodiless response gets none.
@@ -146,11 +129,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
     }
     st.discarded = true;
     st.stage = Stage::Finalized;
-    if let BodyState::Multipart { files, .. } = &mut st.body {
-        for p in files {
-            p.upload.file.unlink();
-        }
-    }
+    st.body.unlink_spools();
     sb_update(Event::Handled(true));
     if let Some(tx) = st.ctx.sender.take() {
         let _ = tx.try_send(Frame::End {
@@ -213,13 +192,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
             return false;
         }
         let st = &mut *job.cast::<ExchangeState>();
-        match write_trailers_core(st, map) {
-            Verb::Ok => true,
-            v => {
-                throw_verb(v);
-                false
-            }
-        }
+        throw_verb(write_trailers_core(st, map))
     })
 }
 
@@ -288,13 +261,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_head(
                 return false;
             }
         };
-        match write_head_core(st, status as u16, map) {
-            Verb::Ok => true,
-            v => {
-                throw_verb(v);
-                false
-            }
-        }
+        throw_verb(write_head_core(st, status as u16, map))
     })
 }
 
@@ -327,15 +294,31 @@ pub(super) unsafe fn write_body_core(
         };
         return Verb::Overflow;
     }
-    let len64 = len as u64;
+    unsafe {
+        send_body(st, len as u64, eos, |n| {
+            Frame::Chunk(Bytes::copy_from_slice(std::slice::from_raw_parts(
+                p.cast::<u8>(),
+                n as usize,
+            )))
+        })
+    }
+}
+
+/// Sends `len` body bytes and seals on `eos`. `frame(n)` builds the frame of the first `n` bytes; a write past the declared content-length sends the part that fits and seals.
+/// # Safety
+/// As `send_frame`.
+pub(super) unsafe fn send_body(
+    st: &mut ExchangeState,
+    len: u64,
+    eos: bool,
+    frame: impl FnOnce(u64) -> Frame,
+) -> Verb {
     if let Some(cl) = st.declared_cl
-        && st.sent_body + len64 > cl
+        && st.sent_body + len > cl
     {
-        let fit = usize::try_from(cl - st.sent_body).unwrap_or(usize::MAX);
+        let fit = cl - st.sent_body;
         if unsafe { emit_head(st, Some(cl)) }.is_ok() && fit > 0 && !st.bodiless {
-            let bytes =
-                Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(p.cast::<u8>(), fit) });
-            let _ = unsafe { send_frame(st, Frame::Chunk(bytes)) };
+            let _ = unsafe { send_frame(st, frame(fit)) };
         }
         st.sent_body = cl;
         unsafe {
@@ -343,19 +326,15 @@ pub(super) unsafe fn write_body_core(
         };
         return Verb::ContentLengthExceeded;
     }
-    let finalizing = (eos && st.sent_body == 0).then_some(len64);
+    let finalizing = (eos && st.sent_body == 0).then_some(len);
     if unsafe { emit_head(st, finalizing) }.is_err() {
         discard_unit(st);
         return Verb::Discarded;
     }
-    st.sent_body += len64;
-    if len > 0 && !st.bodiless {
-        let bytes =
-            Bytes::copy_from_slice(unsafe { std::slice::from_raw_parts(p.cast::<u8>(), len) });
-        if unsafe { send_frame(st, Frame::Chunk(bytes)) }.is_err() {
-            discard_unit(st);
-            return Verb::Discarded;
-        }
+    st.sent_body += len;
+    if len > 0 && !st.bodiless && unsafe { send_frame(st, frame(len)) }.is_err() {
+        discard_unit(st);
+        return Verb::Discarded;
     }
     if eos {
         unsafe {
@@ -376,26 +355,15 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
 ) -> bool {
     guard(false, || unsafe {
         let st = &mut *job.cast::<ExchangeState>();
-        match write_body_core(st, p, len, eos) {
-            Verb::Ok => true,
-            v => {
-                throw_verb(v);
-                false
-            }
-        }
+        throw_verb(write_body_core(st, p, len, eos))
     })
 }
 
 /// # Safety
 /// As `send_frame`.
 pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: HeaderMap) {
-    if let BodyState::Multipart { files, .. } = &mut st.body {
-        for p in files {
-            p.upload.file.unlink();
-        }
-    }
+    st.body.unlink_spools();
     st.stage = Stage::Finalized;
-    note_served();
     sb_update(Event::Handled(truncated));
     let _ = unsafe {
         send_frame(
@@ -429,13 +397,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_flush(job: *mut c_void) -> bool {
                 }
             }
         };
-        match v {
-            Verb::Ok => true,
-            v => {
-                throw_verb(v);
-                false
-            }
-        }
+        throw_verb(v)
     })
 }
 
@@ -467,11 +429,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
         let mut st = unsafe { release(job.cast::<ExchangeState>()) };
         let cycle_died = unsafe { (*rapira_sapi::rapira_cg()).unclean_shutdown };
         if st.stage != Stage::Finalized && !cycle_died {
-            if let BodyState::Multipart { files, .. } = &mut st.body {
-                for p in files {
-                    p.upload.file.unlink();
-                }
-            }
+            st.body.unlink_spools();
             if let Some(tx) = st.ctx.sender.take() {
                 if st.head_sent {
                     let _ = tx.try_send(Frame::End {

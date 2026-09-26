@@ -32,7 +32,7 @@ fn classic_executor(ctx: &mut Context) -> (Event, bool) {
         }
         crate::context::apply_proto_num(ctx);
 
-        let failed = !run_script(std::path::Path::new(crate::context::script().filename));
+        let failed = !run_script(std::path::Path::new(&crate::context::script().filename));
         let pg = rapira_pg();
         let exec_err: bool = failed
             && ((*rapira_cg()).unclean_shutdown

@@ -1,18 +1,15 @@
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
-use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
 use rapira_sapi::plugin::{Mode, Plugin, Stopper, run_plugin};
-use rapira_sapi::work::DispatcherClasses;
 use rapira_sapi::{Rapira, WorkerHooks};
 
 /// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset, so the plugin outcome sets the exit code.
 static WORKER_EXIT: AtomicI32 = AtomicI32::new(-1);
 
-/// Racing ahead of the stopper registration is fine: the boot path re-checks WORKER_EXIT right after registering.
-fn request_worker_exit(code: i32, stopper: &OnceLock<Stopper>) {
+fn request_worker_exit(code: i32, stopper: &Stopper) {
     let decided = WORKER_EXIT
         .compare_exchange(-1, code, SeqCst, SeqCst)
         .is_ok()
@@ -20,8 +17,8 @@ fn request_worker_exit(code: i32, stopper: &OnceLock<Stopper>) {
             && WORKER_EXIT
                 .compare_exchange(WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, SeqCst, SeqCst)
                 .is_ok());
-    if decided && let Some(s) = stopper.get() {
-        s.stop();
+    if decided {
+        stopper.stop();
     }
 }
 
@@ -70,12 +67,7 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
         );
         return WORKER_EXIT_UNHEALTHY;
     }
-    let classes: Option<DispatcherClasses> = if mode == Mode::Dispatcher {
-        plugin.php().and_then(|p| p.dispatcher)
-    } else {
-        None
-    };
-    let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
+    let stopper = Stopper::default();
     let hooks: WorkerHooks = WorkerHooks {
         max_requests: effective_quota(max_requests),
         on_quota: Box::new({
@@ -89,19 +81,13 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
         slot: env.slot_view,
     };
 
-    let rapira = match Rapira::start_worker(mode, entrypoint, hooks, classes) {
-        Ok(r) => r,
-        Err(e) => {
-            tracing::error!(target: "rapira", "worker PHP boot failed: {e:#}");
-            return WORKER_EXIT_UNHEALTHY;
-        }
-    };
+    let rapira = Rapira::start_worker(mode, entrypoint, hooks, plugin.php().dispatcher);
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
     let name: &str = plugin.name();
     let outcome: anyhow::Result<()> =
-        serve_plugin(plugin, rapira.sink(), grace, drain_grace, &stopper);
+        serve_plugin(plugin, rapira.sink(), stopper, grace, drain_grace);
     if let Err(e) = &outcome {
         tracing::error!(target: "rapira", "plugin {name}: {e:#}");
     }
@@ -118,16 +104,12 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
 fn serve_plugin(
     plugin: Box<dyn Plugin>,
     sink: rapira_sapi::work::Sink,
+    stopper: Stopper,
     grace: Duration,
     drain_grace: Duration,
-    stopper: &OnceLock<Stopper>,
 ) -> anyhow::Result<()> {
-    let running = run_plugin(plugin, sink, grace, drain_grace)?;
-    let _ = stopper.set(running.stopper());
-    if WORKER_EXIT.load(SeqCst) != -1 {
-        running.stop();
-    }
-    spawn_signal_thread(running.stopper());
+    let running = run_plugin(plugin, sink, stopper.clone(), grace, drain_grace)?;
+    spawn_signal_thread(stopper);
     running.join()
 }
 
@@ -136,35 +118,12 @@ fn spawn_signal_thread(stopper: Stopper) {
     std::thread::Builder::new()
         .name("rapira-worker-signal".into())
         .spawn(move || {
-            let sig = wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
+            let sig = rapira_master::wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
             tracing::info!(target: "rapira", "signal {sig} received; draining worker");
             stopper.stop();
-            let _ = wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
+            let _ = rapira_master::wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
             tracing::warn!(target: "rapira", "second signal; forcing worker exit");
             std::process::exit(131);
         })
         .expect("spawn worker signal thread");
-}
-
-fn sigset(signals: &[libc::c_int]) -> libc::sigset_t {
-    // SAFETY: operates on a stack-owned, freshly-initialized signal set.
-    unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        for &sig in signals {
-            libc::sigaddset(&mut set, sig);
-        }
-        set
-    }
-}
-
-/// Blocks until one of `signals` (already blocked) is delivered. https://man7.org/linux/man-pages/man3/sigwait.3.html
-fn wait_signal(signals: &[libc::c_int]) -> libc::c_int {
-    // SAFETY: `set` and `sig` are stack values live for the whole call.
-    unsafe {
-        let set = sigset(signals);
-        let mut sig: libc::c_int = 0;
-        libc::sigwait(&set, &mut sig);
-        sig
-    }
 }

@@ -54,7 +54,7 @@ pub fn req(uri: &str) -> Request {
         content_type: None,
         content_length: 0,
         body: rapira_sapi::types::Body::Raw(std::io::Cursor::new(Vec::new())),
-        received_at: None,
+        received_at: 0.0,
         tls: None,
     }
 }

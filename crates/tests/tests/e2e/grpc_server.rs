@@ -1,10 +1,13 @@
 //! The rapira_grpc server over the wire, with `grpc/wire-worker.php` in the role of the application: the three protocols, statuses and metadata, what PHP sees, deadlines, the plugin routes, and the drain.
 
+use std::io::{self, Read, Write};
+use std::net::TcpStream;
 use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use http::Method;
 use http_body_util::BodyExt;
+use rapira_net::ListenAddr;
 use serde_json::{Value, json};
 use tests::grpc::{
     Conn, ECHO_PATH, ERROR_INFO, Fields, HI, HI_FRAME, Wire, envelope, fields, status_bytes,
@@ -799,9 +802,7 @@ async fn shutdown_joins_the_server_and_drops_every_intake_clone() {
 
     // The last intake clone goes with the worker's sink, and receive() then throws ClosedException.
     assert!(
-        server_log::records(&srv.log_file())
-            .iter()
-            .any(|c| c.target == "app" && c.message == "closed"),
+        !server_log::app_contexts(&srv.log_file(), "closed").is_empty(),
         "every intake clone is gone"
     );
 }
@@ -921,4 +922,69 @@ async fn drain_ends_health_watch_streams() {
         Some(&b"0"[..]),
         "{trailers:?}"
     );
+}
+
+enum Next {
+    Frame { kind: u8, flags: u8 },
+    Closed,
+}
+
+/// Reads one HTTP/2 frame. A read past the socket read timeout fails the test. https://www.rfc-editor.org/rfc/rfc9113#section-4.1
+fn next_frame(stream: &mut TcpStream) -> Next {
+    let mut head = [0u8; 9];
+    if let Err(e) = stream.read_exact(&mut head) {
+        return match e.kind() {
+            io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset => Next::Closed,
+            _ => panic!("no frame within the read timeout: {e}"),
+        };
+    }
+    let len = u32::from_be_bytes([0, head[0], head[1], head[2]]) as usize;
+    let mut payload = vec![0u8; len];
+    stream.read_exact(&mut payload).expect("the frame payload");
+    Next::Frame {
+        kind: head[3],
+        flags: head[4],
+    }
+}
+
+/// A silent peer gets a PING after `keepalive_interval_secs` without a read, and the listener closes the connection when the PING has no ACK within `keepalive_timeout_secs`. With 1 s each, both events come within the 4 s read timeout; the 10 s defaults miss it. https://www.rfc-editor.org/rfc/rfc9113#section-6.7
+#[test]
+fn keepalive_pings_a_silent_peer_and_closes_it() {
+    const SETTINGS: u8 = 0x4;
+    const PING: u8 = 0x6;
+    const ACK: u8 = 0x1;
+    let srv = Spawn::grpc(wire_worker())
+        .grpc_extra("keepalive_interval_secs = 1\nkeepalive_timeout_secs = 1")
+        .spawn();
+    let ListenAddr::Tcp(addr) = listen(&srv) else {
+        panic!("the grpc listener of Spawn::grpc is tcp");
+    };
+    let mut stream = TcpStream::connect(addr).expect("connect");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(4)))
+        .expect("read timeout");
+    // The client connection preface, then an empty SETTINGS frame. https://www.rfc-editor.org/rfc/rfc9113#section-3.4
+    stream
+        .write_all(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n\0\0\0\x04\0\0\0\0\0")
+        .expect("write the preface");
+    loop {
+        match next_frame(&mut stream) {
+            Next::Frame {
+                kind: SETTINGS,
+                flags,
+            } if flags & ACK == 0 => stream
+                .write_all(b"\0\0\0\x04\x01\0\0\0\0")
+                .expect("acknowledge the server SETTINGS"),
+            Next::Frame { kind: PING, flags } if flags & ACK == 0 => break,
+            Next::Frame { .. } => {}
+            Next::Closed => panic!("the listener closed the connection before a PING"),
+        }
+    }
+    // Only a GOAWAY may come before the close.
+    while let Next::Frame { kind, .. } = next_frame(&mut stream) {
+        assert_eq!(
+            kind, 0x7,
+            "a frame other than GOAWAY after the unanswered PING"
+        );
+    }
 }

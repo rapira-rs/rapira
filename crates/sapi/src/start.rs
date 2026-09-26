@@ -82,15 +82,13 @@ pub fn boot_master(parts: &[PhpPart]) -> anyhow::Result<PhpModule> {
         php_module_startup(&mut module, &raw mut rapira_module_entry) == SUCCESS
     };
 
+    // Drop shuts the module down on the failure path too.
+    let module = PhpModule {};
     if !started {
         error!(target: "rapira", "php_module_startup failed, shutting down");
-        unsafe {
-            php_module_shutdown();
-            sapi_shutdown();
-        }
         return Err(anyhow::anyhow!("php_module_startup failed"));
     }
-    Ok(PhpModule {})
+    Ok(module)
 }
 
 /// MINIT calls it after the base classes (module.c).
@@ -105,13 +103,13 @@ pub extern "C" fn rapira_rs_register_plugin_classes() {
 }
 
 impl Rapira {
-    /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `classes`: the dispatcher surface receive() serves; None for the classic and worker modes.
+    /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `classes`: the dispatcher surface receive() serves in dispatcher mode.
     pub fn start_worker(
         mode: Mode,
         entrypoint: PathBuf,
         hooks: WorkerHooks,
-        classes: Option<DispatcherClasses>,
-    ) -> anyhow::Result<Self> {
+        classes: DispatcherClasses,
+    ) -> Self {
         let WorkerHooks {
             max_requests,
             on_quota,
@@ -148,10 +146,10 @@ impl Rapira {
             )
         });
 
-        Ok(Self {
+        Self {
             sink: Some(sink),
             worker: Some(worker),
-        })
+        }
     }
 
     /// The intake of this worker. The PHP thread sees the intake closed once `Rapira` and every clone are dropped.
@@ -182,9 +180,11 @@ impl Drop for Rapira {
 }
 
 /// NTS inits module and request on different threads, so the call stack is re-initialized on this thread: https://github.com/php/php-src/pull/9104
-fn worker_main(mode: Mode, entrypoint: PathBuf, rx: JobRx, classes: Option<DispatcherClasses>) {
+fn worker_main(mode: Mode, entrypoint: PathBuf, rx: JobRx, classes: DispatcherClasses) {
     JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
-    crate::exchange::set_classes(classes);
+    if mode == Mode::Dispatcher {
+        crate::exchange::set_classes(classes);
+    }
     loop {
         unsafe {
             rapira_init_call_stack();

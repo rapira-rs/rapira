@@ -55,7 +55,7 @@ pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {
 
 pub static PHP_PART: PhpPart = PhpPart {
     register: rapira_grpc_register_classes,
-    dispatcher: Some(DISPATCHER_CLASSES),
+    dispatcher: DISPATCHER_CLASSES,
 };
 
 /// `Rapira\Grpc\MethodKind`: client streaming streams the request, server streaming streams the response.

@@ -11,8 +11,8 @@ use rapira_net::ListenAddr;
 use rapira_sapi::Mode;
 
 use crate::harness::{
-    BOOT, Server, Spawn, diagnostics, fixture_path, free_port, http_get, listen, scratch_dir,
-    spawn_with_config, wait_workers, worker_pids,
+    BOOT, Server, Spawn, diagnostics, fixture_path, free_port, http_get, listen,
+    parse_status_and_body, scratch_dir, spawn_with_config, wait_workers, worker_pids,
 };
 
 const REQ: Duration = Duration::from_secs(10);
@@ -267,10 +267,9 @@ fn unix_status(sock: &Path) -> u16 {
     stream
         .write_all(b"GET / HTTP/1.0\r\n\r\n")
         .expect("write the request");
-    let mut raw = String::new();
-    stream.read_to_string(&mut raw).expect("read the response");
-    raw.split(' ')
-        .nth(1)
-        .and_then(|code| code.parse().ok())
-        .unwrap_or_else(|| panic!("no status in {raw:?}"))
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw).expect("read the response");
+    parse_status_and_body(&raw)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&raw)))
+        .0
 }

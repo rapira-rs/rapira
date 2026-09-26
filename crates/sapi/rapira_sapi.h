@@ -38,10 +38,11 @@
 #define RAPIRA_VERSION "0.0.0-dev"
 #endif
 
-// array_init_size, smart_str_free and zend_symtable_str_find are macro/inline-only; shims for Rust
+// array_init_size, smart_str_free, zend_symtable_str_find and zend_array_is_list are macro/inline-only; shims for Rust
 void rapira_array_init(zval *zv, uint32_t size);
 void rapira_smart_str_free(smart_str *s);
 zval *rapira_symtable_str_find(HashTable *ht, const char *str, size_t len);
+bool rapira_array_is_list(HashTable *ht);
 // ZVAL_OBJ_COPY is a macro; the shim writes the case `name` of the enum `ce` into `dst` with a new reference
 void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name);
 // ZVAL_STRINGL is a macro; the shim writes a new non-interned string into `zv`

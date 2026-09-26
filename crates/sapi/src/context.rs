@@ -4,24 +4,19 @@ use std::{
     os::raw::c_void,
     path::Path,
     ptr::{null, null_mut},
-    sync::{PoisonError, RwLock},
+    sync::OnceLock,
 };
 
 /// The script paths of this worker process, the same for every request.
-#[derive(Clone, Copy)]
 pub(crate) struct ScriptPaths {
-    pub(crate) filename: &'static str,
-    pub(crate) script_name: &'static str,
-    pub(crate) document_root: &'static str,
+    pub(crate) filename: String,
+    pub(crate) script_name: String,
+    pub(crate) document_root: String,
 }
 
-static SCRIPT: RwLock<ScriptPaths> = RwLock::new(ScriptPaths {
-    filename: "",
-    script_name: "",
-    document_root: "",
-});
+static SCRIPT: OnceLock<ScriptPaths> = OnceLock::new();
 
-/// Sets the script paths for all later requests. Each call leaks the new strings: a worker process sets them once.
+/// Sets the script paths for all later requests. A worker process sets them once, before its first request.
 pub(crate) fn set_script(filename: &Path) {
     let document_root = filename
         .parent()
@@ -30,15 +25,17 @@ pub(crate) fn set_script(filename: &Path) {
     let script_name = filename
         .file_name()
         .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
-    *SCRIPT.write().unwrap_or_else(PoisonError::into_inner) = ScriptPaths {
-        filename: filename.to_string_lossy().into_owned().leak(),
-        script_name: script_name.leak(),
-        document_root: document_root.leak(),
-    };
+    let _ = SCRIPT.set(ScriptPaths {
+        filename: filename.to_string_lossy().into_owned(),
+        script_name,
+        document_root,
+    });
 }
 
-pub(crate) fn script() -> ScriptPaths {
-    *SCRIPT.read().unwrap_or_else(PoisonError::into_inner)
+pub(crate) fn script() -> &'static ScriptPaths {
+    SCRIPT
+        .get()
+        .expect("start_worker sets the script paths before the first request")
 }
 
 /// # Safety

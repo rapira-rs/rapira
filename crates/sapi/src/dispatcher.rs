@@ -3,7 +3,7 @@ use std::{
     ptr::null_mut,
 };
 
-use tracing::{Level, event, level_filters::LevelFilter};
+use tracing::{Level, level_filters::LevelFilter};
 
 use crate::{
     HashPosition, HashTable, IS_OBJECT, PHP_JSON_PARTIAL_OUTPUT_ON_ERROR, add_assoc_stringl_ex,
@@ -17,22 +17,10 @@ use crate::{
 fn emit(level: Level, message: &[u8], context: &[u8]) {
     let message = String::from_utf8_lossy(message);
     let context = String::from_utf8_lossy(context);
-
-    macro_rules! log_at {
-        ($lvl:expr) => {
-            if context.is_empty() {
-                event!(target: "app", $lvl, "{message}");
-            } else {
-                event!(target: "app", $lvl, context = %context, "{message}");
-            }
-        };
-    }
-    match level {
-        Level::ERROR => log_at!(Level::ERROR),
-        Level::WARN => log_at!(Level::WARN),
-        Level::INFO => log_at!(Level::INFO),
-        Level::DEBUG => log_at!(Level::DEBUG),
-        _ => log_at!(Level::TRACE),
+    if context.is_empty() {
+        crate::diagnostics::event_at!("app", level, "{message}");
+    } else {
+        crate::diagnostics::event_at!("app", level, context = %context, "{message}");
     }
 }
 
