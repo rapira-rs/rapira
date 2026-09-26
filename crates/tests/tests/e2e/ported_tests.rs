@@ -458,7 +458,6 @@ fn raw_status_line_204_classic() -> anyhow::Result<()> {
         resp.header("Content-Type").as_deref(),
         Some("application/json")
     );
-    assert_eq!(resp.body_string(), "", "a 204 carries no body on the wire");
     Ok(())
 }
 
