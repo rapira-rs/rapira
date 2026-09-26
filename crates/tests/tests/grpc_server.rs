@@ -239,7 +239,10 @@ async fn each_protocol_reaches_php_over_the_wire() {
             assert_eq!(remote, conn.peer, "{}", case.name);
             got
         } else {
-            send.await
+            tokio::select! {
+                got = send => got,
+                Some(_) = calls.recv() => panic!("{}: the call reached PHP", case.name),
+            }
         };
         let got = got.unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
 
@@ -587,7 +590,10 @@ async fn php_failures_map_to_statuses() {
         let headers = [("content-type", case.content_type), ("te", "trailers")];
         let send = conn.send(Method::POST, ECHO_PATH, &headers, case.body);
         let got = match case.php {
-            PhpDoes::Refuse | PhpDoes::Unreached => send.await,
+            PhpDoes::Refuse | PhpDoes::Unreached => tokio::select! {
+                got = send => got,
+                Some(_) = calls.recv() => panic!("{}: the call reached PHP", case.name),
+            },
             PhpDoes::Lose | PhpDoes::Reply(_) => {
                 let (got, ()) = tokio::join!(send, async {
                     let call = calls.recv().await.expect("the call reached PHP");
