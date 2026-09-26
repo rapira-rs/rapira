@@ -25,7 +25,7 @@ pub fn discover() -> anyhow::Result<Php> {
     })
 }
 
-/// Compiles `files` with cc into a static library named `name`, with the PHP include dirs and `extra_includes`, and defines RAPIRA_VERSION from CARGO_PKG_VERSION.
+/// Compiles `files` with cc into a static library named `name`, with the PHP include dirs and `extra_includes`, and defines RAPIRA_VERSION from CARGO_PKG_VERSION. Emits rerun-if-changed for `files`.
 pub fn compile(name: &str, files: &[&str], php: &Php, extra_includes: &[&str]) {
     let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
     let mut c = cc::Build::new();
@@ -35,9 +35,12 @@ pub fn compile(name: &str, files: &[&str], php: &Php, extra_includes: &[&str]) {
     c.includes(&php.includes);
     c.includes(extra_includes);
     c.compile(name);
+    for f in files {
+        println!("cargo:rerun-if-changed={f}");
+    }
 }
 
-/// Emits rerun-if-changed for each file and for PATH and PHP_CONFIG.
+/// Emits rerun-if-changed for each file that `compile` does not take, and for PATH and PHP_CONFIG.
 pub fn rerun_if_changed(files: &[&str]) {
     println!("cargo:rerun-if-env-changed=PATH");
     println!("cargo:rerun-if-env-changed=PHP_CONFIG");

@@ -64,7 +64,7 @@ fn main() -> anyhow::Result<()> {
         "rapira_exception.stub.php",
         "rapira_exception_arginfo.h",
     ];
-    rapira_php_build::rerun_if_changed(&[C_FILES, inputs].concat());
+    rapira_php_build::rerun_if_changed(inputs);
 
     Ok(())
 }
