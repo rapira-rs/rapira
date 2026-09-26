@@ -62,7 +62,7 @@ fn chunked_stream_preserves_keepalive() {
     assert_eq!(status, 200);
 }
 
-/// A PHP-committed 1xx never reaches the wire: the front drops interim heads, so the first head block is the final 200 and the response is otherwise untouched.
+/// A PHP-committed 1xx never reaches the wire: the plugin drops interim heads, so the first head block is the final 200 and the response is otherwise untouched.
 #[test]
 fn interim_heads_never_reach_the_wire() {
     let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
@@ -210,119 +210,6 @@ fn assert_completed_response_finalizes(path: &str, contents: &[u8]) {
             diagnostics(&srv)
         );
     }
-}
-
-#[test]
-fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
-    use std::net::TcpListener;
-    use std::os::fd::BorrowedFd;
-    use std::sync::Arc;
-
-    use extension_api::{
-        BoxFuture, HttpRequest, HttpResponse, ListenAddr, Middleware, Next, PrepareCtx,
-    };
-    use http_body_util::BodyExt;
-    use php_sys::{Mode, Rapira};
-    use rapira_runtime::ExtensionRuntime;
-
-    struct PrefixBody;
-
-    impl Middleware for PrefixBody {
-        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async move {
-                let (mut parts, body) = next.run(req).await.into_parts();
-                let Some(length) = parts
-                    .headers
-                    .get("content-length")
-                    .and_then(|v| v.to_str().ok()?.parse::<u64>().ok())
-                else {
-                    return HttpResponse::from_parts(parts, body);
-                };
-                parts
-                    .headers
-                    .insert("content-length", (length + 4).to_string().parse().unwrap());
-                let mut prefix = Some(b"pre:".to_vec());
-                let body = body
-                    .map_frame(move |frame| {
-                        frame.map_data(|data| {
-                            if data.is_empty() {
-                                return data;
-                            }
-                            if let Some(mut prefix) = prefix.take() {
-                                prefix.extend_from_slice(&data);
-                                prefix.into()
-                            } else {
-                                data
-                            }
-                        })
-                    })
-                    .boxed_unsync();
-                HttpResponse::from_parts(parts, body)
-            })
-        }
-    }
-
-    let _php = tests::php_lock();
-    let dir = crate::harness::scratch_dir();
-    let script = dir.join("completed-response-worker.php");
-    std::fs::copy(
-        crate::harness::fixture_path("lifecycle/completed-response-worker.php"),
-        &script,
-    )?;
-    let mut host = ExtensionRuntime::new();
-    host.register::<rapira_http::Server>(rapira_http::Config {
-        listen: ListenAddr::Tcp(([127, 0, 0, 1], 0).into()),
-        superglobals: false,
-        middleware: vec![Arc::new(PrefixBody)],
-        ..rapira_http::Config::default()
-    });
-    let mut prepared = PrepareCtx::new();
-    host.prepare_all(&mut prepared)?;
-    // SAFETY: prepared owns the descriptor for the lifetime of this borrow.
-    let listener = unsafe { BorrowedFd::borrow_raw(prepared.listener_fds()[0]) };
-    let addr = TcpListener::from(listener.try_clone_to_owned()?).local_addr()?;
-    let rapira = Rapira::start(Mode::Dispatcher(script.clone()))?;
-    let running = host.run(rapira.handle(), script);
-
-    let streamed = (|| -> anyhow::Result<()> {
-        let mut client = Conn::open(addr, T)?;
-        client.send(b"GET /body HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")?;
-        let (status, fields) = client.read_head(T)?;
-        anyhow::ensure!(status == 200, "response status: {status}");
-        anyhow::ensure!(
-            fields
-                .iter()
-                .any(|(k, v)| k == "content-length" && v == "9"),
-            "response fields: {fields:?}"
-        );
-        let body = client.read_remaining(T)?;
-        anyhow::ensure!(body == b"pre:01234", "transformed body: {body:?}");
-        Ok(())
-    })();
-
-    // Release PHP on a failed HTTP assertion before stopping the runtime.
-    std::fs::write(dir.join("client-read"), b"read")?;
-    let result = streamed.and_then(|()| -> anyhow::Result<()> {
-        let (status, body) = http_get(addr, "/state", T)?;
-        anyhow::ensure!(status == 200, "state status: {status}");
-        let expected = format!("pre:{}:2:finalized", std::process::id());
-        anyhow::ensure!(
-            body == expected.as_bytes(),
-            "PHP finalization state: {}",
-            String::from_utf8_lossy(&body)
-        );
-        Ok(())
-    });
-    let outcomes = running.stop();
-    drop(rapira);
-    result?;
-    anyhow::ensure!(
-        outcomes.iter().all(Result::is_ok),
-        "HTTP shutdown: {outcomes:?}"
-    );
-    // A failure above keeps the scratch dir for inspection, as `Server::drop` does.
-    std::fs::remove_dir_all(dir)?;
-    Ok(())
 }
 
 #[test]

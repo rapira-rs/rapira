@@ -1,10 +1,18 @@
-use extension_api::{HttpResponse, empty_body};
 use http::header::{
     CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, TE, TRAILER,
     TRANSFER_ENCODING, UPGRADE,
 };
+use http_body_util::BodyExt;
 
-pub(crate) fn error_response(status: http::StatusCode) -> HttpResponse {
+use crate::middleware::{Body, BoxError, Response};
+
+pub(crate) fn empty_body() -> Body {
+    http_body_util::Empty::<bytes::Bytes>::new()
+        .map_err(BoxError::from)
+        .boxed_unsync()
+}
+
+pub(crate) fn error_response(status: http::StatusCode) -> Response {
     let mut res = http::Response::new(empty_body());
     *res.status_mut() = status;
     res.headers_mut()
@@ -28,14 +36,17 @@ static HOP_BY_HOP: [HeaderName; 8] = [
 
 /// Removes the hop-by-hop fields and the fields that a Connection value names, then sets the declared content-length.
 pub(crate) fn response_headers(mut headers: HeaderMap, content_length: Option<u64>) -> HeaderMap {
-    let named: Vec<HeaderName> = headers
-        .get_all(CONNECTION)
-        .iter()
-        .flat_map(|v| v.as_bytes().split(|&b| b == b','))
-        .filter_map(|token| HeaderName::from_bytes(token.trim_ascii()).ok())
-        .collect();
-    for name in named.iter().chain(&HOP_BY_HOP) {
-        headers.remove(name);
+    // Connection is in HOP_BY_HOP, so a map without a hop-by-hop key has nothing to remove.
+    if headers.keys().any(|k| HOP_BY_HOP.contains(k)) {
+        let named: Vec<HeaderName> = headers
+            .get_all(CONNECTION)
+            .iter()
+            .flat_map(|v| v.as_bytes().split(|&b| b == b','))
+            .filter_map(|token| HeaderName::from_bytes(token.trim_ascii()).ok())
+            .collect();
+        for name in named.iter().chain(&HOP_BY_HOP) {
+            headers.remove(name);
+        }
     }
     if let Some(n) = content_length {
         headers.insert(CONTENT_LENGTH, HeaderValue::from(n));
@@ -87,6 +98,40 @@ mod tests {
         );
         assert_eq!(map.get("content-length").unwrap().as_bytes(), b"4");
         assert!(map.get("transfer-encoding").is_none());
+    }
+
+    #[test]
+    fn map_without_hop_by_hop_keeps_every_field() {
+        struct Case {
+            name: &'static str,
+            input: &'static [(&'static str, &'static str)],
+            content_length: Option<u64>,
+            want: &'static [(&'static str, &'static str)],
+        }
+        let cases = [
+            Case {
+                name: "only content-type, content-length inserted",
+                input: &[("Content-Type", "text/plain")],
+                content_length: Some(5),
+                want: &[("content-type", "text/plain"), ("content-length", "5")],
+            },
+            Case {
+                name: "only content-type, no declared length",
+                input: &[("Content-Type", "text/plain")],
+                content_length: None,
+                want: &[("content-type", "text/plain")],
+            },
+            Case {
+                name: "empty map, content-length inserted",
+                input: &[],
+                content_length: Some(0),
+                want: &[("content-length", "0")],
+            },
+        ];
+        for c in &cases {
+            let map = response_headers(hdrs(c.input), c.content_length);
+            assert_eq!(map, hdrs(c.want), "{}", c.name);
+        }
     }
 
     #[test]

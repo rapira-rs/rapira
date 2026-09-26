@@ -15,7 +15,7 @@ stubs:
 	@test -x "$(PHP_BIN)" || { echo "php not found at $(PHP_BIN); set PHP_BIN=/path/to/php"; exit 1; }
 	@mkdir -p target/stubgen
 	@cp "$(GEN_STUB)" target/stubgen/gen_stub.php
-	@for stub in crates/php_sys/*.stub.php; do \
+	@for stub in $$(find crates -name '*.stub.php' -not -path '*/target/*'); do \
 		$(PHP_BIN) target/stubgen/gen_stub.php "$$stub" || exit 1; \
 	done
 
@@ -66,5 +66,13 @@ php-macos:
 
 coverage:
 	@$(LOCATE_PHP); \
-	CARGO_TARGET_DIR=target/coverage $(PHP_ENV) cargo llvm-cov --workspace --lcov --output-path lcov.info \
+	export CARGO_TARGET_DIR=target/coverage $(PHP_ENV) && \
+	export RUSTFLAGS="$$RUSTFLAGS -Cllvm-args=-runtime-counter-relocation" && \
+	eval "$$(cargo llvm-cov show-env --export-prefix)" && \
+	export LLVM_PROFILE_FILE="$$CARGO_LLVM_COV_TARGET_DIR/rapira-%p%c.profraw" && \
+	cargo llvm-cov clean --workspace && \
+	cargo test --workspace && \
+	cargo build -p rapira_core --bin rapira && \
+	cargo test -p tests --test e2e --features e2e -- --test-threads=1 && \
+	cargo llvm-cov report --workspace --lcov --output-path lcov.info \
 		--ignore-filename-regex '(crates/tests/|bindings\.rs$$|/src/main\.rs$$)'

@@ -3,6 +3,15 @@
 // Echoes every Request field into the response body for the field-mapping tests.
 
 $d = \Rapira\get_dispatcher();
+// the error message of a userland write to an initialized readonly property
+$denied = static function (object $o, string $prop): string {
+    try {
+        $o->$prop = 'x';
+        return 'written';
+    } catch (\Error $e) {
+        return $e->getMessage();
+    }
+};
 try {
     while (true) {
         $ex = $d->receive();
@@ -45,6 +54,8 @@ try {
             ])),
             'received-at=' . var_export($req->receivedAt, true),
             'received-at-positive=' . var_export($req->receivedAt > 0, true),
+            'readonly-request=' . $denied($req, 'method'),
+            'readonly-remote=' . $denied($req->remote, $req->remote instanceof \Rapira\InetAddress ? 'ip' : 'path'),
         ];
         $ex->writeBody(implode("\n", $lines));
     }

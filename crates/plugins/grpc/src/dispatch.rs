@@ -9,14 +9,16 @@ use connectrpc::{
     CodecFormat, ConnectError, Dispatcher, EncodedBody, EncodedResponse, ErrorCode, ErrorDetail,
     MethodDescriptor, Payload, Protocol, RequestContext,
 };
-use extension_api::{Addr, Php, Rejected, RpcProtocol, RpcStatus, UnaryCall};
+use rapira_sapi::Addr;
+use rapira_sapi::work::Intake;
 
 use crate::schema::Schema;
+use crate::{Call, RpcProtocol, RpcStatus, UnaryCall};
 
 /// Routes the unary methods of the configured services to PHP.
 pub(crate) struct PhpDispatcher {
     pub(crate) schema: Arc<Schema>,
-    pub(crate) php: Php,
+    pub(crate) intake: Intake<Call>,
 }
 
 impl Dispatcher for PhpDispatcher {
@@ -34,9 +36,9 @@ impl Dispatcher for PhpDispatcher {
         format: CodecFormat,
     ) -> UnaryResult {
         let schema = Arc::clone(&self.schema);
-        let php = self.php.clone();
+        let intake = self.intake.clone();
         let path = path.to_owned();
-        Box::pin(async move { unary(&schema, &php, path, ctx, request, format).await })
+        Box::pin(async move { unary(&schema, &intake, path, ctx, request, format).await })
     }
 
     fn call_server_streaming(
@@ -77,7 +79,7 @@ fn streaming() -> ConnectError {
 
 async fn unary(
     schema: &Schema,
-    php: &Php,
+    intake: &Intake<Call>,
     path: String,
     mut ctx: RequestContext,
     request: Payload,
@@ -119,18 +121,15 @@ async fn unary(
             .unwrap_or(Addr::Unix(None)),
         message,
     };
-    let reply = match php.unary(call).await {
-        Ok(Some(reply)) => reply,
-        Ok(None) => {
-            tracing::warn!(target: "grpc", "{path}: the worker lost the call");
-            return Err(ConnectError::internal("internal error"));
-        }
-        Err(e) => {
-            let reason = e
-                .downcast_ref::<Rejected>()
-                .map_or_else(|| e.to_string(), |r| r.reason.clone());
-            return Err(ConnectError::unavailable(reason));
-        }
+    let (call, reply) = Call::new(call);
+    // A refusal before dispatch: PHP never saw the call.
+    if let Err(e) = intake.submit(call).await {
+        return Err(ConnectError::unavailable(e.to_string()));
+    }
+    // A closed channel means that PHP lost the call. Dropping this future closes the call for PHP.
+    let Ok(reply) = reply.await else {
+        tracing::warn!(target: "grpc", "{path}: the worker lost the call");
+        return Err(ConnectError::internal("internal error"));
     };
     let message = match reply.outcome {
         Ok(message) => message,

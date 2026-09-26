@@ -366,7 +366,7 @@ fn abandoned_exchange_is_discarded_by_next_receive() {
     );
 }
 
-/// A field php-src lets through but no front can represent must cost only that field, not the response.
+/// A field php-src lets through but the plugin cannot represent must cost only that field, not the response.
 #[test]
 fn unrepresentable_header_still_serves_the_response() {
     let srv = spawn_with_config("lifecycle/bad-header-worker.php", 1, "mode = \"worker\"\n");
@@ -492,7 +492,7 @@ fn reject_policy_answers_400_for_an_alias_name() {
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 }
 
-/// More than one `Host` line is a 400; the h1 parser hands the repeated field through intact, so the rejection is this front's own.
+/// More than one `Host` line is a 400; the h1 parser hands the repeated field through intact, so the rejection is this plugin's own.
 /// RFC 9112 §3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 #[test]
 fn a_second_host_field_line_answers_400() {
@@ -611,7 +611,7 @@ fn expect_100_continue_is_skipped_when_the_request_is_refused() {
     );
 }
 
-/// A final 1xx from PHP cannot go on the wire: hyper would rewrite it to a 500 and error the connection, so the front serves 502.
+/// A final 1xx from PHP cannot go on the wire: hyper would rewrite it to a 500 and error the connection, so the plugin serves 502.
 #[test]
 fn final_interim_status_becomes_502() {
     let srv = spawn_with_config("lifecycle/status-1xx-worker.php", 1, "mode = \"worker\"\n");
@@ -708,7 +708,7 @@ fn dispatcher_request_fidelity_over_the_wire() {
     assert_eq!(code, 400, "missing Host on HTTP/1.1 must answer 400");
 }
 
-/// A PHP-written head crosses the wire: the status line, one field line per list value, the front's own framing, and a HEAD carrying neither body nor content-length.
+/// A PHP-written head crosses the wire: the status line, one field line per list value, the plugin's own framing, and a HEAD carrying neither body nor content-length.
 /// RFC 9110 §8.6: https://www.rfc-editor.org/rfc/rfc9110#section-8.6
 #[test]
 fn dispatcher_write_head_reaches_the_wire() {

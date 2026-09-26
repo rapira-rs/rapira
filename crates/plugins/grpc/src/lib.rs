@@ -1,21 +1,27 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::anyhow;
+use anyhow::{Result, anyhow};
 use connectrpc::Router;
 use connectrpc_health::StaticChecker;
 use connectrpc_reflection::Reflector;
-use extension_api::{Extension, ListenAddr, Php, PrepareCtx, PreparedListener, Result};
-use rapira_net::ServerThread;
+use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
+use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
+use rapira_sapi::work::Intake;
 
+mod call;
+pub mod config;
 mod dispatch;
+mod php;
 mod schema;
 mod serve;
 
-pub use schema::{MethodInfo, Schema, ServiceInfo};
+use call::{Call, RpcProtocol, RpcStatus, UnaryCall, UnaryReply};
+pub use php::PHP_PART;
+use schema::{MethodInfo, Schema, set_services};
 
 #[derive(Clone)]
-pub struct Config {
+pub(crate) struct Config {
     pub listen: ListenAddr,
     pub schema: Arc<Schema>,
     /// Serve `grpc.reflection.v1` and `v1alpha` for the configured services.
@@ -24,7 +30,6 @@ pub struct Config {
     pub default_timeout: Option<Duration>,
     /// The longest timeout that a client can set.
     pub max_timeout: Option<Duration>,
-    pub drain_grace: Duration,
     /// HTTP/2 PING cadence and the wait for its ACK. A peer that is gone without a FIN sends no ACK, so its connection closes within the sum and does not hold a later drain.
     pub keepalive_interval: Duration,
     pub keepalive_timeout: Duration,
@@ -33,32 +38,39 @@ pub struct Config {
 pub struct Server {
     config: Config,
     prepared: Option<Prepared>,
-    thread: ServerThread,
 }
 
-/// What `prepare` leaves for `run`: the listener and the routes that the host answers without PHP.
+/// What `prepare` leaves for `serve`: the listener and the routes that the plugin answers without PHP.
 pub(crate) struct Prepared {
     pub(crate) listener: PreparedListener,
     pub(crate) router: Router,
     pub(crate) health: Arc<StaticChecker>,
 }
 
-impl Extension for Server {
-    type Config = Config;
-
-    fn init(config: Config) -> Self {
+impl Server {
+    pub(crate) fn init(config: Config) -> Self {
         Self {
             config,
             prepared: None,
-            thread: ServerThread::default(),
         }
     }
+}
 
-    fn name(&self) -> &str {
-        "rapira-grpc"
+impl Plugin for Server {
+    fn name(&self) -> &'static str {
+        "grpc"
+    }
+
+    fn modes(&self) -> &'static [Mode] {
+        &[Mode::Dispatcher]
+    }
+
+    fn php(&self) -> Option<PhpPart> {
+        Some(PHP_PART)
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
+        set_services(self.config.schema.services().to_vec())?;
         let listener = ctx.bind(&self.config.listen)?;
         tracing::info!(target: "grpc", "prepared listener on {}", listener.addr());
 
@@ -84,19 +96,12 @@ impl Extension for Server {
         Ok(())
     }
 
-    async fn run(&mut self, php: Php) -> Result<()> {
-        let config = self.config.clone();
-        let Some(prepared) = self.prepared.take() else {
+    fn serve(self: Box<Self>, worker: Worker) -> Result<()> {
+        let Self { config, prepared } = *self;
+        let Some(prepared) = prepared else {
             return Err(anyhow!("grpc listener was not prepared"));
         };
-        self.thread
-            .run("grpc", move |stop, rt| {
-                serve::serve(php, config, prepared, stop, rt)
-            })
-            .await
-    }
-
-    async fn shutdown(&mut self) -> Result<()> {
-        self.thread.shutdown().await
+        let intake = Intake::new(worker.sink.clone());
+        serve::serve(intake, config, prepared, worker)
     }
 }

@@ -5,10 +5,12 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use bytes::Bytes;
-use extension_api::{BoxError, Reply, ReplyEvent};
+use rapira_sapi::Frame;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
 
 use crate::handler::InflightReqCount;
+use crate::middleware::BoxError;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ConnectionState {
@@ -17,10 +19,10 @@ pub(crate) struct ConnectionState {
 }
 
 pub(crate) struct ReplyBody {
-    reply: Option<Reply>,
+    reply: Option<Receiver<Frame>>,
     declared_cl: Option<u64>,
     sent: u64,
-    staged: Option<ReplyEvent>,
+    staged: Option<Frame>,
     file: Option<FilePump>,
     err_armed: bool,
     closed: watch::Receiver<ConnectionState>,
@@ -50,10 +52,10 @@ fn read_slice(file: std::fs::File, off: u64, want: usize) -> FileRead {
 
 impl ReplyBody {
     pub(crate) fn new(
-        reply: Reply,
+        reply: Receiver<Frame>,
         declared_cl: Option<u64>,
         guard: Arc<InflightReqCount>,
-        staged: Option<ReplyEvent>,
+        staged: Option<Frame>,
         closed: watch::Receiver<ConnectionState>,
     ) -> Self {
         Self {
@@ -134,13 +136,13 @@ impl http_body::Body for ReplyBody {
                 }
                 return Poll::Ready(Some(Ok(http_body::Frame::data(buf.into()))));
             }
-            let ev: Option<ReplyEvent> = if let Some(ev) = this.staged.take() {
+            let ev: Option<Frame> = if let Some(ev) = this.staged.take() {
                 Some(ev)
             } else {
                 let Some(reply) = this.reply.as_mut() else {
                     return Poll::Ready(None);
                 };
-                std::task::ready!(reply.poll_next(cx))
+                std::task::ready!(reply.poll_recv(cx))
             };
             match ev {
                 None => {
@@ -151,11 +153,11 @@ impl http_body::Body for ReplyBody {
                     );
                     return this.terminal_error(cx);
                 }
-                Some(ReplyEvent::Chunk(b)) => {
+                Some(Frame::Chunk(b)) => {
                     this.sent += b.len() as u64;
                     return Poll::Ready(Some(Ok(http_body::Frame::data(b))));
                 }
-                Some(ReplyEvent::File { file, offset, len }) => {
+                Some(Frame::File { file, offset, len }) => {
                     let want = std::cmp::min(64 * 1024, len) as usize;
                     this.file = Some(FilePump {
                         join: read_slice(file, offset, want),
@@ -165,8 +167,8 @@ impl http_body::Body for ReplyBody {
                     });
                 }
                 // The producer latches the head, so neither event can follow it.
-                Some(ReplyEvent::Interim { .. } | ReplyEvent::Head { .. }) => {}
-                Some(ReplyEvent::End { truncated, .. }) => {
+                Some(Frame::Interim(_) | Frame::Head { .. }) => {}
+                Some(Frame::End { truncated, .. }) => {
                     if truncated {
                         tracing::debug!(target: "http", "php ended the reply as truncated");
                         return this.terminal_error(cx);
@@ -191,7 +193,7 @@ impl Drop for ReplyBody {
     fn drop(&mut self) {
         // A length-delimited HTTP body can finish before PHP sends End: https://www.rfc-editor.org/rfc/rfc9112#section-6.3
         if self.declared_cl == Some(self.sent)
-            && !matches!(self.staged, Some(ReplyEvent::End { .. }))
+            && !matches!(self.staged, Some(Frame::End { .. }))
             && self.guard.end_flush.get().is_some()
             && let Some(reply) = self.reply.take()
         {
@@ -203,13 +205,13 @@ impl Drop for ReplyBody {
 /// Consumes the reply to End. A connection close cancels the reply unless a flush past the guard's watermark has written the last response byte to the socket.
 /// After that flush the drain holds the reply until PHP sends End, so a delivered response never reports cancellation to PHP.
 pub(crate) fn spawn_drain(
-    mut reply: Reply,
+    mut reply: Receiver<Frame>,
     mut closed: watch::Receiver<ConnectionState>,
     guard: Arc<InflightReqCount>,
 ) {
     // A buffered reply queues End behind the head or the last chunk, so consume it here.
     let mut cx = Context::from_waker(std::task::Waker::noop());
-    if let Poll::Ready(Some(ReplyEvent::End { .. }) | None) = reply.poll_next(&mut cx) {
+    if let Poll::Ready(Some(Frame::End { .. }) | None) = reply.poll_recv(&mut cx) {
         return;
     }
     tokio::spawn(async move {
@@ -227,9 +229,9 @@ pub(crate) fn spawn_drain(
     });
 }
 
-async fn drain(reply: &mut Reply) {
-    while let Some(ev) = reply.next().await {
-        if matches!(ev, ReplyEvent::End { .. }) {
+async fn drain(reply: &mut Receiver<Frame>) {
+    while let Some(ev) = reply.recv().await {
+        if matches!(ev, Frame::End { .. }) {
             break;
         }
     }
@@ -341,92 +343,41 @@ impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<T> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_api::ReplySource;
     use http_body_util::BodyExt;
-    use std::collections::VecDeque;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
     use std::sync::{Arc, Weak};
+    use tokio::sync::mpsc;
 
-    struct Script {
-        events: VecDeque<ReplyEvent>,
-        dropped: Option<Arc<AtomicBool>>,
-        /// Park forever once the events run out, like a worker that never finishes.
-        hang: bool,
-    }
-
-    impl ReplySource for Script {
-        fn poll_next(&mut self, _cx: &mut Context<'_>) -> Poll<Option<ReplyEvent>> {
-            match self.events.pop_front() {
-                Some(ev) => Poll::Ready(Some(ev)),
-                None if self.hang => Poll::Pending,
-                None => Poll::Ready(None),
-            }
+    /// A reply that yields `events`; it stays open while the caller holds the sender.
+    fn open_reply(events: Vec<Frame>) -> (Receiver<Frame>, mpsc::Sender<Frame>) {
+        let (tx, rx) = mpsc::channel(4);
+        for ev in events {
+            tx.try_send(ev).unwrap();
         }
+        (rx, tx)
     }
 
-    impl Drop for Script {
-        fn drop(&mut self) {
-            if let Some(flag) = &self.dropped {
-                flag.store(true, Ordering::Release);
-            }
-        }
+    /// A reply that yields `events` and then closes.
+    fn reply(events: Vec<Frame>) -> Receiver<Frame> {
+        open_reply(events).0
     }
 
-    struct DrainSource {
-        events: tokio::sync::mpsc::UnboundedReceiver<ReplyEvent>,
-        pending: Option<tokio::sync::oneshot::Sender<()>>,
-    }
-
-    impl ReplySource for DrainSource {
-        fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<ReplyEvent>> {
-            let poll = self.events.poll_recv(cx);
-            if poll.is_pending()
-                && let Some(pending) = self.pending.take()
-            {
-                let _ = pending.send(());
-            }
-            poll
-        }
-    }
-
-    fn drain_reply() -> (
-        Reply,
-        tokio::sync::mpsc::UnboundedSender<ReplyEvent>,
-        tokio::sync::oneshot::Receiver<()>,
-    ) {
-        let (event_tx, event_rx) = tokio::sync::mpsc::unbounded_channel();
-        let (pending_tx, pending_rx) = tokio::sync::oneshot::channel();
-        let source = DrainSource {
-            events: event_rx,
-            pending: Some(pending_tx),
-        };
-        (Reply::new(Box::new(source)), event_tx, pending_rx)
-    }
-
-    fn reply(events: Vec<ReplyEvent>) -> Reply {
-        Reply::new(Box::new(Script {
-            events: events.into(),
-            dropped: None,
-            hang: false,
-        }))
-    }
-
-    fn end(truncated: bool) -> ReplyEvent {
-        ReplyEvent::End {
+    fn end(truncated: bool) -> Frame {
+        Frame::End {
             trailers: http::HeaderMap::new(),
             truncated,
         }
     }
 
-    fn chunk(s: &str) -> ReplyEvent {
-        ReplyEvent::Chunk(Bytes::copy_from_slice(s.as_bytes()))
+    fn chunk(s: &str) -> Frame {
+        Frame::Chunk(Bytes::copy_from_slice(s.as_bytes()))
     }
 
     fn guard() -> Arc<InflightReqCount> {
         Arc::new(InflightReqCount::init(&Arc::new(AtomicUsize::new(0))))
     }
 
-    fn body(events: Vec<ReplyEvent>, declared_cl: Option<u64>) -> ReplyBody {
+    fn body(events: Vec<Frame>, declared_cl: Option<u64>) -> ReplyBody {
         ReplyBody::new(
             reply(events),
             declared_cl,
@@ -517,21 +468,16 @@ mod tests {
     /// Dropping the body drops the reply synchronously: the client-gone signal for PHP.
     #[test]
     fn dropping_the_body_cancels_php() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let source = Script {
-            events: vec![chunk("head-flushed")].into(),
-            dropped: Some(Arc::clone(&dropped)),
-            hang: true,
-        };
+        let (reply, events) = open_reply(vec![chunk("head-flushed")]);
         let b = ReplyBody::new(
-            Reply::new(Box::new(source)),
+            reply,
             None,
             guard(),
             None,
             watch::channel(ConnectionState::default()).1,
         );
         drop(b);
-        assert!(dropped.load(Ordering::Acquire));
+        assert!(events.is_closed());
     }
 
     #[tokio::test(start_paused = true)]
@@ -575,31 +521,43 @@ mod tests {
         inflight: Arc<AtomicUsize>,
         /// Weak: the drain task stays the only owner of the request count.
         guard: Weak<InflightReqCount>,
-        events: tokio::sync::mpsc::UnboundedSender<ReplyEvent>,
+        events: mpsc::Sender<Frame>,
         state: watch::Sender<ConnectionState>,
     }
 
     impl Drain {
-        /// Records the watermark after the drain started, as `RapiraService::call` does for a bodiless reply.
+        /// Records the watermark after the drain started, as `respond` does for a bodiless reply.
         fn mark(&self, flush: u64) {
             let guard = self.guard.upgrade().expect("the drain must hold the guard");
             guard.end_flush.set(flush).unwrap();
         }
     }
 
-    /// A drain parked on an empty reply after one chunk, with the request still counted.
+    /// A drain parked on an empty reply after two chunks, with the request still counted.
     async fn parked_drain() -> Drain {
         let inflight = Arc::new(AtomicUsize::new(0));
         let guard = Arc::new(InflightReqCount::init(&inflight));
         let weak = Arc::downgrade(&guard);
-        let (reply, events, pending) = drain_reply();
-        events.send(chunk("discarded")).unwrap();
+        let (reply, events) = open_reply(vec![chunk("queued")]);
         let (state, state_rx) = watch::channel(ConnectionState::default());
         spawn_drain(reply, state_rx, guard);
-        tokio::time::timeout(Duration::from_secs(5), pending)
-            .await
-            .expect("drain must reach a pending state after the chunk")
-            .expect("drain must retain the reply while it is pending");
+        assert!(
+            !events.is_closed(),
+            "a chunk at the head must hand the reply to the drain task"
+        );
+        events.send(chunk("discarded")).await.unwrap();
+        // The drain task takes the chunk and parks on the empty reply.
+        tokio::time::timeout(Duration::from_secs(5), async {
+            while events.capacity() < events.max_capacity() {
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .expect("drain must reach a pending state after the chunk");
+        assert!(
+            !events.is_closed(),
+            "drain must retain the reply while it is pending"
+        );
         assert_eq!(inflight.load(Ordering::Acquire), 1);
         Drain {
             inflight,
@@ -613,7 +571,7 @@ mod tests {
     #[tokio::test]
     async fn bodiless_drain_consumes_to_end_without_cancelling() {
         let d = parked_drain().await;
-        d.events.send(end(false)).unwrap();
+        d.events.send(end(false)).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), d.events.closed())
             .await
             .expect("drain must drop the reply after End");
@@ -646,7 +604,7 @@ mod tests {
             "the reply must outlive the connection"
         );
         assert_eq!(d.inflight.load(Ordering::Acquire), 1);
-        d.events.send(end(false)).unwrap();
+        d.events.send(end(false)).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), d.events.closed())
             .await
             .expect("drain must drop the reply after End");
@@ -666,37 +624,26 @@ mod tests {
         assert_eq!(d.inflight.load(Ordering::Acquire), 0);
     }
 
-    /// One chunk and no End, the shape of an unfinalized PHP exchange; `dropped` turns true when the reply is dropped.
-    fn parked_source(dropped: &Arc<AtomicBool>) -> Reply {
-        Reply::new(Box::new(Script {
-            events: vec![chunk("abc")].into(),
-            dropped: Some(Arc::clone(dropped)),
-            hang: true,
-        }))
+    /// One chunk and no End, the shape of an unfinalized PHP exchange; the sender closes when the reply is dropped.
+    fn parked_source() -> (Receiver<Frame>, mpsc::Sender<Frame>) {
+        open_reply(vec![chunk("abc")])
     }
 
     /// A completed length-delimited body hands its reply to the drain once the watermark is set.
     #[tokio::test]
     async fn completed_body_keeps_the_reply_for_the_drain() {
-        let dropped = Arc::new(AtomicBool::new(false));
+        let (reply, events) = parked_source();
         let guard = guard();
         guard.end_flush.set(0).unwrap();
         let (state, state_rx) = watch::channel(ConnectionState::default());
-        let mut b = ReplyBody::new(parked_source(&dropped), Some(3), guard, None, state_rx);
+        let mut b = ReplyBody::new(reply, Some(3), guard, None, state_rx);
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "abc");
         drop(b);
-        assert!(
-            !dropped.load(Ordering::Acquire),
-            "the drain must hold the reply"
-        );
+        assert!(!events.is_closed(), "the drain must hold the reply");
         state.send_modify(|s| s.closed = true);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !dropped.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("an unflushed drain must cancel on close");
+        tokio::time::timeout(Duration::from_secs(5), events.closed())
+            .await
+            .expect("an unflushed drain must cancel on close");
     }
 
     /// The buffered path queues End behind the last chunk: drop consumes it without a drain task.
@@ -704,9 +651,7 @@ mod tests {
     async fn queued_end_is_consumed_at_drop_without_a_task() {
         let guard = guard();
         guard.end_flush.set(0).unwrap();
-        let (reply, events, mut pending) = drain_reply();
-        events.send(chunk("hello")).unwrap();
-        events.send(end(false)).unwrap();
+        let (reply, events) = open_reply(vec![chunk("hello"), end(false)]);
         let mut b = ReplyBody::new(
             reply,
             Some(5),
@@ -719,7 +664,7 @@ mod tests {
         let tasks = metrics.num_alive_tasks();
         drop(b);
         assert!(
-            pending.try_recv().is_err(),
+            events.is_closed(),
             "drop must consume the queued End in place"
         );
         assert_eq!(
@@ -732,19 +677,11 @@ mod tests {
     /// A bodiless reply with End already queued behind the head is consumed in place.
     #[tokio::test]
     async fn queued_end_is_consumed_without_a_drain_task() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let reply = Reply::new(Box::new(Script {
-            events: vec![end(false)].into(),
-            dropped: Some(Arc::clone(&dropped)),
-            hang: true,
-        }));
+        let (reply, events) = open_reply(vec![end(false)]);
         let metrics = tokio::runtime::Handle::current().metrics();
         let tasks = metrics.num_alive_tasks();
         spawn_drain(reply, watch::channel(ConnectionState::default()).1, guard());
-        assert!(
-            dropped.load(Ordering::Acquire),
-            "the reply must drop at once"
-        );
+        assert!(events.is_closed(), "the reply must drop at once");
         assert_eq!(
             metrics.num_alive_tasks(),
             tasks,
@@ -757,16 +694,11 @@ mod tests {
     async fn pending_reply_goes_to_the_drain_task() {
         let guard = guard();
         guard.end_flush.set(0).unwrap();
-        let (reply, events, mut pending) = drain_reply();
-        events.send(chunk("abc")).unwrap();
+        let (reply, events) = open_reply(vec![chunk("abc")]);
         let (_state, state_rx) = watch::channel(ConnectionState::default());
         let mut b = ReplyBody::new(reply, Some(3), guard, None, state_rx);
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "abc");
         drop(b);
-        assert!(
-            pending.try_recv().is_ok(),
-            "drop must poll the reply before it hands it over"
-        );
         // The paused clock auto-advances once every task is idle, so the timeout proves the drain kept the reply.
         assert!(
             tokio::time::timeout(Duration::from_secs(1), events.closed())
@@ -774,7 +706,7 @@ mod tests {
                 .is_err(),
             "the drain task must hold the reply until End arrives"
         );
-        events.send(end(false)).unwrap();
+        events.send(end(false)).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), events.closed())
             .await
             .expect("the drain task must consume End");
@@ -783,9 +715,9 @@ mod tests {
     /// Without the watermark the bytes never reached hyper: dropping the body cancels PHP at once.
     #[tokio::test]
     async fn completed_body_without_a_watermark_cancels_php() {
-        let dropped = Arc::new(AtomicBool::new(false));
+        let (reply, events) = parked_source();
         let mut b = ReplyBody::new(
-            parked_source(&dropped),
+            reply,
             Some(3),
             guard(),
             None,
@@ -793,63 +725,6 @@ mod tests {
         );
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "abc");
         drop(b);
-        assert!(dropped.load(Ordering::Acquire));
-    }
-
-    #[tokio::test]
-    async fn file_event_streams_the_slice_in_chunks() {
-        use std::io::Write;
-        let mut f = tempfile::tempfile().unwrap();
-        // A prime period, so a read at a wrong offset returns other bytes.
-        let payload: Vec<u8> = (0..100 * 1024).map(|i| (i % 251) as u8).collect();
-        f.write_all(&payload).unwrap();
-        let mut b = body(
-            vec![
-                ReplyEvent::File {
-                    file: f,
-                    offset: 1024,
-                    len: 80 * 1024,
-                },
-                end(false),
-            ],
-            None,
-        );
-        let mut got: Vec<u8> = Vec::new();
-        let mut frames = Vec::new();
-        while let Some(r) = data(&mut b).await {
-            let bytes = r.unwrap();
-            frames.push(bytes.len());
-            got.extend_from_slice(&bytes);
-        }
-        assert_eq!(frames, [64 * 1024, 16 * 1024]);
-        assert!(got == payload[1024..1024 + 80 * 1024], "wrong slice bytes");
-    }
-
-    /// A file that shrank below the promised slice aborts instead of faking a clean end.
-    #[tokio::test]
-    async fn shrunken_file_becomes_a_body_error() {
-        use std::io::Write;
-        let mut f = tempfile::tempfile().unwrap();
-        f.write_all(&vec![7u8; 64 * 1024]).unwrap();
-        let mut b = body(
-            vec![
-                ReplyEvent::File {
-                    file: f,
-                    offset: 0,
-                    len: 90 * 1024,
-                },
-                end(false),
-            ],
-            None,
-        );
-        let mut got = 0usize;
-        let err = loop {
-            match data(&mut b).await.unwrap() {
-                Ok(bytes) => got += bytes.len(),
-                Err(e) => break e,
-            }
-        };
-        assert_eq!(got, 64 * 1024);
-        assert!(err.contains("truncated"), "{err}");
+        assert!(events.is_closed());
     }
 }

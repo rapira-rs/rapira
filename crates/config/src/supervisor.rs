@@ -1,9 +1,9 @@
 use anyhow::bail;
 use serde::Deserialize;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::Duration;
 
-use crate::{capped_timeout, config_relative};
+use crate::{ConfigCtx, capped_timeout};
 
 #[derive(Debug)]
 pub struct SupervisorSettings {
@@ -20,22 +20,23 @@ impl SupervisorSettings {
     }
 }
 
+/// The `[supervisor]` table.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct SupervisorSection {
+pub struct SupervisorSection {
     pidfile: Option<String>,
     process_control_timeout_secs: Option<u64>,
 }
 
-pub(crate) fn resolve_supervisor(
+pub fn resolve_supervisor(
     section: SupervisorSection,
-    config_dir: Option<&Path>,
+    ctx: &ConfigCtx,
 ) -> anyhow::Result<SupervisorSettings> {
     let pidfile = section
         .pidfile
         .as_deref()
         .filter(|s| !s.is_empty())
-        .map(|p| config_relative(config_dir, p))
+        .map(|p| ctx.resolve_path(p))
         .transpose()?;
 
     let control_secs = section.process_control_timeout_secs.unwrap_or(30);
@@ -56,6 +57,59 @@ pub(crate) fn resolve_supervisor(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn supervisor(toml: &str) -> anyhow::Result<SupervisorSettings> {
+        let section: SupervisorSection = toml::from_str(toml)?;
+        resolve_supervisor(
+            section,
+            &ConfigCtx {
+                dir: PathBuf::from("/w"),
+            },
+        )
+    }
+
+    #[test]
+    fn supervisor_pidfile_resolves_against_config_dir() {
+        let s = supervisor("pidfile = \"rapira.pid\"\n").unwrap();
+        assert_eq!(s.pidfile, Some(PathBuf::from("/w/rapira.pid")));
+    }
+
+    struct Case {
+        name: &'static str,
+        toml: &'static str,
+        error: &'static str,
+    }
+
+    /// A zero stop budget escalates at once and leaves the drain no time.
+    #[test]
+    fn supervisor_errors_name_the_key() {
+        let cases = [
+            Case {
+                name: "zero control timeout",
+                toml: "process_control_timeout_secs = 0\n",
+                error: "supervisor.process_control_timeout_secs must be at least 1",
+            },
+            Case {
+                name: "control timeout above the cap",
+                toml: "process_control_timeout_secs = 100000\n",
+                error: "supervisor.process_control_timeout_secs 100000 is too large (max 86400)",
+            },
+            Case {
+                name: "unknown key",
+                toml: "bogus = 1\n",
+                error: "unknown field `bogus`",
+            },
+            Case {
+                name: "max_requests belongs to the pool",
+                toml: "max_requests = 1\n",
+                error: "unknown field `max_requests`",
+            },
+        ];
+        for case in cases {
+            let err = supervisor(case.toml).expect_err(case.name).to_string();
+            assert!(err.contains(case.error), "{}: {err}", case.name);
+        }
+    }
 
     #[test]
     fn drain_grace_leaves_room_before_the_master_escalates() {

@@ -8,5 +8,7 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-serde = { version = "1", features = ["derive"] }
-toml = "1.1"
+serde = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }

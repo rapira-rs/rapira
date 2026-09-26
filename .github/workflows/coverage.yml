@@ -59,9 +59,18 @@ jobs:
         # a skip in a gated suite on Linux means a broken install, not a pass
         env:
           RAPIRA_REQUIRE_EXTS: imap,openssl
-        run: >-
-          cargo llvm-cov --workspace --lcov --output-path lcov.info
-          --ignore-filename-regex '(crates/tests/|bindings\.rs$|/src/main\.rs$)'
+        # workers leave through _exit, which skips the profile write at exit; continuous mode (%c) keeps the
+        # counters in a mapped file that forked workers share, and on Linux it needs counter relocation:
+        # https://clang.llvm.org/docs/SourceBasedCodeCoverage.html#running-the-instrumented-program
+        run: |
+          export RUSTFLAGS="$RUSTFLAGS -Cllvm-args=-runtime-counter-relocation"
+          eval "$(cargo llvm-cov show-env --export-prefix)"
+          export LLVM_PROFILE_FILE="$CARGO_LLVM_COV_TARGET_DIR/rapira-%p%c.profraw"
+          cargo llvm-cov clean --workspace
+          cargo test --workspace
+          cargo build -p rapira_core --bin rapira
+          cargo test -p tests --test e2e --features e2e -- --test-threads=1
+          cargo llvm-cov report --workspace --lcov --output-path lcov.info --ignore-filename-regex '(crates/tests/|bindings\.rs$|/src/main\.rs$)'
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1

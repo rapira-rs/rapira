@@ -5,21 +5,49 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use extension_api::{
-    Addr, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer, Php,
-    Protocol, Rejected, ReplyEvent,
-};
+use http::header::CONTENT_TYPE;
 use http_body::Body;
 use http_body_util::BodyExt;
+use hyper::body::Incoming;
+use rapira_sapi::work::{Intake, Refused};
+use rapira_sapi::{Addr, Frame, Request};
+use tower::{Service as _, ServiceExt as _};
 
+use crate::check::{self, Rejection};
+use crate::middleware::{self, BoxError, Layer, Peer, Service};
 use crate::response::{error_response, response_headers};
-use crate::{Config, bridge, check, request};
+use crate::{Config, Exchange, bridge, multipart, request};
 
 pub(crate) struct Shared {
     pub cfg: Config,
-    pub php: Php,
-    pub chain: Arc<[Arc<dyn Middleware>]>,
+    pub intake: Intake<Exchange>,
+    /// The multipart limits; None outside dispatcher mode.
+    pub uploads: Option<Arc<multipart::Limits>>,
     pub inflight: Arc<AtomicUsize>,
+}
+
+impl From<Refused> for Rejection {
+    fn from(e: Refused) -> Self {
+        Self {
+            status: match e {
+                Refused::Saturated => http::StatusCode::SERVICE_UNAVAILABLE,
+                Refused::Stopped => http::StatusCode::INTERNAL_SERVER_ERROR,
+            },
+            reason: e.to_string(),
+        }
+    }
+}
+
+impl From<multipart::ParseError> for Rejection {
+    fn from(e: multipart::ParseError) -> Self {
+        match e {
+            multipart::ParseError::Rejected { status, reason } => Self { status, reason },
+            multipart::ParseError::Io(e) => Self {
+                status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                reason: format!("upload spool failed: {e}"),
+            },
+        }
+    }
 }
 
 pub(crate) struct InflightReqCount {
@@ -56,7 +84,7 @@ pub(crate) struct RespBody {
     kind: BodyKind,
     guard: Arc<InflightReqCount>,
     /// Declared body bytes still to pass through, with the connection state that holds the flush count.
-    /// Armed by `call` once every middleware has returned.
+    /// Armed by [`respond`] once every middleware has returned.
     transport: Option<(u64, tokio::sync::watch::Receiver<bridge::ConnectionState>)>,
 }
 
@@ -67,7 +95,7 @@ pub(crate) struct RespBody {
 enum BodyKind {
     Reply(bridge::ReplyBody),
     Empty,
-    Boxed(extension_api::Body),
+    Boxed(middleware::Body),
 }
 
 fn refused(status: http::StatusCode, req_count: Arc<InflightReqCount>) -> http::Response<RespBody> {
@@ -121,51 +149,25 @@ impl Body for RespBody {
     }
 }
 
-pub(crate) struct RapiraService {
+/// Serves one request of the connection. `chain` is [`Conn::chain`].
+pub(crate) async fn respond(
     handler: Arc<Conn>,
-}
-
-impl RapiraService {
-    pub(crate) fn new(
-        shared: Arc<Shared>,
-        remote: Addr,
-        server: Addr,
-        closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
-    ) -> Self {
-        Self {
-            handler: Arc::new(Conn {
-                shared,
-                closed,
-                remote,
-                server,
-            }),
+    chain: Option<Service>,
+    req: http::Request<Incoming>,
+) -> http::Response<RespBody> {
+    let closed = handler.closed.clone();
+    let method = req.method().clone();
+    let mut response = handle(handler, chain, req).await;
+    // Track the body sent to hyper after all middleware has returned.
+    if let Some(length) = framed_length(&method, &response) {
+        let body = response.body_mut();
+        if length == 0 {
+            body.guard.end_flush.get_or_init(|| closed.borrow().flushes);
+        } else {
+            body.transport = Some((length, closed));
         }
     }
-}
-
-impl hyper::service::Service<http::Request<hyper::body::Incoming>> for RapiraService {
-    type Response = http::Response<RespBody>;
-    type Error = Infallible;
-    type Future = BoxFuture<'static, Result<http::Response<RespBody>, Infallible>>;
-
-    fn call(&self, req: http::Request<hyper::body::Incoming>) -> Self::Future {
-        let handler = Arc::clone(&self.handler);
-        let closed = handler.closed.clone();
-        let method = req.method().clone();
-        Box::pin(async move {
-            let mut response = handle(handler, req).await;
-            // Track the body sent to hyper after all middleware has returned.
-            if let Some(length) = framed_length(&method, &response) {
-                let body = response.body_mut();
-                if length == 0 {
-                    body.guard.end_flush.get_or_init(|| closed.borrow().flushes);
-                } else {
-                    body.transport = Some((length, closed));
-                }
-            }
-            Ok(response)
-        })
-    }
+    response
 }
 
 /// The body length hyper will frame, in the order hyper's h1 encoder (`proto/h1/role.rs`, `Server::encode`) decides it:
@@ -192,7 +194,11 @@ fn framed_length(method: &http::Method, response: &http::Response<RespBody>) -> 
         .or_else(|| response.body().size_hint().exact())
 }
 
-async fn handle<B>(handler: Arc<Conn>, req: http::Request<B>) -> http::Response<RespBody>
+async fn handle<B>(
+    handler: Arc<Conn>,
+    chain: Option<Service>,
+    req: http::Request<B>,
+) -> http::Response<RespBody>
 where
     B: Body<Data = bytes::Bytes> + Unpin + Send + 'static,
     B::Error: std::error::Error + Send + Sync + 'static,
@@ -225,7 +231,7 @@ where
         received_at,
     };
 
-    if handler.shared.chain.is_empty() {
+    let Some(chain) = chain else {
         return serve_php(
             &handler.shared,
             &handler.closed,
@@ -236,20 +242,21 @@ where
             peer,
         )
         .await;
-    }
+    };
 
-    parts.extensions.insert(Protocol::Http);
     parts.extensions.insert(peer);
     parts.extensions.insert(ReqState {
         authority,
         guard: Arc::clone(&reqs_counter),
     });
-    let body: extension_api::Body = incoming.map_err(BoxError::from).boxed_unsync();
-    let req = HttpRequest::from_parts(parts, body);
+    let body: middleware::Body = incoming.map_err(BoxError::from).boxed_unsync();
+    let req = middleware::Request::from_parts(parts, body);
 
-    let res = Next::new(Arc::clone(&handler.shared.chain), handler)
-        .run(req)
-        .await;
+    // The awaited future is the boxed one that `call` returns: the compiler cannot prove `Send` for a held `Oneshot` over this request type.
+    // https://github.com/rust-lang/rust/issues/110338
+    let mut chain = chain;
+    let Ok(ready) = chain.ready().await;
+    let Ok(res) = ready.call(req).await;
     // The final response and the PHP reply share one guard; the drain window
     // stays open until the last holder drops.
     res.map(|body| RespBody {
@@ -259,21 +266,52 @@ where
     })
 }
 
-struct Conn {
+/// Wraps `inner` in `layers`, the first listed outermost.
+fn fold(layers: &[Layer], inner: Service) -> Service {
+    layers
+        .iter()
+        .rev()
+        .fold(inner, |inner, layer| tower::Layer::layer(layer, inner))
+}
+
+/// One connection. [`Conn::serve`] is the inner service of its middleware chain.
+pub(crate) struct Conn {
     shared: Arc<Shared>,
     closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
     remote: Addr,
     server: Addr,
 }
 
-impl Handler for Conn {
-    fn call(&self, req: HttpRequest) -> BoxFuture<'_, HttpResponse> {
-        Box::pin(self.serve(req))
-    }
-}
-
 impl Conn {
-    async fn serve(&self, req: HttpRequest) -> HttpResponse {
+    pub(crate) fn new(
+        shared: Arc<Shared>,
+        remote: Addr,
+        server: Addr,
+        closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            shared,
+            closed,
+            remote,
+            server,
+        })
+    }
+
+    /// The configured middleware around [`Conn::serve`]. None without middleware.
+    pub(crate) fn chain(self: &Arc<Self>) -> Option<Service> {
+        let layers = &self.shared.cfg.middleware;
+        if layers.is_empty() {
+            return None;
+        }
+        let conn = Arc::clone(self);
+        let serve = tower::service_fn(move |req| {
+            let conn = Arc::clone(&conn);
+            async move { Ok::<_, Infallible>(conn.serve(req).await) }
+        });
+        Some(fold(layers, Service::new(serve)))
+    }
+
+    async fn serve(&self, req: middleware::Request) -> middleware::Response {
         let (mut parts, body) = req.into_parts();
         let Some(state) = parts.extensions.remove::<ReqState>() else {
             tracing::error!(target: "http", "request state missing from request extensions");
@@ -317,7 +355,7 @@ where
     let mut collected: Vec<u8> = Vec::with_capacity(reserve);
     loop {
         // hyper only times the head read, so each body frame gets its own progress bound here.
-        let frame = match tokio::time::timeout(cfg.keepalive_timeout, body.frame()).await {
+        let frame = match timeout_lazy(cfg.keepalive_timeout, body.frame()).await {
             Ok(frame) => frame,
             Err(_) => {
                 tracing::debug!(target: "http", "request body stalled past keepalive_timeout");
@@ -345,46 +383,33 @@ where
     }
 
     let request = request::build(parts, authority, collected, peer, cfg);
-    let mut reply = match shared.php.exec(request).await {
+    let mut reply = match submit(shared, request).await {
         Ok(reply) => reply,
-        Err(e) => {
-            if let Some(r) = e.downcast_ref::<Rejected>() {
-                tracing::warn!(target: "http", "rejected before dispatch: {r}");
-                let status = http::StatusCode::from_u16(r.status)
-                    .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-                return refused(status, guard);
-            }
-            let status = if e.chain().any(|c| c.is::<std::io::Error>()) {
-                http::StatusCode::INTERNAL_SERVER_ERROR
-            } else {
-                http::StatusCode::BAD_GATEWAY
-            };
-            tracing::error!(target: "http", "php exec failed: {e:#}");
-            return refused(status, guard);
+        Err(r) => {
+            tracing::warn!(target: "http", "rejected before dispatch: {r}");
+            return refused(r.status, guard);
         }
     };
 
     let (status, headers, content_length, bodiless) = loop {
-        match reply.next().await {
+        match reply.recv().await {
             None => {
                 tracing::error!(target: "http", "php worker died before a response head");
                 return refused(http::StatusCode::BAD_GATEWAY, guard);
             }
-            Some(ReplyEvent::Interim { status, .. }) => {
-                tracing::debug!(target: "http", "dropped interim {status}");
+            Some(Frame::Interim(head)) => {
+                tracing::debug!(target: "http", "dropped interim {}", head.status);
             }
-            Some(ReplyEvent::Head {
-                status,
-                headers,
+            Some(Frame::Head {
+                head,
                 content_length,
                 bodiless,
-                ..
-            }) => break (status, headers, content_length, bodiless),
-            Some(ReplyEvent::End { .. }) => {
+            }) => break (head.status, head.headers, content_length, bodiless),
+            Some(Frame::End { .. }) => {
                 tracing::error!(target: "http", "php produced no response head");
                 return refused(http::StatusCode::BAD_GATEWAY, guard);
             }
-            Some(ReplyEvent::Chunk(_) | ReplyEvent::File { .. }) => {
+            Some(Frame::Chunk(_) | Frame::File { .. }) => {
                 tracing::warn!(target: "http", "dropped body bytes preceding the response head");
             }
         }
@@ -397,7 +422,7 @@ where
             // the connection; a 502 head keeps the connection coherent.
             tracing::error!(
                 target: "http",
-                "php committed status {status} as final; this front cannot forward it - serving 502"
+                "php committed status {status} as final; this plugin cannot forward it - serving 502"
             );
             http::StatusCode::BAD_GATEWAY
         }
@@ -410,7 +435,7 @@ where
         BodyKind::Empty
     } else {
         let staged = if declared_cl.is_some() {
-            tokio::time::timeout(Duration::from_millis(10), reply.next())
+            timeout_lazy(Duration::from_millis(10), reply.recv())
                 .await
                 .ok()
                 .flatten()
@@ -436,494 +461,230 @@ where
     res
 }
 
+/// Polls `fut` once and arms the timer only when it is pending: a ready future needs no timer.
+async fn timeout_lazy<F: Future>(
+    dur: Duration,
+    fut: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    let mut fut = std::pin::pin!(fut);
+    match std::future::poll_fn(|cx| Poll::Ready(fut.as_mut().poll(cx))).await {
+        Poll::Ready(out) => Ok(out),
+        Poll::Pending => tokio::time::timeout(dur, fut).await,
+    }
+}
+
+/// Both refusals come before dispatch: the multipart parse, then the intake.
+async fn submit(
+    shared: &Shared,
+    request: Request,
+) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
+    let request = parse_multipart(request, shared.uploads.as_ref()).await?;
+    let (exchange, reply) = Exchange::new(request, shared.cfg.superglobals);
+    shared.intake.submit(exchange).await?;
+    Ok(reply)
+}
+
+/// Parses a multipart body before submit, so a rejected body never reaches the pending and active counters. `limits` is None outside dispatcher mode.
+async fn parse_multipart(
+    mut req: Request,
+    limits: Option<&Arc<multipart::Limits>>,
+) -> Result<Request, Rejection> {
+    let Some(limits) = limits else {
+        return Ok(req);
+    };
+    let rapira_sapi::types::Body::Raw(raw) = &mut req.body else {
+        return Ok(req);
+    };
+    if raw.get_ref().is_empty() {
+        return Ok(req);
+    }
+    // Content-type is a singleton field per RFC 9110 §8.3: with repeated lines the plugin and a PHP consumer could split the body on different boundaries.
+    // https://www.rfc-editor.org/rfc/rfc9110#section-8.3
+    let lines = req.headers.get_all(CONTENT_TYPE);
+    if lines.iter().nth(1).is_some() && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
+    {
+        return Err(Rejection {
+            status: http::StatusCode::BAD_REQUEST,
+            reason: "repeated content-type field lines with a multipart body".into(),
+        });
+    }
+    let Some(content_type) = req.content_type.as_deref() else {
+        return Ok(req);
+    };
+    if !multipart::is_multipart(content_type) {
+        return Ok(req);
+    }
+    let boundary = multipart::boundary(content_type)?;
+    let bytes = std::mem::take(raw.get_mut());
+    let limits = Arc::clone(limits);
+    let parsed = tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
+        .await
+        .map_err(|e| Rejection {
+            status: http::StatusCode::INTERNAL_SERVER_ERROR,
+            reason: format!("multipart parse task failed: {e}"),
+        })?;
+    req.body = rapira_sapi::types::Body::Multipart(parsed?);
+    Ok(req)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_api::{Backend, Reply, ReplySource, Request, UnaryCall, UnaryReply};
-    use std::collections::VecDeque;
-    use std::future::Future;
-    use std::sync::Mutex;
-    use std::sync::atomic::AtomicBool;
+    use tower::layer::layer_fn;
+    use tower::service_fn;
 
-    struct NoPhp;
+    use crate::response::empty_body;
 
-    impl Backend for NoPhp {
-        fn exec(
-            &self,
-            _req: Request,
-        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Reply>> + Send + '_>> {
-            unreachable!("the middleware answers before PHP")
-        }
-
-        fn unary(
-            &self,
-            _call: UnaryCall,
-        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Option<UnaryReply>>> + Send + '_>>
-        {
-            unreachable!("the HTTP handler sends no call")
-        }
-    }
-
-    /// Parks a source after its scripted events until released.
-    #[derive(Default)]
-    struct Gate {
-        released: AtomicBool,
-        waker: Mutex<Option<std::task::Waker>>,
-    }
-
-    impl Gate {
-        fn release(&self) {
-            self.released.store(true, Ordering::Release);
-            if let Some(w) = self.waker.lock().unwrap().take() {
-                w.wake();
-            }
-        }
-    }
-
-    struct TestSource {
-        events: Vec<ReplyEvent>,
-        dropped: Option<Arc<AtomicBool>>,
-        gate: Option<Arc<Gate>>,
-    }
-
-    impl ReplySource for TestSource {
-        fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<ReplyEvent>> {
-            if !self.events.is_empty() {
-                return Poll::Ready(Some(self.events.remove(0)));
-            }
-            let Some(gate) = &self.gate else {
-                return Poll::Ready(None);
-            };
-            // The waker is stored before the flag is read, so a release between the two still wakes.
-            *gate.waker.lock().unwrap() = Some(cx.waker().clone());
-            if gate.released.load(Ordering::Acquire) {
-                return Poll::Ready(None);
-            }
-            Poll::Pending
-        }
-    }
-
-    impl Drop for TestSource {
-        fn drop(&mut self) {
-            if let Some(flag) = &self.dropped {
-                flag.store(true, Ordering::Release);
-            }
-        }
-    }
-
-    struct Scripted {
-        scripts: Mutex<VecDeque<Vec<ReplyEvent>>>,
-        seen_authorities: Mutex<Vec<Option<Vec<u8>>>>,
-        dropped: Option<Arc<AtomicBool>>,
-        gate: Option<Arc<Gate>>,
-    }
-
-    impl Scripted {
-        fn one(events: Vec<ReplyEvent>, dropped: Option<Arc<AtomicBool>>) -> Self {
-            Self {
-                scripts: Mutex::new(VecDeque::from([events])),
-                seen_authorities: Mutex::new(Vec::new()),
-                dropped,
-                gate: None,
-            }
-        }
-
-        /// One script whose source parks after its events until `gate` is released.
-        fn parked(events: Vec<ReplyEvent>, gate: &Arc<Gate>) -> Self {
-            Self {
-                scripts: Mutex::new(VecDeque::from([events])),
-                seen_authorities: Mutex::new(Vec::new()),
-                dropped: None,
-                gate: Some(Arc::clone(gate)),
-            }
-        }
-    }
-
-    impl Backend for Scripted {
-        fn exec(
-            &self,
-            req: Request,
-        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Reply>> + Send + '_>> {
-            self.seen_authorities.lock().unwrap().push(req.authority);
-            let events = self
-                .scripts
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("a script per exec");
-            let dropped = self.dropped.clone();
-            let gate = self.gate.clone();
-            Box::pin(async move {
-                Ok(Reply::new(Box::new(TestSource {
-                    events,
-                    dropped,
-                    gate,
-                })))
+    fn deny() -> Layer {
+        Layer::new(layer_fn(|_inner: Service| {
+            service_fn(|_req: middleware::Request| async {
+                Ok(error_response(http::StatusCode::FORBIDDEN))
             })
-        }
-
-        fn unary(
-            &self,
-            _call: UnaryCall,
-        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Option<UnaryReply>>> + Send + '_>>
-        {
-            unreachable!("the HTTP handler sends no call")
-        }
+        }))
     }
 
-    fn head(bodiless: bool) -> ReplyEvent {
-        ReplyEvent::Head {
-            status: 200,
-            headers: http::HeaderMap::new(),
-            content_length: None,
-            bodiless,
-        }
+    /// Appends `{name}-in` to the request and `{name}-out` to the response.
+    fn tag(name: &'static str) -> Layer {
+        Layer::new(
+            tower::ServiceBuilder::new()
+                .map_request(move |mut req: middleware::Request| {
+                    req.headers_mut()
+                        .append("x-trace", format!("{name}-in").parse().unwrap());
+                    req
+                })
+                .map_response(move |mut res: middleware::Response| {
+                    res.headers_mut()
+                        .append("x-trace", format!("{name}-out").parse().unwrap());
+                    res
+                }),
+        )
     }
 
-    fn head_cl(content_length: u64) -> ReplyEvent {
-        ReplyEvent::Head {
-            status: 200,
-            headers: http::HeaderMap::new(),
-            content_length: Some(content_length),
-            bodiless: false,
-        }
+    /// Answers 200 with the `x-trace` values of the request.
+    fn echo() -> Service {
+        Service::new(service_fn(|req: middleware::Request| async move {
+            let mut res = http::Response::builder()
+                .status(200)
+                .body(empty_body())
+                .unwrap();
+            for v in req.headers().get_all("x-trace") {
+                res.headers_mut().append("x-trace", v.clone());
+            }
+            Ok(res)
+        }))
     }
 
-    fn chunk(s: &str) -> ReplyEvent {
-        ReplyEvent::Chunk(bytes::Bytes::copy_from_slice(s.as_bytes()))
+    fn trace(res: &middleware::Response) -> Vec<&str> {
+        res.headers()
+            .get_all("x-trace")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect()
     }
 
-    fn end() -> ReplyEvent {
-        ReplyEvent::End {
-            trailers: http::HeaderMap::new(),
-            truncated: false,
-        }
+    #[tokio::test(flavor = "current_thread")]
+    async fn chain_runs_outermost_first_and_unwinds_in_reverse() {
+        let chain = fold(&[tag("a"), tag("b")], echo());
+        let Ok(res) = chain.oneshot(http::Request::new(empty_body())).await;
+        assert_eq!(res.status(), 200);
+        assert_eq!(trace(&res), ["a-in", "b-in", "b-out", "a-out"]);
     }
 
-    struct Deny;
-
-    impl Middleware for Deny {
-        fn handle<'a>(&'a self, _req: HttpRequest, _next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async { error_response(http::StatusCode::FORBIDDEN) })
-        }
+    #[tokio::test(flavor = "current_thread")]
+    async fn short_circuit_skips_downstream_and_the_handler() {
+        let chain = fold(&[tag("a"), deny(), tag("never")], echo());
+        let Ok(res) = chain.oneshot(http::Request::new(empty_body())).await;
+        assert_eq!(res.status(), 403);
+        assert_eq!(trace(&res), ["a-out"]);
     }
 
-    struct Replace;
-
-    impl Middleware for Replace {
-        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async move {
-                let _ = next.run(req).await;
-                error_response(http::StatusCode::IM_A_TEAPOT)
-            })
-        }
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_chain_reaches_the_handler_directly() {
+        let chain = fold(&[], echo());
+        let mut req = http::Request::new(empty_body());
+        req.headers_mut().append("x-trace", "solo".parse().unwrap());
+        let Ok(res) = chain.oneshot(req).await;
+        assert_eq!(res.status(), 200);
+        assert_eq!(trace(&res), ["solo"]);
     }
 
-    struct Pass;
-
-    impl Middleware for Pass {
-        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async move { next.run(req).await })
-        }
+    /// Pending for `left` polls, then ready. Each pending poll wakes the task at once.
+    struct ReadyAfter {
+        left: Option<u32>,
     }
 
-    /// Re-boxes the body through `map_frame`, which keeps `is_end_stream` but drops the size hint.
-    struct MapBody;
-
-    impl Middleware for MapBody {
-        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async move {
-                next.run(req)
-                    .await
-                    .map(|body| body.map_frame(|frame| frame).boxed_unsync())
-            })
-        }
-    }
-
-    /// Adds a positive content-length to the response, as a middleware serving cached GET headers on HEAD would.
-    struct HeadLength;
-
-    impl Middleware for HeadLength {
-        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async move {
-                let mut res = next.run(req).await;
-                res.headers_mut().insert(
-                    http::header::CONTENT_LENGTH,
-                    http::HeaderValue::from_static("5"),
-                );
-                res
-            })
+    impl Future for ReadyAfter {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            match self.left {
+                Some(0) => Poll::Ready(()),
+                Some(n) => {
+                    self.left = Some(n - 1);
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                None => Poll::Pending,
+            }
         }
     }
 
-    /// Serves one request through hyper over an in-memory pipe; returns the raw response once the connection has closed.
-    async fn serve_raw(
-        handler: Arc<Conn>,
-        closed_tx: tokio::sync::watch::Sender<bridge::ConnectionState>,
-        request: &[u8],
-    ) -> Vec<u8> {
-        use tokio::io::{AsyncReadExt, AsyncWriteExt};
-        let (mut client, server) = tokio::io::duplex(64 * 1024);
-        let io = bridge::TimedIo::new(
-            hyper_util::rt::TokioIo::new(server),
-            Duration::from_secs(5),
-            closed_tx.clone(),
-        );
-        let conn = hyper::server::conn::http1::Builder::new()
-            .timer(hyper_util::rt::TokioTimer::new())
-            .serve_connection(io, RapiraService { handler });
-        let mut closed = closed_tx.subscribe();
-        tokio::spawn(async move {
-            let _ = conn.await;
-            closed_tx.send_modify(|s| s.closed = true);
-        });
-        client.write_all(request).await.unwrap();
-        let mut response = Vec::new();
-        client.read_to_end(&mut response).await.unwrap();
-        closed.wait_for(|s| s.closed).await.unwrap();
-        response
-    }
-
-    /// Polls on a timer, so a paused clock advances while the drain task runs.
-    async fn until_inflight(inflight: &AtomicUsize, want: usize) {
-        while inflight.load(Ordering::Acquire) != want {
-            tokio::time::sleep(Duration::from_millis(1)).await;
-        }
-    }
-
-    fn setup(
-        backend: Arc<dyn Backend>,
-        chain: Vec<Arc<dyn Middleware>>,
-    ) -> (
-        Arc<Conn>,
-        Arc<AtomicUsize>,
-        tokio::sync::watch::Sender<bridge::ConnectionState>,
-    ) {
-        let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
-        let shared = Arc::new(Shared {
-            cfg: Config::default(),
-            php: Php::new(backend),
-            chain: chain.into(),
-            inflight: Arc::clone(&inflight),
-        });
-        let (closed_tx, closed) = tokio::sync::watch::channel(bridge::ConnectionState::default());
-        let handler = Arc::new(Conn {
-            shared,
-            closed,
-            remote: Addr::Inet(([127, 0, 0, 1], 40000).into()),
-            server: Addr::Inet(([127, 0, 0, 1], 8000).into()),
-        });
-        (handler, inflight, closed_tx)
-    }
-
-    fn get_request() -> http::Request<http_body_util::Empty<bytes::Bytes>> {
-        http::Request::builder()
-            .uri("/")
-            .header("host", "e2e")
-            .body(http_body_util::Empty::<bytes::Bytes>::new())
-            .unwrap()
-    }
-
-    /// A middleware answer must hold the inflight guard until hyper drops the body.
-    #[tokio::test]
-    async fn short_circuit_keeps_the_inflight_guard() {
-        let (handler, inflight, _closed_tx) =
-            setup(Arc::new(NoPhp), vec![Arc::new(Deny) as Arc<dyn Middleware>]);
-        let res = handle(handler, get_request()).await;
-        assert_eq!(res.status(), http::StatusCode::FORBIDDEN);
-        assert_eq!(
-            inflight.load(Ordering::Acquire),
-            1,
-            "the guard must ride the response body"
-        );
-        drop(res);
-        assert_eq!(inflight.load(Ordering::Acquire), 0);
-    }
-
-    /// A middleware that replaces the PHP response must keep the request counted
-    /// until hyper drops the replacement body.
-    #[tokio::test]
-    async fn replaced_response_keeps_the_inflight_guard() {
-        let backend = Arc::new(Scripted::one(vec![head(false), end()], None));
-        let (handler, inflight, _closed_tx) =
-            setup(backend, vec![Arc::new(Replace) as Arc<dyn Middleware>]);
-        let res = handle(handler, get_request()).await;
-        assert_eq!(res.status(), http::StatusCode::IM_A_TEAPOT);
-        assert_eq!(
-            inflight.load(Ordering::Acquire),
-            1,
-            "the guard must ride the replacement response"
-        );
-        drop(res);
-        assert_eq!(inflight.load(Ordering::Acquire), 0);
-    }
-
-    /// A bodiless reply keeps the response guarded after its reply is consumed to End.
-    #[tokio::test]
-    async fn bodiless_response_stays_guarded_after_the_reply_ends() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let backend = Arc::new(Scripted::one(
-            vec![head(true), end()],
-            Some(Arc::clone(&dropped)),
+    /// Outside a runtime `tokio::time::timeout` panics: a ready future must complete without it.
+    #[test]
+    fn timeout_lazy_ready_future_needs_no_timer() {
+        let mut fut = std::pin::pin!(timeout_lazy(
+            Duration::from_secs(1),
+            ReadyAfter { left: Some(0) }
         ));
-        let (handler, inflight, _closed_tx) = setup(backend, Vec::new());
-        let res = handle(handler, get_request()).await;
-        assert_eq!(res.status(), http::StatusCode::OK);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !dropped.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the reply must be consumed to End");
-        assert_eq!(
-            inflight.load(Ordering::Acquire),
-            1,
-            "the guard must ride the empty response"
-        );
-        drop(res);
-        assert_eq!(inflight.load(Ordering::Acquire), 0);
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
     }
 
-    /// One handler serves the whole connection; each request must carry its own state.
-    #[tokio::test]
-    async fn sequential_requests_share_the_handler_but_not_the_state() {
-        let backend = Arc::new(Scripted {
-            scripts: Mutex::new(VecDeque::from([
-                vec![head(false), end()],
-                vec![head(false), end()],
-            ])),
-            seen_authorities: Mutex::new(Vec::new()),
-            dropped: None,
-            gate: None,
-        });
-        let (handler, inflight, _closed_tx) = setup(
-            Arc::clone(&backend) as Arc<dyn Backend>,
-            vec![Arc::new(Pass) as Arc<dyn Middleware>],
-        );
-        for _ in 0..2 {
-            let res = handle(Arc::clone(&handler), get_request()).await;
-            assert_eq!(res.status(), http::StatusCode::OK);
-            assert_eq!(inflight.load(Ordering::Acquire), 1);
-            drop(res);
-            assert_eq!(inflight.load(Ordering::Acquire), 0);
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn timeout_lazy_outcomes() {
+        struct Case {
+            name: &'static str,
+            pending_polls: Option<u32>,
+            elapsed: bool,
+            waited: Duration,
         }
-        assert_eq!(
-            *backend.seen_authorities.lock().unwrap(),
-            vec![Some(b"e2e".to_vec()), Some(b"e2e".to_vec())],
-            "every exec must see the authority of its own request"
-        );
-    }
-
-    /// The chain path must hand the guard to the drain task: the request stays
-    /// counted after the response is gone, until the reply stream ends.
-    #[tokio::test]
-    async fn a_parked_drain_keeps_the_request_counted_through_the_chain() {
-        let gate = Arc::new(Gate::default());
-        let backend = Arc::new(Scripted::parked(vec![head(true)], &gate));
-        let (handler, inflight, _closed_tx) =
-            setup(backend, vec![Arc::new(Pass) as Arc<dyn Middleware>]);
-        let res = handle(handler, get_request()).await;
-        assert_eq!(res.status(), http::StatusCode::OK);
-        drop(res);
-        assert_eq!(
-            inflight.load(Ordering::Acquire),
-            1,
-            "the drain task must keep the request counted"
-        );
-        gate.release();
-        tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
-            .await
-            .expect("drain must release the count at the stream end");
-    }
-
-    /// `map_frame` drops the size hint, so the bodiless watermark must come from `is_end_stream`.
-    #[tokio::test(start_paused = true)]
-    async fn delivered_head_behind_body_mapping_middleware_keeps_php_alive() {
-        let gate = Arc::new(Gate::default());
-        let backend = Arc::new(Scripted::parked(vec![head(true)], &gate));
-        let (handler, inflight, closed_tx) =
-            setup(backend, vec![Arc::new(MapBody) as Arc<dyn Middleware>]);
-        let response = serve_raw(
-            handler,
-            closed_tx,
-            b"HEAD / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
-        )
-        .await;
-        assert!(
-            response.starts_with(b"HTTP/1.1 200"),
-            "{}",
-            String::from_utf8_lossy(&response)
-        );
-        // The paused clock auto-advances once every task is idle, so the timeout proves the drain kept the reply.
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), until_inflight(&inflight, 0))
-                .await
-                .is_err(),
-            "a close after the flushed head must not cancel PHP"
-        );
-        gate.release();
-        tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
-            .await
-            .expect("End releases the count");
-    }
-
-    /// hyper writes no body for HEAD whatever content-length says, so the head alone completes the response.
-    #[tokio::test(start_paused = true)]
-    async fn head_with_a_positive_content_length_completes_at_the_head() {
-        let gate = Arc::new(Gate::default());
-        let backend = Arc::new(Scripted::parked(vec![head(true)], &gate));
-        let (handler, inflight, closed_tx) =
-            setup(backend, vec![Arc::new(HeadLength) as Arc<dyn Middleware>]);
-        let response = serve_raw(
-            handler,
-            closed_tx,
-            b"HEAD / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
-        )
-        .await;
-        assert!(
-            response.starts_with(b"HTTP/1.1 200") && response.ends_with(b"\r\n\r\n"),
-            "{}",
-            String::from_utf8_lossy(&response)
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), until_inflight(&inflight, 0))
-                .await
-                .is_err(),
-            "a close after the flushed head must not cancel PHP"
-        );
-        gate.release();
-        tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
-            .await
-            .expect("End releases the count");
-    }
-
-    /// hyper drops a length-delimited body once the last byte is buffered; the flush after it must keep PHP alive past the close.
-    #[tokio::test(start_paused = true)]
-    async fn delivered_fixed_length_body_keeps_php_alive_past_the_close() {
-        let gate = Arc::new(Gate::default());
-        let backend = Arc::new(Scripted::parked(vec![head_cl(5), chunk("01234")], &gate));
-        let (handler, inflight, closed_tx) = setup(backend, Vec::new());
-        let response = serve_raw(
-            handler,
-            closed_tx,
-            b"GET / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
-        )
-        .await;
-        let text = String::from_utf8_lossy(&response).to_ascii_lowercase();
-        assert!(
-            text.contains("content-length: 5") && text.ends_with("\r\n\r\n01234"),
-            "{text}"
-        );
-        assert!(
-            tokio::time::timeout(Duration::from_secs(1), until_inflight(&inflight, 0))
-                .await
-                .is_err(),
-            "a close after the flushed body must not cancel PHP"
-        );
-        gate.release();
-        tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
-            .await
-            .expect("End releases the count");
+        let dur = Duration::from_millis(10);
+        let cases = [
+            Case {
+                name: "ready future returns at once",
+                pending_polls: Some(0),
+                elapsed: false,
+                waited: Duration::ZERO,
+            },
+            Case {
+                name: "future ready after the first poll returns Ok",
+                pending_polls: Some(1),
+                elapsed: false,
+                waited: Duration::ZERO,
+            },
+            Case {
+                name: "future ready after several polls returns Ok",
+                pending_polls: Some(3),
+                elapsed: false,
+                waited: Duration::ZERO,
+            },
+            Case {
+                name: "pending future times out at the deadline",
+                pending_polls: None,
+                elapsed: true,
+                waited: dur,
+            },
+        ];
+        for case in cases {
+            let start = tokio::time::Instant::now();
+            let out = timeout_lazy(
+                dur,
+                ReadyAfter {
+                    left: case.pending_polls,
+                },
+            )
+            .await;
+            assert_eq!(out.is_err(), case.elapsed, "{}", case.name);
+            assert_eq!(start.elapsed(), case.waited, "{}", case.name);
+        }
     }
 }

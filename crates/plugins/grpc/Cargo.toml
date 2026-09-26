@@ -4,15 +4,17 @@ version = "0.8.1"
 edition.workspace = true
 publish = false
 license = "MIT"
-description = "gRPC front for rapira - serves unary gRPC, gRPC-Web and Connect calls from PHP"
+description = "The grpc plugin of rapira - serves unary gRPC, gRPC-Web and Connect calls from PHP"
 
 [lints]
 workspace = true
 
 [dependencies]
-extension_api = { workspace = true }
+rapira_sapi = { workspace = true }
 rapira_net = { workspace = true }
+rapira_config = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 buffa = { workspace = true }
 buffa-descriptor = { workspace = true }
@@ -25,3 +27,9 @@ base64 = { workspace = true }
 http = { workspace = true }
 tower = { workspace = true }
 
+[build-dependencies]
+anyhow = { workspace = true }
+rapira_php_build = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }

@@ -355,19 +355,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "extension_api"
-version = "0.8.1"
-dependencies = [
- "anyhow",
- "bytes",
- "http",
- "http-body-util",
- "libc",
- "socket2",
- "tokio",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -847,21 +834,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9b4f627cb1b25917193a259e49bdad08f671f8d9708acfd5fe0a8c1455d87220"
 
 [[package]]
-name = "php_sys"
-version = "0.8.1"
-dependencies = [
- "anyhow",
- "base64",
- "bindgen",
- "bytes",
- "cc",
- "http",
- "rapira_scoreboard",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "pin-project"
 version = "1.1.13"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -942,17 +914,16 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "clap",
- "extension_api",
  "libc",
  "mimalloc",
- "php_sys",
  "rapira_config",
  "rapira_grpc",
  "rapira_http",
  "rapira_master",
- "rapira_runtime",
- "rapira_static_files",
- "serde_json",
+ "rapira_net",
+ "rapira_sapi",
+ "serde",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -969,10 +940,14 @@ dependencies = [
  "connectrpc",
  "connectrpc-health",
  "connectrpc-reflection",
- "extension_api",
  "http",
+ "rapira_config",
  "rapira_net",
+ "rapira_php_build",
+ "rapira_sapi",
+ "serde",
  "tokio",
+ "toml",
  "tower",
  "tracing",
 ]
@@ -983,15 +958,24 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "bytes",
- "extension_api",
  "http",
  "http-body",
  "http-body-util",
+ "httparse",
  "hyper",
  "hyper-util",
+ "libc",
+ "memchr",
+ "rapira_config",
  "rapira_net",
+ "rapira_php_build",
+ "rapira_sapi",
+ "rapira_static_files",
+ "serde",
  "tempfile",
  "tokio",
+ "toml",
+ "tower",
  "tracing",
 ]
 
@@ -1001,6 +985,7 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "libc",
+ "rapira_config",
  "rapira_scoreboard",
  "tracing",
 ]
@@ -1010,25 +995,33 @@ name = "rapira_net"
 version = "0.8.1"
 dependencies = [
  "anyhow",
- "extension_api",
  "libc",
- "tempfile",
+ "rapira_config",
+ "socket2",
  "tokio",
  "tracing",
 ]
 
 [[package]]
-name = "rapira_runtime"
+name = "rapira_php_build"
 version = "0.8.1"
 dependencies = [
  "anyhow",
- "extension_api",
+ "cc",
+]
+
+[[package]]
+name = "rapira_sapi"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "bindgen",
+ "bytes",
  "http",
- "httparse",
- "libc",
- "memchr",
- "php_sys",
- "tempfile",
+ "rapira_config",
+ "rapira_net",
+ "rapira_php_build",
+ "rapira_scoreboard",
  "tokio",
  "tracing",
 ]
@@ -1045,13 +1038,15 @@ dependencies = [
 name = "rapira_static_files"
 version = "0.8.1"
 dependencies = [
+ "anyhow",
  "bytes",
- "extension_api",
  "http",
  "http-body-util",
  "percent-encoding",
- "tempfile",
+ "rapira_config",
+ "serde",
  "tokio",
+ "tower",
  "tower-http 0.7.1",
  "tracing",
 ]
@@ -1268,20 +1263,16 @@ dependencies = [
  "anyhow",
  "base64",
  "bytes",
- "extension_api",
  "http",
  "http-body-util",
  "hyper",
  "hyper-util",
  "libc",
- "php_sys",
- "rapira_grpc",
- "rapira_http",
- "rapira_runtime",
+ "rapira_net",
+ "rapira_sapi",
  "serde_json",
  "tokio",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -25,6 +25,7 @@ try {
             $lines[] = "file$i=" . $u->name . ':' . $u->clientFilename . ':' . $u->size
                 . ':' . file_get_contents($u->tmpPath);
             $lines[] = "file$i-type=" . var_export($u->clientMediaType, true);
+            $lines[] = "file$i-cd=" . var_export(isset($u->headers['content-disposition']), true);
         }
         $ex->writeBody(implode("\n", $lines));
     }

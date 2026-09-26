@@ -20,12 +20,11 @@ path = "src/main.rs"
 [workspace]
 members = [
     "crates/config",
-    "crates/runtime",
-    "crates/api",
     "crates/tests",
     "crates/master",
+    "crates/php_build",
     "crates/middleware/static_files",
-    "crates/php_sys",
+    "crates/sapi",
     "crates/scoreboard",
     "crates/net",
     "crates/plugins/http",
@@ -36,16 +35,17 @@ members = [
 anyhow = "1"
 base64 = "0.22"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
-php_sys = { path = "crates/php_sys" }
-rapira_runtime = { path = "crates/runtime" }
+rapira_sapi = { path = "crates/sapi" }
+rapira_php_build = { path = "crates/php_build" }
 rapira_config = { path = "crates/config" }
-extension_api = { path = "crates/api" }
 rapira_static_files = { path = "crates/middleware/static_files" }
 rapira_http = { path = "crates/plugins/http" }
 rapira_grpc = { path = "crates/plugins/grpc" }
 rapira_net = { path = "crates/net" }
 rapira_master = { path = "crates/master" }
 rapira_scoreboard = { path = "crates/scoreboard" }
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 http = "1"
@@ -70,18 +70,15 @@ codegen-units = 1
 [dependencies]
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-extension_api = { workspace = true }
 rapira_master = { workspace = true }
-rapira_runtime = { workspace = true }
-php_sys = { workspace = true }
+rapira_net = { workspace = true }
+rapira_sapi = { workspace = true }
 rapira_config = { workspace = true }
-rapira_static_files = { workspace = true }
 rapira_http = { workspace = true }
 rapira_grpc = { workspace = true }
 libc = { workspace = true }
 mimalloc = "0.1"
+serde = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono", "json"] }
-
-[dev-dependencies]
-serde_json = "1"

@@ -4,21 +4,20 @@ version = "0.8.1"
 edition.workspace = true
 publish = false
 license = "MIT"
-description = "Static file middleware for the rapira HTTP front"
+description = "Static file middleware for the rapira http plugin"
 
 [lints]
 workspace = true
 
 [dependencies]
-extension_api = { workspace = true }
+rapira_config = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 tracing = { workspace = true }
 percent-encoding = "2"
 tokio = { workspace = true, features = ["fs", "rt"] }
+tower = { workspace = true }
 tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }
-
-[dev-dependencies]
-tempfile = "3"
-tokio = { workspace = true, features = ["rt-multi-thread", "macros"] }

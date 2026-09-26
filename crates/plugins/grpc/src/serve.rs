@@ -1,21 +1,23 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::anyhow;
+use anyhow::{Result, anyhow};
 use connectrpc::server::serve_connection;
 use connectrpc::{
     Chain, CompressionRegistry, ConnectRpcBody, ConnectRpcService, ConnectionConfig,
     ConnectionInfo, DeadlinePolicy, GzipProvider, Router,
 };
 use connectrpc_health::StaticChecker;
-use extension_api::{Addr, Php, Result};
-use rapira_net::{Acceptor, Serve, StopHandle};
+use rapira_net::{Acceptor, Serve};
+use rapira_sapi::Addr;
+use rapira_sapi::plugin::Worker;
+use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 use tower::util::MapResponse;
 
 use crate::dispatch::PhpDispatcher;
-use crate::{Config, Prepared};
+use crate::{Call, Config, Prepared};
 
 /// Everything the accept loop hands to a connection, and the drain that follows it.
 struct Serving {
@@ -27,7 +29,12 @@ struct Serving {
 }
 
 impl Serving {
-    fn start(php: Php, config: &Config, router: Router, health: Arc<StaticChecker>) -> Self {
+    fn start(
+        intake: Intake<Call>,
+        config: &Config,
+        router: Router,
+        health: Arc<StaticChecker>,
+    ) -> Self {
         tracing::info!(target: "grpc", "listening on {}", config.listen);
         let mut deadlines = DeadlinePolicy::new();
         if let Some(timeout) = config.default_timeout {
@@ -38,9 +45,9 @@ impl Serving {
         }
         let dispatcher = PhpDispatcher {
             schema: Arc::clone(&config.schema),
-            php,
+            intake,
         };
-        // The host routes come first, so a configured service cannot hide health or reflection.
+        // The plugin routes come first, so a configured service cannot hide health or reflection.
         let service = ConnectRpcService::new(Chain(router, dispatcher))
             .with_deadline_policy(deadlines)
             // The default registry offers every codec that the build compiles, zstd included.
@@ -61,15 +68,10 @@ impl Serving {
     {
         let open = self.shutdown.subscribe();
         let mut stop = open.clone();
-        let connection = serve_connection(
-            io,
-            info,
-            MapResponse::new(self.service.clone(), status_in_trailers),
-            self.connection.clone(),
-            async move {
-                let _ = stop.wait_for(|stop| *stop).await;
-            },
-        );
+        let service = MapResponse::new(self.service.clone(), status_in_trailers);
+        let connection = serve_connection(io, info, service, self.connection.clone(), async move {
+            let _ = stop.wait_for(|stop| *stop).await;
+        });
         tokio::spawn(async move {
             // The shutdown future drops its receiver when shutdown starts, and the calls in flight continue after that. `open` keeps `closed()` pending until the connection ends.
             let closed = connection.await;
@@ -127,16 +129,17 @@ fn status_in_trailers(
     response
 }
 
-/// Runs the accept loop on the calling thread, then drains the connections.
+/// Runs the accept loop on the calling thread until the stop flag, then drains the connections.
 pub(crate) fn serve(
-    php: Php,
+    intake: Intake<Call>,
     config: Config,
     prepared: Prepared,
-    stop: StopHandle,
-    rt: &tokio::runtime::Runtime,
+    worker: Worker,
 ) -> Result<()> {
-    let acceptor = Acceptor::adopt(prepared.listener, stop, rt)?;
-    let serving = Serving::start(php, &config, prepared.router, prepared.health);
-    let fatal = acceptor.run(rt, &serving);
-    rt.block_on(serving.drain(fatal, config.drain_grace))
+    let acceptor = Acceptor::adopt(prepared.listener, worker.stop.clone(), &worker.handle)?;
+    let serving = Serving::start(intake, &config, prepared.router, prepared.health);
+    let fatal = acceptor.run(&worker.handle, &serving);
+    worker
+        .handle
+        .block_on(serving.drain(fatal, worker.drain_grace))
 }

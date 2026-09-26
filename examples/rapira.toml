@@ -11,7 +11,7 @@ listen = "127.0.0.1:8000"    # host:port, ":port" (all interfaces), or "unix:/pa
 # unsafe_field_names = "drop" # or "reject": 400 for header names aliasing a CGI variable
 # middleware = ["static"]    # applied in list order; each configured middleware must be listed
 
-# Host-side multipart limits - dispatcher mode only (classic/worker parse in PHP,
+# Multipart limits of the http plugin - dispatcher mode only (classic/worker parse in PHP,
 # where php.ini owns the limits); an explicit table under another mode refuses to boot.
 # [http.uploads]
 # dir = "/tmp"               # spool root for file parts; defaults to the system temp dir

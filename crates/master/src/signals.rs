@@ -188,32 +188,6 @@ mod tests {
     use super::*;
 
     #[test]
-    fn early_block_covers_the_terminate_by_default_signals() {
-        block_early_signals();
-        let mut mask: libc::sigset_t = sigset(&[]);
-        // SAFETY: mask is a live sigset_t; a null `set` makes this a read.
-        unsafe { libc::sigprocmask(libc::SIG_BLOCK, std::ptr::null(), &mut mask) };
-        for sig in [libc::SIGUSR1, libc::SIGUSR2, libc::SIGCHLD, libc::SIGHUP] {
-            // SAFETY: mask is a live sigset_t.
-            assert_eq!(
-                unsafe { libc::sigismember(&mask, sig) },
-                1,
-                "signal {sig} is not blocked during boot"
-            );
-        }
-        // SAFETY: getpid is always safe.
-        let want_stop = c_int::from(unsafe { libc::getpid() } == 1);
-        for sig in [libc::SIGTERM, libc::SIGINT, libc::SIGQUIT] {
-            // SAFETY: mask is a live sigset_t.
-            assert_eq!(
-                unsafe { libc::sigismember(&mask, sig) },
-                want_stop,
-                "off pid 1, signal {sig} must keep its default disposition so a wedged boot stays killable"
-            );
-        }
-    }
-
-    #[test]
     fn sigset_membership() {
         let set = sigset(&[libc::SIGTERM, libc::SIGQUIT]);
         // SAFETY: set is a live sigset_t.

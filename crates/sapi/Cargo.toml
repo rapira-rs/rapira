@@ -1,0 +1,27 @@
+[package]
+name = "rapira_sapi"
+version = "0.8.1"
+edition.workspace = true
+build = "build.rs"
+links = "rapira_sapi"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+tracing = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync"] }
+rapira_net = { workspace = true }
+rapira_config = { workspace = true }
+rapira_scoreboard = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+
+[build-dependencies]
+anyhow = { workspace = true }
+bindgen = "0"
+rapira_php_build = { workspace = true }
+
+[dev-dependencies]
+tokio = { workspace = true, features = ["macros"] }

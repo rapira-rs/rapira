@@ -1,0 +1,12 @@
+[package]
+name = "rapira_php_build"
+version = "0.8.1"
+edition.workspace = true
+description = "php-config discovery and the C compile for the build scripts of the SAPI crate and the plugins"
+
+[lints]
+workspace = true
+
+[dependencies]
+anyhow = { workspace = true }
+cc = "1.2"

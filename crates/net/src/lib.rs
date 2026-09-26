@@ -1,48 +1,19 @@
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use extension_api::{ListenAddr, PreparedListener};
 #[cfg(not(target_os = "linux"))]
 use tokio::net::{TcpListener, UnixListener};
-use tokio::runtime::{Builder, Runtime};
-#[cfg(not(target_os = "linux"))]
+use tokio::runtime::Handle;
 use tokio::sync::watch;
 
 #[cfg(target_os = "linux")]
 mod accept_linux;
 
+pub mod listen;
+pub use listen::{ListenAddr, PrepareCtx, PreparedListener};
+
 #[cfg(target_os = "linux")]
 use accept_linux::{TcpListener, UnixListener};
-
-/// Stops the accept loop. The blocked acceptor waits on this eventfd.
-#[cfg(target_os = "linux")]
-pub type Stop = accept_linux::Wake;
-
-#[cfg(target_os = "linux")]
-pub type StopHandle = accept_linux::Wake;
-
-/// Stops the accept loop. The async acceptor selects on this flag.
-#[cfg(not(target_os = "linux"))]
-pub struct Stop(watch::Sender<bool>);
-
-#[cfg(not(target_os = "linux"))]
-pub type StopHandle = watch::Receiver<bool>;
-
-#[cfg(not(target_os = "linux"))]
-impl Stop {
-    pub fn new() -> std::io::Result<Self> {
-        Ok(Self(watch::channel(false).0))
-    }
-
-    pub fn handle(&self) -> StopHandle {
-        self.0.subscribe()
-    }
-
-    pub fn stop(&self) {
-        let _ = self.0.send(true);
-    }
-}
 
 /// Takes the accepted connections. [`Acceptor::run`] calls it inside its runtime.
 pub trait Serve {
@@ -55,7 +26,7 @@ pub struct Acceptor {
     socket: Socket,
     addr: ListenAddr,
     #[cfg(not(target_os = "linux"))]
-    stop: StopHandle,
+    stop: watch::Receiver<bool>,
 }
 
 enum Socket {
@@ -64,12 +35,24 @@ enum Socket {
 }
 
 impl Acceptor {
+    /// `stop` set to true ends [`Acceptor::run`].
     pub fn adopt(
         prepared: PreparedListener,
-        stop: StopHandle,
-        rt: &Runtime,
+        stop: watch::Receiver<bool>,
+        rt: &Handle,
     ) -> std::io::Result<Self> {
         use std::os::fd::{FromRawFd, IntoRawFd};
+        // The blocked acceptor waits on an eventfd, so a task on rt passes the flag on to it.
+        #[cfg(target_os = "linux")]
+        let stop = {
+            let wake = accept_linux::Wake::new()?;
+            let (bridge, mut flag) = (wake.clone(), stop);
+            rt.spawn(async move {
+                let _ = flag.wait_for(|stop| *stop).await;
+                bridge.stop();
+            });
+            wake
+        };
         let addr = prepared.addr().clone();
         let tcp: bool = matches!(addr, ListenAddr::Tcp(_));
         // On other OSes from_std registers the tokio listener with the reactor of rt.
@@ -100,11 +83,11 @@ impl Acceptor {
         })
     }
 
-    /// Runs the accept loop on the calling thread until the stop handle fires. A blocked
+    /// Runs the accept loop on the calling thread until the stop flag is set. A blocked
     /// accept is what lets the kernel hand each connection to one worker. Returns the
     /// listener failure, if any. The listener is closed when this returns.
     #[cfg(target_os = "linux")]
-    pub fn run(self, rt: &Runtime, serve: &impl Serve) -> Option<anyhow::Error> {
+    pub fn run(self, rt: &Handle, serve: &impl Serve) -> Option<anyhow::Error> {
         let mut fatal: Option<anyhow::Error> = None;
         // tokio::spawn and from_std reach the runtime the connections run on.
         let _guard = rt.enter();
@@ -128,10 +111,10 @@ impl Acceptor {
         fatal
     }
 
-    /// Runs the accept loop on rt until the stop handle fires. Returns the listener
+    /// Runs the accept loop on rt until the stop flag is set. Returns the listener
     /// failure, if any. The listener is closed when this returns.
     #[cfg(not(target_os = "linux"))]
-    pub fn run(self, rt: &Runtime, serve: &impl Serve) -> Option<anyhow::Error> {
+    pub fn run(self, rt: &Handle, serve: &impl Serve) -> Option<anyhow::Error> {
         let Self {
             socket,
             addr,
@@ -224,78 +207,6 @@ async fn accept_connection(socket: &Socket, serve: &impl Serve) -> std::io::Resu
         }
     }
     Ok(())
-}
-
-/// One plugin's server thread: a 2-worker runtime and the accept loop, stopped through [`Stop`].
-#[derive(Default)]
-pub struct ServerThread {
-    stop: Option<Stop>,
-    join: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
-}
-
-impl ServerThread {
-    /// Spawns `rapira-{name}` and runs `body` on it with the stop handle and the runtime; returns when the thread ends. Dropping the future leaves the thread running for [`shutdown`](Self::shutdown).
-    pub async fn run(
-        &mut self,
-        name: &'static str,
-        body: impl FnOnce(StopHandle, &Runtime) -> anyhow::Result<()> + Send + 'static,
-    ) -> anyhow::Result<()> {
-        let stop = Stop::new().map_err(|e| anyhow!("creating the {name} stop handle: {e}"))?;
-        let handle = stop.handle();
-        let thread = std::thread::Builder::new()
-            .name(format!("rapira-{name}"))
-            .spawn(move || {
-                let rt = Builder::new_multi_thread()
-                    .enable_all()
-                    .worker_threads(2)
-                    .thread_name(format!("rapira-{name}-io"))
-                    .build()
-                    .map_err(|e| anyhow!("building the {name} runtime: {e}"))?;
-                body(handle, &rt)
-            })?;
-
-        self.stop = Some(stop);
-        let join = self.join.insert(tokio::task::spawn_blocking(move || {
-            join_thread(thread, name)
-        }));
-        let result = join.await;
-        self.join = None;
-        result.map_err(|e| anyhow!("{name} join task failed: {e}"))?
-    }
-
-    /// The thread was started and nothing joined it yet.
-    pub fn is_running(&self) -> bool {
-        self.join.is_some()
-    }
-
-    /// Fires the stop handle; the thread ends on its own time.
-    pub fn stop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            stop.stop();
-        }
-    }
-
-    /// Stops the thread and waits for it.
-    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
-        self.stop();
-        if let Some(join) = self.join.take() {
-            join.await
-                .map_err(|e| anyhow!("server join task failed: {e}"))??;
-        }
-        Ok(())
-    }
-}
-
-/// Joins a server thread. A panic in the thread becomes an error.
-fn join_thread(thread: JoinHandle<anyhow::Result<()>>, name: &str) -> anyhow::Result<()> {
-    thread.join().map_err(|payload| {
-        let msg = payload
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("unknown panic");
-        anyhow!("{name} server thread panicked: {msg}")
-    })?
 }
 
 #[cfg(test)]

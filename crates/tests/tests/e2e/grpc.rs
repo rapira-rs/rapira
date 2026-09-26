@@ -1,16 +1,15 @@
 use std::net::SocketAddr;
 
-use extension_api::{ListenAddr, PrepareCtx};
 use http::Method;
-use php_sys::{Mode, Rapira};
-use rapira_runtime::ExtensionRuntime;
+use rapira_net::ListenAddr;
 use serde_json::Value;
-use tests::grpc::{Conn, ECHO_PATH as ECHO, Fields, Wire, config, envelope, fields, tcp_addr};
+use tests::grpc::{Conn, ECHO_PATH as ECHO, Fields, Wire, envelope, fields};
+use tests::server_log;
 
 use crate::harness::{
-    BOOT, ECHO_SERVICE, MASTER_EXIT_OK, STOP_BUDGET, assert_exit_code, diagnostics, fixture_path,
-    http_get, signal, spawn_grpc, spawn_grpc_boot_failure, spawn_grpc_with_http, wait_log_contains,
-    wait_workers,
+    BOOT, ECHO_SERVICE, MASTER_EXIT_OK, STOP_BUDGET, Spawn, assert_exit_code, diagnostics,
+    fixture_path, http_get, signal, spawn_grpc, spawn_grpc_boot_failure, spawn_grpc_with_http,
+    wait_log_contains, wait_workers,
 };
 
 /// `EchoRequest { text }`: field 1, length-delimited, for a text shorter than 128 bytes.
@@ -18,47 +17,6 @@ fn echo_request(text: &str) -> Vec<u8> {
     let mut message = vec![0x0a, text.len() as u8];
     message.extend_from_slice(text.as_bytes());
     message
-}
-
-/// A rapira_grpc server in this process. `echo-worker.php` answers.
-struct Host {
-    rapira: Rapira,
-    running: rapira_runtime::Running,
-    tcp: ListenAddr,
-    _prepared: PrepareCtx,
-}
-
-impl Host {
-    fn start() -> anyhow::Result<Host> {
-        let mut host = ExtensionRuntime::new();
-        host.register::<rapira_grpc::Server>(config(ListenAddr::Tcp(([127, 0, 0, 1], 0).into())));
-        let mut prepared = PrepareCtx::new();
-        host.prepare_all(&mut prepared)?;
-        let tcp = ListenAddr::Tcp(tcp_addr(&prepared, 0));
-
-        let script = fixture_path("grpc/echo-worker.php");
-        let rapira = Rapira::start(Mode::GrpcDispatcher {
-            script: script.clone(),
-            services: tests::echo_services(),
-        })?;
-        let running = host.run(rapira.handle(), script);
-        Ok(Host {
-            rapira,
-            running,
-            tcp,
-            _prepared: prepared,
-        })
-    }
-
-    fn stop(self) -> anyhow::Result<()> {
-        let outcomes = self.running.stop();
-        drop(self.rapira);
-        anyhow::ensure!(
-            outcomes.iter().all(Result::is_ok),
-            "gRPC shutdown: {outcomes:?}"
-        );
-        Ok(())
-    }
 }
 
 fn runtime() -> tokio::runtime::Runtime {
@@ -81,7 +39,17 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
         /// An app record that PHP leaves, and its context.
         log: (&'static str, &'static str),
     }
+    // The metadata case has no deadline, so it waits out the worker boot, and PHP is in its loop when the deadline case starts.
     let cases = [
+        Case {
+            name: "metadata crosses the edge",
+            text: "meta",
+            metadata: &[("x-echo", "a"), ("x-echo-bin", "AP8")],
+            grpc_status: "0",
+            headers: &[("x-echo", "a")],
+            trailers: &[("x-echo-bin", "AP8")],
+            log: ("meta", r#"{"keys":["x-echo","x-echo-bin"]}"#),
+        },
         Case {
             name: "the deadline cancels the php call",
             text: "slow",
@@ -94,59 +62,51 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
                 r#"{"cancelled":"yes","respond":"Rapira\\Exception\\WorkDiscardedException"}"#,
             ),
         },
-        Case {
-            name: "metadata crosses the edge",
-            text: "meta",
-            metadata: &[("x-echo", "a"), ("x-echo-bin", "AP8")],
-            grpc_status: "0",
-            headers: &[("x-echo", "a")],
-            trailers: &[("x-echo-bin", "AP8")],
-            log: ("meta", r#"{"keys":["x-echo","x-echo-bin"]}"#),
-        },
     ];
 
-    let _php = tests::php_lock();
-    tests::init_log_capture();
-    tests::captured().clear();
-    let host = Host::start()?;
+    let mut srv = Spawn::grpc(fixture_path("grpc/echo-worker.php"))
+        .json_log()
+        .spawn();
+    let listen = ListenAddr::Tcp(srv.addr);
     let rt = runtime();
-    let result = (|| -> anyhow::Result<()> {
-        for case in cases {
-            let got = rt.block_on(async {
-                let mut conn = Conn::open(&host.tcp, Wire::H2).await?;
-                conn.grpc(ECHO, case.metadata, &envelope(&echo_request(case.text)))
-                    .await
-            })?;
-            anyhow::ensure!(
-                got.grpc_status() == Some(case.grpc_status),
-                "{}: {got:?}",
+    for case in cases {
+        let got = rt.block_on(async {
+            let mut conn = Conn::open(&listen, Wire::H2).await?;
+            conn.grpc(ECHO, case.metadata, &envelope(&echo_request(case.text)))
+                .await
+        })?;
+        assert_eq!(
+            got.grpc_status(),
+            Some(case.grpc_status),
+            "{}: {got:?}",
+            case.name
+        );
+        for (name, want) in fields(case.headers).iter() {
+            assert_eq!(
+                got.headers.get(name),
+                Some(want),
+                "{}: header {name}: {got:?}",
                 case.name
             );
-            for (name, want) in fields(case.headers).iter() {
-                anyhow::ensure!(
-                    got.headers.get(name) == Some(want),
-                    "{}: header {name}: {got:?}",
-                    case.name
-                );
-            }
-            for (name, want) in fields(case.trailers).iter() {
-                anyhow::ensure!(
-                    got.trailers.get(name) == Some(want),
-                    "{}: trailer {name}: {got:?}",
-                    case.name
-                );
-            }
-            let (message, context) = case.log;
-            let got: Value = serde_json::from_str(&tests::wait_app_record(message))?;
-            let want: Value = serde_json::from_str(context)?;
-            anyhow::ensure!(got == want, "{}: {message} record {got}", case.name);
         }
-        Ok(())
-    })();
+        for (name, want) in fields(case.trailers).iter() {
+            assert_eq!(
+                got.trailers.get(name),
+                Some(want),
+                "{}: trailer {name}: {got:?}",
+                case.name
+            );
+        }
+        let (message, context) = case.log;
+        let got: Value =
+            serde_json::from_str(&server_log::wait_app_record(&srv.log_file(), message))?;
+        let want: Value = serde_json::from_str(context)?;
+        assert_eq!(got, want, "{}: {message} record", case.name);
+    }
     // The client runtime holds the client connections. Dropping it closes them, so the drain does not wait on them.
     drop(rt);
-    let stopped = host.stop();
-    result.and(stopped)
+    srv.stop();
+    Ok(())
 }
 
 /// A Connect unary call with a JSON body over HTTP/1.1. The server may send the reply chunked, so hyper reads it.
@@ -166,7 +126,7 @@ fn connect_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<(u16
     runtime().block_on(async { tokio::time::timeout(BOOT, call).await })?
 }
 
-/// Sources: the Connect protocol (a unary call posts the message as proto3 JSON) and `grpc/health/v1/health.proto`.
+/// Sources: the Connect protocol (a unary call posts the message as proto3 JSON), `grpc/health/v1/health.proto`, and `fixtures/grpc/echo.proto`: with no `services` key the pool serves both services of the file that no other file imports, `EchoService` with three methods and `OtherService` with one.
 #[test]
 fn grpc_pool_serves_from_rapira_toml() {
     struct Case {
@@ -183,10 +143,16 @@ fn grpc_pool_serves_from_rapira_toml() {
             reply: r#"{"text":"hi"}"#,
         },
         Case {
-            name: "the host answers health",
+            name: "the plugin answers health",
             path: "/grpc.health.v1.Health/Check",
             body: "{}",
             reply: r#"{"status":"SERVING"}"#,
+        },
+        Case {
+            name: "a forked worker reads the services that prepare set",
+            path: ECHO,
+            body: r#"{"text":"services"}"#,
+            reply: r#"{"text":"rapira.test.v1.EchoService:3,rapira.test.v1.OtherService:1"}"#,
         },
     ];
     let srv = spawn_grpc(2);

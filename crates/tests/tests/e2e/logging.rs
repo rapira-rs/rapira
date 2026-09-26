@@ -1,4 +1,5 @@
 use crate::harness::*;
+use rapira_sapi::Mode;
 use std::time::{Duration, Instant};
 
 /// `[log] format = "json"` shapes every record while `RUST_LOG` still owns the filter.
@@ -125,4 +126,106 @@ fn rust_log_replaces_the_config_filter() {
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+const MARKS: &str = "logging_mv/marks-worker.php";
+const BANNER: &str = "rapira_core v";
+
+/// A RUST_LOG with a directive replaces the `[log]` filter spec; a missing or blank one leaves the spec in charge, and a `[log.targets]` key matches as a target prefix.
+#[test]
+fn log_filter_source_and_target_prefix() {
+    struct Case {
+        name: &'static str,
+        /// None removes RUST_LOG from the environment.
+        rust_log: Option<&'static str>,
+        log: &'static str,
+        shown: &'static [&'static str],
+        hidden: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            name: "config spec with a target prefix",
+            rust_log: None,
+            log: "[log]\nlevel = \"error\"\n[log.targets]\nph = \"warn\"\n",
+            shown: &["WARN-MARK"],
+            hidden: &["NOTICE-MARK", BANNER],
+        },
+        Case {
+            name: "RUST_LOG replaces the whole config spec",
+            rust_log: Some("info"),
+            log: "[log]\nlevel = \"error\"\n[log.targets]\nphp = \"warn\"\n",
+            shown: &["WARN-MARK", "NOTICE-MARK", BANNER],
+            hidden: &[],
+        },
+        Case {
+            name: "blank RUST_LOG falls back to the config spec",
+            rust_log: Some("  "),
+            log: "[log]\nlevel = \"error\"\n[log.targets]\nphp = \"warn\"\n",
+            shown: &["WARN-MARK"],
+            hidden: &["NOTICE-MARK", BANNER],
+        },
+        Case {
+            name: "invalid RUST_LOG directive is dropped, the rest stays",
+            rust_log: Some("!!!,warn"),
+            log: "[log]\nlevel = \"trace\"\n",
+            shown: &["WARN-MARK"],
+            hidden: &["NOTICE-MARK", BANNER],
+        },
+    ];
+    for case in cases {
+        let mut srv = match case.rust_log {
+            None => spawn_without_rust_log(MARKS, 1, case.log),
+            Some(filter) => Spawn::http(Mode::Dispatcher, fixture_path(MARKS))
+                .toml(case.log)
+                .rust_log(filter)
+                .spawn(),
+        };
+        let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+        assert_eq!(code, 200, "{}\n{}", case.name, diagnostics(&srv));
+        srv.stop();
+        let text = std::fs::read_to_string(srv.log_file()).expect("read server.log");
+        for mark in case.shown {
+            assert!(
+                text.contains(mark),
+                "{}: {mark} missing:\n{text}",
+                case.name
+            );
+        }
+        for mark in case.hidden {
+            assert!(
+                !text.contains(mark),
+                "{}: {mark} leaked:\n{text}",
+                case.name
+            );
+        }
+    }
+}
+
+/// A JSON record nests the event fields under `fields`, names the target and the level, stamps UTC milliseconds and carries no span keys.
+#[test]
+fn json_record_shape() {
+    let mut srv = Spawn::http(Mode::Dispatcher, fixture_path(MARKS))
+        .json_log()
+        .spawn();
+    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    srv.stop();
+    let text = std::fs::read_to_string(srv.log_file()).expect("read server.log");
+    let records: Vec<serde_json::Value> = text
+        .lines()
+        .filter(|l| l.contains("APP-MARK"))
+        .map(|l| serde_json::from_str(l).unwrap_or_else(|e| panic!("{e}: {l}")))
+        .collect();
+    assert_eq!(records.len(), 1, "one JSON record per event:\n{text}");
+    let v = &records[0];
+    assert_eq!(v["fields"]["message"], "APP-MARK", "{v}");
+    assert_eq!(v["fields"]["context"], r#"{"answer":42}"#, "{v}");
+    assert_eq!(v["target"], "app", "{v}");
+    assert_eq!(v["level"], "INFO", "{v}");
+    // ChronoUtc %.3f: RFC 3339 UTC with exactly milliseconds.
+    let ts = v["timestamp"].as_str().expect("timestamp");
+    assert_eq!(ts.len(), "2026-01-01T00:00:00.000Z".len(), "{ts}");
+    assert_eq!(&ts[19..20], ".", "{ts}");
+    assert!(ts.ends_with('Z'), "{ts}");
+    assert!(v.get("span").is_none() && v.get("spans").is_none(), "{v}");
 }

@@ -1,11 +1,11 @@
 # Contributing to Rapira
 
-This repository contains the server: the SAPI core (`crates/php_sys`), the extension runtime, the pre-fork master and the `rapira` binary. The documentation site is a separate repository, [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io) - docs changes go there (see [contributing to the docs](https://rapira.rs/docs/contributing)).
+This repository contains the server: the SAPI crate (`crates/sapi`), the plugins, the pre-fork master and the `rapira` binary. The documentation site is a separate repository, [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io) - docs changes go there (see [contributing to the docs](https://rapira.rs/docs/contributing)).
 
 ## Prerequisites
 
 - Rust stable - `rust-toolchain.toml` selects the exact channel for you
-- A C compiler (the build compiles `crates/php_sys/*.c` against the PHP headers)
+- A C compiler (the build compiles `crates/sapi/*.c` and the C method shells of each plugin against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
 - PHP 8.4 or 8.5, **NTS**, built with the embed SAPI (`--enable-embed=shared`). ZTS builds are rejected at compile time.
 
@@ -32,12 +32,12 @@ PHP is discovered through `php-config`; point at a specific one with `PHP_CONFIG
 make test   # runs test_nts, then test_e2e - sequentially on purpose
 ```
 
-- `make test_nts` - the in-process unit and integration suites (`cargo test --workspace`; the e2e suite is feature-gated off here).
-- `make test_e2e` - the spawn-the-binary end-to-end suite (`crates/tests`, `--features e2e`): forks workers, binds ports, drives real HTTP, asserts signal/reload/scaling behavior. Single-threaded on purpose; never run it concurrently with `test_nts`.
-- `make coverage` - needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
-- `make stubs` - maintainers only: regenerates each `crates/php_sys/*_arginfo.h` header from its `crates/php_sys/*.stub.php` stub with PHP's `gen_stub.php`. Never edit the generated headers by hand.
+- `make test_nts` - the unit tests of every crate (`cargo test --workspace`; the e2e suite is feature-gated off here).
+- `make test_e2e` - the end-to-end suite (`crates/tests`, `--features e2e`): each test spawns the `rapira` binary, which forks workers and binds ports, and drives it over HTTP, gRPC and signals. Single-threaded on purpose; never run it concurrently with `test_nts`.
+- `make coverage` - writes the line coverage of the unit and e2e suites to `lcov.info`. It needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
+- `make stubs` - maintainers only: regenerates each `*_arginfo.h` header under `crates/` from the `*.stub.php` stub next to it with PHP's `gen_stub.php`. Never edit the generated headers by hand.
 
-Test placement: unit tests live inside their crate; integration tests, their harness (`crates/tests/src/`) and their fixtures (`crates/tests/fixtures/`) in `crates/tests`; end-to-end tests under `crates/tests/tests/e2e/` behind the `e2e` feature.
+Test placement: unit tests live inside their crate and use no fixture: no file on disk, no socket, no child process, no environment variable and no PHP. Every test that needs a fixture spawns the `rapira` binary and lives under `crates/tests/tests/e2e/` behind the `e2e` feature. The shared harness (the wire clients and the log readers) is in `crates/tests/src/`, and the fixtures are in `crates/tests/fixtures/` and `crates/tests/tests/e2e/fixtures/`.
 
 ## Lint and format
 
@@ -47,24 +47,39 @@ cargo clippy --workspace --all-targets -- -D warnings
 cargo clippy -p tests --features e2e --tests -- -D warnings
 ```
 
-C sources (`crates/php_sys/*.c`, `*.h`) follow `.clang-format`.
+C sources (`*.c`, `*.h` under `crates/`) follow `.clang-format`.
 
 ## Repository layout
 
-| Path                   | What it is                                                                          |
-| ---------------------- | ----------------------------------------------------------------------------------- |
-| `src/`                 | the `rapira` binary: CLI and boot                                                   |
-| `crates/php_sys`       | the SAPI: C glue, bindgen bindings, worker/classic request loops, `rapira.stub.php` |
-| `crates/runtime`       | the extension runtime that drives PHP                                               |
-| `crates/master`        | the pre-fork supervisor: forking, reaping, scaling, signals, reload                 |
-| `crates/config`        | `rapira.toml` configuration                                                         |
-| `crates/api`           | the native extension contract                                                       |
-| `crates/scoreboard`    | shared per-worker counters                                                          |
-| `crates/net`           | the accept loop that the HTTP and gRPC fronts share                                 |
-| `crates/plugins/http`  | the HTTP front                                                                      |
-| `crates/plugins/grpc`  | the gRPC front: gRPC, gRPC-Web and Connect                                          |
-| `crates/middleware`    | built-in HTTP middleware, one crate per middleware                                  |
-| `crates/tests`         | integration and e2e suites                                                          |
+| Crate                 | Directory                        | Role                                                                                                                                         |
+| --------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rapira_core`         | `src/`                           | the `rapira` binary: CLI, the `rapira.toml` file shape, the plugin list, boot, fork and the worker entry                                     |
+| `rapira_php_build`    | `crates/php_build`               | build helper: `php-config` discovery and the C compile of the method shells, for `rapira_sapi` and every plugin with a PHP surface           |
+| `rapira_net`          | `crates/net`                     | listeners: `ListenAddr`, `PrepareCtx` and `PreparedListener` bind in the master before the fork, `Acceptor` adopts and accepts in the worker |
+| `rapira_sapi`         | `crates/sapi`                    | the embed SAPI: boot, the PHP thread, the intake, the base PHP contract, the classic and worker modes, the `Plugin` and `Work` traits        |
+| `rapira_config`       | `crates/config`                  | the shared config shapes: `[supervisor]`, `[log]`, the pool table, `listen`, the duration and path helpers                                   |
+| `rapira_master`       | `crates/master`                  | the pre-fork supervisor: forking, reaping, scaling, signals, reload                                                                          |
+| `rapira_scoreboard`   | `crates/scoreboard`              | shared per-worker counters                                                                                                                   |
+| `rapira_http`         | `crates/plugins/http`            | the http plugin: HTTP/1.1, the `Rapira\Http` classes, the `[http]` table ([README](crates/plugins/http/README.md))                           |
+| `rapira_grpc`         | `crates/plugins/grpc`            | the grpc plugin: gRPC, gRPC-Web and Connect, the `Rapira\Grpc` classes, the `[grpc]` table ([README](crates/plugins/grpc/README.md))         |
+| `rapira_static_files` | `crates/middleware/static_files` | the `static` http middleware, a tower layer; each built-in http middleware is one crate under `crates/middleware`                            |
+| `tests`               | `crates/tests`                   | the e2e suite, its harness and its fixtures                                                                                                  |
+
+## Plugins
+
+- A dispatcher plugin owns a pool and turns each request into a work unit that PHP pulls with `receive()`: the http plugin makes a `Rapira\Http\Exchange`, the grpc plugin makes a `Rapira\Grpc\UnaryCall`.
+- A plugin without a pool, such as a KV client, has no support, and the contract lists its PHP acquisition path as open.
+- A middleware is a tower layer that the http plugin applies around its inner service in config order. It never touches PHP.
+
+A plugin is one crate under `crates/plugins` that implements `rapira_sapi::plugin::Plugin`. It owns its config table, its PHP stub, its C method shells, the Rust behind those methods, its work unit and its transport. The two plugin READMEs describe the crate layout.
+
+To add a plugin:
+
+- Create its crate under `crates/plugins`.
+- In the root `Cargo.toml`, add the crate to the workspace `members`, to `[workspace.dependencies]` and to the `[dependencies]` of `rapira_core`.
+- In `src/settings.rs`, add its table to `FileConfig` and its settings to `Settings`.
+- In `settings` in `src/settings.rs`, call its `resolve`, and add its table to the check that refuses a file with no plugin table.
+- In `serve` in `src/main.rs`, build the plugin with its pool, and add its `PhpPart` to the `boot_master` call.
 
 ## Pull requests
 

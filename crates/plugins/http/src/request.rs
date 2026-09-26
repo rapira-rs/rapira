@@ -1,8 +1,10 @@
-use extension_api::{Peer, Request};
+use rapira_sapi::Request;
+use rapira_sapi::types::Body;
 
 use crate::Config;
+use crate::middleware::Peer;
 
-/// Moves the header map out of `parts`.
+/// Moves the header map out of `parts`. The body stays raw: the handler parses multipart.
 pub(crate) fn build(
     parts: &mut http::request::Parts,
     authority: Option<Vec<u8>>,
@@ -15,6 +17,7 @@ pub(crate) fn build(
         http::Version::HTTP_10 => "HTTP/1.0".to_owned(),
         v => format!("{v:?}"),
     };
+    let headers = std::mem::take(&mut parts.headers);
     Request {
         method: parts.method.as_str().to_owned(),
         // Origin-form view for every target form. Display restores the leading slash
@@ -41,15 +44,36 @@ pub(crate) fn build(
         server_port: cfg.server_port,
         tls: None,
         received_at: Some(peer.received_at),
-        headers: std::mem::take(&mut parts.headers),
-        body,
+        content_type: headers
+            .get(http::header::CONTENT_TYPE)
+            .map(|v| v.as_bytes().to_vec()),
+        content_length: body.len() as i64,
+        body: Body::Raw(std::io::Cursor::new(body)),
+        headers,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_api::Addr;
+    use rapira_sapi::Addr;
+
+    /// build() reads only the server name and port.
+    fn config() -> Config {
+        Config {
+            listen: rapira_net::ListenAddr::Tcp(([127, 0, 0, 1], 8000).into()),
+            server_name: "localhost".to_owned(),
+            server_port: 8000,
+            max_body_size: 0,
+            unsafe_field_names: crate::UnsafeFieldNames::Drop,
+            superglobals: true,
+            write_timeout: std::time::Duration::ZERO,
+            keepalive_timeout: std::time::Duration::ZERO,
+            middleware: Vec::new(),
+            uploads: None,
+            sendfile_root: std::path::PathBuf::new(),
+        }
+    }
 
     fn peer() -> Peer {
         Peer {
@@ -76,7 +100,7 @@ mod tests {
             Some(b"e2e".to_vec()),
             Vec::new(),
             peer(),
-            &Config::default(),
+            &config(),
         );
         let probes: Vec<_> = built.headers.get_all("x-probe").iter().collect();
         assert_eq!(probes, ["one", "two"]);
@@ -94,7 +118,7 @@ mod tests {
             .body(())
             .unwrap();
         let (mut parts, ()) = req.into_parts();
-        build(&mut parts, None, Vec::new(), peer(), &Config::default())
+        build(&mut parts, None, Vec::new(), peer(), &config())
     }
 
     /// RFC 9112 §3.2.2 absolute-form: PHP gets the origin-form view; the target keeps the full form.

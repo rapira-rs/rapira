@@ -1,12 +1,19 @@
+use std::cell::Cell;
 use std::fs::File;
 use std::io::{self, Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
+use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
+
+use rapira_net::ListenAddr;
+use rapira_sapi::{Addr, Mode};
+use serde_json::Value;
+use tests::server_log;
 
 /// Connect budget for a freshly spawned master (CI macOS worst case).
 pub const BOOT: Duration = Duration::from_secs(30);
@@ -23,13 +30,28 @@ pub const STOP_BUDGET: Duration = Duration::from_secs(45);
 /// A running master and the scratch dir holding its config and log.
 pub struct Server {
     pub child: Child,
+    /// The TCP listener of the first pool. When every pool listens on a unix socket, nothing listens here.
     pub addr: SocketAddr,
     pub dir: PathBuf,
+    /// The listener of the `[grpc]` pool, when the config has one.
+    pub grpc: Option<ListenAddr>,
 }
 
 impl Server {
     pub fn pid(&self) -> u32 {
         self.child.id()
+    }
+
+    /// The stdout and stderr of the master and its workers.
+    pub fn log_file(&self) -> PathBuf {
+        self.dir.join("server.log")
+    }
+
+    /// Stops the master gracefully and waits for its exit, so the log holds the last record of every worker. The scratch dir stays until the drop.
+    pub fn stop(&mut self) {
+        signal(self.pid(), libc::SIGQUIT);
+        let status = self.wait_exit(STOP_BUDGET);
+        assert_exit_code(status, MASTER_EXIT_OK, self);
     }
 
     pub fn wait_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
@@ -149,22 +171,38 @@ fn spawn_with_extras(
     if let Some(ini) = &cwd_ini {
         std::fs::write(dir.join("php.ini"), ini.contents).expect("write php.ini");
     }
-    let render = |port| render_config(port, processes, &entrypoint, http_extra, extra_toml);
-    spawn_ready(dir, &render, rust_log, cwd_ini.as_ref())
+    let render = |port| render_config(&tcp(port), processes, &entrypoint, http_extra, extra_toml);
+    spawn_ready(dir, &render, None, rust_log, cwd_ini.as_ref(), &[])
 }
 
-/// Spawns until the port that `render` gets accepts a connection, on a fresh port each time.
+/// The `listen` value of a TCP pool on `port`.
+fn tcp(port: u16) -> String {
+    format!("127.0.0.1:{port}")
+}
+
+/// Spawns until a listener accepts a connection, on a fresh port each time: the port that `render` gets, or `unix` when no pool listens on TCP.
 fn spawn_ready(
     dir: PathBuf,
     render: &dyn Fn(u16) -> String,
+    unix: Option<&Path>,
     rust_log: Option<&str>,
     cwd_ini: Option<&CwdIni<'_>>,
+    env: &[(String, String)],
 ) -> Server {
     let mut last_log = String::new();
     for _ in 0..3 {
-        let (mut child, addr) = spawn_attempt(&dir, render, rust_log, cwd_ini);
-        if wait_for_port(&addr, &mut child, BOOT) {
-            return Server { child, addr, dir };
+        let (mut child, addr) = spawn_attempt(&dir, render, rust_log, cwd_ini, env);
+        let ready = match unix {
+            Some(path) => ListenAddr::Unix(path.to_owned()),
+            None => ListenAddr::Tcp(addr),
+        };
+        if wait_for_listener(&ready, &mut child, BOOT) {
+            return Server {
+                child,
+                addr,
+                dir,
+                grpc: None,
+            };
         }
         let _ = child.kill();
         let _ = child.wait();
@@ -192,6 +230,7 @@ fn spawn_attempt(
     render: &dyn Fn(u16) -> String,
     rust_log: Option<&str>,
     cwd_ini: Option<&CwdIni<'_>>,
+    env: &[(String, String)],
 ) -> (Child, SocketAddr) {
     let port = free_port();
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -210,6 +249,9 @@ fn spawn_attempt(
         Some(v) => cmd.env("RUST_LOG", v),
         None => cmd.env_remove("RUST_LOG"),
     };
+    for (k, v) in env {
+        cmd.env(k, v);
+    }
     let child = cmd
         .stdout(Stdio::from(log.try_clone().expect("clone log fd")))
         .stderr(Stdio::from(log))
@@ -233,14 +275,25 @@ pub fn spawn_boot_failure_with_entrypoint(entrypoint: &str) -> (ExitStatus, Stri
 }
 
 fn boot_failure(dir: PathBuf, entrypoint: &str, http_extra: &str) -> (ExitStatus, String) {
-    let render = |port| render_config(port, 1, entrypoint, http_extra, "");
-    exit_of(dir, &render)
+    let render = |port| render_config(&tcp(port), 1, entrypoint, http_extra, "");
+    exit_of(dir, &render, Some("info"), None, &[])
 }
 
 /// One spawn that must exit: returns the status with the whole log.
-fn exit_of(dir: PathBuf, render: &dyn Fn(u16) -> String) -> (ExitStatus, String) {
-    let (child, addr) = spawn_attempt(&dir, render, Some("info"), None);
-    let mut srv = Server { child, addr, dir };
+fn exit_of(
+    dir: PathBuf,
+    render: &dyn Fn(u16) -> String,
+    rust_log: Option<&str>,
+    cwd_ini: Option<&CwdIni<'_>>,
+    env: &[(String, String)],
+) -> (ExitStatus, String) {
+    let (child, addr) = spawn_attempt(&dir, render, rust_log, cwd_ini, env);
+    let mut srv = Server {
+        child,
+        addr,
+        dir,
+        grpc: None,
+    };
     let Some(status) = srv.wait_exit(BOOT) else {
         panic!("rapira did not exit");
     };
@@ -252,18 +305,18 @@ fn exit_of(dir: PathBuf, render: &dyn Fn(u16) -> String) -> (ExitStatus, String)
 /// TOML accepts an explicit super-table header after its sub-table.
 /// `http_extra` renders last, so a header it opens ends the file.
 fn render_config(
-    port: u16,
+    listen: &str,
     processes: usize,
     fixture: &str,
     http_extra: &str,
     extra: &str,
 ) -> String {
     format!(
-        "[http.pool]\nprocesses = {processes}\nentrypoint = \"{fixture}\"\n{extra}\n[http]\nlisten = \"127.0.0.1:{port}\"\n{http_extra}"
+        "[http.pool]\nprocesses = {processes}\nentrypoint = \"{fixture}\"\n{extra}\n[http]\nlisten = \"{listen}\"\n{http_extra}"
     )
 }
 
-pub const ECHO_SERVICE: &str = "rapira.test.v1.EchoService";
+pub use tests::grpc::ECHO_SERVICE;
 
 /// Copies `grpc/echo-worker.php` and its descriptor set into `dir` as `grpc-worker.php` and `echo.binpb`.
 fn stage_grpc(dir: &Path) {
@@ -275,12 +328,22 @@ fn stage_grpc(dir: &Path) {
     std::fs::copy(tests::echo_descriptor_set(), dir.join("echo.binpb")).expect("copy echo.binpb");
 }
 
-/// A `[grpc]` pool over the staged echo fixture; `descriptor_set` and `service` go into the file verbatim, and no `service` leaves the key out.
-fn render_grpc(port: u16, processes: usize, descriptor_set: &str, service: Option<&str>) -> String {
-    let services = service.map_or(String::new(), |s| format!("services = [\"{s}\"]\n"));
+/// A `[grpc]` pool over `entrypoint`. `listen`, `descriptor_set` and `extra` (keys inside `[grpc]`) go into the file verbatim; `services` becomes a TOML string array, and None leaves the key out.
+fn render_grpc(
+    listen: &str,
+    processes: usize,
+    entrypoint: &str,
+    descriptor_set: &str,
+    services: Option<&[String]>,
+    extra: &str,
+) -> String {
+    let services = services.map_or(String::new(), |names| {
+        let quoted: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
+        format!("services = [{}]\n", quoted.join(", "))
+    });
     format!(
-        "[grpc]\nlisten = \"127.0.0.1:{port}\"\ndescriptor_set = \"{descriptor_set}\"\n{services}\
-         [grpc.pool]\nprocesses = {processes}\nentrypoint = \"grpc-worker.php\"\n"
+        "[grpc]\nlisten = \"{listen}\"\ndescriptor_set = \"{descriptor_set}\"\n{services}{extra}\n\
+         [grpc.pool]\nprocesses = {processes}\nentrypoint = \"{entrypoint}\"\n"
     )
 }
 
@@ -288,8 +351,19 @@ fn render_grpc(port: u16, processes: usize, descriptor_set: &str, service: Optio
 pub fn spawn_grpc(processes: usize) -> Server {
     let dir = scratch_dir();
     stage_grpc(&dir);
-    let render = |port| render_grpc(port, processes, "echo.binpb", None);
-    spawn_ready(dir, &render, Some("info"), None)
+    let render = |port| {
+        render_grpc(
+            &tcp(port),
+            processes,
+            "grpc-worker.php",
+            "echo.binpb",
+            None,
+            "",
+        )
+    };
+    let mut srv = spawn_ready(dir, &render, None, Some("info"), None, &[]);
+    srv.grpc = Some(ListenAddr::Tcp(srv.addr));
+    srv
 }
 
 /// A master with an `[http]` pool over `http_fixture` and a `[grpc]` pool over the echo fixture, one process each.
@@ -300,10 +374,11 @@ pub fn spawn_grpc_with_http(http_fixture: &str) -> (Server, SocketAddr) {
     let http_port = std::cell::Cell::new(0);
     let render = |port| {
         http_port.set(free_port());
-        render_config(http_port.get(), 1, &entrypoint, "", "")
-            + &render_grpc(port, 1, "echo.binpb", None)
+        render_config(&tcp(http_port.get()), 1, &entrypoint, "", "")
+            + &render_grpc(&tcp(port), 1, "grpc-worker.php", "echo.binpb", None, "")
     };
-    let srv = spawn_ready(dir, &render, Some("info"), None);
+    let mut srv = spawn_ready(dir, &render, None, Some("info"), None, &[]);
+    srv.grpc = Some(ListenAddr::Tcp(srv.addr));
     (srv, SocketAddr::from(([127, 0, 0, 1], http_port.get())))
 }
 
@@ -311,15 +386,326 @@ pub fn spawn_grpc_with_http(http_fixture: &str) -> (Server, SocketAddr) {
 pub fn spawn_grpc_boot_failure(descriptor_set: &str, service: &str) -> (ExitStatus, String) {
     let dir = scratch_dir();
     stage_grpc(&dir);
-    let render = |port| render_grpc(port, 1, descriptor_set, Some(service));
-    exit_of(dir, &render)
+    let services = [service.to_owned()];
+    let render = |port| {
+        render_grpc(
+            &tcp(port),
+            1,
+            "grpc-worker.php",
+            descriptor_set,
+            Some(&services),
+            "",
+        )
+    };
+    exit_of(dir, &render, Some("info"), None, &[])
+}
+
+/// A master to spawn with one worker process per pool: [`Spawn::http`] or [`Spawn::grpc`] starts the config, and each setter adds to it.
+/// The directory of each pool's fixture is copied into `http/` or `grpc/` in the scratch dir, so a fixture can include its siblings.
+/// PHPRC names a `php.ini` in the scratch dir with the contents of `crates/tests/fixtures/ini/shared/php.ini`, unless [`Spawn::php_ini`] replaces them.
+pub struct Spawn {
+    http: Option<(Mode, PathBuf)>,
+    /// The listener of the `[http]` pool; None listens on a TCP port that the harness picks.
+    http_listen: Option<ListenAddr>,
+    grpc: Option<PathBuf>,
+    /// The listener of the `[grpc]` pool; None listens on a TCP port that the harness picks.
+    grpc_listen: Option<ListenAddr>,
+    /// The `[grpc] services` list; None leaves the key out.
+    services: Option<Vec<String>>,
+    /// The `[grpc] descriptor_set`; None stages `echo.binpb`.
+    descriptor_set: Option<PathBuf>,
+    http_extra: String,
+    grpc_extra: String,
+    http_pool: String,
+    grpc_pool: String,
+    toml: String,
+    php_ini: String,
+    env: Vec<(String, String)>,
+    rust_log: String,
+}
+
+impl Spawn {
+    /// An `[http]` pool in `mode` over `fixture`. `Server::addr` is its listener.
+    pub fn http(mode: Mode, fixture: impl Into<PathBuf>) -> Spawn {
+        Spawn {
+            http: Some((mode, fixture.into())),
+            ..Spawn::empty()
+        }
+    }
+
+    /// A `[grpc]` pool over `fixture` that serves `rapira.test.v1.EchoService` out of `echo.binpb`. `Server::grpc` is its listener, and `Server::addr` too when it listens on TCP.
+    pub fn grpc(fixture: impl Into<PathBuf>) -> Spawn {
+        Spawn {
+            grpc: Some(fixture.into()),
+            ..Spawn::empty()
+        }
+    }
+
+    fn empty() -> Spawn {
+        let ini = tests::fixture("ini/shared/php.ini");
+        Spawn {
+            http: None,
+            http_listen: None,
+            grpc: None,
+            grpc_listen: None,
+            services: Some(vec![ECHO_SERVICE.to_owned()]),
+            descriptor_set: None,
+            http_extra: String::new(),
+            grpc_extra: String::new(),
+            http_pool: String::new(),
+            grpc_pool: String::new(),
+            toml: String::new(),
+            php_ini: std::fs::read_to_string(&ini)
+                .unwrap_or_else(|e| panic!("read {}: {e}", ini.display())),
+            env: Vec::new(),
+            rust_log: "info".to_owned(),
+        }
+    }
+
+    /// Adds the `[grpc]` pool of [`Spawn::grpc`] next to the `[http]` pool. `Server::grpc` is its listener.
+    pub fn with_grpc(mut self, fixture: impl Into<PathBuf>) -> Spawn {
+        self.grpc = Some(fixture.into());
+        self
+    }
+
+    /// The `[http]` pool listens on the unix socket `sock`.
+    pub fn http_unix(self, sock: &Path) -> Spawn {
+        self.http_listen(ListenAddr::Unix(sock.to_owned()))
+    }
+
+    /// The `[http]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
+    pub fn http_listen(mut self, listen: ListenAddr) -> Spawn {
+        self.http_listen = Some(listen);
+        self
+    }
+
+    /// The `[grpc]` pool listens on the unix socket `sock`.
+    pub fn grpc_unix(self, sock: &Path) -> Spawn {
+        self.grpc_listen(ListenAddr::Unix(sock.to_owned()))
+    }
+
+    /// The `[grpc]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
+    pub fn grpc_listen(mut self, listen: ListenAddr) -> Spawn {
+        self.grpc_listen = Some(listen);
+        self
+    }
+
+    /// The `[grpc] services` list in place of `EchoService`. None leaves the key out, so the pool serves the services of the files that no other file imports.
+    pub fn services(mut self, services: Option<&[&str]>) -> Spawn {
+        self.services = services.map(|names| names.iter().map(|&n| n.to_owned()).collect());
+        self
+    }
+
+    /// The `[grpc] descriptor_set` in place of `echo.binpb`.
+    pub fn descriptor_set(mut self, path: &Path) -> Spawn {
+        self.descriptor_set = Some(path.to_owned());
+        self
+    }
+
+    /// Keys inside `[http]`, for example `server_port = 8080`. The text may open `[http.*]` tables after its keys.
+    pub fn http_extra(mut self, keys: &str) -> Spawn {
+        self.http_extra += keys;
+        self.http_extra.push('\n');
+        self
+    }
+
+    /// Keys inside `[grpc]`, for example `reflection = true`.
+    pub fn grpc_extra(mut self, keys: &str) -> Spawn {
+        self.grpc_extra += keys;
+        self.grpc_extra.push('\n');
+        self
+    }
+
+    /// Keys inside `[http.pool]`, for example `scaling = "ondemand"`.
+    pub fn http_pool(mut self, keys: &str) -> Spawn {
+        self.http_pool += keys;
+        self.http_pool.push('\n');
+        self
+    }
+
+    /// Keys inside `[grpc.pool]`, for example `scaling = "ondemand"`.
+    pub fn grpc_pool(mut self, keys: &str) -> Spawn {
+        self.grpc_pool += keys;
+        self.grpc_pool.push('\n');
+        self
+    }
+
+    /// Top-level tables at the end of the config, for example `[supervisor]`.
+    pub fn toml(mut self, tables: &str) -> Spawn {
+        self.toml += tables;
+        self.toml.push('\n');
+        self
+    }
+
+    /// `[log] format = "json"`, for the readers in `tests::server_log`. RUST_LOG still selects the records.
+    pub fn json_log(self) -> Spawn {
+        self.toml("[log]\nformat = \"json\"")
+    }
+
+    /// The contents of the `php.ini` that PHPRC names.
+    pub fn php_ini(mut self, contents: &str) -> Spawn {
+        contents.clone_into(&mut self.php_ini);
+        self
+    }
+
+    /// An environment variable of the master and its workers.
+    pub fn env(mut self, key: &str, value: &str) -> Spawn {
+        self.env.push((key.to_owned(), value.to_owned()));
+        self
+    }
+
+    /// The RUST_LOG filter of the master and its workers; `info` when not set.
+    pub fn rust_log(mut self, filter: &str) -> Spawn {
+        filter.clone_into(&mut self.rust_log);
+        self
+    }
+
+    /// Spawns the master and returns when its first listener accepts a connection.
+    pub fn spawn(self) -> Server {
+        let grpc_port = Cell::new(0);
+        let (dir, render) = self.stage(&grpc_port);
+        let ini = self.ini();
+        let mut srv = spawn_ready(
+            dir,
+            &render,
+            self.unix_only(),
+            Some(&self.rust_log),
+            Some(&ini),
+            &self.env,
+        );
+        if self.grpc.is_some() {
+            srv.grpc = Some(match &self.grpc_listen {
+                Some(listen) => listen.clone(),
+                None => ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], grpc_port.get()))),
+            });
+        }
+        srv
+    }
+
+    /// The unix socket of the first pool that listens on one, when no pool listens on a port that the harness picks.
+    fn unix_only(&self) -> Option<&Path> {
+        let picked = (self.http.is_some() && self.http_listen.is_none())
+            || (self.grpc.is_some() && self.grpc_listen.is_none());
+        if picked {
+            return None;
+        }
+        [&self.http_listen, &self.grpc_listen]
+            .into_iter()
+            .find_map(|listen| match listen {
+                Some(ListenAddr::Unix(sock)) => Some(sock.as_path()),
+                _ => None,
+            })
+    }
+
+    /// Spawns a master that must fail its boot: returns the exit status with the whole log.
+    pub fn boot_failure(self) -> (ExitStatus, String) {
+        let grpc_port = Cell::new(0);
+        let (dir, render) = self.stage(&grpc_port);
+        exit_of(
+            dir,
+            &render,
+            Some(&self.rust_log),
+            Some(&self.ini()),
+            &self.env,
+        )
+    }
+
+    fn ini(&self) -> CwdIni<'_> {
+        CwdIni {
+            contents: &self.php_ini,
+            via_phprc: true,
+        }
+    }
+
+    /// Fills a scratch dir and returns it with the config for a port; `grpc_port` gets the port of the `[grpc]` pool.
+    fn stage<'a>(&'a self, grpc_port: &'a Cell<u16>) -> (PathBuf, impl Fn(u16) -> String + 'a) {
+        let dir = scratch_dir();
+        std::fs::write(dir.join("php.ini"), &self.php_ini).expect("write php.ini");
+        let http = self
+            .http
+            .as_ref()
+            .map(|(mode, fixture)| (*mode, stage_dir(&dir, "http", fixture)));
+        let grpc = self.grpc.as_ref().map(|fixture| {
+            let descriptor_set = match &self.descriptor_set {
+                Some(path) => path.display().to_string(),
+                None => {
+                    std::fs::copy(tests::echo_descriptor_set(), dir.join("echo.binpb"))
+                        .expect("copy echo.binpb");
+                    "echo.binpb".to_owned()
+                }
+            };
+            (stage_dir(&dir, "grpc", fixture), descriptor_set)
+        });
+        let render = move |port| {
+            // The spawn waits for `port`, so it goes to the first pool without a listen address.
+            let mut port = Some(port);
+            let mut config = String::new();
+            if let Some((mode, entrypoint)) = &http {
+                let listen = match &self.http_listen {
+                    Some(listen) => listen.to_string(),
+                    None => tcp(port.take().unwrap_or_else(free_port)),
+                };
+                let pool = format!("mode = \"{mode}\"\n{}", self.http_pool);
+                config += &render_config(&listen, 1, entrypoint, &self.http_extra, &pool);
+                config.push('\n');
+            }
+            if let Some((entrypoint, descriptor_set)) = &grpc {
+                let listen = match &self.grpc_listen {
+                    Some(listen) => listen.to_string(),
+                    None => {
+                        grpc_port.set(port.take().unwrap_or_else(free_port));
+                        tcp(grpc_port.get())
+                    }
+                };
+                config += &render_grpc(
+                    &listen,
+                    1,
+                    entrypoint,
+                    descriptor_set,
+                    self.services.as_deref(),
+                    &self.grpc_extra,
+                );
+                // `render_grpc` ends in `[grpc.pool]`.
+                config += &self.grpc_pool;
+                config.push('\n');
+            }
+            config + &self.toml
+        };
+        (dir, render)
+    }
+}
+
+/// Copies the files of the directory of `fixture` into `dir/sub`; returns the entrypoint relative to `dir`.
+fn stage_dir(dir: &Path, sub: &str, fixture: &Path) -> String {
+    let name = fixture
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or_else(|| panic!("fixture {} has no utf-8 file name", fixture.display()));
+    let from = fixture.parent().expect("fixture has a directory");
+    let to = dir.join(sub);
+    std::fs::create_dir_all(&to).expect("create the fixture dir");
+    for entry in std::fs::read_dir(from).unwrap_or_else(|e| panic!("read {}: {e}", from.display()))
+    {
+        let path = entry.expect("fixture dir entry").path();
+        if path.is_file() {
+            std::fs::copy(&path, to.join(path.file_name().expect("file name")))
+                .unwrap_or_else(|e| panic!("copy {}: {e}", path.display()));
+        }
+    }
+    format!("{sub}/{name}")
 }
 
 /// Connect-only readiness: the master binds the listen socket before forking, so a successful connect means it booted far enough to serve.
-fn wait_for_port(addr: &SocketAddr, child: &mut Child, timeout: Duration) -> bool {
+fn wait_for_listener(listen: &ListenAddr, child: &mut Child, timeout: Duration) -> bool {
     let end = Instant::now() + timeout;
     while Instant::now() < end {
-        if TcpStream::connect_timeout(addr, Duration::from_millis(200)).is_ok() {
+        let accepted = match listen {
+            ListenAddr::Tcp(addr) => {
+                TcpStream::connect_timeout(addr, Duration::from_millis(200)).is_ok()
+            }
+            ListenAddr::Unix(path) => UnixStream::connect(path).is_ok(),
+        };
+        if accepted {
             std::thread::sleep(Duration::from_millis(100));
             return child.try_wait().ok().flatten().is_none();
         }
@@ -671,7 +1057,7 @@ pub fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// `extension_dir` of the linked PHP, from the same `php-config` the build script uses (crates/php_sys/build.rs).
+/// `extension_dir` of the linked PHP, from the same `php-config` the build script uses (crates/sapi/build.rs).
 fn php_extension_dir() -> Option<PathBuf> {
     let bin = std::env::var("PHP_CONFIG").unwrap_or_else(|_| "php-config".into());
     let out = Command::new(bin).arg("--extension-dir").output().ok()?;
@@ -765,7 +1151,8 @@ pub fn wait_file_contains_all(
     }
 }
 
-fn free_port() -> u16 {
+/// A port that no listener holds when this returns.
+pub fn free_port() -> u16 {
     let l = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     l.local_addr().expect("local_addr").port()
 }
@@ -933,4 +1320,63 @@ pub fn wait_log_contains(srv: &Server, needle: &str, deadline: Duration) -> bool
         }
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Sends SIGUSR1 until the master logs a scoreboard line of slot 0 that contains `fragment`, for at most 10 s; returns that line.
+pub fn slot_line(srv: &Server, fragment: &str) -> String {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        signal(srv.pid(), libc::SIGUSR1);
+        std::thread::sleep(Duration::from_millis(20));
+        let log = std::fs::read_to_string(srv.log_file()).unwrap_or_default();
+        if let Some(line) = log
+            .lines()
+            .find(|l| l.contains("slot 0 pid") && l.contains(fragment))
+        {
+            return line.to_owned();
+        }
+        assert!(
+            Instant::now() < deadline,
+            "no slot 0 line with {fragment:?} within 10s\n{log}"
+        );
+    }
+}
+
+/// The listener of the `[grpc]` pool of `srv`.
+pub fn listen(srv: &Server) -> ListenAddr {
+    srv.grpc.clone().expect("the config has a [grpc] pool")
+}
+
+/// The context of each `call` record that `grpc/wire-worker.php` logged, in log order. The fixture logs before it answers, so a call that has its response is in the log.
+pub fn calls(srv: &Server) -> Vec<Value> {
+    server_log::records(&srv.log_file())
+        .into_iter()
+        .filter(|c| c.target == "app" && c.message == "call")
+        .map(|c| serde_json::from_str(&c.context).expect("a call record holds JSON"))
+        .collect()
+}
+
+/// The `remote` that PHP reports for a client at `peer`. `Conn::open` connects from an unnamed unix socket, which PHP reports as `unix:NULL`.
+pub fn logged_remote(peer: &Addr) -> String {
+    match peer {
+        Addr::Inet(addr) => addr.to_string(),
+        Addr::Unix(_) => "unix:NULL".to_owned(),
+    }
+}
+
+/// Waits off the test runtime for the master to exit 0, so the clients on the runtime keep running through the drain.
+pub async fn exited(mut srv: Server) -> Server {
+    tokio::task::spawn_blocking(move || {
+        let status = srv.wait_exit(STOP_BUDGET);
+        assert_exit_code(status, MASTER_EXIT_OK, &srv);
+        srv
+    })
+    .await
+    .expect("the wait task")
+}
+
+/// A graceful stop: SIGQUIT, then [`exited`].
+pub async fn stop(srv: Server) -> Server {
+    signal(srv.pid(), libc::SIGQUIT);
+    exited(srv).await
 }

@@ -62,6 +62,28 @@ try {
             $ex->sendFile($req->headers['x-path'][0] ?? '', 2, 3);
             continue;
         }
+        if ($probe === 'sendfile-range') {
+            $length = isset($q['length']) ? (int) $q['length'] : null;
+            try {
+                $ex->sendFile($req->headers['x-path'][0] ?? '', (int) ($q['offset'] ?? 0), $length);
+            } catch (FileNotSendableException) {
+                $ex->writeHead(403);
+                $ex->writeBody('denied');
+            }
+            continue;
+        }
+        if ($probe === 'sendfile-shrink') {
+            // The flushed head has no content-length, so the body is chunked and only a cut body lacks the last chunk.
+            // The marker tells the test that the file is cut.
+            $path = $req->headers['x-path'][0] ?? '';
+            $ex->flush();
+            $ex->sendFile($path);
+            $f = fopen($path, 'r+');
+            ftruncate($f, (int) ($q['to'] ?? 0));
+            fclose($f);
+            touch($path . '.shrunk');
+            continue;
+        }
         if ($probe === 'sendfile-missing') {
             try {
                 $ex->sendFile('/definitely/not/here');
@@ -111,7 +133,7 @@ try {
         }
         if ($probe === 'declared-cl') {
             $ex->writeHead(200, ['content-length' => ['10']]);
-            // under-run: legal here, the front closes the connection
+            // under-run: legal here, the plugin closes the connection
             $ex->writeBody('abc');
             continue;
         }

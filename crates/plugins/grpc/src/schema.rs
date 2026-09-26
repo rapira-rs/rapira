@@ -1,13 +1,13 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::anyhow;
 use buffa_descriptor::generated::descriptor::method_options::IdempotencyLevel;
 use buffa_descriptor::{DescriptorPool, DynamicMessage, MessageIndex, ServiceDescriptor};
 
 /// The services of a FileDescriptorSet that rapira serves.
-pub struct Schema {
+pub(crate) struct Schema {
     pool: Arc<DescriptorPool>,
     /// Keyed `package.Service/Method`, the request path without its leading slash.
     methods: HashMap<String, Method>,
@@ -15,20 +15,35 @@ pub struct Schema {
 }
 
 /// A configured service with every method it declares.
-#[derive(Debug, PartialEq, Eq)]
-pub struct ServiceInfo {
+#[derive(Debug, Clone)]
+pub(crate) struct ServiceInfo {
     pub name: String,
     pub methods: Vec<MethodInfo>,
 }
 
 /// A method with fully qualified message type names.
-#[derive(Debug, PartialEq, Eq)]
-pub struct MethodInfo {
+#[derive(Debug, Clone)]
+pub(crate) struct MethodInfo {
     pub name: String,
     pub input_type: String,
     pub output_type: String,
     pub client_streaming: bool,
     pub server_streaming: bool,
+}
+
+/// The services that `getServices()` reports. The master sets them in `prepare`, before the fork, so every worker inherits them.
+static SERVICES: OnceLock<Vec<ServiceInfo>> = OnceLock::new();
+
+/// Sets the services that `getServices()` reports. A second call is an error.
+pub(crate) fn set_services(services: Vec<ServiceInfo>) -> anyhow::Result<()> {
+    SERVICES
+        .set(services)
+        .map_err(|_| anyhow!("the grpc services are already set"))
+}
+
+/// The services that `getServices()` reports; empty before `set_services`.
+pub(crate) fn services() -> &'static [ServiceInfo] {
+    SERVICES.get().map_or(&[], Vec::as_slice)
 }
 
 /// A unary method that rapira routes to PHP.
@@ -39,8 +54,8 @@ pub(crate) struct Method {
     pub(crate) idempotent: bool,
 }
 
-/// The services the host answers itself: never routed to PHP.
-const HOST_SERVICES: [&str; 3] = [
+/// The services the plugin answers itself: never routed to PHP.
+const PLUGIN_SERVICES: [&str; 3] = [
     connectrpc_health::HEALTH_SERVICE_NAME,
     connectrpc_reflection::SERVER_REFLECTION_SERVICE_NAME,
     connectrpc_reflection::SERVER_REFLECTION_V1ALPHA_SERVICE_NAME,
@@ -48,7 +63,7 @@ const HOST_SERVICES: [&str; 3] = [
 
 impl Schema {
     /// Loads the set at `path` and keeps the unary methods of `services` as routes. `None` serves the services of the files that no other file of the set imports.
-    pub fn load(path: &Path, services: Option<&[String]>) -> anyhow::Result<Schema> {
+    pub(crate) fn load(path: &Path, services: Option<&[String]>) -> anyhow::Result<Schema> {
         let bytes = std::fs::read(path)
             .map_err(|e| anyhow!("reading grpc.descriptor_set {}: {e}", path.display()))?;
         // The operator supplies the set, so the element memory limit for untrusted input does not apply.
@@ -78,9 +93,9 @@ impl Schema {
             Some(names) => {
                 let mut selected = Vec::with_capacity(names.len());
                 for name in names {
-                    if HOST_SERVICES.contains(&name.trim_start_matches('.')) {
+                    if PLUGIN_SERVICES.contains(&name.trim_start_matches('.')) {
                         return Err(anyhow!(
-                            "grpc.services entry `{name}` is served by the host"
+                            "grpc.services entry `{name}` is served by the plugin"
                         ));
                     }
                     let service = pool.service_by_name(name).ok_or_else(|| {
@@ -125,11 +140,11 @@ impl Schema {
                         })
                     })
                     .filter(|s| {
-                        let host = HOST_SERVICES.contains(&s.full_name());
-                        if host {
-                            tracing::debug!(target: "grpc", "{} is the host's own service; not routed to PHP", s.full_name());
+                        let own = PLUGIN_SERVICES.contains(&s.full_name());
+                        if own {
+                            tracing::debug!(target: "grpc", "{} is the plugin's own service; not routed to PHP", s.full_name());
                         }
-                        !host
+                        !own
                     })
                     .collect();
                 if selected.is_empty() {
@@ -156,7 +171,7 @@ impl Schema {
     }
 
     /// Every method of the configured services, streaming ones included, in descriptor order.
-    pub fn services(&self) -> &[ServiceInfo] {
+    pub(crate) fn services(&self) -> &[ServiceInfo] {
         &self.services
     }
 
