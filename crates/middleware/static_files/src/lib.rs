@@ -3,9 +3,11 @@ mod cache;
 use std::path::PathBuf;
 
 use bytes::Bytes;
-use extension_api::{BoxError, BoxFuture, HttpRequest, HttpResponse, Middleware, Next, empty_body};
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty};
+use rapira_sapi::api::{
+    BoxError, BoxFuture, HttpRequest, HttpResponse, Middleware, Next, empty_body,
+};
 use tower_http::services::ServeDir;
 use tower_http::services::fs::DefaultServeDirFallback;
 
@@ -120,8 +122,8 @@ impl Middleware for StaticFiles {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_api::{Addr, Handler, Peer, Protocol};
     use http_body_util::Full;
+    use rapira_sapi::api::{Addr, Handler, Peer, Protocol};
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};

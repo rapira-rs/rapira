@@ -3,9 +3,9 @@
 use std::io::Write;
 use std::path::PathBuf;
 
-use extension_api::Rejected;
+use crate::api::Rejected;
+use crate::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
 use memchr::memmem;
-use rapira_sapi::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
 
 #[derive(Debug, Clone)]
 pub struct Limits {

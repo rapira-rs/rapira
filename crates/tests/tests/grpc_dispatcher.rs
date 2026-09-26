@@ -1,7 +1,7 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use rapira_sapi::types::Addr;
-use rapira_sapi::{GrpcOutcome, GrpcProtocol, GrpcStatus, Mode, Rapira};
+use rapira_sapi::api::{Addr, RpcProtocol, RpcStatus, UnaryReply};
+use rapira_sapi::{Mode, Rapira};
 use serde_json::{Value, json};
 use tests::{
     Fields, app_results, assert_case_records, call, captured, dispatcher_record, echo_services,
@@ -90,7 +90,7 @@ enum Want {
 
 impl Want {
     /// The outcome, or None for a lost call.
-    fn outcome(&self) -> Option<GrpcOutcome> {
+    fn outcome(&self) -> Option<UnaryReply> {
         let (headers, trailers, result) = match self {
             Self::Ok(message) => (&[][..], &[][..], Ok(message.as_bytes().to_vec().into())),
             Self::Reply(headers, trailers, message) => {
@@ -99,7 +99,7 @@ impl Want {
             Self::Status(code, message, details) => (
                 &[][..],
                 &[][..],
-                Err(GrpcStatus {
+                Err(RpcStatus {
                     code: *code,
                     message: (*message).to_owned(),
                     details: details
@@ -110,10 +110,10 @@ impl Want {
             ),
             Self::Lost => return None,
         };
-        Some(GrpcOutcome {
+        Some(UnaryReply {
             headers: fields(headers),
             trailers: fields(trailers),
-            result,
+            outcome: result,
         })
     }
 }
@@ -231,7 +231,7 @@ struct ContextCase {
     name: &'static str,
     metadata: &'static [(&'static str, &'static str)],
     deadline: Option<f64>,
-    protocol: GrpcProtocol,
+    protocol: RpcProtocol,
     remote: Addr,
     /// The logged Context without `receivedAt`, as JSON.
     expected: &'static str,
@@ -257,7 +257,7 @@ const CONTEXT_CASES: &[ContextCase] = &[
             ("host", "e"),
         ],
         deadline: Some(1_722_700_000.5),
-        protocol: GrpcProtocol::GrpcWeb,
+        protocol: RpcProtocol::GrpcWeb,
         remote: Addr::Inet(SocketAddr::V4(SocketAddrV4::new(
             Ipv4Addr::new(203, 0, 113, 7),
             44123,
@@ -277,7 +277,7 @@ const CONTEXT_CASES: &[ContextCase] = &[
         name: "unix peer without a deadline",
         metadata: &[],
         deadline: None,
-        protocol: GrpcProtocol::Connect,
+        protocol: RpcProtocol::Connect,
         remote: Addr::Unix(None),
         expected: r#"{
             "same": true,
@@ -311,7 +311,7 @@ fn call_context_reports_the_request_facts() -> anyhow::Result<()> {
         let after = std::time::UNIX_EPOCH.elapsed()?.as_secs_f64();
         let got = outcome(rx);
         assert_eq!(
-            got.map(|o| o.result),
+            got.map(|o| o.outcome),
             Some(Ok("context".into())),
             "{}",
             c.name
@@ -362,7 +362,7 @@ fn response_metadata_is_call_scoped() -> anyhow::Result<()> {
     let got = outcome(call(&h, grpc_request("md-rules"))?);
     drop(h);
     drop(r);
-    assert_eq!(got.map(|o| o.result), Some(Ok("md-rules".into())));
+    assert_eq!(got.map(|o| o.outcome), Some(Ok("md-rules".into())));
     assert_case_records(METADATA_CASES);
     Ok(())
 }
@@ -407,8 +407,8 @@ fn a_call_closed_before_the_pull_never_reaches_php() -> anyhow::Result<()> {
     let kept = call(&h, grpc_request("echo:kept"))?;
     std::fs::write(&marker, b"go")?;
 
-    let held = outcome(held).map(|o| o.result);
-    let kept = outcome(kept).map(|o| o.result);
+    let held = outcome(held).map(|o| o.outcome);
+    let kept = outcome(kept).map(|o| o.outcome);
     drop(h);
     drop(r);
     let _ = std::fs::remove_file(&marker);

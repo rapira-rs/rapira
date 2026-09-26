@@ -621,8 +621,8 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
     let h = r.handle();
 
     let mut rq = req("/", "dispatcher/request-worker.php");
-    rq.remote = rapira_sapi::types::Addr::Unix(None);
-    rq.server = rapira_sapi::types::Addr::Unix(Some("/run/rapira.sock".into()));
+    rq.remote = rapira_sapi::api::Addr::Unix(None);
+    rq.server = rapira_sapi::api::Addr::Unix(Some("/run/rapira.sock".into()));
     let (status, body) = drain(tests::submit(&h, rq)?);
     assert_eq!(status, 200);
     for line in [
@@ -681,12 +681,12 @@ fn tls_view_reaches_php() -> anyhow::Result<()> {
     let h = r.handle();
 
     let mut rq = req("/", "dispatcher/request-worker.php");
-    rq.tls = Some(rapira_sapi::types::TlsView {
+    rq.tls = Some(rapira_sapi::api::Tls {
         version: "TLSv1.3".into(),
         cipher: "TLS_AES_256_GCM_SHA384".into(),
         alpn: Some("h2".into()),
         server_name: Some("sni.example".into()),
-        cert: Some(rapira_sapi::types::ClientCertView {
+        cert: Some(rapira_sapi::api::ClientCert {
             serial: "0AB1".into(),
             organization: None,
             fingerprint: "abcd".into(),
@@ -700,7 +700,7 @@ fn tls_view_reaches_php() -> anyhow::Result<()> {
     );
 
     let mut rq = req("/", "dispatcher/request-worker.php");
-    rq.tls = Some(rapira_sapi::types::TlsView {
+    rq.tls = Some(rapira_sapi::api::Tls {
         version: "TLSv1.2".into(),
         cipher: "X".into(),
         alpn: None,

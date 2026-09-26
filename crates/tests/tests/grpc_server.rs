@@ -5,10 +5,10 @@ use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
-use extension_api::{ListenAddr, RpcProtocol};
 use http::Method;
 use http_body_util::BodyExt;
 use rapira_grpc::Config;
+use rapira_sapi::api::{ListenAddr, RpcProtocol};
 use serde_json::Value;
 use tests::grpc::{
     Answer, Conn, ECHO_PATH, ERROR_INFO, FakePhp, Fields, HI, HI_FRAME, Wire, config, envelope,

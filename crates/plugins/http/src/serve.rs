@@ -3,11 +3,11 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::anyhow;
-use extension_api::{Addr, ListenAddr, Php, PreparedListener, Result};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use rapira_net::{Acceptor, Serve, StopHandle};
+use rapira_sapi::api::{Addr, ListenAddr, Php, PreparedListener, Result};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch::channel;
 

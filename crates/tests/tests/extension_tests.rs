@@ -1,6 +1,6 @@
-use extension_api::{Extension, Php, Request, Result, RpcProtocol, RpcStatus, UnaryCall};
 use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue, SET_COOKIE};
-use rapira_runtime::ExtensionRuntime;
+use rapira_sapi::api::{Extension, Php, Request, Result, RpcProtocol, RpcStatus, UnaryCall};
+use rapira_sapi::runtime::ExtensionRuntime;
 use rapira_sapi::{Mode, Rapira};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -18,8 +18,8 @@ fn get_request(uri: &str) -> Request {
         authority: None,
         https: false,
         protocol: "HTTP/1.1".into(),
-        remote: extension_api::Addr::Inet(([127, 0, 0, 1], 44123).into()),
-        server: extension_api::Addr::Inet(([127, 0, 0, 1], 80).into()),
+        remote: rapira_sapi::api::Addr::Inet(([127, 0, 0, 1], 44123).into()),
+        server: rapira_sapi::api::Addr::Inet(([127, 0, 0, 1], 80).into()),
         server_name: "localhost".into(),
         server_port: 80,
         tls: None,
@@ -95,7 +95,7 @@ impl Extension for RejectDriver {
             Ok(_) => anyhow::bail!("malformed multipart must reject"),
         };
         let rejected = err
-            .downcast_ref::<extension_api::Rejected>()
+            .downcast_ref::<rapira_sapi::api::Rejected>()
             .ok_or_else(|| anyhow::anyhow!("expected Rejected, got {err:#}"))?;
         anyhow::ensure!(
             rejected.status == 400,
@@ -114,7 +114,7 @@ impl Extension for RejectDriver {
             Ok(_) => anyhow::bail!("over-limit file part must reject"),
         };
         let rejected = err
-            .downcast_ref::<extension_api::Rejected>()
+            .downcast_ref::<rapira_sapi::api::Rejected>()
             .ok_or_else(|| anyhow::anyhow!("expected Rejected, got {err:#}"))?;
         anyhow::ensure!(
             rejected.status == 413,
@@ -138,7 +138,7 @@ impl Extension for RejectDriver {
                 Ok(_) => anyhow::bail!("repeated content-type with a multipart body must reject"),
             };
             let rejected = err
-                .downcast_ref::<extension_api::Rejected>()
+                .downcast_ref::<rapira_sapi::api::Rejected>()
                 .ok_or_else(|| anyhow::anyhow!("expected Rejected, got {err:#}"))?;
             anyhow::ensure!(
                 rejected.status == 400,
@@ -171,17 +171,17 @@ fn rejected_bodies_never_reach_the_pool() -> anyhow::Result<()> {
     let rapira = Rapira::start(Mode::Dispatcher(fixture("dispatcher/echo-loop-worker.php")))?;
     let mut host = ExtensionRuntime::new();
     host.register::<RejectDriver>(());
-    let limits = rapira_runtime::multipart::Limits {
+    let limits = rapira_sapi::multipart::Limits {
         max_file_size: 1024,
-        ..rapira_runtime::multipart::Limits::default()
+        ..rapira_sapi::multipart::Limits::default()
     };
     let outcomes = host
         .run_with_options(
             rapira.handle(),
             fixture("dispatcher/echo-loop-worker.php"),
-            rapira_runtime::RuntimeOptions {
+            rapira_sapi::runtime::RuntimeOptions {
                 uploads: std::sync::Arc::new(limits),
-                ..rapira_runtime::RuntimeOptions::default()
+                ..rapira_sapi::runtime::RuntimeOptions::default()
             },
         )
         .join();
@@ -283,7 +283,7 @@ impl Extension for UnaryDriver {
                 protocol: RpcProtocol::Connect,
                 metadata: HeaderMap::new(),
                 deadline: None,
-                remote: extension_api::Addr::Inet(([127, 0, 0, 1], 44123).into()),
+                remote: rapira_sapi::api::Addr::Inet(([127, 0, 0, 1], 44123).into()),
                 message: c.message.as_bytes().to_vec().into(),
             };
             let got: Parts = php
@@ -301,7 +301,7 @@ impl Extension for UnaryDriver {
 }
 
 #[test]
-fn unary_calls_cross_the_extension_api() -> anyhow::Result<()> {
+fn unary_calls_cross_the_api() -> anyhow::Result<()> {
     let _guard = php_lock();
     let script = fixture("grpc/unary-worker.php");
     let rapira = Rapira::start(Mode::GrpcDispatcher {
@@ -644,9 +644,9 @@ fn shutdown_timeout_is_reported() -> anyhow::Result<()> {
     let running = host.run_with_options(
         rapira.handle(),
         fixture("extension_tests/ext-driver-classic.php"),
-        rapira_runtime::RuntimeOptions {
+        rapira_sapi::runtime::RuntimeOptions {
             grace: Duration::from_millis(100),
-            ..rapira_runtime::RuntimeOptions::default()
+            ..rapira_sapi::runtime::RuntimeOptions::default()
         },
     );
     let start = Instant::now();

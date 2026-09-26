@@ -9,7 +9,7 @@ use connectrpc::{
     CodecFormat, ConnectError, Dispatcher, EncodedBody, EncodedResponse, ErrorCode, ErrorDetail,
     MethodDescriptor, Payload, Protocol, RequestContext,
 };
-use extension_api::{Addr, Php, Rejected, RpcProtocol, RpcStatus, UnaryCall};
+use rapira_sapi::api::{Addr, Php, Rejected, RpcProtocol, RpcStatus, UnaryCall};
 
 use crate::schema::Schema;
 

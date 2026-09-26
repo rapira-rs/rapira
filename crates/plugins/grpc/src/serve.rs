@@ -8,8 +8,8 @@ use connectrpc::{
     ConnectionInfo, DeadlinePolicy, GzipProvider, Router,
 };
 use connectrpc_health::StaticChecker;
-use extension_api::{Addr, Php, Result};
 use rapira_net::{Acceptor, Serve, StopHandle};
+use rapira_sapi::api::{Addr, Php, Result};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 use tower::util::MapResponse;

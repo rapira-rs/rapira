@@ -5,12 +5,13 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use extension_api::{
-    Addr, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer, Php,
-    Protocol, Rejected, ReplyEvent,
-};
 use http_body::Body;
 use http_body_util::BodyExt;
+use rapira_sapi::Frame;
+use rapira_sapi::api::{
+    Addr, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer, Php,
+    Protocol, Rejected,
+};
 
 use crate::response::{error_response, response_headers};
 use crate::{Config, bridge, check, request};
@@ -67,7 +68,7 @@ pub(crate) struct RespBody {
 enum BodyKind {
     Reply(bridge::ReplyBody),
     Empty,
-    Boxed(extension_api::Body),
+    Boxed(rapira_sapi::api::Body),
 }
 
 fn refused(status: http::StatusCode, req_count: Arc<InflightReqCount>) -> http::Response<RespBody> {
@@ -244,7 +245,7 @@ where
         authority,
         guard: Arc::clone(&reqs_counter),
     });
-    let body: extension_api::Body = incoming.map_err(BoxError::from).boxed_unsync();
+    let body: rapira_sapi::api::Body = incoming.map_err(BoxError::from).boxed_unsync();
     let req = HttpRequest::from_parts(parts, body);
 
     let res = Next::new(Arc::clone(&handler.shared.chain), handler)
@@ -370,21 +371,19 @@ where
                 tracing::error!(target: "http", "php worker died before a response head");
                 return refused(http::StatusCode::BAD_GATEWAY, guard);
             }
-            Some(ReplyEvent::Interim { status, .. }) => {
-                tracing::debug!(target: "http", "dropped interim {status}");
+            Some(Frame::Interim(head)) => {
+                tracing::debug!(target: "http", "dropped interim {}", head.status);
             }
-            Some(ReplyEvent::Head {
-                status,
-                headers,
+            Some(Frame::Head {
+                head,
                 content_length,
                 bodiless,
-                ..
-            }) => break (status, headers, content_length, bodiless),
-            Some(ReplyEvent::End { .. }) => {
+            }) => break (head.status, head.headers, content_length, bodiless),
+            Some(Frame::End { .. }) => {
                 tracing::error!(target: "http", "php produced no response head");
                 return refused(http::StatusCode::BAD_GATEWAY, guard);
             }
-            Some(ReplyEvent::Chunk(_) | ReplyEvent::File { .. }) => {
+            Some(Frame::Chunk(_) | Frame::File { .. }) => {
                 tracing::warn!(target: "http", "dropped body bytes preceding the response head");
             }
         }
@@ -439,11 +438,12 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_api::{Backend, Reply, ReplySource, Request, UnaryCall, UnaryReply};
+    use rapira_sapi::ResponseHead;
+    use rapira_sapi::api::{Backend, Reply, Request, UnaryCall, UnaryReply};
     use std::collections::VecDeque;
     use std::future::Future;
     use std::sync::Mutex;
-    use std::sync::atomic::AtomicBool;
+    use tokio::sync::mpsc;
 
     struct NoPhp;
 
@@ -451,91 +451,46 @@ mod tests {
         fn exec(
             &self,
             _req: Request,
-        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Reply>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = rapira_sapi::api::Result<Reply>> + Send + '_>> {
             unreachable!("the middleware answers before PHP")
         }
 
         fn unary(
             &self,
             _call: UnaryCall,
-        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Option<UnaryReply>>> + Send + '_>>
+        ) -> Pin<Box<dyn Future<Output = rapira_sapi::api::Result<Option<UnaryReply>>> + Send + '_>>
         {
             unreachable!("the HTTP handler sends no call")
         }
     }
 
-    /// Parks a source after its scripted events until released.
-    #[derive(Default)]
-    struct Gate {
-        released: AtomicBool,
-        waker: Mutex<Option<std::task::Waker>>,
-    }
-
-    impl Gate {
-        fn release(&self) {
-            self.released.store(true, Ordering::Release);
-            if let Some(w) = self.waker.lock().unwrap().take() {
-                w.wake();
-            }
+    /// A reply that yields `events`; it stays open while the caller holds the sender.
+    fn open_reply(events: Vec<Frame>) -> (Reply, mpsc::Sender<Frame>) {
+        let (tx, rx) = mpsc::channel(4);
+        for ev in events {
+            tx.try_send(ev).unwrap();
         }
+        (Reply::new(rx), tx)
     }
 
-    struct TestSource {
-        events: Vec<ReplyEvent>,
-        dropped: Option<Arc<AtomicBool>>,
-        gate: Option<Arc<Gate>>,
-    }
-
-    impl ReplySource for TestSource {
-        fn poll_next(&mut self, cx: &mut Context<'_>) -> Poll<Option<ReplyEvent>> {
-            if !self.events.is_empty() {
-                return Poll::Ready(Some(self.events.remove(0)));
-            }
-            let Some(gate) = &self.gate else {
-                return Poll::Ready(None);
-            };
-            // The waker is stored before the flag is read, so a release between the two still wakes.
-            *gate.waker.lock().unwrap() = Some(cx.waker().clone());
-            if gate.released.load(Ordering::Acquire) {
-                return Poll::Ready(None);
-            }
-            Poll::Pending
-        }
-    }
-
-    impl Drop for TestSource {
-        fn drop(&mut self) {
-            if let Some(flag) = &self.dropped {
-                flag.store(true, Ordering::Release);
-            }
-        }
-    }
-
+    /// Answers each exec with the next reply.
     struct Scripted {
-        scripts: Mutex<VecDeque<Vec<ReplyEvent>>>,
+        replies: Mutex<VecDeque<Reply>>,
         seen_authorities: Mutex<Vec<Option<Vec<u8>>>>,
-        dropped: Option<Arc<AtomicBool>>,
-        gate: Option<Arc<Gate>>,
     }
 
     impl Scripted {
-        fn one(events: Vec<ReplyEvent>, dropped: Option<Arc<AtomicBool>>) -> Self {
+        fn new(replies: Vec<Reply>) -> Self {
             Self {
-                scripts: Mutex::new(VecDeque::from([events])),
+                replies: Mutex::new(replies.into()),
                 seen_authorities: Mutex::new(Vec::new()),
-                dropped,
-                gate: None,
             }
         }
 
-        /// One script whose source parks after its events until `gate` is released.
-        fn parked(events: Vec<ReplyEvent>, gate: &Arc<Gate>) -> Self {
-            Self {
-                scripts: Mutex::new(VecDeque::from([events])),
-                seen_authorities: Mutex::new(Vec::new()),
-                dropped: None,
-                gate: Some(Arc::clone(gate)),
-            }
+        /// One reply that yields `events`; it stays open while the caller holds the sender.
+        fn one(events: Vec<Frame>) -> (Self, mpsc::Sender<Frame>) {
+            let (reply, tx) = open_reply(events);
+            (Self::new(vec![reply]), tx)
         }
     }
 
@@ -543,58 +498,55 @@ mod tests {
         fn exec(
             &self,
             req: Request,
-        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Reply>> + Send + '_>> {
+        ) -> Pin<Box<dyn Future<Output = rapira_sapi::api::Result<Reply>> + Send + '_>> {
             self.seen_authorities.lock().unwrap().push(req.authority);
-            let events = self
-                .scripts
+            let reply = self
+                .replies
                 .lock()
                 .unwrap()
                 .pop_front()
-                .expect("a script per exec");
-            let dropped = self.dropped.clone();
-            let gate = self.gate.clone();
-            Box::pin(async move {
-                Ok(Reply::new(Box::new(TestSource {
-                    events,
-                    dropped,
-                    gate,
-                })))
-            })
+                .expect("a reply per exec");
+            Box::pin(async move { Ok(reply) })
         }
 
         fn unary(
             &self,
             _call: UnaryCall,
-        ) -> Pin<Box<dyn Future<Output = extension_api::Result<Option<UnaryReply>>> + Send + '_>>
+        ) -> Pin<Box<dyn Future<Output = rapira_sapi::api::Result<Option<UnaryReply>>> + Send + '_>>
         {
             unreachable!("the HTTP handler sends no call")
         }
     }
 
-    fn head(bodiless: bool) -> ReplyEvent {
-        ReplyEvent::Head {
+    fn ok_head() -> ResponseHead {
+        ResponseHead {
             status: 200,
             headers: http::HeaderMap::new(),
+        }
+    }
+
+    fn head(bodiless: bool) -> Frame {
+        Frame::Head {
+            head: ok_head(),
             content_length: None,
             bodiless,
         }
     }
 
-    fn head_cl(content_length: u64) -> ReplyEvent {
-        ReplyEvent::Head {
-            status: 200,
-            headers: http::HeaderMap::new(),
+    fn head_cl(content_length: u64) -> Frame {
+        Frame::Head {
+            head: ok_head(),
             content_length: Some(content_length),
             bodiless: false,
         }
     }
 
-    fn chunk(s: &str) -> ReplyEvent {
-        ReplyEvent::Chunk(bytes::Bytes::copy_from_slice(s.as_bytes()))
+    fn chunk(s: &str) -> Frame {
+        Frame::Chunk(bytes::Bytes::copy_from_slice(s.as_bytes()))
     }
 
-    fn end() -> ReplyEvent {
-        ReplyEvent::End {
+    fn end() -> Frame {
+        Frame::End {
             trailers: http::HeaderMap::new(),
             truncated: false,
         }
@@ -744,9 +696,11 @@ mod tests {
     /// until hyper drops the replacement body.
     #[tokio::test]
     async fn replaced_response_keeps_the_inflight_guard() {
-        let backend = Arc::new(Scripted::one(vec![head(false), end()], None));
-        let (handler, inflight, _closed_tx) =
-            setup(backend, vec![Arc::new(Replace) as Arc<dyn Middleware>]);
+        let (backend, _) = Scripted::one(vec![head(false), end()]);
+        let (handler, inflight, _closed_tx) = setup(
+            Arc::new(backend),
+            vec![Arc::new(Replace) as Arc<dyn Middleware>],
+        );
         let res = handle(handler, get_request()).await;
         assert_eq!(res.status(), http::StatusCode::IM_A_TEAPOT);
         assert_eq!(
@@ -761,21 +715,13 @@ mod tests {
     /// A bodiless reply keeps the response guarded after its reply is consumed to End.
     #[tokio::test]
     async fn bodiless_response_stays_guarded_after_the_reply_ends() {
-        let dropped = Arc::new(AtomicBool::new(false));
-        let backend = Arc::new(Scripted::one(
-            vec![head(true), end()],
-            Some(Arc::clone(&dropped)),
-        ));
-        let (handler, inflight, _closed_tx) = setup(backend, Vec::new());
+        let (backend, events) = Scripted::one(vec![head(true), end()]);
+        let (handler, inflight, _closed_tx) = setup(Arc::new(backend), Vec::new());
         let res = handle(handler, get_request()).await;
         assert_eq!(res.status(), http::StatusCode::OK);
-        tokio::time::timeout(Duration::from_secs(5), async {
-            while !dropped.load(Ordering::Acquire) {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("the reply must be consumed to End");
+        tokio::time::timeout(Duration::from_secs(5), events.closed())
+            .await
+            .expect("the reply must be consumed to End");
         assert_eq!(
             inflight.load(Ordering::Acquire),
             1,
@@ -788,15 +734,10 @@ mod tests {
     /// One handler serves the whole connection; each request must carry its own state.
     #[tokio::test]
     async fn sequential_requests_share_the_handler_but_not_the_state() {
-        let backend = Arc::new(Scripted {
-            scripts: Mutex::new(VecDeque::from([
-                vec![head(false), end()],
-                vec![head(false), end()],
-            ])),
-            seen_authorities: Mutex::new(Vec::new()),
-            dropped: None,
-            gate: None,
-        });
+        let backend = Arc::new(Scripted::new(vec![
+            open_reply(vec![head(false), end()]).0,
+            open_reply(vec![head(false), end()]).0,
+        ]));
         let (handler, inflight, _closed_tx) = setup(
             Arc::clone(&backend) as Arc<dyn Backend>,
             vec![Arc::new(Pass) as Arc<dyn Middleware>],
@@ -819,10 +760,11 @@ mod tests {
     /// counted after the response is gone, until the reply stream ends.
     #[tokio::test]
     async fn a_parked_drain_keeps_the_request_counted_through_the_chain() {
-        let gate = Arc::new(Gate::default());
-        let backend = Arc::new(Scripted::parked(vec![head(true)], &gate));
-        let (handler, inflight, _closed_tx) =
-            setup(backend, vec![Arc::new(Pass) as Arc<dyn Middleware>]);
+        let (backend, events) = Scripted::one(vec![head(true)]);
+        let (handler, inflight, _closed_tx) = setup(
+            Arc::new(backend),
+            vec![Arc::new(Pass) as Arc<dyn Middleware>],
+        );
         let res = handle(handler, get_request()).await;
         assert_eq!(res.status(), http::StatusCode::OK);
         drop(res);
@@ -831,7 +773,7 @@ mod tests {
             1,
             "the drain task must keep the request counted"
         );
-        gate.release();
+        events.send(end()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
             .await
             .expect("drain must release the count at the stream end");
@@ -840,10 +782,11 @@ mod tests {
     /// `map_frame` drops the size hint, so the bodiless watermark must come from `is_end_stream`.
     #[tokio::test(start_paused = true)]
     async fn delivered_head_behind_body_mapping_middleware_keeps_php_alive() {
-        let gate = Arc::new(Gate::default());
-        let backend = Arc::new(Scripted::parked(vec![head(true)], &gate));
-        let (handler, inflight, closed_tx) =
-            setup(backend, vec![Arc::new(MapBody) as Arc<dyn Middleware>]);
+        let (backend, events) = Scripted::one(vec![head(true)]);
+        let (handler, inflight, closed_tx) = setup(
+            Arc::new(backend),
+            vec![Arc::new(MapBody) as Arc<dyn Middleware>],
+        );
         let response = serve_raw(
             handler,
             closed_tx,
@@ -862,7 +805,7 @@ mod tests {
                 .is_err(),
             "a close after the flushed head must not cancel PHP"
         );
-        gate.release();
+        events.send(end()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
             .await
             .expect("End releases the count");
@@ -871,10 +814,11 @@ mod tests {
     /// hyper writes no body for HEAD whatever content-length says, so the head alone completes the response.
     #[tokio::test(start_paused = true)]
     async fn head_with_a_positive_content_length_completes_at_the_head() {
-        let gate = Arc::new(Gate::default());
-        let backend = Arc::new(Scripted::parked(vec![head(true)], &gate));
-        let (handler, inflight, closed_tx) =
-            setup(backend, vec![Arc::new(HeadLength) as Arc<dyn Middleware>]);
+        let (backend, events) = Scripted::one(vec![head(true)]);
+        let (handler, inflight, closed_tx) = setup(
+            Arc::new(backend),
+            vec![Arc::new(HeadLength) as Arc<dyn Middleware>],
+        );
         let response = serve_raw(
             handler,
             closed_tx,
@@ -892,7 +836,7 @@ mod tests {
                 .is_err(),
             "a close after the flushed head must not cancel PHP"
         );
-        gate.release();
+        events.send(end()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
             .await
             .expect("End releases the count");
@@ -901,9 +845,8 @@ mod tests {
     /// hyper drops a length-delimited body once the last byte is buffered; the flush after it must keep PHP alive past the close.
     #[tokio::test(start_paused = true)]
     async fn delivered_fixed_length_body_keeps_php_alive_past_the_close() {
-        let gate = Arc::new(Gate::default());
-        let backend = Arc::new(Scripted::parked(vec![head_cl(5), chunk("01234")], &gate));
-        let (handler, inflight, closed_tx) = setup(backend, Vec::new());
+        let (backend, events) = Scripted::one(vec![head_cl(5), chunk("01234")]);
+        let (handler, inflight, closed_tx) = setup(Arc::new(backend), Vec::new());
         let response = serve_raw(
             handler,
             closed_tx,
@@ -921,7 +864,7 @@ mod tests {
                 .is_err(),
             "a close after the flushed body must not cancel PHP"
         );
-        gate.release();
+        events.send(end()).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
             .await
             .expect("End releases the count");

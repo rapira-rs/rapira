@@ -20,8 +20,6 @@ path = "src/main.rs"
 [workspace]
 members = [
     "crates/config",
-    "crates/runtime",
-    "crates/api",
     "crates/tests",
     "crates/master",
     "crates/middleware/static_files",
@@ -37,9 +35,7 @@ anyhow = "1"
 base64 = "0.22"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 rapira_sapi = { path = "crates/sapi" }
-rapira_runtime = { path = "crates/runtime" }
 rapira_config = { path = "crates/config" }
-extension_api = { path = "crates/api" }
 rapira_static_files = { path = "crates/middleware/static_files" }
 rapira_http = { path = "crates/plugins/http" }
 rapira_grpc = { path = "crates/plugins/grpc" }
@@ -70,9 +66,7 @@ codegen-units = 1
 [dependencies]
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-extension_api = { workspace = true }
 rapira_master = { workspace = true }
-rapira_runtime = { workspace = true }
 rapira_sapi = { workspace = true }
 rapira_config = { workspace = true }
 rapira_static_files = { workspace = true }

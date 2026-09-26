@@ -3,7 +3,8 @@ use std::path::PathBuf;
 use std::pin::Pin;
 use std::sync::Arc;
 
-mod middleware;
+use crate::middleware;
+use crate::types::Frame;
 pub use middleware::{
     Body, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer,
     Protocol, empty_body,
@@ -39,50 +40,19 @@ pub trait Backend: Send + Sync + 'static {
     ) -> Pin<Box<dyn Future<Output = Result<Option<UnaryReply>>> + Send + '_>>;
 }
 
-pub enum ReplyEvent {
-    Interim {
-        status: u16,
-        headers: http::HeaderMap,
-    },
-    Head {
-        status: u16,
-        headers: http::HeaderMap,
-        content_length: Option<u64>,
-        bodiless: bool,
-    },
-    Chunk(bytes::Bytes),
-    File {
-        file: std::fs::File,
-        offset: u64,
-        /// Never zero: a producer does not emit an empty slice.
-        len: u64,
-    },
-    End {
-        trailers: http::HeaderMap,
-        truncated: bool,
-    },
-}
+pub struct Reply(tokio::sync::mpsc::Receiver<Frame>);
 
-pub trait ReplySource: Send + 'static {
-    fn poll_next(&mut self, cx: &mut std::task::Context<'_>)
-    -> std::task::Poll<Option<ReplyEvent>>;
-}
-
-pub struct Reply(Box<dyn ReplySource>);
 impl Reply {
-    pub fn new(source: Box<dyn ReplySource>) -> Self {
-        Self(source)
+    pub fn new(rx: tokio::sync::mpsc::Receiver<Frame>) -> Self {
+        Self(rx)
     }
 
-    pub fn poll_next(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<ReplyEvent>> {
-        self.0.poll_next(cx)
+    pub fn poll_next(&mut self, cx: &mut std::task::Context<'_>) -> std::task::Poll<Option<Frame>> {
+        self.0.poll_recv(cx)
     }
 
-    pub async fn next(&mut self) -> Option<ReplyEvent> {
-        std::future::poll_fn(|cx| self.0.poll_next(cx)).await
+    pub async fn next(&mut self) -> Option<Frame> {
+        self.0.recv().await
     }
 }
 
@@ -112,6 +82,7 @@ impl Php {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Addr {
     Inet(std::net::SocketAddr),
+    /// None is an unnamed endpoint, the usual case for a unix peer.
     Unix(Option<PathBuf>),
 }
 
@@ -166,6 +137,7 @@ pub struct Request {
 }
 
 /// One unary RPC. `message` is the binary protobuf encoding of the method's input message.
+#[derive(Debug)]
 pub struct UnaryCall {
     /// `package.Service/Method`, without a leading slash.
     pub method: String,
@@ -187,6 +159,7 @@ pub enum RpcProtocol {
 }
 
 /// The outcome of a unary RPC. The metadata is in wire form: `-bin` values are unpadded base64.
+#[derive(Debug, PartialEq)]
 pub struct UnaryReply {
     pub headers: http::HeaderMap,
     pub trailers: http::HeaderMap,

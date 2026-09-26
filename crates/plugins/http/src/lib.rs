@@ -2,8 +2,10 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
-use extension_api::{Extension, ListenAddr, Middleware, Php, PrepareCtx, PreparedListener, Result};
 use rapira_net::ServerThread;
+use rapira_sapi::api::{
+    Extension, ListenAddr, Middleware, Php, PrepareCtx, PreparedListener, Result,
+};
 
 mod bridge;
 mod check;
@@ -100,7 +102,7 @@ mod tests {
     use std::pin::Pin;
     use std::task::Poll;
 
-    use extension_api::{Backend, Reply, Request, UnaryCall, UnaryReply};
+    use rapira_sapi::api::{Backend, Reply, Request, UnaryCall, UnaryReply};
 
     use super::*;
 
