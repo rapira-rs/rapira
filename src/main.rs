@@ -187,10 +187,10 @@ mod tests {
     use rapira_net::PrepareCtx;
     use rapira_sapi::plugin::Mode;
 
-    /// An `[http]` table on an ephemeral port. The boot check only opens the entrypoint, so the pool names this source file.
+    /// An `[http]` table on an ephemeral port. The entrypoint check only opens the file, so the pool names this source file. Worker mode has no uploads dir to check.
     fn ephemeral_plugin() -> HttpServer {
         let section: rapira_http::config::Section = toml::from_str(&format!(
-            "listen = \"127.0.0.1:0\"\n[pool]\nentrypoint = \"{}\"",
+            "listen = \"127.0.0.1:0\"\n[pool]\nentrypoint = \"{}\"\nmode = \"worker\"",
             file!()
         ))
         .expect("an [http] table");
