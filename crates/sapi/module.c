@@ -148,7 +148,17 @@ void rapira_receive_untimed(void) {
 }
 
 // zend_set_timeout re-assigns EG(timeout_seconds) itself (zend_execute_API.c).
-void rapira_receive_timed(void) { zend_set_timeout(rapira_job_timeout, false); }
+// receive() calls this without rapira_receive_untimed() when a job is queued:
+// the capture is then still due, and zend_set_timeout(0) keeps a running timer.
+void rapira_receive_timed(void) {
+    if (rapira_job_timeout < 0) {
+        rapira_job_timeout = EG(timeout_seconds);
+    }
+    if (rapira_job_timeout == 0) {
+        zend_unset_timeout();
+    }
+    zend_set_timeout(rapira_job_timeout, false);
+}
 
 // Per-request state php_request_startup() resets that the worker path skips.
 static void rapira_request_init(void) {
