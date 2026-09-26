@@ -2,7 +2,7 @@ use tokio::sync::mpsc::{self, Sender};
 
 use rapira_sapi::callbacks::send_error_head;
 use rapira_sapi::types::{Context, Frame, Request};
-use rapira_sapi::work::{Held, Work, now_unix_f64};
+use rapira_sapi::work::{Held, Work};
 use rapira_sapi::zend_object;
 
 use crate::php::{ExchangeState, exchange_from};
@@ -17,10 +17,9 @@ pub(crate) struct Exchange {
 }
 
 impl Exchange {
-    /// `rx` is the reply the transport reads. Stamps received_at when the transport left it None.
+    /// `rx` is the reply the transport reads.
     /// `superglobals` builds the CGI view here, on the transport thread: true in the classic and worker modes.
-    pub(crate) fn new(mut req: Request, superglobals: bool) -> (Self, mpsc::Receiver<Frame>) {
-        req.received_at.get_or_insert_with(now_unix_f64);
+    pub(crate) fn new(req: Request, superglobals: bool) -> (Self, mpsc::Receiver<Frame>) {
         let (tx, rx) = mpsc::channel(FRAME_CAP);
         let ctx = Context::new(req, tx, superglobals);
         (Self { ctx }, rx)
