@@ -1,5 +1,7 @@
-use rapira_sapi::{Mode, Rapira};
-use tests::{assert_case_records, captured, fixture, init_log_capture, php_lock};
+use rapira_sapi::Mode;
+use tests::{fixture, server_log};
+
+use crate::harness::{BOOT, Spawn, diagnostics, wait_log_contains};
 
 // Expected values come from the Rapira\Grpc contract classes, and the Metadata messages from the userland body of its constructor.
 const CASES: &[(&str, &str)] = &[
@@ -69,19 +71,18 @@ const CASES: &[(&str, &str)] = &[
 
 /// The fixture runs one PHP case per row and logs `case {name, result}`; a thrown case logs its class.
 #[test]
-fn value_types_follow_the_contract() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    init_log_capture();
-    captured().clear();
+fn value_types_follow_the_contract() {
+    let mut srv = Spawn::http(Mode::Dispatcher, fixture("grpc/values.php"))
+        .json_log()
+        .spawn();
+    // The worker runs the script once when it starts. The stop comes after the last case of the script, so the log holds every record.
+    let last = "context keeps a null tls";
+    assert!(
+        wait_log_contains(&srv, last, BOOT),
+        "no {last:?} case\n{}",
+        diagnostics(&srv)
+    );
+    srv.stop();
 
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Dispatcher,
-        fixture("grpc/values.php"),
-        Some(rapira_http::DISPATCHER_CLASSES),
-    )?;
-    drop(r);
-
-    assert_case_records(CASES);
-    Ok(())
+    server_log::assert_case_records(&srv.log_file(), CASES);
 }

@@ -14,6 +14,7 @@ mod grpc;
 mod grpc_dispatcher;
 mod grpc_schema;
 mod grpc_server;
+mod grpc_values;
 mod harness;
 mod http_values;
 mod imap_tests;
