@@ -6,11 +6,11 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use rapira_sapi::Frame;
-use rapira_sapi::middleware::BoxError;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
 
 use crate::handler::InflightReqCount;
+use crate::middleware::BoxError;
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct ConnectionState {

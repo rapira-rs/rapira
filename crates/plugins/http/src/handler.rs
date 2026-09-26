@@ -8,12 +8,12 @@ use std::time::Duration;
 use http::header::CONTENT_TYPE;
 use http_body::Body;
 use http_body_util::BodyExt;
-use rapira_sapi::middleware::{
-    BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer, Protocol,
-};
+use hyper::body::Incoming;
 use rapira_sapi::work::{Intake, Refused};
 use rapira_sapi::{Addr, Frame, Request};
+use tower::{Service as _, ServiceExt as _};
 
+use crate::middleware::{self, BoxError, Layer, Peer, Service};
 use crate::response::{error_response, response_headers};
 use crate::{Config, Exchange, bridge, check, multipart, request};
 
@@ -22,7 +22,6 @@ pub(crate) struct Shared {
     pub intake: Intake<Exchange>,
     /// The multipart limits; None outside dispatcher mode.
     pub uploads: Option<Arc<multipart::Limits>>,
-    pub chain: Arc<[Arc<dyn Middleware>]>,
     pub inflight: Arc<AtomicUsize>,
 }
 
@@ -108,7 +107,7 @@ pub(crate) struct RespBody {
 enum BodyKind {
     Reply(bridge::ReplyBody),
     Empty,
-    Boxed(rapira_sapi::middleware::Body),
+    Boxed(middleware::Body),
 }
 
 fn refused(status: http::StatusCode, req_count: Arc<InflightReqCount>) -> http::Response<RespBody> {
@@ -162,51 +161,42 @@ impl Body for RespBody {
     }
 }
 
+/// The hyper service of a connection without middleware.
 pub(crate) struct RapiraService {
-    handler: Arc<Conn>,
+    pub(crate) handler: Arc<Conn>,
 }
 
-impl RapiraService {
-    pub(crate) fn new(
-        shared: Arc<Shared>,
-        remote: Addr,
-        server: Addr,
-        closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
-    ) -> Self {
-        Self {
-            handler: Arc::new(Conn {
-                shared,
-                closed,
-                remote,
-                server,
-            }),
-        }
-    }
-}
-
-impl hyper::service::Service<http::Request<hyper::body::Incoming>> for RapiraService {
+impl hyper::service::Service<http::Request<Incoming>> for RapiraService {
     type Response = http::Response<RespBody>;
     type Error = Infallible;
-    type Future = BoxFuture<'static, Result<http::Response<RespBody>, Infallible>>;
+    type Future =
+        Pin<Box<dyn Future<Output = Result<http::Response<RespBody>, Infallible>> + Send>>;
 
-    fn call(&self, req: http::Request<hyper::body::Incoming>) -> Self::Future {
+    fn call(&self, req: http::Request<Incoming>) -> Self::Future {
         let handler = Arc::clone(&self.handler);
-        let closed = handler.closed.clone();
-        let method = req.method().clone();
-        Box::pin(async move {
-            let mut response = handle(handler, req).await;
-            // Track the body sent to hyper after all middleware has returned.
-            if let Some(length) = framed_length(&method, &response) {
-                let body = response.body_mut();
-                if length == 0 {
-                    body.guard.end_flush.get_or_init(|| closed.borrow().flushes);
-                } else {
-                    body.transport = Some((length, closed));
-                }
-            }
-            Ok(response)
-        })
+        Box::pin(async move { Ok(respond(handler, None, req).await) })
     }
+}
+
+/// Serves one request of the connection. `chain` is [`Conn::chain`].
+pub(crate) async fn respond(
+    handler: Arc<Conn>,
+    chain: Option<Service>,
+    req: http::Request<Incoming>,
+) -> http::Response<RespBody> {
+    let closed = handler.closed.clone();
+    let method = req.method().clone();
+    let mut response = handle(handler, chain, req).await;
+    // Track the body sent to hyper after all middleware has returned.
+    if let Some(length) = framed_length(&method, &response) {
+        let body = response.body_mut();
+        if length == 0 {
+            body.guard.end_flush.get_or_init(|| closed.borrow().flushes);
+        } else {
+            body.transport = Some((length, closed));
+        }
+    }
+    response
 }
 
 /// The body length hyper will frame, in the order hyper's h1 encoder (`proto/h1/role.rs`, `Server::encode`) decides it:
@@ -233,7 +223,11 @@ fn framed_length(method: &http::Method, response: &http::Response<RespBody>) -> 
         .or_else(|| response.body().size_hint().exact())
 }
 
-async fn handle<B>(handler: Arc<Conn>, req: http::Request<B>) -> http::Response<RespBody>
+async fn handle<B>(
+    handler: Arc<Conn>,
+    chain: Option<Service>,
+    req: http::Request<B>,
+) -> http::Response<RespBody>
 where
     B: Body<Data = bytes::Bytes> + Unpin + Send + 'static,
     B::Error: std::error::Error + Send + Sync + 'static,
@@ -266,7 +260,7 @@ where
         received_at,
     };
 
-    if handler.shared.chain.is_empty() {
+    let Some(chain) = chain else {
         return serve_php(
             &handler.shared,
             &handler.closed,
@@ -277,20 +271,21 @@ where
             peer,
         )
         .await;
-    }
+    };
 
-    parts.extensions.insert(Protocol::Http);
     parts.extensions.insert(peer);
     parts.extensions.insert(ReqState {
         authority,
         guard: Arc::clone(&reqs_counter),
     });
-    let body: rapira_sapi::middleware::Body = incoming.map_err(BoxError::from).boxed_unsync();
-    let req = HttpRequest::from_parts(parts, body);
+    let body: middleware::Body = incoming.map_err(BoxError::from).boxed_unsync();
+    let req = middleware::Request::from_parts(parts, body);
 
-    let res = Next::new(Arc::clone(&handler.shared.chain), handler)
-        .run(req)
-        .await;
+    // The awaited future is the boxed one that `call` returns: the compiler cannot prove `Send` for a held `Oneshot` over this request type.
+    // https://github.com/rust-lang/rust/issues/110338
+    let mut chain = chain;
+    let Ok(ready) = chain.ready().await;
+    let Ok(res) = ready.call(req).await;
     // The final response and the PHP reply share one guard; the drain window
     // stays open until the last holder drops.
     res.map(|body| RespBody {
@@ -300,21 +295,52 @@ where
     })
 }
 
-struct Conn {
+/// Wraps `inner` in `layers`, the first listed outermost.
+fn fold(layers: &[Layer], inner: Service) -> Service {
+    layers
+        .iter()
+        .rev()
+        .fold(inner, |inner, layer| tower::Layer::layer(layer, inner))
+}
+
+/// One connection. [`Conn::serve`] is the inner service of its middleware chain.
+pub(crate) struct Conn {
     shared: Arc<Shared>,
     closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
     remote: Addr,
     server: Addr,
 }
 
-impl Handler for Conn {
-    fn call(&self, req: HttpRequest) -> BoxFuture<'_, HttpResponse> {
-        Box::pin(self.serve(req))
-    }
-}
-
 impl Conn {
-    async fn serve(&self, req: HttpRequest) -> HttpResponse {
+    pub(crate) fn new(
+        shared: Arc<Shared>,
+        remote: Addr,
+        server: Addr,
+        closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
+    ) -> Arc<Self> {
+        Arc::new(Self {
+            shared,
+            closed,
+            remote,
+            server,
+        })
+    }
+
+    /// The configured middleware around [`Conn::serve`]. None without middleware.
+    pub(crate) fn chain(self: &Arc<Self>) -> Option<Service> {
+        let layers = &self.shared.cfg.middleware;
+        if layers.is_empty() {
+            return None;
+        }
+        let conn = Arc::clone(self);
+        let serve = tower::service_fn(move |req| {
+            let conn = Arc::clone(&conn);
+            async move { Ok::<_, Infallible>(conn.serve(req).await) }
+        });
+        Some(fold(layers, Service::new(serve)))
+    }
+
+    async fn serve(&self, req: middleware::Request) -> middleware::Response {
         let (mut parts, body) = req.into_parts();
         let Some(state) = parts.extensions.remove::<ReqState>() else {
             tracing::error!(target: "http", "request state missing from request extensions");
@@ -526,6 +552,11 @@ mod tests {
     use rapira_sapi::ResponseHead;
     use rapira_sapi::types::Body as SapiBody;
     use tokio::sync::mpsc;
+    use tower::layer::layer_fn;
+    use tower::service_fn;
+    use tower::util::MapResponseLayer;
+
+    use crate::response::empty_body;
 
     /// An intake that nothing drains: the middleware answers before PHP.
     fn no_php() -> Intake<Exchange> {
@@ -585,60 +616,114 @@ mod tests {
         }
     }
 
-    struct Deny;
-
-    impl Middleware for Deny {
-        fn handle<'a>(&'a self, _req: HttpRequest, _next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async { error_response(http::StatusCode::FORBIDDEN) })
-        }
-    }
-
-    struct Replace;
-
-    impl Middleware for Replace {
-        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async move {
-                let _ = next.run(req).await;
-                error_response(http::StatusCode::IM_A_TEAPOT)
+    fn deny() -> Layer {
+        Layer::new(layer_fn(|_inner: Service| {
+            service_fn(|_req: middleware::Request| async {
+                Ok(error_response(http::StatusCode::FORBIDDEN))
             })
-        }
+        }))
     }
 
-    struct Pass;
+    fn replace() -> Layer {
+        Layer::new(MapResponseLayer::new(|_res: middleware::Response| {
+            error_response(http::StatusCode::IM_A_TEAPOT)
+        }))
+    }
 
-    impl Middleware for Pass {
-        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async move { next.run(req).await })
-        }
+    fn pass() -> Layer {
+        Layer::new(tower::layer::util::Identity::new())
     }
 
     /// Re-boxes the body through `map_frame`, which keeps `is_end_stream` but drops the size hint.
-    struct MapBody;
-
-    impl Middleware for MapBody {
-        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async move {
-                next.run(req)
-                    .await
-                    .map(|body| body.map_frame(|frame| frame).boxed_unsync())
-            })
-        }
+    fn map_body() -> Layer {
+        Layer::new(MapResponseLayer::new(|res: middleware::Response| {
+            res.map(|body| body.map_frame(|frame| frame).boxed_unsync())
+        }))
     }
 
     /// Adds a positive content-length to the response, as a middleware serving cached GET headers on HEAD would.
-    struct HeadLength;
+    fn head_length() -> Layer {
+        Layer::new(MapResponseLayer::new(|mut res: middleware::Response| {
+            res.headers_mut().insert(
+                http::header::CONTENT_LENGTH,
+                http::HeaderValue::from_static("5"),
+            );
+            res
+        }))
+    }
 
-    impl Middleware for HeadLength {
-        fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async move {
-                let mut res = next.run(req).await;
-                res.headers_mut().insert(
-                    http::header::CONTENT_LENGTH,
-                    http::HeaderValue::from_static("5"),
-                );
-                res
-            })
-        }
+    /// Appends `{name}-in` to the request and `{name}-out` to the response.
+    fn tag(name: &'static str) -> Layer {
+        Layer::new(
+            tower::ServiceBuilder::new()
+                .map_request(move |mut req: middleware::Request| {
+                    req.headers_mut()
+                        .append("x-trace", format!("{name}-in").parse().unwrap());
+                    req
+                })
+                .map_response(move |mut res: middleware::Response| {
+                    res.headers_mut()
+                        .append("x-trace", format!("{name}-out").parse().unwrap());
+                    res
+                }),
+        )
+    }
+
+    /// Answers 200 with the `x-trace` values of the request.
+    fn echo() -> Service {
+        Service::new(service_fn(|req: middleware::Request| async move {
+            let mut res = http::Response::builder()
+                .status(200)
+                .body(empty_body())
+                .unwrap();
+            for v in req.headers().get_all("x-trace") {
+                res.headers_mut().append("x-trace", v.clone());
+            }
+            Ok(res)
+        }))
+    }
+
+    fn trace(res: &middleware::Response) -> Vec<&str> {
+        res.headers()
+            .get_all("x-trace")
+            .iter()
+            .map(|v| v.to_str().unwrap())
+            .collect()
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn chain_runs_outermost_first_and_unwinds_in_reverse() {
+        let chain = fold(&[tag("a"), tag("b")], echo());
+        let Ok(res) = chain.oneshot(http::Request::new(empty_body())).await;
+        assert_eq!(res.status(), 200);
+        assert_eq!(trace(&res), ["a-in", "b-in", "b-out", "a-out"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn short_circuit_skips_downstream_and_the_handler() {
+        let chain = fold(&[tag("a"), deny(), tag("never")], echo());
+        let Ok(res) = chain.oneshot(http::Request::new(empty_body())).await;
+        assert_eq!(res.status(), 403);
+        assert_eq!(trace(&res), ["a-out"]);
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn empty_chain_reaches_the_handler_directly() {
+        let chain = fold(&[], echo());
+        let mut req = http::Request::new(empty_body());
+        req.headers_mut().append("x-trace", "solo".parse().unwrap());
+        let Ok(res) = chain.oneshot(req).await;
+        assert_eq!(res.status(), 200);
+        assert_eq!(trace(&res), ["solo"]);
+    }
+
+    /// Serves `req` as the connection of `handler` would, without hyper.
+    async fn call<B>(handler: &Arc<Conn>, req: http::Request<B>) -> http::Response<RespBody>
+    where
+        B: Body<Data = bytes::Bytes> + Unpin + Send + 'static,
+        B::Error: std::error::Error + Send + Sync + 'static,
+    {
+        handle(Arc::clone(handler), handler.chain(), req).await
     }
 
     /// Serves one request through hyper over an in-memory pipe; returns the raw response once the connection has closed.
@@ -654,9 +739,11 @@ mod tests {
             Duration::from_secs(5),
             closed_tx.clone(),
         );
-        let conn = hyper::server::conn::http1::Builder::new()
-            .timer(hyper_util::rt::TokioTimer::new())
-            .serve_connection(io, RapiraService { handler });
+        let mut builder = hyper::server::conn::http1::Builder::new();
+        builder.timer(hyper_util::rt::TokioTimer::new());
+        // Dropping the shutdown handle would start a graceful shutdown, so it lives until the connection closes.
+        let graceful = hyper_util::server::graceful::GracefulShutdown::new();
+        let conn = crate::serve::connection(&builder, &graceful, io, handler);
         let mut closed = closed_tx.subscribe();
         tokio::spawn(async move {
             let _ = conn.await;
@@ -679,7 +766,7 @@ mod tests {
     fn setup(
         intake: Intake<Exchange>,
         uploads: Option<Arc<multipart::Limits>>,
-        chain: Vec<Arc<dyn Middleware>>,
+        middleware: Vec<Layer>,
     ) -> (
         Arc<Conn>,
         Arc<AtomicUsize>,
@@ -687,19 +774,21 @@ mod tests {
     ) {
         let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Shared {
-            cfg: Config::default(),
+            cfg: Config {
+                middleware,
+                ..Config::default()
+            },
             intake,
             uploads,
-            chain: chain.into(),
             inflight: Arc::clone(&inflight),
         });
         let (closed_tx, closed) = tokio::sync::watch::channel(bridge::ConnectionState::default());
-        let handler = Arc::new(Conn {
+        let handler = Conn::new(
             shared,
+            Addr::Inet(([127, 0, 0, 1], 40000).into()),
+            Addr::Inet(([127, 0, 0, 1], 8000).into()),
             closed,
-            remote: Addr::Inet(([127, 0, 0, 1], 40000).into()),
-            server: Addr::Inet(([127, 0, 0, 1], 8000).into()),
-        });
+        );
         (handler, inflight, closed_tx)
     }
 
@@ -805,9 +894,9 @@ mod tests {
                 )))
                 .unwrap();
             let status = match case.status {
-                Some(_) => handle(Arc::clone(&handler), request).await.status(),
+                Some(_) => call(&handler, request).await.status(),
                 None => {
-                    let (res, body) = tokio::join!(handle(Arc::clone(&handler), request), async {
+                    let (res, body) = tokio::join!(call(&handler, request), async {
                         let exchange = units.recv().await.expect("an exchange");
                         let SapiBody::Raw(body) = &exchange.request().body else {
                             panic!("{}: the body was parsed", case.name);
@@ -834,9 +923,8 @@ mod tests {
     /// A middleware answer must hold the inflight guard until hyper drops the body.
     #[tokio::test]
     async fn short_circuit_keeps_the_inflight_guard() {
-        let (handler, inflight, _closed_tx) =
-            setup(no_php(), None, vec![Arc::new(Deny) as Arc<dyn Middleware>]);
-        let res = handle(handler, get_request()).await;
+        let (handler, inflight, _closed_tx) = setup(no_php(), None, vec![deny()]);
+        let res = call(&handler, get_request()).await;
         assert_eq!(res.status(), http::StatusCode::FORBIDDEN);
         assert_eq!(
             inflight.load(Ordering::Acquire),
@@ -852,9 +940,8 @@ mod tests {
     #[tokio::test]
     async fn replaced_response_keeps_the_inflight_guard() {
         let (intake, _php) = php_one(vec![head(false), end()]);
-        let (handler, inflight, _closed_tx) =
-            setup(intake, None, vec![Arc::new(Replace) as Arc<dyn Middleware>]);
-        let res = handle(handler, get_request()).await;
+        let (handler, inflight, _closed_tx) = setup(intake, None, vec![replace()]);
+        let res = call(&handler, get_request()).await;
         assert_eq!(res.status(), http::StatusCode::IM_A_TEAPOT);
         assert_eq!(
             inflight.load(Ordering::Acquire),
@@ -870,7 +957,7 @@ mod tests {
     async fn bodiless_response_stays_guarded_after_the_reply_ends() {
         let (intake, php) = php_one(vec![head(true), end()]);
         let (handler, inflight, _closed_tx) = setup(intake, None, Vec::new());
-        let res = handle(handler, get_request()).await;
+        let res = call(&handler, get_request()).await;
         assert_eq!(res.status(), http::StatusCode::OK);
         let events = php.await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), events.closed())
@@ -899,10 +986,9 @@ mod tests {
             }
             authorities
         });
-        let (handler, inflight, _closed_tx) =
-            setup(intake, None, vec![Arc::new(Pass) as Arc<dyn Middleware>]);
+        let (handler, inflight, _closed_tx) = setup(intake, None, vec![pass()]);
         for _ in 0..2 {
-            let res = handle(Arc::clone(&handler), get_request()).await;
+            let res = call(&handler, get_request()).await;
             assert_eq!(res.status(), http::StatusCode::OK);
             assert_eq!(inflight.load(Ordering::Acquire), 1);
             drop(res);
@@ -921,9 +1007,8 @@ mod tests {
     #[tokio::test]
     async fn a_parked_drain_keeps_the_request_counted_through_the_chain() {
         let (intake, php) = php_one(vec![head(true)]);
-        let (handler, inflight, _closed_tx) =
-            setup(intake, None, vec![Arc::new(Pass) as Arc<dyn Middleware>]);
-        let res = handle(handler, get_request()).await;
+        let (handler, inflight, _closed_tx) = setup(intake, None, vec![pass()]);
+        let res = call(&handler, get_request()).await;
         assert_eq!(res.status(), http::StatusCode::OK);
         let events = php.await.unwrap();
         drop(res);
@@ -942,8 +1027,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn delivered_head_behind_body_mapping_middleware_keeps_php_alive() {
         let (intake, php) = php_one(vec![head(true)]);
-        let (handler, inflight, closed_tx) =
-            setup(intake, None, vec![Arc::new(MapBody) as Arc<dyn Middleware>]);
+        let (handler, inflight, closed_tx) = setup(intake, None, vec![map_body()]);
         let response = serve_raw(
             handler,
             closed_tx,
@@ -973,11 +1057,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn head_with_a_positive_content_length_completes_at_the_head() {
         let (intake, php) = php_one(vec![head(true)]);
-        let (handler, inflight, closed_tx) = setup(
-            intake,
-            None,
-            vec![Arc::new(HeadLength) as Arc<dyn Middleware>],
-        );
+        let (handler, inflight, closed_tx) = setup(intake, None, vec![head_length()]);
         let response = serve_raw(
             handler,
             closed_tx,

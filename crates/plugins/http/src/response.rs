@@ -2,9 +2,17 @@ use http::header::{
     CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, TE, TRAILER,
     TRANSFER_ENCODING, UPGRADE,
 };
-use rapira_sapi::middleware::{HttpResponse, empty_body};
+use http_body_util::BodyExt;
 
-pub(crate) fn error_response(status: http::StatusCode) -> HttpResponse {
+use crate::middleware::{Body, BoxError, Response};
+
+pub(crate) fn empty_body() -> Body {
+    http_body_util::Empty::<bytes::Bytes>::new()
+        .map_err(BoxError::from)
+        .boxed_unsync()
+}
+
+pub(crate) fn error_response(status: http::StatusCode) -> Response {
     let mut res = http::Response::new(empty_body());
     *res.status_mut() = status;
     res.headers_mut()

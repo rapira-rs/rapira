@@ -17,7 +17,6 @@ rapira_config = { workspace = true }
 rapira_scoreboard = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
-http-body-util = { workspace = true }
 libc = { workspace = true }
 
 [build-dependencies]

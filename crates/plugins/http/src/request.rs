@@ -1,8 +1,8 @@
 use rapira_sapi::Request;
-use rapira_sapi::middleware::Peer;
 use rapira_sapi::types::Body;
 
 use crate::Config;
+use crate::middleware::Peer;
 
 /// Moves the header map out of `parts`. The body stays raw: the handler parses multipart.
 pub(crate) fn build(

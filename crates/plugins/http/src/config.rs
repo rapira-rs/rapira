@@ -1,7 +1,6 @@
 use std::fs::{OpenOptions, remove_file};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail, ensure};
@@ -284,16 +283,15 @@ fn check_uploads_dir(dir: &Path) -> Result<()> {
 }
 
 impl Server {
-    /// Builds the middleware chain in list order. Runs in the master after the logger starts, so the diagnostics here reach the log.
+    /// Builds the middleware layers in list order. Runs in the master after the logger starts, so the diagnostics here reach the log.
     pub fn from_settings(settings: Settings, supervisor: &SupervisorSettings) -> Self {
-        let mut middleware: Vec<Arc<dyn rapira_sapi::middleware::Middleware>> = Vec::new();
+        let mut middleware: Vec<crate::middleware::Layer> = Vec::new();
         for mw in settings.middleware {
             match mw {
                 Middleware::Static(st) => {
                     tracing::info!(target: "rapira", "static files from {}, forbid {:?}", st.root.display(), st.forbid);
-                    middleware.push(Arc::new(rapira_static_files::StaticFiles::new(
-                        st.root, st.forbid,
-                    )));
+                    middleware
+                        .push(rapira_static_files::StaticFiles::new(st.root, st.forbid).layer());
                 }
             }
         }

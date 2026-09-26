@@ -25,6 +25,7 @@ tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "sync"
 bytes = { workspace = true }
 base64 = { workspace = true }
 http = { workspace = true }
+hyper = { workspace = true }
 tower = { workspace = true }
 
 [build-dependencies]
@@ -33,3 +34,4 @@ rapira_php_build = { workspace = true }
 
 [dev-dependencies]
 toml = { workspace = true }
+tokio = { workspace = true, features = ["macros", "rt"] }

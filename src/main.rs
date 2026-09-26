@@ -223,6 +223,7 @@ mod tests {
             drain_grace: std::time::Duration::from_secs(5),
             keepalive_interval: std::time::Duration::from_secs(10),
             keepalive_timeout: std::time::Duration::from_secs(10),
+            interceptors: Vec::new(),
         }
     }
 

@@ -7,7 +7,6 @@ pub mod diagnostics;
 pub mod dispatcher;
 pub mod exchange;
 pub mod executor;
-pub mod middleware;
 pub mod module;
 pub mod plugin;
 pub mod quota;

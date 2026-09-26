@@ -3,22 +3,29 @@ mod config;
 
 pub use config::{Section, Settings, resolve};
 
+use std::convert::Infallible;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use http::{Method, StatusCode};
+use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Empty};
-use rapira_sapi::middleware::{
-    BoxError, BoxFuture, HttpRequest, HttpResponse, Middleware, Next, empty_body,
-};
+use tower::util::BoxCloneServiceLayer;
+use tower::{Service, ServiceExt as _};
 use tower_http::services::ServeDir;
 use tower_http::services::fs::DefaultServeDirFallback;
 
 use cache::CachingBackend;
 
-/// Serves files from a directory and hands every miss to the next middleware.
+type BoxError = Box<dyn std::error::Error + Send + Sync>;
+/// The body of the http plugin's middleware chain.
+type Body = UnsyncBoxBody<Bytes, BoxError>;
+
+/// Serves files from a directory and hands every miss to the inner service.
 /// A permission error or a bad file name is also a miss. Any other read failure
-/// answers 500. That request does not reach the next middleware.
+/// answers 500. That request does not reach the inner service.
 pub struct StaticFiles {
     dir: ServeDir<DefaultServeDirFallback, CachingBackend>,
     forbid: Vec<String>,
@@ -83,82 +90,116 @@ fn is_miss(e: &std::io::Error) -> bool {
     )
 }
 
-impl Middleware for StaticFiles {
-    fn handle<'a>(&'a self, req: HttpRequest, next: Next) -> BoxFuture<'a, HttpResponse> {
-        Box::pin(async move {
-            if req.method() != Method::GET && req.method() != Method::HEAD {
-                return next.run(req).await;
-            }
-            if !self.eligible(req.uri().path()) {
-                return next.run(req).await;
-            }
-
-            // The probe carries only the head. The original request stays unchanged for the
-            // miss path, so the Peer and Protocol extensions reach the handler.
-            let mut probe = http::Request::new(Empty::<Bytes>::new());
-            *probe.method_mut() = req.method().clone();
-            *probe.uri_mut() = req.uri().clone();
-            *probe.headers_mut() = req.headers().clone();
-
-            let mut dir = self.dir.clone();
-            match dir.try_call(probe).await {
-                Ok(res) if res.status() != StatusCode::NOT_FOUND => {
-                    res.map(|b| b.map_err(|e| -> BoxError { Box::new(e) }).boxed_unsync())
-                }
-                // A directory URL answers 404 without a filesystem error. It then reaches PHP.
-                Ok(_) => next.run(req).await,
-                Err(e) if is_miss(&e) => next.run(req).await,
-                // An Err outside the miss kinds is a read failure and must not reach PHP.
-                // https://docs.rs/tower-http/0.7.1/tower_http/services/struct.ServeDir.html#method.try_call
-                Err(e) => {
-                    tracing::error!(target: "http", "static probe failed for {}: {e}", req.uri().path());
-                    http::Response::builder()
-                        .status(StatusCode::INTERNAL_SERVER_ERROR)
-                        .body(empty_body())
-                        .unwrap()
-                }
-            }
-        })
+impl StaticFiles {
+    /// The middleware as a tower layer over the http plugin's inner service.
+    pub fn layer<S>(
+        self,
+    ) -> BoxCloneServiceLayer<S, http::Request<Body>, http::Response<Body>, Infallible>
+    where
+        S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
+            + Clone
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        let files = Arc::new(self);
+        BoxCloneServiceLayer::new(tower::layer::layer_fn(move |inner: S| {
+            let files = Arc::clone(&files);
+            tower::service_fn(move |req| {
+                let files = Arc::clone(&files);
+                let inner = inner.clone();
+                async move { Ok(files.handle(req, inner).await) }
+            })
+        }))
     }
+
+    async fn handle<S>(&self, req: http::Request<Body>, inner: S) -> http::Response<Body>
+    where
+        S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
+            + Send
+            + 'static,
+        S::Future: Send + 'static,
+    {
+        if req.method() != Method::GET && req.method() != Method::HEAD {
+            return forward(inner, req).await;
+        }
+        if !self.eligible(req.uri().path()) {
+            return forward(inner, req).await;
+        }
+
+        // The probe carries only the head. The original request stays unchanged for the
+        // miss path, so its extensions reach the inner service.
+        let mut probe = http::Request::new(Empty::<Bytes>::new());
+        *probe.method_mut() = req.method().clone();
+        *probe.uri_mut() = req.uri().clone();
+        *probe.headers_mut() = req.headers().clone();
+
+        let mut dir = self.dir.clone();
+        match dir.try_call(probe).await {
+            Ok(res) if res.status() != StatusCode::NOT_FOUND => {
+                res.map(|b| b.map_err(|e| -> BoxError { Box::new(e) }).boxed_unsync())
+            }
+            // A directory URL answers 404 without a filesystem error. It then reaches PHP.
+            Ok(_) => forward(inner, req).await,
+            Err(e) if is_miss(&e) => forward(inner, req).await,
+            // An Err outside the miss kinds is a read failure and must not reach PHP.
+            // https://docs.rs/tower-http/0.7.1/tower_http/services/struct.ServeDir.html#method.try_call
+            Err(e) => {
+                tracing::error!(target: "http", "static probe failed for {}: {e}", req.uri().path());
+                http::Response::builder()
+                    .status(StatusCode::INTERNAL_SERVER_ERROR)
+                    .body(Empty::<Bytes>::new().map_err(BoxError::from).boxed_unsync())
+                    .unwrap()
+            }
+        }
+    }
+}
+
+/// Hands a miss to the inner service.
+/// The `Oneshot` is boxed as `Send` before the await: the compiler cannot prove `Send` for a held `Oneshot` over this request type.
+/// https://github.com/rust-lang/rust/issues/110338
+async fn forward<S>(inner: S, req: http::Request<Body>) -> http::Response<Body>
+where
+    S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
+        + Send
+        + 'static,
+    S::Future: Send + 'static,
+{
+    let call: Pin<Box<dyn Future<Output = Result<http::Response<Body>, Infallible>> + Send>> =
+        Box::pin(inner.oneshot(req));
+    let Ok(res) = call.await;
+    res
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use http_body_util::Full;
-    use rapira_sapi::Addr;
-    use rapira_sapi::middleware::{Handler, Peer, Protocol};
-    use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};
+    use tower::util::BoxCloneService;
+    use tower::{Layer as _, Service as _};
 
-    fn peer() -> Peer {
-        let addr: SocketAddr = "127.0.0.1:9".parse().unwrap();
-        Peer {
-            remote: Addr::Inet(addr),
-            server: Addr::Inet(addr),
-            https: false,
-            received_at: 0.0,
-        }
-    }
+    type HttpRequest = http::Request<Body>;
+    type HttpResponse = http::Response<Body>;
+    type Service = BoxCloneService<HttpRequest, HttpResponse, Infallible>;
+
+    /// An extension the http plugin would insert before the chain.
+    #[derive(Clone)]
+    struct Marker;
 
     /// Marks fallthrough: the response reports whether the extensions and body survived.
-    struct Fallthrough;
-
-    impl Handler for Fallthrough {
-        fn call<'a>(&'a self, req: HttpRequest) -> BoxFuture<'a, HttpResponse> {
-            Box::pin(async move {
-                let kept = req.extensions().get::<Peer>().is_some()
-                    && req.extensions().get::<Protocol>().is_some();
-                let body = req.into_body().collect().await.unwrap().to_bytes();
-                http::Response::builder()
-                    .status(200)
-                    .header("x-handler", "php")
-                    .header("x-extensions", if kept { "kept" } else { "lost" })
-                    .body(Full::new(body).map_err(|e| match e {}).boxed_unsync())
-                    .unwrap()
-            })
-        }
+    fn fallthrough() -> Service {
+        Service::new(tower::service_fn(|req: HttpRequest| async move {
+            let kept = req.extensions().get::<Marker>().is_some();
+            let body = req.into_body().collect().await.unwrap().to_bytes();
+            Ok(http::Response::builder()
+                .status(200)
+                .header("x-handler", "php")
+                .header("x-extensions", if kept { "kept" } else { "lost" })
+                .body(Full::new(body).map_err(|e| match e {}).boxed_unsync())
+                .unwrap())
+        }))
     }
 
     fn request(method: &str, path: &str, body: &str) -> HttpRequest {
@@ -171,20 +212,28 @@ mod tests {
                     .boxed_unsync(),
             )
             .unwrap();
-        req.extensions_mut().insert(Protocol::Http);
-        req.extensions_mut().insert(peer());
+        req.extensions_mut().insert(Marker);
         req
     }
 
+    /// The layer over the fallthrough service.
+    fn service(st: StaticFiles) -> Service {
+        st.layer().layer(fallthrough())
+    }
+
     async fn run(st: StaticFiles, req: HttpRequest) -> HttpResponse {
-        run_shared(&Arc::new(st), req).await
+        run_shared(&service(st), req).await
     }
 
     /// A cache test sends more than one request to the same instance.
-    async fn run_shared(st: &Arc<StaticFiles>, req: HttpRequest) -> HttpResponse {
-        let chain: Arc<[Arc<dyn Middleware>]> =
-            Arc::from(vec![Arc::clone(st) as Arc<dyn Middleware>]);
-        Next::new(chain, Arc::new(Fallthrough)).run(req).await
+    /// The future holds its own clone, so a spawned task can await it.
+    fn run_shared(st: &Service, req: HttpRequest) -> impl Future<Output = HttpResponse> + use<> {
+        let mut st = st.clone();
+        async move {
+            let Ok(ready) = st.ready().await;
+            let Ok(res) = ready.call(req).await;
+            res
+        }
     }
 
     /// Use whole seconds. An ext4 volume with 128-byte inodes has no nanosecond field, so it
@@ -227,14 +276,14 @@ mod tests {
     }
 
     /// A cache test needs the instance and a handle on the store behind it.
-    fn cached(dir: &tempfile::TempDir) -> (Arc<StaticFiles>, CachingBackend) {
+    fn cached(dir: &tempfile::TempDir) -> (Service, CachingBackend) {
         let cache = CachingBackend::default();
         let st = StaticFiles::with_cache(
             dir.path().to_path_buf(),
             vec![".php".to_owned()],
             cache.clone(),
         );
-        (Arc::new(st), cache)
+        (service(st), cache)
     }
 
     fn header<'r>(res: &'r HttpResponse, name: &str) -> &'r str {
@@ -714,7 +763,7 @@ mod tests {
         let gate = Arc::new(tokio::sync::Barrier::new(8));
         let mut tasks = Vec::new();
         for _ in 0..8 {
-            let st = Arc::clone(&st);
+            let st = st.clone();
             let gate = Arc::clone(&gate);
             tasks.push(tokio::spawn(async move {
                 gate.wait().await;

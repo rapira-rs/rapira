@@ -10,7 +10,6 @@ description = "Static file middleware for the rapira HTTP front"
 workspace = true
 
 [dependencies]
-rapira_sapi = { workspace = true }
 rapira_config = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
@@ -20,6 +19,7 @@ http-body-util = { workspace = true }
 tracing = { workspace = true }
 percent-encoding = "2"
 tokio = { workspace = true, features = ["fs", "rt"] }
+tower = { workspace = true }
 tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }
 
 [dev-dependencies]
