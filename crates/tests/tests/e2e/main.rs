@@ -17,4 +17,5 @@ mod reload;
 mod scaling;
 mod static_files;
 mod streaming;
+mod timeout_tests;
 mod worker_mode;
