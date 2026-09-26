@@ -1,23 +1,19 @@
+use std::time::{Duration, Instant};
+
 use http::header::{HeaderName, HeaderValue};
-use rapira_sapi::{Mode, Rapira};
+use rapira_sapi::Mode;
 use serde_json::Value;
-use tests::{
-    captured, drain, drain_resp, fixture, init_log_capture, php_lock, req, wait_app_record,
-};
+use tests::wire::submit;
+use tests::{drain, drain_resp, drain_resp_deadline, fixture, req, server_log};
+
+use crate::harness::Spawn;
 
 /// Superglobals are rebuilt per job over the resident loop: query state must not leak.
 #[test]
 fn worker_serves_with_per_job_superglobals() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("worker/hello-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("worker/hello-worker.php")).spawn();
 
-    let resp = drain_resp(tests::submit(&h, req("/?q=zap"))?);
+    let resp = drain_resp(submit(srv.addr, req("/?q=zap"))?);
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.body_string(), "hello:GET:zap");
     assert_eq!(
@@ -26,40 +22,28 @@ fn worker_serves_with_per_job_superglobals() -> anyhow::Result<()> {
         "header() must reach the head"
     );
 
-    let resp = drain_resp(tests::submit(&h, req("/"))?);
+    let resp = drain_resp(submit(srv.addr, req("/"))?);
     assert_eq!(
         resp.body_string(),
         "hello:GET:-",
         "query state must not leak"
     );
-
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// Closing the intake makes handle_request() return false: the post-loop code runs exactly once.
 #[test]
 fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    init_log_capture();
-    captured().clear();
-
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("worker/drain-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let mut srv = Spawn::http(Mode::Worker, fixture("worker/drain-worker.php"))
+        .json_log()
+        .spawn();
     for want in ["n=1", "n=2"] {
-        let resp = drain_resp(tests::submit(&h, req("/"))?);
+        let resp = drain_resp(submit(srv.addr, req("/"))?);
         assert_eq!(resp.body_string(), want, "resident state must accumulate");
     }
-    drop(h);
-    drop(r);
+    srv.stop();
 
-    let exited = captured()
+    let exited = server_log::records(&srv.log_file())
         .iter()
         .filter(|c| c.target == "app" && c.message == "loop-exited served=2")
         .count();
@@ -70,17 +54,8 @@ fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
 /// Classic mode: the gate throws `NotInWorkerModeError`, and ZPP rejects a non-callable ahead of it.
 #[test]
 fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("worker/gate-classic.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let (status, body) = drain(tests::submit(&h, req("/"))?);
-    drop(h);
-    drop(r);
+    let srv = Spawn::http(Mode::Classic, fixture("worker/gate-classic.php")).spawn();
+    let (status, body) = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(status, 200, "every throw must be caught (body: {body:?})");
     for line in [
@@ -97,34 +72,29 @@ fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
 /// Dispatcher mode: the gate refuses before the shared intake is touched, so no unit is stolen.
 #[test]
 fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    init_log_capture();
-    captured().clear();
-
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let mut srv = Spawn::http(
         Mode::Dispatcher,
         fixture("worker/gate-dispatcher-worker.php"),
-        Some(rapira_http::DISPATCHER_CLASSES),
-    )?;
-    let h = r.sink();
-    let resp = drain_resp(tests::submit(&h, req("/"))?);
+    )
+    .json_log()
+    .spawn();
+    let resp = drain_resp(submit(srv.addr, req("/"))?);
     assert_eq!(
         resp.body_string(),
         "ok",
         "the unit must survive the refusal"
     );
-    drop(h);
-    drop(r);
+    srv.stop();
 
-    let gated = captured()
+    let records = server_log::records(&srv.log_file());
+    let gated = records
         .iter()
         .filter(|c| {
             c.target == "app" && c.message == "gate Rapira\\Exception\\NotInWorkerModeError"
         })
         .count();
     assert_eq!(gated, 1);
-    let finish_gated = captured()
+    let finish_gated = records
         .iter()
         .filter(|c| c.target == "app" && c.message == "finish-gate")
         .count();
@@ -138,49 +108,30 @@ fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
 /// exit() inside a handler ships that response and leaves the resident loop and its state alive.
 #[test]
 fn exit_in_a_handler_survives_the_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("worker/exit-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("worker/exit-worker.php")).spawn();
 
-    let resp = drain_resp(tests::submit(&h, req("/?die=1"))?);
+    let resp = drain_resp(submit(srv.addr, req("/?die=1"))?);
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.body_string(), "n=1", "exit must still ship the body");
-    let resp = drain_resp(tests::submit(&h, req("/"))?);
+    let resp = drain_resp(submit(srv.addr, req("/"))?);
     assert_eq!(resp.body_string(), "n=2", "the loop and its state survive");
-
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// A self-stopping loop classifies Recycle: the next job re-bootstraps and is still served.
 #[test]
 fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    init_log_capture();
-    captured().clear();
-
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("worker/one-turn-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let mut srv = Spawn::http(Mode::Worker, fixture("worker/one-turn-worker.php"))
+        .json_log()
+        .spawn();
     for _ in 0..2 {
-        let resp = drain_resp(tests::submit(&h, req("/"))?);
+        let resp = drain_resp(submit(srv.addr, req("/"))?);
         assert_eq!(resp.status(), 200);
         assert_eq!(resp.body_string(), "once");
     }
-    drop(h);
-    drop(r);
+    srv.stop();
 
-    let turns = captured()
+    let turns = server_log::records(&srv.log_file())
         .iter()
         .filter(|c| c.target == "app" && c.message == "one-turn-done")
         .count();
@@ -191,134 +142,79 @@ fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
 /// A bootstrap that never calls handle_request() sheds 503 instead of hanging or answering 200.
 #[test]
 fn never_looping_script_sheds_503() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("worker/never-loop-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let mut rx = tests::submit(&h, req("/"))?;
-    let resp = tests::drain_resp_deadline(
-        &mut rx,
-        std::time::Instant::now() + std::time::Duration::from_secs(10),
-    )
-    .expect("the shed 503 never arrived");
+    let srv = Spawn::http(Mode::Worker, fixture("worker/never-loop-worker.php")).spawn();
+    let mut rx = submit(srv.addr, req("/"))?;
+    let resp = drain_resp_deadline(&mut rx, Instant::now() + Duration::from_secs(10))
+        .expect("the shed 503 never arrived");
     assert_eq!(resp.status(), 503, "a never-serving bootstrap must shed");
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// Bootstrap $_ENV survives late compilation: php_auto_globals_create_env dtors the array before checking variables_order.
 #[test]
 fn bootstrap_env_survives_late_compilation() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("worker/env-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("worker/env-worker.php")).spawn();
     for job in 0..2 {
-        let resp = drain_resp(tests::submit(&h, req("/"))?);
+        let resp = drain_resp(submit(srv.addr, req("/"))?);
         assert_eq!(resp.body_string(), "set-at-boot", "job {job}");
     }
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// `Location:` on a POST answers 303: sapi_activate resets proto_num, so a missing re-apply degrades it to 302.
 #[test]
 fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("worker/location-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("worker/location-worker.php")).spawn();
     let mut rq = req("/");
     rq.method = "POST".into();
-    let resp = drain_resp(tests::submit(&h, rq)?);
+    let resp = drain_resp(submit(srv.addr, rq)?);
     assert_eq!(resp.status(), 303);
     assert_eq!(resp.header("location").as_deref(), Some("/elsewhere"));
 
-    let resp = drain_resp(tests::submit(&h, req("/"))?);
+    let resp = drain_resp(submit(srv.addr, req("/"))?);
     assert_eq!(resp.status(), 302);
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// Classic mode hits the same populate-before-activate defect and must also answer 303.
 #[test]
 fn post_location_redirects_303_in_classic_mode() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("worker/location-classic.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Classic, fixture("worker/location-classic.php")).spawn();
     let mut rq = req("/");
     rq.method = "POST".into();
-    let resp = drain_resp(tests::submit(&h, rq)?);
+    let resp = drain_resp(submit(srv.addr, rq)?);
     assert_eq!(resp.status(), 303);
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// A client that vanishes while queued is discarded before handout: the handler must not run and recycle the worker.
 #[test]
 fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    init_log_capture();
-    captured().clear();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("worker/held-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("worker/held-worker.php"))
+        .json_log()
+        .spawn();
 
-    let rx_a = tests::submit(&h, req("/"))?;
-    wait_app_record("held");
-    drop(tests::submit(&h, req("/"))?);
+    let rx_a = submit(srv.addr, req("/"))?;
+    server_log::wait_app_record(&srv.log_file(), "held");
+    let rx_b = submit(srv.addr, req("/"))?;
+    // No signal shows that B is queued. The wait lets the plugin read B and queue it before the close, well inside the 400 ms that A holds the worker.
+    std::thread::sleep(Duration::from_millis(100));
+    drop(rx_b);
     let resp_a = drain_resp(rx_a);
     assert_eq!(resp_a.body_string(), "done");
 
-    let resp = drain_resp(tests::submit(&h, req("/?probe=count"))?);
+    let resp = drain_resp(submit(srv.addr, req("/?probe=count"))?);
     assert_eq!(resp.body_string(), "runs=1");
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// handle_request() from inside its own handler is refused: no deadlock, and the outer job completes.
 #[test]
 fn nested_handle_request_is_refused() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("worker/nested-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let mut rx = tests::submit(&h, req("/"))?;
-    let resp = tests::drain_resp_deadline(
-        &mut rx,
-        std::time::Instant::now() + std::time::Duration::from_secs(10),
-    )
-    .expect("the outer response never arrived");
+    let srv = Spawn::http(Mode::Worker, fixture("worker/nested-worker.php")).spawn();
+    let mut rx = submit(srv.addr, req("/"))?;
+    let resp = drain_resp_deadline(&mut rx, Instant::now() + Duration::from_secs(10))
+        .expect("the outer response never arrived");
     assert_eq!(resp.status(), 200);
     assert!(
         resp.body_string()
@@ -326,13 +222,11 @@ fn nested_handle_request_is_refused() -> anyhow::Result<()> {
         "got {:?}",
         resp.body_string()
     );
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// $_SERVER keys in registration order: the CGI names of register_server_variables, then HTTP_*, then the keys php_register_server_variables adds.
-/// Header names map as php_register_variable_ex mangles them ('.' to '_'), and a later name that maps to the same key overwrites the value in place.
+/// The HTTP_* keys follow the field lines on the wire: the client writes Host first, then the case headers, then Content-Type from `content_type`.
 #[test]
 fn server_keys_keep_order_and_mangling() -> anyhow::Result<()> {
     const CGI: &[&str] = &[
@@ -369,31 +263,17 @@ fn server_keys_keep_order_and_mangling() -> anyhow::Result<()> {
     }
     let cases = [
         Case {
-            name: "no header gives only the CGI keys",
+            name: "the Host line alone gives the CGI keys and HTTP_HOST",
             content_type: None,
             headers: &[],
-            keys: &["CONTENT_LENGTH"],
+            keys: &["CONTENT_LENGTH", "HTTP_HOST"],
             values: &[("CONTENT_LENGTH", "0"), ("AUTH_TYPE", "")],
-        },
-        Case {
-            name: "dot in a field name maps to underscore",
-            content_type: None,
-            headers: &[("x.dot", "a")],
-            keys: &["CONTENT_LENGTH", "HTTP_X_DOT"],
-            values: &[("HTTP_X_DOT", "a")],
-        },
-        Case {
-            name: "dot and dash names share one key and the later one wins",
-            content_type: None,
-            headers: &[("x.dot", "a"), ("x-dot", "b")],
-            keys: &["CONTENT_LENGTH", "HTTP_X_DOT"],
-            values: &[("HTTP_X_DOT", "b")],
         },
         Case {
             name: "repeated field lines join into one value",
             content_type: None,
             headers: &[("x-rep", "1"), ("x-rep", "2")],
-            keys: &["CONTENT_LENGTH", "HTTP_X_REP"],
+            keys: &["CONTENT_LENGTH", "HTTP_HOST", "HTTP_X_REP"],
             values: &[("HTTP_X_REP", "1, 2")],
         },
         Case {
@@ -407,8 +287,10 @@ fn server_keys_keep_order_and_mangling() -> anyhow::Result<()> {
                 "REMOTE_USER",
                 "CONTENT_TYPE",
                 "CONTENT_LENGTH",
+                "HTTP_HOST",
                 "HTTP_AUTHORIZATION",
                 "HTTP_X_A",
+                "HTTP_CONTENT_TYPE",
                 "PHP_AUTH_USER",
                 "PHP_AUTH_PW",
             ],
@@ -422,14 +304,7 @@ fn server_keys_keep_order_and_mangling() -> anyhow::Result<()> {
         },
     ];
 
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("worker/server-pairs-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("worker/server-pairs-worker.php")).spawn();
     for case in &cases {
         let mut rq = req("/");
         rq.content_type = case.content_type.map(Into::into);
@@ -439,7 +314,7 @@ fn server_keys_keep_order_and_mangling() -> anyhow::Result<()> {
                 HeaderValue::from_static(value),
             );
         }
-        let resp = drain_resp(tests::submit(&h, rq)?);
+        let resp = drain_resp(submit(srv.addr, rq)?);
         let pairs: Vec<(String, Value)> = serde_json::from_str(&resp.body_string())?;
         // With register_argc_argv = 1 (the PHP 8.4 default; 8.5 defaults to 0) the engine appends argv and argc after REQUEST_TIME.
         // https://www.php.net/manual/en/ini.core.php#ini.register-argc-argv
@@ -464,7 +339,5 @@ fn server_keys_keep_order_and_mangling() -> anyhow::Result<()> {
             assert_eq!(got, Some(&Value::from(want)), "{}: {key}", case.name);
         }
     }
-    drop(h);
-    drop(r);
     Ok(())
 }

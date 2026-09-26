@@ -16,3 +16,4 @@ mod reload;
 mod scaling;
 mod static_files;
 mod streaming;
+mod worker_mode;
