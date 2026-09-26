@@ -1046,7 +1046,6 @@ dependencies = [
  "percent-encoding",
  "rapira_config",
  "serde",
- "tempfile",
  "tokio",
  "tower",
  "tower-http 0.7.1",
