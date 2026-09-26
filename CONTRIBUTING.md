@@ -32,12 +32,12 @@ PHP is discovered through `php-config`; point at a specific one with `PHP_CONFIG
 make test   # runs test_nts, then test_e2e - sequentially on purpose
 ```
 
-- `make test_nts` - the in-process unit and integration suites (`cargo test --workspace`; the e2e suite is feature-gated off here).
-- `make test_e2e` - the spawn-the-binary end-to-end suite (`crates/tests`, `--features e2e`): forks workers, binds ports, drives real HTTP, asserts signal/reload/scaling behavior. Single-threaded on purpose; never run it concurrently with `test_nts`.
+- `make test_nts` - the unit tests of every crate (`cargo test --workspace`; the e2e suite is feature-gated off here).
+- `make test_e2e` - the end-to-end suite (`crates/tests`, `--features e2e`): each test spawns the `rapira` binary, which forks workers and binds ports, and drives it over HTTP, gRPC and signals. Single-threaded on purpose; never run it concurrently with `test_nts`.
 - `make coverage` - needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
 - `make stubs` - maintainers only: regenerates each `*_arginfo.h` header under `crates/` from the `*.stub.php` stub next to it with PHP's `gen_stub.php`. Never edit the generated headers by hand.
 
-Test placement: unit tests live inside their crate; integration tests, their harness (`crates/tests/src/`) and their fixtures (`crates/tests/fixtures/`) in `crates/tests`; end-to-end tests under `crates/tests/tests/e2e/` behind the `e2e` feature.
+Test placement: a unit test that needs no fixture, no test double and no socket lives inside its crate. Every other test spawns the `rapira` binary and lives under `crates/tests/tests/e2e/` behind the `e2e` feature. The shared harness (the wire clients and the log readers) is in `crates/tests/src/`, and the fixtures are in `crates/tests/fixtures/` and `crates/tests/tests/e2e/fixtures/`.
 
 ## Lint and format
 
@@ -63,7 +63,7 @@ C sources (`*.c`, `*.h` under `crates/`) follow `.clang-format`.
 | `rapira_http`         | `crates/plugins/http`            | the http plugin: HTTP/1.1, the `Rapira\Http` classes, the `[http]` table ([README](crates/plugins/http/README.md))                           |
 | `rapira_grpc`         | `crates/plugins/grpc`            | the grpc plugin: gRPC, gRPC-Web and Connect, the `Rapira\Grpc` classes, the `[grpc]` table ([README](crates/plugins/grpc/README.md))         |
 | `rapira_static_files` | `crates/middleware/static_files` | the `static` http middleware, a tower layer; each built-in http middleware is one crate under `crates/middleware`                            |
-| `tests`               | `crates/tests`                   | integration and e2e suites                                                                                                                   |
+| `tests`               | `crates/tests`                   | the e2e suite, its harness and its fixtures                                                                                                  |
 
 ## Plugins
 
