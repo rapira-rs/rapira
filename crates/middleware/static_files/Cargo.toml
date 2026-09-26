@@ -11,6 +11,9 @@ workspace = true
 
 [dependencies]
 rapira_sapi = { workspace = true }
+rapira_config = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }

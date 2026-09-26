@@ -4,21 +4,21 @@ use std::path::PathBuf;
 use std::str::FromStr;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Listen {
+pub enum ListenAddr {
     Tcp(SocketAddr),
     Unix(PathBuf),
 }
 
-impl fmt::Display for Listen {
+impl fmt::Display for ListenAddr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Listen::Tcp(addr) => write!(f, "{addr}"),
-            Listen::Unix(path) => write!(f, "unix:{}", path.display()),
+            ListenAddr::Tcp(addr) => write!(f, "{addr}"),
+            ListenAddr::Unix(path) => write!(f, "unix:{}", path.display()),
         }
     }
 }
 
-impl FromStr for Listen {
+impl FromStr for ListenAddr {
     type Err = anyhow::Error;
 
     /// The `:port` check runs before the `SocketAddr` parse: an IPv6 literal contains ':' but never leads with one.
@@ -28,7 +28,7 @@ impl FromStr for Listen {
             if path.is_empty() {
                 anyhow::bail!("unix socket path is empty");
             }
-            return Ok(Listen::Unix(PathBuf::from(path)));
+            return Ok(ListenAddr::Unix(PathBuf::from(path)));
         }
         if !s.contains(':') {
             anyhow::bail!("`{s}` is not a listen address: use host:port, :port, or unix:<path>");
@@ -37,9 +37,12 @@ impl FromStr for Listen {
             let port: u16 = port
                 .parse()
                 .map_err(|_| anyhow::anyhow!("`{s}` has an invalid port"))?;
-            return Ok(Listen::Tcp(SocketAddr::from((Ipv4Addr::UNSPECIFIED, port))));
+            return Ok(ListenAddr::Tcp(SocketAddr::from((
+                Ipv4Addr::UNSPECIFIED,
+                port,
+            ))));
         }
-        s.parse::<SocketAddr>().map(Listen::Tcp).map_err(|_| {
+        s.parse::<SocketAddr>().map(ListenAddr::Tcp).map_err(|_| {
             anyhow::anyhow!("`{s}` is not host:port (expected an IP literal, e.g. 127.0.0.1:8000)")
         })
     }
@@ -52,23 +55,29 @@ mod tests {
     #[test]
     fn listen_parses_all_forms() {
         assert_eq!(
-            "127.0.0.1:8000".parse::<Listen>().unwrap(),
-            Listen::Tcp(SocketAddr::from(([127, 0, 0, 1], 8000)))
+            "127.0.0.1:8000".parse::<ListenAddr>().unwrap(),
+            ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], 8000)))
         );
         assert_eq!(
-            ":8080".parse::<Listen>().unwrap(),
-            Listen::Tcp(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 8080)))
+            ":8080".parse::<ListenAddr>().unwrap(),
+            ListenAddr::Tcp(SocketAddr::from((Ipv4Addr::UNSPECIFIED, 8080)))
         );
-        assert!(matches!("[::1]:8000".parse::<Listen>(), Ok(Listen::Tcp(_))));
-        let l: Listen = "unix:/run/rapira.sock".parse().unwrap();
-        assert_eq!(l, Listen::Unix(PathBuf::from("/run/rapira.sock")));
+        assert!(matches!(
+            "[::1]:8000".parse::<ListenAddr>(),
+            Ok(ListenAddr::Tcp(_))
+        ));
+        let l: ListenAddr = "unix:/run/rapira.sock".parse().unwrap();
+        assert_eq!(l, ListenAddr::Unix(PathBuf::from("/run/rapira.sock")));
         assert_eq!(l.to_string(), "unix:/run/rapira.sock");
     }
 
     #[test]
     fn listen_rejects_invalid() {
         for bad in ["8080", "", ":", "unix:", "localhost:8000"] {
-            assert!(bad.parse::<Listen>().is_err(), "`{bad}` should not parse");
+            assert!(
+                bad.parse::<ListenAddr>().is_err(),
+                "`{bad}` should not parse"
+            );
         }
     }
 }

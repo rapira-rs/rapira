@@ -40,6 +40,14 @@ function serve(UnaryCall $call): void
             }
             $call->respond($m);
             return;
+        case 'services':
+            $names = [];
+            foreach (\Rapira\get_dispatcher()->getServices() as $service) {
+                $names[] = $service->name . ':' . count($service->methods);
+            }
+            $text = implode(',', $names);
+            $call->respond("\x0a" . chr(strlen($text)) . $text);
+            return;
     }
     $call->respond($m);
 }

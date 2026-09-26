@@ -12,7 +12,11 @@ workspace = true
 [dependencies]
 rapira_sapi = { workspace = true }
 rapira_net = { workspace = true }
+rapira_config = { workspace = true }
+rapira_static_files = { workspace = true }
 anyhow = { workspace = true }
+libc = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
@@ -32,3 +36,4 @@ rapira_php_build = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util", "io-util"] }
+toml = { workspace = true }

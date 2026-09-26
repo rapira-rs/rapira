@@ -7,23 +7,7 @@ use tokio::sync::watch;
 
 use crate::work::{DispatcherClasses, Sink};
 
-/// The pool mode of a worker.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Mode {
-    Classic,
-    Worker,
-    Dispatcher,
-}
-
-impl std::fmt::Display for Mode {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(match self {
-            Self::Classic => "classic",
-            Self::Worker => "worker",
-            Self::Dispatcher => "dispatcher",
-        })
-    }
-}
+pub use rapira_config::Mode;
 
 /// One plugin's PHP surface.
 #[derive(Clone, Copy)]

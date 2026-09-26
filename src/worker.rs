@@ -44,15 +44,6 @@ pub struct PoolArgs {
     pub entrypoint: PathBuf,
     pub max_requests: u64,
     pub grace: Duration,
-    /// None for a gRPC pool.
-    pub http: Option<HttpArgs>,
-}
-
-/// The worker settings of an http pool.
-#[derive(Clone)]
-pub struct HttpArgs {
-    /// The uploads dir of a dispatcher pool: each worker spools in its own dir there. None outside dispatcher mode, which parses no uploads.
-    pub uploads_dir: Option<PathBuf>,
 }
 
 /// Returns the process exit code for the master's fork bracket; never runs PHP module teardown, MSHUTDOWN stays with the master.
@@ -62,7 +53,6 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
         entrypoint,
         max_requests,
         grace,
-        http,
     } = args;
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { rapira_sapi::rapira_child_init() };
@@ -107,23 +97,6 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
-    let mut spool_dir: Option<PathBuf> = None;
-    if let Some(base) = http.and_then(|http| http.uploads_dir) {
-        // The http plugin spools in the same dir.
-        let dir = rapira_http::multipart::worker_spool_dir(&base);
-        if let Err(e) = {
-            use std::os::unix::fs::DirBuilderExt;
-            std::fs::DirBuilder::new().mode(0o700).create(&dir)
-        } {
-            tracing::error!(
-                target: "rapira",
-                "creating spool dir {}: {e}",
-                dir.display()
-            );
-            return WORKER_EXIT_UNHEALTHY;
-        }
-        spool_dir = Some(dir);
-    }
     let name: &str = plugin.name();
     let outcome: anyhow::Result<()> =
         serve_plugin(plugin, rapira.sink(), grace, entrypoint, mode, &stopper);
@@ -131,11 +104,6 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
         tracing::error!(target: "rapira", "plugin {name}: {e:#}");
     }
     drop(rapira);
-    if let Some(dir) = &spool_dir
-        && let Err(e) = std::fs::remove_dir_all(dir)
-    {
-        tracing::warn!(target: "rapira", "removing spool dir {}: {e}", dir.display());
-    }
 
     match WORKER_EXIT.load(SeqCst) {
         -1 if outcome.is_err() => 1,

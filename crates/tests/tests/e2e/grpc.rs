@@ -166,7 +166,7 @@ fn connect_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<(u16
     runtime().block_on(async { tokio::time::timeout(BOOT, call).await })?
 }
 
-/// Sources: the Connect protocol (a unary call posts the message as proto3 JSON) and `grpc/health/v1/health.proto`.
+/// Sources: the Connect protocol (a unary call posts the message as proto3 JSON), `grpc/health/v1/health.proto`, and `fixtures/grpc/echo.proto`: with no `services` key the pool serves both services of the file that no other file imports, `EchoService` with three methods and `OtherService` with one.
 #[test]
 fn grpc_pool_serves_from_rapira_toml() {
     struct Case {
@@ -187,6 +187,12 @@ fn grpc_pool_serves_from_rapira_toml() {
             path: "/grpc.health.v1.Health/Check",
             body: "{}",
             reply: r#"{"status":"SERVING"}"#,
+        },
+        Case {
+            name: "a forked worker reads the services that prepare set",
+            path: ECHO,
+            body: r#"{"text":"services"}"#,
+            reply: r#"{"text":"rapira.test.v1.EchoService:3,rapira.test.v1.OtherService:1"}"#,
         },
     ];
     let srv = spawn_grpc(2);

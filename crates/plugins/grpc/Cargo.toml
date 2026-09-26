@@ -12,7 +12,9 @@ workspace = true
 [dependencies]
 rapira_sapi = { workspace = true }
 rapira_net = { workspace = true }
+rapira_config = { workspace = true }
 anyhow = { workspace = true }
+serde = { workspace = true }
 tracing = { workspace = true }
 buffa = { workspace = true }
 buffa-descriptor = { workspace = true }
@@ -28,3 +30,6 @@ tower = { workspace = true }
 [build-dependencies]
 anyhow = { workspace = true }
 rapira_php_build = { workspace = true }
+
+[dev-dependencies]
+toml = { workspace = true }

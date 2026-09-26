@@ -1,16 +1,34 @@
-use anyhow::bail;
-use serde::Deserialize;
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-use crate::listen::Listen;
-use crate::pool::{PoolSection, PoolSettings, RunMode, resolve_pool};
-use crate::{config_relative, nonzero_timeout, parse_listen};
+use anyhow::{Result, bail};
+use rapira_config::{
+    ConfigCtx, ListenAddr, Mode, PoolSection, PoolSettings, SupervisorSettings, check_entrypoint,
+    nonzero_timeout, parse_listen, resolve_pool,
+};
+use serde::Deserialize;
+
+use crate::{Config, Schema, Server};
+
+/// The `[grpc]` table.
+#[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Section {
+    pub listen: Option<String>,
+    pub descriptor_set: Option<String>,
+    pub services: Option<Vec<String>>,
+    pub reflection: Option<bool>,
+    pub default_timeout_secs: Option<u64>,
+    pub max_timeout_secs: Option<u64>,
+    #[serde(default)]
+    pub pool: PoolSection,
+}
 
 #[derive(Debug)]
-pub struct GrpcSettings {
-    pub listen: Listen,
+pub struct Settings {
+    pub listen: ListenAddr,
     pub descriptor_set: PathBuf,
     /// The services to serve out of the set; None serves the services of the files that no other file of the set imports.
     pub services: Option<Vec<String>>,
@@ -22,33 +40,25 @@ pub struct GrpcSettings {
     pub pool: PoolSettings,
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct GrpcSection {
-    listen: Option<String>,
-    descriptor_set: Option<String>,
-    services: Option<Vec<String>>,
-    reflection: Option<bool>,
-    default_timeout_secs: Option<u64>,
-    max_timeout_secs: Option<u64>,
-    #[serde(default)]
-    pool: PoolSection,
+/// Boot checks run here: entrypoint file.
+pub fn resolve(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
+    let settings = settings(section, ctx)?;
+    check_entrypoint("grpc.pool", &settings.pool.entrypoint)?;
+    Ok(settings)
 }
 
-pub(crate) fn resolve_grpc(
-    section: GrpcSection,
-    config_dir: Option<&Path>,
-) -> anyhow::Result<GrpcSettings> {
+/// The settings of `section`. Reads no file.
+fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
     let listen = parse_listen(
         "grpc",
         section.listen.as_deref(),
-        Listen::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 50051))),
+        ListenAddr::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 50051))),
     )?;
 
     let Some(ds) = section.descriptor_set.as_deref().filter(|s| !s.is_empty()) else {
         bail!("grpc.descriptor_set is required");
     };
-    let descriptor_set = config_relative(config_dir, ds)?;
+    let descriptor_set = ctx.resolve_path(ds)?;
 
     let services = section.services;
     if services.as_ref().is_some_and(Vec::is_empty) {
@@ -66,15 +76,15 @@ pub(crate) fn resolve_grpc(
         bail!("grpc.default_timeout_secs ({default}) exceeds grpc.max_timeout_secs ({max})");
     }
 
-    let pool = resolve_pool(section.pool, "grpc.pool", config_dir)?;
-    if pool.mode != RunMode::Dispatcher {
+    let pool = resolve_pool(section.pool, "grpc.pool", ctx)?;
+    if pool.mode != Mode::Dispatcher {
         bail!(
             "grpc.pool.mode must be \"dispatcher\" (got \"{}\")",
-            pool.mode.as_str()
+            pool.mode
         );
     }
 
-    Ok(GrpcSettings {
+    Ok(Settings {
         listen,
         descriptor_set,
         services,
@@ -85,19 +95,39 @@ pub(crate) fn resolve_grpc(
     })
 }
 
-fn optional_timeout(key: &str, secs: Option<u64>) -> anyhow::Result<Option<Duration>> {
+fn optional_timeout(key: &str, secs: Option<u64>) -> Result<Option<Duration>> {
     secs.map(|secs| nonzero_timeout("grpc", key, secs))
         .transpose()
 }
 
+impl Server {
+    /// The schema loads here, in the master, so a bad descriptor set or service name stops the boot before the fork.
+    pub fn from_settings(settings: Settings, supervisor: &SupervisorSettings) -> Result<Self> {
+        let schema = Arc::new(Schema::load(
+            &settings.descriptor_set,
+            settings.services.as_deref(),
+        )?);
+        Ok(Self::init(Config {
+            listen: settings.listen,
+            schema,
+            reflection: settings.reflection,
+            default_timeout: settings.default_timeout,
+            max_timeout: settings.max_timeout,
+            drain_grace: supervisor.drain_grace(),
+            keepalive_interval: Duration::from_secs(10),
+            keepalive_timeout: Duration::from_secs(10),
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+
     use super::*;
-    use crate::{load_str, merge};
 
     struct Want {
-        http: bool,
-        listen: Listen,
+        listen: ListenAddr,
         descriptor_set: &'static str,
         services: Option<&'static [&'static str]>,
         reflection: bool,
@@ -111,19 +141,18 @@ mod tests {
         expected: Result<Want, &'static str>,
     }
 
-    /// A `[grpc]` table with the required keys, `extra` lines in the table, and a dispatcher pool.
+    /// A `[grpc]` table with the required key, `extra` lines in the table, and a dispatcher pool.
     fn toml(extra: &str) -> String {
         format!(
-            "[grpc]\ndescriptor_set = \"a.binpb\"\n{extra}\
-             [grpc.pool]\nentrypoint = \"g.php\"\n"
+            "descriptor_set = \"a.binpb\"\n{extra}\
+             [pool]\nentrypoint = \"g.php\"\n"
         )
     }
 
     /// What `toml("")` resolves to.
     fn base() -> Want {
         Want {
-            http: false,
-            listen: Listen::Tcp(SocketAddr::from(([127, 0, 0, 1], 50051))),
+            listen: ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], 50051))),
             descriptor_set: "/w/a.binpb",
             services: None,
             reflection: false,
@@ -142,14 +171,6 @@ mod tests {
                 expected: Ok(base()),
             },
             Case {
-                name: "both tables",
-                toml: format!("[http.pool]\nentrypoint = \"a.php\"\n{}", toml("")),
-                expected: Ok(Want {
-                    http: true,
-                    ..base()
-                }),
-            },
-            Case {
                 name: "services narrow the set",
                 toml: toml("services = [\"p.S\"]\n"),
                 expected: Ok(Want {
@@ -166,13 +187,8 @@ mod tests {
                 }),
             },
             Case {
-                name: "no plugin",
-                toml: "[log]\nlevel = \"info\"\n".into(),
-                expected: Err("no plugin configured: add an [http] or a [grpc] table"),
-            },
-            Case {
                 name: "descriptor_set missing",
-                toml: "[grpc]\n[grpc.pool]\nentrypoint = \"g.php\"\n".into(),
+                toml: "[pool]\nentrypoint = \"g.php\"\n".into(),
                 expected: Err("grpc.descriptor_set is required"),
             },
             Case {
@@ -196,6 +212,11 @@ mod tests {
                 expected: Err("grpc.default_timeout_secs must be at least 1"),
             },
             Case {
+                name: "max timeout above the cap",
+                toml: toml("max_timeout_secs = 100000\n"),
+                expected: Err("grpc.max_timeout_secs 100000 is too large (max 86400)"),
+            },
+            Case {
                 name: "default above max",
                 toml: toml("default_timeout_secs = 60\nmax_timeout_secs = 10\n"),
                 expected: Err("grpc.default_timeout_secs (60) exceeds grpc.max_timeout_secs (10)"),
@@ -213,7 +234,7 @@ mod tests {
                 name: "unix listen",
                 toml: toml("listen = \"unix:/run/g.sock\"\n"),
                 expected: Ok(Want {
-                    listen: Listen::Unix(PathBuf::from("/run/g.sock")),
+                    listen: ListenAddr::Unix(PathBuf::from("/run/g.sock")),
                     ..base()
                 }),
             },
@@ -223,12 +244,15 @@ mod tests {
                 expected: Err("unknown field `foo`"),
             },
         ];
+        let ctx = ConfigCtx {
+            dir: PathBuf::from("/w"),
+        };
         for case in cases {
-            let got = load_str(&case.toml).and_then(|file| merge(file, Some(Path::new("/w"))));
+            let got = toml::from_str::<Section>(&case.toml)
+                .map_err(anyhow::Error::from)
+                .and_then(|section| settings(section, &ctx));
             match (got, case.expected) {
-                (Ok(s), Ok(want)) => {
-                    assert_eq!(s.http.is_some(), want.http, "{}", case.name);
-                    let g = s.grpc.expect(case.name);
+                (Ok(g), Ok(want)) => {
                     assert_eq!(g.listen, want.listen, "{}", case.name);
                     assert_eq!(
                         g.descriptor_set,
@@ -247,7 +271,7 @@ mod tests {
                     assert_eq!(g.reflection, want.reflection, "{}", case.name);
                     assert_eq!(g.default_timeout, want.default_timeout, "{}", case.name);
                     assert_eq!(g.max_timeout, want.max_timeout, "{}", case.name);
-                    assert_eq!(g.pool.mode, RunMode::Dispatcher, "{}", case.name);
+                    assert_eq!(g.pool.mode, Mode::Dispatcher, "{}", case.name);
                 }
                 (Err(err), Err(want)) => {
                     let err = err.to_string();

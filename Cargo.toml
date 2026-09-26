@@ -44,6 +44,8 @@ rapira_grpc = { path = "crates/plugins/grpc" }
 rapira_net = { path = "crates/net" }
 rapira_master = { path = "crates/master" }
 rapira_scoreboard = { path = "crates/scoreboard" }
+serde = { version = "1", features = ["derive"] }
+toml = "1.1"
 tokio = { version = "1", features = ["sync"] }
 bytes = "1"
 http = "1"
@@ -72,11 +74,12 @@ rapira_master = { workspace = true }
 rapira_net = { workspace = true }
 rapira_sapi = { workspace = true }
 rapira_config = { workspace = true }
-rapira_static_files = { workspace = true }
 rapira_http = { workspace = true }
 rapira_grpc = { workspace = true }
 libc = { workspace = true }
 mimalloc = "0.1"
+serde = { workspace = true }
+toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono", "json"] }
 
