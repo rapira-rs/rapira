@@ -1,5 +1,36 @@
-use tests::{app_record, app_records};
+use rapira_sapi::Mode;
+use tests::wire::submit;
+use tests::{AppRecord, drain, fixture, req, server_log};
 use tracing::Level;
+
+use crate::harness::Spawn;
+
+/// Runs `script` in classic mode and returns its `app` records and its `php` messages; the fixture must echo `logged` last, so a script that died half way cannot masquerade as one that logged nothing.
+fn app_records(script: &str) -> (Vec<AppRecord>, Vec<String>) {
+    // Every level of the `app` and `php` targets reaches the log.
+    let mut srv = Spawn::http(Mode::Classic, fixture(script))
+        .json_log()
+        .rust_log("info,app=trace,php=trace")
+        .spawn();
+    let (status, body) = drain(submit(srv.addr, req("/")).expect("dispatch"));
+    // The stop waits for the worker exit, so the log holds every record.
+    srv.stop();
+
+    assert_eq!(status, 200, "{script} must run clean (body: {body:?})");
+    assert!(body.contains("logged"), "{script} ran to the end: {body:?}");
+    server_log::app_records(&srv.log_file())
+}
+
+/// The one `app` record `script` must leave; asserting the count fails the test on a stray extra record instead of ignoring it.
+fn app_record(script: &str) -> AppRecord {
+    let (records, _) = app_records(script);
+    assert_eq!(
+        records.len(),
+        1,
+        "{script} must log exactly one app record (got {records:?})"
+    );
+    records.into_iter().next().expect("checked above")
+}
 
 /// Every LogLevel case reaches the matching tracing level; an omitted argument lands on Info.
 #[test]
@@ -172,22 +203,12 @@ fn log_survives_a_throwing_json_serializer() {
 /// exit() inside a serializer is an unwind-exit, not a serialization failure: log() must not eat it.
 #[test]
 fn log_preserves_exit_from_a_serializer() {
-    use rapira_sapi::{Mode, Rapira};
-    use tests::{drain, fixture, init_log_capture, php_lock, req};
-
-    let _guard = php_lock();
-    init_log_capture();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let srv = Spawn::http(
         Mode::Classic,
         fixture("app_logger/app-logger-exit-in-serializer.php"),
-        None,
     )
-    .expect("classic boot");
-    let h = r.sink();
-    let (status, body) = drain(tests::submit(&h, req("/")).expect("dispatch"));
-    drop(h);
-    drop(r);
+    .spawn();
+    let (status, body) = drain(submit(srv.addr, req("/")).expect("dispatch"));
 
     assert_eq!(status, 200);
     assert!(body.contains("quitting"), "got: {body:?}");

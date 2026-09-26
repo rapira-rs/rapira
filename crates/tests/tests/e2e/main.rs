@@ -1,4 +1,5 @@
 mod apm;
+mod app_logger;
 mod basic_tests;
 mod classic;
 mod concurrency;
