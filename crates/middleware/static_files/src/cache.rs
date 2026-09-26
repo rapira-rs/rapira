@@ -156,8 +156,6 @@ struct Entry {
 struct Store {
     map: HashMap<PathBuf, Entry>,
     bytes: usize,
-    #[cfg(test)]
-    reads: usize,
 }
 
 impl Store {
@@ -307,11 +305,6 @@ impl CachingBackend {
             return Ok(Self::stream(file, meta));
         }
 
-        #[cfg(test)]
-        {
-            self.lock().reads += 1;
-        }
-
         let (mut file, buf, reread) = tokio::task::spawn_blocking(move || {
             let mut buf = Vec::with_capacity(meta.len as usize);
             // The size check above used the stat from before the read. A bounded read stops
@@ -359,30 +352,5 @@ impl Backend for CachingBackend {
             return Box::pin(ready(Ok(file)));
         }
         Box::pin(self.clone().fill(path))
-    }
-}
-
-#[cfg(test)]
-impl CachingBackend {
-    pub(crate) fn accounted(&self) -> usize {
-        self.lock().bytes
-    }
-
-    /// Adds the size of every entry in the map. The result must equal the running total.
-    pub(crate) fn recomputed(&self) -> usize {
-        self.lock()
-            .map
-            .iter()
-            .map(|(path, entry)| Store::footprint(path, entry.body.len()))
-            .sum()
-    }
-
-    pub(crate) fn entries(&self) -> usize {
-        self.lock().map.len()
-    }
-
-    /// The number of files that the cache read into memory. It does not count a refused file.
-    pub(crate) fn reads(&self) -> usize {
-        self.lock().reads
     }
 }
