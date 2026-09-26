@@ -4,7 +4,7 @@ version = "0.8.1"
 edition.workspace = true
 publish = false
 license = "MIT"
-description = "HTTP front for rapira - terminates HTTP and answers every request from PHP"
+description = "The http plugin of rapira - terminates HTTP and answers every request from PHP"
 
 [lints]
 workspace = true
