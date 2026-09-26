@@ -9,15 +9,12 @@ bind! {
     RAPIRA_MODE_DISPATCHER,
     // the two halves of the linked-libphp version check
     PHP_VERSION_ID, php_version_id,
-    // the embedded-object layouts; rapira_sapi.h, rapira_http.h and rapira_grpc.h are the source of truth
-    rapira_exchange_obj, rapira_dispatcher_info_obj, rapira_grpc_call_obj,
+    // the embedded-object layouts; rapira_sapi.h and rapira_grpc.h are the source of truth
+    rapira_dispatcher_info_obj, rapira_grpc_call_obj,
     rapira_grpc_metadata_obj,
     // MINIT-written class-entry globals the Rust builder reads (static mut)
-    rapira_ce_http_request, rapira_ce_http_multipart, rapira_ce_http_form_field,
-    rapira_ce_http_uploaded_file, rapira_ce_tls, rapira_ce_inet_address,
+    rapira_ce_tls, rapira_ce_inet_address,
     rapira_ce_unix_address, rapira_ce_already_finalized_error,
-    rapira_ce_http_head_already_written_error, rapira_ce_internal_http_exchange,
-    rapira_ce_internal_http_dispatcher, rapira_ce_internal_http_dispatcher_info,
     rapira_ce_timeout_exception, rapira_ce_closed_exception,
     rapira_ce_no_dispatcher_error, rapira_ce_grpc_status, rapira_ce_grpc_exception,
     rapira_ce_grpc_method_kind, rapira_ce_grpc_method_info, rapira_ce_grpc_service_info,
@@ -26,8 +23,7 @@ bind! {
     rapira_ce_grpc_context, rapira_ce_grpc_metadata, rapira_ce_grpc_protocol,
     rapira_ce_grpc_error_detail,
     zend_argument_value_error, zend_argument_type_error,
-    rapira_ce_work_discarded_exception, rapira_ce_http_content_length_exceeded_error,
-    rapira_ce_http_head_not_written_error, rapira_ce_http_file_not_sendable_exception,
+    rapira_ce_work_discarded_exception,
     // re-arms the wall timer the send-park guard disarms around a full-channel wait
     zend_set_timeout,
     // the FOREACH macros are header-only, so the array walk uses the exported position API

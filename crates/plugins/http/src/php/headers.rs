@@ -100,7 +100,7 @@ pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<HeaderMap, &'
             let mut str_key: *mut zend_string = std::ptr::null_mut();
             let mut num_key = 0;
             let kt = zend_hash_get_current_key_ex(ht, &mut str_key, &mut num_key, &pos);
-            if i64::from(kt) != crate::HASH_KEY_IS_STRING || str_key.is_null() {
+            if i64::from(kt) != rapira_sapi::HASH_KEY_IS_STRING || str_key.is_null() {
                 return Err(c"header name is not representable on the wire");
             }
             let Ok(name) = HeaderName::from_bytes(zend::zstr_bytes(str_key)) else {

@@ -367,22 +367,15 @@ namespace Rapira\Internal\Grpc {
      */
     final class Dispatcher implements \Rapira\Grpc\GrpcDispatcher
     {
-        /**
-         * Host-created: obtain it from \Rapira\get_dispatcher().
-         *
-         * @implementation-alias Rapira\Internal\Http\Dispatcher::__construct
-         */
+        /** Host-created: obtain it from \Rapira\get_dispatcher(). */
         private function __construct() {}
 
         public function name(): string {}
 
-        /** @implementation-alias Rapira\Internal\Http\Dispatcher::tryReceive */
         public function tryReceive(): \Rapira\Grpc\UnaryCall|\Rapira\Grpc\ServerStreamingCall|\Rapira\Grpc\ClientStreamingCall|\Rapira\Grpc\BidiStreamingCall|null {}
 
-        /** @implementation-alias Rapira\Internal\Http\Dispatcher::receive */
         public function receive(int $timeout = -1): \Rapira\Grpc\UnaryCall|\Rapira\Grpc\ServerStreamingCall|\Rapira\Grpc\ClientStreamingCall|\Rapira\Grpc\BidiStreamingCall {}
 
-        /** @implementation-alias Rapira\Internal\Http\Dispatcher::getInfo */
         public function getInfo(): \Rapira\Grpc\GrpcDispatcherInfo {}
 
         public function getServices(): array {}
@@ -394,17 +387,11 @@ namespace Rapira\Internal\Grpc {
      */
     final class DispatcherInfo implements \Rapira\Grpc\GrpcDispatcherInfo
     {
-        /**
-         * Host-created.
-         *
-         * @implementation-alias Rapira\Internal\Http\DispatcherInfo::__construct
-         */
+        /** Host-created. */
         private function __construct() {}
 
-        /** @implementation-alias Rapira\Internal\Http\DispatcherInfo::pendingCount */
         public function pendingCount(): int {}
 
-        /** @implementation-alias Rapira\Internal\Http\DispatcherInfo::activeCount */
         public function activeCount(): int {}
     }
 
@@ -416,11 +403,7 @@ namespace Rapira\Internal\Grpc {
      */
     final class UnaryCall implements \Rapira\Grpc\UnaryCall
     {
-        /**
-         * Host-created.
-         *
-         * @implementation-alias Rapira\Internal\Http\Exchange::__construct
-         */
+        /** Host-created. */
         private function __construct() {}
 
         public function isFinalized(): bool {}
@@ -446,11 +429,7 @@ namespace Rapira\Internal\Grpc {
      */
     final class ResponseMetadata implements \Rapira\Grpc\Responder\ResponseMetadata
     {
-        /**
-         * Host-created.
-         *
-         * @implementation-alias Rapira\Internal\Http\Exchange::__construct
-         */
+        /** Host-created. */
         private function __construct() {}
 
         public function addHeader(string $name, string $value): void {}

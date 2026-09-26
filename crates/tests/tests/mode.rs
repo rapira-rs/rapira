@@ -33,7 +33,7 @@ fn dispatcher_mode_answers_dispatcher() -> anyhow::Result<()> {
         &tests::PHP_PARTS,
         Mode::Dispatcher,
         fixture("mode/dispatcher.php"),
-        Some(rapira_sapi::http::DISPATCHER_CLASSES),
+        Some(rapira_http::DISPATCHER_CLASSES),
     )?;
     drop(r);
 

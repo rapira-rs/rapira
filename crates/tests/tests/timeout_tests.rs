@@ -15,7 +15,7 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
         &tests::PHP_PARTS,
         Mode::Dispatcher,
         fixture("dispatcher/echo-loop-worker.php"),
-        Some(rapira_sapi::http::DISPATCHER_CLASSES),
+        Some(rapira_http::DISPATCHER_CLASSES),
     )?;
     let h = r.sink();
 
@@ -46,7 +46,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
         &tests::PHP_PARTS,
         Mode::Dispatcher,
         fixture("dispatcher/verbs-worker.php"),
-        Some(rapira_sapi::http::DISPATCHER_CLASSES),
+        Some(rapira_http::DISPATCHER_CLASSES),
     )?;
     let h = r.sink();
 

@@ -133,11 +133,17 @@ pub unsafe extern "C" fn rapira_rs_exchange_send_file(
 ) -> bool {
     guard(false, || unsafe {
         if offset < 0 {
-            crate::zend_argument_value_error(2, c"must be greater than or equal to 0".as_ptr());
+            rapira_sapi::zend_argument_value_error(
+                2,
+                c"must be greater than or equal to 0".as_ptr(),
+            );
             return false;
         }
         if !length_is_null && length < 1 {
-            crate::zend_argument_value_error(3, c"must be greater than or equal to 1".as_ptr());
+            rapira_sapi::zend_argument_value_error(
+                3,
+                c"must be greater than or equal to 1".as_ptr(),
+            );
             return false;
         }
         let st = &mut *job.cast::<ExchangeState>();

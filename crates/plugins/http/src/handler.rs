@@ -8,15 +8,14 @@ use std::time::Duration;
 use http::header::CONTENT_TYPE;
 use http_body::Body;
 use http_body_util::BodyExt;
-use rapira_sapi::http::Exchange;
 use rapira_sapi::middleware::{
     BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer, Protocol,
 };
 use rapira_sapi::work::{Intake, Refused};
-use rapira_sapi::{Addr, Frame, Request, multipart};
+use rapira_sapi::{Addr, Frame, Request};
 
 use crate::response::{error_response, response_headers};
-use crate::{Config, bridge, check, request};
+use crate::{Config, Exchange, bridge, check, multipart, request};
 
 pub(crate) struct Shared {
     pub cfg: Config,

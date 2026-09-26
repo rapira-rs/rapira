@@ -1,6 +1,6 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
+use rapira_http::Exchange;
 use rapira_sapi::grpc::{Call, RpcProtocol, UnaryCall, UnaryReply};
-use rapira_sapi::http::Exchange;
 use rapira_sapi::plugin::PhpPart;
 use rapira_sapi::work::{Intake, Refused, Sink};
 use rapira_sapi::{Addr, Frame, GrpcMethod, GrpcService, Mode, Rapira, Request, WorkerHooks};
@@ -13,8 +13,8 @@ use tokio::sync::{mpsc, oneshot};
 
 pub mod grpc;
 
-/// Every test boot registers both parts, as the root does with both pools configured.
-pub static PHP_PARTS: [PhpPart; 2] = [rapira_sapi::http::PHP_PART, rapira_sapi::grpc::PHP_PART];
+/// Every test boot registers both parts, as the root does.
+pub static PHP_PARTS: [PhpPart; 2] = [rapira_http::PHP_PART, rapira_sapi::grpc::PHP_PART];
 
 static PHP_LOCK: Mutex<()> = Mutex::new(());
 static PHP_ENV: Once = Once::new();

@@ -72,7 +72,7 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
                 let r = park_send(tx, frame);
                 if saved > 0 {
                     let remaining = (saved as u64).saturating_sub(consumed.as_secs()).max(1);
-                    zend_set_timeout(remaining as crate::zend_long, false);
+                    zend_set_timeout(remaining as rapira_sapi::zend_long, false);
                 }
                 (r, saved > 0)
             },
@@ -275,7 +275,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_head(
     guard(false, || unsafe {
         let st = &mut *job.cast::<ExchangeState>();
         if !(100..=599).contains(&status) {
-            crate::zend_value_error(
+            rapira_sapi::zend_value_error(
                 c"status must be between 100 and 599, %lld given".as_ptr(),
                 status as std::ffi::c_longlong,
             );
@@ -395,7 +395,7 @@ pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: Hea
         }
     }
     st.stage = Stage::Finalized;
-    update(|c| c.served = true);
+    note_served();
     sb_update(Event::Handled(truncated));
     let _ = unsafe {
         send_frame(
@@ -465,7 +465,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_is_cancelled(job: *const c_void) -> 
 pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
     guard((), || {
         let mut st = unsafe { release(job.cast::<ExchangeState>()) };
-        let cycle_died = unsafe { (*crate::rapira_cg()).unclean_shutdown };
+        let cycle_died = unsafe { (*rapira_sapi::rapira_cg()).unclean_shutdown };
         if st.stage != Stage::Finalized && !cycle_died {
             if let BodyState::Multipart { files, .. } = &mut st.body {
                 for p in files {

@@ -41,7 +41,7 @@ fn worker_singleton() -> anyhow::Result<()> {
             &tests::PHP_PARTS,
             Mode::Dispatcher,
             fixture("dispatcher/worker-singleton.php"),
-            Some(rapira_sapi::http::DISPATCHER_CLASSES),
+            Some(rapira_http::DISPATCHER_CLASSES),
         )
     })?;
     for (key, want) in [

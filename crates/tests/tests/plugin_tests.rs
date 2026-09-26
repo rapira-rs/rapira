@@ -1,7 +1,7 @@
 use http::header::{HeaderMap, SET_COOKIE};
+use rapira_http::Exchange;
 use rapira_net::PrepareCtx;
 use rapira_sapi::grpc::{Call, RpcProtocol, RpcStatus, UnaryCall};
-use rapira_sapi::http::Exchange;
 use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker, run_plugin};
 use rapira_sapi::work::{Intake, Work};
 use rapira_sapi::{Addr, Rapira, Request};

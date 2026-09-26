@@ -78,7 +78,7 @@ fn value_types_follow_the_contract() -> anyhow::Result<()> {
         &tests::PHP_PARTS,
         Mode::Dispatcher,
         fixture("grpc/values.php"),
-        Some(rapira_sapi::http::DISPATCHER_CLASSES),
+        Some(rapira_http::DISPATCHER_CLASSES),
     )?;
     drop(r);
 

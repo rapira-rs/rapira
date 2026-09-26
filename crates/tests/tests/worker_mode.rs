@@ -103,7 +103,7 @@ fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
         &tests::PHP_PARTS,
         Mode::Dispatcher,
         fixture("worker/gate-dispatcher-worker.php"),
-        Some(rapira_sapi::http::DISPATCHER_CLASSES),
+        Some(rapira_http::DISPATCHER_CLASSES),
     )?;
     let h = r.sink();
     let resp = drain_resp(tests::submit(&h, req("/"))?);

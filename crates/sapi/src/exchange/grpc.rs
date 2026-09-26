@@ -4,8 +4,6 @@ use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD_NO_PAD};
 use tokio::sync::oneshot;
 
-use super::request::{add_list, build_address, header_key};
-use super::respond::{Verb, throw_verb};
 use super::*;
 use crate::{
     IS_OBJECT,
@@ -225,6 +223,15 @@ impl Held for GrpcState {
     }
 }
 
+/// Cores return these instead of throwing: no owned state may be live when `zend_throw_*` bailouts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Verb {
+    Ok,
+    Finalized,
+    Discarded,
+    BadField(&'static CStr),
+}
+
 /// Validates one response metadata entry, then adds it to its half. The entry is checked before the state, so a bad entry gives a ValueError on a finalized call too.
 fn add_core(
     st: Option<&mut GrpcState>,
@@ -326,7 +333,7 @@ unsafe fn thrown(v: Verb) -> bool {
                 rapira_ce_work_discarded_exception,
                 c"the host closed the call first",
             ),
-            v => throw_verb(v),
+            Verb::BadField(msg) => zend::throw_value_error(msg),
         }
     }
     false

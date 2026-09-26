@@ -19,10 +19,6 @@ bytes = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 libc = { workspace = true }
-# multipart parsing over the buffered body + file-part spooling
-memchr = "2"
-httparse = "1"
-tempfile = "3"
 
 [build-dependencies]
 anyhow = { workspace = true }

@@ -16,7 +16,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
             &tests::PHP_PARTS,
             Mode::Dispatcher,
             fixture("failboot_worker_tests/failboot-worker.php"),
-            Some(rapira_sapi::http::DISPATCHER_CLASSES),
+            Some(rapira_http::DISPATCHER_CLASSES),
         )?;
         let h = r.sink();
         let rx = tests::submit(&h, req("/"))?;
@@ -71,7 +71,7 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
             &tests::PHP_PARTS,
             Mode::Dispatcher,
             fixture("failboot_worker_tests/failboot-worker.php"),
-            Some(rapira_sapi::http::DISPATCHER_CLASSES),
+            Some(rapira_http::DISPATCHER_CLASSES),
         )?;
         let h = r.sink();
         let mut statuses = Vec::new();
