@@ -367,7 +367,7 @@ where
     let mut collected: Vec<u8> = Vec::with_capacity(reserve);
     loop {
         // hyper only times the head read, so each body frame gets its own progress bound here.
-        let frame = match tokio::time::timeout(cfg.keepalive_timeout, body.frame()).await {
+        let frame = match timeout_lazy(cfg.keepalive_timeout, body.frame()).await {
             Ok(frame) => frame,
             Err(_) => {
                 tracing::debug!(target: "http", "request body stalled past keepalive_timeout");
@@ -449,7 +449,7 @@ where
         BodyKind::Empty
     } else {
         let staged = if declared_cl.is_some() {
-            tokio::time::timeout(Duration::from_millis(10), reply.recv())
+            timeout_lazy(Duration::from_millis(10), reply.recv())
                 .await
                 .ok()
                 .flatten()
@@ -473,6 +473,18 @@ where
     *res.status_mut() = status;
     *res.headers_mut() = response_headers(headers, declared_cl);
     res
+}
+
+/// Polls `fut` once and arms the timer only when it is pending: a ready future needs no timer.
+async fn timeout_lazy<F: Future>(
+    dur: Duration,
+    fut: F,
+) -> Result<F::Output, tokio::time::error::Elapsed> {
+    let mut fut = std::pin::pin!(fut);
+    match std::future::poll_fn(|cx| Poll::Ready(fut.as_mut().poll(cx))).await {
+        Poll::Ready(out) => Ok(out),
+        Poll::Pending => tokio::time::timeout(dur, fut).await,
+    }
 }
 
 /// Both refusals come before dispatch: the multipart parse, then the intake.
@@ -1088,5 +1100,85 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), until_inflight(&inflight, 0))
             .await
             .expect("End releases the count");
+    }
+
+    /// Pending for `left` polls, then ready. Each pending poll wakes the task at once.
+    struct ReadyAfter {
+        left: Option<u32>,
+    }
+
+    impl Future for ReadyAfter {
+        type Output = ();
+        fn poll(mut self: Pin<&mut Self>, cx: &mut Context<'_>) -> Poll<()> {
+            match self.left {
+                Some(0) => Poll::Ready(()),
+                Some(n) => {
+                    self.left = Some(n - 1);
+                    cx.waker().wake_by_ref();
+                    Poll::Pending
+                }
+                None => Poll::Pending,
+            }
+        }
+    }
+
+    /// Outside a runtime `tokio::time::timeout` panics: a ready future must complete without it.
+    #[test]
+    fn timeout_lazy_ready_future_needs_no_timer() {
+        let mut fut = std::pin::pin!(timeout_lazy(
+            Duration::from_secs(1),
+            ReadyAfter { left: Some(0) }
+        ));
+        let mut cx = Context::from_waker(std::task::Waker::noop());
+        assert!(matches!(fut.as_mut().poll(&mut cx), Poll::Ready(Ok(()))));
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn timeout_lazy_outcomes() {
+        struct Case {
+            name: &'static str,
+            pending_polls: Option<u32>,
+            elapsed: bool,
+            waited: Duration,
+        }
+        let dur = Duration::from_millis(10);
+        let cases = [
+            Case {
+                name: "ready future returns at once",
+                pending_polls: Some(0),
+                elapsed: false,
+                waited: Duration::ZERO,
+            },
+            Case {
+                name: "future ready after the first poll returns Ok",
+                pending_polls: Some(1),
+                elapsed: false,
+                waited: Duration::ZERO,
+            },
+            Case {
+                name: "future ready after several polls returns Ok",
+                pending_polls: Some(3),
+                elapsed: false,
+                waited: Duration::ZERO,
+            },
+            Case {
+                name: "pending future times out at the deadline",
+                pending_polls: None,
+                elapsed: true,
+                waited: dur,
+            },
+        ];
+        for case in cases {
+            let start = tokio::time::Instant::now();
+            let out = timeout_lazy(
+                dur,
+                ReadyAfter {
+                    left: case.pending_polls,
+                },
+            )
+            .await;
+            assert_eq!(out.is_err(), case.elapsed, "{}", case.name);
+            assert_eq!(start.elapsed(), case.waited, "{}", case.name);
+        }
     }
 }

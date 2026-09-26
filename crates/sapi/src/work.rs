@@ -118,7 +118,8 @@ impl Sink {
     /// pending is incremented before the send: the consumer decrements as soon as it wakes, so the reverse order could wrap the counter below zero.
     pub async fn submit(&self, mut unit: Box<dyn Work>) -> Result<(), Refused> {
         let pending = PendingGuard::arm(&self.pending);
-        let deadline = Instant::now() + INTAKE_WAIT;
+        // The deadline starts at the first full intake: the common send needs no clock read.
+        let mut deadline = None;
         loop {
             match self.tx.try_send(unit) {
                 Ok(()) => {
@@ -126,6 +127,7 @@ impl Sink {
                     return Ok(());
                 }
                 Err(TrySendError::Full(u)) => {
+                    let deadline = *deadline.get_or_insert_with(|| Instant::now() + INTAKE_WAIT);
                     if Instant::now() > deadline {
                         tracing::warn!(
                             target: "rapira",
