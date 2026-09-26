@@ -22,6 +22,7 @@ mod observer_teardown_tests;
 mod observer_tests;
 mod php_ext_tests;
 mod ported_tests;
+mod registry;
 mod reload;
 mod scaling;
 mod static_files;
