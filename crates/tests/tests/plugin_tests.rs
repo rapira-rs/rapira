@@ -11,6 +11,8 @@ use std::time::{Duration, Instant};
 use tests::{Fields, Response, collect, fields, fixture, php_lock, req};
 
 const GRACE: Duration = Duration::from_secs(30);
+/// The test plugins do not drain.
+const DRAIN_GRACE: Duration = Duration::ZERO;
 
 /// A plugin whose serve is `body`.
 struct TestPlugin(Box<dyn FnOnce(Worker) -> anyhow::Result<()> + Send>);
@@ -63,7 +65,7 @@ fn run_to_end(
     entrypoint: PathBuf,
     mode: Mode,
 ) -> anyhow::Result<()> {
-    run_plugin(plugin, rapira.sink(), GRACE, entrypoint, mode)?.join()
+    run_plugin(plugin, rapira.sink(), GRACE, DRAIN_GRACE, entrypoint, mode)?.join()
 }
 
 async fn exchange(intake: &Intake<Exchange>, req: Request) -> anyhow::Result<Response> {
@@ -278,7 +280,14 @@ fn stop_ends_a_resident_plugin() -> anyhow::Result<()> {
         handle.block_on(worker.stop.wait_for(|stop| *stop))?;
         Ok(())
     });
-    let running = run_plugin(plugin, rapira.sink(), GRACE, script, Mode::Classic)?;
+    let running = run_plugin(
+        plugin,
+        rapira.sink(),
+        GRACE,
+        DRAIN_GRACE,
+        script,
+        Mode::Classic,
+    )?;
 
     let start = Instant::now();
     running.stop();
@@ -304,6 +313,7 @@ fn many_plugins_run() -> anyhow::Result<()> {
                 two_exchanges(),
                 rapira.sink(),
                 GRACE,
+                DRAIN_GRACE,
                 script.clone(),
                 Mode::Worker,
             )
@@ -364,6 +374,7 @@ fn a_plugin_past_the_grace_is_reported() -> anyhow::Result<()> {
         plugin,
         rapira.sink(),
         Duration::from_millis(100),
+        DRAIN_GRACE,
         script,
         Mode::Classic,
     )?;

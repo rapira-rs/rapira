@@ -41,7 +41,7 @@ impl PrepareCtx {
         Self::default()
     }
 
-    /// Backed by dups owned by this context, so the fds stay valid even if an extension drops its `PreparedListener`.
+    /// Backed by dups owned by this context, so the fds stay valid even if a plugin drops its `PreparedListener`.
     pub fn listener_fds(&self) -> Vec<RawFd> {
         self.fds.iter().map(|fd| fd.as_raw_fd()).collect()
     }

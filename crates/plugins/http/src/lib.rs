@@ -30,7 +30,6 @@ pub struct Config {
     pub unsafe_field_names: UnsafeFieldNames,
     pub superglobals: bool,
     pub write_timeout: Duration,
-    pub drain_grace: Duration,
     pub keepalive_timeout: Duration,
     /// `[http].middleware` in config order, the first listed outermost.
     pub middleware: Vec<middleware::Layer>,
@@ -59,7 +58,6 @@ impl Default for Config {
             unsafe_field_names: UnsafeFieldNames::Drop,
             superglobals: true,
             write_timeout: Duration::from_secs(30),
-            drain_grace: Duration::from_secs(25),
             keepalive_timeout: Duration::from_secs(60),
             middleware: Vec::new(),
             uploads: None,
@@ -163,6 +161,7 @@ mod tests {
             Box::new(server),
             sink,
             Duration::from_secs(5),
+            Duration::from_secs(1),
             PathBuf::from("index.php"),
             Mode::Dispatcher,
         )

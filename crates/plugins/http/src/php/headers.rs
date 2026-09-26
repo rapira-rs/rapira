@@ -55,7 +55,7 @@ pub(super) struct SplitHead {
     pub(super) declared_cl: Option<u64>,
 }
 
-/// Takes content-length out as the declared length; the front drops the hop-by-hop fields.
+/// Takes content-length out as the declared length; the plugin drops the hop-by-hop fields.
 pub(super) fn split_framing(mut headers: HeaderMap) -> Result<SplitHead, &'static CStr> {
     let mut lines = headers.get_all(http::header::CONTENT_LENGTH).iter();
     let first = lines.next();

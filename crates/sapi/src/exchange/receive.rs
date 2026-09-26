@@ -13,7 +13,7 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
         let classes = classes();
         if let Some(ptr) = CYCLE.get().unit
             && !(*ptr).finalized()
-            && (*ptr).host_closed()
+            && (*ptr).client_closed()
         {
             tracing::debug!(target: "rapira", "receive() discarded an unfinalized unit whose client left");
             (*ptr).discard();

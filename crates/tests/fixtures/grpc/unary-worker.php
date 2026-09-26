@@ -76,7 +76,7 @@ function serve(GrpcDispatcher $d, UnaryCall $call): void
             $call->respond('busy');
             return;
         case 'drop':
-            unset($call); // never finalized: the host loses this call
+            unset($call); // never finalized: the plugin loses this call
             return;
         case 'throw':
             throw new \RuntimeException('uncaught');

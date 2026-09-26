@@ -159,7 +159,7 @@ fn cycles_are_broken_without_a_diagnostic() {
     assert!(phpdiag.is_empty(), "cycles must raise nothing: {phpdiag:?}");
 }
 
-/// A throwing jsonSerialize() must not escape log(): the record still reaches the host.
+/// A throwing jsonSerialize() must not escape log(): the record still reaches the log.
 #[test]
 fn log_survives_a_throwing_json_serializer() {
     let (level, msg, ctx) = app_record("app_logger/app-logger-throwing-serializer.php");

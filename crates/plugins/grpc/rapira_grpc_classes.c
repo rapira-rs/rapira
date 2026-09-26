@@ -169,7 +169,7 @@ void rapira_grpc_register_classes(void) {
             grpc_response_metadata);
 
     rapira_ce_internal_grpc_dispatcher->default_object_handlers =
-        &rapira_host_handlers;
+        &rapira_dispatcher_handlers;
 
     rapira_ce_internal_grpc_dispatcher_info->create_object =
         rapira_dispatcher_info_create;

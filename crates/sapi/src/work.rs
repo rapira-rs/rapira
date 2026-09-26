@@ -13,13 +13,13 @@ pub(crate) const INTAKE_WAIT: Duration = Duration::from_secs(30);
 pub trait Held {
     /// The worker committed the outcome, or discarded the unit.
     fn finalized(&self) -> bool;
-    /// The host no longer takes an outcome: Work::isCancelled().
-    fn host_closed(&self) -> bool;
+    /// The unit takes no outcome: the client left, or the plugin closed the unit. Work::isCancelled().
+    fn client_closed(&self) -> bool;
     fn discard(&mut self);
 
     /// Work::isFinalized().
     fn is_finalized(&self) -> bool {
-        self.finalized() || self.host_closed()
+        self.finalized() || self.client_closed()
     }
 }
 

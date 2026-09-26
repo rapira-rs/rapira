@@ -45,7 +45,7 @@ zval *rapira_symtable_str_find(HashTable *ht, const char *str, size_t len);
 // ZVAL_OBJ_COPY is a macro; the shim writes the case `name` of the enum `ce` into `dst` with a new reference
 void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name);
 
-// Mode in types.rs, mapped in start.rs (start_worker) - keep in sync
+// Mode in rapira_config (crates/config/src/pool.rs), mapped in start.rs (start_worker) - keep in sync
 enum {
     RAPIRA_MODE_CLASSIC = 0,
     RAPIRA_MODE_WORKER = 1,
@@ -90,7 +90,7 @@ extern zend_class_entry *rapira_ce_unix_address;
 
 // rapira_register_classes fills both before the plugin parts register.
 // A plugin's Dispatcher class: std handlers without clone.
-extern zend_object_handlers rapira_host_handlers;
+extern zend_object_handlers rapira_dispatcher_handlers;
 // A plugin's DispatcherInfo class: the rapira_dispatcher_info_obj layout, with rapira_dispatcher_info_create.
 extern zend_object_handlers rapira_info_handlers;
 zend_object *rapira_dispatcher_info_create(zend_class_entry *ce);

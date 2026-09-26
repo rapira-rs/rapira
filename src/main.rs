@@ -15,9 +15,8 @@ mod worker;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-/// PHP application server driven by native extensions.
 #[derive(Parser)]
-#[command(name = "rapira", version)]
+#[command(name = "rapira", version, about)]
 struct Cli {
     #[command(subcommand)]
     command: Option<Commands>,
@@ -111,6 +110,7 @@ fn pool_run(
                 entrypoint: pool.entrypoint.clone(),
                 max_requests: pool.max_requests,
                 grace: supervisor.process_control_timeout,
+                drain_grace: supervisor.drain_grace(),
             },
         },
         pool_config(name, pool, listeners),
@@ -127,12 +127,12 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let mut plugins: Vec<(Box<dyn Plugin>, PoolSettings)> = Vec::new();
     if let Some(http) = settings.http {
         let pool: PoolSettings = http.pool.clone();
-        let plugin = rapira_http::Server::from_settings(http, &settings.supervisor);
+        let plugin = rapira_http::Server::from_settings(http);
         plugins.push((Box::new(plugin), pool));
     }
     if let Some(grpc) = settings.grpc {
         let pool: PoolSettings = grpc.pool.clone();
-        let plugin = rapira_grpc::Server::from_settings(grpc, &settings.supervisor)?;
+        let plugin = rapira_grpc::Server::from_settings(grpc)?;
         plugins.push((Box::new(plugin), pool));
     }
 
@@ -220,7 +220,6 @@ mod tests {
             reflection: false,
             default_timeout: None,
             max_timeout: None,
-            drain_grace: std::time::Duration::from_secs(5),
             keepalive_interval: std::time::Duration::from_secs(10),
             keepalive_timeout: std::time::Duration::from_secs(10),
             interceptors: Vec::new(),

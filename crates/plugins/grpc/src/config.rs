@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use rapira_config::{
-    ConfigCtx, ListenAddr, Mode, PoolSection, PoolSettings, SupervisorSettings, check_entrypoint,
-    nonzero_timeout, parse_listen, resolve_pool,
+    ConfigCtx, ListenAddr, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout,
+    parse_listen, resolve_pool,
 };
 use serde::Deserialize;
 
@@ -112,7 +112,7 @@ fn optional_timeout(key: &str, secs: Option<u64>) -> Result<Option<Duration>> {
 
 impl Server {
     /// The schema loads here, in the master, so a bad descriptor set or service name stops the boot before the fork.
-    pub fn from_settings(settings: Settings, supervisor: &SupervisorSettings) -> Result<Self> {
+    pub fn from_settings(settings: Settings) -> Result<Self> {
         let schema = Arc::new(Schema::load(
             &settings.descriptor_set,
             settings.services.as_deref(),
@@ -123,7 +123,6 @@ impl Server {
             reflection: settings.reflection,
             default_timeout: settings.default_timeout,
             max_timeout: settings.max_timeout,
-            drain_grace: supervisor.drain_grace(),
             keepalive_interval: Duration::from_secs(10),
             keepalive_timeout: Duration::from_secs(10),
             interceptors: settings.interceptors,

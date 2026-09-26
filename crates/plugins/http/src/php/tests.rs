@@ -147,7 +147,7 @@ fn view_normalizes_protocol_and_empty_unix_path() {
     ));
 }
 
-/// A one-shot write carries its computed length on the Head frame; a streamed write leaves framing to the front.
+/// A one-shot write carries its computed length on the Head frame; a streamed write leaves framing to the plugin.
 #[test]
 fn head_frame_length_follows_the_write_shape() {
     use rapira_sapi::types::Frame;
@@ -165,7 +165,7 @@ fn head_frame_length_follows_the_write_shape() {
     let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
         panic!("head first");
     };
-    assert_eq!(content_length, None, "streaming: the front frames");
+    assert_eq!(content_length, None, "streaming: the plugin frames");
 }
 
 /// Over-declared length sends the fitting prefix and seals untruncated, so later writes see Finalized.
@@ -210,7 +210,7 @@ fn repeated_content_length_is_a_bad_field() {
     assert_eq!(st.stage, Stage::Open, "a rejected head commits nothing");
 }
 
-/// An interim head emits at once with its fields as written (the front frames the wire) and leaves the final-head slot open.
+/// An interim head emits at once with its fields as written (the plugin frames the wire) and leaves the final-head slot open.
 #[test]
 fn interim_head_emits_its_fields_and_leaves_the_final_head_open() {
     use rapira_sapi::types::Frame;

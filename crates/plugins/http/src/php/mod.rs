@@ -238,7 +238,7 @@ impl Held for ExchangeState {
         self.stage == Stage::Finalized
     }
 
-    fn host_closed(&self) -> bool {
+    fn client_closed(&self) -> bool {
         self.discarded
             || (self.stage != Stage::Finalized
                 && self.ctx.sender.as_ref().is_some_and(Sender::is_closed))

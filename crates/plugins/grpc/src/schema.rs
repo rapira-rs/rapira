@@ -59,8 +59,8 @@ pub(crate) struct Method {
     pub(crate) idempotent: bool,
 }
 
-/// The services the host answers itself: never routed to PHP.
-const HOST_SERVICES: [&str; 3] = [
+/// The services the plugin answers itself: never routed to PHP.
+const PLUGIN_SERVICES: [&str; 3] = [
     connectrpc_health::HEALTH_SERVICE_NAME,
     connectrpc_reflection::SERVER_REFLECTION_SERVICE_NAME,
     connectrpc_reflection::SERVER_REFLECTION_V1ALPHA_SERVICE_NAME,
@@ -98,9 +98,9 @@ impl Schema {
             Some(names) => {
                 let mut selected = Vec::with_capacity(names.len());
                 for name in names {
-                    if HOST_SERVICES.contains(&name.trim_start_matches('.')) {
+                    if PLUGIN_SERVICES.contains(&name.trim_start_matches('.')) {
                         return Err(anyhow!(
-                            "grpc.services entry `{name}` is served by the host"
+                            "grpc.services entry `{name}` is served by the plugin"
                         ));
                     }
                     let service = pool.service_by_name(name).ok_or_else(|| {
@@ -145,11 +145,11 @@ impl Schema {
                         })
                     })
                     .filter(|s| {
-                        let host = HOST_SERVICES.contains(&s.full_name());
-                        if host {
-                            tracing::debug!(target: "grpc", "{} is the host's own service; not routed to PHP", s.full_name());
+                        let own = PLUGIN_SERVICES.contains(&s.full_name());
+                        if own {
+                            tracing::debug!(target: "grpc", "{} is the plugin's own service; not routed to PHP", s.full_name());
                         }
-                        !host
+                        !own
                     })
                     .collect();
                 if selected.is_empty() {

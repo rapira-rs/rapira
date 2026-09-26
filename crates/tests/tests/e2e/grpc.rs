@@ -42,6 +42,7 @@ impl Server {
             Box::new(server),
             rapira.sink(),
             std::time::Duration::from_secs(30),
+            std::time::Duration::from_secs(25),
             script,
             Mode::Dispatcher,
         )?;
@@ -183,7 +184,7 @@ fn grpc_pool_serves_from_rapira_toml() {
             reply: r#"{"text":"hi"}"#,
         },
         Case {
-            name: "the host answers health",
+            name: "the plugin answers health",
             path: "/grpc.health.v1.Health/Check",
             body: "{}",
             reply: r#"{"status":"SERVING"}"#,

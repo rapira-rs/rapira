@@ -62,7 +62,7 @@ fn chunked_stream_preserves_keepalive() {
     assert_eq!(status, 200);
 }
 
-/// A PHP-committed 1xx never reaches the wire: the front drops interim heads, so the first head block is the final 200 and the response is otherwise untouched.
+/// A PHP-committed 1xx never reaches the wire: the plugin drops interim heads, so the first head block is the final 200 and the response is otherwise untouched.
 #[test]
 fn interim_heads_never_reach_the_wire() {
     let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
@@ -282,6 +282,7 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
         Box::new(server),
         rapira.sink(),
         std::time::Duration::from_secs(30),
+        std::time::Duration::from_secs(25),
         script,
         Mode::Dispatcher,
     )?;
