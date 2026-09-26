@@ -11,7 +11,7 @@ use rapira_sapi::{Frame, Mode};
 use tests::wire::submit;
 use tests::{drain, drain_resp, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn};
+use crate::harness::{Server, Spawn, slot_line};
 
 /// Read budget of a raw socket exchange.
 const READ: Duration = Duration::from_secs(10);
@@ -638,6 +638,119 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
         spooled_files(&srv),
         Vec::<PathBuf>::new(),
         "seal unlinks both"
+    );
+    Ok(())
+}
+
+/// A malformed or over-limit multipart body answers before dispatch and never reaches PHP; an accepted body reaches PHP raw. Sources: RFC 7578 (multipart/form-data needs a boundary), RFC 9110 §8.3 (content-type is a singleton field).
+#[test]
+fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        method: &'static str,
+        content_type: &'static [&'static str],
+        body: Vec<u8>,
+        /// None: the request reaches PHP with `body` unparsed.
+        status: Option<u16>,
+    }
+    const MULTIPART: &str = "multipart/form-data; boundary=B";
+    const EVIL: &str = "multipart/form-data; boundary=EVIL";
+    let smuggled =
+        b"--EVIL\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--EVIL--".to_vec();
+    let cases = [
+        Case {
+            name: "multipart without a boundary line",
+            method: "POST",
+            content_type: &[MULTIPART],
+            body: b"no boundary here".to_vec(),
+            status: Some(400),
+        },
+        Case {
+            name: "file part over max_file_size",
+            method: "POST",
+            content_type: &[MULTIPART],
+            body: [
+                &b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\n"[..],
+                &vec![b'x'; 1024 * 1024 + 1],
+                b"\r\n--B--",
+            ]
+            .concat(),
+            status: Some(413),
+        },
+        Case {
+            name: "plain line before a repeated multipart line",
+            method: "POST",
+            content_type: &["text/plain", EVIL],
+            body: smuggled.clone(),
+            status: Some(400),
+        },
+        Case {
+            name: "multipart line before a repeated plain line",
+            method: "POST",
+            content_type: &[EVIL, "text/plain"],
+            body: smuggled,
+            status: Some(400),
+        },
+        Case {
+            name: "empty multipart body",
+            method: "POST",
+            content_type: &[MULTIPART],
+            body: Vec::new(),
+            status: None,
+        },
+        Case {
+            name: "plain body that looks like multipart",
+            method: "POST",
+            content_type: &["text/plain"],
+            body: b"--B\r\nnot really\r\n--B--".to_vec(),
+            status: None,
+        },
+        Case {
+            name: "get",
+            method: "GET",
+            content_type: &[],
+            body: Vec::new(),
+            status: None,
+        },
+    ];
+
+    // The file limit is whole MiB, so the over-limit file part is one byte over 1 MiB.
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/echo-loop-worker.php"))
+        .http_extra("[http.uploads]\ndir = \"uploads\"\nmax_file_size_mb = 1")
+        .spawn();
+    let mut accepted = 0;
+    for case in cases {
+        let mut rq = req("/");
+        rq.method = case.method.into();
+        for line in case.content_type {
+            rq.headers
+                .append(http::header::CONTENT_TYPE, HeaderValue::from_static(line));
+        }
+        rq.body = Body::Raw(Cursor::new(case.body.clone()));
+        let (status, body) = drain(submit(srv.addr, rq)?);
+        assert_eq!(
+            status,
+            case.status.unwrap_or(200),
+            "{}: {body:?}",
+            case.name
+        );
+        if case.status.is_none() {
+            // echo-loop-worker.php cannot print a parsed Multipart, so a parsed body fails the status check above.
+            let raw = String::from_utf8_lossy(&case.body);
+            assert_eq!(
+                body,
+                format!("method={} body={raw}", case.method),
+                "{}",
+                case.name
+            );
+            accepted += 1;
+        }
+    }
+    // The slot counts a unit before its response goes out, so the count is final here.
+    let slot = slot_line(&srv, "");
+    assert!(
+        slot.contains(&format!(" handled {accepted} ")),
+        "only the accepted bodies reach PHP: {slot}"
     );
     Ok(())
 }
