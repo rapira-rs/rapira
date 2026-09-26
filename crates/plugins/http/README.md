@@ -8,7 +8,7 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 
 - `name()` returns `http`: the TOML table and the dispatcher name that PHP sees.
 - `modes()` accepts the classic, worker and dispatcher modes.
-- `php()` returns `PHP_PART`: the MINIT function that registers the `Rapira\Http` classes, and the dispatcher classes of dispatcher mode.
+- `php()` returns `PHP_PART`, the `PhpPart` of the plugin: `register`, the function that MINIT calls after the base classes to register the `Rapira\Http` classes, and `dispatcher`, the dispatcher classes of dispatcher mode.
 - `prepare()` runs in the master before the fork, with no runtime. It removes the spool dirs of dead workers and binds the listener with `PrepareCtx::bind`.
 - `serve()` runs in the worker on the plugin thread `rapira-http`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the sink to the PHP thread, the stop flag, the drain grace, the entrypoint and the pool mode. It returns after the stop and the drain.
 
@@ -25,6 +25,7 @@ The client gets 503 when the intake of the worker stays full for 30 seconds, and
 
 ## Crate layout
 
+- `Cargo.toml`: depends on `rapira_sapi`, `rapira_net`, `rapira_config` and `rapira_static_files`. `rapira_php_build` is a build dependency.
 - `build.rs`: compiles the C files with `rapira_php_build::compile`, against the PHP headers and the `rapira_sapi.h` directory from `DEP_RAPIRA_SAPI_INCLUDE`.
 - `rapira_http.stub.php`: the PHP stub of the `Rapira\Http` and `Rapira\Internal\Http` classes.
 - `rapira_http_arginfo.h`: generated from the stub by `make stubs`. Do not edit it.
@@ -43,7 +44,7 @@ The client gets 503 when the intake of the worker stays full for 30 seconds, and
 - `src/bridge.rs`: the reply body that streams the PHP frames and the `sendFile` slices, and the write timeout.
 - `src/exchange.rs`: the `Exchange` unit and its `Work` impl.
 - `src/multipart.rs`: the multipart parser and the spool dirs of dispatcher mode.
-- `src/php/`: the Rust behind the PHP methods: the class entries, `PHP_PART` and `DISPATCHER_CLASSES` (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`) and the value class constructors (`values.rs`).
+- `src/php/`: the Rust behind the PHP methods: the class entries, `PHP_PART` and `DISPATCHER_CLASSES` (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), the value class constructors (`values.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
 
 ## Middleware
 
@@ -58,11 +59,16 @@ The admission checks run before the chain. A request that fails them does not re
 To add a built-in middleware:
 
 - Put its layer in a new crate under `crates/middleware`.
+- In the root `Cargo.toml`, add the crate to the workspace `members` and to `[workspace.dependencies]`.
+- Add the crate to the dependencies in `crates/plugins/http/Cargo.toml`.
+- In `src/config.rs`, add its table to `Section`, as `r#static` is for `[http.static]`.
+- Resolve the table in `settings`, and give the result to `resolve_middleware` as a new argument.
 - Add a variant with its settings to `config::Middleware`.
-- Match its name in `resolve_middleware` in `src/config.rs`.
+- In `resolve_middleware`, match its name, add the name to the known names of the unknown-name error, and refuse a configured table that the list does not name.
+- Add its boot check to `resolve`, as `check_static_root` is for `static`.
 - Build its layer in `Server::from_settings`.
 
-`rapira_static_files::StaticFiles` is the `static` middleware. It serves files from `[http.static].root`. A miss goes to the inner service and PHP. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
+`rapira_static_files::StaticFiles` is the `static` middleware. It serves files from `[http.static].root`. A miss goes to the next layer, and to PHP when `static` is the last layer. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
 
 `StaticFiles` holds served files in memory. An entry stays fresh for one second. A rewritten file therefore reaches the client after that time. Each worker keeps its own cache of up to 16 MiB, and the cache stores no file above 256 KiB. The memory cost is 16 MiB for each process in `http.pool.processes`. A permission change does not stop the cache from serving a file. To stop it, delete the file or replace it. A restart empties the cache.
 
@@ -74,7 +80,7 @@ To add a built-in middleware:
 - Absolute-form request-targets are accepted. The authority of the target replaces `Host`, without the userinfo part. PHP sees the origin-form path and query; the request target keeps the full form. https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
 - `CONNECT` answers 501. The plugin implements no tunnels.
 - A request body that makes no read progress for `keepalive_timeout_secs` answers 408 and closes the connection.
-- `unsafe_field_names` guards the CGI variable mapping: a field name with `_` or `.` lands on the `$_SERVER` entry a `-` name owns, so such names are dropped (default) or the request answers 400 (`"reject"`).
+- `unsafe_field_names` guards the CGI variable mapping of the classic and worker modes: a field name with `_` or `.` lands on the `$_SERVER` entry a `-` name owns, so such names are dropped (default) or the request answers 400 (`"reject"`).
 - Header field names reach PHP lowercased, one entry per field line, values in wire order per name.
 
 ## Response handling
@@ -100,7 +106,7 @@ The `[http]` table. Unknown keys fail the boot.
 - `max_body_size_mb`: the request body limit. Default 8. A larger body answers 413.
 - `write_timeout_secs`: the limit for one stalled write to the client, not for the whole response. Default 30.
 - `keepalive_timeout_secs`: closes an idle keepalive connection, and limits each head read and body-frame read. Default 60.
-- `unsafe_field_names`: `"drop"` (default) or `"reject"` for header names that alias a CGI variable.
+- `unsafe_field_names`: `"drop"` (default) or `"reject"` for header names that alias a CGI variable. In dispatcher mode no `$_SERVER` mapping exists, so `"drop"` keeps the names and `"reject"` still answers 400.
 - `middleware`: the middleware names in chain order, the first listed outermost. Default: none.
 - `[http.uploads]`: the multipart limits of dispatcher mode: `dir` (default: the system temp dir), `max_file_size_mb` (2), `max_field_size_kb` (256), `max_files` (20), `max_parts` (1024), `max_part_headers` (32). This table under another mode fails the boot.
 - `[http.sendfile]`: `root`, the directory that must contain each `sendFile()` path. Default: the entrypoint directory.

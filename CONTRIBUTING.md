@@ -68,10 +68,18 @@ C sources (`*.c`, `*.h` under `crates/`) follow `.clang-format`.
 ## Plugins
 
 - A dispatcher plugin owns a pool and turns each request into a work unit that PHP pulls with `receive()`: the http plugin makes a `Rapira\Http\Exchange`, the grpc plugin makes a `Rapira\Grpc\UnaryCall`.
-- A capability plugin owns no pool: a pool enables it, each worker of that pool starts it after the fork, and PHP gets it through the second acquisition path of the contract. No capability plugin exists yet.
+- A capability plugin owns no pool: a pool enables it, each worker of that pool starts it after the fork, and PHP gets it through the second acquisition path of the contract. No capability plugin exists.
 - A middleware (http) or an interceptor (grpc) is a tower layer that one plugin applies around its inner service in config order. It never touches PHP.
 
-A plugin is one crate under `crates/plugins` that implements `rapira_sapi::plugin::Plugin`. It owns its config table, its PHP stub, its C method shells, the Rust behind those methods, its work unit and its transport. The root adds the table to `FileConfig` in `src/settings.rs`, and adds the plugin and its `PhpPart` to `serve` in `src/main.rs`. The two plugin READMEs describe the crate layout.
+A plugin is one crate under `crates/plugins` that implements `rapira_sapi::plugin::Plugin`. It owns its config table, its PHP stub, its C method shells, the Rust behind those methods, its work unit and its transport. The two plugin READMEs describe the crate layout.
+
+To add a plugin:
+
+- Create its crate under `crates/plugins`.
+- In the root `Cargo.toml`, add the crate to the workspace `members`, to `[workspace.dependencies]` and to the `[dependencies]` of `rapira_core`.
+- In `src/settings.rs`, add its table to `FileConfig` and its settings to `Settings`.
+- In `settings` in `src/settings.rs`, call its `resolve`, and add its table to the check that refuses a file with no plugin table.
+- In `serve` in `src/main.rs`, build the plugin with its pool, and add its `PhpPart` to the `boot_master` call.
 
 ## Pull requests
 

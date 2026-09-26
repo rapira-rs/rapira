@@ -8,7 +8,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 
 - `name()` returns `grpc`: the TOML table and the dispatcher name that PHP sees.
 - `modes()` accepts dispatcher mode only.
-- `php()` returns `PHP_PART`: the MINIT function that registers the `Rapira\Grpc` classes, and the dispatcher classes.
+- `php()` returns `PHP_PART`, the `PhpPart` of the plugin: `register`, the function that MINIT calls after the base classes to register the `Rapira\Grpc` classes, and `dispatcher`, the dispatcher classes.
 - `prepare()` runs in the master before the fork, with no runtime. It sets the service list that `getServices()` returns, binds the listener with `PrepareCtx::bind`, and builds the routes that the plugin answers without PHP: health, and reflection when it is on.
 - `serve()` runs in the worker on the plugin thread `rapira-grpc`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the sink to the PHP thread, the stop flag and the drain grace. It returns after the stop and the drain.
 
@@ -23,6 +23,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 
 ## Crate layout
 
+- `Cargo.toml`: depends on `rapira_sapi`, `rapira_net`, `rapira_config` and the connect-rust crates. `rapira_php_build` is a build dependency.
 - `build.rs`: compiles the C files with `rapira_php_build::compile`, against the PHP headers and the `rapira_sapi.h` directory from `DEP_RAPIRA_SAPI_INCLUDE`.
 - `rapira_grpc.stub.php`: the PHP stub of the `Rapira\Grpc` and `Rapira\Internal\Grpc` classes.
 - `rapira_grpc_arginfo.h`: generated from the stub by `make stubs`. Do not edit it.
