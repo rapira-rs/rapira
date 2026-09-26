@@ -1,9 +1,8 @@
 // https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
 
 use std::io::Write;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use crate::api::Rejected;
 use crate::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
 use memchr::memmem;
 
@@ -30,9 +29,18 @@ impl Default for Limits {
     }
 }
 
+/// The spool dir of this worker process under `base`. The master sweeps the dirs whose process is gone.
+pub fn worker_spool_dir(base: &Path) -> PathBuf {
+    base.join(format!("rapira-spool-{}", std::process::id()))
+}
+
 #[derive(Debug)]
-pub(super) enum ParseError {
-    Rejected(Rejected),
+pub enum ParseError {
+    /// The body is malformed (400) or over a limit (413).
+    Rejected {
+        status: u16,
+        reason: String,
+    },
     Io(std::io::Error),
 }
 
@@ -43,17 +51,17 @@ impl From<std::io::Error> for ParseError {
 }
 
 fn bad(reason: impl Into<String>) -> ParseError {
-    ParseError::Rejected(Rejected {
+    ParseError::Rejected {
         status: 400,
         reason: reason.into(),
-    })
+    }
 }
 
 fn over(reason: impl Into<String>) -> ParseError {
-    ParseError::Rejected(Rejected {
+    ParseError::Rejected {
         status: 413,
         reason: reason.into(),
-    })
+    }
 }
 
 fn trim_ows(mut b: &[u8]) -> &[u8] {
@@ -66,13 +74,13 @@ fn trim_ows(mut b: &[u8]) -> &[u8] {
     b
 }
 
-pub(super) fn is_multipart(content_type: &[u8]) -> bool {
+pub fn is_multipart(content_type: &[u8]) -> bool {
     let media = content_type.split(|&b| b == b';').next().unwrap_or(b"");
     trim_ows(media).eq_ignore_ascii_case(b"multipart/form-data")
 }
 
 /// Case-insensitive, quoted form unquoted, unquoted form terminated by `,` (php-src rfc1867.c:707-751), capped at the RFC 2046 §5.1.1 70 characters.
-pub(super) fn boundary(content_type: &[u8]) -> Result<Vec<u8>, ParseError> {
+pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, ParseError> {
     for seg in content_type.split(|&b| b == b';').skip(1) {
         let Some(eq) = memchr::memchr(b'=', seg) else {
             continue;
@@ -163,11 +171,7 @@ fn next_delimiter(
 
 /// Parses a non-empty body; the empty-body case lands on the contract's string arm (`$body === ''`) instead.
 /// https://www.rfc-editor.org/rfc/rfc7578
-pub(super) fn parse(
-    body: &[u8],
-    boundary: &[u8],
-    limits: &Limits,
-) -> Result<MultipartBody, ParseError> {
+pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartBody, ParseError> {
     let delim: Vec<u8> = [b"--".as_slice(), boundary].concat();
     let finder = memmem::Finder::new(&delim);
 
@@ -391,9 +395,10 @@ mod tests {
         parse(body, b"B", &limits()).unwrap_or_else(|_| panic!("expected a parse"))
     }
 
-    fn rejected(body: &[u8], l: &Limits) -> Rejected {
+    /// The status of the rejection.
+    fn rejected(body: &[u8], l: &Limits) -> u16 {
         match parse(body, b"B", l) {
-            Err(ParseError::Rejected(r)) => r,
+            Err(ParseError::Rejected { status, .. }) => status,
             Err(ParseError::Io(e)) => panic!("io error: {e}"),
             Ok(_) => panic!("expected a rejection"),
         }
@@ -482,11 +487,11 @@ mod tests {
         assert_eq!(mb.files.len(), 1);
         assert_eq!(mb.files[0].client_filename, b"");
 
-        let r = rejected(
+        let status = rejected(
             b"--B\r\ncontent-disposition: form-data; name=\"\"\r\n\r\nv\r\n--B--",
             &limits(),
         );
-        assert_eq!(r.status, 400);
+        assert_eq!(status, 400);
     }
 
     #[test]
@@ -500,14 +505,16 @@ mod tests {
             b"--B\r\ncontent-disposition: form-data; name=a; name=b\r\n\r\nv\r\n--B--",
             b"--B\r\nheaderwithoutseparator",
         ] {
-            assert_eq!(rejected(body, &l).status, 400, "body: {body:?}");
+            assert_eq!(rejected(body, &l), 400, "body: {body:?}");
         }
-        assert!(
-            matches!(boundary(b"multipart/form-data"), Err(ParseError::Rejected(r)) if r.status == 400)
-        );
-        assert!(
-            matches!(boundary(b"multipart/form-data; boundary="), Err(ParseError::Rejected(r)) if r.status == 400)
-        );
+        assert!(matches!(
+            boundary(b"multipart/form-data"),
+            Err(ParseError::Rejected { status: 400, .. })
+        ));
+        assert!(matches!(
+            boundary(b"multipart/form-data; boundary="),
+            Err(ParseError::Rejected { status: 400, .. })
+        ));
     }
 
     #[test]
@@ -518,8 +525,7 @@ mod tests {
             rejected(
                 b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\ntoolong\r\n--B--",
                 &l
-            )
-            .status,
+            ),
             413
         );
         let mut l = limits();
@@ -528,8 +534,7 @@ mod tests {
             rejected(
                 b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\ntoolong\r\n--B--",
                 &l
-            )
-            .status,
+            ),
             413
         );
         let mut l = limits();
@@ -538,8 +543,7 @@ mod tests {
             rejected(
                 b"--B\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--B\r\ncontent-disposition: form-data; name=b\r\n\r\n2\r\n--B--",
                 &l
-            )
-            .status,
+            ),
             413
         );
         let mut l = limits();
@@ -548,8 +552,7 @@ mod tests {
             rejected(
                 b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\nx\r\n--B--",
                 &l
-            )
-            .status,
+            ),
             413
         );
     }
@@ -563,7 +566,7 @@ mod tests {
         l.max_field_size = 1;
         let body = b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\nDATA\r\n\
 --B\r\ncontent-disposition: form-data; name=x\r\n\r\ntoolong\r\n--B--";
-        assert_eq!(rejected(body, &l).status, 413);
+        assert_eq!(rejected(body, &l), 413);
         let leaked: Vec<_> = std::fs::read_dir(dir.path())
             .unwrap()
             .filter_map(|e| e.ok().map(|e| e.path()))

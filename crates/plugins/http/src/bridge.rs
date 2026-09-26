@@ -6,7 +6,8 @@ use std::time::Duration;
 
 use bytes::Bytes;
 use rapira_sapi::Frame;
-use rapira_sapi::api::{BoxError, Reply};
+use rapira_sapi::middleware::BoxError;
+use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
 
 use crate::handler::InflightReqCount;
@@ -18,7 +19,7 @@ pub(crate) struct ConnectionState {
 }
 
 pub(crate) struct ReplyBody {
-    reply: Option<Reply>,
+    reply: Option<Receiver<Frame>>,
     declared_cl: Option<u64>,
     sent: u64,
     staged: Option<Frame>,
@@ -51,7 +52,7 @@ fn read_slice(file: std::fs::File, off: u64, want: usize) -> FileRead {
 
 impl ReplyBody {
     pub(crate) fn new(
-        reply: Reply,
+        reply: Receiver<Frame>,
         declared_cl: Option<u64>,
         guard: Arc<InflightReqCount>,
         staged: Option<Frame>,
@@ -141,7 +142,7 @@ impl http_body::Body for ReplyBody {
                 let Some(reply) = this.reply.as_mut() else {
                     return Poll::Ready(None);
                 };
-                std::task::ready!(reply.poll_next(cx))
+                std::task::ready!(reply.poll_recv(cx))
             };
             match ev {
                 None => {
@@ -204,13 +205,13 @@ impl Drop for ReplyBody {
 /// Consumes the reply to End. A connection close cancels the reply unless a flush past the guard's watermark has written the last response byte to the socket.
 /// After that flush the drain holds the reply until PHP sends End, so a delivered response never reports cancellation to PHP.
 pub(crate) fn spawn_drain(
-    mut reply: Reply,
+    mut reply: Receiver<Frame>,
     mut closed: watch::Receiver<ConnectionState>,
     guard: Arc<InflightReqCount>,
 ) {
     // A buffered reply queues End behind the head or the last chunk, so consume it here.
     let mut cx = Context::from_waker(std::task::Waker::noop());
-    if let Poll::Ready(Some(Frame::End { .. }) | None) = reply.poll_next(&mut cx) {
+    if let Poll::Ready(Some(Frame::End { .. }) | None) = reply.poll_recv(&mut cx) {
         return;
     }
     tokio::spawn(async move {
@@ -228,8 +229,8 @@ pub(crate) fn spawn_drain(
     });
 }
 
-async fn drain(reply: &mut Reply) {
-    while let Some(ev) = reply.next().await {
+async fn drain(reply: &mut Receiver<Frame>) {
+    while let Some(ev) = reply.recv().await {
         if matches!(ev, Frame::End { .. }) {
             break;
         }
@@ -348,16 +349,16 @@ mod tests {
     use tokio::sync::mpsc;
 
     /// A reply that yields `events`; it stays open while the caller holds the sender.
-    fn open_reply(events: Vec<Frame>) -> (Reply, mpsc::Sender<Frame>) {
+    fn open_reply(events: Vec<Frame>) -> (Receiver<Frame>, mpsc::Sender<Frame>) {
         let (tx, rx) = mpsc::channel(4);
         for ev in events {
             tx.try_send(ev).unwrap();
         }
-        (Reply::new(rx), tx)
+        (rx, tx)
     }
 
     /// A reply that yields `events` and then closes.
-    fn reply(events: Vec<Frame>) -> Reply {
+    fn reply(events: Vec<Frame>) -> Receiver<Frame> {
         open_reply(events).0
     }
 
@@ -532,14 +533,18 @@ mod tests {
         }
     }
 
-    /// A drain parked on an empty reply after one chunk, with the request still counted.
+    /// A drain parked on an empty reply after two chunks, with the request still counted.
     async fn parked_drain() -> Drain {
         let inflight = Arc::new(AtomicUsize::new(0));
         let guard = Arc::new(InflightReqCount::init(&inflight));
         let weak = Arc::downgrade(&guard);
-        let (reply, events) = open_reply(Vec::new());
+        let (reply, events) = open_reply(vec![chunk("queued")]);
         let (state, state_rx) = watch::channel(ConnectionState::default());
         spawn_drain(reply, state_rx, guard);
+        assert!(
+            !events.is_closed(),
+            "a chunk at the head must hand the reply to the drain task"
+        );
         events.send(chunk("discarded")).await.unwrap();
         // The drain task takes the chunk and parks on the empty reply.
         tokio::time::timeout(Duration::from_secs(5), async {
@@ -620,7 +625,7 @@ mod tests {
     }
 
     /// One chunk and no End, the shape of an unfinalized PHP exchange; the sender closes when the reply is dropped.
-    fn parked_source() -> (Reply, mpsc::Sender<Frame>) {
+    fn parked_source() -> (Receiver<Frame>, mpsc::Sender<Frame>) {
         open_reply(vec![chunk("abc")])
     }
 
@@ -694,10 +699,6 @@ mod tests {
         let mut b = ReplyBody::new(reply, Some(3), guard, None, state_rx);
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "abc");
         drop(b);
-        assert!(
-            !events.is_closed(),
-            "drop must hand the pending reply to the drain task"
-        );
         // The paused clock auto-advances once every task is idle, so the timeout proves the drain kept the reply.
         assert!(
             tokio::time::timeout(Duration::from_secs(1), events.closed())

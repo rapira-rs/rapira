@@ -48,9 +48,9 @@ fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
     init_log_capture();
     captured().clear();
 
-    let r = Rapira::start(Mode::Worker(fixture(name)), None)?;
+    let r = Rapira::start(Mode::Worker, fixture(name), None)?;
     let h = r.sink();
-    let (s1, b1) = drain(tests::submit(&h, req("/?step=leak", name))?);
+    let (s1, b1) = drain(tests::submit(&h, req("/?step=leak"))?);
     if b1 == "skip" {
         drop(h);
         drop(r);
@@ -62,7 +62,7 @@ fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
         (200, "imap:leaked:1"),
         "the leak request must push one entry and keep it undrained"
     );
-    let (s2, b2) = drain(tests::submit(&h, req("/", name))?);
+    let (s2, b2) = drain(tests::submit(&h, req("/"))?);
     assert_eq!(
         (s2, b2.as_str()),
         (200, "imap:errors:empty"),

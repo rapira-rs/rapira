@@ -5,7 +5,7 @@ use std::path::PathBuf;
 use bytes::Bytes;
 use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Empty};
-use rapira_sapi::api::{
+use rapira_sapi::middleware::{
     BoxError, BoxFuture, HttpRequest, HttpResponse, Middleware, Next, empty_body,
 };
 use tower_http::services::ServeDir;
@@ -123,7 +123,8 @@ impl Middleware for StaticFiles {
 mod tests {
     use super::*;
     use http_body_util::Full;
-    use rapira_sapi::api::{Addr, Handler, Peer, Protocol};
+    use rapira_sapi::Addr;
+    use rapira_sapi::middleware::{Handler, Peer, Protocol};
     use std::net::SocketAddr;
     use std::sync::Arc;
     use std::time::{Duration, SystemTime};

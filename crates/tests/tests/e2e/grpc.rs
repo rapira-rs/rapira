@@ -1,9 +1,9 @@
 use std::net::SocketAddr;
 
 use http::Method;
+use rapira_net::{ListenAddr, PrepareCtx};
 use rapira_sapi::Rapira;
-use rapira_sapi::api::{ListenAddr, PrepareCtx};
-use rapira_sapi::runtime::ExtensionRuntime;
+use rapira_sapi::plugin::{Mode, Plugin as _, run_plugin};
 use serde_json::Value;
 use tests::grpc::{Conn, ECHO_PATH as ECHO, Fields, Wire, config, envelope, fields, tcp_addr};
 
@@ -21,25 +21,31 @@ fn echo_request(text: &str) -> Vec<u8> {
 }
 
 /// A rapira_grpc server in this process. `echo-worker.php` answers.
-struct Host {
+struct Server {
     rapira: Rapira,
-    running: rapira_sapi::runtime::Running,
+    running: rapira_sapi::plugin::Running,
     tcp: ListenAddr,
     _prepared: PrepareCtx,
 }
 
-impl Host {
-    fn start() -> anyhow::Result<Host> {
-        let mut host = ExtensionRuntime::new();
-        host.register::<rapira_grpc::Server>(config(ListenAddr::Tcp(([127, 0, 0, 1], 0).into())));
+impl Server {
+    fn start() -> anyhow::Result<Server> {
+        let mut server =
+            rapira_grpc::Server::init(config(ListenAddr::Tcp(([127, 0, 0, 1], 0).into())));
         let mut prepared = PrepareCtx::new();
-        host.prepare_all(&mut prepared)?;
+        server.prepare(&mut prepared)?;
         let tcp = ListenAddr::Tcp(tcp_addr(&prepared, 0));
 
         let script = fixture_path("grpc/echo-worker.php");
         let rapira = tests::start_grpc(script.clone())?;
-        let running = host.run(&rapira, script);
-        Ok(Host {
+        let running = run_plugin(
+            Box::new(server),
+            rapira.sink(),
+            std::time::Duration::from_secs(30),
+            script,
+            Mode::Dispatcher,
+        )?;
+        Ok(Server {
             rapira,
             running,
             tcp,
@@ -48,13 +54,10 @@ impl Host {
     }
 
     fn stop(self) -> anyhow::Result<()> {
-        let outcomes = self.running.stop();
+        self.running.stop();
+        let outcome = self.running.join();
         drop(self.rapira);
-        anyhow::ensure!(
-            outcomes.iter().all(Result::is_ok),
-            "gRPC shutdown: {outcomes:?}"
-        );
-        Ok(())
+        outcome.map_err(|e| e.context("gRPC shutdown"))
     }
 }
 
@@ -105,12 +108,12 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
     let _php = tests::php_lock();
     tests::init_log_capture();
     tests::captured().clear();
-    let host = Host::start()?;
+    let server = Server::start()?;
     let rt = runtime();
     let result = (|| -> anyhow::Result<()> {
         for case in cases {
             let got = rt.block_on(async {
-                let mut conn = Conn::open(&host.tcp, Wire::H2).await?;
+                let mut conn = Conn::open(&server.tcp, Wire::H2).await?;
                 conn.grpc(ECHO, case.metadata, &envelope(&echo_request(case.text)))
                     .await
             })?;
@@ -142,7 +145,7 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
     })();
     // The client runtime holds the client connections. Dropping it closes them, so the drain does not wait on them.
     drop(rt);
-    let stopped = host.stop();
+    let stopped = server.stop();
     result.and(stopped)
 }
 

@@ -1,5 +1,5 @@
 use http::HeaderMap;
-use rapira_sapi::api::{RpcStatus, UnaryReply};
+use rapira_sapi::grpc::{RpcStatus, UnaryReply};
 use rapira_sapi::{Mode, Rapira};
 use std::sync::mpsc;
 use std::time::Duration;
@@ -13,11 +13,12 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
 
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
         let r = Rapira::start(
-            Mode::Dispatcher(fixture("failboot_worker_tests/failboot-worker.php")),
+            Mode::Dispatcher,
+            fixture("failboot_worker_tests/failboot-worker.php"),
             Some(rapira_sapi::http::DISPATCHER_CLASSES),
         )?;
         let h = r.sink();
-        let rx = tests::submit(&h, req("/", "failboot_worker_tests/failboot-worker.php"))?;
+        let rx = tests::submit(&h, req("/"))?;
         drop(h);
         let (status, body) = drain(rx);
         drop(r);
@@ -66,16 +67,14 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
 
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
         let r = Rapira::start(
-            Mode::Dispatcher(fixture("failboot_worker_tests/failboot-worker.php")),
+            Mode::Dispatcher,
+            fixture("failboot_worker_tests/failboot-worker.php"),
             Some(rapira_sapi::http::DISPATCHER_CLASSES),
         )?;
         let h = r.sink();
         let mut statuses = Vec::new();
         for _ in 0..5 {
-            let (s, _) = drain(tests::submit(
-                &h,
-                req("/", "failboot_worker_tests/failboot-worker.php"),
-            )?);
+            let (s, _) = drain(tests::submit(&h, req("/"))?);
             statuses.push(s);
         }
         let unhealthy = r.scoreboard().expect("private scoreboard slot").unhealthy;

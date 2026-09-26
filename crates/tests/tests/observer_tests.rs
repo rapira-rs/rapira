@@ -15,25 +15,20 @@ fn observer_lock() -> std::sync::MutexGuard<'static, ()> {
 fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
     let _guard = observer_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("observer_tests/observer-bailout.php")),
+        Mode::Worker,
+        fixture("observer_tests/observer-bailout.php"),
         None,
     )?;
     let h = r.sink();
 
-    let (_, probe) = drain(tests::submit(
-        &h,
-        req("/?mode=ok", "observer_tests/observer-bailout.php"),
-    )?);
+    let (_, probe) = drain(tests::submit(&h, req("/?mode=ok"))?);
     if probe.contains("skip") {
         drop(h);
         drop(r);
         return Ok(());
     }
 
-    let (_, b1) = drain(tests::submit(
-        &h,
-        req("/?mode=fatal", "observer_tests/observer-bailout.php"),
-    )?);
+    let (_, b1) = drain(tests::submit(&h, req("/?mode=fatal"))?);
     let mut pos = 0;
     for marker in ["<outer>", "<inner>", "</inner>", "</outer>"] {
         let i = b1[pos..].find(marker).unwrap_or_else(|| {
@@ -49,10 +44,7 @@ fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
         );
     }
 
-    let (_, b2) = drain(tests::submit(
-        &h,
-        req("/?mode=ok", "observer_tests/observer-bailout.php"),
-    )?);
+    let (_, b2) = drain(tests::submit(&h, req("/?mode=ok"))?);
     assert!(
         b2.contains("</outer>") && b2.contains("ok"),
         "worker survives, next request balanced (got {b2:?})"

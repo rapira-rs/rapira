@@ -1,8 +1,10 @@
-use rapira_sapi::api::{Peer, Request};
+use rapira_sapi::Request;
+use rapira_sapi::middleware::Peer;
+use rapira_sapi::types::Body;
 
 use crate::Config;
 
-/// Moves the header map out of `parts`.
+/// Moves the header map out of `parts`. The body stays raw: the handler parses multipart.
 pub(crate) fn build(
     parts: &mut http::request::Parts,
     authority: Option<Vec<u8>>,
@@ -15,6 +17,7 @@ pub(crate) fn build(
         http::Version::HTTP_10 => "HTTP/1.0".to_owned(),
         v => format!("{v:?}"),
     };
+    let headers = std::mem::take(&mut parts.headers);
     Request {
         method: parts.method.as_str().to_owned(),
         // Origin-form view for every target form. Display restores the leading slash
@@ -41,15 +44,19 @@ pub(crate) fn build(
         server_port: cfg.server_port,
         tls: None,
         received_at: Some(peer.received_at),
-        headers: std::mem::take(&mut parts.headers),
-        body,
+        content_type: headers
+            .get(http::header::CONTENT_TYPE)
+            .map(|v| v.as_bytes().to_vec()),
+        content_length: body.len() as i64,
+        body: Body::Raw(std::io::Cursor::new(body)),
+        headers,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapira_sapi::api::Addr;
+    use rapira_sapi::Addr;
 
     fn peer() -> Peer {
         Peer {

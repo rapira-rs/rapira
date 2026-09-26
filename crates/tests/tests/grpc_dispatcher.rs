@@ -1,7 +1,7 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use rapira_sapi::api::{Addr, RpcProtocol, RpcStatus, UnaryReply};
-use rapira_sapi::{Mode, Rapira};
+use rapira_sapi::grpc::{RpcProtocol, RpcStatus, UnaryReply};
+use rapira_sapi::{Addr, Mode, Rapira};
 use serde_json::{Value, json};
 use tests::{
     Fields, app_results, assert_case_records, call, captured, dispatcher_record, fields, fixture,
@@ -66,7 +66,8 @@ fn an_http_worker_after_a_grpc_worker_keeps_the_http_dispatcher() -> anyhow::Res
 
     let http = dispatcher_record(|| {
         Rapira::start(
-            Mode::Dispatcher(fixture("dispatcher/worker-singleton.php")),
+            Mode::Dispatcher,
+            fixture("dispatcher/worker-singleton.php"),
             Some(rapira_sapi::http::DISPATCHER_CLASSES),
         )
     })?;

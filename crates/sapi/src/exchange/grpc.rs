@@ -9,8 +9,8 @@ use super::respond::{Verb, throw_verb};
 use super::*;
 use crate::{
     IS_OBJECT,
-    api::{RpcProtocol, RpcStatus, UnaryCall, UnaryReply},
     grpc::Call,
+    grpc::{RpcProtocol, RpcStatus, UnaryCall, UnaryReply},
     rapira_ce_already_finalized_error, rapira_ce_grpc_context, rapira_ce_grpc_error_detail,
     rapira_ce_grpc_metadata, rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind,
     rapira_ce_grpc_protocol, rapira_ce_grpc_service_info, rapira_ce_grpc_status,

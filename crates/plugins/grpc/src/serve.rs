@@ -1,15 +1,18 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::anyhow;
+use anyhow::{Result, anyhow};
 use connectrpc::server::serve_connection;
 use connectrpc::{
     Chain, CompressionRegistry, ConnectRpcBody, ConnectRpcService, ConnectionConfig,
     ConnectionInfo, DeadlinePolicy, GzipProvider, Router,
 };
 use connectrpc_health::StaticChecker;
-use rapira_net::{Acceptor, Serve, StopHandle};
-use rapira_sapi::api::{Addr, Php, Result};
+use rapira_net::{Acceptor, Serve, Stop};
+use rapira_sapi::Addr;
+use rapira_sapi::grpc::Call;
+use rapira_sapi::plugin::Worker;
+use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 use tower::util::MapResponse;
@@ -27,7 +30,12 @@ struct Serving {
 }
 
 impl Serving {
-    fn start(php: Php, config: &Config, router: Router, health: Arc<StaticChecker>) -> Self {
+    fn start(
+        intake: Intake<Call>,
+        config: &Config,
+        router: Router,
+        health: Arc<StaticChecker>,
+    ) -> Self {
         tracing::info!(target: "grpc", "listening on {}", config.listen);
         let mut deadlines = DeadlinePolicy::new();
         if let Some(timeout) = config.default_timeout {
@@ -38,9 +46,9 @@ impl Serving {
         }
         let dispatcher = PhpDispatcher {
             schema: Arc::clone(&config.schema),
-            php,
+            intake,
         };
-        // The host routes come first, so a configured service cannot hide health or reflection.
+        // The plugin routes come first, so a configured service cannot hide health or reflection.
         let service = ConnectRpcService::new(Chain(router, dispatcher))
             .with_deadline_policy(deadlines)
             // The default registry offers every codec that the build compiles, zstd included.
@@ -127,16 +135,23 @@ fn status_in_trailers(
     response
 }
 
-/// Runs the accept loop on the calling thread, then drains the connections.
+/// Runs the accept loop on the calling thread until the stop flag, then drains the connections.
 pub(crate) fn serve(
-    php: Php,
+    intake: Intake<Call>,
     config: Config,
     prepared: Prepared,
-    stop: StopHandle,
-    rt: &tokio::runtime::Runtime,
+    worker: Worker,
 ) -> Result<()> {
-    let acceptor = Acceptor::adopt(prepared.listener, stop, rt)?;
-    let serving = Serving::start(php, &config, prepared.router, prepared.health);
-    let fatal = acceptor.run(rt, &serving);
-    rt.block_on(serving.drain(fatal, config.drain_grace))
+    let stop = Stop::new().map_err(|e| anyhow!("creating the grpc stop handle: {e}"))?;
+    let acceptor = Acceptor::adopt(prepared.listener, stop.handle(), &worker.handle)?;
+    let mut flag = worker.stop.clone();
+    worker.handle.spawn(async move {
+        let _ = flag.wait_for(|stop| *stop).await;
+        stop.stop();
+    });
+    let serving = Serving::start(intake, &config, prepared.router, prepared.health);
+    let fatal = acceptor.run(&worker.handle, &serving);
+    worker
+        .handle
+        .block_on(serving.drain(fatal, config.drain_grace))
 }

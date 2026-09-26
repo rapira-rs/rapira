@@ -6,7 +6,7 @@ use bytes::Bytes;
 use http::Method;
 use rapira_grpc::{MethodInfo, Schema, ServiceInfo};
 use tests::grpc::{
-    Answer, Conn, ECHO_PATH, ECHO_SERVICE, FakePhp, HI, Wire, config, scratch_dir, start, tcp,
+    Conn, ECHO_PATH, ECHO_SERVICE, HI, Wire, config, respond, scratch_dir, start, tcp,
 };
 
 fn load(path: &Path, services: Option<&[&str]>) -> anyhow::Result<Schema> {
@@ -165,7 +165,8 @@ async fn json_transcodes_by_descriptor() {
     let many_ids_json = format!(r#"{{"ids":[{}1]}}"#, "1,".repeat(IDS - 1));
     struct Case<'a> {
         name: &'static str,
-        answer: Answer,
+        /// The bytes PHP replies with. None: PHP echoes the message.
+        answer: Option<Bytes>,
         request: &'a [u8],
         status: u16,
         /// The bytes PHP gets. None: PHP never sees the call.
@@ -176,7 +177,7 @@ async fn json_transcodes_by_descriptor() {
     let cases = [
         Case {
             name: "json to proto and back",
-            answer: Answer::Echo,
+            answer: None,
             request: br#"{"text":"hi"}"#,
             status: 200,
             sent: Some(HI),
@@ -184,7 +185,7 @@ async fn json_transcodes_by_descriptor() {
         },
         Case {
             name: "well-known type both ways",
-            answer: Answer::Echo,
+            answer: None,
             request: br#"{"text":"hi","at":"1970-01-01T00:00:01Z"}"#,
             status: 200,
             sent: Some(&[0x0a, 0x02, 0x68, 0x69, 0x12, 0x02, 0x08, 0x01]),
@@ -192,7 +193,7 @@ async fn json_transcodes_by_descriptor() {
         },
         Case {
             name: "unknown field ignored",
-            answer: Answer::Echo,
+            answer: None,
             request: br#"{"text":"hi","x":1}"#,
             status: 200,
             sent: Some(HI),
@@ -200,7 +201,7 @@ async fn json_transcodes_by_descriptor() {
         },
         Case {
             name: "defaults omitted",
-            answer: Answer::Echo,
+            answer: None,
             request: b"{}",
             status: 200,
             sent: Some(b""),
@@ -208,7 +209,7 @@ async fn json_transcodes_by_descriptor() {
         },
         Case {
             name: "wrong json type",
-            answer: Answer::Echo,
+            answer: None,
             request: br#"{"text":1}"#,
             status: 400,
             sent: None,
@@ -216,7 +217,7 @@ async fn json_transcodes_by_descriptor() {
         },
         Case {
             name: "not json",
-            answer: Answer::Echo,
+            answer: None,
             request: b"not json",
             status: 400,
             sent: None,
@@ -224,7 +225,7 @@ async fn json_transcodes_by_descriptor() {
         },
         Case {
             name: "invalid utf-8",
-            answer: Answer::Echo,
+            answer: None,
             request: b"{\"text\":\"\xff\"}",
             status: 400,
             sent: None,
@@ -232,7 +233,7 @@ async fn json_transcodes_by_descriptor() {
         },
         Case {
             name: "undecodable reply",
-            answer: Answer::Reply(Bytes::from_static(&[0xff])),
+            answer: Some(Bytes::from_static(&[0xff])),
             request: br#"{"text":"hi"}"#,
             status: 500,
             sent: Some(HI),
@@ -240,7 +241,7 @@ async fn json_transcodes_by_descriptor() {
         },
         Case {
             name: "reply above the untrusted-input element budget",
-            answer: Answer::Reply(Bytes::from(many_ids.clone())),
+            answer: Some(Bytes::from(many_ids.clone())),
             request: br#"{"text":"hi"}"#,
             status: 200,
             sent: Some(HI),
@@ -248,39 +249,41 @@ async fn json_transcodes_by_descriptor() {
         },
     ];
 
-    let php = FakePhp::new(Answer::Echo);
-    let mut running = start(config(tcp()), php.clone()).await;
+    let (mut running, mut calls) = start(config(tcp()));
     let mut conn = Conn::open(&running.listen, Wire::Http1)
         .await
         .expect("connect");
     for case in cases {
-        php.answer(case.answer);
-        let before = php.seen();
-        let got = conn
-            .send(
-                Method::POST,
-                ECHO_PATH,
-                &[("content-type", "application/json")],
-                case.request,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
+        let send = conn.send(
+            Method::POST,
+            ECHO_PATH,
+            &[("content-type", "application/json")],
+            case.request,
+        );
+        let got = match case.sent {
+            Some(sent) => {
+                let (got, ()) = tokio::join!(send, async {
+                    let call = calls.recv().await.expect("the call reached PHP");
+                    assert_eq!(
+                        &call.message()[..],
+                        sent,
+                        "{}: the message PHP got",
+                        case.name
+                    );
+                    let reply = case
+                        .answer
+                        .clone()
+                        .unwrap_or_else(|| call.message().clone());
+                    respond(call, Ok(reply));
+                });
+                got
+            }
+            None => send.await,
+        };
+        let got = got.unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
 
         assert_eq!(got.status, case.status, "{}: {got:?}", case.name);
-        assert_eq!(
-            php.seen() - before,
-            usize::from(case.sent.is_some()),
-            "{}: the call reaching PHP",
-            case.name
-        );
-        if let Some(sent) = case.sent {
-            assert_eq!(
-                php.last_message().as_deref(),
-                Some(sent),
-                "{}: the message PHP got",
-                case.name
-            );
-        }
+        assert!(calls.try_recv().is_err(), "{}: a stray call", case.name);
         if let Some(reply) = case.reply {
             assert!(
                 &got.body[..] == reply,

@@ -1,9 +1,8 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
-use rapira_sapi::api::{Addr, Reply, RpcProtocol, UnaryCall, UnaryReply};
-use rapira_sapi::grpc::Call;
+use rapira_sapi::grpc::{Call, RpcProtocol, UnaryCall, UnaryReply};
 use rapira_sapi::http::Exchange;
 use rapira_sapi::work::{Intake, Refused, Sink};
-use rapira_sapi::{Frame, GrpcMethod, GrpcService, Mode, Rapira, Request, WorkerHooks};
+use rapira_sapi::{Addr, Frame, GrpcMethod, GrpcService, Mode, Rapira, Request, WorkerHooks};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::env::set_var;
@@ -61,11 +60,11 @@ pub fn run_worker(
     if let Some(ini) = ini {
         set_phprc(&guard, ini);
     }
-    let r = Rapira::start(Mode::Worker(fixture(name)), None)?;
+    let r = Rapira::start(Mode::Worker, fixture(name), None)?;
     let h = r.sink();
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {
-        out.push(drain(submit(&h, req(uri, name))?));
+        out.push(drain(submit(&h, req(uri))?));
     }
     drop(h);
     drop(r);
@@ -136,9 +135,8 @@ pub fn assert_skip_allowed(fixture: &str) {
     }
 }
 
-/// Build a minimal `GET` request for `uri`, and point the worker script paths at `fixture_name`.
-pub fn req(uri: &str, fixture_name: &str) -> Request {
-    rapira_sapi::set_script(&fixture(fixture_name));
+/// Build a minimal `GET` request for `uri`.
+pub fn req(uri: &str) -> Request {
     Request {
         https: false,
         method: "GET".into(),
@@ -191,7 +189,8 @@ pub fn start_grpc(script: PathBuf) -> anyhow::Result<Rapira> {
         ..WorkerHooks::default()
     };
     Rapira::start_with_hooks(
-        Mode::Dispatcher(script),
+        Mode::Dispatcher,
+        script,
         hooks,
         Some(rapira_sapi::grpc::DISPATCHER_CLASSES),
     )
@@ -286,10 +285,10 @@ pub struct Response {
 }
 
 /// Drains `reply` to its `End`; a missing head, a missing `End` or a truncated `End` is an error.
-pub async fn collect(mut reply: Reply) -> anyhow::Result<Response> {
+pub async fn collect(mut reply: mpsc::Receiver<Frame>) -> anyhow::Result<Response> {
     let mut response: Option<Response> = None;
     let mut end: Option<bool> = None;
-    while let Some(ev) = reply.next().await {
+    while let Some(ev) = reply.recv().await {
         match ev {
             Frame::Interim(_) => {}
             Frame::Head { head, .. } => {
@@ -478,9 +477,9 @@ pub fn app_records(script: &str) -> (Vec<AppRecord>, Vec<String>) {
     init_log_capture();
     captured().clear();
 
-    let r = Rapira::start(Mode::Classic, None).expect("classic boot");
+    let r = Rapira::start(Mode::Classic, fixture(script), None).expect("classic boot");
     let h = r.sink();
-    let (status, body) = drain(submit(&h, req("/", script)).expect("dispatch"));
+    let (status, body) = drain(submit(&h, req("/")).expect("dispatch"));
     drop(h);
     drop(r);
 
@@ -630,12 +629,12 @@ mod tests {
     use rapira_sapi::ResponseHead;
 
     /// A reply that yields `events` and then closes.
-    fn reply(events: Vec<Frame>) -> Reply {
+    fn reply(events: Vec<Frame>) -> mpsc::Receiver<Frame> {
         let (tx, rx) = mpsc::channel(events.len().max(1));
         for ev in events {
             tx.try_send(ev).unwrap();
         }
-        Reply::new(rx)
+        rx
     }
 
     fn head() -> Frame {

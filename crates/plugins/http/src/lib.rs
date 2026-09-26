@@ -1,11 +1,14 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::anyhow;
-use rapira_net::ServerThread;
-use rapira_sapi::api::{
-    Extension, ListenAddr, Middleware, Php, PrepareCtx, PreparedListener, Result,
-};
+use anyhow::{Result, anyhow};
+use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
+use rapira_sapi::http::Exchange;
+use rapira_sapi::middleware::Middleware;
+use rapira_sapi::multipart;
+use rapira_sapi::plugin::{Mode, Plugin, Worker};
+use rapira_sapi::work::{DispatcherClasses, Intake};
 
 mod bridge;
 mod check;
@@ -26,6 +29,10 @@ pub struct Config {
     pub drain_grace: Duration,
     pub keepalive_timeout: Duration,
     pub middleware: Vec<Arc<dyn Middleware>>,
+    /// Multipart limits of a dispatcher pool. Each worker spools in `multipart::worker_spool_dir(dir)`, which the worker creates. None: the default limits.
+    pub uploads: Option<multipart::Limits>,
+    /// sendFile() containment root.
+    pub sendfile_root: PathBuf,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -47,6 +54,8 @@ impl Default for Config {
             drain_grace: Duration::from_secs(25),
             keepalive_timeout: Duration::from_secs(60),
             middleware: Vec::new(),
+            uploads: None,
+            sendfile_root: PathBuf::from("."),
         }
     }
 }
@@ -54,22 +63,39 @@ impl Default for Config {
 pub struct Server {
     config: Config,
     prepared: Option<PreparedListener>,
-    thread: ServerThread,
+    /// The intake a test injects. None: the worker's sink.
+    intake: Option<Intake<Exchange>>,
 }
 
-impl Extension for Server {
-    type Config = Config;
-
-    fn init(config: Config) -> Self {
+impl Server {
+    pub fn init(config: Config) -> Self {
         Self {
             config,
             prepared: None,
-            thread: ServerThread::default(),
+            intake: None,
         }
     }
 
-    fn name(&self) -> &str {
-        "rapira-http"
+    /// A server that submits to `intake` in place of the worker's sink.
+    pub fn with_intake(config: Config, intake: Intake<Exchange>) -> Self {
+        Self {
+            intake: Some(intake),
+            ..Self::init(config)
+        }
+    }
+}
+
+impl Plugin for Server {
+    fn name(&self) -> &'static str {
+        "http"
+    }
+
+    fn modes(&self) -> &'static [Mode] {
+        &[Mode::Classic, Mode::Worker, Mode::Dispatcher]
+    }
+
+    fn dispatcher_classes(&self) -> Option<DispatcherClasses> {
+        Some(rapira_sapi::http::DISPATCHER_CLASSES)
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
@@ -79,66 +105,70 @@ impl Extension for Server {
         Ok(())
     }
 
-    async fn run(&mut self, php: Php) -> Result<()> {
-        let config = self.config.clone();
-        let Some(prepared) = self.prepared.take() else {
+    fn serve(self: Box<Self>, worker: Worker) -> Result<()> {
+        let Self {
+            config,
+            prepared,
+            intake,
+        } = *self;
+        let Some(prepared) = prepared else {
             return Err(anyhow!("http listener was not prepared"));
         };
-        self.thread
-            .run("http", move |stop, rt| {
-                serve::serve(php, config, prepared, stop, rt)
-            })
-            .await
-    }
-
-    async fn shutdown(&mut self) -> Result<()> {
-        self.thread.shutdown().await
+        rapira_sapi::set_sendfile_root(config.sendfile_root.clone());
+        let intake = intake.unwrap_or_else(|| Intake::new(worker.sink.clone()));
+        serve::serve(intake, config, prepared, worker)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::future::Future as _;
-    use std::pin::Pin;
-    use std::task::Poll;
-
-    use rapira_sapi::api::{Backend, Reply, Request, UnaryCall, UnaryReply};
+    use rapira_sapi::plugin::run_plugin;
+    use rapira_sapi::work::Sink;
 
     use super::*;
 
-    struct UnusedBackend;
-
-    impl Backend for UnusedBackend {
-        fn exec(&self, _req: Request) -> Pin<Box<dyn Future<Output = Result<Reply>> + Send + '_>> {
-            unreachable!("the lifecycle test does not send a request")
-        }
-
-        fn unary(
-            &self,
-            _call: UnaryCall,
-        ) -> Pin<Box<dyn Future<Output = Result<Option<UnaryReply>>> + Send + '_>> {
-            unreachable!("the lifecycle test does not send a call")
-        }
-    }
-
-    #[tokio::test]
-    async fn shutdown_joins_the_server_after_run_is_cancelled() {
-        let mut server = Server::init(Config {
-            listen: ListenAddr::Tcp(([127, 0, 0, 1], 0).into()),
-            ..Config::default()
-        });
+    /// Stop ends the accept loop and the drain, and the plugin thread drops every intake clone and the listener.
+    #[test]
+    fn stop_joins_the_server_and_drops_every_intake_clone() {
+        let (intake, mut units) = Intake::<Exchange>::channel(1);
+        let mut server = Server::with_intake(
+            Config {
+                listen: ListenAddr::Tcp(([127, 0, 0, 1], 0).into()),
+                ..Config::default()
+            },
+            intake,
+        );
         let mut ctx = PrepareCtx::new();
         server.prepare(&mut ctx).unwrap();
-        let backend = Arc::new(UnusedBackend);
-        let php = Php::new(backend.clone());
+        let fd = ctx.listener_fds()[0];
+        // SAFETY: `ctx` owns the descriptor while it is borrowed here.
+        let listener = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
+        let addr = std::net::TcpListener::from(listener.try_clone_to_owned().unwrap())
+            .local_addr()
+            .unwrap();
+        drop(ctx);
+        let (sink, _php) = Sink::channel(1);
+        let running = run_plugin(
+            Box::new(server),
+            sink,
+            Duration::from_secs(5),
+            PathBuf::from("index.php"),
+            Mode::Dispatcher,
+        )
+        .unwrap();
+        std::net::TcpStream::connect(addr).expect("the server accepts before stop");
 
-        let mut run = Box::pin(server.run(php));
-        assert!(std::future::poll_fn(|cx| Poll::Ready(run.as_mut().poll(cx).is_pending())).await);
-        drop(run);
+        running.stop();
+        running.join().unwrap();
 
-        assert!(server.thread.is_running());
-        server.shutdown().await.unwrap();
-        assert!(!server.thread.is_running());
-        assert_eq!(Arc::strong_count(&backend), 1);
+        assert!(
+            matches!(
+                units.try_recv(),
+                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+            ),
+            "every intake clone is gone"
+        );
+        let refused = std::net::TcpStream::connect(addr);
+        assert!(refused.is_err(), "the listener is closed: {refused:?}");
     }
 }

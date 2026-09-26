@@ -8,9 +8,10 @@ use rapira_http::{
     Config as HttpConfig, Server as HttpServer, UnsafeFieldNames as HttpUnsafeFieldNames,
 };
 use rapira_master::PoolConfig;
-use rapira_sapi::api::{ListenAddr, Middleware, PrepareCtx};
-use rapira_sapi::runtime::ExtensionRuntime;
-use rapira_sapi::{GrpcMethod, GrpcService, Mode, Rapira};
+use rapira_net::{ListenAddr, PrepareCtx};
+use rapira_sapi::middleware::Middleware;
+use rapira_sapi::plugin::{Mode, Plugin};
+use rapira_sapi::{GrpcMethod, GrpcService, Rapira};
 use std::{
     fs::{File, OpenOptions, read_dir, remove_file},
     os::fd::RawFd,
@@ -37,7 +38,7 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Boot the server: start PHP, register extensions, and serve requests.
+    /// Boot the server: start PHP, prepare the plugins, and serve requests.
     Serve(ServeArgs),
 }
 
@@ -51,7 +52,7 @@ struct ServeArgs {
 /// One pool's fork-time payload. The master hands out `WorkerEnv::pool` as the index into the list.
 struct PoolRun {
     /// Taken exactly once, in the forked child.
-    host: Option<ExtensionRuntime>,
+    plugin: Option<Box<dyn Plugin>>,
     args: worker::PoolArgs,
 }
 
@@ -82,7 +83,7 @@ fn spool_dir_reclaimable(name: &str) -> bool {
     gone && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
 }
 
-/// Dispatcher mode only: the host spools file parts here, so the dir must exist and accept a new file. The sweep reclaims the spool dirs of masters that are gone.
+/// Dispatcher mode only: the http plugin spools file parts here, so the dir must exist and accept a new file. The sweep reclaims the spool dirs of masters that are gone.
 fn prepare_uploads_dir(dir: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(dir)
         .map_err(|e| anyhow::anyhow!("creating http.uploads.dir {}: {e}", dir.display()))?;
@@ -113,15 +114,28 @@ fn prepare_uploads_dir(dir: &Path) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Returns the listeners this host bound. One context serves every pool, so it rejects an address two pools share; it only appends, so the tail of its fd list is this host's slice.
-fn prepare_pool(
-    host: &mut ExtensionRuntime,
-    prepare: &mut PrepareCtx,
-) -> anyhow::Result<Vec<RawFd>> {
+/// Returns the listeners this plugin bound. One context serves every pool, so it rejects an address two pools share; it only appends, so the tail of its fd list is this plugin's slice.
+fn prepare_pool(plugin: &mut dyn Plugin, prepare: &mut PrepareCtx) -> anyhow::Result<Vec<RawFd>> {
+    use anyhow::Context;
     let before: usize = prepare.listener_fds().len();
-    host.prepare_all(prepare)?;
+    plugin
+        .prepare(prepare)
+        .with_context(|| format!("plugin {}: prepare failed", plugin.name()))?;
     let mut fds: Vec<RawFd> = prepare.listener_fds();
     Ok(fds.split_off(before))
+}
+
+/// `name` is the config table of the pool, for the error text.
+fn check_mode(name: &str, plugin: &dyn Plugin, mode: Mode) -> anyhow::Result<()> {
+    let modes: &[Mode] = plugin.modes();
+    if modes.contains(&mode) {
+        return Ok(());
+    }
+    let served: Vec<String> = modes.iter().map(Mode::to_string).collect();
+    anyhow::bail!(
+        "{name}.pool.mode = {mode}: this plugin serves {}",
+        served.join(", ")
+    )
 }
 
 /// `table` is the pool table that names the entrypoint, for the error text.
@@ -173,7 +187,7 @@ fn pool_config(name: &'static str, pool: &PoolSettings, listeners: Vec<RawFd>) -
     }
 }
 
-/// Builds the http pool: its extension host, its listeners, and the supervision config the master needs.
+/// Builds the http pool: its plugin, its listeners, and the supervision config the master needs.
 fn http_pool(
     http: HttpSettings,
     supervisor: &SupervisorSettings,
@@ -183,10 +197,10 @@ fn http_pool(
     check_entrypoint("http.pool", &entrypoint)?;
     let mode: Mode = match http.pool.mode {
         RunMode::Classic => Mode::Classic,
-        RunMode::Worker => Mode::Worker(entrypoint.clone()),
-        RunMode::Dispatcher => Mode::Dispatcher(entrypoint.clone()),
+        RunMode::Worker => Mode::Worker,
+        RunMode::Dispatcher => Mode::Dispatcher,
     };
-    let dispatcher: bool = matches!(mode, Mode::Dispatcher(_));
+    let dispatcher: bool = mode == Mode::Dispatcher;
 
     // middleware ---------------------------------------------------
     let mut middleware: Vec<Arc<dyn Middleware>> = Vec::new();
@@ -231,24 +245,6 @@ fn http_pool(
         );
     }
 
-    // parse HTTP configuration -------------------------------------
-    let http_cfg: HttpConfig = HttpConfig {
-        listen: listen_addr(http.listen),
-        server_name: http.server_name,
-        server_port: http.server_port,
-        max_body_size: http.max_body_size,
-        write_timeout: http.write_timeout,
-        drain_grace: supervisor.drain_grace(),
-        unsafe_field_names: match http.unsafe_field_names {
-            UnsafeFieldNames::Drop => HttpUnsafeFieldNames::Drop,
-            UnsafeFieldNames::Reject => HttpUnsafeFieldNames::Reject,
-        },
-        superglobals: !dispatcher,
-        keepalive_timeout: http.keepalive_timeout,
-        middleware,
-    };
-    //----------------------------------------------------------------
-
     // uploads: dispatcher mode only ---------------------------------
     let uploads = if dispatcher {
         prepare_uploads_dir(&http.uploads.dir)?;
@@ -265,36 +261,53 @@ fn http_pool(
     };
     // ---------------------------------------------------------------------
 
-    let mut host: ExtensionRuntime = ExtensionRuntime::new();
-    host.register::<HttpServer>(http_cfg);
+    // parse HTTP configuration -------------------------------------
+    let uploads_dir: Option<PathBuf> = uploads.as_ref().map(|u| u.dir.clone());
+    let http_cfg: HttpConfig = HttpConfig {
+        listen: listen_addr(http.listen),
+        server_name: http.server_name,
+        server_port: http.server_port,
+        max_body_size: http.max_body_size,
+        write_timeout: http.write_timeout,
+        drain_grace: supervisor.drain_grace(),
+        unsafe_field_names: match http.unsafe_field_names {
+            UnsafeFieldNames::Drop => HttpUnsafeFieldNames::Drop,
+            UnsafeFieldNames::Reject => HttpUnsafeFieldNames::Reject,
+        },
+        superglobals: !dispatcher,
+        keepalive_timeout: http.keepalive_timeout,
+        middleware,
+        uploads,
+        sendfile_root: http.sendfile_root,
+    };
+    //----------------------------------------------------------------
+
     pool_run(
         "http",
         &http.pool,
         mode,
-        host,
+        Box::new(HttpServer::init(http_cfg)),
         prepare,
         supervisor,
-        Some(worker::HttpArgs {
-            uploads,
-            sendfile_root: http.sendfile_root,
-        }),
+        Some(worker::HttpArgs { uploads_dir }),
     )
 }
 
-/// Binds the pool's listeners and packs what the master forks with.
+/// Checks the pool mode, binds the pool's listeners and packs what the master forks with.
 fn pool_run(
     name: &'static str,
     pool: &PoolSettings,
     mode: Mode,
-    mut host: ExtensionRuntime,
+    mut plugin: Box<dyn Plugin>,
     prepare: &mut PrepareCtx,
     supervisor: &SupervisorSettings,
     http: Option<worker::HttpArgs>,
 ) -> anyhow::Result<(PoolRun, PoolConfig)> {
-    let listeners: Vec<RawFd> = prepare_pool(&mut host, prepare)?;
+    check_mode(name, plugin.as_ref(), mode)?;
+    let listeners: Vec<RawFd> = prepare_pool(plugin.as_mut(), prepare)?;
     Ok((
         PoolRun {
-            host: Some(host),
+            plugin: Some(plugin),
             args: worker::PoolArgs {
                 mode,
                 entrypoint: pool.entrypoint.clone(),
@@ -339,8 +352,7 @@ fn grpc_pool(
         })
         .collect();
 
-    let mut host: ExtensionRuntime = ExtensionRuntime::new();
-    host.register::<GrpcServer>(GrpcConfig {
+    let plugin = GrpcServer::init(GrpcConfig {
         listen: listen_addr(grpc.listen),
         schema,
         reflection: grpc.reflection,
@@ -353,8 +365,8 @@ fn grpc_pool(
     let (mut run, config) = pool_run(
         "grpc",
         &grpc.pool,
-        Mode::Dispatcher(entrypoint),
-        host,
+        Mode::Dispatcher,
+        Box::new(plugin),
         prepare,
         supervisor,
         None,
@@ -396,8 +408,11 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let stop: Result<rapira_master::StopReason, anyhow::Error> =
         rapira_master::run(cfg, move |env: rapira_master::WorkerEnv| {
             let pool: &mut PoolRun = &mut pools[env.pool];
-            let host: ExtensionRuntime = pool.host.take().expect("fresh child owns the host copy");
-            worker::worker_body(env, host, pool.args.clone())
+            let plugin: Box<dyn Plugin> = pool
+                .plugin
+                .take()
+                .expect("fresh child owns the plugin copy");
+            worker::worker_body(env, plugin, pool.args.clone())
         });
 
     match stop {
@@ -415,26 +430,23 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{prepare_pool, spool_dir_reclaimable};
+    use super::{check_mode, prepare_pool, spool_dir_reclaimable};
     use rapira_http::{Config as HttpConfig, Server as HttpServer};
-    use rapira_sapi::api::{ListenAddr, PrepareCtx};
-    use rapira_sapi::runtime::ExtensionRuntime;
+    use rapira_net::{ListenAddr, PrepareCtx};
 
-    fn ephemeral_host() -> ExtensionRuntime {
-        let mut host = ExtensionRuntime::new();
-        host.register::<HttpServer>(HttpConfig {
+    fn ephemeral_plugin() -> HttpServer {
+        HttpServer::init(HttpConfig {
             listen: ListenAddr::Tcp("127.0.0.1:0".parse().expect("loopback addr")),
             ..HttpConfig::default()
-        });
-        host
+        })
     }
 
-    /// Two hosts bind on one shared context; each call reports only the fd its own host bound.
+    /// Two plugins bind on one shared context; each call reports only the fd its own plugin bound.
     #[test]
-    fn prepare_pool_returns_only_the_fds_its_host_bound() {
+    fn prepare_pool_returns_only_the_fds_its_plugin_bound() {
         let mut prepare = PrepareCtx::new();
-        let mut first = ephemeral_host();
-        let mut second = ephemeral_host();
+        let mut first = ephemeral_plugin();
+        let mut second = ephemeral_plugin();
 
         let first_fds = prepare_pool(&mut first, &mut prepare).expect("prepare the first pool");
         let second_fds = prepare_pool(&mut second, &mut prepare).expect("prepare the second pool");
@@ -443,6 +455,33 @@ mod tests {
         assert_eq!(second_fds.len(), 1, "{second_fds:?}");
         assert_ne!(first_fds[0], second_fds[0]);
         assert_eq!(prepare.listener_fds().len(), 2);
+    }
+
+    fn grpc_test_config() -> rapira_grpc::Config {
+        let descriptor_set = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("crates/tests/fixtures/grpc/echo.binpb");
+        rapira_grpc::Config {
+            listen: ListenAddr::Tcp("127.0.0.1:0".parse().expect("loopback addr")),
+            schema: std::sync::Arc::new(
+                rapira_grpc::Schema::load(&descriptor_set, None).expect("echo.binpb loads"),
+            ),
+            reflection: false,
+            default_timeout: None,
+            max_timeout: None,
+            drain_grace: std::time::Duration::from_secs(5),
+            keepalive_interval: std::time::Duration::from_secs(10),
+            keepalive_timeout: std::time::Duration::from_secs(10),
+        }
+    }
+
+    #[test]
+    fn a_pool_mode_the_plugin_does_not_serve_fails_the_boot() {
+        let plugin = rapira_grpc::Server::init(grpc_test_config());
+        let err = check_mode("grpc", &plugin, rapira_sapi::plugin::Mode::Worker).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "grpc.pool.mode = worker: this plugin serves dispatcher"
+        );
     }
 
     /// The sweep reclaims only dirs whose owning process is gone.

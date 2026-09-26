@@ -1,8 +1,10 @@
+use bytes::Bytes;
 use http::HeaderMap;
 use tokio::sync::oneshot;
 
-use crate::api::{RpcStatus, UnaryCall, UnaryReply};
+use super::{RpcProtocol, RpcStatus, UnaryCall, UnaryReply};
 use crate::exchange::{GrpcState, grpc_call_from};
+use crate::types::Addr;
 use crate::work::{Held, Work, now_unix_f64};
 use crate::zend_object;
 
@@ -27,6 +29,36 @@ impl Call {
             reply,
         };
         (call, rx)
+    }
+
+    pub fn method(&self) -> &str {
+        &self.call.method
+    }
+
+    pub fn protocol(&self) -> RpcProtocol {
+        self.call.protocol
+    }
+
+    pub fn metadata(&self) -> &HeaderMap {
+        &self.call.metadata
+    }
+
+    /// Unix seconds.
+    pub fn deadline(&self) -> Option<f64> {
+        self.call.deadline
+    }
+
+    pub fn remote(&self) -> &Addr {
+        &self.call.remote
+    }
+
+    pub fn message(&self) -> &Bytes {
+        &self.call.message
+    }
+
+    /// Commits the outcome, as a finalize from PHP does.
+    pub fn respond(self, reply: UnaryReply) {
+        let _ = self.reply.send(reply);
     }
 }
 

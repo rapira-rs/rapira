@@ -1,13 +1,9 @@
-//! A harness for the rapira_grpc server: a fake PHP behind it, and clients that speak gRPC, gRPC-Web and Connect over the wire.
+//! A harness for the rapira_grpc server: the test plays PHP through a channel intake, and clients speak gRPC, gRPC-Web and Connect over the wire.
 
-use std::future::Future;
 use std::net::SocketAddr;
 use std::os::fd::BorrowedFd;
 use std::path::PathBuf;
-use std::pin::Pin;
-use std::sync::atomic::{AtomicBool, Ordering};
-use std::sync::{Arc, Mutex};
-use std::task::Poll;
+use std::sync::Arc;
 use std::time::Duration;
 
 use base64::Engine as _;
@@ -17,11 +13,13 @@ use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rapira_grpc::{Config, Schema, Server};
-use rapira_sapi::api::{
-    Addr, Backend, Extension as _, ListenAddr, Php, PrepareCtx, Rejected, Reply, Request,
-    RpcStatus, UnaryCall, UnaryReply,
-};
+use rapira_net::{ListenAddr, PrepareCtx};
+use rapira_sapi::Addr;
+use rapira_sapi::grpc::{Call, RpcStatus, UnaryReply};
+use rapira_sapi::plugin::{Mode, Plugin as _, run_plugin};
+use rapira_sapi::work::{Intake, Sink};
 use tokio::io::{AsyncRead, AsyncWrite};
+use tokio::sync::mpsc;
 
 pub const ECHO_SERVICE: &str = "rapira.test.v1.EchoService";
 pub const ECHO_PATH: &str = "/rapira.test.v1.EchoService/Echo";
@@ -96,7 +94,7 @@ pub fn status_bytes(url: &str) -> Vec<u8> {
     .concat()
 }
 
-/// The response metadata that [`Answer::EchoWithMetadata`] and [`Answer::Fail`] set: headers `x-h: v`, trailers `x-t: w` and `x-b-bin: AQI`.
+/// The response metadata of [`respond_with_halves`]: headers `x-h: v`, trailers `x-t: w` and `x-b-bin: AQI`.
 pub fn halves() -> (HeaderMap, HeaderMap) {
     (
         fields(&[("x-h", "v")]),
@@ -104,161 +102,63 @@ pub fn halves() -> (HeaderMap, HeaderMap) {
     )
 }
 
-/// What the fake PHP does with a call.
-#[derive(Clone, Debug)]
-pub enum Answer {
-    /// Replies with the request message.
-    Echo,
-    /// Replies with the request message and the [`halves`].
-    EchoWithMetadata,
-    /// Replies with these bytes.
-    Reply(Bytes),
-    /// Replies with the request message after the delay.
-    Late(Duration),
-    /// Never replies.
-    Never,
-    /// Fails with NOT_FOUND `no invoice`, one detail of this type URL and the [`halves`].
-    Fail(&'static str),
-    /// Refuses the call before PHP sees it, as a saturated pool does.
-    Refuse,
-    /// Drops the call without an outcome.
-    Lose,
-}
-
-/// A PHP pool that answers every call the same way.
-pub struct FakePhp {
-    answer: Mutex<Answer>,
-    /// The calls that reached PHP, in order.
-    pub calls: Mutex<Vec<UnaryCall>>,
-    /// The host dropped a call that PHP never answers.
-    pub dropped: AtomicBool,
-}
-
-impl FakePhp {
-    pub fn new(answer: Answer) -> Arc<Self> {
-        Arc::new(Self {
-            answer: Mutex::new(answer),
-            calls: Mutex::new(Vec::new()),
-            dropped: AtomicBool::new(false),
-        })
-    }
-
-    /// What the calls from now on get.
-    pub fn answer(&self, answer: Answer) {
-        *self.answer.lock().unwrap() = answer;
-    }
-
-    pub fn seen(&self) -> usize {
-        self.calls.lock().unwrap().len()
-    }
-
-    /// The message of the last call that reached PHP.
-    pub fn last_message(&self) -> Option<Bytes> {
-        self.calls.lock().unwrap().last().map(|c| c.message.clone())
+/// NOT_FOUND `no invoice` with one detail: `url` packing `0a 01 78`.
+pub fn not_found(url: &str) -> RpcStatus {
+    RpcStatus {
+        code: 5,
+        message: "no invoice".into(),
+        details: vec![(url.into(), Bytes::from_static(&[0x0a, 0x01, 0x78]))],
     }
 }
 
-struct SetOnDrop<'a>(&'a AtomicBool);
-
-impl Drop for SetOnDrop<'_> {
-    fn drop(&mut self) {
-        self.0.store(true, Ordering::Release);
-    }
+/// Commits `outcome` with no response metadata, as PHP does.
+pub fn respond(call: Call, outcome: Result<Bytes, RpcStatus>) {
+    call.respond(UnaryReply {
+        headers: HeaderMap::new(),
+        trailers: HeaderMap::new(),
+        outcome,
+    });
 }
 
-impl Backend for FakePhp {
-    fn exec(
-        &self,
-        _req: Request,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Reply>> + Send + '_>> {
-        unreachable!("the gRPC plugin sends no HTTP request")
-    }
-
-    fn unary(
-        &self,
-        call: UnaryCall,
-    ) -> Pin<Box<dyn Future<Output = anyhow::Result<Option<UnaryReply>>> + Send + '_>> {
-        let answer = self.answer.lock().unwrap().clone();
-        let message = call.message.clone();
-        if !matches!(answer, Answer::Refuse) {
-            self.calls.lock().unwrap().push(call);
-        }
-        Box::pin(async move {
-            let (headers, trailers) = match answer {
-                Answer::EchoWithMetadata | Answer::Fail(_) => halves(),
-                _ => (HeaderMap::new(), HeaderMap::new()),
-            };
-            let outcome = match answer {
-                Answer::Echo | Answer::EchoWithMetadata => Ok(message),
-                Answer::Reply(bytes) => Ok(bytes),
-                Answer::Late(delay) => {
-                    tokio::time::sleep(delay).await;
-                    Ok(message)
-                }
-                Answer::Never => {
-                    let _dropped = SetOnDrop(&self.dropped);
-                    std::future::pending().await
-                }
-                Answer::Fail(url) => Err(RpcStatus {
-                    code: 5,
-                    message: "no invoice".into(),
-                    details: vec![(url.into(), Bytes::from_static(&[0x0a, 0x01, 0x78]))],
-                }),
-                Answer::Refuse => {
-                    return Err(anyhow::Error::new(Rejected {
-                        status: 503,
-                        reason: "worker pool saturated".into(),
-                    }));
-                }
-                Answer::Lose => return Ok(None),
-            };
-            Ok(Some(UnaryReply {
-                headers,
-                trailers,
-                outcome,
-            }))
-        })
-    }
+/// Commits `outcome` with the [`halves`].
+pub fn respond_with_halves(call: Call, outcome: Result<Bytes, RpcStatus>) {
+    let (headers, trailers) = halves();
+    call.respond(UnaryReply {
+        headers,
+        trailers,
+        outcome,
+    });
 }
 
-/// A server whose `run` future is gone, as after the host cancelled it. The server thread serves on until [`Running::shutdown`].
+/// Replies with the request message.
+pub fn echo(call: Call) {
+    let message = call.message().clone();
+    respond(call, Ok(message));
+}
+
+/// A server on its own plugin thread.
 pub struct Running {
-    server: Server,
+    running: Option<rapira_sapi::plugin::Running>,
     /// Where the server listens; a `:0` bind is resolved.
     pub listen: ListenAddr,
-    stopped: bool,
 }
 
 impl Running {
+    /// Stops the server and joins it. The join runs off the test runtime, so the clients on it keep running through the drain.
     pub async fn shutdown(&mut self) -> anyhow::Result<()> {
-        self.stopped = true;
-        self.server.shutdown().await
+        let running = self.running.take().expect("shut down once");
+        running.stop();
+        tokio::task::spawn_blocking(move || running.join()).await?
     }
 }
 
-/// A test that panics before `shutdown` still stops the server. Otherwise the test runtime waits for the join task forever.
-impl Drop for Running {
-    fn drop(&mut self) {
-        if self.stopped {
-            return;
-        }
-        let server = &mut self.server;
-        // `shutdown` awaits a join task of the test runtime, which a runtime on another thread can do.
-        std::thread::scope(|s| {
-            s.spawn(move || {
-                let rt = tokio::runtime::Builder::new_current_thread()
-                    .build()
-                    .expect("shutdown runtime");
-                let _ = rt.block_on(server.shutdown());
-            });
-        });
-    }
-}
-
-/// Binds, starts the server thread and drops the `run` future, as the host does before `shutdown`.
-pub async fn start(config: Config, backend: Arc<dyn Backend>) -> Running {
+/// Binds and starts the server. The receiver plays PHP: the test pulls each call and answers it. A dropped receiver refuses every call.
+pub fn start(config: Config) -> (Running, mpsc::Receiver<Call>) {
+    let (intake, calls) = Intake::<Call>::channel(16);
     let listen = config.listen.clone();
-    let mut server = Server::init(config);
+    // Past the drain grace, so a drain error surfaces from serve.
+    let grace = config.drain_grace + Duration::from_secs(5);
+    let mut server = Server::with_intake(config, intake);
     let mut ctx = PrepareCtx::new();
     server.prepare(&mut ctx).expect("bind");
     let listen = match listen {
@@ -267,26 +167,21 @@ pub async fn start(config: Config, backend: Arc<dyn Backend>) -> Running {
     };
     // The context holds a dup of the listener. From here on only the server keeps the socket open.
     drop(ctx);
-    let mut run = Box::pin(server.run(Php::new(backend)));
-    // One poll starts the server thread.
-    assert!(std::future::poll_fn(|cx| Poll::Ready(run.as_mut().poll(cx).is_pending())).await);
-    drop(run);
-    Running {
-        server,
+    // The server submits to the injected intake, so nothing reads this sink.
+    let (sink, _) = Sink::channel(1);
+    let running = run_plugin(
+        Box::new(server),
+        sink,
+        grace,
+        PathBuf::from("index.php"),
+        Mode::Dispatcher,
+    )
+    .expect("start the plugin thread");
+    let running = Running {
+        running: Some(running),
         listen,
-        stopped: false,
-    }
-}
-
-/// Polls `done` for at most 10 s.
-pub async fn wait_until(done: impl Fn() -> bool) {
-    for _ in 0..1000 {
-        if done() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    panic!("the condition did not hold within 10 s");
+    };
+    (running, calls)
 }
 
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}

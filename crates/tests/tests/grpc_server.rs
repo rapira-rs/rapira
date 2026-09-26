@@ -1,18 +1,19 @@
-//! The rapira_grpc server over the wire, with a fake PHP behind it: the three protocols, statuses and metadata, what PHP sees, deadlines, the host routes, and the drain.
+//! The rapira_grpc server over the wire, with the test in the role of PHP: the three protocols, statuses and metadata, what PHP sees, deadlines, the plugin routes, and the drain.
 
-use std::sync::Arc;
-use std::sync::atomic::Ordering;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use http::Method;
 use http_body_util::BodyExt;
 use rapira_grpc::Config;
-use rapira_sapi::api::{ListenAddr, RpcProtocol};
+use rapira_net::ListenAddr;
+use rapira_sapi::grpc::{Call, RpcProtocol};
+use rapira_sapi::work::Work as _;
 use serde_json::Value;
 use tests::grpc::{
-    Answer, Conn, ECHO_PATH, ERROR_INFO, FakePhp, Fields, HI, HI_FRAME, Wire, config, envelope,
-    fields, scratch_dir, start, status_bytes, status_details, tcp, wait_until, web_trailers,
+    Conn, ECHO_PATH, ERROR_INFO, Fields, HI, HI_FRAME, Wire, config, echo, envelope, fields,
+    not_found, respond, respond_with_halves, scratch_dir, start, status_bytes, status_details, tcp,
+    web_trailers,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -217,23 +218,31 @@ async fn each_protocol_reaches_php_over_the_wire() {
         },
     ];
 
-    let php = FakePhp::new(Answer::Echo);
     let dir = scratch_dir("wire");
-    let mut on_tcp = start(config(tcp()), php.clone()).await;
+    let (mut on_tcp, mut tcp_calls) = start(config(tcp()));
     let unix = ListenAddr::Unix(dir.join("grpc.sock"));
-    let mut on_unix = start(config(unix), php.clone()).await;
+    let (mut on_unix, mut unix_calls) = start(config(unix));
 
     for case in cases {
-        let listen = match case.on {
-            On::Tcp => &on_tcp.listen,
-            On::Unix => &on_unix.listen,
+        let (listen, calls) = match case.on {
+            On::Tcp => (&on_tcp.listen, &mut tcp_calls),
+            On::Unix => (&on_unix.listen, &mut unix_calls),
         };
         let mut conn = Conn::open(listen, case.wire).await.expect("connect");
-        let before = php.seen();
-        let got = conn
-            .send(case.method, case.path, case.headers, case.body)
-            .await
-            .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
+        let send = conn.send(case.method, case.path, case.headers, case.body);
+        let got = if case.php {
+            let (got, remote) = tokio::join!(send, async {
+                let call = calls.recv().await.expect("the call reached PHP");
+                let remote = call.remote().clone();
+                echo(call);
+                remote
+            });
+            assert_eq!(remote, conn.peer, "{}", case.name);
+            got
+        } else {
+            send.await
+        };
+        let got = got.unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
 
         assert_eq!(got.status, case.status, "{}: {got:?}", case.name);
         assert_eq!(
@@ -253,11 +262,7 @@ async fn each_protocol_reaches_php_over_the_wire() {
         if let Some(reply) = case.reply {
             assert_eq!(&got.body[..], reply, "{}", case.name);
         }
-        let calls = php.calls.lock().unwrap();
-        assert_eq!(calls.len() - before, usize::from(case.php), "{}", case.name);
-        if case.php {
-            assert_eq!(calls[before].remote, conn.peer, "{}", case.name);
-        }
+        assert!(calls.try_recv().is_err(), "{}: a stray call", case.name);
     }
 
     on_tcp.shutdown().await.unwrap();
@@ -270,7 +275,8 @@ async fn each_protocol_reaches_php_over_the_wire() {
 async fn statuses_and_metadata_encode_per_protocol() {
     struct Case {
         name: &'static str,
-        answer: Answer,
+        /// PHP fails the call with NOT_FOUND and a detail of this type URL. None: PHP echoes the message. Both carry the halves.
+        fails_with: Option<&'static str>,
         wire: Wire,
         content_type: &'static str,
         body: &'static [u8],
@@ -299,7 +305,7 @@ async fn statuses_and_metadata_encode_per_protocol() {
     let cases = [
         Case {
             name: "grpc error",
-            answer: Answer::Fail(ERROR_INFO),
+            fails_with: Some(ERROR_INFO),
             wire: Wire::H2,
             content_type: "application/grpc",
             body: HI_FRAME,
@@ -311,7 +317,7 @@ async fn statuses_and_metadata_encode_per_protocol() {
         },
         Case {
             name: "grpc-web error",
-            answer: Answer::Fail(ERROR_INFO),
+            fails_with: Some(ERROR_INFO),
             wire: Wire::Http1,
             content_type: "application/grpc-web+proto",
             body: HI_FRAME,
@@ -323,7 +329,7 @@ async fn statuses_and_metadata_encode_per_protocol() {
         },
         Case {
             name: "connect error",
-            answer: Answer::Fail(ERROR_INFO),
+            fails_with: Some(ERROR_INFO),
             wire: Wire::Http1,
             content_type: "application/proto",
             body: HI,
@@ -337,7 +343,7 @@ async fn statuses_and_metadata_encode_per_protocol() {
         },
         Case {
             name: "grpc keeps a custom type url whole",
-            answer: Answer::Fail(ACME),
+            fails_with: Some(ACME),
             wire: Wire::H2,
             content_type: "application/grpc",
             body: HI_FRAME,
@@ -349,7 +355,7 @@ async fn statuses_and_metadata_encode_per_protocol() {
         },
         Case {
             name: "connect sends the bare type name",
-            answer: Answer::Fail(ACME),
+            fails_with: Some(ACME),
             wire: Wire::Http1,
             content_type: "application/proto",
             body: HI,
@@ -363,7 +369,7 @@ async fn statuses_and_metadata_encode_per_protocol() {
         },
         Case {
             name: "grpc success",
-            answer: Answer::EchoWithMetadata,
+            fails_with: None,
             wire: Wire::H2,
             content_type: "application/grpc",
             body: HI_FRAME,
@@ -375,7 +381,7 @@ async fn statuses_and_metadata_encode_per_protocol() {
         },
         Case {
             name: "grpc-web success",
-            answer: Answer::EchoWithMetadata,
+            fails_with: None,
             wire: Wire::Http1,
             content_type: "application/grpc-web+proto",
             body: HI_FRAME,
@@ -387,7 +393,7 @@ async fn statuses_and_metadata_encode_per_protocol() {
         },
         Case {
             name: "connect success",
-            answer: Answer::EchoWithMetadata,
+            fails_with: None,
             wire: Wire::Http1,
             content_type: "application/proto",
             body: HI,
@@ -399,22 +405,24 @@ async fn statuses_and_metadata_encode_per_protocol() {
         },
     ];
 
-    let php = FakePhp::new(Answer::Echo);
-    let mut running = start(config(tcp()), php.clone()).await;
+    let (mut running, mut calls) = start(config(tcp()));
     for case in cases {
-        php.answer(case.answer);
         let mut conn = Conn::open(&running.listen, case.wire)
             .await
             .expect("connect");
-        let got = conn
-            .send(
-                Method::POST,
-                ECHO_PATH,
-                &[("content-type", case.content_type), ("te", "trailers")],
-                case.body,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
+        let headers = [("content-type", case.content_type), ("te", "trailers")];
+        let (got, ()) = tokio::join!(
+            conn.send(Method::POST, ECHO_PATH, &headers, case.body),
+            async {
+                let call = calls.recv().await.expect("the call reached PHP");
+                let outcome = match case.fails_with {
+                    Some(url) => Err(not_found(url)),
+                    None => Ok(call.message().clone()),
+                };
+                respond_with_halves(call, outcome);
+            }
+        );
+        let got = got.unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
 
         assert_eq!(got.status, case.status, "{}: {got:?}", case.name);
         let trailers = if case.content_type.starts_with("application/grpc-web") {
@@ -464,12 +472,23 @@ async fn statuses_and_metadata_encode_per_protocol() {
     running.shutdown().await.unwrap();
 }
 
-/// Sources: the extension API (`Err` is a refusal before dispatch, `Ok(None)` a lost call), the contract gRPC README (a lost call is a sanitized INTERNAL), PROTOCOL-HTTP2 (3 is INVALID_ARGUMENT, 13 INTERNAL, 14 UNAVAILABLE) and the Connect protocol (the HTTP status of each code).
+/// Sources: the intake (a refusal before dispatch, a call that PHP drops without an outcome), the contract gRPC README (a lost call is a sanitized INTERNAL), PROTOCOL-HTTP2 (3 is INVALID_ARGUMENT, 13 INTERNAL, 14 UNAVAILABLE) and the Connect protocol (the HTTP status of each code).
 #[tokio::test]
 async fn php_failures_map_to_statuses() {
+    /// What the PHP side does with the call.
+    enum PhpDoes {
+        /// The receiver is gone: the plugin refuses the call before dispatch.
+        Refuse,
+        /// Drops the call without an outcome.
+        Lose,
+        /// Replies with these bytes.
+        Reply(&'static [u8]),
+        /// The call never reaches PHP.
+        Unreached,
+    }
     struct Case {
         name: &'static str,
-        answer: Answer,
+        php: PhpDoes,
         wire: Wire,
         content_type: &'static str,
         body: &'static [u8],
@@ -481,39 +500,35 @@ async fn php_failures_map_to_statuses() {
         message: Option<&'static str>,
         /// None: not checked.
         reply: Option<&'static [u8]>,
-        /// The call reaches PHP.
-        php: bool,
     }
     let cases = [
         Case {
             name: "a refused call is unavailable over grpc",
-            answer: Answer::Refuse,
+            php: PhpDoes::Refuse,
             wire: Wire::H2,
             content_type: "application/grpc",
             body: HI_FRAME,
             status: 200,
             grpc_status: Some("14"),
             connect_code: None,
-            message: Some("worker pool saturated"),
+            message: Some("worker pool stopped"),
             reply: Some(b""),
-            php: false,
         },
         Case {
             name: "a refused call is unavailable over connect",
-            answer: Answer::Refuse,
+            php: PhpDoes::Refuse,
             wire: Wire::Http1,
             content_type: "application/proto",
             body: HI,
             status: 503,
             grpc_status: None,
             connect_code: Some("unavailable"),
-            message: Some("worker pool saturated"),
+            message: Some("worker pool stopped"),
             reply: None,
-            php: false,
         },
         Case {
             name: "a lost call is internal",
-            answer: Answer::Lose,
+            php: PhpDoes::Lose,
             wire: Wire::H2,
             content_type: "application/grpc",
             body: HI_FRAME,
@@ -522,11 +537,10 @@ async fn php_failures_map_to_statuses() {
             connect_code: None,
             message: Some("internal error"),
             reply: Some(b""),
-            php: true,
         },
         Case {
             name: "an undecodable reply is internal under json",
-            answer: Answer::Reply(Bytes::from_static(&[0xff])),
+            php: PhpDoes::Reply(&[0xff]),
             wire: Wire::Http1,
             content_type: "application/json",
             body: br#"{"text":"hi"}"#,
@@ -535,11 +549,10 @@ async fn php_failures_map_to_statuses() {
             connect_code: Some("internal"),
             message: Some("internal error"),
             reply: None,
-            php: true,
         },
         Case {
             name: "an undecodable reply passes through under proto",
-            answer: Answer::Reply(Bytes::from_static(&[0xff])),
+            php: PhpDoes::Reply(&[0xff]),
             wire: Wire::Http1,
             content_type: "application/proto",
             body: HI,
@@ -548,11 +561,10 @@ async fn php_failures_map_to_statuses() {
             connect_code: None,
             message: None,
             reply: Some(&[0xff]),
-            php: true,
         },
         Case {
             name: "malformed json never reaches php",
-            answer: Answer::Echo,
+            php: PhpDoes::Unreached,
             wire: Wire::Http1,
             content_type: "application/json",
             body: b"{",
@@ -561,27 +573,34 @@ async fn php_failures_map_to_statuses() {
             connect_code: Some("invalid_argument"),
             message: None,
             reply: None,
-            php: false,
         },
     ];
 
-    let php = FakePhp::new(Answer::Echo);
-    let mut running = start(config(tcp()), php.clone()).await;
+    let (mut running, mut calls) = start(config(tcp()));
+    let (mut refusing, refused_calls) = start(config(tcp()));
+    drop(refused_calls);
     for case in cases {
-        php.answer(case.answer);
-        let mut conn = Conn::open(&running.listen, case.wire)
-            .await
-            .expect("connect");
-        let before = php.seen();
-        let got = conn
-            .send(
-                Method::POST,
-                ECHO_PATH,
-                &[("content-type", case.content_type), ("te", "trailers")],
-                case.body,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
+        let listen = match case.php {
+            PhpDoes::Refuse => &refusing.listen,
+            _ => &running.listen,
+        };
+        let mut conn = Conn::open(listen, case.wire).await.expect("connect");
+        let headers = [("content-type", case.content_type), ("te", "trailers")];
+        let send = conn.send(Method::POST, ECHO_PATH, &headers, case.body);
+        let got = match case.php {
+            PhpDoes::Refuse | PhpDoes::Unreached => send.await,
+            PhpDoes::Lose | PhpDoes::Reply(_) => {
+                let (got, ()) = tokio::join!(send, async {
+                    let call = calls.recv().await.expect("the call reached PHP");
+                    match case.php {
+                        PhpDoes::Reply(bytes) => respond(call, Ok(Bytes::from_static(bytes))),
+                        _ => drop(call),
+                    }
+                });
+                got
+            }
+        };
+        let got = got.unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
 
         assert_eq!(got.status, case.status, "{}: {got:?}", case.name);
         assert_eq!(
@@ -603,12 +622,13 @@ async fn php_failures_map_to_statuses() {
         if let Some(reply) = case.reply {
             assert_eq!(&got.body[..], reply, "{}", case.name);
         }
-        assert_eq!(php.seen() - before, usize::from(case.php), "{}", case.name);
+        assert!(calls.try_recv().is_err(), "{}: a stray call", case.name);
     }
     running.shutdown().await.unwrap();
+    refusing.shutdown().await.unwrap();
 }
 
-/// Sources: the extension API (`UnaryCall`), PROTOCOL-HTTP2 (`grpc-timeout`) and the Connect protocol (`connect-timeout-ms`).
+/// Sources: the intake (`UnaryCall`), PROTOCOL-HTTP2 (`grpc-timeout`) and the Connect protocol (`connect-timeout-ms`).
 #[tokio::test]
 async fn request_facts_reach_php() {
     struct Case {
@@ -646,8 +666,7 @@ async fn request_facts_reach_php() {
         },
     ];
 
-    let php = FakePhp::new(Answer::Echo);
-    let mut running = start(config(tcp()), php.clone()).await;
+    let (mut running, mut calls) = start(config(tcp()));
     for case in cases {
         let mut conn = Conn::open(&running.listen, case.wire)
             .await
@@ -656,67 +675,64 @@ async fn request_facts_reach_php() {
             .duration_since(UNIX_EPOCH)
             .unwrap()
             .as_secs_f64();
-        let got = conn
-            .send(
-                Method::POST,
-                ECHO_PATH,
-                &[
-                    ("content-type", case.content_type),
-                    ("te", "trailers"),
-                    ("x-a", "1"),
-                    case.timeout,
-                ],
-                case.body,
-            )
-            .await
-            .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
+        let peer = conn.peer.clone();
+        let headers = [
+            ("content-type", case.content_type),
+            ("te", "trailers"),
+            ("x-a", "1"),
+            case.timeout,
+        ];
+        let (got, ()) = tokio::join!(
+            conn.send(Method::POST, ECHO_PATH, &headers, case.body),
+            async {
+                let call = calls.recv().await.expect("the call reached PHP");
+                assert_eq!(
+                    call.method(),
+                    "rapira.test.v1.EchoService/Echo",
+                    "{}",
+                    case.name
+                );
+                assert_eq!(call.protocol(), case.protocol, "{}", case.name);
+                assert_eq!(
+                    call.metadata().get("x-a").map(|v| v.as_bytes()),
+                    Some(&b"1"[..]),
+                    "{}: {:?}",
+                    case.name,
+                    call.metadata()
+                );
+                assert!(
+                    call.deadline()
+                        .is_some_and(|d| d > wall + 50.0 && d < wall + 70.0),
+                    "{}: deadline {:?} for a 60 s timeout at {wall}",
+                    case.name,
+                    call.deadline()
+                );
+                assert_eq!(call.remote(), &peer, "{}", case.name);
+                echo(call);
+            }
+        );
+        let got = got.unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
         assert_eq!(got.status, 200, "{}: {got:?}", case.name);
-
-        let calls = php.calls.lock().unwrap();
-        let call = calls.last().expect("the call reached PHP");
-        assert_eq!(
-            call.method, "rapira.test.v1.EchoService/Echo",
-            "{}",
-            case.name
-        );
-        assert_eq!(call.protocol, case.protocol, "{}", case.name);
-        assert_eq!(
-            call.metadata.get("x-a").map(|v| v.as_bytes()),
-            Some(&b"1"[..]),
-            "{}: {:?}",
-            case.name,
-            call.metadata
-        );
-        assert!(
-            call.deadline
-                .is_some_and(|d| d > wall + 50.0 && d < wall + 70.0),
-            "{}: deadline {:?} for a 60 s timeout at {wall}",
-            case.name,
-            call.deadline
-        );
-        assert_eq!(call.remote, conn.peer, "{}", case.name);
     }
     running.shutdown().await.unwrap();
 }
 
-/// Sources: the contract gRPC README (the host enforces `Call\Context::$deadline`) and PROTOCOL-HTTP2 `grpc-timeout` (`200m` is 200 ms, status 4 is DEADLINE_EXCEEDED).
+/// Sources: the contract gRPC README (the server enforces `Call\Context::$deadline`) and PROTOCOL-HTTP2 `grpc-timeout` (`200m` is 200 ms, status 4 is DEADLINE_EXCEEDED).
 #[tokio::test]
 async fn a_passed_deadline_drops_the_call() {
-    let php = FakePhp::new(Answer::Never);
-    let mut running = start(config(tcp()), php.clone()).await;
+    let (mut running, mut calls) = start(config(tcp()));
     let mut conn = Conn::open(&running.listen, Wire::H2)
         .await
         .expect("connect");
+    // PHP leaves the call queued.
     let got = conn
         .grpc(ECHO_PATH, &[("grpc-timeout", "200m")], HI_FRAME)
         .await
         .unwrap();
 
     assert_eq!(got.grpc_status(), Some("4"), "{got:?}");
-    assert!(
-        php.dropped.load(Ordering::Acquire),
-        "the call must be dropped"
-    );
+    let call = calls.recv().await.expect("the call reached the intake");
+    assert!(call.cancelled(), "the call must be dropped");
     running.shutdown().await.unwrap();
 }
 
@@ -728,7 +744,7 @@ async fn a_silent_peer_loses_its_connection() {
         keepalive_timeout: Duration::from_millis(200),
         ..config(tcp())
     };
-    let mut running = start(config, FakePhp::new(Answer::Echo)).await;
+    let (mut running, _calls) = start(config);
     let &ListenAddr::Tcp(addr) = &running.listen else {
         unreachable!("tcp() listens on TCP")
     };
@@ -748,7 +764,7 @@ async fn a_silent_peer_loses_its_connection() {
 
 /// Sources: `grpc/health/v1/health.proto` (`HealthCheckRequest.service` and `HealthCheckResponse.status` are field 1, SERVING is 1), `grpc/reflection/v1/reflection.proto` (`list_services` is field 7), and PROTOCOL-HTTP2 (12 for an unknown method).
 #[tokio::test]
-async fn health_and_reflection_answer_from_the_host() {
+async fn health_and_reflection_answer_from_the_plugin() {
     struct Case {
         name: &'static str,
         reflection: bool,
@@ -794,13 +810,12 @@ async fn health_and_reflection_answer_from_the_host() {
         },
     ];
 
-    let php = FakePhp::new(Answer::Echo);
-    let mut plain = start(config(tcp()), php.clone()).await;
+    let (mut plain, mut plain_calls) = start(config(tcp()));
     let reflecting = Config {
         reflection: true,
         ..config(tcp())
     };
-    let mut reflecting = start(reflecting, php.clone()).await;
+    let (mut reflecting, mut reflecting_calls) = start(reflecting);
     for case in cases {
         let listen = if case.reflection {
             &reflecting.listen
@@ -824,16 +839,18 @@ async fn health_and_reflection_answer_from_the_host() {
             case.name
         );
     }
-    assert_eq!(php.seen(), 0, "the host answers without PHP");
+    assert!(
+        plain_calls.try_recv().is_err() && reflecting_calls.try_recv().is_err(),
+        "the plugin answers without PHP"
+    );
     plain.shutdown().await.unwrap();
     reflecting.shutdown().await.unwrap();
 }
 
-/// Mirrors the HTTP plugin: the host drops `run`, then `shutdown` joins the server thread, which frees every `Php` clone and closes the listener.
+/// Mirrors the HTTP plugin: stop ends the accept loop and the drain, and the plugin thread drops every intake clone and the listener.
 #[tokio::test]
-async fn shutdown_joins_the_server_after_run_is_cancelled() {
-    let backend = FakePhp::new(Answer::Echo);
-    let mut running = start(config(tcp()), backend.clone()).await;
+async fn shutdown_joins_the_server_and_drops_every_intake_clone() {
+    let (mut running, mut calls) = start(config(tcp()));
     let &ListenAddr::Tcp(addr) = &running.listen else {
         unreachable!("tcp() listens on TCP")
     };
@@ -844,7 +861,13 @@ async fn shutdown_joins_the_server_after_run_is_cancelled() {
 
     running.shutdown().await.unwrap();
 
-    assert_eq!(Arc::strong_count(&backend), 1, "every Php clone is gone");
+    assert!(
+        matches!(
+            calls.try_recv(),
+            Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
+        ),
+        "every intake clone is gone"
+    );
     let refused = tokio::net::TcpStream::connect(addr).await;
     assert!(refused.is_err(), "the listener is closed: {refused:?}");
 }
@@ -853,7 +876,8 @@ async fn shutdown_joins_the_server_after_run_is_cancelled() {
 async fn drain_waits_for_calls_within_the_grace() {
     struct Case {
         name: &'static str,
-        answer: Answer,
+        /// PHP echoes the call after this delay. None: PHP holds the call past the grace.
+        answer_after: Option<Duration>,
         grace: Duration,
         grpc_status: Option<&'static str>,
         /// A text of the shutdown error. None: shutdown succeeds.
@@ -862,34 +886,44 @@ async fn drain_waits_for_calls_within_the_grace() {
     let cases = [
         Case {
             name: "a call that ends inside the grace completes",
-            answer: Answer::Late(Duration::from_millis(100)),
+            answer_after: Some(Duration::from_millis(100)),
             grace: Duration::from_secs(2),
             grpc_status: Some("0"),
             shutdown: None,
         },
         Case {
             name: "a call past the grace is cut",
-            answer: Answer::Never,
+            answer_after: None,
             grace: Duration::from_millis(200),
             grpc_status: None,
             shutdown: Some("grpc drain timed out"),
         },
     ];
     for case in cases {
-        let php = FakePhp::new(case.answer);
         let config = Config {
             drain_grace: case.grace,
             ..config(tcp())
         };
-        let mut running = start(config, php.clone()).await;
+        let (mut running, mut calls) = start(config);
         let mut conn = Conn::open(&running.listen, Wire::H2)
             .await
             .expect("connect");
-        let call = tokio::spawn(async move { conn.grpc(ECHO_PATH, &[], HI_FRAME).await });
-        wait_until(|| php.seen() == 1).await;
+        let client = tokio::spawn(async move { conn.grpc(ECHO_PATH, &[], HI_FRAME).await });
+        let call: Call = calls.recv().await.expect("the call reached PHP");
+        let held: Option<Call> = match case.answer_after {
+            Some(delay) => {
+                tokio::spawn(async move {
+                    tokio::time::sleep(delay).await;
+                    echo(call);
+                });
+                None
+            }
+            None => Some(call),
+        };
 
         let shutdown = running.shutdown().await;
-        let got = call.await.unwrap();
+        let got = client.await.unwrap();
+        drop(held);
         assert_eq!(
             got.as_ref().ok().and_then(|r| r.grpc_status()),
             case.grpc_status,
@@ -917,7 +951,7 @@ async fn drain_ends_health_watch_streams() {
         drain_grace: grace,
         ..config(tcp())
     };
-    let mut running = start(config, FakePhp::new(Answer::Echo)).await;
+    let (mut running, _calls) = start(config);
     let mut conn = Conn::open(&running.listen, Wire::H2)
         .await
         .expect("connect");

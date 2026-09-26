@@ -22,7 +22,7 @@ static SCRIPT: RwLock<ScriptPaths> = RwLock::new(ScriptPaths {
 });
 
 /// Sets the script paths for all later requests. Each call leaks the new strings: a worker process sets them once.
-pub fn set_script(filename: &Path) {
+pub(crate) fn set_script(filename: &Path) {
     let document_root = filename
         .parent()
         .map(|p| p.to_string_lossy().into_owned())

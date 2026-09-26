@@ -1,4 +1,3 @@
-use crate::api::{Addr, Tls};
 use bytes::Bytes;
 use http::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderName};
 use std::ffi::{CStr, CString};
@@ -6,11 +5,29 @@ use std::os::raw::c_int;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Addr {
+    Inet(std::net::SocketAddr),
+    /// None is an unnamed endpoint, the usual case for a unix peer.
+    Unix(Option<PathBuf>),
+}
+
 #[derive(Debug, Clone)]
-pub enum Mode {
-    Classic,
-    Worker(PathBuf),
-    Dispatcher(PathBuf),
+pub struct ClientCert {
+    pub serial: String,
+    pub organization: Option<String>,
+    pub fingerprint: String,
+}
+
+#[derive(Debug, Clone)]
+pub struct Tls {
+    pub version: String,
+    pub cipher: String,
+    /// PHP `Tls::$negotiatedProtocol`.
+    pub alpn: Option<String>,
+    /// PHP `Tls::$requestedServerName`.
+    pub server_name: Option<String>,
+    pub cert: Option<ClientCert>,
 }
 
 /// One service of a gRPC pool. `name` is fully qualified.

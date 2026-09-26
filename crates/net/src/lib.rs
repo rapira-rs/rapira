@@ -1,10 +1,9 @@
-use std::thread::JoinHandle;
 use std::time::Duration;
 
 use anyhow::anyhow;
 #[cfg(not(target_os = "linux"))]
 use tokio::net::{TcpListener, UnixListener};
-use tokio::runtime::{Builder, Runtime};
+use tokio::runtime::Handle;
 #[cfg(not(target_os = "linux"))]
 use tokio::sync::watch;
 
@@ -69,7 +68,7 @@ impl Acceptor {
     pub fn adopt(
         prepared: PreparedListener,
         stop: StopHandle,
-        rt: &Runtime,
+        rt: &Handle,
     ) -> std::io::Result<Self> {
         use std::os::fd::{FromRawFd, IntoRawFd};
         let addr = prepared.addr().clone();
@@ -106,7 +105,7 @@ impl Acceptor {
     /// accept is what lets the kernel hand each connection to one worker. Returns the
     /// listener failure, if any. The listener is closed when this returns.
     #[cfg(target_os = "linux")]
-    pub fn run(self, rt: &Runtime, serve: &impl Serve) -> Option<anyhow::Error> {
+    pub fn run(self, rt: &Handle, serve: &impl Serve) -> Option<anyhow::Error> {
         let mut fatal: Option<anyhow::Error> = None;
         // tokio::spawn and from_std reach the runtime the connections run on.
         let _guard = rt.enter();
@@ -133,7 +132,7 @@ impl Acceptor {
     /// Runs the accept loop on rt until the stop handle fires. Returns the listener
     /// failure, if any. The listener is closed when this returns.
     #[cfg(not(target_os = "linux"))]
-    pub fn run(self, rt: &Runtime, serve: &impl Serve) -> Option<anyhow::Error> {
+    pub fn run(self, rt: &Handle, serve: &impl Serve) -> Option<anyhow::Error> {
         let Self {
             socket,
             addr,
@@ -226,78 +225,6 @@ async fn accept_connection(socket: &Socket, serve: &impl Serve) -> std::io::Resu
         }
     }
     Ok(())
-}
-
-/// One plugin's server thread: a 2-worker runtime and the accept loop, stopped through [`Stop`].
-#[derive(Default)]
-pub struct ServerThread {
-    stop: Option<Stop>,
-    join: Option<tokio::task::JoinHandle<anyhow::Result<()>>>,
-}
-
-impl ServerThread {
-    /// Spawns `rapira-{name}` and runs `body` on it with the stop handle and the runtime; returns when the thread ends. Dropping the future leaves the thread running for [`shutdown`](Self::shutdown).
-    pub async fn run(
-        &mut self,
-        name: &'static str,
-        body: impl FnOnce(StopHandle, &Runtime) -> anyhow::Result<()> + Send + 'static,
-    ) -> anyhow::Result<()> {
-        let stop = Stop::new().map_err(|e| anyhow!("creating the {name} stop handle: {e}"))?;
-        let handle = stop.handle();
-        let thread = std::thread::Builder::new()
-            .name(format!("rapira-{name}"))
-            .spawn(move || {
-                let rt = Builder::new_multi_thread()
-                    .enable_all()
-                    .worker_threads(2)
-                    .thread_name(format!("rapira-{name}-io"))
-                    .build()
-                    .map_err(|e| anyhow!("building the {name} runtime: {e}"))?;
-                body(handle, &rt)
-            })?;
-
-        self.stop = Some(stop);
-        let join = self.join.insert(tokio::task::spawn_blocking(move || {
-            join_thread(thread, name)
-        }));
-        let result = join.await;
-        self.join = None;
-        result.map_err(|e| anyhow!("{name} join task failed: {e}"))?
-    }
-
-    /// The thread was started and nothing joined it yet.
-    pub fn is_running(&self) -> bool {
-        self.join.is_some()
-    }
-
-    /// Fires the stop handle; the thread ends on its own time.
-    pub fn stop(&mut self) {
-        if let Some(stop) = self.stop.take() {
-            stop.stop();
-        }
-    }
-
-    /// Stops the thread and waits for it.
-    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
-        self.stop();
-        if let Some(join) = self.join.take() {
-            join.await
-                .map_err(|e| anyhow!("server join task failed: {e}"))??;
-        }
-        Ok(())
-    }
-}
-
-/// Joins a server thread. A panic in the thread becomes an error.
-fn join_thread(thread: JoinHandle<anyhow::Result<()>>, name: &str) -> anyhow::Result<()> {
-    thread.join().map_err(|payload| {
-        let msg = payload
-            .downcast_ref::<&str>()
-            .copied()
-            .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-            .unwrap_or("unknown panic");
-        anyhow!("{name} server thread panicked: {msg}")
-    })?
 }
 
 #[cfg(test)]
