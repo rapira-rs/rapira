@@ -328,7 +328,7 @@ fn stage_grpc(dir: &Path) {
     std::fs::copy(tests::echo_descriptor_set(), dir.join("echo.binpb")).expect("copy echo.binpb");
 }
 
-/// A `[grpc]` pool over `entrypoint`; `listen`, `descriptor_set`, `services` and `extra` (keys inside `[grpc]`) go into the file verbatim, and no `services` leaves the key out.
+/// A `[grpc]` pool over `entrypoint`. `listen`, `descriptor_set` and `extra` (keys inside `[grpc]`) go into the file verbatim; `services` becomes a TOML string array, and None leaves the key out.
 fn render_grpc(
     listen: &str,
     processes: usize,

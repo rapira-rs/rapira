@@ -71,7 +71,7 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     .spawn();
     let (s1, b1) = drain(submit(srv.addr, req("/"))?);
     let (s2, b2) = drain(submit(srv.addr, req("/"))?);
-    // The slot counts a job after its response, so wait until it counts both.
+    // The slot counts a job before its response goes out, so both jobs are counted here.
     let slot = slot_line(&srv, "handled 2 errors");
 
     assert_eq!(s1, 200);
