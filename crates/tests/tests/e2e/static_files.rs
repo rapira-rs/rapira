@@ -92,6 +92,7 @@ fn static_files_serve_over_the_wire() {
         text.to_lowercase().contains("content-range: bytes 0-3/10"),
         "{text}"
     );
+    assert_eq!(head_field(&raw, "content-length"), "4");
     assert!(text.ends_with("0123"), "{text}");
 
     let _ = std::fs::remove_dir_all(&root);
