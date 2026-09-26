@@ -532,12 +532,22 @@ mod tests {
     use super::*;
     use rapira_sapi::ResponseHead;
     use rapira_sapi::types::Body as SapiBody;
+    use rapira_sapi::work::Work as _;
     use tokio::sync::mpsc;
     use tower::layer::layer_fn;
     use tower::service_fn;
     use tower::util::MapResponseLayer;
 
     use crate::response::empty_body;
+
+    /// Takes the request and the reply sender of `exchange` as the PHP thread does in the classic and worker modes.
+    fn take(exchange: Exchange) -> (Request, mpsc::Sender<Frame>) {
+        let ctx = Box::new(exchange)
+            .into_cgi()
+            .expect("an exchange has a CGI context");
+        let tx = ctx.sender.expect("a queued exchange holds its sender");
+        (ctx.req, tx)
+    }
 
     /// An intake that nothing drains: the middleware answers before PHP.
     fn no_php() -> Intake<Exchange> {
@@ -553,8 +563,7 @@ mod tests {
     ) {
         let (intake, mut units) = Intake::<Exchange>::channel(1);
         let php = tokio::spawn(async move {
-            let exchange = units.recv().await.expect("an exchange");
-            let tx = exchange.reply_sender();
+            let (_, tx) = take(units.recv().await.expect("an exchange"));
             for frame in frames {
                 tx.send(frame).await.unwrap();
             }
@@ -874,12 +883,11 @@ mod tests {
                 Some(_) => call(&handler, request).await.status(),
                 None => {
                     let (res, body) = tokio::join!(call(&handler, request), async {
-                        let exchange = units.recv().await.expect("an exchange");
-                        let SapiBody::Raw(body) = &exchange.request().body else {
+                        let (req, tx) = take(units.recv().await.expect("an exchange"));
+                        let SapiBody::Raw(body) = req.body else {
                             panic!("{}: the body was parsed", case.name);
                         };
-                        let body = body.get_ref().clone();
-                        let tx = exchange.reply_sender();
+                        let body = body.into_inner();
                         tx.send(head(false)).await.unwrap();
                         tx.send(end()).await.unwrap();
                         body
@@ -956,8 +964,8 @@ mod tests {
         let php = tokio::spawn(async move {
             let mut authorities = Vec::new();
             while let Some(exchange) = units.recv().await {
-                authorities.push(exchange.request().authority.clone());
-                let tx = exchange.reply_sender();
+                let (req, tx) = take(exchange);
+                authorities.push(req.authority);
                 tx.send(head(false)).await.unwrap();
                 tx.send(end()).await.unwrap();
             }

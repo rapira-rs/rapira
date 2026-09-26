@@ -25,20 +25,6 @@ impl Exchange {
         let ctx = Context::new(req, tx, superglobals);
         (Self { ctx }, rx)
     }
-
-    #[cfg(test)]
-    pub fn request(&self) -> &Request {
-        &self.ctx.req
-    }
-
-    /// The frame sender PHP writes the reply to.
-    #[cfg(test)]
-    pub fn reply_sender(&self) -> Sender<Frame> {
-        self.ctx
-            .sender
-            .clone()
-            .expect("a queued exchange holds its sender")
-    }
 }
 
 impl Work for Exchange {
