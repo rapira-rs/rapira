@@ -1,63 +1,97 @@
-//! The descriptor set behind a gRPC pool: what `Schema::load` accepts, and the JSON transcoding that Connect clients get from it.
+//! The descriptor set behind a gRPC pool: what the boot accepts, and the JSON transcoding that Connect clients get from it.
 
 use std::path::{Path, PathBuf};
+use std::process::ExitStatus;
 
-use bytes::Bytes;
 use http::Method;
-use rapira_grpc::{MethodInfo, Schema, ServiceInfo};
-use tests::grpc::{
-    Conn, ECHO_PATH, ECHO_SERVICE, HI, Wire, config, respond, scratch_dir, start, tcp,
-};
+use rapira_net::ListenAddr;
+use serde_json::{Value, json};
+use tests::grpc::{Conn, ECHO_PATH, ECHO_SERVICE, HI, Wire};
+use tests::{fixture, server_log};
 
-fn load(path: &Path, services: Option<&[&str]>) -> anyhow::Result<Schema> {
-    let services: Option<Vec<String>> =
-        services.map(|names| names.iter().map(|&s| s.to_owned()).collect());
-    Schema::load(path, services.as_deref())
+use crate::grpc_server::{calls, grpc_table, stop};
+use crate::harness::{Spawn, scratch_dir};
+
+/// The services that `getServices()` lists in a pool over echo.binpb that serves `services`.
+fn services_of(services: Option<&[&str]>) -> Vec<Value> {
+    let dir = scratch_dir();
+    let srv = grpc_table(
+        &fixture("grpc/identity.php"),
+        &dir.join("grpc.sock"),
+        &tests::echo_descriptor_set(),
+        services,
+    )
+    .json_log()
+    .spawn();
+    let ctx: Value =
+        serde_json::from_str(&server_log::wait_app_record(&srv.log_file(), "dispatcher"))
+            .expect("the dispatcher record holds JSON");
+    drop(srv);
+    let _ = std::fs::remove_dir_all(dir);
+    ctx["services"].as_array().expect("a service list").clone()
+}
+
+/// The exit status and the log of a boot over `path` that serves `services`. The schema loads before the bind, so the socket path stays unused.
+fn boot_failure(path: &Path, services: &[&str]) -> (ExitStatus, String) {
+    let dir = scratch_dir();
+    let failed = grpc_table(
+        &fixture("grpc/identity.php"),
+        &dir.join("grpc.sock"),
+        path,
+        Some(services),
+    )
+    .boot_failure();
+    let _ = std::fs::remove_dir_all(dir);
+    failed
 }
 
 /// The listing keeps streaming methods, in echo.proto order. echo.proto imports dep.proto, so the default list skips DepService.
+///
+/// Expected values: echo.proto, and MethodInfo and MethodKind of the contract.
 #[test]
 fn services_report_every_configured_method() {
-    let method = |name: &str, server_streaming| MethodInfo {
-        name: name.to_owned(),
-        input_type: "rapira.test.v1.EchoRequest".to_owned(),
-        output_type: "rapira.test.v1.EchoResponse".to_owned(),
-        client_streaming: false,
-        server_streaming,
+    let method = |name: &str, kind: &str| {
+        json!({
+            "class": "Rapira\\Grpc\\MethodInfo",
+            "name": name,
+            "inputType": "rapira.test.v1.EchoRequest",
+            "outputType": "rapira.test.v1.EchoResponse",
+            "kind": kind,
+        })
     };
-    let want = [ServiceInfo {
-        name: ECHO_SERVICE.to_owned(),
-        methods: vec![
-            method("Echo", false),
-            method("Get", false),
-            method("Watch", true),
+    let want = json!({
+        "class": "Rapira\\Grpc\\ServiceInfo",
+        "name": ECHO_SERVICE,
+        "methods": [
+            method("Echo", "unary"),
+            method("Get", "unary"),
+            method("Watch", "server-streaming"),
         ],
-    }];
-    let listed =
-        load(&tests::echo_descriptor_set(), Some(&[ECHO_SERVICE])).expect("echo.binpb loads");
-    assert_eq!(listed.services(), want, "an explicit list narrows the set");
+    });
+    let listed = services_of(Some(&[ECHO_SERVICE]));
+    assert_eq!(
+        listed,
+        std::slice::from_ref(&want),
+        "an explicit list narrows the set"
+    );
 
-    let every = load(&tests::echo_descriptor_set(), None).expect("echo.binpb loads");
-    let names: Vec<&str> = every.services().iter().map(|s| s.name.as_str()).collect();
+    let every = services_of(None);
+    let names: Vec<&str> = every.iter().filter_map(|s| s["name"].as_str()).collect();
     assert_eq!(
         names,
         ["rapira.test.v1.EchoService", "rapira.test.v1.OtherService"],
         "no list serves every service of the files that no other file imports, in descriptor order"
     );
-    assert_eq!(every.services()[0], want[0]);
+    assert_eq!(every[0], want);
 
-    let dep = load(
-        &tests::echo_descriptor_set(),
-        Some(&["rapira.test.dep.v1.DepService"]),
-    )
-    .expect("echo.binpb loads");
+    let dep = services_of(Some(&["rapira.test.dep.v1.DepService"]));
     assert_eq!(
-        dep.services()[0].name,
-        "rapira.test.dep.v1.DepService",
+        dep[0]["name"], "rapira.test.dep.v1.DepService",
         "an explicit list can name the service of an imported file"
     );
 }
 
+/// The master loads the schema before the fork, and `main` returns the error, so the process exits 1.
 #[test]
 fn load_rejects_a_set_it_cannot_serve() {
     struct Case {
@@ -66,7 +100,7 @@ fn load_rejects_a_set_it_cannot_serve() {
         service: &'static str,
         error: &'static str,
     }
-    let dir = scratch_dir("schema");
+    let dir = scratch_dir();
     let not_a_set = dir.join("not-a-set.binpb");
     std::fs::write(&not_a_set, [0xff, 0xff]).unwrap();
     let cases = [
@@ -102,23 +136,21 @@ fn load_rejects_a_set_it_cannot_serve() {
         },
         Case {
             name: "set without its imports",
-            path: tests::fixture("grpc/echo-no-imports.binpb"),
+            path: fixture("grpc/echo-no-imports.binpb"),
             service: ECHO_SERVICE,
             error: "--include_imports",
         },
         Case {
             name: "set without an import that supplies only an option",
-            path: tests::fixture("grpc_options/ping-no-imports.binpb"),
+            path: fixture("grpc_options/ping-no-imports.binpb"),
             service: "rapira.test.options.v1.PingService",
             error: "--include_imports",
         },
     ];
     for case in cases {
-        let Err(err) = load(&case.path, Some(&[case.service])) else {
-            panic!("{}: the set loaded", case.name);
-        };
-        let err = err.to_string();
-        assert!(err.contains(case.error), "{}: {err}", case.name);
+        let (status, log) = boot_failure(&case.path, &[case.service]);
+        assert_eq!(status.code(), Some(1), "{}: {log}", case.name);
+        assert!(log.contains(case.error), "{}: {log}", case.name);
     }
     let _ = std::fs::remove_dir_all(dir);
 }
@@ -141,16 +173,18 @@ fn load_rejects_a_service_listed_twice() {
         },
     ];
     for case in cases {
-        let Err(err) = load(&tests::echo_descriptor_set(), Some(&case.services)) else {
-            panic!("{}: the set loaded", case.name);
-        };
-        let err = err.to_string();
+        let (status, log) = boot_failure(&tests::echo_descriptor_set(), &case.services);
+        assert_eq!(status.code(), Some(1), "{}: {log}", case.name);
         assert!(
-            err.contains("grpc.services lists `rapira.test.v1.EchoService` twice"),
-            "{}: {err}",
+            log.contains("grpc.services lists `rapira.test.v1.EchoService` twice"),
+            "{}: {log}",
             case.name
         );
     }
+}
+
+fn hex(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02x}")).collect()
 }
 
 /// A Connect JSON call transcodes by the descriptor: the request into the bytes PHP gets, the reply out of the bytes PHP returns.
@@ -159,14 +193,13 @@ fn load_rejects_a_service_listed_twice() {
 #[tokio::test]
 async fn json_transcodes_by_descriptor() {
     // buffa charges the size of its Value type, at least 64 bytes, per element against a 32 MiB budget for untrusted input, so at most 524,288 elements fit. The reply is the application's, so the budget does not apply to it.
+    // grpc/wire-worker.php replies with this many elements for `x-reply: many-ids`.
     const IDS: usize = 600_000;
-    let mut many_ids = vec![0x1a, 0xc0, 0xcf, 0x24];
-    many_ids.resize(many_ids.len() + IDS, 0x01);
     let many_ids_json = format!(r#"{{"ids":[{}1]}}"#, "1,".repeat(IDS - 1));
     struct Case<'a> {
         name: &'static str,
-        /// The bytes PHP replies with. None: PHP echoes the message.
-        answer: Option<Bytes>,
+        /// The `x-reply` value that selects the bytes PHP replies with. None: PHP echoes the message.
+        answer: Option<&'static str>,
         request: &'a [u8],
         status: u16,
         /// The bytes PHP gets. None: PHP never sees the call.
@@ -233,7 +266,7 @@ async fn json_transcodes_by_descriptor() {
         },
         Case {
             name: "undecodable reply",
-            answer: Some(Bytes::from_static(&[0xff])),
+            answer: Some("ff"),
             request: br#"{"text":"hi"}"#,
             status: 500,
             sent: Some(HI),
@@ -241,7 +274,7 @@ async fn json_transcodes_by_descriptor() {
         },
         Case {
             name: "reply above the untrusted-input element budget",
-            answer: Some(Bytes::from(many_ids.clone())),
+            answer: Some("many-ids"),
             request: br#"{"text":"hi"}"#,
             status: 200,
             sent: Some(HI),
@@ -249,41 +282,31 @@ async fn json_transcodes_by_descriptor() {
         },
     ];
 
-    let (mut running, mut calls) = start(config(tcp()));
-    let mut conn = Conn::open(&running.listen, Wire::Http1)
-        .await
-        .expect("connect");
+    let srv = Spawn::grpc(fixture("grpc/wire-worker.php"))
+        .json_log()
+        .spawn();
+    let listen = ListenAddr::Tcp(srv.grpc.expect("the config has a [grpc] pool"));
+    let mut conn = Conn::open(&listen, Wire::Http1).await.expect("connect");
     for case in cases {
-        let send = conn.send(
-            Method::POST,
-            ECHO_PATH,
-            &[("content-type", "application/json")],
-            case.request,
-        );
-        let got = match case.sent {
-            Some(sent) => {
-                let (got, ()) = tokio::join!(send, async {
-                    let call = calls.recv().await.expect("the call reached PHP");
-                    assert_eq!(
-                        &call.message()[..],
-                        sent,
-                        "{}: the message PHP got",
-                        case.name
-                    );
-                    let reply = case
-                        .answer
-                        .clone()
-                        .unwrap_or_else(|| call.message().clone());
-                    respond(call, Ok(reply));
-                });
-                got
-            }
-            None => send.await,
-        };
-        let got = got.unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
+        let before = calls(&srv).len();
+        let mut headers = vec![("content-type", "application/json")];
+        headers.extend(case.answer.map(|answer| ("x-reply", answer)));
+        let got = conn
+            .send(Method::POST, ECHO_PATH, &headers, case.request)
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
 
         assert_eq!(got.status, case.status, "{}: {got:?}", case.name);
-        assert!(calls.try_recv().is_err(), "{}: a stray call", case.name);
+        let sent: Vec<Value> = calls(&srv)[before..]
+            .iter()
+            .map(|call| call["message"].clone())
+            .collect();
+        let want: Vec<Value> = case
+            .sent
+            .map(|bytes| json!(hex(bytes)))
+            .into_iter()
+            .collect();
+        assert_eq!(sent, want, "{}: the message PHP got", case.name);
         if let Some(reply) = case.reply {
             assert!(
                 &got.body[..] == reply,
@@ -293,5 +316,6 @@ async fn json_transcodes_by_descriptor() {
             );
         }
     }
-    running.shutdown().await.unwrap();
+    drop(conn);
+    stop(srv).await;
 }

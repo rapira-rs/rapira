@@ -11,6 +11,7 @@ mod failboot_tests;
 mod failboot_worker_tests;
 mod general_tests;
 mod grpc;
+mod grpc_schema;
 mod grpc_server;
 mod harness;
 mod http_values;

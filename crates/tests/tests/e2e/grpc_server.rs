@@ -86,7 +86,7 @@ async fn exited(mut srv: Server) -> Server {
 }
 
 /// A graceful stop: SIGQUIT, then [`exited`].
-async fn stop(srv: Server) -> Server {
+pub(crate) async fn stop(srv: Server) -> Server {
     signal(srv.pid(), libc::SIGQUIT);
     exited(srv).await
 }
