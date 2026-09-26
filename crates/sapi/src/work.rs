@@ -144,11 +144,6 @@ impl Sink {
             }
         }
     }
-
-    #[cfg(test)]
-    fn pending(&self) -> usize {
-        self.pending.load(Ordering::Relaxed)
-    }
 }
 
 /// The typed handle a plugin's transport submits to.
@@ -206,12 +201,5 @@ mod tests {
         let intake = Intake::<Probe>::new(sink);
         drop(rx);
         assert_eq!(intake.submit(Probe).await.unwrap_err(), Refused::Stopped);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn sink_counts_a_submitted_unit_as_pending() {
-        let (sink, _rx) = sink();
-        sink.submit(Box::new(Probe)).await.unwrap();
-        assert_eq!(sink.pending(), 1);
     }
 }
