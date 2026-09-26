@@ -34,7 +34,7 @@ make test   # runs test_nts, then test_e2e - sequentially on purpose
 
 - `make test_nts` - the unit tests of every crate (`cargo test --workspace`; the e2e suite is feature-gated off here).
 - `make test_e2e` - the end-to-end suite (`crates/tests`, `--features e2e`): each test spawns the `rapira` binary, which forks workers and binds ports, and drives it over HTTP, gRPC and signals. Single-threaded on purpose; never run it concurrently with `test_nts`.
-- `make coverage` - needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
+- `make coverage` - writes the line coverage of the unit and e2e suites to `lcov.info`. It needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
 - `make stubs` - maintainers only: regenerates each `*_arginfo.h` header under `crates/` from the `*.stub.php` stub next to it with PHP's `gen_stub.php`. Never edit the generated headers by hand.
 
 Test placement: unit tests live inside their crate and do not start PHP. Every test that needs PHP spawns the `rapira` binary and lives under `crates/tests/tests/e2e/` behind the `e2e` feature. The shared harness (the wire clients and the log readers) is in `crates/tests/src/`, and the fixtures are in `crates/tests/fixtures/` and `crates/tests/tests/e2e/fixtures/`.
