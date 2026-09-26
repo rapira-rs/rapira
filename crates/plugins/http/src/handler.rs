@@ -13,9 +13,10 @@ use rapira_sapi::work::{Intake, Refused};
 use rapira_sapi::{Addr, Frame, Request};
 use tower::{Service as _, ServiceExt as _};
 
+use crate::check::{self, Rejection};
 use crate::middleware::{self, BoxError, Layer, Peer, Service};
 use crate::response::{error_response, response_headers};
-use crate::{Config, Exchange, bridge, check, multipart, request};
+use crate::{Config, Exchange, bridge, multipart, request};
 
 pub(crate) struct Shared {
     pub cfg: Config,
@@ -25,37 +26,24 @@ pub(crate) struct Shared {
     pub inflight: Arc<AtomicUsize>,
 }
 
-/// A refusal before dispatch: PHP never saw the request.
-#[derive(Debug)]
-pub(crate) struct Rejected {
-    pub status: u16,
-    pub reason: String,
-}
-
-impl std::fmt::Display for Rejected {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.status, self.reason)
-    }
-}
-
-impl From<Refused> for Rejected {
+impl From<Refused> for Rejection {
     fn from(e: Refused) -> Self {
         Self {
             status: match e {
-                Refused::Saturated => 503,
-                Refused::Stopped => 500,
+                Refused::Saturated => http::StatusCode::SERVICE_UNAVAILABLE,
+                Refused::Stopped => http::StatusCode::INTERNAL_SERVER_ERROR,
             },
             reason: e.to_string(),
         }
     }
 }
 
-impl From<multipart::ParseError> for Rejected {
+impl From<multipart::ParseError> for Rejection {
     fn from(e: multipart::ParseError) -> Self {
         match e {
             multipart::ParseError::Rejected { status, reason } => Self { status, reason },
             multipart::ParseError::Io(e) => Self {
-                status: 500,
+                status: http::StatusCode::INTERNAL_SERVER_ERROR,
                 reason: format!("upload spool failed: {e}"),
             },
         }
@@ -399,9 +387,7 @@ where
         Ok(reply) => reply,
         Err(r) => {
             tracing::warn!(target: "http", "rejected before dispatch: {r}");
-            let status = http::StatusCode::from_u16(r.status)
-                .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-            return refused(status, guard);
+            return refused(r.status, guard);
         }
     };
 
@@ -491,7 +477,7 @@ async fn timeout_lazy<F: Future>(
 async fn submit(
     shared: &Shared,
     request: Request,
-) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejected> {
+) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
     let request = parse_multipart(request, shared.uploads.as_ref()).await?;
     let (exchange, reply) = Exchange::new(request, shared.cfg.superglobals);
     shared.intake.submit(exchange).await?;
@@ -502,7 +488,7 @@ async fn submit(
 async fn parse_multipart(
     mut req: Request,
     limits: Option<&Arc<multipart::Limits>>,
-) -> Result<Request, Rejected> {
+) -> Result<Request, Rejection> {
     let Some(limits) = limits else {
         return Ok(req);
     };
@@ -517,8 +503,8 @@ async fn parse_multipart(
     let lines = req.headers.get_all(CONTENT_TYPE);
     if lines.iter().nth(1).is_some() && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
     {
-        return Err(Rejected {
-            status: 400,
+        return Err(Rejection {
+            status: http::StatusCode::BAD_REQUEST,
             reason: "repeated content-type field lines with a multipart body".into(),
         });
     }
@@ -533,8 +519,8 @@ async fn parse_multipart(
     let limits = Arc::clone(limits);
     let parsed = tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
         .await
-        .map_err(|e| Rejected {
-            status: 500,
+        .map_err(|e| Rejection {
+            status: http::StatusCode::INTERNAL_SERVER_ERROR,
             reason: format!("multipart parse task failed: {e}"),
         })?;
     req.body = rapira_sapi::types::Body::Multipart(parsed?);

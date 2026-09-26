@@ -82,7 +82,7 @@ pub(crate) fn sweep_spool_dirs(base: &Path) {
 pub enum ParseError {
     /// The body is malformed (400) or over a limit (413).
     Rejected {
-        status: u16,
+        status: http::StatusCode,
         reason: String,
     },
     Io(std::io::Error),
@@ -96,14 +96,14 @@ impl From<std::io::Error> for ParseError {
 
 fn bad(reason: impl Into<String>) -> ParseError {
     ParseError::Rejected {
-        status: 400,
+        status: http::StatusCode::BAD_REQUEST,
         reason: reason.into(),
     }
 }
 
 fn over(reason: impl Into<String>) -> ParseError {
     ParseError::Rejected {
-        status: 413,
+        status: http::StatusCode::PAYLOAD_TOO_LARGE,
         reason: reason.into(),
     }
 }
@@ -461,7 +461,7 @@ mod tests {
     /// The status of the rejection.
     fn rejected(body: &[u8], l: &Limits) -> u16 {
         match parse(body, b"B", l) {
-            Err(ParseError::Rejected { status, .. }) => status,
+            Err(ParseError::Rejected { status, .. }) => status.as_u16(),
             Err(ParseError::Io(e)) => panic!("io error: {e}"),
             Ok(_) => panic!("expected a rejection"),
         }
@@ -572,11 +572,11 @@ mod tests {
         }
         assert!(matches!(
             boundary(b"multipart/form-data"),
-            Err(ParseError::Rejected { status: 400, .. })
+            Err(ParseError::Rejected { status, .. }) if status == 400
         ));
         assert!(matches!(
             boundary(b"multipart/form-data; boundary="),
-            Err(ParseError::Rejected { status: 400, .. })
+            Err(ParseError::Rejected { status, .. }) if status == 400
         ));
     }
 

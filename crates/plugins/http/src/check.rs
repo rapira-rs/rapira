@@ -3,10 +3,17 @@ use http::{Method, Version};
 
 use crate::UnsafeFieldNames;
 
+/// A refusal before dispatch: PHP never saw the request.
 #[derive(Debug)]
 pub(crate) struct Rejection {
     pub status: http::StatusCode,
     pub reason: String,
+}
+
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.status.as_u16(), self.reason)
+    }
 }
 
 impl Rejection {
