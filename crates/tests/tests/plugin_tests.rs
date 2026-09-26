@@ -69,7 +69,7 @@ fn run_to_end(
 }
 
 async fn exchange(intake: &Intake<Exchange>, req: Request) -> anyhow::Result<Response> {
-    let (exchange, reply) = Exchange::new(req);
+    let (exchange, reply) = Exchange::new(req, true);
     intake.submit(exchange).await?;
     collect(reply).await
 }

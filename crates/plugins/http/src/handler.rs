@@ -161,23 +161,6 @@ impl Body for RespBody {
     }
 }
 
-/// The hyper service of a connection without middleware.
-pub(crate) struct RapiraService {
-    pub(crate) handler: Arc<Conn>,
-}
-
-impl hyper::service::Service<http::Request<Incoming>> for RapiraService {
-    type Response = http::Response<RespBody>;
-    type Error = Infallible;
-    type Future =
-        Pin<Box<dyn Future<Output = Result<http::Response<RespBody>, Infallible>> + Send>>;
-
-    fn call(&self, req: http::Request<Incoming>) -> Self::Future {
-        let handler = Arc::clone(&self.handler);
-        Box::pin(async move { Ok(respond(handler, None, req).await) })
-    }
-}
-
 /// Serves one request of the connection. `chain` is [`Conn::chain`].
 pub(crate) async fn respond(
     handler: Arc<Conn>,
@@ -498,7 +481,7 @@ async fn submit(
     request: Request,
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejected> {
     let request = parse_multipart(request, shared.uploads.as_ref()).await?;
-    let (exchange, reply) = Exchange::new(request);
+    let (exchange, reply) = Exchange::new(request, shared.cfg.superglobals);
     shared.intake.submit(exchange).await?;
     Ok(reply)
 }
