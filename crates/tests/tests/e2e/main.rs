@@ -8,6 +8,7 @@ mod dispatcher;
 mod dispatcher_loop;
 mod extensions;
 mod failboot_tests;
+mod failboot_worker_tests;
 mod general_tests;
 mod grpc;
 mod harness;
