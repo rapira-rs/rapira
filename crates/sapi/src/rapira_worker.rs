@@ -133,7 +133,6 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
         }
     };
     crate::exchange::reclaim_current();
-    log_and_clear_last_error();
     exit
 }
 
