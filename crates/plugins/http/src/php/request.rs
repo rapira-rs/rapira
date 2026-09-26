@@ -1,22 +1,5 @@
 use super::*;
 
-/// add_assoc_zval_ex moves the list ref in: the hash-update family never addrefs.
-pub(super) unsafe fn add_list<'v>(
-    dst: *mut zval,
-    key: *const c_char,
-    key_len: usize,
-    values: impl Iterator<Item = &'v [u8]>,
-) {
-    unsafe {
-        let mut list: zval = std::mem::zeroed();
-        rapira_array_init(&mut list, values.size_hint().0 as u32);
-        for v in values {
-            zend::list_push_stringl(&mut list, v);
-        }
-        add_assoc_zval_ex(dst, key, key_len, &mut list);
-    }
-}
-
 unsafe fn emit_headers(dst: *mut zval, g: &Grouped) {
     unsafe {
         rapira_array_init(dst, g.0.len() as u32);
@@ -31,16 +14,6 @@ unsafe fn emit_headers(dst: *mut zval, g: &Grouped) {
     }
 }
 
-/// The key pointer of a header name for add_assoc_zval_ex.
-/// The symtable prefilter in add_assoc_zval_ex reads the byte after a leading `-`. For the name "-" that byte is past the name, so a NUL-terminated copy replaces it.
-pub(super) fn header_key(name: &str) -> *const c_char {
-    if name == "-" {
-        c"-".as_ptr()
-    } else {
-        name.as_ptr().cast()
-    }
-}
-
 /// One entry per name, with its values in field line order.
 unsafe fn emit_header_map(dst: *mut zval, headers: &HeaderMap) {
     unsafe {
@@ -49,25 +22,6 @@ unsafe fn emit_header_map(dst: *mut zval, headers: &HeaderMap) {
             let key = name.as_str();
             let values = headers.get_all(name).iter().map(HeaderValue::as_bytes);
             add_list(dst, header_key(key), key.len(), values);
-        }
-    }
-}
-
-pub(super) unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
-    unsafe {
-        match addr {
-            AddrOwned::Inet { ip, port } => {
-                let ce = rapira_ce_inet_address;
-                let _ = object_init_ex(dst, ce);
-                let o = (*dst).value.obj;
-                zend::prop_stringl(ce, o, c"ip", ip.as_bytes());
-                zend::prop_long(ce, o, c"port", i64::from(*port));
-            }
-            AddrOwned::Unix(path) => {
-                let ce = rapira_ce_unix_address;
-                let _ = object_init_ex(dst, ce);
-                zend::prop_str_or_null(ce, (*dst).value.obj, c"path", path.as_deref());
-            }
         }
     }
 }
@@ -197,14 +151,14 @@ unsafe fn build_multipart(
 /// `ex` is a live exchange with a non-null job; `return_value` is writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_build_request(
-    ex: *mut rapira_exchange_obj,
+    ex: *mut ExchangeObj,
     return_value: *mut zval,
 ) -> bool {
     guard(false, || unsafe { build_request_impl(ex, return_value) })
 }
 
 /// A throw during the property writes leaves readonly slots uninitialized: the partial object is released and the memo left unset.
-unsafe fn build_request_impl(ex: *mut rapira_exchange_obj, return_value: *mut zval) -> bool {
+unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> bool {
     unsafe {
         if !zend::is_undef(&(*ex).request) {
             *return_value = (*ex).request;

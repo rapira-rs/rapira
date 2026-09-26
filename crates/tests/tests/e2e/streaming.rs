@@ -283,7 +283,7 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
         &tests::PHP_PARTS,
         Mode::Dispatcher,
         script.clone(),
-        Some(rapira_sapi::http::DISPATCHER_CLASSES),
+        Some(rapira_http::DISPATCHER_CLASSES),
     )?;
     let running = run_plugin(
         Box::new(server),

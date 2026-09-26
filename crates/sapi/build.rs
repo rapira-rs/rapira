@@ -11,9 +11,6 @@ const C_FILES: &[&str] = &[
     "module.c",
     "rapira_classes.c",
     "rapira_dispatcher.c",
-    "rapira_http.c",
-    "rapira_http_classes.c",
-    "rapira_exchange.c",
     "rapira_grpc.c",
     "rapira_grpc_classes.c",
 ];
@@ -64,15 +61,12 @@ fn main() -> anyhow::Result<()> {
     let inputs: &[&str] = &[
         "bindgen.h",
         "rapira_sapi.h",
-        "rapira_http.h",
         "rapira_grpc.h",
         "allowed_bindings.rs",
         "rapira.stub.php",
         "rapira_arginfo.h",
         "rapira_exception.stub.php",
         "rapira_exception_arginfo.h",
-        "rapira_http.stub.php",
-        "rapira_http_arginfo.h",
         "rapira_grpc.stub.php",
         "rapira_grpc_arginfo.h",
     ];

@@ -4,18 +4,22 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
-use rapira_sapi::http::Exchange;
 use rapira_sapi::middleware::Middleware;
-use rapira_sapi::multipart;
 use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
 use rapira_sapi::work::Intake;
 
 mod bridge;
 mod check;
+mod exchange;
 mod handler;
+pub mod multipart;
+mod php;
 mod request;
 mod response;
 mod serve;
+
+pub use exchange::Exchange;
+pub use php::{DISPATCHER_CLASSES, PHP_PART, set_sendfile_root};
 
 #[derive(Clone)]
 pub struct Config {
@@ -95,7 +99,7 @@ impl Plugin for Server {
     }
 
     fn php(&self) -> Option<PhpPart> {
-        Some(rapira_sapi::http::PHP_PART)
+        Some(PHP_PART)
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
@@ -114,7 +118,7 @@ impl Plugin for Server {
         let Some(prepared) = prepared else {
             return Err(anyhow!("http listener was not prepared"));
         };
-        rapira_sapi::set_sendfile_root(config.sendfile_root.clone());
+        set_sendfile_root(config.sendfile_root.clone());
         let intake = intake.unwrap_or_else(|| Intake::new(worker.sink.clone()));
         serve::serve(intake, config, prepared, worker)
     }

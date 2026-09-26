@@ -27,7 +27,7 @@ pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     })
 }
 
-pub(crate) const MAX_BUFFERED_BODY: usize = 1 << 30;
+pub const MAX_BUFFERED_BODY: usize = 1 << 30;
 
 struct SapiHeaders(*mut sapi_headers_struct);
 
@@ -342,7 +342,7 @@ pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type:
         crate::diagnostics::php_log!(syslog_to_level(syslog_type), "{s}");
     })
 }
-pub(crate) fn send_error_head(c: &mut Context, status: u16) {
+pub fn send_error_head(c: &mut Context, status: u16) {
     if c.stream != StreamState::NotSent {
         return;
     }

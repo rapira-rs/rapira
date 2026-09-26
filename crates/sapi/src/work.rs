@@ -26,7 +26,7 @@ pub trait Held {
 /// Reclaims the Box that receive() handed out: clears the cycle slot if it still points here, and counts an unfinalized unit as handled.
 /// # Safety
 /// `ptr` came from `Box::into_raw` in receive and was not reclaimed before.
-pub(crate) unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
+pub unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
     crate::exchange::forget_held(ptr.cast::<()>());
     let st = unsafe { Box::from_raw(ptr) };
     if !st.finalized() {
@@ -76,7 +76,7 @@ impl std::fmt::Display for Refused {
 
 impl std::error::Error for Refused {}
 
-pub(crate) fn now_unix_f64() -> f64 {
+pub fn now_unix_f64() -> f64 {
     std::time::UNIX_EPOCH
         .elapsed()
         .map(|d| d.as_secs_f64())

@@ -10,7 +10,7 @@ use rapira_http::{
 use rapira_master::PoolConfig;
 use rapira_net::{ListenAddr, PrepareCtx};
 use rapira_sapi::middleware::Middleware;
-use rapira_sapi::plugin::{Mode, PhpPart, Plugin};
+use rapira_sapi::plugin::{Mode, Plugin};
 use rapira_sapi::{GrpcMethod, GrpcService};
 use std::{
     fs::{File, OpenOptions, read_dir, remove_file},
@@ -248,7 +248,7 @@ fn http_pool(
     // uploads: dispatcher mode only ---------------------------------
     let uploads = if dispatcher {
         prepare_uploads_dir(&http.uploads.dir)?;
-        Some(rapira_sapi::multipart::Limits {
+        Some(rapira_http::multipart::Limits {
             dir: http.uploads.dir,
             max_file_size: http.uploads.max_file_size,
             max_field_size: http.uploads.max_field_size,
@@ -395,12 +395,9 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) =
         http.into_iter().chain(grpc).unzip();
 
-    // MINIT once, after every pool bound its listeners.
-    let parts: Vec<PhpPart> = pools
-        .iter()
-        .filter_map(|pool| pool.plugin.as_ref().and_then(|plugin| plugin.php()))
-        .collect();
-    let module: rapira_sapi::PhpModule = rapira_sapi::boot_master(&parts)?;
+    // MINIT once, after every pool bound its listeners. Every linked plugin registers its classes, whatever pools are configured.
+    let module: rapira_sapi::PhpModule =
+        rapira_sapi::boot_master(&[rapira_http::PHP_PART, rapira_sapi::grpc::PHP_PART])?;
 
     // forks ------------------------------------------------------------------
     let cfg: rapira_master::MasterConfig = rapira_master::MasterConfig {

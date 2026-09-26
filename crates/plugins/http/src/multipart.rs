@@ -3,8 +3,8 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use crate::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
 use memchr::memmem;
+use rapira_sapi::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
 
 #[derive(Debug, Clone)]
 pub struct Limits {

@@ -2,7 +2,7 @@
 #include "zend_API.h"
 #include "zend_types.h"
 
-// rust glue (src/values.rs): these return false with a PHP exception already pending
+// rust glue (src/php/values.rs): these return false with a PHP exception already pending
 extern bool rapira_rs_ctor_form_field(zend_object *obj, zend_string *name,
                                       zend_string *value, zval *headers);
 extern bool rapira_rs_ctor_uploaded_file(zend_object *obj, zend_string *name,

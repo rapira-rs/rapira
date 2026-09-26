@@ -1,47 +1,32 @@
 pub(crate) use std::{
     cell::Cell,
-    ffi::{CStr, CString, c_char, c_int, c_void},
+    ffi::{CStr, c_char, c_int, c_void},
     path::Path,
-    time::{Duration, Instant},
+    time::Duration,
 };
 
 pub(crate) use bytes::Bytes;
 pub(crate) use http::header::{HeaderMap, HeaderName, HeaderValue};
-pub(crate) use tokio::sync::mpsc::{Sender, error::TrySendError};
 
 pub(crate) use crate::work::{DispatcherClasses, Held, release};
 pub(crate) use crate::{
-    HashPosition, HashTable, IS_ARRAY, IS_STRING, RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
+    HashPosition, HashTable, IS_STRING, RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
     add_next_index_object,
-    callbacks::{MAX_BUFFERED_BODY, guard},
-    object_init_ex, rapira_array_init, rapira_ce_already_finalized_error,
-    rapira_ce_closed_exception, rapira_ce_http_content_length_exceeded_error,
-    rapira_ce_http_file_not_sendable_exception, rapira_ce_http_form_field,
-    rapira_ce_http_head_already_written_error, rapira_ce_http_head_not_written_error,
-    rapira_ce_http_multipart, rapira_ce_http_request, rapira_ce_http_uploaded_file,
-    rapira_ce_inet_address, rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception,
-    rapira_ce_tls, rapira_ce_unix_address, rapira_ce_work_discarded_exception,
-    rapira_dispatcher_info_obj, rapira_eg, rapira_exchange_obj, rapira_receive_timed,
-    rapira_receive_untimed,
+    callbacks::guard,
+    object_init_ex, rapira_array_init, rapira_ce_closed_exception, rapira_ce_inet_address,
+    rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
+    rapira_dispatcher_info_obj, rapira_receive_timed, rapira_receive_untimed,
     scoreboard::{Event, sb_update},
     start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
-    types::{Addr, Body, Context, FormField, Frame, Request, ResponseHead, Tls, UploadedFile},
-    zend, zend_class_entry, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
-    zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_set_timeout,
-    zend_string, zend_unset_timeout, zval, zval_add_ref, zval_ptr_dtor,
+    types::Addr,
+    zend, zend_class_entry, zend_hash_get_current_data_ex, zend_hash_internal_pointer_reset_ex,
+    zend_hash_move_forward_ex, zend_object, zval, zval_add_ref, zval_ptr_dtor,
 };
 
 mod grpc;
-mod headers;
 mod receive;
-mod request;
-mod respond;
-mod sendfile;
-#[cfg(test)]
-mod tests;
 
 pub(crate) use grpc::{GrpcState, grpc_call_from, is_binary, printable};
-pub use sendfile::set_sendfile_root;
 
 thread_local! {
     /// The dispatcher classes of the plugin this PHP thread serves; None outside dispatcher mode.
@@ -119,7 +104,7 @@ pub(crate) fn note_received() {
     update(|c| c.received = true);
 }
 
-pub(crate) fn note_served() {
+pub fn note_served() {
     update(|c| c.served = true);
 }
 
@@ -131,41 +116,7 @@ pub(crate) fn received_any() -> bool {
     CYCLE.get().received
 }
 
-/// The head locks on the first head or body write: a body chunk commits an implicit 200 first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stage {
-    Open,
-    HeadCommitted,
-    Finalized,
-}
-
-/// A committed head, not yet on the wire: the bytes leave with the first body-touching verb.
-struct PendingHead {
-    status: u16,
-    headers: HeaderMap,
-}
-
-enum BodyState {
-    Raw(Vec<u8>),
-    /// Spool files unlink at seal(); Drop is the abnormal-path net.
-    Multipart {
-        fields: Vec<FieldPart>,
-        files: Vec<FilePart>,
-    },
-}
-
-struct FieldPart {
-    field: FormField,
-    headers: Grouped,
-}
-
-struct FilePart {
-    upload: UploadedFile,
-    path: Vec<u8>,
-    headers: Grouped,
-}
-
-enum AddrOwned {
+pub enum AddrOwned {
     Inet {
         ip: String,
         port: u16,
@@ -174,13 +125,13 @@ enum AddrOwned {
     Unix(Option<Vec<u8>>),
 }
 
-fn path_bytes(p: &Path) -> Vec<u8> {
+pub fn path_bytes(p: &Path) -> Vec<u8> {
     use std::os::unix::ffi::OsStrExt;
     p.as_os_str().as_bytes().to_vec()
 }
 
 impl AddrOwned {
-    fn new(a: &Addr) -> Self {
+    pub fn new(a: &Addr) -> Self {
         match a {
             Addr::Inet(sa) => Self::Inet {
                 ip: sa.ip().to_string(),
@@ -191,159 +142,65 @@ impl AddrOwned {
     }
 }
 
-/// Multipart part headers, one entry per name. Keys are CStrings: the symtable prefilter in add_assoc_zval_ex reads one byte past a leading `-`, which the terminator covers.
-struct Grouped(Vec<(CString, Vec<Vec<u8>>)>);
+/// add_assoc_zval_ex moves the list ref in: the hash-update family never addrefs.
+/// # Safety
+/// `dst` a live array; engine active on this thread.
+pub unsafe fn add_list<'v>(
+    dst: *mut zval,
+    key: *const c_char,
+    key_len: usize,
+    values: impl Iterator<Item = &'v [u8]>,
+) {
+    unsafe {
+        let mut list: zval = std::mem::zeroed();
+        rapira_array_init(&mut list, values.size_hint().0 as u32);
+        for v in values {
+            zend::list_push_stringl(&mut list, v);
+        }
+        add_assoc_zval_ex(dst, key, key_len, &mut list);
+    }
+}
 
-impl Grouped {
-    fn new(headers: &[(String, Vec<u8>)]) -> Self {
-        let mut out: Vec<(CString, Vec<Vec<u8>>)> = Vec::new();
-        for (name, value) in headers {
-            let nb = name.as_bytes();
-            if nb.is_empty() {
-                continue;
+/// The key pointer of a header name for add_assoc_zval_ex.
+/// The symtable prefilter in add_assoc_zval_ex reads the byte after a leading `-`. For the name "-" that byte is past the name, so a NUL-terminated copy replaces it.
+pub fn header_key(name: &str) -> *const c_char {
+    if name == "-" {
+        c"-".as_ptr()
+    } else {
+        name.as_ptr().cast()
+    }
+}
+
+/// # Safety
+/// `dst` writable; engine active on this thread.
+pub unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
+    unsafe {
+        match addr {
+            AddrOwned::Inet { ip, port } => {
+                let ce = rapira_ce_inet_address;
+                let _ = object_init_ex(dst, ce);
+                let o = (*dst).value.obj;
+                zend::prop_stringl(ce, o, c"ip", ip.as_bytes());
+                zend::prop_long(ce, o, c"port", i64::from(*port));
             }
-            match out.iter_mut().find(|(n, _)| n.as_bytes() == nb) {
-                Some((_, values)) => values.push(value.clone()),
-                None => {
-                    let Ok(key) = CString::new(nb) else { continue };
-                    out.push((key, vec![value.clone()]));
-                }
+            AddrOwned::Unix(path) => {
+                let ce = rapira_ce_unix_address;
+                let _ = object_init_ex(dst, ce);
+                zend::prop_str_or_null(ce, (*dst).value.obj, c"path", path.as_deref());
             }
         }
-        Self(out)
-    }
-}
-
-/// Contract spelling for `Request::$protocol`: HTTP/2, not the CGI HTTP/2.0.
-fn protocol_php(protocol: &str) -> &str {
-    match protocol {
-        "HTTP/2.0" => "HTTP/2",
-        "HTTP/3.0" => "HTTP/3",
-        p => p,
-    }
-}
-
-/// Owned values of the `Request` object. The builder keeps them in the state because a Zend OOM bailout longjmps through its frame, so that frame holds no values with Drop glue.
-struct RequestView {
-    uri_abs: String,
-    remote: AddrOwned,
-    server: AddrOwned,
-}
-
-impl RequestView {
-    fn new(req: &Request) -> Self {
-        let scheme = if req.https { "https" } else { "http" };
-        let host = match &req.authority {
-            Some(a) => String::from_utf8_lossy(a).into_owned(),
-            None => match &req.server {
-                Addr::Inet(sa) => sa.to_string(),
-                Addr::Unix(_) => format!("{}:{}", req.server_name, req.server_port),
-            },
-        };
-        let path = if req.uri.starts_with('/') {
-            req.uri.as_str()
-        } else {
-            "/"
-        };
-        Self {
-            uri_abs: format!("{scheme}://{host}{path}"),
-            remote: AddrOwned::new(&req.remote),
-            server: AddrOwned::new(&req.server),
-        }
-    }
-}
-
-pub struct ExchangeState {
-    // body above ctx: declaration drop order unlinks the spool files before the frame sender closes
-    body: BodyState,
-    ctx: Context,
-    /// Filled by the first `getRequest()`.
-    view: Option<RequestView>,
-    stage: Stage,
-    head_sent: bool,
-    pending: Option<PendingHead>,
-    declared_cl: Option<u64>,
-    /// Bytes accepted toward `declared_cl`: bodiless units count too, so a HEAD handler hits the same errors.
-    sent_body: u64,
-    discarded: bool,
-    /// 204, 304, 101, or a HEAD request: chunks are accepted and dropped.
-    bodiless: bool,
-    /// Last wall-timer arm: the park guard re-arms the remaining budget.
-    armed_at: Instant,
-}
-
-impl ExchangeState {
-    pub(crate) fn new(req: Request, tx: Sender<Frame>) -> Self {
-        let mut ctx = Context::new(req, tx, false);
-        let taken = std::mem::replace(
-            &mut ctx.req.body,
-            Body::Raw(std::io::Cursor::new(Vec::new())),
-        );
-        let body = match taken {
-            Body::Raw(cursor) => BodyState::Raw(cursor.into_inner()),
-            Body::Multipart(mb) => BodyState::Multipart {
-                fields: mb
-                    .fields
-                    .into_iter()
-                    .map(|f| FieldPart {
-                        headers: Grouped::new(&f.headers),
-                        field: f,
-                    })
-                    .collect(),
-                files: mb
-                    .files
-                    .into_iter()
-                    .map(|f| FilePart {
-                        path: path_bytes(&f.file.path),
-                        headers: Grouped::new(&f.headers),
-                        upload: f,
-                    })
-                    .collect(),
-            },
-        };
-        let bodiless = ctx.req.method.eq_ignore_ascii_case("HEAD");
-
-        Self {
-            ctx,
-            body,
-            view: None,
-            stage: Stage::Open,
-            head_sent: false,
-            pending: None,
-            declared_cl: None,
-            sent_body: 0,
-            discarded: false,
-            bodiless,
-            armed_at: Instant::now(),
-        }
-    }
-}
-
-impl Held for ExchangeState {
-    fn finalized(&self) -> bool {
-        self.stage == Stage::Finalized
-    }
-
-    fn host_closed(&self) -> bool {
-        self.discarded
-            || (self.stage != Stage::Finalized
-                && self.ctx.sender.as_ref().is_some_and(Sender::is_closed))
-    }
-
-    fn discard(&mut self) {
-        respond::discard_unit(self);
     }
 }
 
 /// `fn $name(obj) -> *mut $t` recovers the enclosing C struct: the C fields sit before `std` (the layouts in rapira_sapi.h, rapira_http.h and rapira_grpc.h).
+#[macro_export]
 macro_rules! container_of {
     ($vis:vis $name:ident, $t:ty) => {
-        $vis unsafe fn $name(obj: *mut zend_object) -> *mut $t {
+        $vis unsafe fn $name(obj: *mut $crate::zend_object) -> *mut $t {
             unsafe { obj.byte_sub(std::mem::offset_of!($t, std)).cast() }
         }
     };
 }
 pub(crate) use container_of;
 
-container_of!(pub(crate) exchange_from, rapira_exchange_obj);
 container_of!(info_from, rapira_dispatcher_info_obj);

@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
-use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -27,8 +27,10 @@ struct JobRx {
     pending: Arc<AtomicUsize>,
 }
 
-/// The parts that MINIT registers after the base classes.
-static PARTS: OnceLock<Vec<PhpPart>> = OnceLock::new();
+thread_local! {
+    /// The parts that MINIT registers after the base classes. MINIT runs on the thread that calls `boot_master`.
+    static PARTS: RefCell<Vec<PhpPart>> = const { RefCell::new(Vec::new()) };
+}
 
 pub struct PhpModule {}
 
@@ -73,8 +75,7 @@ fn check_linked_php() -> anyhow::Result<()> {
 /// MINIT once in the master. Base classes first, then each part in order.
 pub fn boot_master(parts: &[PhpPart]) -> anyhow::Result<PhpModule> {
     check_linked_php()?;
-    // The root boots once. The test harness boots each time with the same parts, so the first boot sets them.
-    PARTS.get_or_init(|| parts.to_vec());
+    PARTS.set(parts.to_vec());
     let mut module: _sapi_module_struct = module::build_sapi_module();
     let started: bool = unsafe {
         // The Rust runtime sets SIGPIPE to SIG_IGN before main, so a write to a closed peer returns EPIPE: https://doc.rust-lang.org/beta/unstable-book/compiler-flags/on-broken-pipe.html
@@ -97,10 +98,12 @@ pub fn boot_master(parts: &[PhpPart]) -> anyhow::Result<PhpModule> {
 /// MINIT calls it after the base classes (module.c).
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_register_plugin_classes() {
-    for part in PARTS.get().into_iter().flatten() {
-        // SAFETY: MINIT runs on the booting thread, and the base classes the part extends are registered.
-        unsafe { (part.register)() };
-    }
+    PARTS.with_borrow(|parts| {
+        for part in parts {
+            // SAFETY: MINIT runs on the booting thread, and the base classes the part extends are registered.
+            unsafe { (part.register)() };
+        }
+    });
 }
 
 impl Rapira {

@@ -116,7 +116,7 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
     let mut spool_dir: Option<PathBuf> = None;
     if let Some(base) = http.and_then(|http| http.uploads_dir) {
         // The http plugin spools in the same dir.
-        let dir = rapira_sapi::multipart::worker_spool_dir(&base);
+        let dir = rapira_http::multipart::worker_spool_dir(&base);
         if let Err(e) = {
             use std::os::unix::fs::DirBuilderExt;
             std::fs::DirBuilder::new().mode(0o700).create(&dir)

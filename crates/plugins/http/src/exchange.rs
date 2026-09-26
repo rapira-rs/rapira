@@ -1,10 +1,11 @@
 use tokio::sync::mpsc::{self, Sender};
 
-use crate::callbacks::send_error_head;
-use crate::exchange::{ExchangeState, exchange_from};
-use crate::types::{Context, Frame, Request};
-use crate::work::{Held, Work, now_unix_f64};
-use crate::zend_object;
+use rapira_sapi::callbacks::send_error_head;
+use rapira_sapi::types::{Context, Frame, Request};
+use rapira_sapi::work::{Held, Work, now_unix_f64};
+use rapira_sapi::zend_object;
+
+use crate::php::{ExchangeState, exchange_from};
 
 // cap 4 lets a buffered Head+Chunk+End trio, plus a stray interim head, queue without parking the PHP thread
 const FRAME_CAP: usize = 4;

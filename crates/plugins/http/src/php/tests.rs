@@ -2,7 +2,7 @@ use super::headers::*;
 use super::respond::*;
 use super::sendfile::*;
 use super::*;
-use crate::types::Request;
+use rapira_sapi::types::Request;
 use std::path::PathBuf;
 
 fn base_req() -> Request {
@@ -39,15 +39,15 @@ enum Sealed {
     Nothing,
 }
 
-fn recv_sealed(rx: &mut tokio::sync::mpsc::Receiver<crate::types::Frame>) -> Sealed {
+fn recv_sealed(rx: &mut tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>) -> Sealed {
     let (mut status, mut body, mut saw_frames) = (None, Vec::new(), false);
     while let Ok(frame) = rx.try_recv() {
         saw_frames = true;
         match frame {
-            crate::types::Frame::Interim(_) | crate::types::Frame::File { .. } => {}
-            crate::types::Frame::Head { head, .. } => status = Some(head.status),
-            crate::types::Frame::Chunk(b) => body.extend_from_slice(&b),
-            crate::types::Frame::End { truncated, .. } => {
+            rapira_sapi::types::Frame::Interim(_) | rapira_sapi::types::Frame::File { .. } => {}
+            rapira_sapi::types::Frame::Head { head, .. } => status = Some(head.status),
+            rapira_sapi::types::Frame::Chunk(b) => body.extend_from_slice(&b),
+            rapira_sapi::types::Frame::End { truncated, .. } => {
                 return match (truncated, status) {
                     (true, status) => Sealed::Truncated { status, body },
                     (false, Some(status)) => Sealed::Complete { status, body },
@@ -67,7 +67,7 @@ fn state_of(
     req: Request,
 ) -> (
     ExchangeState,
-    tokio::sync::mpsc::Receiver<crate::types::Frame>,
+    tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>,
 ) {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     (ExchangeState::new(req, tx), rx)
@@ -75,7 +75,7 @@ fn state_of(
 
 fn state() -> (
     ExchangeState,
-    tokio::sync::mpsc::Receiver<crate::types::Frame>,
+    tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>,
 ) {
     state_of(base_req())
 }
@@ -150,7 +150,7 @@ fn view_normalizes_protocol_and_empty_unix_path() {
 /// A one-shot write carries its computed length on the Head frame; a streamed write leaves framing to the front.
 #[test]
 fn head_frame_length_follows_the_write_shape() {
-    use crate::types::Frame;
+    use rapira_sapi::types::Frame;
     let (mut st, mut rx) = state();
     let v = unsafe { write_body_core(&mut st, c"abc".as_ptr(), 3, true) };
     assert_eq!(v, Verb::Ok);
@@ -171,7 +171,7 @@ fn head_frame_length_follows_the_write_shape() {
 /// Over-declared length sends the fitting prefix and seals untruncated, so later writes see Finalized.
 #[test]
 fn content_length_exceeded_sends_the_prefix_and_seals() {
-    use crate::types::Frame;
+    use rapira_sapi::types::Frame;
     let (mut st, mut rx) = state();
     let v = unsafe { write_head_core(&mut st, 200, map(&[("content-length", "5")])) };
     assert_eq!(v, Verb::Ok);
@@ -213,7 +213,7 @@ fn repeated_content_length_is_a_bad_field() {
 /// An interim head emits at once with its fields as written (the front frames the wire) and leaves the final-head slot open.
 #[test]
 fn interim_head_emits_its_fields_and_leaves_the_final_head_open() {
-    use crate::types::Frame;
+    use rapira_sapi::types::Frame;
     let (mut st, mut rx) = state();
     let fields = map(&[
         ("link", "</a.css>; rel=preload"),
@@ -249,7 +249,7 @@ fn gone_client_discards_once_and_stays_discarded() {
 /// `flush()` emits the implicit 200 once; a repeat flush puts nothing new on the stream.
 #[test]
 fn flush_emits_the_implicit_head_once() {
-    use crate::types::Frame;
+    use rapira_sapi::types::Frame;
     let (mut st, mut rx) = state();
     let job: *mut c_void = (&raw mut st).cast();
     assert!(unsafe { rapira_rs_exchange_flush(job) });
@@ -271,7 +271,7 @@ fn flush_emits_the_implicit_head_once() {
 /// A committed 101 is bodiless: chunks are accepted and dropped.
 #[test]
 fn a_101_head_drops_body_chunks() {
-    use crate::types::Frame;
+    use rapira_sapi::types::Frame;
     let (mut st, mut rx) = state();
     assert_eq!(
         unsafe { write_head_core(&mut st, 101, HeaderMap::new()) },
@@ -292,7 +292,7 @@ fn a_101_head_drops_body_chunks() {
 /// sendFile validation, one test fn: the root is process-global state.
 #[test]
 fn send_file_validation_table() {
-    use crate::types::Frame;
+    use rapira_sapi::types::Frame;
     let dir = std::env::temp_dir();
     set_sendfile_root(dir.clone());
     let path = dir.join(format!("rapira-sf-{}", std::process::id()));
@@ -356,7 +356,7 @@ fn send_file_validation_table() {
 /// Trailers end the response on the End frame: a headless call is HeadNotWritten, a repeat call Finalized.
 #[test]
 fn trailers_finalize_with_a_committed_head() {
-    use crate::types::Frame;
+    use rapira_sapi::types::Frame;
     let (mut st, mut rx) = state();
     let v = unsafe { write_trailers_core(&mut st, map(&[("x", "y")])) };
     assert_eq!(v, Verb::HeadNotWritten, "nothing here commits a head");
@@ -417,12 +417,12 @@ fn seal_unlinks_the_spool_files() {
     st.body = BodyState::Multipart {
         fields: Vec::new(),
         files: vec![FilePart {
-            upload: crate::types::UploadedFile {
+            upload: rapira_sapi::types::UploadedFile {
                 name: b"f".to_vec(),
                 client_filename: b"a.bin".to_vec(),
                 client_media_type: None,
                 headers: Vec::new(),
-                file: crate::types::SpooledFile { path: path.clone() },
+                file: rapira_sapi::types::SpooledFile { path: path.clone() },
                 size: 7,
             },
             path: path_bytes(&path),
