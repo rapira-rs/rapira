@@ -44,7 +44,7 @@ $serve = static function (Exchange $ex): void {
             $ex->writeBody($body);
         }
     } catch (RapiraThrowable) {
-        // The host closed the exchange first - nothing to answer.
+        // The http plugin closed the exchange first - nothing to answer.
     } catch (PageNotFound $e) {
         try {
             $ex->writeHead(404, ['content-type' => ['text/plain']]);

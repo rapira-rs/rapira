@@ -57,7 +57,7 @@ while (true) {
         // Drained: no more work will ever arrive.
         break;
     } catch (RapiraThrowable) {
-        // The host closed the exchange first - nothing to answer, move on.
+        // The http plugin closed the exchange first - nothing to answer, move on.
     } catch (\Throwable $e) {
         try {
             $ex->writeHead(500, ['content-type' => ['text/plain']]);

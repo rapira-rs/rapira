@@ -4,7 +4,7 @@ version = "0.8.1"
 edition.workspace = true
 publish = false
 license = "MIT"
-description = "gRPC front for rapira - serves unary gRPC, gRPC-Web and Connect calls from PHP"
+description = "The grpc plugin of rapira - serves unary gRPC, gRPC-Web and Connect calls from PHP"
 
 [lints]
 workspace = true

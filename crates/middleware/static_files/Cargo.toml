@@ -4,7 +4,7 @@ version = "0.8.1"
 edition.workspace = true
 publish = false
 license = "MIT"
-description = "Static file middleware for the rapira HTTP front"
+description = "Static file middleware for the rapira http plugin"
 
 [lints]
 workspace = true
