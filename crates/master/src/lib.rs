@@ -105,7 +105,7 @@ pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::R
     let forker = process::Forker {
         self_pipe,
         lifeline,
-        worker,
+        worker: Box::new(worker),
     };
     let mut master = events::Master::new(cfg, scoreboard, forker);
     master.run_loop()

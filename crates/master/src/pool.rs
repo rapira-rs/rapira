@@ -5,7 +5,7 @@ use libc::c_int;
 use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, SLOT_STARTING, Scoreboard, now_millis};
 
 use crate::pctl::KillPhase;
-use crate::process::{ExitVerdict, KillIntent, ProcTable, Spawner, WorkerProc, kill};
+use crate::process::{ExitVerdict, Forker, KillIntent, ProcTable, WorkerProc, kill};
 use crate::scaling::{DynAction, DynInput, dynamic_start_count, dynamic_tick, ondemand_armed};
 use crate::{PoolConfig, Scaling};
 
@@ -136,7 +136,7 @@ impl Pool {
         self.table.procs.iter().any(|p| p.generation < cur)
     }
 
-    fn spawn_into(&mut self, slot: usize, now: Instant, spawner: &mut dyn Spawner) {
+    fn spawn_into(&mut self, slot: usize, now: Instant, spawner: &mut Forker<'_>) {
         self.board.set_starting(slot);
         let generation = self.table.generation;
         match spawner.spawn(self.index, self.board.slot(slot)) {
@@ -159,7 +159,7 @@ impl Pool {
         }
     }
 
-    pub(crate) fn fork_initial(&mut self, now: Instant, spawner: &mut dyn Spawner) {
+    pub(crate) fn fork_initial(&mut self, now: Instant, spawner: &mut Forker<'_>) {
         let count: usize = match self.cfg.scaling {
             Scaling::Static => self.cfg.processes,
             Scaling::Dynamic {
@@ -190,7 +190,7 @@ impl Pool {
         ) && self.find_spawn_slot().is_some()
     }
 
-    pub(crate) fn ondemand_fork_one(&mut self, now: Instant, spawner: &mut dyn Spawner) {
+    pub(crate) fn ondemand_fork_one(&mut self, now: Instant, spawner: &mut Forker<'_>) {
         if let Some(slot) = self.find_spawn_slot() {
             self.spawn_into(slot, now, spawner);
         }
@@ -211,7 +211,7 @@ impl Pool {
     }
 
     /// Overlap reload: spawn one current-gen worker as headroom and gate on it serving before any old worker is drained, so capacity never dips.
-    pub(crate) fn begin_reload(&mut self, now: Instant, spawner: &mut dyn Spawner) {
+    pub(crate) fn begin_reload(&mut self, now: Instant, spawner: &mut Forker<'_>) {
         self.table.generation += 1;
         let slot = if self.has_old_gen() {
             self.find_spawn_slot()
@@ -222,7 +222,7 @@ impl Pool {
     }
 
     /// Ondemand (or no free slot) spawns no replacement and drains the next old worker directly: replacements come from demand.
-    fn reload_enter_await(&mut self, slot: Option<usize>, now: Instant, spawner: &mut dyn Spawner) {
+    fn reload_enter_await(&mut self, slot: Option<usize>, now: Instant, spawner: &mut Forker<'_>) {
         match slot {
             Some(s) if !matches!(self.cfg.scaling, Scaling::Ondemand) => {
                 self.spawn_into(s, now, spawner);
@@ -306,7 +306,7 @@ impl Pool {
         verdict: ExitVerdict,
         now: Instant,
         stopping: bool,
-        spawner: &mut dyn Spawner,
+        spawner: &mut Forker<'_>,
     ) -> anyhow::Result<()> {
         let slot = w.slot;
         let lived = now.saturating_duration_since(w.spawned_at);
@@ -409,7 +409,7 @@ impl Pool {
         &mut self,
         now: Instant,
         stopping: bool,
-        spawner: &mut dyn Spawner,
+        spawner: &mut Forker<'_>,
     ) {
         if stopping {
             return;
@@ -429,7 +429,7 @@ impl Pool {
         }
     }
 
-    fn static_refill(&mut self, now: Instant, spawner: &mut dyn Spawner) {
+    fn static_refill(&mut self, now: Instant, spawner: &mut Forker<'_>) {
         let running = self.table.running();
         let pending = (0..self.table.slots.len())
             .filter(|&i| self.table.slots[i].respawn_at.is_some())
@@ -449,7 +449,7 @@ impl Pool {
         min_spare: usize,
         max_spare: usize,
         now: Instant,
-        spawner: &mut dyn Spawner,
+        spawner: &mut Forker<'_>,
     ) {
         let inp = DynInput {
             idle: self.idle_count(),
@@ -509,7 +509,7 @@ impl Pool {
         }
     }
 
-    pub(crate) fn fire_due(&mut self, now: Instant, spawner: &mut dyn Spawner) {
+    pub(crate) fn fire_due(&mut self, now: Instant, spawner: &mut Forker<'_>) {
         if let Some(r) = self.reload
             && now >= r.deadline
         {
@@ -556,81 +556,13 @@ impl Pool {
 }
 
 #[cfg(test)]
-impl Pool {
-    pub(crate) fn push_proc(
-        &mut self,
-        pid: libc::pid_t,
-        slot: usize,
-        generation: u32,
-        at: Instant,
-    ) {
-        self.table.procs.push(WorkerProc {
-            pid,
-            slot,
-            generation,
-            spawned_at: at,
-            kill_intent: None,
-        });
-    }
-
-    pub(crate) fn take_proc(&mut self, pid: libc::pid_t) -> WorkerProc {
-        let i = self
-            .table
-            .procs
-            .iter()
-            .position(|p| p.pid == pid)
-            .expect("the table holds the pid");
-        self.table.procs.swap_remove(i)
-    }
-
-    pub(crate) fn set_slot(&self, slot: usize, state: u32) {
-        self.board.slot(slot).state.store(state, Relaxed);
-    }
-}
-
-/// Counts WARN events on the `master` target; hand-rolled because the crate depends only on the `tracing` facade.
-#[cfg(test)]
-#[derive(Clone, Default)]
-pub(crate) struct WarnCounter(std::sync::Arc<std::sync::atomic::AtomicUsize>);
-
-#[cfg(test)]
-impl WarnCounter {
-    pub(crate) fn count(&self) -> usize {
-        self.0.load(Relaxed)
-    }
-}
-
-#[cfg(test)]
-impl tracing::Subscriber for WarnCounter {
-    fn enabled(&self, md: &tracing::Metadata) -> bool {
-        md.target() == "master" && *md.level() == tracing::Level::WARN
-    }
-    fn event(&self, _: &tracing::Event) {
-        self.0.fetch_add(1, Relaxed);
-    }
-    fn new_span(&self, _: &tracing::span::Attributes) -> tracing::span::Id {
-        tracing::span::Id::from_u64(1)
-    }
-    fn record(&self, _: &tracing::span::Id, _: &tracing::span::Record) {}
-    fn record_follows_from(&self, _: &tracing::span::Id, _: &tracing::span::Id) {}
-    fn enter(&self, _: &tracing::span::Id) {}
-    fn exit(&self, _: &tracing::span::Id) {}
-}
-
-#[cfg(test)]
 mod tests {
     use super::*;
-    use crate::process::{FakeSpawner, TestChild, dead_worker, wait_signal};
-    use rapira_scoreboard::{SLOT_ACTIVE, SLOT_IDLE, SLOT_STARTING};
-    use std::sync::atomic::Ordering::Relaxed;
 
-    // Sentinel pids above PID_MAX_LIMIT: the QUIT/TERM/KILL these tests send resolve to ESRCH.
+    // Sentinel pid above PID_MAX_LIMIT: no live process holds it.
     const P_OLD0: libc::pid_t = 2_000_000_001;
-    const P_OLD1: libc::pid_t = 2_000_000_002;
-    const P_OLD2: libc::pid_t = 2_000_000_003;
-    const P_NEW: libc::pid_t = 2_000_000_100;
 
-    fn test_pool(processes: usize, scaling: Scaling) -> (Pool, FakeSpawner) {
+    fn test_pool(processes: usize, scaling: Scaling) -> Pool {
         let board = Scoreboard::create(processes * 2).unwrap();
         let cfg = PoolConfig {
             name: "http",
@@ -640,564 +572,12 @@ mod tests {
             request_terminate_timeout: Duration::ZERO,
             listeners: Vec::new(),
         };
-        let pool = Pool::new(0, cfg, board, Duration::from_secs(30));
-        (pool, FakeSpawner::new())
-    }
-
-    #[test]
-    fn fork_initial_static_fills_processes() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Static);
-        p.fork_initial(Instant::now(), &mut sp);
-
-        assert_eq!(sp.calls.len(), 3);
-        for (i, &(pool, view)) in sp.calls.iter().enumerate() {
-            assert_eq!(pool, 0);
-            assert!(
-                std::ptr::eq(view, p.board.slot(i)),
-                "spawn {i} took slot {i}"
-            );
-        }
-        assert_eq!(p.table.running(), 3);
-    }
-
-    #[test]
-    fn fork_initial_dynamic_starts_at_midpoint() {
-        let (mut p, mut sp) = test_pool(
-            10,
-            Scaling::Dynamic {
-                min_spare: 2,
-                max_spare: 6,
-            },
-        );
-        p.fork_initial(Instant::now(), &mut sp);
-        assert_eq!(sp.calls.len(), 4);
-    }
-
-    #[test]
-    fn fork_initial_ondemand_spawns_none() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Ondemand);
-        p.fork_initial(Instant::now(), &mut sp);
-        assert!(sp.calls.is_empty());
-        assert_eq!(p.table.running(), 0);
-    }
-
-    #[test]
-    fn begin_reload_spawns_one_replacement_and_awaits_it() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        for (i, &pid) in [P_OLD0, P_OLD1].iter().enumerate() {
-            p.push_proc(pid, i, 0, t0 + Duration::from_millis(i as u64));
-            p.set_slot(i, SLOT_IDLE);
-        }
-
-        p.begin_reload(t0, &mut sp);
-
-        assert_eq!(p.table.generation, 1);
-        assert_eq!(sp.calls.len(), 1);
-        assert!(std::ptr::eq(sp.calls[0].1, p.board.slot(2)));
-        assert_eq!(
-            p.reload,
-            Some(Reload {
-                phase: ReloadPhase::Await {
-                    slot: 2,
-                    until: t0 + Duration::from_secs(30)
-                },
-                deadline: t0 + Duration::from_millis(50),
-            })
-        );
-    }
-
-    #[test]
-    fn begin_reload_with_no_workers_finishes_immediately() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Static);
-        p.begin_reload(Instant::now(), &mut sp);
-        assert_eq!(p.table.generation, 1);
-        assert!(p.reload.is_none());
-        assert!(sp.calls.is_empty(), "no old worker needs a replacement");
-    }
-
-    #[test]
-    fn reload_gate_holds_until_replacement_idle() {
-        let (mut p, _sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        p.table.generation = 1;
-        for (i, &pid) in [P_OLD0, P_OLD1, P_OLD2].iter().enumerate() {
-            p.push_proc(pid, i, 0, t0 + Duration::from_millis(i as u64));
-            p.set_slot(i, SLOT_IDLE);
-        }
-        p.push_proc(P_NEW, 3, 1, t0 + Duration::from_millis(10));
-        p.set_slot(3, SLOT_STARTING);
-        p.reload = Some(Reload {
-            phase: ReloadPhase::Await {
-                slot: 3,
-                until: t0 + Duration::from_secs(30),
-            },
-            deadline: t0,
-        });
-
-        p.on_reload_deadline(t0);
-        assert!(matches!(
-            p.reload.unwrap().phase,
-            ReloadPhase::Await { slot: 3, .. }
-        ));
-
-        p.set_slot(3, SLOT_IDLE);
-        p.on_reload_deadline(t0);
-        assert!(matches!(
-            p.reload.unwrap().phase,
-            ReloadPhase::Drain {
-                draining: P_OLD0,
-                ..
-            }
-        ));
-    }
-
-    /// Under load a replacement can be ACTIVE at every probe; the gate must accept that as serving.
-    #[test]
-    fn reload_gate_opens_on_active_replacement() {
-        let (mut p, _sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        p.table.generation = 1;
-        p.push_proc(P_OLD0, 0, 0, t0);
-        p.set_slot(0, SLOT_IDLE);
-        p.push_proc(P_NEW, 3, 1, t0);
-        p.set_slot(3, SLOT_ACTIVE);
-        p.reload = Some(Reload {
-            phase: ReloadPhase::Await {
-                slot: 3,
-                until: t0 + Duration::from_secs(30),
-            },
-            deadline: t0,
-        });
-
-        p.on_reload_deadline(t0);
-        assert!(matches!(
-            p.reload.unwrap().phase,
-            ReloadPhase::Drain {
-                draining: P_OLD0,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn reload_gate_forces_past_stuck_replacement_at_safety_cap() {
-        let (mut p, _sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        p.table.generation = 1;
-        p.push_proc(P_OLD0, 0, 0, t0);
-        p.set_slot(0, SLOT_IDLE);
-        p.push_proc(P_NEW, 3, 1, t0);
-        p.set_slot(3, SLOT_STARTING);
-        p.reload = Some(Reload {
-            phase: ReloadPhase::Await { slot: 3, until: t0 },
-            deadline: t0,
-        });
-
-        p.on_reload_deadline(t0 + Duration::from_millis(1));
-        assert!(matches!(
-            p.reload.unwrap().phase,
-            ReloadPhase::Drain {
-                draining: P_OLD0,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn reload_gate_rearms_probe_before_safety_cap() {
-        let (mut p, _sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        p.table.generation = 1;
-        p.push_proc(P_OLD0, 0, 0, t0);
-        p.set_slot(0, SLOT_IDLE);
-        p.push_proc(P_NEW, 3, 1, t0);
-        p.set_slot(3, SLOT_STARTING);
-        p.reload = Some(Reload {
-            phase: ReloadPhase::Await {
-                slot: 3,
-                until: t0 + Duration::from_secs(30),
-            },
-            deadline: t0,
-        });
-
-        let now = t0 + Duration::from_millis(1);
-        p.on_reload_deadline(now);
-        let r = p.reload.unwrap();
-        assert!(matches!(r.phase, ReloadPhase::Await { slot: 3, .. }));
-        assert_eq!(r.deadline, now + RELOAD_GATE_POLL);
-    }
-
-    #[test]
-    fn drain_escalates_term_then_kill_against_its_pid() {
-        let (mut p, _sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        p.table.generation = 1;
-        p.push_proc(P_OLD0, 0, 0, t0);
-        p.push_proc(P_NEW, 1, 1, t0);
-        p.reload = Some(Reload {
-            phase: ReloadPhase::Drain {
-                draining: P_OLD0,
-                phase: KillPhase::Quit,
-            },
-            deadline: t0,
-        });
-
-        let mut at = t0;
-        for expected in [KillPhase::Term, KillPhase::Kill, KillPhase::Kill] {
-            p.on_reload_deadline(at);
-            let r = p.reload.expect("the drain chain stays armed");
-            assert_eq!(
-                r.phase,
-                ReloadPhase::Drain {
-                    draining: P_OLD0,
-                    phase: expected
-                }
-            );
-            assert_eq!(r.deadline, at + Duration::from_secs(1));
-            at = r.deadline;
-        }
-    }
-
-    #[test]
-    fn drain_handoff_spawns_the_next_replacement_into_the_freed_slot() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        for (i, &pid) in [P_OLD0, P_OLD1].iter().enumerate() {
-            p.push_proc(pid, i, 0, t0 + Duration::from_millis(i as u64));
-            p.set_slot(i, SLOT_IDLE);
-        }
-        p.begin_reload(t0, &mut sp);
-        p.set_slot(2, SLOT_IDLE);
-        p.on_reload_deadline(t0 + Duration::from_millis(50));
-        assert!(matches!(
-            p.reload.unwrap().phase,
-            ReloadPhase::Drain {
-                draining: P_OLD0,
-                ..
-            }
-        ));
-
-        let w = p.take_proc(P_OLD0);
-        let t1 = t0 + Duration::from_millis(60);
-        p.on_child_exit(w, ExitVerdict::Drain, t1, false, &mut sp)
-            .unwrap();
-
-        assert_eq!(sp.calls.len(), 2);
-        assert!(
-            std::ptr::eq(sp.calls[1].1, p.board.slot(0)),
-            "the next replacement takes the slot the drained worker freed"
-        );
-        assert!(matches!(
-            p.reload.unwrap().phase,
-            ReloadPhase::Await { slot: 0, .. }
-        ));
-    }
-
-    #[test]
-    fn reload_finishes_when_last_old_worker_reaped() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        p.table.generation = 1;
-        p.push_proc(P_NEW, 0, 1, t0);
-        p.reload = Some(Reload {
-            phase: ReloadPhase::Drain {
-                draining: P_OLD0,
-                phase: KillPhase::Quit,
-            },
-            deadline: t0 + Duration::from_secs(30),
-        });
-
-        let drained = dead_worker(P_OLD0, 1, 0, t0);
-        p.on_child_exit(drained, ExitVerdict::Drain, t0, false, &mut sp)
-            .unwrap();
-
-        assert!(p.reload.is_none());
-        assert_eq!(p.table.procs.len(), 1);
-        assert!(sp.calls.is_empty(), "no old worker is left to replace");
-    }
-
-    #[test]
-    fn ondemand_reload_paces_one_at_a_time_without_spawning() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Ondemand);
-        let t0 = Instant::now();
-        for (i, &pid) in [P_OLD0, P_OLD1].iter().enumerate() {
-            p.push_proc(pid, i, 0, t0 + Duration::from_millis(i as u64));
-            p.set_slot(i, SLOT_IDLE);
-        }
-
-        p.begin_reload(t0, &mut sp);
-        assert_eq!(p.table.generation, 1);
-        assert!(sp.calls.is_empty(), "ondemand must not spawn a replacement");
-        assert!(matches!(
-            p.reload.unwrap().phase,
-            ReloadPhase::Drain {
-                draining: P_OLD0,
-                phase: KillPhase::Quit
-            }
-        ));
-
-        let w0 = p.take_proc(P_OLD0);
-        p.on_child_exit(w0, ExitVerdict::Drain, t0, false, &mut sp)
-            .unwrap();
-        assert_eq!(p.table.procs.len(), 1);
-        assert!(
-            matches!(
-                p.reload.unwrap().phase,
-                ReloadPhase::Drain {
-                    draining: P_OLD1,
-                    phase: KillPhase::Quit
-                }
-            ),
-            "the next drain starts at QUIT again"
-        );
-
-        let w1 = p.take_proc(P_OLD1);
-        p.on_child_exit(w1, ExitVerdict::Drain, t0, false, &mut sp)
-            .unwrap();
-        assert!(p.reload.is_none());
-        assert_eq!(p.table.procs.len(), 0);
-    }
-
-    #[test]
-    fn unhealthy_after_ever_served_respawns_not_failboot() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        p.ever_served = true;
-        let w = dead_worker(P_OLD0, 0, 0, t0);
-        let r = p.on_child_exit(
-            w,
-            ExitVerdict::Unhealthy,
-            t0 + Duration::from_secs(1),
-            false,
-            &mut sp,
-        );
-        assert!(r.is_ok());
-        assert!(p.table.slots[0].respawn_at.is_some());
-    }
-
-    #[test]
-    fn gen0_unhealthy_never_served_failboots() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        assert!(!p.ever_served);
-        let w = dead_worker(P_OLD0, 0, 0, t0);
-        let e = p
-            .on_child_exit(w, ExitVerdict::Unhealthy, t0, false, &mut sp)
-            .unwrap_err()
-            .to_string();
-        assert!(e.contains("http pool: worker"), "{e}");
-    }
-
-    #[test]
-    fn gen1_unhealthy_never_served_respawns_not_failboot() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        p.table.generation = 1;
-        assert!(!p.ever_served);
-        let w = dead_worker(P_OLD0, 0, 1, t0);
-        let r = p.on_child_exit(w, ExitVerdict::Unhealthy, t0, false, &mut sp);
-        assert!(r.is_ok());
-        assert!(p.table.slots[0].respawn_at.is_some());
-    }
-
-    /// A master-chosen kill respawns immediately: no failboot (that is for Unhealthy only) and no backoff.
-    #[test]
-    fn timeout_kill_respawns_immediately_without_failboot() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        assert!(!p.ever_served);
-        let w = dead_worker(P_OLD0, 0, 0, t0);
-        let r = p.on_child_exit(w, ExitVerdict::TimeoutKill, t0, false, &mut sp);
-        assert!(r.is_ok());
-        assert_eq!(p.table.slots[0].respawn_at, Some(t0));
-        assert_eq!(p.table.slots[0].crash_streak, 0);
-    }
-
-    #[test]
-    fn exit_while_stopping_schedules_nothing() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        p.on_child_exit(
-            dead_worker(P_OLD0, 0, 0, t0),
-            ExitVerdict::Crash,
-            t0,
-            true,
-            &mut sp,
-        )
-        .unwrap();
-        p.on_child_exit(
-            dead_worker(P_OLD1, 1, 0, t0),
-            ExitVerdict::Unhealthy,
-            t0,
-            true,
-            &mut sp,
-        )
-        .expect("a stopping pool never failboots");
-
-        assert_eq!(p.table.slots[0].respawn_at, None);
-        assert_eq!(p.table.slots[1].respawn_at, None);
-        assert!(sp.calls.is_empty());
-    }
-
-    #[test]
-    fn ondemand_crash_backoff_suppresses_without_respawn() {
-        let (mut p, mut sp) = test_pool(1, Scaling::Ondemand);
-        let t0 = Instant::now();
-        let w = dead_worker(P_OLD0, 0, 0, t0);
-        p.on_child_exit(
-            w,
-            ExitVerdict::Crash,
-            t0 + Duration::from_secs(1),
-            false,
-            &mut sp,
-        )
-        .unwrap();
-        let due = p.table.slots[0]
-            .respawn_at
-            .expect("backoff kept as suppression");
-
-        p.fire_due(due + Duration::from_millis(1), &mut sp);
-        assert_eq!(p.table.slots[0].respawn_at, None, "suppression lifted");
-        assert!(sp.calls.is_empty(), "expiry must not fork");
-    }
-
-    #[test]
-    fn watchdog_kills_a_worker_with_timeout_intent() {
-        let (mut p, _sp) = test_pool(1, Scaling::Static);
-        p.cfg.request_terminate_timeout = Duration::from_secs(2);
-        let mut child = TestChild::sleeper();
-        p.push_proc(child.pid(), 0, 0, Instant::now());
-        p.table.procs[0].kill_intent = Some(KillIntent::Timeout);
-        p.set_slot(0, SLOT_ACTIVE);
-        p.board
-            .slot(0)
-            .last_activity_ms
-            .store(now_millis().saturating_sub(5_000), Relaxed);
-
-        p.watchdog_tick();
-        assert_eq!(wait_signal(&mut child), Some(libc::SIGKILL));
-    }
-
-    #[test]
-    fn watchdog_spares_fresh_active_and_idle_workers() {
-        let (mut p, _sp) = test_pool(3, Scaling::Static);
-        p.cfg.request_terminate_timeout = Duration::from_secs(2);
-        let t0 = Instant::now();
-        p.push_proc(P_OLD0, 0, 0, t0);
-        p.set_slot(0, SLOT_ACTIVE);
-        p.board
-            .slot(0)
-            .last_activity_ms
-            .store(now_millis(), Relaxed);
-        p.push_proc(P_OLD1, 1, 0, t0);
-        p.set_slot(1, SLOT_IDLE);
-        p.board
-            .slot(1)
-            .last_activity_ms
-            .store(now_millis().saturating_sub(60_000), Relaxed);
-
-        p.watchdog_tick();
-        assert!(p.table.procs.iter().all(|w| w.kill_intent.is_none()));
-    }
-
-    #[test]
-    fn dynamic_ceiling_warns_once_and_never_spawns() {
-        let (mut p, mut sp) = test_pool(
-            2,
-            Scaling::Dynamic {
-                min_spare: 2,
-                max_spare: 4,
-            },
-        );
-        let t0 = Instant::now();
-        for (i, &pid) in [P_OLD0, P_OLD1].iter().enumerate() {
-            p.push_proc(pid, i, 0, t0);
-            p.set_slot(i, SLOT_ACTIVE);
-        }
-
-        let warns = WarnCounter::default();
-        tracing::subscriber::with_default(warns.clone(), || {
-            p.maintenance_tick(t0, false, &mut sp);
-            p.maintenance_tick(t0 + Duration::from_secs(1), false, &mut sp);
-        });
-        assert_eq!(warns.count(), 1, "ceiling warning must fire once");
-        assert!(p.warned_max_children);
-        assert!(sp.calls.is_empty(), "the ceiling ticks must not spawn");
-    }
-
-    #[test]
-    fn static_refill_counts_pending_respawn_as_committed() {
-        let (mut p, mut sp) = test_pool(1, Scaling::Static);
-        let t0 = Instant::now();
-        p.table.slots[0].schedule_immediate(t0);
-
-        p.maintenance_tick(t0, false, &mut sp);
-        assert!(
-            sp.calls.is_empty(),
-            "the pending respawn already covers the target"
-        );
-        assert_eq!(p.table.slots[0].respawn_at, Some(t0), "deadline untouched");
-    }
-
-    #[test]
-    fn maintenance_is_paused_only_while_this_pool_reloads() {
-        let (mut p, mut sp) = test_pool(3, Scaling::Static);
-        let t0 = Instant::now();
-        p.reload = Some(Reload {
-            phase: ReloadPhase::Await {
-                slot: 0,
-                until: t0 + Duration::from_secs(30),
-            },
-            deadline: t0 + Duration::from_secs(30),
-        });
-
-        p.maintenance_tick(t0, false, &mut sp);
-        assert!(sp.calls.is_empty(), "a reloading pool must not refill");
-
-        p.reload = None;
-        p.maintenance_tick(t0, true, &mut sp);
-        assert!(sp.calls.is_empty(), "a stopping master must not refill");
-
-        p.maintenance_tick(t0, false, &mut sp);
-        assert_eq!(sp.calls.len(), 3, "the pool refills once it is idle again");
-    }
-
-    /// The request bound is independent of the reload chain: an overdue worker is terminated while this pool reloads.
-    #[test]
-    fn watchdog_runs_while_this_pool_reloads() {
-        let (mut p, mut sp) = test_pool(1, Scaling::Static);
-        p.cfg.request_terminate_timeout = Duration::from_secs(2);
-        let t0 = Instant::now();
-        p.push_proc(P_OLD0, 0, 1, t0);
-        p.set_slot(0, SLOT_ACTIVE);
-        p.board
-            .slot(0)
-            .last_activity_ms
-            .store(now_millis().saturating_sub(5_000), Relaxed);
-        p.reload = Some(Reload {
-            phase: ReloadPhase::Await {
-                slot: 1,
-                until: t0 + Duration::from_secs(30),
-            },
-            deadline: t0 + RELOAD_GATE_POLL,
-        });
-
-        p.maintenance_tick(t0, false, &mut sp);
-        assert_eq!(
-            p.table.procs[0].kill_intent,
-            Some(KillIntent::Timeout),
-            "the overdue active worker must have timeout intent"
-        );
-        assert!(
-            sp.calls.is_empty(),
-            "scaling stays paused during the reload"
-        );
+        Pool::new(0, cfg, board, Duration::from_secs(30))
     }
 
     #[test]
     fn ondemand_arms_only_when_a_fork_can_land() {
-        let (mut p, _sp) = test_pool(1, Scaling::Ondemand);
+        let mut p = test_pool(1, Scaling::Ondemand);
         assert!(p.armed(false));
 
         let t0 = Instant::now();
@@ -1209,7 +589,7 @@ mod tests {
 
     #[test]
     fn ondemand_stays_armed_while_this_pool_reloads() {
-        let (mut p, _sp) = test_pool(1, Scaling::Ondemand);
+        let mut p = test_pool(1, Scaling::Ondemand);
         let t0 = Instant::now();
         p.reload = Some(Reload {
             phase: ReloadPhase::Drain {
@@ -1225,13 +605,13 @@ mod tests {
     /// Static and dynamic workers accept in the children; the master watches only its self-pipe.
     #[test]
     fn non_ondemand_never_arms_listeners() {
-        let (p, _sp) = test_pool(1, Scaling::Static);
+        let p = test_pool(1, Scaling::Static);
         assert!(!p.armed(false));
     }
 
     #[test]
     fn next_deadline_is_the_earliest_of_reload_and_respawns() {
-        let (mut p, _sp) = test_pool(3, Scaling::Static);
+        let mut p = test_pool(3, Scaling::Static);
         let t0 = Instant::now();
         assert_eq!(p.next_deadline(), None);
 

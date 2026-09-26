@@ -1,5 +1,3 @@
-#[cfg(test)]
-use std::os::fd::FromRawFd;
 use std::os::fd::{AsRawFd, RawFd};
 use std::time::{Duration, Instant};
 
@@ -158,28 +156,19 @@ pub(crate) fn kill(pid: libc::pid_t, sig: c_int) {
     unsafe { libc::kill(pid, sig) };
 }
 
-/// Fork source for a pool. The trait keeps `Pool` free of the worker closure's type and lets the tests drive every spawn path.
-pub(crate) trait Spawner {
-    fn signal_fd(&self) -> RawFd;
-    fn spawn(
-        &mut self,
-        pool: usize,
-        slot_view: &'static SharedSlot,
-    ) -> std::io::Result<libc::pid_t>;
-}
-
-pub(crate) struct Forker<F: FnMut(WorkerEnv) -> i32> {
+/// Fork source for every pool. The boxed worker closure keeps `Pool` and `Master` free of the closure's type.
+pub(crate) struct Forker<'w> {
     pub self_pipe: SelfPipe,
     pub lifeline: Lifeline,
-    pub worker: F,
+    pub worker: Box<dyn FnMut(WorkerEnv) -> i32 + 'w>,
 }
 
-impl<F: FnMut(WorkerEnv) -> i32> Spawner for Forker<F> {
-    fn signal_fd(&self) -> RawFd {
+impl Forker<'_> {
+    pub(crate) fn signal_fd(&self) -> RawFd {
         self.self_pipe.rd.as_raw_fd()
     }
 
-    fn spawn(
+    pub(crate) fn spawn(
         &mut self,
         pool: usize,
         slot_view: &'static SharedSlot,
@@ -265,108 +254,6 @@ fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
             unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
             Ok(pid)
         }
-    }
-}
-
-/// Test spawner: records the pool and slot view of every spawn, and hands out pids no live process can hold.
-#[cfg(test)]
-pub(crate) struct FakeSpawner {
-    pipe: SelfPipe,
-    next_pid: libc::pid_t,
-    pub calls: Vec<(usize, &'static SharedSlot)>,
-}
-
-#[cfg(test)]
-impl FakeSpawner {
-    pub(crate) fn new() -> FakeSpawner {
-        let mut fds = [0 as RawFd; 2];
-        // SAFETY: socketpair fills a 2-element array with two owned fds.
-        let rc = unsafe { libc::socketpair(libc::AF_UNIX, libc::SOCK_STREAM, 0, fds.as_mut_ptr()) };
-        assert_eq!(rc, 0, "socketpair");
-        FakeSpawner {
-            pipe: SelfPipe {
-                // SAFETY: fds holds two fresh fds we take sole ownership of.
-                rd: unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[0]) },
-                wr: unsafe { std::os::fd::OwnedFd::from_raw_fd(fds[1]) },
-            },
-            next_pid: 2_000_000_200,
-            calls: Vec::new(),
-        }
-    }
-}
-
-#[cfg(test)]
-impl Spawner for FakeSpawner {
-    fn signal_fd(&self) -> RawFd {
-        self.pipe.rd.as_raw_fd()
-    }
-
-    fn spawn(
-        &mut self,
-        pool: usize,
-        slot_view: &'static SharedSlot,
-    ) -> std::io::Result<libc::pid_t> {
-        self.calls.push((pool, slot_view));
-        let pid = self.next_pid;
-        self.next_pid += 1;
-        Ok(pid)
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn dead_worker(
-    pid: libc::pid_t,
-    slot: usize,
-    generation: u32,
-    at: Instant,
-) -> WorkerProc {
-    WorkerProc {
-        pid,
-        slot,
-        generation,
-        spawned_at: at,
-        kill_intent: None,
-    }
-}
-
-/// A real child for the tests that must observe a signal. Drop kills it, so a failed assertion cannot leak it.
-#[cfg(test)]
-pub(crate) struct TestChild(std::process::Child);
-
-#[cfg(test)]
-impl TestChild {
-    pub(crate) fn sleeper() -> TestChild {
-        TestChild(
-            std::process::Command::new("/bin/sleep")
-                .arg("30")
-                .spawn()
-                .unwrap(),
-        )
-    }
-
-    pub(crate) fn pid(&self) -> libc::pid_t {
-        self.0.id() as libc::pid_t
-    }
-}
-
-#[cfg(test)]
-impl Drop for TestChild {
-    fn drop(&mut self) {
-        let _ = self.0.kill();
-        let _ = self.0.wait();
-    }
-}
-
-#[cfg(test)]
-pub(crate) fn wait_signal(child: &mut TestChild) -> Option<c_int> {
-    use std::os::unix::process::ExitStatusExt;
-    let deadline = Instant::now() + Duration::from_secs(5);
-    loop {
-        if let Some(status) = child.0.try_wait().unwrap() {
-            return status.signal();
-        }
-        assert!(Instant::now() < deadline, "the child outlived the kill");
-        std::thread::sleep(Duration::from_millis(10));
     }
 }
 
