@@ -4,6 +4,7 @@ mod async_tests;
 mod basic_tests;
 mod classic;
 mod concurrency;
+mod dispatcher;
 mod dispatcher_loop;
 mod extensions;
 mod general_tests;
