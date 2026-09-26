@@ -78,14 +78,14 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
     let hooks: WorkerHooks = WorkerHooks {
         max_requests: effective_quota(max_requests),
-        on_quota: Some(Box::new({
+        on_quota: Box::new({
             let stopper = stopper.clone();
             move || request_worker_exit(WORKER_EXIT_RECYCLE, &stopper)
-        })),
-        on_unhealthy: Some(Box::new({
+        }),
+        on_unhealthy: Box::new({
             let stopper = stopper.clone();
             move || request_worker_exit(WORKER_EXIT_UNHEALTHY, &stopper)
-        })),
+        }),
         slot: env.slot_view,
     };
 

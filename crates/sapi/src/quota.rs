@@ -7,8 +7,8 @@ use crate::scoreboard::{Event, sb_update};
 pub struct WorkerHooks {
     /// 0 = unlimited; jitter already applied by the caller.
     pub max_requests: u64,
-    pub on_quota: Option<Box<dyn FnOnce() + Send>>,
-    pub on_unhealthy: Option<Box<dyn FnOnce() + Send>>,
+    pub on_quota: Box<dyn FnOnce() + Send>,
+    pub on_unhealthy: Box<dyn FnOnce() + Send>,
     /// The scoreboard slot this worker reports into.
     pub slot: &'static rapira_scoreboard::SharedSlot,
 }
@@ -28,15 +28,15 @@ thread_local! {
 /// Install on the PHP worker thread before the first job.
 pub(crate) fn install(
     max_requests: u64,
-    on_quota: Option<Box<dyn FnOnce() + Send>>,
-    on_unhealthy: Option<Box<dyn FnOnce() + Send>>,
+    on_quota: Box<dyn FnOnce() + Send>,
+    on_unhealthy: Box<dyn FnOnce() + Send>,
 ) {
     Q.with_borrow_mut(|q| {
         *q = QuotaState {
             served: 0,
             max: max_requests,
-            on_quota,
-            on_unhealthy,
+            on_quota: Some(on_quota),
+            on_unhealthy: Some(on_unhealthy),
         };
     });
 }
