@@ -44,6 +44,8 @@ void rapira_smart_str_free(smart_str *s);
 zval *rapira_symtable_str_find(HashTable *ht, const char *str, size_t len);
 // ZVAL_OBJ_COPY is a macro; the shim writes the case `name` of the enum `ce` into `dst` with a new reference
 void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name);
+// ZVAL_STRINGL is a macro; the shim writes a new non-interned string into `zv`
+void rapira_zval_stringl(zval *zv, const char *s, size_t len);
 
 // Mode in rapira_config (crates/config/src/pool.rs), mapped in start.rs (start_worker) - keep in sync
 enum {

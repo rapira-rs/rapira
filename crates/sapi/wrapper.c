@@ -34,6 +34,10 @@ void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name) {
     ZVAL_OBJ_COPY(dst, zend_enum_get_case_cstr(ce, name));
 }
 
+void rapira_zval_stringl(zval *zv, const char *s, size_t len) {
+    ZVAL_STRINGL(zv, s, len);
+}
+
 void rapira_init_call_stack(void) {
 #ifdef ZEND_CHECK_STACK_LIMIT
     zend_call_stack_init();

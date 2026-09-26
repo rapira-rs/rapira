@@ -4,6 +4,10 @@ pub(crate) use std::{
     path::Path,
     time::Duration,
 };
+use std::{
+    net::{IpAddr, Ipv4Addr},
+    sync::OnceLock,
+};
 
 pub(crate) use crate::work::{DispatcherClasses, Held, release};
 pub(crate) use crate::{
@@ -108,6 +112,7 @@ pub(crate) fn received_any() -> bool {
     CYCLE.get().received
 }
 
+#[derive(Debug, PartialEq, Eq)]
 pub enum AddrOwned {
     Inet {
         ip: String,
@@ -122,11 +127,45 @@ pub fn path_bytes(p: &Path) -> Vec<u8> {
     p.as_os_str().as_bytes().to_vec()
 }
 
+/// Appends `n` in decimal.
+pub fn push_dec(out: &mut String, mut n: u16) {
+    let mut buf = [0u8; 5];
+    let mut at = buf.len();
+    loop {
+        at -= 1;
+        buf[at] = b'0' + (n % 10) as u8;
+        n /= 10;
+        if n == 0 {
+            break;
+        }
+    }
+    for &d in &buf[at..] {
+        out.push(char::from(d));
+    }
+}
+
+/// Appends the dotted form of `ip`, the same bytes as its `Display`.
+pub fn push_ipv4(out: &mut String, ip: Ipv4Addr) {
+    for (i, octet) in ip.octets().into_iter().enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        push_dec(out, u16::from(octet));
+    }
+}
+
 impl AddrOwned {
     pub fn new(a: &Addr) -> Self {
         match a {
             Addr::Inet(sa) => Self::Inet {
-                ip: sa.ip().to_string(),
+                ip: match sa.ip() {
+                    IpAddr::V4(v4) => {
+                        let mut ip = String::with_capacity(15);
+                        push_ipv4(&mut ip, v4);
+                        ip
+                    }
+                    v6 @ IpAddr::V6(_) => v6.to_string(),
+                },
                 port: sa.port(),
             },
             Addr::Unix(p) => Self::Unix(p.as_deref().map(path_bytes).filter(|b| !b.is_empty())),
@@ -163,6 +202,10 @@ pub fn header_key(name: &str) -> *const c_char {
     }
 }
 
+/// Slot offsets of `InetAddress` (ip, port) and `UnixAddress` (path); the classes are fixed after MINIT.
+static INET_SLOTS: OnceLock<[u32; 2]> = OnceLock::new();
+static UNIX_SLOT: OnceLock<u32> = OnceLock::new();
+
 /// # Safety
 /// `dst` writable; engine active on this thread.
 pub unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
@@ -170,15 +213,18 @@ pub unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
         match addr {
             AddrOwned::Inet { ip, port } => {
                 let ce = rapira_ce_inet_address;
+                let [ip_slot, port_slot] =
+                    *INET_SLOTS.get_or_init(|| [c"ip", c"port"].map(|n| zend::prop_offset(ce, n)));
                 let _ = object_init_ex(dst, ce);
                 let o = (*dst).value.obj;
-                zend::prop_stringl(ce, o, c"ip", ip.as_bytes());
-                zend::prop_long(ce, o, c"port", i64::from(*port));
+                zend::slot_stringl(o, ip_slot, ip.as_bytes());
+                zend::slot_long(o, port_slot, i64::from(*port));
             }
             AddrOwned::Unix(path) => {
                 let ce = rapira_ce_unix_address;
+                let path_slot = *UNIX_SLOT.get_or_init(|| zend::prop_offset(ce, c"path"));
                 let _ = object_init_ex(dst, ce);
-                zend::prop_str_or_null(ce, (*dst).value.obj, c"path", path.as_deref());
+                zend::slot_str_or_null((*dst).value.obj, path_slot, path.as_deref());
             }
         }
     }

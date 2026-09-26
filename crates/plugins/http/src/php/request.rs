@@ -1,3 +1,5 @@
+use std::sync::OnceLock;
+
 use super::*;
 
 unsafe fn emit_headers(dst: *mut zval, g: &Grouped) {
@@ -157,7 +159,10 @@ pub unsafe extern "C" fn rapira_rs_exchange_build_request(
     guard(false, || unsafe { build_request_impl(ex, return_value) })
 }
 
-/// A throw during the property writes leaves readonly slots uninitialized: the partial object is released and the memo left unset.
+/// Slot offsets of the `Request` properties in declaration order; the class is fixed after MINIT.
+static REQUEST_SLOTS: OnceLock<[u32; 11]> = OnceLock::new();
+
+/// A throw while the property values are built releases them and leaves the memo unset. The slot writes do not throw.
 unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> bool {
     unsafe {
         if !zend::is_undef(&(*ex).request) {
@@ -199,40 +204,57 @@ unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> b
             return false;
         }
 
+        let [
+            method_slot,
+            uri_slot,
+            target_slot,
+            authority_slot,
+            protocol_slot,
+            headers_slot,
+            body_slot,
+            remote_slot,
+            server_slot,
+            tls_slot,
+            received_at_slot,
+        ] = *REQUEST_SLOTS.get_or_init(|| {
+            [
+                c"method",
+                c"uri",
+                c"target",
+                c"authority",
+                c"protocol",
+                c"headers",
+                c"body",
+                c"remote",
+                c"server",
+                c"tls",
+                c"receivedAt",
+            ]
+            .map(|n| zend::prop_offset(ce, n))
+        });
         let mut reqz: zval = std::mem::zeroed();
         let _ = object_init_ex(&mut reqz, ce);
         let o = reqz.value.obj;
-        zend::prop_stringl(ce, o, c"method", req.method.as_bytes());
-        zend::prop_stringl(ce, o, c"uri", view.uri_abs.as_bytes());
+        zend::slot_stringl(o, method_slot, req.method.as_bytes());
+        zend::slot_stringl(o, uri_slot, view.uri_abs.as_bytes());
         let target = req.target.as_deref().unwrap_or(req.uri.as_bytes());
-        zend::prop_stringl(ce, o, c"target", target);
-        zend::prop_str_or_null(ce, o, c"authority", req.authority.as_deref());
-        zend::prop_stringl(ce, o, c"protocol", protocol_php(&req.protocol).as_bytes());
-        zend::prop_zval(ce, o, c"headers", &mut headers);
-        zval_ptr_dtor(&mut headers);
+        zend::slot_stringl(o, target_slot, target);
+        zend::slot_str_or_null(o, authority_slot, req.authority.as_deref());
+        zend::slot_stringl(o, protocol_slot, protocol_php(&req.protocol).as_bytes());
+        zend::slot_init(o, headers_slot, &headers);
         match &st.body {
-            BodyState::Raw(v) => zend::prop_stringl(ce, o, c"body", v),
-            BodyState::Multipart { .. } => {
-                zend::prop_zval(ce, o, c"body", &mut mp);
-                zval_ptr_dtor(&mut mp);
-            }
+            BodyState::Raw(v) => zend::slot_stringl(o, body_slot, v),
+            BodyState::Multipart { .. } => zend::slot_init(o, body_slot, &mp),
         }
-        zend::prop_zval(ce, o, c"remote", &mut remote);
-        zval_ptr_dtor(&mut remote);
-        zend::prop_zval(ce, o, c"server", &mut server);
-        zval_ptr_dtor(&mut server);
+        zend::slot_init(o, remote_slot, &remote);
+        zend::slot_init(o, server_slot, &server);
         if req.tls.is_some() {
-            zend::prop_zval(ce, o, c"tls", &mut tls);
+            zend::slot_init(o, tls_slot, &tls);
         } else {
-            zend::prop_null(ce, o, c"tls");
+            zend::slot_null(o, tls_slot);
         }
-        zval_ptr_dtor(&mut tls);
-        zend::prop_double(ce, o, c"receivedAt", req.received_at.unwrap_or(0.0));
+        zend::slot_double(o, received_at_slot, req.received_at.unwrap_or(0.0));
 
-        if zend::exception_pending() {
-            zval_ptr_dtor(&mut reqz);
-            return false;
-        }
         (*ex).request = reqz;
         *return_value = reqz;
         zval_add_ref(return_value);
