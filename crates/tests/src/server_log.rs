@@ -125,10 +125,6 @@ pub fn app_results(log: &Path, message: &str) -> Vec<String> {
 }
 
 /// A fixture that probes one case at a time logs `case {name, result}`; this is name to result.
-pub fn case_results(log: &Path) -> HashMap<String, String> {
-    case_map(&records(log))
-}
-
 fn case_map(all: &[Captured]) -> HashMap<String, String> {
     all.iter()
         .filter(|c| c.target == "app" && c.message == "case")

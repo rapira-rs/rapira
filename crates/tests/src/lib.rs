@@ -67,7 +67,6 @@ pub fn echo_descriptor_set() -> PathBuf {
 /// A response stream collected to its `End` (or to the producer dying).
 #[derive(Debug, Default)]
 pub struct Resp {
-    pub interim: Vec<rapira_sapi::ResponseHead>,
     pub head: Option<rapira_sapi::ResponseHead>,
     pub content_length: Option<u64>,
     pub bodiless: bool,
@@ -76,8 +75,6 @@ pub struct Resp {
     pub truncated: bool,
     /// An `End` frame arrived; false = the producer died first.
     pub ended: bool,
-    /// Head frames seen; `head` keeps only the last, so a duplicate would otherwise be invisible.
-    pub heads: u32,
 }
 
 impl Resp {
@@ -98,23 +95,17 @@ impl Resp {
     /// Fold one frame in; true when the stream is over.
     fn fold(&mut self, frame: Frame) -> bool {
         match frame {
-            Frame::Interim(h) => self.interim.push(h),
             Frame::Head {
                 head,
                 content_length,
                 bodiless,
                 ..
             } => {
-                self.heads += 1;
                 self.head = Some(head);
                 self.content_length = content_length;
                 self.bodiless = bodiless;
             }
             Frame::Chunk(b) => self.body.extend_from_slice(&b),
-            Frame::File { file, offset, len } => match read_slice(&file, offset, len) {
-                Ok(bytes) => self.body.extend_from_slice(&bytes),
-                Err(e) => panic!("reading a File frame: {e}"),
-            },
             Frame::End {
                 trailers,
                 truncated,
@@ -124,24 +115,12 @@ impl Resp {
                 self.ended = true;
                 return true;
             }
+            Frame::Interim(_) | Frame::File { .. } => {
+                unreachable!("the wire client sends only Head, Chunk and End")
+            }
         }
         false
     }
-}
-
-fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Vec<u8>> {
-    use std::os::unix::fs::FileExt;
-    let mut out = vec![0u8; usize::try_from(len).unwrap_or(usize::MAX)];
-    let mut done = 0usize;
-    while done < out.len() {
-        let n = file.read_at(&mut out[done..], offset + done as u64)?;
-        if n == 0 {
-            break;
-        }
-        done += n;
-    }
-    out.truncate(done);
-    Ok(out)
 }
 
 /// Drains `reply` to its `End`; a missing head, a missing `End` or a truncated `End` is an error.
@@ -269,14 +248,10 @@ mod tests {
         );
     }
 
-    /// Chunks concatenate in order; interim heads are dropped.
+    /// Chunks concatenate in order.
     #[tokio::test]
     async fn collect_concatenates_the_stream() {
         let r = collect(reply(vec![
-            Frame::Interim(ResponseHead {
-                status: 103,
-                headers: HeaderMap::new(),
-            }),
             head(),
             Frame::Chunk(b"one,"[..].into()),
             Frame::Chunk(b"two"[..].into()),
