@@ -26,11 +26,13 @@ impl Exchange {
         (Self { ctx }, rx)
     }
 
+    #[cfg(test)]
     pub fn request(&self) -> &Request {
         &self.ctx.req
     }
 
     /// The frame sender PHP writes the reply to.
+    #[cfg(test)]
     pub fn reply_sender(&self) -> Sender<Frame> {
         self.ctx
             .sender
