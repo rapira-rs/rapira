@@ -1,3 +1,4 @@
+use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -43,37 +44,48 @@ pub trait Plugin: Send + 'static {
 pub struct Running {
     name: &'static str,
     thread: Option<JoinHandle<anyhow::Result<()>>>,
-    stop: watch::Sender<bool>,
+    stopper: Stopper,
     grace: Duration,
 }
 
 impl Running {
     /// Sets the stop flag. The plugin drains on its own time.
     pub fn stop(&self) {
-        self.stop.send_replace(true);
+        self.stopper.stop();
     }
 
     pub fn stopper(&self) -> Stopper {
-        Stopper(self.stop.clone())
+        self.stopper.clone()
     }
 
     /// Joins the plugin thread. An error from serve, a panic, or a join past `grace` after stop is an Err.
     pub fn join(mut self) -> anyhow::Result<()> {
         let thread = self.thread.take().expect("join consumes Running");
-        let mut stopped_at: Option<Instant> = None;
-        while !thread.is_finished() {
-            if stopped_at.is_none() && *self.stop.borrow() {
-                stopped_at = Some(Instant::now());
-            }
-            if stopped_at.is_some_and(|at| at.elapsed() > self.grace) {
-                return Err(anyhow!(
-                    "{} did not stop within {:?}",
-                    self.name,
-                    self.grace
-                ));
-            }
-            std::thread::sleep(Duration::from_millis(10));
+        let events = &self.stopper.events;
+        let mut state = events.lock();
+        while !state.ended {
+            state = match state.stopped_at {
+                None => events
+                    .changed
+                    .wait(state)
+                    .unwrap_or_else(PoisonError::into_inner),
+                Some(at) => {
+                    let Some(left) = self.grace.checked_sub(at.elapsed()) else {
+                        return Err(anyhow!(
+                            "{} did not stop within {:?}",
+                            self.name,
+                            self.grace
+                        ));
+                    };
+                    events
+                        .changed
+                        .wait_timeout(state, left)
+                        .unwrap_or_else(PoisonError::into_inner)
+                        .0
+                }
+            };
         }
+        drop(state);
         thread.join().map_err(|payload| {
             let msg = payload
                 .downcast_ref::<&str>()
@@ -89,18 +101,55 @@ impl Drop for Running {
     /// An unjoined plugin thread gets the stop flag and ends on its own.
     fn drop(&mut self) {
         if self.thread.is_some() {
-            self.stop.send_replace(true);
+            self.stopper.stop();
         }
     }
 }
 
 /// Sets the stop flag from a plain thread: it needs no runtime.
 #[derive(Clone)]
-pub struct Stopper(watch::Sender<bool>);
+pub struct Stopper {
+    flag: watch::Sender<bool>,
+    events: Arc<JoinEvents>,
+}
 
 impl Stopper {
     pub fn stop(&self) {
-        self.0.send_replace(true);
+        self.flag.send_replace(true);
+        let mut state = self.events.lock();
+        state.stopped_at.get_or_insert_with(Instant::now);
+        self.events.changed.notify_all();
+    }
+}
+
+/// The two events that [`Running::join`] waits for.
+#[derive(Default)]
+struct JoinEvents {
+    state: Mutex<JoinState>,
+    changed: Condvar,
+}
+
+#[derive(Default)]
+struct JoinState {
+    /// The first stop: the grace of the join counts from here.
+    stopped_at: Option<Instant>,
+    /// The plugin thread ended.
+    ended: bool,
+}
+
+impl JoinEvents {
+    fn lock(&self) -> MutexGuard<'_, JoinState> {
+        self.state.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+}
+
+/// Marks the end of the plugin thread when it drops, also on a panic.
+struct Ended(Arc<JoinEvents>);
+
+impl Drop for Ended {
+    fn drop(&mut self) {
+        self.0.lock().ended = true;
+        self.0.changed.notify_all();
     }
 }
 
@@ -119,7 +168,9 @@ pub fn run_plugin(
         .thread_name(format!("rapira-{name}-io"))
         .build()
         .map_err(|e| anyhow!("building the {name} runtime: {e}"))?;
-    let (stop, stop_rx) = watch::channel(false);
+    let (flag, stop_rx) = watch::channel(false);
+    let events = Arc::new(JoinEvents::default());
+    let ended = Ended(Arc::clone(&events));
     let worker = Worker {
         handle: rt.handle().clone(),
         sink,
@@ -129,6 +180,7 @@ pub fn run_plugin(
     let thread = std::thread::Builder::new()
         .name(format!("rapira-{name}"))
         .spawn(move || {
+            let _ended = ended;
             let result = plugin.serve(worker);
             // The runtime drops here, on a plain thread: a drop in an async context panics.
             drop(rt);
@@ -138,7 +190,7 @@ pub fn run_plugin(
     Ok(Running {
         name,
         thread: Some(thread),
-        stop,
+        stopper: Stopper { flag, events },
         grace,
     })
 }
