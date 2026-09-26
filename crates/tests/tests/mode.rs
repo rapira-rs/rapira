@@ -5,10 +5,10 @@ use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, re
 #[test]
 fn worker_mode_answers_worker_for_every_job() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("mode/worker.php")), None)?;
+    let r = Rapira::start(Mode::Worker, fixture("mode/worker.php"), None)?;
     let h = r.sink();
     for job in 0..2 {
-        let resp = drain_resp(tests::submit(&h, req("/", "mode/worker.php"))?);
+        let resp = drain_resp(tests::submit(&h, req("/"))?);
         assert_eq!(resp.status(), 200, "job {job}");
         assert_eq!(resp.body_string(), "Worker:case:same:unbacked", "job {job}");
     }
@@ -25,7 +25,8 @@ fn dispatcher_mode_answers_dispatcher() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
-        Mode::Dispatcher(fixture("mode/dispatcher.php")),
+        Mode::Dispatcher,
+        fixture("mode/dispatcher.php"),
         Some(rapira_sapi::http::DISPATCHER_CLASSES),
     )?;
     drop(r);
@@ -52,9 +53,9 @@ fn dispatcher_mode_answers_dispatcher() -> anyhow::Result<()> {
 #[test]
 fn classic_mode_answers_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(Mode::Classic, fixture("mode/classic.php"), None)?;
     let h = r.sink();
-    let (status, body) = drain(tests::submit(&h, req("/", "mode/classic.php"))?);
+    let (status, body) = drain(tests::submit(&h, req("/"))?);
     drop(h);
     drop(r);
 

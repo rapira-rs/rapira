@@ -11,16 +11,14 @@ fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()
         "/fixtures/ini/observer_teardown_tests/observer-quiet.ini"
     )));
     let r = Rapira::start(
-        Mode::Worker(fixture("shared/session-bailout-worker.php")),
+        Mode::Worker,
+        fixture("shared/session-bailout-worker.php"),
         None,
     )?;
     let h = r.sink();
 
     for _ in 0..3 {
-        let (_, body) = drain(tests::submit(
-            &h,
-            req("/", "shared/session-bailout-worker.php"),
-        )?);
+        let (_, body) = drain(tests::submit(&h, req("/"))?);
         assert!(
             body.contains("sid="),
             "worker must keep serving (got {body:?})"

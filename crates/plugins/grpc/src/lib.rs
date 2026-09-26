@@ -1,12 +1,14 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::anyhow;
+use anyhow::{Result, anyhow};
 use connectrpc::Router;
 use connectrpc_health::StaticChecker;
 use connectrpc_reflection::Reflector;
-use rapira_net::ServerThread;
-use rapira_sapi::api::{Extension, ListenAddr, Php, PrepareCtx, PreparedListener, Result};
+use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
+use rapira_sapi::grpc::Call;
+use rapira_sapi::plugin::{Mode, Plugin, Worker};
+use rapira_sapi::work::{DispatcherClasses, Intake};
 
 mod dispatch;
 mod schema;
@@ -33,29 +35,46 @@ pub struct Config {
 pub struct Server {
     config: Config,
     prepared: Option<Prepared>,
-    thread: ServerThread,
+    /// The intake a test injects. None: the worker's sink.
+    intake: Option<Intake<Call>>,
 }
 
-/// What `prepare` leaves for `run`: the listener and the routes that the host answers without PHP.
+/// What `prepare` leaves for `serve`: the listener and the routes that the plugin answers without PHP.
 pub(crate) struct Prepared {
     pub(crate) listener: PreparedListener,
     pub(crate) router: Router,
     pub(crate) health: Arc<StaticChecker>,
 }
 
-impl Extension for Server {
-    type Config = Config;
-
-    fn init(config: Config) -> Self {
+impl Server {
+    pub fn init(config: Config) -> Self {
         Self {
             config,
             prepared: None,
-            thread: ServerThread::default(),
+            intake: None,
         }
     }
 
-    fn name(&self) -> &str {
-        "rapira-grpc"
+    /// A server that submits to `intake` in place of the worker's sink.
+    pub fn with_intake(config: Config, intake: Intake<Call>) -> Self {
+        Self {
+            intake: Some(intake),
+            ..Self::init(config)
+        }
+    }
+}
+
+impl Plugin for Server {
+    fn name(&self) -> &'static str {
+        "grpc"
+    }
+
+    fn modes(&self) -> &'static [Mode] {
+        &[Mode::Dispatcher]
+    }
+
+    fn dispatcher_classes(&self) -> Option<DispatcherClasses> {
+        Some(rapira_sapi::grpc::DISPATCHER_CLASSES)
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
@@ -84,19 +103,16 @@ impl Extension for Server {
         Ok(())
     }
 
-    async fn run(&mut self, php: Php) -> Result<()> {
-        let config = self.config.clone();
-        let Some(prepared) = self.prepared.take() else {
+    fn serve(self: Box<Self>, worker: Worker) -> Result<()> {
+        let Self {
+            config,
+            prepared,
+            intake,
+        } = *self;
+        let Some(prepared) = prepared else {
             return Err(anyhow!("grpc listener was not prepared"));
         };
-        self.thread
-            .run("grpc", move |stop, rt| {
-                serve::serve(php, config, prepared, stop, rt)
-            })
-            .await
-    }
-
-    async fn shutdown(&mut self) -> Result<()> {
-        self.thread.shutdown().await
+        let intake = intake.unwrap_or_else(|| Intake::new(worker.sink.clone()));
+        serve::serve(intake, config, prepared, worker)
     }
 }

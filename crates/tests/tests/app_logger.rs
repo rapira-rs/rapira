@@ -173,16 +173,18 @@ fn log_survives_a_throwing_json_serializer() {
 #[test]
 fn log_preserves_exit_from_a_serializer() {
     use rapira_sapi::{Mode, Rapira};
-    use tests::{drain, init_log_capture, php_lock, req};
+    use tests::{drain, fixture, init_log_capture, php_lock, req};
 
     let _guard = php_lock();
     init_log_capture();
-    let r = Rapira::start(Mode::Classic, None).expect("classic boot");
+    let r = Rapira::start(
+        Mode::Classic,
+        fixture("app_logger/app-logger-exit-in-serializer.php"),
+        None,
+    )
+    .expect("classic boot");
     let h = r.sink();
-    let (status, body) = drain(
-        tests::submit(&h, req("/", "app_logger/app-logger-exit-in-serializer.php"))
-            .expect("dispatch"),
-    );
+    let (status, body) = drain(tests::submit(&h, req("/")).expect("dispatch"));
     drop(h);
     drop(r);
 

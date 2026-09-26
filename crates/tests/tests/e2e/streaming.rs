@@ -219,11 +219,10 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
     use std::sync::Arc;
 
     use http_body_util::BodyExt;
-    use rapira_sapi::api::{
-        BoxFuture, HttpRequest, HttpResponse, ListenAddr, Middleware, Next, PrepareCtx,
-    };
-    use rapira_sapi::runtime::ExtensionRuntime;
-    use rapira_sapi::{Mode, Rapira};
+    use rapira_net::{ListenAddr, PrepareCtx};
+    use rapira_sapi::Rapira;
+    use rapira_sapi::middleware::{BoxFuture, HttpRequest, HttpResponse, Middleware, Next};
+    use rapira_sapi::plugin::{Mode, Plugin as _, run_plugin};
 
     struct PrefixBody;
 
@@ -269,23 +268,29 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
         crate::harness::fixture_path("lifecycle/completed-response-worker.php"),
         &script,
     )?;
-    let mut host = ExtensionRuntime::new();
-    host.register::<rapira_http::Server>(rapira_http::Config {
+    let mut server = rapira_http::Server::init(rapira_http::Config {
         listen: ListenAddr::Tcp(([127, 0, 0, 1], 0).into()),
         superglobals: false,
         middleware: vec![Arc::new(PrefixBody)],
         ..rapira_http::Config::default()
     });
     let mut prepared = PrepareCtx::new();
-    host.prepare_all(&mut prepared)?;
+    server.prepare(&mut prepared)?;
     // SAFETY: prepared owns the descriptor for the lifetime of this borrow.
     let listener = unsafe { BorrowedFd::borrow_raw(prepared.listener_fds()[0]) };
     let addr = TcpListener::from(listener.try_clone_to_owned()?).local_addr()?;
     let rapira = Rapira::start(
-        Mode::Dispatcher(script.clone()),
+        Mode::Dispatcher,
+        script.clone(),
         Some(rapira_sapi::http::DISPATCHER_CLASSES),
     )?;
-    let running = host.run(&rapira, script);
+    let running = run_plugin(
+        Box::new(server),
+        rapira.sink(),
+        std::time::Duration::from_secs(30),
+        script,
+        Mode::Dispatcher,
+    )?;
 
     let streamed = (|| -> anyhow::Result<()> {
         let mut client = Conn::open(addr, T)?;
@@ -316,13 +321,11 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
         );
         Ok(())
     });
-    let outcomes = running.stop();
+    running.stop();
+    let stopped = running.join();
     drop(rapira);
     result?;
-    anyhow::ensure!(
-        outcomes.iter().all(Result::is_ok),
-        "HTTP shutdown: {outcomes:?}"
-    );
+    stopped.map_err(|e| e.context("HTTP shutdown"))?;
     // A failure above keeps the scratch dir for inspection, as `Server::drop` does.
     std::fs::remove_dir_all(dir)?;
     Ok(())

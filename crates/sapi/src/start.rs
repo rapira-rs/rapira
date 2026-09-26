@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
@@ -11,7 +12,7 @@ use crate::quota::{self, WorkerHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
 use crate::work::{DispatcherClasses, Sink, Work};
-use crate::{classic_worker::classic_worker, types::Mode, *};
+use crate::{classic_worker::classic_worker, plugin::Mode, *};
 
 thread_local! {
     static JOB_RX: RefCell<Option<JobRx>> = const { RefCell::new(None) };
@@ -35,7 +36,6 @@ impl Drop for PhpModule {
 
 pub struct Rapira {
     sink: Option<Sink>,
-    pub(crate) dispatcher: bool,
     worker: Option<JoinHandle<()>>,
     board: Option<rapira_scoreboard::Scoreboard>,
     module: Option<PhpModule>,
@@ -85,9 +85,10 @@ impl Rapira {
         Ok(PhpModule {})
     }
 
-    /// `classes`: the dispatcher surface receive() serves; None for the classic and worker modes.
+    /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `classes`: the dispatcher surface receive() serves; None for the classic and worker modes.
     pub fn start_worker(
         mode: Mode,
+        entrypoint: PathBuf,
         hooks: WorkerHooks,
         classes: Option<DispatcherClasses>,
     ) -> anyhow::Result<Self> {
@@ -110,13 +111,13 @@ impl Rapira {
         let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
         let sink = Sink::new(intake_tx, pending.clone());
 
-        let dispatcher = matches!(mode, Mode::Dispatcher(_));
+        crate::context::set_script(&entrypoint);
         // SAFETY: safe, trust me, I'm a developer
         unsafe {
-            crate::rapira_mode = match &mode {
+            crate::rapira_mode = match mode {
                 Mode::Classic => RAPIRA_MODE_CLASSIC,
-                Mode::Worker(_) => RAPIRA_MODE_WORKER,
-                Mode::Dispatcher(_) => RAPIRA_MODE_DISPATCHER,
+                Mode::Worker => RAPIRA_MODE_WORKER,
+                Mode::Dispatcher => RAPIRA_MODE_DISPATCHER,
             } as c_int;
         };
 
@@ -126,6 +127,7 @@ impl Rapira {
             quota::install(max_requests, on_quota, on_unhealthy);
             worker_main(
                 mode,
+                entrypoint,
                 JobRx {
                     rx: intake_rx,
                     pending,
@@ -137,26 +139,30 @@ impl Rapira {
 
         Ok(Self {
             sink: Some(sink),
-            dispatcher,
             worker: Some(worker),
             board,
             module: None,
         })
     }
 
-    pub fn start(mode: Mode, classes: Option<DispatcherClasses>) -> anyhow::Result<Self> {
-        Self::start_with_hooks(mode, WorkerHooks::default(), classes)
+    pub fn start(
+        mode: Mode,
+        entrypoint: PathBuf,
+        classes: Option<DispatcherClasses>,
+    ) -> anyhow::Result<Self> {
+        Self::start_with_hooks(mode, entrypoint, WorkerHooks::default(), classes)
     }
 
     /// Boots the master and one worker in this process.
     pub fn start_with_hooks(
         mode: Mode,
+        entrypoint: PathBuf,
         hooks: WorkerHooks,
         classes: Option<DispatcherClasses>,
     ) -> anyhow::Result<Self> {
         info!(target: "rapira", "booting with mode: {mode:?}");
         let module = Self::boot_master()?;
-        let mut rapira = Self::start_worker(mode, hooks, classes)?;
+        let mut rapira = Self::start_worker(mode, entrypoint, hooks, classes)?;
         rapira.module = Some(module);
         Ok(rapira)
     }
@@ -202,6 +208,7 @@ impl Drop for Rapira {
 /// NTS inits module and request on different threads, so the call stack is re-initialized on this thread: https://github.com/php/php-src/pull/9104
 fn worker_main(
     mode: Mode,
+    entrypoint: PathBuf,
     rx: JobRx,
     classes: Option<DispatcherClasses>,
     on_thread_start: Option<Box<dyn FnOnce() + Send>>,
@@ -215,12 +222,12 @@ fn worker_main(
         unsafe {
             rapira_init_call_stack();
         };
-        let exit: WorkerExit = match &mode {
+        let exit: WorkerExit = match mode {
             Mode::Classic => {
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker(script) | Mode::Dispatcher(script) => rapira_worker(script.clone()),
+            Mode::Worker | Mode::Dispatcher => rapira_worker(entrypoint.clone()),
         };
         if matches!(exit, WorkerExit::Closed) {
             break;

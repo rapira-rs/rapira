@@ -2,12 +2,16 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 
-use anyhow::anyhow;
+use anyhow::{Result, anyhow};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
-use rapira_net::{Acceptor, Serve, StopHandle};
-use rapira_sapi::api::{Addr, ListenAddr, Php, PreparedListener, Result};
+use rapira_net::{Acceptor, ListenAddr, PreparedListener, Serve, Stop};
+use rapira_sapi::Addr;
+use rapira_sapi::http::Exchange;
+use rapira_sapi::multipart;
+use rapira_sapi::plugin::{Mode, Worker};
+use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch::channel;
 
@@ -22,7 +26,11 @@ struct Serving {
 }
 
 impl Serving {
-    fn start(php: Php, config: Config) -> Self {
+    fn start(
+        intake: Intake<Exchange>,
+        uploads: Option<Arc<multipart::Limits>>,
+        config: Config,
+    ) -> Self {
         match &config.listen {
             ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
             unix => tracing::info!(target: "http", "listening on {unix}"),
@@ -30,7 +38,8 @@ impl Serving {
         let chain: Arc<[_]> = config.middleware.clone().into();
         let shared = Arc::new(Shared {
             cfg: config,
-            php,
+            intake,
+            uploads,
             chain,
             inflight: Arc::new(AtomicUsize::new(0)),
         });
@@ -121,18 +130,33 @@ impl Serve for Serving {
     }
 }
 
-/// Runs the accept loop on the calling thread, then drains the connections.
+/// Runs the accept loop on the calling thread until the stop flag, then drains the connections.
 pub(crate) fn serve(
-    php: Php,
+    intake: Intake<Exchange>,
     config: Config,
     prepared: PreparedListener,
-    stop: StopHandle,
-    rt: &tokio::runtime::Runtime,
+    worker: Worker,
 ) -> Result<()> {
-    let acceptor = Acceptor::adopt(prepared, stop, rt)?;
-    let serving = Serving::start(php, config);
-    let fatal = acceptor.run(rt, &serving);
-    rt.block_on(serving.drain(fatal))
+    let stop = Stop::new().map_err(|e| anyhow!("creating the http stop handle: {e}"))?;
+    let acceptor = Acceptor::adopt(prepared, stop.handle(), &worker.handle)?;
+    let mut flag = worker.stop.clone();
+    worker.handle.spawn(async move {
+        let _ = flag.wait_for(|stop| *stop).await;
+        stop.stop();
+    });
+    // The plugin parses multipart in dispatcher mode only: the other modes feed php-src's own rfc1867 through read_post.
+    let uploads = (worker.mode == Mode::Dispatcher).then(|| {
+        Arc::new(match config.uploads.clone() {
+            Some(mut limits) => {
+                limits.dir = multipart::worker_spool_dir(&limits.dir);
+                limits
+            }
+            None => multipart::Limits::default(),
+        })
+    });
+    let serving = Serving::start(intake, uploads, config);
+    let fatal = acceptor.run(&worker.handle, &serving);
+    worker.handle.block_on(serving.drain(fatal))
 }
 
 fn listen_addr(listen: &ListenAddr) -> Addr {

@@ -17,8 +17,9 @@ tracing = { workspace = true }
 tracing-subscriber = "0.3"
 # App-record helpers (case_results, dispatcher_record).
 serde_json = "1"
-# The gRPC harness (src/grpc.rs): a fake PHP behind rapira_grpc, and hyper clients for gRPC, gRPC-Web and Connect.
+# The gRPC harness (src/grpc.rs): rapira_grpc behind a channel intake, and hyper clients for gRPC, gRPC-Web and Connect.
 rapira_grpc = { workspace = true }
+rapira_net = { workspace = true }
 bytes = { workspace = true }
 base64 = { workspace = true }
 http-body-util = { workspace = true }

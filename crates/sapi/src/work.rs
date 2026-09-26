@@ -142,17 +142,15 @@ impl Sink {
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn for_test(
-        cap: usize,
-    ) -> (
-        Sink,
-        std::sync::mpsc::Receiver<Box<dyn Work>>,
-        Arc<AtomicUsize>,
-    ) {
+    /// A sink with no PHP thread. The receiver plays the PHP thread.
+    pub fn channel(cap: usize) -> (Sink, std::sync::mpsc::Receiver<Box<dyn Work>>) {
         let (tx, rx) = std::sync::mpsc::sync_channel(cap);
-        let pending = Arc::new(AtomicUsize::new(0));
-        (Self::new(tx, pending.clone()), rx, pending)
+        (Self::new(tx, Arc::new(AtomicUsize::new(0))), rx)
+    }
+
+    #[cfg(test)]
+    fn pending(&self) -> usize {
+        self.pending.load(Ordering::Relaxed)
     }
 }
 
@@ -177,6 +175,7 @@ impl<U: Work> Clone for Intake<U> {
 }
 
 impl<U: Work> Intake<U> {
+    /// The worker behind `sink` must have started with the `DispatcherClasses` of the plugin that owns `U`.
     pub fn new(sink: Sink) -> Self {
         Self {
             route: Route::Sink(sink),
@@ -243,17 +242,15 @@ mod tests {
         let (intake, _rx) = Intake::<Probe>::channel(1);
         intake.submit(Probe).await.unwrap();
         let second = tokio::spawn(async move { intake.submit(Probe).await });
+        tokio::task::yield_now().await;
         tokio::time::advance(INTAKE_WAIT + std::time::Duration::from_secs(1)).await;
         assert_eq!(second.await.unwrap().unwrap_err(), Refused::Saturated);
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn sink_counts_pending_until_the_consumer_pulls() {
-        let (sink, rx, pending) = Sink::for_test(1);
+        let (sink, _rx) = Sink::channel(1);
         sink.submit(Box::new(Probe)).await.unwrap();
-        assert_eq!(pending.load(std::sync::atomic::Ordering::Relaxed), 1);
-        let _ = rx.recv().unwrap();
-        pending.fetch_sub(1, std::sync::atomic::Ordering::Relaxed);
-        assert_eq!(pending.load(std::sync::atomic::Ordering::Relaxed), 0);
+        assert_eq!(sink.pending(), 1);
     }
 }

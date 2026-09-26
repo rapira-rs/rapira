@@ -4,11 +4,11 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
-use rapira_sapi::runtime::{ExtensionRuntime, Stopper};
+use rapira_sapi::plugin::{Mode, Plugin, Stopper, run_plugin};
 use rapira_sapi::work::DispatcherClasses;
-use rapira_sapi::{GrpcService, Mode, Rapira, WorkerHooks};
+use rapira_sapi::{GrpcService, Rapira, WorkerHooks};
 
-/// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset, so the extension outcomes set the exit code.
+/// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset, so the plugin outcome sets the exit code.
 static WORKER_EXIT: AtomicI32 = AtomicI32::new(-1);
 
 /// Racing ahead of the stopper registration is fine: the boot path re-checks WORKER_EXIT right after registering.
@@ -53,14 +53,12 @@ pub struct PoolArgs {
 /// The worker settings of an http pool.
 #[derive(Clone)]
 pub struct HttpArgs {
-    /// Multipart limits, with a per-worker spool dir under `dir`; None outside dispatcher mode, which parses no uploads.
-    pub uploads: Option<rapira_sapi::multipart::Limits>,
-    /// sendFile() containment root, canonicalized per worker.
-    pub sendfile_root: PathBuf,
+    /// The uploads dir of a dispatcher pool: each worker spools in its own dir there. None outside dispatcher mode, which parses no uploads.
+    pub uploads_dir: Option<PathBuf>,
 }
 
 /// Returns the process exit code for the master's fork bracket; never runs PHP module teardown, MSHUTDOWN stays with the master.
-pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i32 {
+pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i32 {
     let PoolArgs {
         mode,
         entrypoint,
@@ -83,14 +81,10 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         );
         return WORKER_EXIT_UNHEALTHY;
     }
-    let mut uploads: Option<rapira_sapi::multipart::Limits> = http.and_then(|http| {
-        rapira_sapi::set_sendfile_root(http.sendfile_root);
-        http.uploads
-    });
-    let classes: Option<DispatcherClasses> = if services.is_some() {
-        Some(rapira_sapi::grpc::DISPATCHER_CLASSES)
+    let classes: Option<DispatcherClasses> = if mode == Mode::Dispatcher {
+        plugin.dispatcher_classes()
     } else {
-        matches!(mode, Mode::Dispatcher(_)).then_some(rapira_sapi::http::DISPATCHER_CLASSES)
+        None
     };
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
     let hooks: WorkerHooks = WorkerHooks {
@@ -109,7 +103,7 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         }),
     };
 
-    let rapira = match Rapira::start_worker(mode, hooks, classes) {
+    let rapira = match Rapira::start_worker(mode, entrypoint.clone(), hooks, classes) {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(target: "rapira", "worker PHP boot failed: {e:#}");
@@ -120,37 +114,28 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
     let mut spool_dir: Option<PathBuf> = None;
-    if let Some(uploads) = uploads.as_mut() {
-        uploads.dir = uploads
-            .dir
-            .join(format!("rapira-spool-{}", std::process::id()));
+    if let Some(base) = http.and_then(|http| http.uploads_dir) {
+        // The http plugin spools in the same dir.
+        let dir = rapira_sapi::multipart::worker_spool_dir(&base);
         if let Err(e) = {
             use std::os::unix::fs::DirBuilderExt;
-            std::fs::DirBuilder::new().mode(0o700).create(&uploads.dir)
+            std::fs::DirBuilder::new().mode(0o700).create(&dir)
         } {
             tracing::error!(
                 target: "rapira",
                 "creating spool dir {}: {e}",
-                uploads.dir.display()
+                dir.display()
             );
             return WORKER_EXIT_UNHEALTHY;
         }
-        spool_dir = Some(uploads.dir.clone());
+        spool_dir = Some(dir);
     }
-    let running: rapira_sapi::runtime::Running = host.run_with_options(
-        &rapira,
-        entrypoint,
-        rapira_sapi::runtime::RuntimeOptions {
-            uploads: Arc::new(uploads.unwrap_or_default()),
-            grace,
-        },
-    );
-    let _ = stopper.set(running.stopper());
-    if WORKER_EXIT.load(SeqCst) != -1 {
-        stopper.get().expect("just set").stop();
+    let name: &str = plugin.name();
+    let outcome: anyhow::Result<()> =
+        serve_plugin(plugin, rapira.sink(), grace, entrypoint, mode, &stopper);
+    if let Err(e) = &outcome {
+        tracing::error!(target: "rapira", "plugin {name}: {e:#}");
     }
-
-    let outcomes: Vec<Result<(), String>> = running.serve_worker();
     drop(rapira);
     if let Some(dir) = &spool_dir
         && let Err(e) = std::fs::remove_dir_all(dir)
@@ -159,8 +144,81 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
     }
 
     match WORKER_EXIT.load(SeqCst) {
-        -1 if outcomes.iter().any(|o| o.is_err()) => 1,
+        -1 if outcome.is_err() => 1,
         -1 => 0,
         code => code,
+    }
+}
+
+/// Runs the plugin until it stops and joins it.
+fn serve_plugin(
+    plugin: Box<dyn Plugin>,
+    sink: rapira_sapi::work::Sink,
+    grace: Duration,
+    entrypoint: PathBuf,
+    mode: Mode,
+    stopper: &OnceLock<Stopper>,
+) -> anyhow::Result<()> {
+    let running = run_plugin(plugin, sink, grace, entrypoint, mode)?;
+    let _ = stopper.set(running.stopper());
+    if WORKER_EXIT.load(SeqCst) != -1 {
+        running.stop();
+    }
+    spawn_signal_thread(running.stopper());
+    running.join()
+}
+
+/// Requires the fork bracket to have masked exactly {QUIT, INT} in the child: the first signal drains, a second force-exits 131.
+fn spawn_signal_thread(stopper: Stopper) {
+    std::thread::Builder::new()
+        .name("rapira-worker-signal".into())
+        .spawn(move || {
+            let sig = wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
+            tracing::info!(target: "rapira", "signal {sig} received; draining worker");
+            stopper.stop();
+            let _ = wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
+            tracing::warn!(target: "rapira", "second signal; forcing worker exit");
+            std::process::exit(131);
+        })
+        .expect("spawn worker signal thread");
+}
+
+fn sigset(signals: &[libc::c_int]) -> libc::sigset_t {
+    // SAFETY: operates on a stack-owned, freshly-initialized signal set.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        for &sig in signals {
+            libc::sigaddset(&mut set, sig);
+        }
+        set
+    }
+}
+
+/// Blocks until one of `signals` (already blocked) is delivered. https://man7.org/linux/man-pages/man3/sigwait.3.html
+fn wait_signal(signals: &[libc::c_int]) -> libc::c_int {
+    // SAFETY: `set` and `sig` are stack values live for the whole call.
+    unsafe {
+        let set = sigset(signals);
+        let mut sig: libc::c_int = 0;
+        libc::sigwait(&set, &mut sig);
+        sig
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `sigwait` dequeues a blocked, pending signal instead of running the default terminate action.
+    #[test]
+    fn sigwait_reaps_a_blocked_signal() {
+        let set = sigset(&[libc::SIGTERM]);
+        // SAFETY: SIGTERM is blocked in this thread, so `raise` leaves it pending for `sigwait` to dequeue.
+        unsafe {
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            libc::raise(libc::SIGTERM);
+        }
+        assert_eq!(wait_signal(&[libc::SIGTERM]), libc::SIGTERM);
     }
 }

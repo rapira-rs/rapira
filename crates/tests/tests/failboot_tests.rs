@@ -1,7 +1,7 @@
 use std::path::Path;
 
 use rapira_sapi::{Mode, Rapira};
-use tests::{drain, php_lock, req, set_phprc};
+use tests::{drain, fixture, php_lock, req, set_phprc};
 
 /// Pins that a start after a module-startup failure still runs a full module startup, not the early-return path.
 #[test]
@@ -15,7 +15,7 @@ fn module_startup_failure_then_clean_restart() -> anyhow::Result<()> {
         )),
     );
     assert!(
-        Rapira::start(Mode::Classic, None).is_err(),
+        Rapira::start(Mode::Classic, fixture("shared/hello.php"), None).is_err(),
         "removed-directive ini must fail startup"
     );
 
@@ -26,12 +26,9 @@ fn module_startup_failure_then_clean_restart() -> anyhow::Result<()> {
             "/fixtures/ini/shared/php.ini"
         )),
     );
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(Mode::Classic, fixture("shared/hello.php"), None)?;
     let h = r.sink();
-    assert_eq!(
-        drain(tests::submit(&h, req("/", "shared/hello.php"))?).0,
-        200
-    );
+    assert_eq!(drain(tests::submit(&h, req("/"))?).0, 200);
     drop(h);
     drop(r);
     Ok(())

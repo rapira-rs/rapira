@@ -22,6 +22,15 @@ impl Exchange {
         let (tx, rx) = mpsc::channel(FRAME_CAP);
         (Self { req, tx }, rx)
     }
+
+    pub fn request(&self) -> &Request {
+        &self.req
+    }
+
+    /// The frame sender PHP writes the reply to.
+    pub fn reply_sender(&self) -> Sender<Frame> {
+        self.tx.clone()
+    }
 }
 
 impl Work for Exchange {

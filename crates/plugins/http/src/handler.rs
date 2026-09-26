@@ -5,22 +5,63 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use http::header::CONTENT_TYPE;
 use http_body::Body;
 use http_body_util::BodyExt;
-use rapira_sapi::Frame;
-use rapira_sapi::api::{
-    Addr, BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer, Php,
-    Protocol, Rejected,
+use rapira_sapi::http::Exchange;
+use rapira_sapi::middleware::{
+    BoxError, BoxFuture, Handler, HttpRequest, HttpResponse, Middleware, Next, Peer, Protocol,
 };
+use rapira_sapi::work::{Intake, Refused};
+use rapira_sapi::{Addr, Frame, Request, multipart};
 
 use crate::response::{error_response, response_headers};
 use crate::{Config, bridge, check, request};
 
 pub(crate) struct Shared {
     pub cfg: Config,
-    pub php: Php,
+    pub intake: Intake<Exchange>,
+    /// The multipart limits; None outside dispatcher mode.
+    pub uploads: Option<Arc<multipart::Limits>>,
     pub chain: Arc<[Arc<dyn Middleware>]>,
     pub inflight: Arc<AtomicUsize>,
+}
+
+/// A refusal before dispatch: PHP never saw the request.
+#[derive(Debug)]
+pub(crate) struct Rejected {
+    pub status: u16,
+    pub reason: String,
+}
+
+impl std::fmt::Display for Rejected {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.status, self.reason)
+    }
+}
+
+impl From<Refused> for Rejected {
+    fn from(e: Refused) -> Self {
+        Self {
+            status: match e {
+                Refused::Saturated => 503,
+                Refused::Stopped => 500,
+            },
+            reason: e.to_string(),
+        }
+    }
+}
+
+impl From<multipart::ParseError> for Rejected {
+    fn from(e: multipart::ParseError) -> Self {
+        match e {
+            multipart::ParseError::Rejected { status, reason } => Self { status, reason },
+            multipart::ParseError::Io(e) => Self {
+                status: 500,
+                reason: format!("upload spool failed: {e}"),
+            },
+        }
+    }
 }
 
 pub(crate) struct InflightReqCount {
@@ -68,7 +109,7 @@ pub(crate) struct RespBody {
 enum BodyKind {
     Reply(bridge::ReplyBody),
     Empty,
-    Boxed(rapira_sapi::api::Body),
+    Boxed(rapira_sapi::middleware::Body),
 }
 
 fn refused(status: http::StatusCode, req_count: Arc<InflightReqCount>) -> http::Response<RespBody> {
@@ -245,7 +286,7 @@ where
         authority,
         guard: Arc::clone(&reqs_counter),
     });
-    let body: rapira_sapi::api::Body = incoming.map_err(BoxError::from).boxed_unsync();
+    let body: rapira_sapi::middleware::Body = incoming.map_err(BoxError::from).boxed_unsync();
     let req = HttpRequest::from_parts(parts, body);
 
     let res = Next::new(Arc::clone(&handler.shared.chain), handler)
@@ -346,27 +387,18 @@ where
     }
 
     let request = request::build(parts, authority, collected, peer, cfg);
-    let mut reply = match shared.php.exec(request).await {
+    let mut reply = match submit(shared, request).await {
         Ok(reply) => reply,
-        Err(e) => {
-            if let Some(r) = e.downcast_ref::<Rejected>() {
-                tracing::warn!(target: "http", "rejected before dispatch: {r}");
-                let status = http::StatusCode::from_u16(r.status)
-                    .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
-                return refused(status, guard);
-            }
-            let status = if e.chain().any(|c| c.is::<std::io::Error>()) {
-                http::StatusCode::INTERNAL_SERVER_ERROR
-            } else {
-                http::StatusCode::BAD_GATEWAY
-            };
-            tracing::error!(target: "http", "php exec failed: {e:#}");
+        Err(r) => {
+            tracing::warn!(target: "http", "rejected before dispatch: {r}");
+            let status = http::StatusCode::from_u16(r.status)
+                .unwrap_or(http::StatusCode::INTERNAL_SERVER_ERROR);
             return refused(status, guard);
         }
     };
 
     let (status, headers, content_length, bodiless) = loop {
-        match reply.next().await {
+        match reply.recv().await {
             None => {
                 tracing::error!(target: "http", "php worker died before a response head");
                 return refused(http::StatusCode::BAD_GATEWAY, guard);
@@ -409,7 +441,7 @@ where
         BodyKind::Empty
     } else {
         let staged = if declared_cl.is_some() {
-            tokio::time::timeout(Duration::from_millis(10), reply.next())
+            tokio::time::timeout(Duration::from_millis(10), reply.recv())
                 .await
                 .ok()
                 .flatten()
@@ -435,87 +467,89 @@ where
     res
 }
 
+/// Both refusals come before dispatch: the multipart parse, then the intake.
+async fn submit(
+    shared: &Shared,
+    request: Request,
+) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejected> {
+    let request = parse_multipart(request, shared.uploads.as_ref()).await?;
+    let (exchange, reply) = Exchange::new(request);
+    shared.intake.submit(exchange).await?;
+    Ok(reply)
+}
+
+/// Parses a multipart body before submit, so a rejected body never reaches the pending and active counters. `limits` is None outside dispatcher mode.
+async fn parse_multipart(
+    mut req: Request,
+    limits: Option<&Arc<multipart::Limits>>,
+) -> Result<Request, Rejected> {
+    let Some(limits) = limits else {
+        return Ok(req);
+    };
+    let rapira_sapi::types::Body::Raw(raw) = &mut req.body else {
+        return Ok(req);
+    };
+    if raw.get_ref().is_empty() {
+        return Ok(req);
+    }
+    // Content-type is a singleton field per RFC 9110 §8.3: with repeated lines the plugin and a PHP consumer could split the body on different boundaries.
+    // https://www.rfc-editor.org/rfc/rfc9110#section-8.3
+    let lines = req.headers.get_all(CONTENT_TYPE);
+    if lines.iter().nth(1).is_some() && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
+    {
+        return Err(Rejected {
+            status: 400,
+            reason: "repeated content-type field lines with a multipart body".into(),
+        });
+    }
+    let Some(content_type) = req.content_type.as_deref() else {
+        return Ok(req);
+    };
+    if !multipart::is_multipart(content_type) {
+        return Ok(req);
+    }
+    let boundary = multipart::boundary(content_type)?;
+    let bytes = std::mem::take(raw.get_mut());
+    let limits = Arc::clone(limits);
+    let parsed = tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
+        .await
+        .map_err(|e| Rejected {
+            status: 500,
+            reason: format!("multipart parse task failed: {e}"),
+        })?;
+    req.body = rapira_sapi::types::Body::Multipart(parsed?);
+    Ok(req)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rapira_sapi::ResponseHead;
-    use rapira_sapi::api::{Backend, Reply, Request, UnaryCall, UnaryReply};
-    use std::collections::VecDeque;
-    use std::future::Future;
-    use std::sync::Mutex;
+    use rapira_sapi::types::Body as SapiBody;
     use tokio::sync::mpsc;
 
-    struct NoPhp;
-
-    impl Backend for NoPhp {
-        fn exec(
-            &self,
-            _req: Request,
-        ) -> Pin<Box<dyn Future<Output = rapira_sapi::api::Result<Reply>> + Send + '_>> {
-            unreachable!("the middleware answers before PHP")
-        }
-
-        fn unary(
-            &self,
-            _call: UnaryCall,
-        ) -> Pin<Box<dyn Future<Output = rapira_sapi::api::Result<Option<UnaryReply>>> + Send + '_>>
-        {
-            unreachable!("the HTTP handler sends no call")
-        }
+    /// An intake that nothing drains: the middleware answers before PHP.
+    fn no_php() -> Intake<Exchange> {
+        Intake::channel(1).0
     }
 
-    /// A reply that yields `events`; it stays open while the caller holds the sender.
-    fn open_reply(events: Vec<Frame>) -> (Reply, mpsc::Sender<Frame>) {
-        let (tx, rx) = mpsc::channel(4);
-        for ev in events {
-            tx.try_send(ev).unwrap();
-        }
-        (Reply::new(rx), tx)
-    }
-
-    /// Answers each exec with the next reply.
-    struct Scripted {
-        replies: Mutex<VecDeque<Reply>>,
-        seen_authorities: Mutex<Vec<Option<Vec<u8>>>>,
-    }
-
-    impl Scripted {
-        fn new(replies: Vec<Reply>) -> Self {
-            Self {
-                replies: Mutex::new(replies.into()),
-                seen_authorities: Mutex::new(Vec::new()),
+    /// Plays PHP for one exchange: pulls it and sends `frames`. The task returns the frame sender, which keeps the reply open.
+    fn php_one(
+        frames: Vec<Frame>,
+    ) -> (
+        Intake<Exchange>,
+        tokio::task::JoinHandle<mpsc::Sender<Frame>>,
+    ) {
+        let (intake, mut units) = Intake::<Exchange>::channel(1);
+        let php = tokio::spawn(async move {
+            let exchange = units.recv().await.expect("an exchange");
+            let tx = exchange.reply_sender();
+            for frame in frames {
+                tx.send(frame).await.unwrap();
             }
-        }
-
-        /// One reply that yields `events`; it stays open while the caller holds the sender.
-        fn one(events: Vec<Frame>) -> (Self, mpsc::Sender<Frame>) {
-            let (reply, tx) = open_reply(events);
-            (Self::new(vec![reply]), tx)
-        }
-    }
-
-    impl Backend for Scripted {
-        fn exec(
-            &self,
-            req: Request,
-        ) -> Pin<Box<dyn Future<Output = rapira_sapi::api::Result<Reply>> + Send + '_>> {
-            self.seen_authorities.lock().unwrap().push(req.authority);
-            let reply = self
-                .replies
-                .lock()
-                .unwrap()
-                .pop_front()
-                .expect("a reply per exec");
-            Box::pin(async move { Ok(reply) })
-        }
-
-        fn unary(
-            &self,
-            _call: UnaryCall,
-        ) -> Pin<Box<dyn Future<Output = rapira_sapi::api::Result<Option<UnaryReply>>> + Send + '_>>
-        {
-            unreachable!("the HTTP handler sends no call")
-        }
+            tx
+        });
+        (intake, php)
     }
 
     fn ok_head() -> ResponseHead {
@@ -644,7 +678,8 @@ mod tests {
     }
 
     fn setup(
-        backend: Arc<dyn Backend>,
+        intake: Intake<Exchange>,
+        uploads: Option<Arc<multipart::Limits>>,
         chain: Vec<Arc<dyn Middleware>>,
     ) -> (
         Arc<Conn>,
@@ -654,7 +689,8 @@ mod tests {
         let inflight: Arc<AtomicUsize> = Arc::new(AtomicUsize::new(0));
         let shared = Arc::new(Shared {
             cfg: Config::default(),
-            php: Php::new(backend),
+            intake,
+            uploads,
             chain: chain.into(),
             inflight: Arc::clone(&inflight),
         });
@@ -676,11 +712,131 @@ mod tests {
             .unwrap()
     }
 
+    /// A malformed or over-limit multipart body answers before dispatch and never reaches PHP; an accepted body reaches PHP raw. Sources: RFC 7578 (multipart/form-data needs a boundary), RFC 9110 §8.3 (content-type is a singleton field).
+    #[tokio::test]
+    async fn rejected_bodies_never_reach_php() {
+        struct Case {
+            name: &'static str,
+            method: &'static str,
+            content_type: &'static [&'static str],
+            body: Vec<u8>,
+            /// None: the request reaches PHP with `body` unparsed.
+            status: Option<u16>,
+        }
+        const MULTIPART: &str = "multipart/form-data; boundary=B";
+        const EVIL: &str = "multipart/form-data; boundary=EVIL";
+        let smuggled =
+            b"--EVIL\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--EVIL--".to_vec();
+        let cases = [
+            Case {
+                name: "multipart without a boundary line",
+                method: "POST",
+                content_type: &[MULTIPART],
+                body: b"no boundary here".to_vec(),
+                status: Some(400),
+            },
+            Case {
+                name: "file part over max_file_size",
+                method: "POST",
+                content_type: &[MULTIPART],
+                body: [
+                    &b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\n"[..],
+                    &[b'x'; 8192],
+                    b"\r\n--B--",
+                ]
+                .concat(),
+                status: Some(413),
+            },
+            Case {
+                name: "plain line before a repeated multipart line",
+                method: "POST",
+                content_type: &["text/plain", EVIL],
+                body: smuggled.clone(),
+                status: Some(400),
+            },
+            Case {
+                name: "multipart line before a repeated plain line",
+                method: "POST",
+                content_type: &[EVIL, "text/plain"],
+                body: smuggled,
+                status: Some(400),
+            },
+            Case {
+                name: "empty multipart body",
+                method: "POST",
+                content_type: &[MULTIPART],
+                body: Vec::new(),
+                status: None,
+            },
+            Case {
+                name: "plain body that looks like multipart",
+                method: "POST",
+                content_type: &["text/plain"],
+                body: b"--B\r\nnot really\r\n--B--".to_vec(),
+                status: None,
+            },
+            Case {
+                name: "get",
+                method: "GET",
+                content_type: &[],
+                body: Vec::new(),
+                status: None,
+            },
+        ];
+
+        let spool = tempfile::tempdir().unwrap();
+        let limits = multipart::Limits {
+            dir: spool.path().to_path_buf(),
+            max_file_size: 1024,
+            ..multipart::Limits::default()
+        };
+        let (intake, mut units) = Intake::<Exchange>::channel(1);
+        let (handler, _inflight, _closed_tx) = setup(intake, Some(Arc::new(limits)), Vec::new());
+        for case in cases {
+            let mut request = http::Request::builder()
+                .method(case.method)
+                .uri("/")
+                .header("host", "e2e");
+            for line in case.content_type {
+                request = request.header(http::header::CONTENT_TYPE, *line);
+            }
+            let request = request
+                .body(http_body_util::Full::new(bytes::Bytes::from(
+                    case.body.clone(),
+                )))
+                .unwrap();
+            let status = match case.status {
+                Some(_) => handle(Arc::clone(&handler), request).await.status(),
+                None => {
+                    let (res, body) = tokio::join!(handle(Arc::clone(&handler), request), async {
+                        let exchange = units.recv().await.expect("an exchange");
+                        let SapiBody::Raw(body) = &exchange.request().body else {
+                            panic!("{}: the body was parsed", case.name);
+                        };
+                        let body = body.get_ref().clone();
+                        let tx = exchange.reply_sender();
+                        tx.send(head(false)).await.unwrap();
+                        tx.send(end()).await.unwrap();
+                        body
+                    });
+                    assert_eq!(body, case.body, "{}", case.name);
+                    res.status()
+                }
+            };
+            assert_eq!(status.as_u16(), case.status.unwrap_or(200), "{}", case.name);
+            assert!(
+                units.try_recv().is_err(),
+                "{}: a unit reached PHP",
+                case.name
+            );
+        }
+    }
+
     /// A middleware answer must hold the inflight guard until hyper drops the body.
     #[tokio::test]
     async fn short_circuit_keeps_the_inflight_guard() {
         let (handler, inflight, _closed_tx) =
-            setup(Arc::new(NoPhp), vec![Arc::new(Deny) as Arc<dyn Middleware>]);
+            setup(no_php(), None, vec![Arc::new(Deny) as Arc<dyn Middleware>]);
         let res = handle(handler, get_request()).await;
         assert_eq!(res.status(), http::StatusCode::FORBIDDEN);
         assert_eq!(
@@ -696,11 +852,9 @@ mod tests {
     /// until hyper drops the replacement body.
     #[tokio::test]
     async fn replaced_response_keeps_the_inflight_guard() {
-        let (backend, _) = Scripted::one(vec![head(false), end()]);
-        let (handler, inflight, _closed_tx) = setup(
-            Arc::new(backend),
-            vec![Arc::new(Replace) as Arc<dyn Middleware>],
-        );
+        let (intake, _php) = php_one(vec![head(false), end()]);
+        let (handler, inflight, _closed_tx) =
+            setup(intake, None, vec![Arc::new(Replace) as Arc<dyn Middleware>]);
         let res = handle(handler, get_request()).await;
         assert_eq!(res.status(), http::StatusCode::IM_A_TEAPOT);
         assert_eq!(
@@ -715,10 +869,11 @@ mod tests {
     /// A bodiless reply keeps the response guarded after its reply is consumed to End.
     #[tokio::test]
     async fn bodiless_response_stays_guarded_after_the_reply_ends() {
-        let (backend, events) = Scripted::one(vec![head(true), end()]);
-        let (handler, inflight, _closed_tx) = setup(Arc::new(backend), Vec::new());
+        let (intake, php) = php_one(vec![head(true), end()]);
+        let (handler, inflight, _closed_tx) = setup(intake, None, Vec::new());
         let res = handle(handler, get_request()).await;
         assert_eq!(res.status(), http::StatusCode::OK);
+        let events = php.await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), events.closed())
             .await
             .expect("the reply must be consumed to End");
@@ -734,14 +889,19 @@ mod tests {
     /// One handler serves the whole connection; each request must carry its own state.
     #[tokio::test]
     async fn sequential_requests_share_the_handler_but_not_the_state() {
-        let backend = Arc::new(Scripted::new(vec![
-            open_reply(vec![head(false), end()]).0,
-            open_reply(vec![head(false), end()]).0,
-        ]));
-        let (handler, inflight, _closed_tx) = setup(
-            Arc::clone(&backend) as Arc<dyn Backend>,
-            vec![Arc::new(Pass) as Arc<dyn Middleware>],
-        );
+        let (intake, mut units) = Intake::<Exchange>::channel(1);
+        let php = tokio::spawn(async move {
+            let mut authorities = Vec::new();
+            while let Some(exchange) = units.recv().await {
+                authorities.push(exchange.request().authority.clone());
+                let tx = exchange.reply_sender();
+                tx.send(head(false)).await.unwrap();
+                tx.send(end()).await.unwrap();
+            }
+            authorities
+        });
+        let (handler, inflight, _closed_tx) =
+            setup(intake, None, vec![Arc::new(Pass) as Arc<dyn Middleware>]);
         for _ in 0..2 {
             let res = handle(Arc::clone(&handler), get_request()).await;
             assert_eq!(res.status(), http::StatusCode::OK);
@@ -749,10 +909,11 @@ mod tests {
             drop(res);
             assert_eq!(inflight.load(Ordering::Acquire), 0);
         }
+        drop(handler);
         assert_eq!(
-            *backend.seen_authorities.lock().unwrap(),
+            php.await.unwrap(),
             vec![Some(b"e2e".to_vec()), Some(b"e2e".to_vec())],
-            "every exec must see the authority of its own request"
+            "every exchange must carry the authority of its own request"
         );
     }
 
@@ -760,13 +921,12 @@ mod tests {
     /// counted after the response is gone, until the reply stream ends.
     #[tokio::test]
     async fn a_parked_drain_keeps_the_request_counted_through_the_chain() {
-        let (backend, events) = Scripted::one(vec![head(true)]);
-        let (handler, inflight, _closed_tx) = setup(
-            Arc::new(backend),
-            vec![Arc::new(Pass) as Arc<dyn Middleware>],
-        );
+        let (intake, php) = php_one(vec![head(true)]);
+        let (handler, inflight, _closed_tx) =
+            setup(intake, None, vec![Arc::new(Pass) as Arc<dyn Middleware>]);
         let res = handle(handler, get_request()).await;
         assert_eq!(res.status(), http::StatusCode::OK);
+        let events = php.await.unwrap();
         drop(res);
         assert_eq!(
             inflight.load(Ordering::Acquire),
@@ -782,17 +942,16 @@ mod tests {
     /// `map_frame` drops the size hint, so the bodiless watermark must come from `is_end_stream`.
     #[tokio::test(start_paused = true)]
     async fn delivered_head_behind_body_mapping_middleware_keeps_php_alive() {
-        let (backend, events) = Scripted::one(vec![head(true)]);
-        let (handler, inflight, closed_tx) = setup(
-            Arc::new(backend),
-            vec![Arc::new(MapBody) as Arc<dyn Middleware>],
-        );
+        let (intake, php) = php_one(vec![head(true)]);
+        let (handler, inflight, closed_tx) =
+            setup(intake, None, vec![Arc::new(MapBody) as Arc<dyn Middleware>]);
         let response = serve_raw(
             handler,
             closed_tx,
             b"HEAD / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
         )
         .await;
+        let events = php.await.unwrap();
         assert!(
             response.starts_with(b"HTTP/1.1 200"),
             "{}",
@@ -814,9 +973,10 @@ mod tests {
     /// hyper writes no body for HEAD whatever content-length says, so the head alone completes the response.
     #[tokio::test(start_paused = true)]
     async fn head_with_a_positive_content_length_completes_at_the_head() {
-        let (backend, events) = Scripted::one(vec![head(true)]);
+        let (intake, php) = php_one(vec![head(true)]);
         let (handler, inflight, closed_tx) = setup(
-            Arc::new(backend),
+            intake,
+            None,
             vec![Arc::new(HeadLength) as Arc<dyn Middleware>],
         );
         let response = serve_raw(
@@ -825,6 +985,7 @@ mod tests {
             b"HEAD / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
         )
         .await;
+        let events = php.await.unwrap();
         assert!(
             response.starts_with(b"HTTP/1.1 200") && response.ends_with(b"\r\n\r\n"),
             "{}",
@@ -845,14 +1006,15 @@ mod tests {
     /// hyper drops a length-delimited body once the last byte is buffered; the flush after it must keep PHP alive past the close.
     #[tokio::test(start_paused = true)]
     async fn delivered_fixed_length_body_keeps_php_alive_past_the_close() {
-        let (backend, events) = Scripted::one(vec![head_cl(5), chunk("01234")]);
-        let (handler, inflight, closed_tx) = setup(Arc::new(backend), Vec::new());
+        let (intake, php) = php_one(vec![head_cl(5), chunk("01234")]);
+        let (handler, inflight, closed_tx) = setup(intake, None, Vec::new());
         let response = serve_raw(
             handler,
             closed_tx,
             b"GET / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
         )
         .await;
+        let events = php.await.unwrap();
         let text = String::from_utf8_lossy(&response).to_ascii_lowercase();
         assert!(
             text.contains("content-length: 5") && text.ends_with("\r\n\r\n01234"),

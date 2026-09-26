@@ -5,7 +5,7 @@ use rapira_sapi::{Mode, Rapira, Request};
 use tests::{Resp, captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
 fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u8>) -> Request {
-    let mut r: Request = req(&format!("/{fixture_name}?{query}"), fixture_name);
+    let mut r: Request = req(&format!("/{fixture_name}?{query}"));
     r.method = "POST".into();
     r.content_type = content_type.map(|s| s.as_bytes().to_vec());
     r.content_length = body.len() as i64;
@@ -26,7 +26,11 @@ fn app_messages(prefix: &str) -> Vec<String> {
 #[test]
 fn post_superglobals_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(
+        Mode::Classic,
+        fixture("ported_tests/post-superglobals.php"),
+        None,
+    )?;
     let h = r.sink();
     let request = post(
         "ported_tests/post-superglobals.php",
@@ -58,7 +62,8 @@ fn post_superglobals_classic() -> anyhow::Result<()> {
 fn post_superglobals_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/post-superglobals-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/post-superglobals-worker.php"),
         None,
     )?;
     let h = r.sink();
@@ -104,7 +109,11 @@ fn post_superglobals_worker() -> anyhow::Result<()> {
 #[test]
 fn request_merge_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(
+        Mode::Classic,
+        fixture("ported_tests/request-merge.php"),
+        None,
+    )?;
     let h = r.sink();
     let (status, body) = drain(tests::submit(
         &h,
@@ -131,7 +140,8 @@ fn request_merge_classic() -> anyhow::Result<()> {
 fn request_merge_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/request-merge-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/request-merge-worker.php"),
         None,
     )?;
     let h = r.sink();
@@ -163,7 +173,8 @@ fn request_merge_worker() -> anyhow::Result<()> {
 fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/jit-request-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/jit-request-worker.php"),
         None,
     )?;
     let h = r.sink();
@@ -175,10 +186,7 @@ fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
         };
         let (status, body) = drain(tests::submit(
             &h,
-            req(
-                &format!("/jit-request-worker.php?{query}"),
-                "ported_tests/jit-request-worker.php",
-            ),
+            req(&format!("/jit-request-worker.php?{query}")),
         )?);
         assert_eq!(status, 200);
         assert!(
@@ -208,12 +216,13 @@ fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
 fn cookies_refresh_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/cookies-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/cookies-worker.php"),
         None,
     )?;
     let h = r.sink();
     for i in 0..3 {
-        let mut request = req("/cookies-worker.php", "ported_tests/cookies-worker.php");
+        let mut request = req("/cookies-worker.php");
         request.headers.append(
             COOKIE,
             HeaderValue::try_from(format!("foo=bar; i={i}")).unwrap(),
@@ -234,9 +243,9 @@ fn cookies_refresh_worker() -> anyhow::Result<()> {
 #[test]
 fn malformed_cookies_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(Mode::Classic, fixture("ported_tests/cookies.php"), None)?;
     let h = r.sink();
-    let mut request = req("/cookies.php", "ported_tests/cookies.php");
+    let mut request = req("/cookies.php");
     request.headers.append(
         COOKIE,
         HeaderValue::from_static(
@@ -269,13 +278,10 @@ fn malformed_cookies_classic() -> anyhow::Result<()> {
 
 fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(mode, None)?;
+    let r = Rapira::start(mode, fixture(fixture_name), None)?;
     let h = r.sink();
 
-    let r1 = drain_resp(tests::submit(
-        &h,
-        req(&format!("/{fixture_name}"), fixture_name),
-    )?);
+    let r1 = drain_resp(tests::submit(&h, req(&format!("/{fixture_name}")))?);
     assert_eq!(r1.status(), 200);
     assert_eq!(
         r1.body_string(),
@@ -296,7 +302,7 @@ fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
         })
         .expect("session cookie must be issued");
 
-    let mut request = req(&format!("/{fixture_name}"), fixture_name);
+    let mut request = req(&format!("/{fixture_name}"));
     request.headers.append(
         COOKIE,
         HeaderValue::try_from(format!("PHPSESSID={sid}")).unwrap(),
@@ -321,10 +327,7 @@ fn session_cookie_roundtrip_classic() -> anyhow::Result<()> {
 
 #[test]
 fn session_cookie_roundtrip_worker() -> anyhow::Result<()> {
-    session_roundtrip(
-        Mode::Worker(fixture("ported_tests/session-count-worker.php")),
-        "ported_tests/session-count-worker.php",
-    )
+    session_roundtrip(Mode::Worker, "ported_tests/session-count-worker.php")
 }
 
 /// A userland save handler registered during request 1 must still serve request 2.
@@ -332,24 +335,16 @@ fn session_cookie_roundtrip_worker() -> anyhow::Result<()> {
 fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/session-handler-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/session-handler-worker.php"),
         None,
     )?;
     let h = r.sink();
     let (s1, b1) = drain(tests::submit(
         &h,
-        req(
-            "/session-handler-worker.php?action=register",
-            "ported_tests/session-handler-worker.php",
-        ),
+        req("/session-handler-worker.php?action=register"),
     )?);
-    let (s2, b2) = drain(tests::submit(
-        &h,
-        req(
-            "/session-handler-worker.php",
-            "ported_tests/session-handler-worker.php",
-        ),
-    )?);
+    let (s2, b2) = drain(tests::submit(&h, req("/session-handler-worker.php"))?);
     drop(h);
     drop(r);
 
@@ -375,30 +370,22 @@ fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
 fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/preloop-session-handler-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/preloop-session-handler-worker.php"),
         None,
     )?;
     let h = r.sink();
     let (s1, b1) = drain(tests::submit(
         &h,
-        req(
-            "/preloop-session-handler-worker.php?action=check",
-            "ported_tests/preloop-session-handler-worker.php",
-        ),
+        req("/preloop-session-handler-worker.php?action=check"),
     )?);
     let (s2, b2) = drain(tests::submit(
         &h,
-        req(
-            "/preloop-session-handler-worker.php?action=use_session",
-            "ported_tests/preloop-session-handler-worker.php",
-        ),
+        req("/preloop-session-handler-worker.php?action=use_session"),
     )?);
     let (s3, b3) = drain(tests::submit(
         &h,
-        req(
-            "/preloop-session-handler-worker.php?action=check",
-            "ported_tests/preloop-session-handler-worker.php",
-        ),
+        req("/preloop-session-handler-worker.php?action=check"),
     )?);
     drop(h);
     drop(r);
@@ -424,17 +411,15 @@ fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
 fn response_header_edges_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/headers-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/headers-worker.php"),
         None,
     )?;
     let h = r.sink();
     for i in [42, 43] {
         let resp = drain_resp(tests::submit(
             &h,
-            req(
-                &format!("/headers-worker.php?i={i}"),
-                "ported_tests/headers-worker.php",
-            ),
+            req(&format!("/headers-worker.php?i={i}")),
         )?);
         assert_eq!(
             resp.status(),
@@ -483,15 +468,13 @@ fn assert_headers_list_response(resp: &Resp, i: u16) {
 #[test]
 fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(
+        Mode::Classic,
+        fixture("ported_tests/response-headers.php"),
+        None,
+    )?;
     let h = r.sink();
-    let resp = drain_resp(tests::submit(
-        &h,
-        req(
-            "/response-headers.php?i=1",
-            "ported_tests/response-headers.php",
-        ),
-    )?);
+    let resp = drain_resp(tests::submit(&h, req("/response-headers.php?i=1"))?);
     drop(h);
     drop(r);
     assert_headers_list_response(&resp, 1);
@@ -503,17 +486,15 @@ fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
 fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/response-headers-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/response-headers-worker.php"),
         None,
     )?;
     let h = r.sink();
     for i in [1u16, 2] {
         let resp = drain_resp(tests::submit(
             &h,
-            req(
-                &format!("/response-headers-worker.php?i={i}"),
-                "ported_tests/response-headers-worker.php",
-            ),
+            req(&format!("/response-headers-worker.php?i={i}")),
         )?);
         assert_headers_list_response(&resp, i);
     }
@@ -526,16 +507,10 @@ fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
 #[test]
 fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker(fixture("ported_tests/flush-worker.php")), None)?;
+    let r = Rapira::start(Mode::Worker, fixture("ported_tests/flush-worker.php"), None)?;
     let h = r.sink();
     for i in [42, 43] {
-        let rx = tests::submit(
-            &h,
-            req(
-                &format!("/flush-worker.php?i={i}"),
-                "ported_tests/flush-worker.php",
-            ),
-        )?;
+        let rx = tests::submit(&h, req(&format!("/flush-worker.php?i={i}")))?;
         let resp = drain_resp(rx);
         assert_eq!(resp.heads, 1, "exactly one head per response");
         assert_eq!(resp.status(), 200);
@@ -555,12 +530,13 @@ fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
 #[test]
 fn raw_status_line_204_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(
+        Mode::Classic,
+        fixture("ported_tests/only-headers.php"),
+        None,
+    )?;
     let h = r.sink();
-    let resp = drain_resp(tests::submit(
-        &h,
-        req("/only-headers.php", "ported_tests/only-headers.php"),
-    )?);
+    let resp = drain_resp(tests::submit(&h, req("/only-headers.php"))?);
     drop(h);
     drop(r);
 
@@ -579,7 +555,8 @@ fn raw_status_line_204_classic() -> anyhow::Result<()> {
 fn large_post_body_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/large-request-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/large-request-worker.php"),
         None,
     )?;
     let h = r.sink();
@@ -639,7 +616,7 @@ fn assert_upload_and_cleanup(status: u16, body: &str) {
 #[test]
 fn multipart_upload_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(Mode::Classic, fixture("ported_tests/upload.php"), None)?;
     let h = r.sink();
     let (status, body) = drain(tests::submit(
         &h,
@@ -660,7 +637,8 @@ fn multipart_upload_classic() -> anyhow::Result<()> {
 fn multipart_upload_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/upload-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/upload-worker.php"),
         None,
     )?;
     let h = r.sink();
@@ -686,7 +664,8 @@ fn multipart_upload_worker() -> anyhow::Result<()> {
 fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/upload-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/upload-worker.php"),
         None,
     )?;
     let h = r.sink();
@@ -705,10 +684,7 @@ fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<(
         "req1 must see the upload (got {b1:?})"
     );
 
-    let (s2, b2) = drain(tests::submit(
-        &h,
-        req("/upload-worker.php", "ported_tests/upload-worker.php"),
-    )?);
+    let (s2, b2) = drain(tests::submit(&h, req("/upload-worker.php"))?);
     assert_eq!(s2, 200);
     assert_eq!(
         b2, "NO FILE",
@@ -724,17 +700,15 @@ fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<(
 fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("shared/output-then-throw-worker.php")),
+        Mode::Worker,
+        fixture("shared/output-then-throw-worker.php"),
         None,
     )?;
     let h = r.sink();
     for i in [1, 2] {
         let resp = drain_resp(tests::submit(
             &h,
-            req(
-                &format!("/output-then-throw-worker.php?i={i}"),
-                "shared/output-then-throw-worker.php",
-            ),
+            req(&format!("/output-then-throw-worker.php?i={i}")),
         )?);
         assert_eq!(resp.heads, 1, "exactly one head frame (got {})", resp.heads);
         assert_eq!(resp.status(), 200, "headers were committed by the echo");
@@ -756,24 +730,13 @@ fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
 fn no_destructor_sweep_between_jobs_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/preloop-destruct-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/preloop-destruct-worker.php"),
         None,
     )?;
     let h = r.sink();
-    let (s1, b1) = drain(tests::submit(
-        &h,
-        req(
-            "/preloop-destruct-worker.php",
-            "ported_tests/preloop-destruct-worker.php",
-        ),
-    )?);
-    let (s2, b2) = drain(tests::submit(
-        &h,
-        req(
-            "/preloop-destruct-worker.php",
-            "ported_tests/preloop-destruct-worker.php",
-        ),
-    )?);
+    let (s1, b1) = drain(tests::submit(&h, req("/preloop-destruct-worker.php"))?);
+    let (s2, b2) = drain(tests::submit(&h, req("/preloop-destruct-worker.php"))?);
     drop(h);
     drop(r);
 
@@ -797,24 +760,13 @@ fn no_destructor_sweep_between_jobs_worker() -> anyhow::Result<()> {
 fn throwing_destructor_after_job_stays_contained_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/dtor-throw-shutdown-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/dtor-throw-shutdown-worker.php"),
         None,
     )?;
     let h = r.sink();
-    let (s1, b1) = drain(tests::submit(
-        &h,
-        req(
-            "/dtor-throw-shutdown-worker.php",
-            "ported_tests/dtor-throw-shutdown-worker.php",
-        ),
-    )?);
-    let (s2, b2) = drain(tests::submit(
-        &h,
-        req(
-            "/dtor-throw-shutdown-worker.php",
-            "ported_tests/dtor-throw-shutdown-worker.php",
-        ),
-    )?);
+    let (s1, b1) = drain(tests::submit(&h, req("/dtor-throw-shutdown-worker.php"))?);
+    let (s2, b2) = drain(tests::submit(&h, req("/dtor-throw-shutdown-worker.php"))?);
     drop(h);
     drop(r);
 
@@ -835,18 +787,13 @@ fn boot_shutdown_function_fires_once_at_worker_exit() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/boot-shutdown-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/boot-shutdown-worker.php"),
         None,
     )?;
     let h = r.sink();
     for _ in 0..2 {
-        let (status, body) = drain(tests::submit(
-            &h,
-            req(
-                "/boot-shutdown-worker.php",
-                "ported_tests/boot-shutdown-worker.php",
-            ),
-        )?);
+        let (status, body) = drain(tests::submit(&h, req("/boot-shutdown-worker.php"))?);
         assert_eq!(status, 200);
         assert_eq!(
             body, "fired=0",
@@ -878,7 +825,8 @@ fn job_shutdown_function_fires_at_end_of_its_job() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/job-shutdown-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/job-shutdown-worker.php"),
         None,
     )?;
     let h = r.sink();
@@ -887,13 +835,7 @@ fn job_shutdown_function_fires_at_end_of_its_job() -> anyhow::Result<()> {
         "req=2 job_fired=1 boot_fired=0",
         "req=3 job_fired=1 boot_fired=0",
     ] {
-        let (status, body) = drain(tests::submit(
-            &h,
-            req(
-                "/job-shutdown-worker.php",
-                "ported_tests/job-shutdown-worker.php",
-            ),
-        )?);
+        let (status, body) = drain(tests::submit(&h, req("/job-shutdown-worker.php"))?);
         assert_eq!((status, body.as_str()), (200, want));
     }
 
@@ -924,18 +866,13 @@ fn late_shutdown_function_runs_after_boot_entries() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/late-shutdown-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/late-shutdown-worker.php"),
         None,
     )?;
     let h = r.sink();
     for _ in 0..2 {
-        let (status, body) = drain(tests::submit(
-            &h,
-            req(
-                "/late-shutdown-worker.php",
-                "ported_tests/late-shutdown-worker.php",
-            ),
-        )?);
+        let (status, body) = drain(tests::submit(&h, req("/late-shutdown-worker.php"))?);
         assert_eq!((status, body.as_str()), (200, "ok"));
     }
 
@@ -967,17 +904,12 @@ fn fatal_in_boot_shutdown_function_exits_clean() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/shutdown-fatal-boot-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/shutdown-fatal-boot-worker.php"),
         None,
     )?;
     let h = r.sink();
-    let (status, body) = drain(tests::submit(
-        &h,
-        req(
-            "/shutdown-fatal-boot-worker.php",
-            "ported_tests/shutdown-fatal-boot-worker.php",
-        ),
-    )?);
+    let (status, body) = drain(tests::submit(&h, req("/shutdown-fatal-boot-worker.php"))?);
     assert_eq!((status, body.as_str()), (200, "ok"));
 
     drop(h);
@@ -999,7 +931,8 @@ fn boot_global_object_survives_requests() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/boot-global-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/boot-global-worker.php"),
         None,
     )?;
     let h = r.sink();
@@ -1008,13 +941,7 @@ fn boot_global_object_survives_requests() -> anyhow::Result<()> {
         "kernel=ok calls=2",
         "kernel=ok calls=3",
     ] {
-        let (status, body) = drain(tests::submit(
-            &h,
-            req(
-                "/boot-global-worker.php",
-                "ported_tests/boot-global-worker.php",
-            ),
-        )?);
+        let (status, body) = drain(tests::submit(&h, req("/boot-global-worker.php"))?);
         assert_eq!((status, body.as_str()), (200, want));
     }
     assert_eq!(
@@ -1038,17 +965,12 @@ fn boot_global_object_survives_requests() -> anyhow::Result<()> {
 fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("shared/output-then-throw-worker.php")),
+        Mode::Worker,
+        fixture("shared/output-then-throw-worker.php"),
         None,
     )?;
     let h = r.sink();
-    let resp = drain_resp(tests::submit(
-        &h,
-        req(
-            "/output-then-throw-worker.php?i=1",
-            "shared/output-then-throw-worker.php",
-        ),
-    )?);
+    let resp = drain_resp(tests::submit(&h, req("/output-then-throw-worker.php?i=1"))?);
     drop(h);
     drop(r);
 
@@ -1061,15 +983,13 @@ fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
 #[test]
 fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(
+        Mode::Classic,
+        fixture("ported_tests/exit-after-output-classic.php"),
+        None,
+    )?;
     let h = r.sink();
-    let resp = drain_resp(tests::submit(
-        &h,
-        req(
-            "/exit-after-output-classic.php",
-            "ported_tests/exit-after-output-classic.php",
-        ),
-    )?);
+    let resp = drain_resp(tests::submit(&h, req("/exit-after-output-classic.php"))?);
     drop(h);
     drop(r);
 
@@ -1084,15 +1004,13 @@ fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
 #[test]
 fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(
+        Mode::Classic,
+        fixture("ported_tests/throw-after-output-classic.php"),
+        None,
+    )?;
     let h = r.sink();
-    let resp = drain_resp(tests::submit(
-        &h,
-        req(
-            "/throw-after-output-classic.php",
-            "ported_tests/throw-after-output-classic.php",
-        ),
-    )?);
+    let resp = drain_resp(tests::submit(&h, req("/throw-after-output-classic.php"))?);
     drop(h);
     drop(r);
 
@@ -1107,18 +1025,13 @@ fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
 fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/file-stream-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/file-stream-worker.php"),
         None,
     )?;
     let h = r.sink();
     for expected in ["word1", "word2", "word3"] {
-        let (status, body) = drain(tests::submit(
-            &h,
-            req(
-                "/file-stream-worker.php",
-                "ported_tests/file-stream-worker.php",
-            ),
-        )?);
+        let (status, body) = drain(tests::submit(&h, req("/file-stream-worker.php"))?);
         assert_eq!(status, 200);
         assert_eq!(
             body, expected,
@@ -1134,14 +1047,12 @@ fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
 fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("shared/error-keeps-headers-worker.php")),
+        Mode::Worker,
+        fixture("shared/error-keeps-headers-worker.php"),
         None,
     )?;
     let h = r.sink();
-    let resp = drain_resp(tests::submit(
-        &h,
-        req("/", "shared/error-keeps-headers-worker.php"),
-    )?);
+    let resp = drain_resp(tests::submit(&h, req("/"))?);
     drop(h);
     drop(r);
     assert_eq!(resp.heads, 1);
@@ -1161,9 +1072,13 @@ fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
 #[test]
 fn multi_cookie_headers_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(
+        Mode::Classic,
+        fixture("ported_tests/multi-cookie.php"),
+        None,
+    )?;
     let h = r.sink();
-    let mut request = req("/multi-cookie.php", "ported_tests/multi-cookie.php");
+    let mut request = req("/multi-cookie.php");
     request
         .headers
         .append(COOKIE, HeaderValue::from_static("a=1; b=2"));
@@ -1178,9 +1093,9 @@ fn multi_cookie_headers_classic() -> anyhow::Result<()> {
 #[test]
 fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(Mode::Classic, fixture("ported_tests/fold-check.php"), None)?;
     let h = r.sink();
-    let mut request = req("/fold-check.php", "ported_tests/fold-check.php");
+    let mut request = req("/fold-check.php");
     let forwarded_for = http::HeaderName::from_static("x-forwarded-for");
     for (name, value) in [
         (COOKIE, "a=1"),
@@ -1207,12 +1122,13 @@ fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
 #[test]
 fn latin1_header_value_passes_through() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(
+        Mode::Classic,
+        fixture("ported_tests/latin1-header.php"),
+        None,
+    )?;
     let h = r.sink();
-    let resp = drain_resp(tests::submit(
-        &h,
-        req("/", "ported_tests/latin1-header.php"),
-    )?);
+    let resp = drain_resp(tests::submit(&h, req("/"))?);
     drop(h);
     drop(r);
     let v = resp
@@ -1230,12 +1146,13 @@ fn latin1_header_value_passes_through() -> anyhow::Result<()> {
 #[test]
 fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, None)?;
+    let r = Rapira::start(
+        Mode::Classic,
+        fixture("shared/error-keeps-headers.php"),
+        None,
+    )?;
     let h = r.sink();
-    let resp = drain_resp(tests::submit(
-        &h,
-        req("/error-keeps-headers.php", "shared/error-keeps-headers.php"),
-    )?);
+    let resp = drain_resp(tests::submit(&h, req("/error-keeps-headers.php"))?);
     drop(h);
     drop(r);
     assert_eq!(resp.heads, 1, "exactly one head");
@@ -1257,7 +1174,8 @@ fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
 fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/upload-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/upload-worker.php"),
         None,
     )?;
     let h = r.sink();
@@ -1283,17 +1201,12 @@ fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
 fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
-        Mode::Worker(fixture("ported_tests/bad-header-worker.php")),
+        Mode::Worker,
+        fixture("ported_tests/bad-header-worker.php"),
         None,
     )?;
     let h = r.sink();
-    let resp = drain_resp(tests::submit(
-        &h,
-        req(
-            "/bad-header-worker.php",
-            "ported_tests/bad-header-worker.php",
-        ),
-    )?);
+    let resp = drain_resp(tests::submit(&h, req("/bad-header-worker.php"))?);
     drop(h);
     drop(r);
 

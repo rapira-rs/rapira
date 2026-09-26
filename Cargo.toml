@@ -67,6 +67,7 @@ codegen-units = 1
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 rapira_master = { workspace = true }
+rapira_net = { workspace = true }
 rapira_sapi = { workspace = true }
 rapira_config = { workspace = true }
 rapira_static_files = { workspace = true }
