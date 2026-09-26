@@ -131,7 +131,7 @@ grpcurl -plaintext 127.0.0.1:50051 list
 
 On the stop signal the accept loop ends, health reports NOT_SERVING, and open `Watch` streams end. Calls in flight drain within the drain window (see Config). Connections that are open after the drain window are cut, and the shutdown reports an error. An open reflection stream, for example an Evans REPL session (https://github.com/ktr0731/evans), holds its connection until the drain window ends.
 
-The listener sends an HTTP/2 keepalive PING to an idle connection every 10 seconds, and closes the connection when the peer does not answer within 10 seconds.
+The listener sends an HTTP/2 keepalive PING to a connection that sends no request, no request data and no PING answer for `keepalive_interval_secs`, and closes the connection when the peer does not answer within `keepalive_timeout_secs`. Both keys are 10 seconds by default. An HTTP/2 peer that is gone without a FIN keeps its connection open for at most the sum of both keys after its last frame. HTTP/1.1 has no PING, so these keys do not apply to a gRPC-Web or Connect client on HTTP/1.1.
 
 ## Limits
 
@@ -151,9 +151,11 @@ The `[grpc]` table. Unknown keys fail the boot.
 - `reflection`: serve server reflection. Default `false`.
 - `default_timeout_secs`: the timeout of a call that has none. Default: unset, no deadline.
 - `max_timeout_secs`: the upper limit for a client timeout. Default: unset, no limit. `default_timeout_secs` must not be larger.
+- `keepalive_interval_secs`: the time without a new request, request data or a PING answer after which the listener sends an HTTP/2 keepalive PING. Default `10`. It must be at least 1.
+- `keepalive_timeout_secs`: the time the listener waits for the PING answer before it closes the connection. Default `10`. It must be at least 1.
 - `[grpc.pool]`: the worker pool. It takes the keys of `[http.pool]`, and its `mode` must be `"dispatcher"`.
 
-The drain window is not a key of this table. It is `[supervisor].process_control_timeout_secs` minus 5 seconds, or minus half of it when it is below 10 seconds. The drain therefore ends before the master sends SIGTERM. The HTTP/2 keepalive interval and its timeout are 10 seconds each, and no key changes them.
+The drain window is not a key of this table. It is `[supervisor].process_control_timeout_secs` minus 5 seconds, or minus half of it when it is below 10 seconds. The drain therefore ends before the master sends SIGTERM.
 
 ## Build
 

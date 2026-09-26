@@ -205,10 +205,7 @@ where
 {
     let reqs_counter: Arc<InflightReqCount> =
         Arc::new(InflightReqCount::init(&handler.shared.inflight));
-    let received_at: f64 = std::time::UNIX_EPOCH
-        .elapsed()
-        .map(|d| d.as_secs_f64())
-        .unwrap_or(0.0);
+    let received_at: f64 = rapira_sapi::work::now_unix_f64();
     let (mut parts, incoming) = req.into_parts();
 
     let authority = match check::check_request(

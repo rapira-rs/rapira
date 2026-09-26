@@ -30,6 +30,10 @@ zval *rapira_symtable_str_find(HashTable *ht, const char *str, size_t len) {
     return zend_symtable_str_find(ht, str, len);
 }
 
+bool rapira_array_is_list(HashTable *ht) {
+    return zend_array_is_list(ht);
+}
+
 void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name) {
     ZVAL_OBJ_COPY(dst, zend_enum_get_case_cstr(ce, name));
 }

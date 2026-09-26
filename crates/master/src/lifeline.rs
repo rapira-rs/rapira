@@ -1,8 +1,6 @@
-use std::io;
-use std::os::fd::{AsRawFd, FromRawFd, OwnedFd, RawFd};
+use std::os::fd::{AsRawFd, OwnedFd};
 
-#[cfg(not(target_os = "linux"))]
-use crate::signals::set_cloexec;
+use anyhow::Context as _;
 
 /// `wr` is never written: its disappearance is what signals master death to every worker's `rd`.
 pub(crate) struct Lifeline {
@@ -13,25 +11,10 @@ pub(crate) struct Lifeline {
 impl Lifeline {
     /// Both ends are `CLOEXEC`: fork still inherits them, the flag only keeps them out of exec'd processes.
     pub(crate) fn create() -> anyhow::Result<Lifeline> {
-        let mut fds = [0 as RawFd; 2];
-        #[cfg(target_os = "linux")]
-        // SAFETY: fds is a 2-element array the syscall fills with valid fds.
-        let rc: i32 = unsafe { libc::pipe2(fds.as_mut_ptr(), libc::O_CLOEXEC) };
-        #[cfg(not(target_os = "linux"))]
-        let rc = {
-            // SAFETY: fds is a 2-element array the syscall fills with valid fds.
-            let r = unsafe { libc::pipe(fds.as_mut_ptr()) };
-            if r == 0 {
-                set_cloexec(fds[0])?;
-                set_cloexec(fds[1])?;
-            }
-            r
-        };
-        anyhow::ensure!(rc == 0, "lifeline pipe: {}", io::Error::last_os_error());
+        let (rd, wr) = std::io::pipe().context("lifeline pipe")?;
         Ok(Lifeline {
-            // SAFETY: fds holds two fresh fds we take sole ownership of.
-            rd: unsafe { OwnedFd::from_raw_fd(fds[0]) },
-            wr: unsafe { OwnedFd::from_raw_fd(fds[1]) },
+            rd: rd.into(),
+            wr: wr.into(),
         })
     }
 }

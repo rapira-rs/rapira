@@ -729,7 +729,8 @@ pub fn http_get_with_headers(
     fields: &[(&str, &str)],
     timeout: Duration,
 ) -> io::Result<(u16, Vec<u8>)> {
-    parse_status_and_body(&http_get_raw(addr, path, fields, timeout)?)
+    let raw = http_get_raw(addr, path, fields, timeout)?;
+    parse_status_and_body(&raw).map(|(status, body)| (status, body.to_vec()))
 }
 
 /// The whole response, head included: for assertions about which fields reached the client.
@@ -774,7 +775,8 @@ pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io
 
 /// A caller-controlled request: no implicit Host or Connection line.
 pub fn http_raw(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
-    parse_status_and_body(&http_raw_bytes(addr, request, timeout)?)
+    let raw = http_raw_bytes(addr, request, timeout)?;
+    parse_status_and_body(&raw).map(|(status, body)| (status, body.to_vec()))
 }
 
 /// Sibling of [`http_get`] with a body; `content_type` is bytes because a multipart boundary is opaque octets and obs-text is legal in a field value.
@@ -797,7 +799,8 @@ pub fn http_post(
     http_raw(addr, &req, timeout)
 }
 
-fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, Vec<u8>)> {
+/// The status code and the body of a close-delimited response.
+pub fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, &[u8])> {
     if raw.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -819,7 +822,7 @@ fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, Vec<u8>)> {
         .nth(1)
         .and_then(|c| c.parse::<u16>().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no status code"))?;
-    Ok((code, raw[head_end + 4..].to_vec()))
+    Ok((code, &raw[head_end + 4..]))
 }
 
 /// Direct children of `master`; the `ps` field syntax is valid on both procps and BSD ps, and `Z` is excluded so a dead-but-unreaped worker is not counted.
@@ -1349,10 +1352,9 @@ pub fn listen(srv: &Server) -> ListenAddr {
 
 /// The context of each `call` record that `grpc/wire-worker.php` logged, in log order. The fixture logs before it answers, so a call that has its response is in the log.
 pub fn calls(srv: &Server) -> Vec<Value> {
-    server_log::records(&srv.log_file())
-        .into_iter()
-        .filter(|c| c.target == "app" && c.message == "call")
-        .map(|c| serde_json::from_str(&c.context).expect("a call record holds JSON"))
+    server_log::app_contexts(&srv.log_file(), "call")
+        .iter()
+        .map(|c| serde_json::from_str(c).expect("a call record holds JSON"))
         .collect()
 }
 

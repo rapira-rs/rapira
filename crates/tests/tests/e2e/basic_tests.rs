@@ -607,10 +607,7 @@ fn classic_finish_request() -> anyhow::Result<()> {
         body.contains("BEFORE") && !body.contains("AFTER"),
         "post-finish output must not reach the client (got: {body:?})"
     );
-    let ran = server_log::records(&srv.log_file())
-        .iter()
-        .filter(|c| c.target == "app" && c.message == "post-finish-ran")
-        .count();
+    let ran = server_log::app_contexts(&srv.log_file(), "post-finish-ran").len();
     assert_eq!(ran, 1, "the script must keep running after the early flush");
     Ok(())
 }

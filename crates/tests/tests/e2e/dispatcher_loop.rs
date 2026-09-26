@@ -11,7 +11,9 @@ use rapira_sapi::{Frame, Mode};
 use tests::wire::submit;
 use tests::{drain, drain_resp, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn, scratch_dir, slot_line, wait_log_contains};
+use crate::harness::{
+    Server, Spawn, parse_status_and_body, scratch_dir, slot_line, wait_log_contains,
+};
 
 /// Read budget of a raw socket exchange.
 const READ: Duration = Duration::from_secs(10);
@@ -21,25 +23,14 @@ fn verbs_probe(query: &str) -> anyhow::Result<(u16, String)> {
     Ok(drain(submit(srv.addr, req(query))?))
 }
 
-/// The contexts of the `app` records named `message` in the log of `srv`.
-fn app_contexts(srv: &Server, message: &str) -> Vec<String> {
-    server_log::records(&srv.log_file())
-        .into_iter()
-        .filter(|c| c.target == "app" && c.message == message)
-        .map(|c| c.context)
-        .collect()
-}
-
 /// Writes `request` on `stream` and reads the response to EOF; returns the status and the body.
 /// The request must end the connection (HTTP/1.0, or `connection: close`), and the response must be length-framed.
 fn raw_exchange(mut stream: impl Read + Write, request: &[u8]) -> anyhow::Result<(u16, String)> {
     stream.write_all(request)?;
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw)?;
-    let text = String::from_utf8_lossy(&raw);
-    let (head, body) = text.split_once("\r\n\r\n").context("no response head")?;
-    let status = head.split(' ').nth(1).context("no status")?.parse()?;
-    Ok((status, body.to_owned()))
+    let (status, body) = parse_status_and_body(&raw)?;
+    Ok((status, String::from_utf8_lossy(body).into_owned()))
 }
 
 /// Two sequential units through the echo loop, then the graceful stop must land as `ClosedException` in the parked `receive()`.
@@ -67,7 +58,7 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     srv.stop();
 
     assert_eq!(
-        app_contexts(&srv, "drained").len(),
+        server_log::app_contexts(&srv.log_file(), "drained").len(),
         1,
         "ClosedException must reach the fixture exactly once"
     );
@@ -87,7 +78,7 @@ fn recv_probes_on_an_empty_channel() -> anyhow::Result<()> {
     server_log::wait_app_record(&srv.log_file(), "recv-probes");
     srv.stop();
 
-    let contexts = app_contexts(&srv, "recv-probes");
+    let contexts = server_log::app_contexts(&srv.log_file(), "recv-probes");
     assert_eq!(contexts.len(), 1, "one probe record (got {contexts:?})");
     for fragment in [
         r#""try":"null""#,
@@ -123,7 +114,7 @@ fn double_finalize_throws_already_finalized() -> anyhow::Result<()> {
 
     srv.stop();
 
-    let records = app_contexts(&srv, "double-finalize");
+    let records = server_log::app_contexts(&srv.log_file(), "double-finalize");
     assert_eq!(records.len(), 1, "one throw record (got {records:?})");
     assert!(
         records[0].contains(r#""class":"Rapira\\Exception\\AlreadyFinalizedError""#),
@@ -174,7 +165,7 @@ fn verb_edges_throw_their_documented_classes() -> anyhow::Result<()> {
     assert_eq!((status, body.as_str()), (200, "try-busy;neg-timeout"));
     srv.stop();
 
-    let records = app_contexts(&srv, "head-after-eos");
+    let records = server_log::app_contexts(&srv.log_file(), "head-after-eos");
     assert_eq!(records.len(), 1, "one throw record (got {records:?})");
     assert!(
         records[0].contains(r#""class":"Rapira\\Http\\Exception\\HeadAlreadyWrittenError""#),

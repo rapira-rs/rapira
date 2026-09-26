@@ -168,91 +168,75 @@ impl Forker<'_> {
         self.self_pipe.rd.as_raw_fd()
     }
 
+    /// Fork bracket: the child leaves {QUIT, INT} blocked for the worker's sigwait watcher and `_exit`s under `catch_unwind`, so no master Drop (pidfile unlink, PHP shutdown) can ever run in a child.
     pub(crate) fn spawn(
         &mut self,
         pool: usize,
         slot_view: &'static SharedSlot,
     ) -> std::io::Result<libc::pid_t> {
-        spawn_worker(
-            pool,
-            slot_view,
-            &self.self_pipe,
-            &self.lifeline,
-            &mut self.worker,
-        )
-    }
-}
+        let lifeline_rd: std::os::fd::OwnedFd = self.lifeline.rd.try_clone()?;
 
-/// Fork bracket: the child leaves {QUIT, INT} blocked for the worker's sigwait watcher and `_exit`s under `catch_unwind`, so no master Drop (pidfile unlink, PHP shutdown) can ever run in a child.
-fn spawn_worker<F: FnMut(WorkerEnv) -> i32>(
-    pool: usize,
-    slot_view: &'static SharedSlot,
-    self_pipe: &SelfPipe,
-    lifeline: &Lifeline,
-    worker: &mut F,
-) -> std::io::Result<libc::pid_t> {
-    let lifeline_rd: std::os::fd::OwnedFd = lifeline.rd.try_clone()?;
+        let block: libc::sigset_t = sigset(&MASTER_SIGNALS);
+        // SAFETY: zeroed sigset_t is fully overwritten by sigprocmask's out-param.
+        let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
+        // SAFETY: block/old are live sigset_ts.
+        unsafe { libc::sigprocmask(libc::SIG_BLOCK, &block, &mut old) };
 
-    let block: libc::sigset_t = sigset(&MASTER_SIGNALS);
-    // SAFETY: zeroed sigset_t is fully overwritten by sigprocmask's out-param.
-    let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
-    // SAFETY: block/old are live sigset_ts.
-    unsafe { libc::sigprocmask(libc::SIG_BLOCK, &block, &mut old) };
+        // SAFETY: fork in a single-threaded master, so no other thread holds a lock the child inherits.
+        match unsafe { libc::fork() } {
+            0 => {
+                // SAFETY: all calls below are async-signal-safe or operate on fds we own.
+                unsafe {
+                    libc::close(self.self_pipe.rd.as_raw_fd());
+                    libc::close(self.self_pipe.wr.as_raw_fd());
+                    libc::close(self.lifeline.wr.as_raw_fd());
 
-    // SAFETY: fork in a single-threaded master, so no other thread holds a lock the child inherits.
-    match unsafe { libc::fork() } {
-        0 => {
-            // SAFETY: all calls below are async-signal-safe or operate on fds we own.
-            unsafe {
-                libc::close(self_pipe.rd.as_raw_fd());
-                libc::close(self_pipe.wr.as_raw_fd());
-                libc::close(lifeline.wr.as_raw_fd());
+                    let mut dfl: libc::sigaction = std::mem::zeroed();
+                    dfl.sa_sigaction = libc::SIG_DFL;
+                    libc::sigemptyset(&mut dfl.sa_mask);
+                    for s in MASTER_SIGNALS {
+                        libc::sigaction(s, &dfl, std::ptr::null_mut());
+                    }
+                    let mut ign: libc::sigaction = std::mem::zeroed();
+                    ign.sa_sigaction = libc::SIG_IGN;
+                    libc::sigemptyset(&mut ign.sa_mask);
+                    libc::sigaction(libc::SIGUSR1, &ign, std::ptr::null_mut());
+                    libc::sigaction(libc::SIGUSR2, &ign, std::ptr::null_mut());
 
-                let mut dfl: libc::sigaction = std::mem::zeroed();
-                dfl.sa_sigaction = libc::SIG_DFL;
-                libc::sigemptyset(&mut dfl.sa_mask);
-                for s in MASTER_SIGNALS {
-                    libc::sigaction(s, &dfl, std::ptr::null_mut());
+                    #[cfg(target_os = "linux")]
+                    libc::prctl(libc::PR_SET_NAME, c"rapira-worker".as_ptr());
+
+                    let hold = sigset(&[libc::SIGQUIT, libc::SIGINT]);
+                    libc::sigprocmask(libc::SIG_SETMASK, &hold, std::ptr::null_mut());
                 }
-                let mut ign: libc::sigaction = std::mem::zeroed();
-                ign.sa_sigaction = libc::SIG_IGN;
-                libc::sigemptyset(&mut ign.sa_mask);
-                libc::sigaction(libc::SIGUSR1, &ign, std::ptr::null_mut());
-                libc::sigaction(libc::SIGUSR2, &ign, std::ptr::null_mut());
 
-                #[cfg(target_os = "linux")]
-                libc::prctl(libc::PR_SET_NAME, c"rapira-worker".as_ptr());
-
-                let hold = sigset(&[libc::SIGQUIT, libc::SIGINT]);
-                libc::sigprocmask(libc::SIG_SETMASK, &hold, std::ptr::null_mut());
+                let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    (self.worker)(WorkerEnv {
+                        pool,
+                        lifeline: lifeline_rd,
+                        slot_view,
+                    })
+                }));
+                let code = match outcome {
+                    Ok(code) => code,
+                    Err(_) => {
+                        tracing::error!(target: "master", "worker child panicked; exiting");
+                        101
+                    }
+                };
+                // SAFETY: async-signal-safe process exit in the child.
+                unsafe { libc::_exit(code) }
             }
-
-            let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                worker(WorkerEnv {
-                    pool,
-                    lifeline: lifeline_rd,
-                    slot_view,
-                })
-            }));
-            let code = match outcome {
-                Ok(code) => code,
-                Err(_) => {
-                    tracing::error!(target: "master", "worker child panicked; exiting");
-                    101
-                }
-            };
-            // SAFETY: async-signal-safe process exit in the child.
-            unsafe { libc::_exit(code) }
-        }
-        -1 => {
-            // SAFETY: restore the pre-fork mask.
-            unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
-            Err(std::io::Error::last_os_error())
-        }
-        pid => {
-            // SAFETY: restore the pre-fork mask.
-            unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
-            Ok(pid)
+            -1 => {
+                // SAFETY: restore the pre-fork mask.
+                unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
+                Err(std::io::Error::last_os_error())
+            }
+            pid => {
+                // SAFETY: restore the pre-fork mask.
+                unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
+                Ok(pid)
+            }
         }
     }
 }

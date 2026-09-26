@@ -43,10 +43,7 @@ fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
     }
     srv.stop();
 
-    let exited = server_log::records(&srv.log_file())
-        .iter()
-        .filter(|c| c.target == "app" && c.message == "loop-exited served=2")
-        .count();
+    let exited = server_log::app_contexts(&srv.log_file(), "loop-exited served=2").len();
     assert_eq!(exited, 1, "the post-loop code must run exactly once");
     Ok(())
 }
@@ -86,18 +83,11 @@ fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
     );
     srv.stop();
 
-    let records = server_log::records(&srv.log_file());
-    let gated = records
-        .iter()
-        .filter(|c| {
-            c.target == "app" && c.message == "gate Rapira\\Exception\\NotInWorkerModeError"
-        })
-        .count();
+    let log = srv.log_file();
+    let gated =
+        server_log::app_contexts(&log, "gate Rapira\\Exception\\NotInWorkerModeError").len();
     assert_eq!(gated, 1);
-    let finish_gated = records
-        .iter()
-        .filter(|c| c.target == "app" && c.message == "finish-gate")
-        .count();
+    let finish_gated = server_log::app_contexts(&log, "finish-gate").len();
     assert_eq!(
         finish_gated, 1,
         "rapira_finish_request() must refuse dispatcher mode"
@@ -131,10 +121,7 @@ fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
     }
     srv.stop();
 
-    let turns = server_log::records(&srv.log_file())
-        .iter()
-        .filter(|c| c.target == "app" && c.message == "one-turn-done")
-        .count();
+    let turns = server_log::app_contexts(&srv.log_file(), "one-turn-done").len();
     assert_eq!(turns, 3, "each bootstrap must run the script to completion");
     Ok(())
 }

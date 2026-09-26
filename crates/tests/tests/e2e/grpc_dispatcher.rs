@@ -43,10 +43,9 @@ async fn call(listen: ListenAddr, message: Vec<u8>, headers: Fields) -> Response
 fn dispatcher_records(srv: &Server, n: usize) -> Vec<Value> {
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
     loop {
-        let records: Vec<Value> = server_log::records(&srv.log_file())
-            .into_iter()
-            .filter(|c| c.target == "app" && c.message == "dispatcher")
-            .map(|c| serde_json::from_str(&c.context).expect("a dispatcher record holds JSON"))
+        let records: Vec<Value> = server_log::app_contexts(&srv.log_file(), "dispatcher")
+            .iter()
+            .map(|c| serde_json::from_str(c).expect("a dispatcher record holds JSON"))
             .collect();
         if records.len() >= n {
             return records;

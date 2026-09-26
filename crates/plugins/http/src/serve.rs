@@ -163,20 +163,18 @@ pub(crate) fn serve(
     worker: Worker,
 ) -> Result<()> {
     let acceptor = Acceptor::adopt(prepared, worker.stop.clone(), &worker.handle)?;
-    // The plugin parses multipart in dispatcher mode only: the other modes feed php-src's own rfc1867 through read_post.
-    let dispatcher: bool = !config.superglobals;
     // Each worker spools in its own dir under the configured one.
-    let spool_dir: Option<PathBuf> = match &config.uploads {
-        Some(limits) if dispatcher => Some(multipart::create_worker_spool_dir(&limits.dir)?),
-        _ => None,
-    };
-    let uploads = dispatcher.then(|| {
-        let mut limits = config.uploads.clone().unwrap_or_default();
-        if let Some(dir) = &spool_dir {
-            limits.dir = dir.clone();
-        }
-        Arc::new(limits)
-    });
+    let uploads: Option<Arc<multipart::Limits>> = config
+        .uploads
+        .as_ref()
+        .map(|limits| {
+            anyhow::Ok(Arc::new(multipart::Limits {
+                dir: multipart::create_worker_spool_dir(&limits.dir)?,
+                ..limits.clone()
+            }))
+        })
+        .transpose()?;
+    let spool_dir: Option<PathBuf> = uploads.as_ref().map(|limits| limits.dir.clone());
     let serving = Serving::start(intake, uploads, config);
     let fatal = acceptor.run(&worker.handle, &serving);
     let drained = worker

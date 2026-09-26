@@ -22,6 +22,8 @@ pub struct Section {
     pub reflection: Option<bool>,
     pub default_timeout_secs: Option<u64>,
     pub max_timeout_secs: Option<u64>,
+    pub keepalive_interval_secs: Option<u64>,
+    pub keepalive_timeout_secs: Option<u64>,
     #[serde(default)]
     pub pool: PoolSection,
 }
@@ -37,6 +39,10 @@ pub struct Settings {
     pub default_timeout: Option<Duration>,
     /// Upper bound on the deadline a client asks for.
     pub max_timeout: Option<Duration>,
+    /// Idle time before the listener sends an HTTP/2 PING.
+    pub keepalive_interval: Duration,
+    /// Wait for the PING ACK before the listener closes the connection.
+    pub keepalive_timeout: Duration,
     pub pool: PoolSettings,
 }
 
@@ -76,6 +82,17 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
         bail!("grpc.default_timeout_secs ({default}) exceeds grpc.max_timeout_secs ({max})");
     }
 
+    let keepalive_interval = nonzero_timeout(
+        "grpc",
+        "keepalive_interval_secs",
+        section.keepalive_interval_secs.unwrap_or(10),
+    )?;
+    let keepalive_timeout = nonzero_timeout(
+        "grpc",
+        "keepalive_timeout_secs",
+        section.keepalive_timeout_secs.unwrap_or(10),
+    )?;
+
     let pool = resolve_pool(section.pool, "grpc.pool", ctx)?;
 
     Ok(Settings {
@@ -85,6 +102,8 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
         reflection: section.reflection.unwrap_or(false),
         default_timeout,
         max_timeout,
+        keepalive_interval,
+        keepalive_timeout,
         pool,
     })
 }
@@ -107,8 +126,8 @@ impl Server {
             reflection: settings.reflection,
             default_timeout: settings.default_timeout,
             max_timeout: settings.max_timeout,
-            keepalive_interval: Duration::from_secs(10),
-            keepalive_timeout: Duration::from_secs(10),
+            keepalive_interval: settings.keepalive_interval,
+            keepalive_timeout: settings.keepalive_timeout,
         }))
     }
 }
@@ -134,6 +153,8 @@ mod tests {
         reflection: bool,
         default_timeout: Option<Duration>,
         max_timeout: Option<Duration>,
+        keepalive_interval: Duration,
+        keepalive_timeout: Duration,
     }
 
     struct Case {
@@ -159,6 +180,8 @@ mod tests {
             reflection: false,
             default_timeout: None,
             max_timeout: None,
+            keepalive_interval: Duration::from_secs(10),
+            keepalive_timeout: Duration::from_secs(10),
         }
     }
 
@@ -227,6 +250,30 @@ mod tests {
                 }),
             },
             Case {
+                name: "keepalive keys resolve",
+                toml: toml("keepalive_interval_secs = 30\nkeepalive_timeout_secs = 5\n"),
+                expected: Ok(Want {
+                    keepalive_interval: Duration::from_secs(30),
+                    keepalive_timeout: Duration::from_secs(5),
+                    ..base()
+                }),
+            },
+            Case {
+                name: "zero keepalive interval",
+                toml: toml("keepalive_interval_secs = 0\n"),
+                expected: Err("grpc.keepalive_interval_secs must be at least 1"),
+            },
+            Case {
+                name: "zero keepalive timeout",
+                toml: toml("keepalive_timeout_secs = 0\n"),
+                expected: Err("grpc.keepalive_timeout_secs must be at least 1"),
+            },
+            Case {
+                name: "keepalive interval above the cap",
+                toml: toml("keepalive_interval_secs = 86401\n"),
+                expected: Err("grpc.keepalive_interval_secs 86401 is too large (max 86400)"),
+            },
+            Case {
                 name: "unix listen",
                 toml: toml("listen = \"unix:/run/g.sock\"\n"),
                 expected: Ok(Want {
@@ -264,6 +311,12 @@ mod tests {
                     assert_eq!(g.reflection, want.reflection, "{}", case.name);
                     assert_eq!(g.default_timeout, want.default_timeout, "{}", case.name);
                     assert_eq!(g.max_timeout, want.max_timeout, "{}", case.name);
+                    assert_eq!(
+                        g.keepalive_interval, want.keepalive_interval,
+                        "{}",
+                        case.name
+                    );
+                    assert_eq!(g.keepalive_timeout, want.keepalive_timeout, "{}", case.name);
                     assert_eq!(g.pool.mode, Mode::Dispatcher, "{}", case.name);
                 }
                 (Err(err), Err(want)) => {

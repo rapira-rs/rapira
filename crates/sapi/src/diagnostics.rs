@@ -10,18 +10,18 @@ const NOTICES: u32 = E_NOTICE | E_USER_NOTICE;
 const DEPRECATIONS: u32 = E_DEPRECATED | E_USER_DEPRECATED;
 
 /// `tracing::event!` needs a const level and target, so the runtime level fans out over five arms.
-macro_rules! php_log {
-    ($lvl:expr, $($arg:tt)+) => {
+macro_rules! event_at {
+    ($target:literal, $lvl:expr, $($arg:tt)+) => {
         match $lvl {
-            tracing::Level::ERROR => tracing::event!(target: "php", tracing::Level::ERROR, $($arg)+),
-            tracing::Level::WARN => tracing::event!(target: "php", tracing::Level::WARN, $($arg)+),
-            tracing::Level::INFO => tracing::event!(target: "php", tracing::Level::INFO, $($arg)+),
-            tracing::Level::DEBUG => tracing::event!(target: "php", tracing::Level::DEBUG, $($arg)+),
-            tracing::Level::TRACE => tracing::event!(target: "php", tracing::Level::TRACE, $($arg)+),
+            tracing::Level::ERROR => tracing::event!(target: $target, tracing::Level::ERROR, $($arg)+),
+            tracing::Level::WARN => tracing::event!(target: $target, tracing::Level::WARN, $($arg)+),
+            tracing::Level::INFO => tracing::event!(target: $target, tracing::Level::INFO, $($arg)+),
+            tracing::Level::DEBUG => tracing::event!(target: $target, tracing::Level::DEBUG, $($arg)+),
+            tracing::Level::TRACE => tracing::event!(target: $target, tracing::Level::TRACE, $($arg)+),
         }
     };
 }
-pub(crate) use php_log;
+pub(crate) use event_at;
 
 /// A masked non-fatal drops to `Trace` rather than vanishing; fatals ignore the mask. https://www.php.net/manual/en/function.error-reporting.php
 pub(crate) fn error_type_to_level(err_type: c_int, mask: c_int) -> (tracing::Level, &'static str) {

@@ -43,7 +43,7 @@ pub(crate) fn build(
         server_name: cfg.server_name.clone(),
         server_port: cfg.server_port,
         tls: None,
-        received_at: Some(peer.received_at),
+        received_at: peer.received_at,
         content_type: headers
             .get(http::header::CONTENT_TYPE)
             .map(|v| v.as_bytes().to_vec()),
@@ -108,7 +108,7 @@ mod tests {
         assert_eq!(built.target, None);
         assert_eq!(built.protocol, "HTTP/1.1");
         assert_eq!(built.authority.as_deref(), Some(&b"e2e"[..]));
-        assert_eq!(built.received_at, Some(1.5));
+        assert_eq!(built.received_at, 1.5);
     }
 
     fn built(uri: &str, method: &str) -> Request {

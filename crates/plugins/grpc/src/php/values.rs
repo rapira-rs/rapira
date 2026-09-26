@@ -5,8 +5,8 @@ use rapira_sapi::callbacks::guard;
 use rapira_sapi::values::address_arg;
 use rapira_sapi::{
     HASH_KEY_IS_STRING, HashPosition, HashTable, IS_ARRAY, IS_STRING, object_init_ex,
-    rapira_array_init, rapira_symtable_str_find, zend, zend_get_exception_base,
-    zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
+    rapira_array_init, rapira_array_is_list, rapira_symtable_str_find, zend,
+    zend_get_exception_base, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_string,
     zend_type_error, zend_value_error, zval, zval_add_ref, zval_ptr_dtor,
 };
@@ -60,29 +60,6 @@ pub unsafe extern "C" fn rapira_rs_ctor_grpc_status(
     })
 }
 
-/// True when the keys of `list` are 0, 1, 2, ... in order, as `array_is_list()` checks.
-/// `&raw mut pos`: the pos parameter is *mut on PHP 8.4 and *const on 8.5.
-/// # Safety
-/// `list` a live array.
-unsafe fn is_list(list: *mut HashTable) -> bool {
-    unsafe {
-        let mut pos: HashPosition = 0;
-        let mut index = 0;
-        zend_hash_internal_pointer_reset_ex(list, &mut pos);
-        while !zend_hash_get_current_data_ex(list, &raw mut pos).is_null() {
-            let mut str_key: *mut zend_string = null_mut();
-            let mut num_key = 0;
-            let kt = zend_hash_get_current_key_ex(list, &mut str_key, &mut num_key, &pos);
-            if i64::from(kt) == HASH_KEY_IS_STRING || num_key != index {
-                return false;
-            }
-            index += 1;
-            zend_hash_move_forward_ex(list, &mut pos);
-        }
-        true
-    }
-}
-
 /// Throws the contract's TypeError for `key`.
 /// # Safety
 /// Engine active on this thread.
@@ -124,7 +101,7 @@ unsafe fn metadata_valid(ht: *mut HashTable) -> bool {
                 return false;
             }
             let list = zend::deref(entry);
-            if zend::zval_type(list) != IS_ARRAY || !is_list((*list).value.arr) {
+            if zend::zval_type(list) != IS_ARRAY || !rapira_array_is_list((*list).value.arr) {
                 not_a_list(key);
                 return false;
             }

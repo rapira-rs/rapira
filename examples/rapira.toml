@@ -51,6 +51,8 @@ processes = 16               # defaults to the CPU count; max_children for dynam
 # reflection = false           # serve grpc.reflection.v1 and v1alpha
 # default_timeout_secs = 30    # deadline of a call without a client timeout; unset (the default) = no deadline
 # max_timeout_secs = 60        # upper limit for a client timeout; unset (the default) = no limit
+# keepalive_interval_secs = 10 # sends an HTTP/2 PING after this long without a request, request data or a PING answer
+# keepalive_timeout_secs = 10  # closes the connection when the PING has no answer within this time
 
 # The worker pool behind the grpc listener. It takes the keys of [http.pool].
 # [grpc.pool]

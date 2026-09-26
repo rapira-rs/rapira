@@ -1,14 +1,14 @@
 use std::{
     ffi::{CStr, CString, c_char, c_void},
     net::SocketAddr,
-    time::{Duration, Instant},
+    time::Instant,
 };
 
 use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::{MAX_BUFFERED_BODY, guard};
 use rapira_sapi::exchange::{
-    AddrOwned, add_list, build_address, header_key, note_served, path_bytes, push_dec, push_ipv4,
+    AddrOwned, add_list, build_address, header_key, path_bytes, push_dec, push_ipv4,
 };
 use rapira_sapi::plugin::PhpPart;
 use rapira_sapi::scoreboard::{Event, sb_update};
@@ -69,7 +69,7 @@ pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {
 
 pub static PHP_PART: PhpPart = PhpPart {
     register: rapira_http_register_classes,
-    dispatcher: Some(DISPATCHER_CLASSES),
+    dispatcher: DISPATCHER_CLASSES,
 };
 
 /// The head locks on the first head or body write: a body chunk commits an implicit 200 first.
@@ -93,6 +93,16 @@ enum BodyState {
         fields: Vec<FieldPart>,
         files: Vec<FilePart>,
     },
+}
+
+impl BodyState {
+    fn unlink_spools(&mut self) {
+        if let Self::Multipart { files, .. } = self {
+            for p in files {
+                p.upload.file.unlink();
+            }
+        }
+    }
 }
 
 struct FieldPart {

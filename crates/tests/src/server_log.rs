@@ -74,15 +74,21 @@ pub fn app_record(log: &Path) -> AppRecord {
     records.into_iter().next().expect("checked above")
 }
 
+/// The contexts of the `app` records of `log` named `message`, in log order.
+pub fn app_contexts(log: &Path, message: &str) -> Vec<String> {
+    records(log)
+        .into_iter()
+        .filter(|c| c.target == "app" && c.message == message)
+        .map(|c| c.context)
+        .collect()
+}
+
 /// Polls `log` until an `app` record with `message` appears, for at most 10 s; returns its context.
 pub fn wait_app_record(log: &Path, message: &str) -> String {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
-        if let Some(c) = records(log)
-            .into_iter()
-            .find(|c| c.target == "app" && c.message == message)
-        {
-            return c.context;
+        if let Some(context) = app_contexts(log, message).into_iter().next() {
+            return context;
         }
         assert!(
             Instant::now() < deadline,
@@ -116,10 +122,9 @@ pub fn dispatcher_record(log: &Path) -> anyhow::Result<Value> {
 
 /// The `result` field of each app record named `message`, in log order.
 pub fn app_results(log: &Path, message: &str) -> Vec<String> {
-    records(log)
+    app_contexts(log, message)
         .iter()
-        .filter(|c| c.target == "app" && c.message == message)
-        .filter_map(|c| serde_json::from_str::<Value>(&c.context).ok())
+        .filter_map(|c| serde_json::from_str::<Value>(c).ok())
         .map(|ctx| result_text(&ctx))
         .collect()
 }

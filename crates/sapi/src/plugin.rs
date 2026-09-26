@@ -14,7 +14,7 @@ pub use rapira_config::Mode;
 pub struct PhpPart {
     /// Registers the plugin's classes. Runs in MINIT after the base classes.
     pub register: unsafe extern "C" fn(),
-    pub dispatcher: Option<DispatcherClasses>,
+    pub dispatcher: DispatcherClasses,
 }
 
 /// What the worker hands to [`Plugin::serve`].
@@ -32,8 +32,8 @@ pub trait Plugin: Send + 'static {
     fn name(&self) -> &'static str;
     /// The pool modes this plugin serves. The root refuses another mode at boot.
     fn modes(&self) -> &'static [Mode];
-    /// The plugin's PHP surface. None for a plugin without one.
-    fn php(&self) -> Option<PhpPart>;
+    /// The plugin's PHP surface.
+    fn php(&self) -> PhpPart;
     /// Master side, before the fork, no runtime.
     fn prepare(&mut self, ctx: &mut rapira_net::PrepareCtx) -> anyhow::Result<()>;
     /// Worker side, on the plugin thread. Returns after the stop signal and the drain.
@@ -49,15 +49,6 @@ pub struct Running {
 }
 
 impl Running {
-    /// Sets the stop flag. The plugin drains on its own time.
-    pub fn stop(&self) {
-        self.stopper.stop();
-    }
-
-    pub fn stopper(&self) -> Stopper {
-        self.stopper.clone()
-    }
-
     /// Joins the plugin thread. An error from serve, a panic, or a join past `grace` after stop is an Err.
     pub fn join(mut self) -> anyhow::Result<()> {
         let thread = self.thread.take().expect("join consumes Running");
@@ -106,8 +97,8 @@ impl Drop for Running {
     }
 }
 
-/// Sets the stop flag from a plain thread: it needs no runtime.
-#[derive(Clone)]
+/// Sets the stop flag from a plain thread: it needs no runtime. A stop before [`run_plugin`] also reaches the plugin.
+#[derive(Clone, Default)]
 pub struct Stopper {
     flag: watch::Sender<bool>,
     events: Arc<JoinEvents>,
@@ -154,10 +145,11 @@ impl Drop for Ended {
 }
 
 /// Builds one two-worker tokio runtime with the IO and time drivers, spawns `rapira-{name}` and runs `serve` on it.
-/// `grace` bounds the join after the stop. `drain_grace` goes to [`Worker::drain_grace`].
+/// `stopper` stops the plugin. `grace` bounds the join after the stop. `drain_grace` goes to [`Worker::drain_grace`].
 pub fn run_plugin(
     plugin: Box<dyn Plugin>,
     sink: Sink,
+    stopper: Stopper,
     grace: Duration,
     drain_grace: Duration,
 ) -> anyhow::Result<Running> {
@@ -168,13 +160,11 @@ pub fn run_plugin(
         .thread_name(format!("rapira-{name}-io"))
         .build()
         .map_err(|e| anyhow!("building the {name} runtime: {e}"))?;
-    let (flag, stop_rx) = watch::channel(false);
-    let events = Arc::new(JoinEvents::default());
-    let ended = Ended(Arc::clone(&events));
+    let ended = Ended(Arc::clone(&stopper.events));
     let worker = Worker {
         handle: rt.handle().clone(),
         sink,
-        stop: stop_rx,
+        stop: stopper.flag.subscribe(),
         drain_grace,
     };
     let thread = std::thread::Builder::new()
@@ -190,7 +180,7 @@ pub fn run_plugin(
     Ok(Running {
         name,
         thread: Some(thread),
-        stopper: Stopper { flag, events },
+        stopper,
         grace,
     })
 }

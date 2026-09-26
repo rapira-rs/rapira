@@ -147,8 +147,8 @@ pub struct Request {
     /// Wire byte count, never re-derived from parsed parts; -1 if unknown.
     pub content_length: i64,
     pub body: Body,
-    /// Unix seconds; None = not yet stamped.
-    pub received_at: Option<f64>,
+    /// Unix seconds.
+    pub received_at: f64,
     pub tls: Option<Tls>,
 }
 
@@ -371,7 +371,7 @@ mod tests {
                 content_type: None,
                 content_length: -1,
                 body: Body::Raw(std::io::Cursor::new(Vec::new())),
-                received_at: None,
+                received_at: 0.0,
                 tls: None,
             },
             c: None,

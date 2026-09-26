@@ -1,7 +1,7 @@
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
-use super::respond::{Verb, discard_unit, emit_head, seal, send_frame, throw_verb};
+use super::respond::{Verb, discard_unit, send_body, throw_verb};
 use super::*;
 
 static SENDFILE_ROOT: OnceLock<PathBuf> = OnceLock::new();
@@ -76,47 +76,13 @@ pub(super) unsafe fn send_file_core(
         Ok(opened) => opened,
         Err(msg) => return Verb::FileNotSendable(msg),
     };
-    if let Some(cl) = st.declared_cl
-        && st.sent_body + len > cl
-    {
-        let fit = cl - st.sent_body;
-        if unsafe { emit_head(st, Some(cl)) }.is_ok() && fit > 0 && !st.bodiless {
-            let _ = unsafe {
-                send_frame(
-                    st,
-                    Frame::File {
-                        file,
-                        offset,
-                        len: fit,
-                    },
-                )
-            };
-        }
-        st.sent_body = cl;
-        unsafe {
-            seal(st, /*truncated=*/ false, HeaderMap::new())
-        };
-        return Verb::ContentLengthExceeded;
+    unsafe {
+        send_body(st, len, eos, |n| Frame::File {
+            file,
+            offset,
+            len: n,
+        })
     }
-    let finalizing = (eos && st.sent_body == 0).then_some(len);
-    if unsafe { emit_head(st, finalizing) }.is_err() {
-        discard_unit(st);
-        return Verb::Discarded;
-    }
-    st.sent_body += len;
-    if len > 0
-        && !st.bodiless
-        && unsafe { send_frame(st, Frame::File { file, offset, len }) }.is_err()
-    {
-        discard_unit(st);
-        return Verb::Discarded;
-    }
-    if eos {
-        unsafe {
-            seal(st, /*truncated=*/ false, HeaderMap::new())
-        };
-    }
-    Verb::Ok
 }
 
 /// # Safety
@@ -149,12 +115,6 @@ pub unsafe extern "C" fn rapira_rs_exchange_send_file(
         let st = &mut *job.cast::<ExchangeState>();
         let path = std::slice::from_raw_parts(path.cast::<u8>(), path_len);
         let length = (!length_is_null).then_some(length as u64);
-        match send_file_core(st, path, offset as u64, length, eos) {
-            Verb::Ok => true,
-            v => {
-                throw_verb(v);
-                false
-            }
-        }
+        throw_verb(send_file_core(st, path, offset as u64, length, eos))
     })
 }

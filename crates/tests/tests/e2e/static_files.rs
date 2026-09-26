@@ -1,6 +1,6 @@
 use crate::harness::{
     Conn, Server, Spawn, diagnostics, http_get, http_get_raw, http_post, http_raw_bytes,
-    scratch_dir, spawn_boot_failure, spawn_with_http_extra,
+    parse_status_and_body, scratch_dir, spawn_boot_failure, spawn_with_http_extra,
 };
 use rapira_sapi::Mode;
 use std::path::Path;
@@ -734,18 +734,8 @@ fn spawn_echo_loop(root: &Path, forbid: Option<&str>) -> Server {
         .spawn()
 }
 
-/// The status code and the body of a close-delimited response.
 fn split_response(raw: &[u8]) -> (u16, &[u8]) {
-    let end = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .unwrap_or_else(|| panic!("no response head: {}", String::from_utf8_lossy(raw)));
-    let status = String::from_utf8_lossy(&raw[..end])
-        .split(' ')
-        .nth(1)
-        .and_then(|code| code.parse().ok())
-        .unwrap_or_else(|| panic!("no status: {}", String::from_utf8_lossy(raw)));
-    (status, &raw[end + 4..])
+    parse_status_and_body(raw).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(raw)))
 }
 
 /// Use whole seconds. An ext4 volume with 128-byte inodes has no nanosecond field, so it

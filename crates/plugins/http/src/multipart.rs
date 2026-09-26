@@ -16,19 +16,6 @@ pub struct Limits {
     pub max_part_headers: usize,
 }
 
-impl Default for Limits {
-    fn default() -> Self {
-        Self {
-            dir: std::env::temp_dir(),
-            max_file_size: 2 * 1024 * 1024,
-            max_field_size: 256 * 1024,
-            max_files: 20,
-            max_parts: 1024,
-            max_part_headers: 32,
-        }
-    }
-}
-
 /// The spool dir of this worker process under `base`. The master sweeps the dirs whose process is gone.
 fn worker_spool_dir(base: &Path) -> PathBuf {
     base.join(format!("rapira-spool-{}", std::process::id()))
@@ -432,7 +419,14 @@ mod tests {
     use super::*;
 
     fn limits() -> Limits {
-        Limits::default()
+        Limits {
+            dir: std::env::temp_dir(),
+            max_file_size: 2 * 1024 * 1024,
+            max_field_size: 256 * 1024,
+            max_files: 20,
+            max_parts: 1024,
+            max_part_headers: 32,
+        }
     }
 
     fn ok(body: &[u8]) -> MultipartBody {

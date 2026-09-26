@@ -66,19 +66,11 @@ impl Pool {
         }
     }
 
-    fn idle_count(&self) -> usize {
+    fn count_state(&self, state: u32) -> usize {
         self.board
             .slots()
             .iter()
-            .filter(|s| s.state.load(Relaxed) == SLOT_IDLE)
-            .count()
-    }
-
-    fn starting_count(&self) -> usize {
-        self.board
-            .slots()
-            .iter()
-            .filter(|s| s.state.load(Relaxed) == SLOT_STARTING)
+            .filter(|s| s.state.load(Relaxed) == state)
             .count()
     }
 
@@ -168,11 +160,15 @@ impl Pool {
             } => dynamic_start_count(min_spare, max_spare, self.cfg.processes),
             Scaling::Ondemand => 0,
         };
-        for _ in 0..count {
-            match self.find_spawn_slot() {
-                Some(slot) => self.spawn_into(slot, now, spawner),
-                None => break,
-            }
+        self.spawn_up_to(count, now, spawner);
+    }
+
+    fn spawn_up_to(&mut self, n: usize, now: Instant, spawner: &mut Forker<'_>) {
+        for _ in 0..n {
+            let Some(slot) = self.find_spawn_slot() else {
+                return;
+            };
+            self.spawn_into(slot, now, spawner);
         }
     }
 
@@ -185,15 +181,13 @@ impl Pool {
             !stopping,
             self.table.running(),
             self.cfg.processes,
-            self.idle_count(),
-            self.starting_count(),
+            self.count_state(SLOT_IDLE),
+            self.count_state(SLOT_STARTING),
         ) && self.find_spawn_slot().is_some()
     }
 
     pub(crate) fn ondemand_fork_one(&mut self, now: Instant, spawner: &mut Forker<'_>) {
-        if let Some(slot) = self.find_spawn_slot() {
-            self.spawn_into(slot, now, spawner);
-        }
+        self.spawn_up_to(1, now, spawner);
     }
 
     pub(crate) fn begin_stop(&mut self) {
@@ -435,13 +429,7 @@ impl Pool {
             .filter(|&i| self.table.slots[i].respawn_at.is_some())
             .count();
         let committed = running + pending;
-        let target = self.cfg.processes;
-        for _ in committed..target {
-            match self.find_spawn_slot() {
-                Some(slot) => self.spawn_into(slot, now, spawner),
-                None => break,
-            }
-        }
+        self.spawn_up_to(self.cfg.processes.saturating_sub(committed), now, spawner);
     }
 
     fn dynamic_maintenance(
@@ -452,7 +440,7 @@ impl Pool {
         spawner: &mut Forker<'_>,
     ) {
         let inp = DynInput {
-            idle: self.idle_count(),
+            idle: self.count_state(SLOT_IDLE),
             running: self.table.running(),
             min_spare,
             max_spare,
@@ -465,12 +453,7 @@ impl Pool {
                 }
             }
             DynAction::Spawn(n) => {
-                for _ in 0..n {
-                    match self.find_spawn_slot() {
-                        Some(slot) => self.spawn_into(slot, now, spawner),
-                        None => break,
-                    }
-                }
+                self.spawn_up_to(n, now, spawner);
                 self.warned_max_children = false;
             }
             DynAction::ReachedMaxChildren => {
@@ -542,7 +525,7 @@ impl Pool {
             "status: {} pool: {} running, {} idle, generation {}",
             self.cfg.name,
             self.table.running(),
-            self.idle_count(),
+            self.count_state(SLOT_IDLE),
             self.table.generation
         );
         for s in self.board.snapshot_slots() {

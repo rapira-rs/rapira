@@ -14,7 +14,7 @@ mod scaling;
 mod signals;
 
 pub use lifeline::spawn_lifeline_watch;
-pub use signals::block_early_signals;
+pub use signals::{block_early_signals, wait_signal};
 
 /// Worker exit-code protocol: the worker emits, the master consumes; any other code is a crash.
 pub const WORKER_EXIT_DRAINED: i32 = 0;
