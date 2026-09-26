@@ -11,7 +11,7 @@ use rapira_sapi::{Frame, Mode};
 use tests::wire::submit;
 use tests::{drain, drain_resp, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn, slot_line};
+use crate::harness::{Server, Spawn, scratch_dir, slot_line, wait_log_contains};
 
 /// Read budget of a raw socket exchange.
 const READ: Duration = Duration::from_secs(10);
@@ -638,6 +638,152 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, an empty name is a 400, and a field over the limit after a file part is a 413.
+/// No spool file outlives its request, also when a later part rejects the body after a file part was spooled.
+#[test]
+fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
+    struct Case<'a> {
+        name: &'static str,
+        parts: Vec<(&'static str, &'a str)>,
+        status: u16,
+        lines: &'static [&'static str],
+    }
+    // max_field_size_kb = 1, so a field of 1025 bytes is over the limit.
+    let long = "x".repeat(1025);
+    let cases = [
+        Case {
+            name: "file part between two fields",
+            parts: vec![
+                ("content-disposition: form-data; name=\"a\"", "one"),
+                (
+                    "content-disposition: form-data; name=\"f\"; filename=\"x.bin\"\r\n\
+                     content-type: application/octet-stream",
+                    "PAYLOAD",
+                ),
+                ("content-disposition: form-data; name=\"b\"", "two"),
+            ],
+            status: 200,
+            lines: &[
+                "counts=2/1",
+                "field0=a=one",
+                "field1=b=two",
+                "file0=f:x.bin:7:PAYLOAD",
+                "file0-type='application/octet-stream'",
+                "file0-cd=true",
+            ],
+        },
+        Case {
+            name: "empty filename",
+            parts: vec![(
+                "content-disposition: form-data; name=\"f\"; filename=\"\"",
+                "",
+            )],
+            status: 200,
+            lines: &["counts=0/1", "file0=f::0:"],
+        },
+        Case {
+            name: "empty name",
+            parts: vec![("content-disposition: form-data; name=\"\"", "v")],
+            status: 400,
+            lines: &[],
+        },
+        Case {
+            name: "field over the limit after a file part",
+            parts: vec![
+                (
+                    "content-disposition: form-data; name=\"f\"; filename=\"a\"",
+                    "DATA",
+                ),
+                ("content-disposition: form-data; name=\"x\"", &long),
+            ],
+            status: 413,
+            lines: &[],
+        },
+    ];
+
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/multipart-worker.php"))
+        .http_extra("[http.uploads]\ndir = \"uploads\"\nmax_field_size_kb = 1")
+        .spawn();
+    for case in cases {
+        let (status, body) = drain(submit(srv.addr, multipart("/", &case.parts))?);
+        assert_eq!(status, case.status, "{}: {body:?}", case.name);
+        for line in case.lines {
+            assert!(
+                body.contains(line),
+                "{}: missing {line:?} in {body:?}",
+                case.name
+            );
+        }
+        assert_eq!(
+            spooled_files(&srv),
+            Vec::<PathBuf>::new(),
+            "{}: no spool file may outlive the request",
+            case.name
+        );
+    }
+    Ok(())
+}
+
+/// At boot the master removes each spool dir under `http.uploads.dir` whose pid is gone. It keeps the dir of a live pid and every name that is not `rapira-spool-<positive pid>`.
+#[test]
+fn spool_sweep_removes_only_dead_pid_dirs() -> anyhow::Result<()> {
+    struct Case {
+        name: String,
+        kept: bool,
+    }
+    let mut child = std::process::Command::new("true").spawn()?;
+    let dead = child.id();
+    child.wait()?;
+    let cases = [
+        Case {
+            name: format!("rapira-spool-{dead}"),
+            kept: false,
+        },
+        Case {
+            name: format!("rapira-spool-{}", std::process::id()),
+            kept: true,
+        },
+        Case {
+            name: "other-dir".to_owned(),
+            kept: true,
+        },
+        Case {
+            name: "rapira-spool-".to_owned(),
+            kept: true,
+        },
+        Case {
+            name: "rapira-spool-x".to_owned(),
+            kept: true,
+        },
+        Case {
+            name: "rapira-spool-0".to_owned(),
+            kept: true,
+        },
+        Case {
+            name: "rapira-spool--5".to_owned(),
+            kept: true,
+        },
+    ];
+    let uploads = scratch_dir();
+    for case in &cases {
+        std::fs::create_dir(uploads.join(&case.name))?;
+    }
+
+    // The master sweeps before it binds the listener, so the sweep is done when the spawn returns.
+    let _srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/multipart-worker.php"))
+        .http_extra(&format!("[http.uploads]\ndir = \"{}\"", uploads.display()))
+        .spawn();
+    for case in &cases {
+        assert_eq!(
+            uploads.join(&case.name).exists(),
+            case.kept,
+            "{}",
+            case.name
+        );
+    }
+    Ok(())
+}
+
 /// A malformed or over-limit multipart body answers before dispatch and never reaches PHP; an accepted body reaches PHP raw. Sources: RFC 7578 (multipart/form-data needs a boundary), RFC 9110 §8.3 (content-type is a singleton field).
 #[test]
 fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
@@ -985,6 +1131,146 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// sendFile rejects a directory, an offset or a slice past the end of the file, and a symlink out of the root before anything is written, so the handler answers 403.
+/// A symlink inside the root stays sendable, and a slice longer than one 64 KiB plugin read keeps its offset across the reads.
+#[test]
+fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        path: PathBuf,
+        query: &'static str,
+        status: u16,
+        body: Vec<u8>,
+    }
+    let srv = sendfile_server();
+    let payload = sendfile_payload(&srv);
+    // A prime period, so a read at a wrong offset returns other bytes.
+    let pattern: Vec<u8> = (0..100 * 1024).map(|i| (i % 251) as u8).collect();
+    let patterned = srv.dir.join("patterned");
+    std::fs::write(&patterned, &pattern)?;
+    let link_in = srv.dir.join("link-in");
+    std::os::unix::fs::symlink(&payload, &link_in)?;
+    let link_out = srv.dir.join("link-out");
+    std::os::unix::fs::symlink("/etc/hosts", &link_out)?;
+    let cases = [
+        Case {
+            name: "directory",
+            path: srv.dir.clone(),
+            query: "",
+            status: 403,
+            body: b"denied".to_vec(),
+        },
+        Case {
+            name: "offset past end",
+            path: payload.clone(),
+            query: "&offset=27",
+            status: 403,
+            body: b"denied".to_vec(),
+        },
+        Case {
+            name: "slice past end",
+            path: payload.clone(),
+            query: "&offset=20&length=10",
+            status: 403,
+            body: b"denied".to_vec(),
+        },
+        Case {
+            name: "escaping symlink",
+            path: link_out,
+            query: "",
+            status: 403,
+            body: b"denied".to_vec(),
+        },
+        Case {
+            name: "intra-root symlink",
+            path: link_in,
+            query: "",
+            status: 200,
+            body: b"abcdefghijklmnopqrstuvwxyz".to_vec(),
+        },
+        Case {
+            name: "slice over two plugin reads",
+            path: patterned,
+            query: "&offset=1024&length=81920",
+            status: 200,
+            body: pattern[1024..1024 + 80 * 1024].to_vec(),
+        },
+    ];
+
+    for case in cases {
+        let target = format!("/?probe=sendfile-range{}", case.query);
+        let resp = drain_resp(submit(srv.addr, with_path_header(&target, &case.path))?);
+        assert_eq!(resp.status(), case.status, "{}", case.name);
+        assert!(
+            resp.body == case.body,
+            "{}: wrong body of {} byte(s)",
+            case.name,
+            resp.body.len()
+        );
+        if case.status == 200 {
+            assert_eq!(
+                resp.content_length,
+                Some(case.body.len() as u64),
+                "{}",
+                case.name
+            );
+            assert!(resp.ended && !resp.truncated, "{}", case.name);
+        }
+    }
+    Ok(())
+}
+
+/// A file that shrinks after sendFile() committed its slice ends the body with an error after the bytes that exist: the chunked body has no last chunk, and the plugin logs the cut.
+#[test]
+fn sendfile_of_a_shrunken_file_ends_short() -> anyhow::Result<()> {
+    const SIZE: u64 = 64 * 1024 * 1024;
+    const CUT: u64 = 32 * 1024 * 1024;
+    let srv = sendfile_server();
+    let path = srv.dir.join("shrinking");
+    // A sparse file: the size costs no memory.
+    std::fs::File::create(&path)?.set_len(SIZE)?;
+    let marker = srv.dir.join("shrinking.shrunk");
+
+    let mut stream = TcpStream::connect(srv.addr)?;
+    stream.set_read_timeout(Some(READ))?;
+    write!(
+        stream,
+        "GET /?probe=sendfile-shrink&to={CUT} HTTP/1.1\r\n\
+         host: localhost\r\n\
+         x-path: {}\r\n\
+         connection: close\r\n\
+         \r\n",
+        path.display()
+    )?;
+    // The test reads nothing before the cut, so the socket buffers stop the plugin read far below CUT.
+    let deadline = std::time::Instant::now() + READ;
+    while !marker.exists() {
+        assert!(std::time::Instant::now() < deadline, "the file was not cut");
+        std::thread::sleep(Duration::from_millis(10));
+    }
+    let mut raw = Vec::new();
+    stream.read_to_end(&mut raw)?;
+
+    let split = raw
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .context("no response head")?;
+    let head = String::from_utf8_lossy(&raw[..split]).to_ascii_lowercase();
+    assert!(head.starts_with("http/1.1 200 "), "head: {head:?}");
+    assert!(
+        head.contains("\r\ntransfer-encoding: chunked"),
+        "head: {head:?}"
+    );
+    let (body, last_chunk) = dechunk(&raw[split + 4..])?;
+    assert_eq!(body.len() as u64, CUT, "the body ends where the file ends");
+    assert!(!last_chunk, "a cut body must not end cleanly");
+    assert!(
+        wait_log_contains(&srv, "the file shrank mid-send", READ),
+        "the plugin must log the cut"
+    );
+    Ok(())
+}
+
 // ---- writeTrailers (stream-worker.php): the third ending
 
 /// `writeTrailers()` after streamed chunks ends the response cleanly. The plugin does not forward response trailers.
@@ -1033,4 +1319,23 @@ fn forbidden_trailer_field_is_rejected() -> anyhow::Result<()> {
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.body_string(), "rejected");
     Ok(())
+}
+
+/// Decodes the chunked body `raw`; returns the data and whether the last chunk arrived.
+/// https://www.rfc-editor.org/rfc/rfc9112#section-7.1
+fn dechunk(mut raw: &[u8]) -> anyhow::Result<(Vec<u8>, bool)> {
+    let mut data = Vec::new();
+    while let Some(eol) = raw.windows(2).position(|w| w == b"\r\n") {
+        let size = usize::from_str_radix(std::str::from_utf8(&raw[..eol])?, 16)?;
+        if size == 0 {
+            return Ok((data, true));
+        }
+        raw = &raw[eol + 2..];
+        data.extend_from_slice(&raw[..size.min(raw.len())]);
+        if raw.len() < size + 2 {
+            break;
+        }
+        raw = &raw[size + 2..];
+    }
+    Ok((data, false))
 }

@@ -431,25 +431,6 @@ fn parse_part(
 mod tests {
     use super::*;
 
-    /// The sweep reclaims only dirs whose owning process is gone.
-    #[test]
-    fn spool_sweep_reclaims_only_dead_pid_dirs() {
-        assert!(!spool_dir_reclaimable("other-dir"));
-        assert!(!spool_dir_reclaimable("rapira-spool-"));
-        assert!(!spool_dir_reclaimable("rapira-spool-x"));
-        assert!(!spool_dir_reclaimable("rapira-spool--5"));
-        assert!(!spool_dir_reclaimable("rapira-spool-0"));
-        let live = std::process::id();
-        assert!(!spool_dir_reclaimable(&format!("rapira-spool-{live}")));
-
-        let mut child = std::process::Command::new("true")
-            .spawn()
-            .expect("spawn a short-lived child");
-        let dead = child.id();
-        let _ = child.wait();
-        assert!(spool_dir_reclaimable(&format!("rapira-spool-{dead}")));
-    }
-
     fn limits() -> Limits {
         Limits::default()
     }
@@ -465,35 +446,6 @@ mod tests {
             Err(ParseError::Io(e)) => panic!("io error: {e}"),
             Ok(_) => panic!("expected a rejection"),
         }
-    }
-
-    #[test]
-    fn fields_and_files_arrive_in_document_order() {
-        let body = b"--B\r\ncontent-disposition: form-data; name=\"a\"\r\n\r\none\r\n\
---B\r\ncontent-disposition: form-data; name=\"f\"; filename=\"x.bin\"\r\ncontent-type: application/octet-stream\r\n\r\nPAYLOAD\r\n\
---B\r\ncontent-disposition: form-data; name=\"b\"\r\n\r\ntwo\r\n\
---B--";
-        let mb = ok(body);
-        assert_eq!(mb.fields.len(), 2);
-        assert_eq!(mb.fields[0].name, b"a");
-        assert_eq!(mb.fields[0].value, b"one");
-        assert_eq!(mb.fields[1].name, b"b");
-        assert_eq!(mb.fields[1].value, b"two");
-        assert_eq!(mb.files.len(), 1);
-        let f = &mb.files[0];
-        assert_eq!(f.name, b"f");
-        assert_eq!(f.client_filename, b"x.bin");
-        assert_eq!(
-            f.client_media_type.as_deref(),
-            Some(&b"application/octet-stream"[..])
-        );
-        assert_eq!(f.size, 7);
-        assert_eq!(std::fs::read(&f.file.path).unwrap(), b"PAYLOAD");
-        assert!(
-            f.headers
-                .iter()
-                .any(|(n, _)| n.eq_ignore_ascii_case("content-disposition"))
-        );
     }
 
     #[test]
@@ -541,20 +493,6 @@ mod tests {
             let mb = ok(&body);
             assert_eq!(mb.fields[0].value, b"v", "close form: {close:?}");
         }
-    }
-
-    #[test]
-    fn empty_filename_is_a_file_part_and_empty_name_is_a_400() {
-        let mb =
-            ok(b"--B\r\ncontent-disposition: form-data; name=f; filename=\"\"\r\n\r\n\r\n--B--");
-        assert_eq!(mb.files.len(), 1);
-        assert_eq!(mb.files[0].client_filename, b"");
-
-        let status = rejected(
-            b"--B\r\ncontent-disposition: form-data; name=\"\"\r\n\r\nv\r\n--B--",
-            &limits(),
-        );
-        assert_eq!(status, 400);
     }
 
     #[test]
@@ -618,23 +556,6 @@ mod tests {
             ),
             413
         );
-    }
-
-    /// Uses its own spool dir: scanning the shared system temp dir races sibling tests.
-    #[test]
-    fn spooled_files_unlink_on_a_later_rejection() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut l = limits();
-        l.dir = dir.path().to_path_buf();
-        l.max_field_size = 1;
-        let body = b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\nDATA\r\n\
---B\r\ncontent-disposition: form-data; name=x\r\n\r\ntoolong\r\n--B--";
-        assert_eq!(rejected(body, &l), 413);
-        let leaked: Vec<_> = std::fs::read_dir(dir.path())
-            .unwrap()
-            .filter_map(|e| e.ok().map(|e| e.path()))
-            .collect();
-        assert!(leaked.is_empty(), "leaked spool files: {leaked:?}");
     }
 
     #[test]

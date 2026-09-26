@@ -1,6 +1,5 @@
 use super::headers::*;
 use super::respond::*;
-use super::sendfile::*;
 use super::*;
 use rapira_sapi::types::Request;
 use std::path::PathBuf;
@@ -442,70 +441,6 @@ fn a_101_head_drops_body_chunks() {
     );
 }
 
-/// sendFile validation, one test fn: the root is process-global state.
-#[test]
-fn send_file_validation_table() {
-    use rapira_sapi::types::Frame;
-    let dir = std::env::temp_dir();
-    set_sendfile_root(dir.clone());
-    let path = dir.join(format!("rapira-sf-{}", std::process::id()));
-    std::fs::write(&path, b"abcdefghijklmnopqrstuvwxyz").unwrap();
-    let pb = path_bytes(&path);
-    let link_out = dir.join(format!("rapira-sf-out-{}", std::process::id()));
-    std::fs::remove_file(&link_out).ok();
-    std::os::unix::fs::symlink("/etc/hosts", &link_out).unwrap();
-
-    let (mut st, _rx) = state();
-    for (name, path, offset, length) in [
-        ("missing", b"/definitely/not/here".to_vec(), 0, None),
-        ("directory", path_bytes(&dir), 0, None),
-        ("offset past end", pb.clone(), 27, None),
-        ("slice past end", pb.clone(), 20, Some(10)),
-        ("outside the root", b"/etc/hosts".to_vec(), 0, None),
-        ("escaping symlink", path_bytes(&link_out), 0, None),
-    ] {
-        let v = unsafe { send_file_core(&mut st, &path, offset, length, true) };
-        assert!(matches!(v, Verb::FileNotSendable(_)), "{name}");
-    }
-    assert_eq!(st.stage, Stage::Open);
-
-    let (mut st, mut rx) = state();
-    let v = unsafe { send_file_core(&mut st, &pb, 2, Some(3), true) };
-    assert_eq!(v, Verb::Ok);
-    let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
-        panic!("head first");
-    };
-    assert_eq!(
-        content_length,
-        Some(3),
-        "the slice length is known up front"
-    );
-    let Ok(Frame::File { offset, len, .. }) = rx.try_recv() else {
-        panic!("the file rides its own frame");
-    };
-    assert_eq!((offset, len), (2, 3));
-    assert!(matches!(
-        rx.try_recv(),
-        Ok(Frame::End {
-            truncated: false,
-            ..
-        })
-    ));
-    assert_eq!(st.stage, Stage::Finalized);
-
-    let link_in = dir.join(format!("rapira-sf-in-{}", std::process::id()));
-    std::fs::remove_file(&link_in).ok();
-    std::os::unix::fs::symlink(&path, &link_in).unwrap();
-    let (mut st, mut rx) = state();
-    let v = unsafe { send_file_core(&mut st, &path_bytes(&link_in), 0, None, true) };
-    assert_eq!(v, Verb::Ok, "intra-root symlinks stay sendable");
-    assert!(matches!(rx.try_recv(), Ok(Frame::Head { .. })));
-
-    std::fs::remove_file(&link_in).ok();
-    std::fs::remove_file(&link_out).ok();
-    std::fs::remove_file(&path).ok();
-}
-
 /// Trailers end the response on the End frame: a headless call is HeadNotWritten, a repeat call Finalized.
 #[test]
 fn trailers_finalize_with_a_committed_head() {
@@ -558,31 +493,4 @@ fn trailer_denylist_matches_the_categories() {
     }
     assert!(!forbidden_trailer("x-checksum"));
     assert!(!forbidden_trailer("server-timing"));
-}
-
-/// Sealing unlinks the spool files, so uploads are gone once the exchange finalizes.
-#[test]
-fn seal_unlinks_the_spool_files() {
-    let (mut st, mut _rx) = state();
-    let dir = std::env::temp_dir();
-    let path = dir.join(format!("rapira-test-spool-{}", std::process::id()));
-    std::fs::write(&path, b"payload").unwrap();
-    st.body = BodyState::Multipart {
-        fields: Vec::new(),
-        files: vec![FilePart {
-            upload: rapira_sapi::types::UploadedFile {
-                name: b"f".to_vec(),
-                client_filename: b"a.bin".to_vec(),
-                client_media_type: None,
-                headers: Vec::new(),
-                file: rapira_sapi::types::SpooledFile { path: path.clone() },
-                size: 7,
-            },
-            path: path_bytes(&path),
-            headers: Grouped::new(&[]),
-        }],
-    };
-    assert!(path.exists());
-    unsafe { seal(&mut st, false, HeaderMap::new()) };
-    assert!(!path.exists(), "seal must unlink the spooled file");
 }
