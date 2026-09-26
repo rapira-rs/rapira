@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Result, bail};
 use rapira_config::{
-    ConfigCtx, ListenAddr, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout,
+    ConfigCtx, ListenAddr, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout,
     parse_listen, resolve_pool,
 };
 use serde::Deserialize;
@@ -86,12 +86,6 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
     }
 
     let pool = resolve_pool(section.pool, "grpc.pool", ctx)?;
-    if pool.mode != Mode::Dispatcher {
-        bail!(
-            "grpc.pool.mode must be \"dispatcher\" (got \"{}\")",
-            pool.mode
-        );
-    }
 
     Ok(Settings {
         listen,
@@ -133,6 +127,8 @@ impl Server {
 #[cfg(test)]
 mod tests {
     use std::path::Path;
+
+    use rapira_config::Mode;
 
     use super::*;
 
@@ -177,7 +173,7 @@ mod tests {
         }
     }
 
-    /// Every resolved grpc pool runs in dispatcher mode, so a success case does not list the mode.
+    /// The default pool mode is dispatcher, so a success case does not list the mode.
     #[test]
     fn grpc_table_resolves_and_validates() {
         let cases = [
@@ -211,11 +207,6 @@ mod tests {
                 name: "services empty",
                 toml: toml("services = []\n"),
                 expected: Err("grpc.services must name at least one service; leave the key out"),
-            },
-            Case {
-                name: "worker mode refused",
-                toml: toml("") + "mode = \"worker\"\n",
-                expected: Err("grpc.pool.mode must be \"dispatcher\" (got \"worker\")"),
             },
             Case {
                 name: "bad listen",

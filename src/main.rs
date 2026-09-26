@@ -67,13 +67,12 @@ fn prepare_pool(plugin: &mut dyn Plugin, prepare: &mut PrepareCtx) -> anyhow::Re
     Ok(fds.split_off(before))
 }
 
-/// `name` is the config table of the pool, for the error text.
-fn check_mode(name: &str, plugin: &dyn Plugin, mode: Mode) -> anyhow::Result<()> {
-    let modes: &[Mode] = plugin.modes();
-    if modes.contains(&mode) {
+/// `name` is the config table of the pool, for the error text. `served` is [`Plugin::modes`].
+fn check_mode(name: &str, served: &[Mode], mode: Mode) -> anyhow::Result<()> {
+    if served.contains(&mode) {
         return Ok(());
     }
-    let served: Vec<String> = modes.iter().map(Mode::to_string).collect();
+    let served: Vec<String> = served.iter().map(Mode::to_string).collect();
     anyhow::bail!(
         "{name}.pool.mode = {mode}: this plugin serves {}",
         served.join(", ")
@@ -100,7 +99,7 @@ fn pool_run(
     supervisor: &SupervisorSettings,
 ) -> anyhow::Result<(PoolRun, PoolConfig)> {
     let name: &'static str = plugin.name();
-    check_mode(name, plugin.as_ref(), pool.mode)?;
+    check_mode(name, plugin.modes(), pool.mode)?;
     let listeners: Vec<RawFd> = prepare_pool(plugin.as_mut(), prepare)?;
     Ok((
         PoolRun {
@@ -185,6 +184,7 @@ mod tests {
     use super::{check_mode, prepare_pool};
     use rapira_http::{Config as HttpConfig, Server as HttpServer};
     use rapira_net::{ListenAddr, PrepareCtx};
+    use rapira_sapi::plugin::Mode;
 
     fn ephemeral_plugin() -> HttpServer {
         HttpServer::init(HttpConfig {
@@ -209,27 +209,9 @@ mod tests {
         assert_eq!(prepare.listener_fds().len(), 2);
     }
 
-    fn grpc_test_config() -> rapira_grpc::Config {
-        let descriptor_set = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("crates/tests/fixtures/grpc/echo.binpb");
-        rapira_grpc::Config {
-            listen: ListenAddr::Tcp("127.0.0.1:0".parse().expect("loopback addr")),
-            schema: std::sync::Arc::new(
-                rapira_grpc::Schema::load(&descriptor_set, None).expect("echo.binpb loads"),
-            ),
-            reflection: false,
-            default_timeout: None,
-            max_timeout: None,
-            keepalive_interval: std::time::Duration::from_secs(10),
-            keepalive_timeout: std::time::Duration::from_secs(10),
-            interceptors: Vec::new(),
-        }
-    }
-
     #[test]
     fn a_pool_mode_the_plugin_does_not_serve_fails_the_boot() {
-        let plugin = rapira_grpc::Server::init(grpc_test_config());
-        let err = check_mode("grpc", &plugin, rapira_sapi::plugin::Mode::Worker).unwrap_err();
+        let err = check_mode("grpc", &[Mode::Dispatcher], Mode::Worker).unwrap_err();
         assert_eq!(
             err.to_string(),
             "grpc.pool.mode = worker: this plugin serves dispatcher"
