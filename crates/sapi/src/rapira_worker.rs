@@ -38,7 +38,7 @@ pub enum WorkerExit {
     Restart,
 }
 
-// wrapper.h's RAPIRA_HANDLE_* values mirror this - keep in sync.
+// rapira_sapi.h's RAPIRA_HANDLE_* values mirror this - keep in sync.
 #[repr(i32)]
 enum HandleAction {
     Stop = 0,

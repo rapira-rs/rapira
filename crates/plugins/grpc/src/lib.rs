@@ -7,8 +7,8 @@ use connectrpc_health::StaticChecker;
 use connectrpc_reflection::Reflector;
 use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
 use rapira_sapi::grpc::Call;
-use rapira_sapi::plugin::{Mode, Plugin, Worker};
-use rapira_sapi::work::{DispatcherClasses, Intake};
+use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
+use rapira_sapi::work::Intake;
 
 mod dispatch;
 mod schema;
@@ -73,8 +73,8 @@ impl Plugin for Server {
         &[Mode::Dispatcher]
     }
 
-    fn dispatcher_classes(&self) -> Option<DispatcherClasses> {
-        Some(rapira_sapi::grpc::DISPATCHER_CLASSES)
+    fn php(&self) -> Option<PhpPart> {
+        Some(rapira_sapi::grpc::PHP_PART)
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {

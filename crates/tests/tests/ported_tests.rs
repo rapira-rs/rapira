@@ -27,6 +27,7 @@ fn app_messages(prefix: &str) -> Vec<String> {
 fn post_superglobals_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Classic,
         fixture("ported_tests/post-superglobals.php"),
         None,
@@ -62,6 +63,7 @@ fn post_superglobals_classic() -> anyhow::Result<()> {
 fn post_superglobals_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/post-superglobals-worker.php"),
         None,
@@ -110,6 +112,7 @@ fn post_superglobals_worker() -> anyhow::Result<()> {
 fn request_merge_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Classic,
         fixture("ported_tests/request-merge.php"),
         None,
@@ -140,6 +143,7 @@ fn request_merge_classic() -> anyhow::Result<()> {
 fn request_merge_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/request-merge-worker.php"),
         None,
@@ -173,6 +177,7 @@ fn request_merge_worker() -> anyhow::Result<()> {
 fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/jit-request-worker.php"),
         None,
@@ -216,6 +221,7 @@ fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
 fn cookies_refresh_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/cookies-worker.php"),
         None,
@@ -243,7 +249,12 @@ fn cookies_refresh_worker() -> anyhow::Result<()> {
 #[test]
 fn malformed_cookies_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, fixture("ported_tests/cookies.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Classic,
+        fixture("ported_tests/cookies.php"),
+        None,
+    )?;
     let h = r.sink();
     let mut request = req("/cookies.php");
     request.headers.append(
@@ -278,7 +289,7 @@ fn malformed_cookies_classic() -> anyhow::Result<()> {
 
 fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(mode, fixture(fixture_name), None)?;
+    let r = Rapira::start(&tests::PHP_PARTS, mode, fixture(fixture_name), None)?;
     let h = r.sink();
 
     let r1 = drain_resp(tests::submit(&h, req(&format!("/{fixture_name}")))?);
@@ -335,6 +346,7 @@ fn session_cookie_roundtrip_worker() -> anyhow::Result<()> {
 fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/session-handler-worker.php"),
         None,
@@ -370,6 +382,7 @@ fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
 fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/preloop-session-handler-worker.php"),
         None,
@@ -411,6 +424,7 @@ fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
 fn response_header_edges_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/headers-worker.php"),
         None,
@@ -469,6 +483,7 @@ fn assert_headers_list_response(resp: &Resp, i: u16) {
 fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Classic,
         fixture("ported_tests/response-headers.php"),
         None,
@@ -486,6 +501,7 @@ fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
 fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/response-headers-worker.php"),
         None,
@@ -507,7 +523,12 @@ fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
 #[test]
 fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker, fixture("ported_tests/flush-worker.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("ported_tests/flush-worker.php"),
+        None,
+    )?;
     let h = r.sink();
     for i in [42, 43] {
         let rx = tests::submit(&h, req(&format!("/flush-worker.php?i={i}")))?;
@@ -531,6 +552,7 @@ fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
 fn raw_status_line_204_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Classic,
         fixture("ported_tests/only-headers.php"),
         None,
@@ -555,6 +577,7 @@ fn raw_status_line_204_classic() -> anyhow::Result<()> {
 fn large_post_body_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/large-request-worker.php"),
         None,
@@ -616,7 +639,12 @@ fn assert_upload_and_cleanup(status: u16, body: &str) {
 #[test]
 fn multipart_upload_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, fixture("ported_tests/upload.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Classic,
+        fixture("ported_tests/upload.php"),
+        None,
+    )?;
     let h = r.sink();
     let (status, body) = drain(tests::submit(
         &h,
@@ -637,6 +665,7 @@ fn multipart_upload_classic() -> anyhow::Result<()> {
 fn multipart_upload_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/upload-worker.php"),
         None,
@@ -664,6 +693,7 @@ fn multipart_upload_worker() -> anyhow::Result<()> {
 fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/upload-worker.php"),
         None,
@@ -700,6 +730,7 @@ fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<(
 fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("shared/output-then-throw-worker.php"),
         None,
@@ -730,6 +761,7 @@ fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
 fn no_destructor_sweep_between_jobs_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/preloop-destruct-worker.php"),
         None,
@@ -760,6 +792,7 @@ fn no_destructor_sweep_between_jobs_worker() -> anyhow::Result<()> {
 fn throwing_destructor_after_job_stays_contained_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/dtor-throw-shutdown-worker.php"),
         None,
@@ -787,6 +820,7 @@ fn boot_shutdown_function_fires_once_at_worker_exit() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/boot-shutdown-worker.php"),
         None,
@@ -825,6 +859,7 @@ fn job_shutdown_function_fires_at_end_of_its_job() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/job-shutdown-worker.php"),
         None,
@@ -866,6 +901,7 @@ fn late_shutdown_function_runs_after_boot_entries() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/late-shutdown-worker.php"),
         None,
@@ -904,6 +940,7 @@ fn fatal_in_boot_shutdown_function_exits_clean() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/shutdown-fatal-boot-worker.php"),
         None,
@@ -931,6 +968,7 @@ fn boot_global_object_survives_requests() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/boot-global-worker.php"),
         None,
@@ -965,6 +1003,7 @@ fn boot_global_object_survives_requests() -> anyhow::Result<()> {
 fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("shared/output-then-throw-worker.php"),
         None,
@@ -984,6 +1023,7 @@ fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
 fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Classic,
         fixture("ported_tests/exit-after-output-classic.php"),
         None,
@@ -1005,6 +1045,7 @@ fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
 fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Classic,
         fixture("ported_tests/throw-after-output-classic.php"),
         None,
@@ -1025,6 +1066,7 @@ fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
 fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/file-stream-worker.php"),
         None,
@@ -1047,6 +1089,7 @@ fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
 fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("shared/error-keeps-headers-worker.php"),
         None,
@@ -1073,6 +1116,7 @@ fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
 fn multi_cookie_headers_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Classic,
         fixture("ported_tests/multi-cookie.php"),
         None,
@@ -1093,7 +1137,12 @@ fn multi_cookie_headers_classic() -> anyhow::Result<()> {
 #[test]
 fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, fixture("ported_tests/fold-check.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Classic,
+        fixture("ported_tests/fold-check.php"),
+        None,
+    )?;
     let h = r.sink();
     let mut request = req("/fold-check.php");
     let forwarded_for = http::HeaderName::from_static("x-forwarded-for");
@@ -1123,6 +1172,7 @@ fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
 fn latin1_header_value_passes_through() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Classic,
         fixture("ported_tests/latin1-header.php"),
         None,
@@ -1147,6 +1197,7 @@ fn latin1_header_value_passes_through() -> anyhow::Result<()> {
 fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Classic,
         fixture("shared/error-keeps-headers.php"),
         None,
@@ -1174,6 +1225,7 @@ fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
 fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/upload-worker.php"),
         None,
@@ -1201,6 +1253,7 @@ fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
 fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("ported_tests/bad-header-worker.php"),
         None,

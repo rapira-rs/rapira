@@ -1,4 +1,4 @@
-#include "wrapper.h"
+#include "rapira_sapi.h"
 
 #include <Zend/zend_smart_str.h>
 

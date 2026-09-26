@@ -1,15 +1,8 @@
-#include "rapira_classes.h"
+#include "rapira_http.h"
 #include "zend_API.h"
 #include "zend_types.h"
 
 // rust glue (src/values.rs): these return false with a PHP exception already pending
-extern bool rapira_rs_ctor_inet_address(zend_object *obj, zend_string *ip,
-                                        int64_t port);
-extern bool rapira_rs_ctor_unix_address(zend_object *obj, zend_string *path);
-extern bool rapira_rs_ctor_tls(zend_object *obj, zend_string *version,
-                               zend_string *cipher, zend_string *negotiated,
-                               zend_string *server_name, zend_string *serial,
-                               zend_string *org, zend_string *fingerprint);
 extern bool rapira_rs_ctor_form_field(zend_object *obj, zend_string *name,
                                       zend_string *value, zval *headers);
 extern bool rapira_rs_ctor_uploaded_file(zend_object *obj, zend_string *name,
@@ -25,52 +18,6 @@ extern bool rapira_rs_ctor_request(zend_object *obj, zend_string *method,
                                    zend_string *protocol, zval *headers,
                                    zval *body, zval *remote, zval *server,
                                    zval *tls, double received_at);
-
-ZEND_METHOD(Rapira_InetAddress, __construct) {
-    zend_string *ip;
-    zend_long port;
-    ZEND_PARSE_PARAMETERS_START(2, 2)
-    Z_PARAM_STR(ip)
-    Z_PARAM_LONG(port)
-    ZEND_PARSE_PARAMETERS_END();
-
-    if (!rapira_rs_ctor_inet_address(Z_OBJ_P(ZEND_THIS), ip, (int64_t)port)) {
-        rapira_throw_or_backstop("InetAddress construction");
-        RETURN_THROWS();
-    }
-}
-
-ZEND_METHOD(Rapira_UnixAddress, __construct) {
-    zend_string *path;
-    ZEND_PARSE_PARAMETERS_START(1, 1)
-    Z_PARAM_STR_OR_NULL(path)
-    ZEND_PARSE_PARAMETERS_END();
-
-    if (!rapira_rs_ctor_unix_address(Z_OBJ_P(ZEND_THIS), path)) {
-        rapira_throw_or_backstop("UnixAddress construction");
-        RETURN_THROWS();
-    }
-}
-
-ZEND_METHOD(Rapira_Tls, __construct) {
-    zend_string *version, *cipher, *negotiated, *server_name, *serial, *org,
-        *fingerprint;
-    ZEND_PARSE_PARAMETERS_START(7, 7)
-    Z_PARAM_STR(version)
-    Z_PARAM_STR(cipher)
-    Z_PARAM_STR_OR_NULL(negotiated)
-    Z_PARAM_STR_OR_NULL(server_name)
-    Z_PARAM_STR_OR_NULL(serial)
-    Z_PARAM_STR_OR_NULL(org)
-    Z_PARAM_STR_OR_NULL(fingerprint)
-    ZEND_PARSE_PARAMETERS_END();
-
-    if (!rapira_rs_ctor_tls(Z_OBJ_P(ZEND_THIS), version, cipher, negotiated,
-                            server_name, serial, org, fingerprint)) {
-        rapira_throw_or_backstop("Tls construction");
-        RETURN_THROWS();
-    }
-}
 
 ZEND_METHOD(Rapira_Http_FormField, __construct) {
     zend_string *name, *value;

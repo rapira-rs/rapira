@@ -178,6 +178,7 @@ fn log_preserves_exit_from_a_serializer() {
     let _guard = php_lock();
     init_log_capture();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Classic,
         fixture("app_logger/app-logger-exit-in-serializer.php"),
         None,

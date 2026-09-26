@@ -22,6 +22,7 @@ members = [
     "crates/config",
     "crates/tests",
     "crates/master",
+    "crates/php_build",
     "crates/middleware/static_files",
     "crates/sapi",
     "crates/scoreboard",
@@ -35,6 +36,7 @@ anyhow = "1"
 base64 = "0.22"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 rapira_sapi = { path = "crates/sapi" }
+rapira_php_build = { path = "crates/php_build" }
 rapira_config = { path = "crates/config" }
 rapira_static_files = { path = "crates/middleware/static_files" }
 rapira_http = { path = "crates/plugins/http" }

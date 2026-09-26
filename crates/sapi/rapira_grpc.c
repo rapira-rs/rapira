@@ -1,5 +1,5 @@
 #include "ext/spl/spl_array.h"
-#include "rapira_classes.h"
+#include "rapira_grpc.h"
 #include "zend_API.h"
 #include "zend_enum.h"
 #include "zend_types.h"

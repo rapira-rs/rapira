@@ -1,10 +1,10 @@
 use std::ffi::{CStr, c_char};
 
 use crate::{
-    IS_NULL, IS_REFERENCE, IS_UNDEF, rapira_eg, zend_class_entry, zend_object, zend_string,
-    zend_throw_error, zend_throw_exception, zend_update_property, zend_update_property_double,
-    zend_update_property_long, zend_update_property_null, zend_update_property_stringl,
-    zend_value_error, zval,
+    IS_NULL, IS_REFERENCE, IS_UNDEF, rapira_cg, rapira_eg, zend_class_entry, zend_object,
+    zend_string, zend_throw_error, zend_throw_exception, zend_update_property,
+    zend_update_property_double, zend_update_property_long, zend_update_property_null,
+    zend_update_property_stringl, zend_value_error, zval,
 };
 
 pub(crate) fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
@@ -203,5 +203,15 @@ pub(crate) unsafe fn throw_value_error(msg: &CStr) {
 pub(crate) unsafe fn throw_exception(ce: *mut zend_class_entry, msg: &CStr) {
     unsafe {
         zend_throw_exception(ce, msg.as_ptr(), 0);
+    }
+}
+
+/// Whether the class table holds `name`, given without the leading backslash. Call it after `boot_master` and before its module drops.
+pub fn class_exists(name: &str) -> bool {
+    let key = name.to_ascii_lowercase();
+    // SAFETY: the engine is started, so CG(class_table) is live. EG(class_table) is set only when a request starts (init_executor), so the master has none.
+    unsafe {
+        !crate::zend_hash_str_find((*rapira_cg()).class_table, key.as_ptr().cast(), key.len())
+            .is_null()
     }
 }

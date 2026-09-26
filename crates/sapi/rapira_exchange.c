@@ -1,5 +1,4 @@
-#include "rapira_classes.h"
-#include "wrapper.h"
+#include "rapira_http.h"
 
 #include "zend_API.h"
 

@@ -7,6 +7,7 @@ use tests::{dispatcher_record, drain, fixture, php_lock, req};
 fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Classic,
         fixture("dispatcher/not-in-dispatcher-mode.php"),
         None,
@@ -37,6 +38,7 @@ fn worker_singleton() -> anyhow::Result<()> {
     let _guard = php_lock();
     let ctx = dispatcher_record(|| {
         Rapira::start(
+            &tests::PHP_PARTS,
             Mode::Dispatcher,
             fixture("dispatcher/worker-singleton.php"),
             Some(rapira_sapi::http::DISPATCHER_CLASSES),
@@ -60,6 +62,7 @@ fn worker_singleton() -> anyhow::Result<()> {
 fn host_created_only() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Classic,
         fixture("dispatcher/host-created-only.php"),
         None,

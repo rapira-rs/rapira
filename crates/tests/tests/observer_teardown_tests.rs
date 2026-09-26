@@ -11,6 +11,7 @@ fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()
         "/fixtures/ini/observer_teardown_tests/observer-quiet.ini"
     )));
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("shared/session-bailout-worker.php"),
         None,

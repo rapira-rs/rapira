@@ -1,8 +1,8 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
+use std::sync::{Arc, OnceLock};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -12,7 +12,11 @@ use crate::quota::{self, WorkerHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
 use crate::work::{DispatcherClasses, Sink, Work};
-use crate::{classic_worker::classic_worker, plugin::Mode, *};
+use crate::{
+    classic_worker::classic_worker,
+    plugin::{Mode, PhpPart},
+    *,
+};
 
 thread_local! {
     static JOB_RX: RefCell<Option<JobRx>> = const { RefCell::new(None) };
@@ -22,6 +26,9 @@ struct JobRx {
     rx: Receiver<Box<dyn Work>>,
     pending: Arc<AtomicUsize>,
 }
+
+/// The parts that MINIT registers after the base classes.
+static PARTS: OnceLock<Vec<PhpPart>> = OnceLock::new();
 
 pub struct PhpModule {}
 
@@ -63,28 +70,40 @@ fn check_linked_php() -> anyhow::Result<()> {
     Ok(())
 }
 
-impl Rapira {
-    pub fn boot_master() -> anyhow::Result<PhpModule> {
-        check_linked_php()?;
-        let mut module: _sapi_module_struct = module::build_sapi_module();
-        let started: bool = unsafe {
-            // The Rust runtime sets SIGPIPE to SIG_IGN before main, so a write to a closed peer returns EPIPE: https://doc.rust-lang.org/beta/unstable-book/compiler-flags/on-broken-pipe.html
-            rapira_process_init();
-            sapi_startup(&mut module);
-            php_module_startup(&mut module, &raw mut rapira_module_entry) == SUCCESS
-        };
+/// MINIT once in the master. Base classes first, then each part in order.
+pub fn boot_master(parts: &[PhpPart]) -> anyhow::Result<PhpModule> {
+    check_linked_php()?;
+    // The root boots once. The test harness boots each time with the same parts, so the first boot sets them.
+    PARTS.get_or_init(|| parts.to_vec());
+    let mut module: _sapi_module_struct = module::build_sapi_module();
+    let started: bool = unsafe {
+        // The Rust runtime sets SIGPIPE to SIG_IGN before main, so a write to a closed peer returns EPIPE: https://doc.rust-lang.org/beta/unstable-book/compiler-flags/on-broken-pipe.html
+        rapira_process_init();
+        sapi_startup(&mut module);
+        php_module_startup(&mut module, &raw mut rapira_module_entry) == SUCCESS
+    };
 
-        if !started {
-            error!(target: "rapira", "php_module_startup failed, shutting down");
-            unsafe {
-                php_module_shutdown();
-                sapi_shutdown();
-            }
-            return Err(anyhow::anyhow!("php_module_startup failed"));
+    if !started {
+        error!(target: "rapira", "php_module_startup failed, shutting down");
+        unsafe {
+            php_module_shutdown();
+            sapi_shutdown();
         }
-        Ok(PhpModule {})
+        return Err(anyhow::anyhow!("php_module_startup failed"));
     }
+    Ok(PhpModule {})
+}
 
+/// MINIT calls it after the base classes (module.c).
+#[unsafe(no_mangle)]
+pub extern "C" fn rapira_rs_register_plugin_classes() {
+    for part in PARTS.get().into_iter().flatten() {
+        // SAFETY: MINIT runs on the booting thread, and the base classes the part extends are registered.
+        unsafe { (part.register)() };
+    }
+}
+
+impl Rapira {
     /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `classes`: the dispatcher surface receive() serves; None for the classic and worker modes.
     pub fn start_worker(
         mode: Mode,
@@ -146,22 +165,24 @@ impl Rapira {
     }
 
     pub fn start(
+        parts: &[PhpPart],
         mode: Mode,
         entrypoint: PathBuf,
         classes: Option<DispatcherClasses>,
     ) -> anyhow::Result<Self> {
-        Self::start_with_hooks(mode, entrypoint, WorkerHooks::default(), classes)
+        Self::start_with_hooks(parts, mode, entrypoint, WorkerHooks::default(), classes)
     }
 
     /// Boots the master and one worker in this process.
     pub fn start_with_hooks(
+        parts: &[PhpPart],
         mode: Mode,
         entrypoint: PathBuf,
         hooks: WorkerHooks,
         classes: Option<DispatcherClasses>,
     ) -> anyhow::Result<Self> {
         info!(target: "rapira", "booting with mode: {mode:?}");
-        let module = Self::boot_master()?;
+        let module = boot_master(parts)?;
         let mut rapira = Self::start_worker(mode, entrypoint, hooks, classes)?;
         rapira.module = Some(module);
         Ok(rapira)

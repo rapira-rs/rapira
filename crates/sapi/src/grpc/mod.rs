@@ -4,8 +4,13 @@ pub use call::Call;
 
 use std::cell::RefCell;
 
+use crate::plugin::PhpPart;
 use crate::types::{Addr, GrpcService};
 use crate::work::DispatcherClasses;
+
+unsafe extern "C" {
+    fn rapira_grpc_register_classes();
+}
 
 /// One unary RPC. `message` is the binary protobuf encoding of the method's input message.
 #[derive(Debug)]
@@ -51,6 +56,11 @@ pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {
     info: || unsafe { crate::rapira_ce_internal_grpc_dispatcher_info },
     unit: || unsafe { crate::rapira_ce_internal_grpc_unary_call },
     busy: c"receive() while a Rapira\\Grpc\\UnaryCall is unfinalized; finalize it first",
+};
+
+pub static PHP_PART: PhpPart = PhpPart {
+    register: rapira_grpc_register_classes,
+    dispatcher: Some(DISPATCHER_CLASSES),
 };
 
 thread_local! {

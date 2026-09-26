@@ -10,8 +10,8 @@ use rapira_http::{
 use rapira_master::PoolConfig;
 use rapira_net::{ListenAddr, PrepareCtx};
 use rapira_sapi::middleware::Middleware;
-use rapira_sapi::plugin::{Mode, Plugin};
-use rapira_sapi::{GrpcMethod, GrpcService, Rapira};
+use rapira_sapi::plugin::{Mode, PhpPart, Plugin};
+use rapira_sapi::{GrpcMethod, GrpcService};
 use std::{
     fs::{File, OpenOptions, read_dir, remove_file},
     os::fd::RawFd,
@@ -396,7 +396,11 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         http.into_iter().chain(grpc).unzip();
 
     // MINIT once, after every pool bound its listeners.
-    let module: rapira_sapi::PhpModule = Rapira::boot_master()?;
+    let parts: Vec<PhpPart> = pools
+        .iter()
+        .filter_map(|pool| pool.plugin.as_ref().and_then(|plugin| plugin.php()))
+        .collect();
+    let module: rapira_sapi::PhpModule = rapira_sapi::boot_master(&parts)?;
 
     // forks ------------------------------------------------------------------
     let cfg: rapira_master::MasterConfig = rapira_master::MasterConfig {

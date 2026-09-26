@@ -82,7 +82,7 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
         return WORKER_EXIT_UNHEALTHY;
     }
     let classes: Option<DispatcherClasses> = if mode == Mode::Dispatcher {
-        plugin.dispatcher_classes()
+        plugin.php().and_then(|p| p.dispatcher)
     } else {
         None
     };

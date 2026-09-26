@@ -1,6 +1,7 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::grpc::{Call, RpcProtocol, UnaryCall, UnaryReply};
 use rapira_sapi::http::Exchange;
+use rapira_sapi::plugin::PhpPart;
 use rapira_sapi::work::{Intake, Refused, Sink};
 use rapira_sapi::{Addr, Frame, GrpcMethod, GrpcService, Mode, Rapira, Request, WorkerHooks};
 use serde_json::Value;
@@ -11,6 +12,9 @@ use std::sync::{self, Mutex, Once, OnceLock, PoisonError};
 use tokio::sync::{mpsc, oneshot};
 
 pub mod grpc;
+
+/// Every test boot registers both parts, as the root does with both pools configured.
+pub static PHP_PARTS: [PhpPart; 2] = [rapira_sapi::http::PHP_PART, rapira_sapi::grpc::PHP_PART];
 
 static PHP_LOCK: Mutex<()> = Mutex::new(());
 static PHP_ENV: Once = Once::new();
@@ -60,7 +64,7 @@ pub fn run_worker(
     if let Some(ini) = ini {
         set_phprc(&guard, ini);
     }
-    let r = Rapira::start(Mode::Worker, fixture(name), None)?;
+    let r = Rapira::start(&PHP_PARTS, Mode::Worker, fixture(name), None)?;
     let h = r.sink();
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {
@@ -189,6 +193,7 @@ pub fn start_grpc(script: PathBuf) -> anyhow::Result<Rapira> {
         ..WorkerHooks::default()
     };
     Rapira::start_with_hooks(
+        &PHP_PARTS,
         Mode::Dispatcher,
         script,
         hooks,
@@ -477,7 +482,7 @@ pub fn app_records(script: &str) -> (Vec<AppRecord>, Vec<String>) {
     init_log_capture();
     captured().clear();
 
-    let r = Rapira::start(Mode::Classic, fixture(script), None).expect("classic boot");
+    let r = Rapira::start(&PHP_PARTS, Mode::Classic, fixture(script), None).expect("classic boot");
     let h = r.sink();
     let (status, body) = drain(submit(&h, req("/")).expect("dispatch"));
     drop(h);

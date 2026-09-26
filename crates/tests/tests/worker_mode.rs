@@ -7,7 +7,12 @@ use tests::{
 #[test]
 fn worker_serves_with_per_job_superglobals() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker, fixture("worker/hello-worker.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("worker/hello-worker.php"),
+        None,
+    )?;
     let h = r.sink();
 
     let resp = drain_resp(tests::submit(&h, req("/?q=zap"))?);
@@ -38,7 +43,12 @@ fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
     init_log_capture();
     captured().clear();
 
-    let r = Rapira::start(Mode::Worker, fixture("worker/drain-worker.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("worker/drain-worker.php"),
+        None,
+    )?;
     let h = r.sink();
     for want in ["n=1", "n=2"] {
         let resp = drain_resp(tests::submit(&h, req("/"))?);
@@ -59,7 +69,12 @@ fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
 #[test]
 fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, fixture("worker/gate-classic.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Classic,
+        fixture("worker/gate-classic.php"),
+        None,
+    )?;
     let h = r.sink();
     let (status, body) = drain(tests::submit(&h, req("/"))?);
     drop(h);
@@ -85,6 +100,7 @@ fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Dispatcher,
         fixture("worker/gate-dispatcher-worker.php"),
         Some(rapira_sapi::http::DISPATCHER_CLASSES),
@@ -121,7 +137,12 @@ fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
 #[test]
 fn exit_in_a_handler_survives_the_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker, fixture("worker/exit-worker.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("worker/exit-worker.php"),
+        None,
+    )?;
     let h = r.sink();
 
     let resp = drain_resp(tests::submit(&h, req("/?die=1"))?);
@@ -142,7 +163,12 @@ fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
     init_log_capture();
     captured().clear();
 
-    let r = Rapira::start(Mode::Worker, fixture("worker/one-turn-worker.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("worker/one-turn-worker.php"),
+        None,
+    )?;
     let h = r.sink();
     for _ in 0..2 {
         let resp = drain_resp(tests::submit(&h, req("/"))?);
@@ -164,7 +190,12 @@ fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
 #[test]
 fn never_looping_script_sheds_503() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker, fixture("worker/never-loop-worker.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("worker/never-loop-worker.php"),
+        None,
+    )?;
     let h = r.sink();
     let mut rx = tests::submit(&h, req("/"))?;
     let resp = tests::drain_resp_deadline(
@@ -182,7 +213,12 @@ fn never_looping_script_sheds_503() -> anyhow::Result<()> {
 #[test]
 fn bootstrap_env_survives_late_compilation() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker, fixture("worker/env-worker.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("worker/env-worker.php"),
+        None,
+    )?;
     let h = r.sink();
     for job in 0..2 {
         let resp = drain_resp(tests::submit(&h, req("/"))?);
@@ -197,7 +233,12 @@ fn bootstrap_env_survives_late_compilation() -> anyhow::Result<()> {
 #[test]
 fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker, fixture("worker/location-worker.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("worker/location-worker.php"),
+        None,
+    )?;
     let h = r.sink();
     let mut rq = req("/");
     rq.method = "POST".into();
@@ -216,7 +257,12 @@ fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
 #[test]
 fn post_location_redirects_303_in_classic_mode() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, fixture("worker/location-classic.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Classic,
+        fixture("worker/location-classic.php"),
+        None,
+    )?;
     let h = r.sink();
     let mut rq = req("/");
     rq.method = "POST".into();
@@ -233,7 +279,12 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     let _guard = php_lock();
     init_log_capture();
     captured().clear();
-    let r = Rapira::start(Mode::Worker, fixture("worker/held-worker.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("worker/held-worker.php"),
+        None,
+    )?;
     let h = r.sink();
 
     let rx_a = tests::submit(&h, req("/"))?;
@@ -253,7 +304,12 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
 #[test]
 fn nested_handle_request_is_refused() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker, fixture("worker/nested-worker.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("worker/nested-worker.php"),
+        None,
+    )?;
     let h = r.sink();
     let mut rx = tests::submit(&h, req("/"))?;
     let resp = tests::drain_resp_deadline(

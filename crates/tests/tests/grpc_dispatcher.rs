@@ -66,6 +66,7 @@ fn an_http_worker_after_a_grpc_worker_keeps_the_http_dispatcher() -> anyhow::Res
 
     let http = dispatcher_record(|| {
         Rapira::start(
+            &tests::PHP_PARTS,
             Mode::Dispatcher,
             fixture("dispatcher/worker-singleton.php"),
             Some(rapira_sapi::http::DISPATCHER_CLASSES),

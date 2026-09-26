@@ -9,7 +9,7 @@ bind! {
     RAPIRA_MODE_DISPATCHER,
     // the two halves of the linked-libphp version check
     PHP_VERSION_ID, php_version_id,
-    // the embedded-object layouts; wrapper.h is the source of truth
+    // the embedded-object layouts; rapira_sapi.h, rapira_http.h and rapira_grpc.h are the source of truth
     rapira_exchange_obj, rapira_dispatcher_info_obj, rapira_grpc_call_obj,
     rapira_grpc_metadata_obj,
     // MINIT-written class-entry globals the Rust builder reads (static mut)
@@ -51,6 +51,8 @@ bind! {
     rapira_symtable_str_find,
     // ZVAL_OBJ_COPY is a macro -> rapira_zval_enum_case shim in wrapper.c
     rapira_zval_enum_case,
+    // zend_hash_str_find_ptr is inline; class_exists (zend.rs) calls its exported half
+    zend_hash_str_find,
     // zend_symtable_str_update is inline; add_assoc_zval_ex is its exported caller (zend_API.c)
     add_assoc_zval_ex, add_next_index_stringl, add_next_index_object,
     zval_add_ref,

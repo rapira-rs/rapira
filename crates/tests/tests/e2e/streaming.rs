@@ -280,6 +280,7 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
     let listener = unsafe { BorrowedFd::borrow_raw(prepared.listener_fds()[0]) };
     let addr = TcpListener::from(listener.try_clone_to_owned()?).local_addr()?;
     let rapira = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Dispatcher,
         script.clone(),
         Some(rapira_sapi::http::DISPATCHER_CLASSES),

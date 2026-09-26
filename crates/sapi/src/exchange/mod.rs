@@ -335,7 +335,7 @@ impl Held for ExchangeState {
     }
 }
 
-/// `fn $name(obj) -> *mut $t` recovers the enclosing C struct: the C fields sit before `std` (wrapper.h layout).
+/// `fn $name(obj) -> *mut $t` recovers the enclosing C struct: the C fields sit before `std` (the layouts in rapira_sapi.h, rapira_http.h and rapira_grpc.h).
 macro_rules! container_of {
     ($vis:vis $name:ident, $t:ty) => {
         $vis unsafe fn $name(obj: *mut zend_object) -> *mut $t {

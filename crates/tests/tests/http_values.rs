@@ -5,7 +5,12 @@ use tests::{drain, fixture, php_lock, req};
 #[test]
 fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic, fixture("http_values/construct.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Classic,
+        fixture("http_values/construct.php"),
+        None,
+    )?;
     let h = r.sink();
     let (status, body) = drain(tests::submit(&h, req("/"))?);
     drop(h);
