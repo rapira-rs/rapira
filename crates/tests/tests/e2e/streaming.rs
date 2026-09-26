@@ -275,7 +275,7 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
     let rapira = Rapira::start(
         &tests::PHP_PARTS,
         Mode::Dispatcher,
-        script.clone(),
+        script,
         Some(rapira_http::DISPATCHER_CLASSES),
     )?;
     let running = run_plugin(
@@ -283,8 +283,6 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
         rapira.sink(),
         std::time::Duration::from_secs(30),
         std::time::Duration::from_secs(25),
-        script,
-        Mode::Dispatcher,
     )?;
 
     let streamed = (|| -> anyhow::Result<()> {

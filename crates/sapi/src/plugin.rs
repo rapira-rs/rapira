@@ -1,4 +1,3 @@
-use std::path::PathBuf;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
@@ -25,8 +24,6 @@ pub struct Worker {
     pub stop: watch::Receiver<bool>,
     /// The bound of the plugin's drain after the stop. The root sets it below the join bound of [`run_plugin`].
     pub drain_grace: Duration,
-    pub entrypoint: PathBuf,
-    pub mode: Mode,
 }
 
 pub trait Plugin: Send + 'static {
@@ -114,8 +111,6 @@ pub fn run_plugin(
     sink: Sink,
     grace: Duration,
     drain_grace: Duration,
-    entrypoint: PathBuf,
-    mode: Mode,
 ) -> anyhow::Result<Running> {
     let name = plugin.name();
     let rt = tokio::runtime::Builder::new_multi_thread()
@@ -130,8 +125,6 @@ pub fn run_plugin(
         sink,
         stop: stop_rx,
         drain_grace,
-        entrypoint,
-        mode,
     };
     let thread = std::thread::Builder::new()
         .name(format!("rapira-{name}"))

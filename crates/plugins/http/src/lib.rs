@@ -164,8 +164,6 @@ mod tests {
             sink,
             Duration::from_secs(5),
             Duration::from_secs(1),
-            PathBuf::from("index.php"),
-            Mode::Dispatcher,
         )
         .unwrap();
         std::net::TcpStream::connect(addr).expect("the server accepts before stop");

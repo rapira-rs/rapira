@@ -10,7 +10,7 @@ use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use rapira_net::{Acceptor, ListenAddr, PreparedListener, Serve, Stop};
 use rapira_sapi::Addr;
-use rapira_sapi::plugin::{Mode, Worker};
+use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch::{Sender, channel};
@@ -170,7 +170,7 @@ pub(crate) fn serve(
         stop.stop();
     });
     // The plugin parses multipart in dispatcher mode only: the other modes feed php-src's own rfc1867 through read_post.
-    let dispatcher: bool = worker.mode == Mode::Dispatcher;
+    let dispatcher: bool = !config.superglobals;
     // Each worker spools in its own dir under the configured one.
     let spool_dir: Option<PathBuf> = match &config.uploads {
         Some(limits) if dispatcher => Some(multipart::create_worker_spool_dir(&limits.dir)?),

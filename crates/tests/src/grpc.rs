@@ -15,7 +15,7 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use rapira_grpc::{Call, Config, RpcStatus, Schema, Server, UnaryReply};
 use rapira_net::{ListenAddr, PrepareCtx};
 use rapira_sapi::Addr;
-use rapira_sapi::plugin::{Mode, Plugin as _, run_plugin};
+use rapira_sapi::plugin::{Plugin as _, run_plugin};
 use rapira_sapi::work::{Intake, Sink};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::mpsc;
@@ -176,15 +176,8 @@ pub fn start_with_drain_grace(
     drop(ctx);
     // The server submits to the injected intake, so nothing reads this sink.
     let (sink, _) = Sink::channel(1);
-    let running = run_plugin(
-        Box::new(server),
-        sink,
-        grace,
-        drain_grace,
-        PathBuf::from("index.php"),
-        Mode::Dispatcher,
-    )
-    .expect("start the plugin thread");
+    let running =
+        run_plugin(Box::new(server), sink, grace, drain_grace).expect("start the plugin thread");
     let running = Running {
         running: Some(running),
         listen,

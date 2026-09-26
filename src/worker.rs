@@ -89,7 +89,7 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
         slot: Some(env.slot_view),
     };
 
-    let rapira = match Rapira::start_worker(mode, entrypoint.clone(), hooks, classes) {
+    let rapira = match Rapira::start_worker(mode, entrypoint, hooks, classes) {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(target: "rapira", "worker PHP boot failed: {e:#}");
@@ -100,15 +100,8 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
     let name: &str = plugin.name();
-    let outcome: anyhow::Result<()> = serve_plugin(
-        plugin,
-        rapira.sink(),
-        grace,
-        drain_grace,
-        entrypoint,
-        mode,
-        &stopper,
-    );
+    let outcome: anyhow::Result<()> =
+        serve_plugin(plugin, rapira.sink(), grace, drain_grace, &stopper);
     if let Err(e) = &outcome {
         tracing::error!(target: "rapira", "plugin {name}: {e:#}");
     }
@@ -127,11 +120,9 @@ fn serve_plugin(
     sink: rapira_sapi::work::Sink,
     grace: Duration,
     drain_grace: Duration,
-    entrypoint: PathBuf,
-    mode: Mode,
     stopper: &OnceLock<Stopper>,
 ) -> anyhow::Result<()> {
-    let running = run_plugin(plugin, sink, grace, drain_grace, entrypoint, mode)?;
+    let running = run_plugin(plugin, sink, grace, drain_grace)?;
     let _ = stopper.set(running.stopper());
     if WORKER_EXIT.load(SeqCst) != -1 {
         running.stop();

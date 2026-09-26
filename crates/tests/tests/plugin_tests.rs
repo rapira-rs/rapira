@@ -6,7 +6,6 @@ use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker, run_plugin};
 use rapira_sapi::work::{Intake, Work};
 use rapira_sapi::{Addr, Rapira, Request};
 use std::future::Future;
-use std::path::PathBuf;
 use std::time::{Duration, Instant};
 use tests::{Fields, Response, collect, fields, fixture, php_lock, req};
 
@@ -59,13 +58,8 @@ where
 }
 
 /// Runs `plugin` on the worker of `rapira` until it returns.
-fn run_to_end(
-    plugin: Box<TestPlugin>,
-    rapira: &Rapira,
-    entrypoint: PathBuf,
-    mode: Mode,
-) -> anyhow::Result<()> {
-    run_plugin(plugin, rapira.sink(), GRACE, DRAIN_GRACE, entrypoint, mode)?.join()
+fn run_to_end(plugin: Box<TestPlugin>, rapira: &Rapira) -> anyhow::Result<()> {
+    run_plugin(plugin, rapira.sink(), GRACE, DRAIN_GRACE)?.join()
 }
 
 async fn exchange(intake: &Intake<Exchange>, req: Request) -> anyhow::Result<Response> {
@@ -170,7 +164,7 @@ const UNARY_CASES: &[UnaryCase] = &[
 fn unary_calls_cross_the_intake() -> anyhow::Result<()> {
     let _guard = php_lock();
     let script = fixture("grpc/unary-worker.php");
-    let rapira = tests::start_grpc(script.clone())?;
+    let rapira = tests::start_grpc(script)?;
     let plugin = driver(|intake: Intake<Call>| async move {
         let mut mismatches = Vec::new();
         for c in UNARY_CASES {
@@ -195,7 +189,7 @@ fn unary_calls_cross_the_intake() -> anyhow::Result<()> {
         anyhow::ensure!(mismatches.is_empty(), "{mismatches:#?}");
         Ok(())
     });
-    let outcome = run_to_end(plugin, &rapira, script, Mode::Dispatcher);
+    let outcome = run_to_end(plugin, &rapira);
     drop(rapira);
     outcome
 }
@@ -204,8 +198,8 @@ fn unary_calls_cross_the_intake() -> anyhow::Result<()> {
 fn classic_mode_serves_exchanges() -> anyhow::Result<()> {
     let _guard = php_lock();
     let script = fixture("plugin_tests/driver-classic.php");
-    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Classic, script.clone(), None)?;
-    let outcome = run_to_end(two_exchanges(), &rapira, script, Mode::Classic);
+    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Classic, script, None)?;
+    let outcome = run_to_end(two_exchanges(), &rapira);
     drop(rapira);
     outcome
 }
@@ -227,8 +221,8 @@ fn error_path_driver() -> Box<TestPlugin> {
 fn buffered_error_response_arrives_whole_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let script = fixture("shared/error-keeps-headers-worker.php");
-    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Worker, script.clone(), None)?;
-    let outcome = run_to_end(error_path_driver(), &rapira, script, Mode::Worker);
+    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Worker, script, None)?;
+    let outcome = run_to_end(error_path_driver(), &rapira);
     drop(rapira);
     outcome
 }
@@ -237,8 +231,8 @@ fn buffered_error_response_arrives_whole_worker() -> anyhow::Result<()> {
 fn buffered_error_response_arrives_whole_classic() -> anyhow::Result<()> {
     let _guard = php_lock();
     let script = fixture("shared/error-keeps-headers.php");
-    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Classic, script.clone(), None)?;
-    let outcome = run_to_end(error_path_driver(), &rapira, script, Mode::Classic);
+    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Classic, script, None)?;
+    let outcome = run_to_end(error_path_driver(), &rapira);
     drop(rapira);
     outcome
 }
@@ -248,7 +242,7 @@ fn buffered_error_response_arrives_whole_classic() -> anyhow::Result<()> {
 fn truncated_response_ends_as_truncated_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let script = fixture("shared/output-then-throw-worker.php");
-    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Worker, script.clone(), None)?;
+    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Worker, script, None)?;
     let plugin = driver(|intake: Intake<Exchange>| async move {
         let err = match exchange(&intake, req("/")).await {
             Ok(resp) => anyhow::bail!(
@@ -264,7 +258,7 @@ fn truncated_response_ends_as_truncated_worker() -> anyhow::Result<()> {
         );
         Ok(())
     });
-    let outcome = run_to_end(plugin, &rapira, script, Mode::Worker);
+    let outcome = run_to_end(plugin, &rapira);
     drop(rapira);
     outcome
 }
@@ -274,20 +268,13 @@ fn truncated_response_ends_as_truncated_worker() -> anyhow::Result<()> {
 fn stop_ends_a_resident_plugin() -> anyhow::Result<()> {
     let _guard = php_lock();
     let script = fixture("plugin_tests/driver-classic.php");
-    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Classic, script.clone(), None)?;
+    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Classic, script, None)?;
     let plugin = TestPlugin::boxed(|mut worker| {
         let handle = worker.handle.clone();
         handle.block_on(worker.stop.wait_for(|stop| *stop))?;
         Ok(())
     });
-    let running = run_plugin(
-        plugin,
-        rapira.sink(),
-        GRACE,
-        DRAIN_GRACE,
-        script,
-        Mode::Classic,
-    )?;
+    let running = run_plugin(plugin, rapira.sink(), GRACE, DRAIN_GRACE)?;
 
     let start = Instant::now();
     running.stop();
@@ -306,18 +293,9 @@ fn many_plugins_run() -> anyhow::Result<()> {
     let _guard = php_lock();
     const N: usize = 12;
     let script = fixture("plugin_tests/driver-worker.php");
-    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Worker, script.clone(), None)?;
+    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Worker, script, None)?;
     let running = (0..N)
-        .map(|_| {
-            run_plugin(
-                two_exchanges(),
-                rapira.sink(),
-                GRACE,
-                DRAIN_GRACE,
-                script.clone(),
-                Mode::Worker,
-            )
-        })
+        .map(|_| run_plugin(two_exchanges(), rapira.sink(), GRACE, DRAIN_GRACE))
         .collect::<anyhow::Result<Vec<_>>>()?;
     let outcomes: Vec<anyhow::Result<()>> = running.into_iter().map(|r| r.join()).collect();
     drop(rapira);
@@ -331,8 +309,8 @@ fn many_plugins_run() -> anyhow::Result<()> {
 fn run_one(plugin: Box<TestPlugin>) -> anyhow::Result<anyhow::Result<()>> {
     let _guard = php_lock();
     let script = fixture("plugin_tests/driver-classic.php");
-    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Classic, script.clone(), None)?;
-    let outcome = run_to_end(plugin, &rapira, script, Mode::Classic);
+    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Classic, script, None)?;
+    let outcome = run_to_end(plugin, &rapira);
     drop(rapira);
     Ok(outcome)
 }
@@ -363,7 +341,7 @@ fn panic_in_serve_is_reported() -> anyhow::Result<()> {
 fn a_plugin_past_the_grace_is_reported() -> anyhow::Result<()> {
     let _guard = php_lock();
     let script = fixture("plugin_tests/driver-classic.php");
-    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Classic, script.clone(), None)?;
+    let rapira = Rapira::start(&tests::PHP_PARTS, Mode::Classic, script, None)?;
     let (release, released) = std::sync::mpsc::channel::<()>();
     let plugin = TestPlugin::boxed(move |worker| {
         drop(worker);
@@ -375,8 +353,6 @@ fn a_plugin_past_the_grace_is_reported() -> anyhow::Result<()> {
         rapira.sink(),
         Duration::from_millis(100),
         DRAIN_GRACE,
-        script,
-        Mode::Classic,
     )?;
     let start = Instant::now();
     running.stop();
