@@ -1,47 +1,40 @@
 use std::{ops::Deref, path::Path};
 
 use http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE};
-use rapira_sapi::{Mode, Rapira, Request};
-use tests::{Resp, captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
+use rapira_sapi::{Mode, Request};
+use tests::wire::submit;
+use tests::{Resp, drain, drain_resp, fixture, req, server_log};
+
+use crate::harness::Spawn;
 
 fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u8>) -> Request {
     let mut r: Request = req(&format!("/{fixture_name}?{query}"));
     r.method = "POST".into();
     r.content_type = content_type.map(|s| s.as_bytes().to_vec());
-    r.content_length = body.len() as i64;
     r.body = rapira_sapi::types::Body::Raw(std::io::Cursor::new(body));
     r
 }
 
-/// The captured `app`-target messages starting with `prefix`, in order.
-fn app_messages(prefix: &str) -> Vec<String> {
-    captured()
-        .iter()
+/// The `app`-target messages of `log` starting with `prefix`, in order.
+fn app_messages(log: &Path, prefix: &str) -> Vec<String> {
+    server_log::records(log)
+        .into_iter()
         .filter(|c| c.target == "app" && c.message.starts_with(prefix))
-        .map(|c| c.message.clone())
+        .map(|c| c.message)
         .collect()
 }
 
 /// POST form body parses into $_POST while the query string populates $_GET.
 #[test]
 fn post_superglobals_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("ported_tests/post-superglobals.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Classic, fixture("ported_tests/post-superglobals.php")).spawn();
     let request = post(
         "ported_tests/post-superglobals.php",
         "foo=bar&baz=buz",
         Some("application/x-www-form-urlencoded"),
         b"bam=bam&some=10".to_vec(),
     );
-    let (status, body) = drain(tests::submit(&h, request)?);
-    drop(h);
-    drop(r);
+    let (status, body) = drain(submit(srv.addr, request)?);
 
     assert_eq!(status, 200);
     for expected in [
@@ -61,16 +54,13 @@ fn post_superglobals_classic() -> anyhow::Result<()> {
 /// $_GET/$_POST must be rebuilt per worker request - no stale values.
 #[test]
 fn post_superglobals_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let srv = Spawn::http(
         Mode::Worker,
         fixture("ported_tests/post-superglobals-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let (s1, b1) = drain(tests::submit(
-        &h,
+    )
+    .spawn();
+    let (s1, b1) = drain(submit(
+        srv.addr,
         post(
             "ported_tests/post-superglobals-worker.php",
             "foo=bar&iG=42",
@@ -78,8 +68,8 @@ fn post_superglobals_worker() -> anyhow::Result<()> {
             b"baz=bat&i=7".to_vec(),
         ),
     )?);
-    let (s2, b2) = drain(tests::submit(
-        &h,
+    let (s2, b2) = drain(submit(
+        srv.addr,
         post(
             "ported_tests/post-superglobals-worker.php",
             "foo=bar&iG=43",
@@ -87,8 +77,6 @@ fn post_superglobals_worker() -> anyhow::Result<()> {
             b"baz=bat&i=8".to_vec(),
         ),
     )?);
-    drop(h);
-    drop(r);
 
     assert_eq!(s1, 200);
     assert!(
@@ -110,16 +98,9 @@ fn post_superglobals_worker() -> anyhow::Result<()> {
 /// $_REQUEST merges GET + POST under the default variables_order/request_order.
 #[test]
 fn request_merge_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("ported_tests/request-merge.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let (status, body) = drain(tests::submit(
-        &h,
+    let srv = Spawn::http(Mode::Classic, fixture("ported_tests/request-merge.php")).spawn();
+    let (status, body) = drain(submit(
+        srv.addr,
         post(
             "ported_tests/request-merge.php",
             "get_key=get_value_1",
@@ -127,8 +108,6 @@ fn request_merge_classic() -> anyhow::Result<()> {
             b"post_key=post_value_1".to_vec(),
         ),
     )?);
-    drop(h);
-    drop(r);
 
     assert_eq!(status, 200);
     assert!(
@@ -141,18 +120,15 @@ fn request_merge_classic() -> anyhow::Result<()> {
 
 #[test]
 fn request_merge_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let srv = Spawn::http(
         Mode::Worker,
         fixture("ported_tests/request-merge-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    )
+    .spawn();
     for i in 1..=3 {
         let body_bytes = format!("post_key=post_value_{i}").into_bytes();
-        let (status, body) = drain(tests::submit(
-            &h,
+        let (status, body) = drain(submit(
+            srv.addr,
             post(
                 "ported_tests/request-merge-worker.php",
                 &format!("get_key=get_value_{i}"),
@@ -167,30 +143,21 @@ fn request_merge_worker() -> anyhow::Result<()> {
             "req{i}: $_REQUEST must carry only this request's data (got: {body:?})"
         );
     }
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// A jit autoglobal first touched only in a later request must still build fresh, not stale.
 #[test]
 fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("ported_tests/jit-request-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("ported_tests/jit-request-worker.php")).spawn();
     for i in 1..=4 {
         let query = if i % 2 == 1 {
             format!("use_request=1&val={i}")
         } else {
             format!("val={i}")
         };
-        let (status, body) = drain(tests::submit(
-            &h,
+        let (status, body) = drain(submit(
+            srv.addr,
             req(&format!("/jit-request-worker.php?{query}")),
         )?);
         assert_eq!(status, 200);
@@ -211,51 +178,33 @@ fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
             assert!(body.contains("SKIPPED"), "req{i} (got: {body:?})");
         }
     }
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// The Cookie header feeds $_COOKIE fresh on every worker request.
 #[test]
 fn cookies_refresh_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("ported_tests/cookies-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("ported_tests/cookies-worker.php")).spawn();
     for i in 0..3 {
         let mut request = req("/cookies-worker.php");
         request.headers.append(
             COOKIE,
             HeaderValue::try_from(format!("foo=bar; i={i}")).unwrap(),
         );
-        let (status, body) = drain(tests::submit(&h, request)?);
+        let (status, body) = drain(submit(srv.addr, request)?);
         assert_eq!(status, 200);
         assert!(
             body.contains("'foo' => 'bar'") && body.contains(&format!("'i' => '{i}'")),
             "req{i}: $_COOKIE must reflect this request's header (got: {body:?})"
         );
     }
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// PHP's cookie parser rewrites bad name chars to underscores, drops separator-only segments, keeps trailing value spaces, and keeps the first duplicate.
 #[test]
 fn malformed_cookies_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("ported_tests/cookies.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Classic, fixture("ported_tests/cookies.php")).spawn();
     let mut request = req("/cookies.php");
     request.headers.append(
         COOKIE,
@@ -263,9 +212,7 @@ fn malformed_cookies_classic() -> anyhow::Result<()> {
             "foo =bar; ===;;==;  .dot.=val  ; PHPSESSID=1234; dup=first; dup=second",
         ),
     );
-    let (status, body) = drain(tests::submit(&h, request)?);
-    drop(h);
-    drop(r);
+    let (status, body) = drain(submit(srv.addr, request)?);
 
     assert_eq!(status, 200);
     for expected in [
@@ -288,11 +235,9 @@ fn malformed_cookies_classic() -> anyhow::Result<()> {
 }
 
 fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(&tests::PHP_PARTS, mode, fixture(fixture_name), None)?;
-    let h = r.sink();
+    let srv = Spawn::http(mode, fixture(fixture_name)).spawn();
 
-    let r1 = drain_resp(tests::submit(&h, req(&format!("/{fixture_name}")))?);
+    let r1 = drain_resp(submit(srv.addr, req(&format!("/{fixture_name}")))?);
     assert_eq!(r1.status(), 200);
     assert_eq!(
         r1.body_string(),
@@ -318,9 +263,7 @@ fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
         COOKIE,
         HeaderValue::try_from(format!("PHPSESSID={sid}")).unwrap(),
     );
-    let r2 = drain_resp(tests::submit(&h, request)?);
-    drop(h);
-    drop(r);
+    let r2 = drain_resp(submit(srv.addr, request)?);
 
     assert_eq!(r2.status(), 200);
     assert_eq!(
@@ -344,21 +287,16 @@ fn session_cookie_roundtrip_worker() -> anyhow::Result<()> {
 /// A userland save handler registered during request 1 must still serve request 2.
 #[test]
 fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let srv = Spawn::http(
         Mode::Worker,
         fixture("ported_tests/session-handler-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let (s1, b1) = drain(tests::submit(
-        &h,
+    )
+    .spawn();
+    let (s1, b1) = drain(submit(
+        srv.addr,
         req("/session-handler-worker.php?action=register"),
     )?);
-    let (s2, b2) = drain(tests::submit(&h, req("/session-handler-worker.php"))?);
-    drop(h);
-    drop(r);
+    let (s2, b2) = drain(submit(srv.addr, req("/session-handler-worker.php"))?);
 
     assert_eq!(s1, 200);
     assert!(
@@ -380,28 +318,23 @@ fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
 /// A save handler registered before the worker loop stays installed for all requests.
 #[test]
 fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let srv = Spawn::http(
         Mode::Worker,
         fixture("ported_tests/preloop-session-handler-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let (s1, b1) = drain(tests::submit(
-        &h,
+    )
+    .spawn();
+    let (s1, b1) = drain(submit(
+        srv.addr,
         req("/preloop-session-handler-worker.php?action=check"),
     )?);
-    let (s2, b2) = drain(tests::submit(
-        &h,
+    let (s2, b2) = drain(submit(
+        srv.addr,
         req("/preloop-session-handler-worker.php?action=use_session"),
     )?);
-    let (s3, b3) = drain(tests::submit(
-        &h,
+    let (s3, b3) = drain(submit(
+        srv.addr,
         req("/preloop-session-handler-worker.php?action=check"),
     )?);
-    drop(h);
-    drop(r);
 
     assert_eq!((s1, s2, s3), (200, 200, 200));
     assert!(
@@ -422,17 +355,10 @@ fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
 /// header() edges: no-space colon trims, a colon-less line never becomes a header, http_response_code sticks, and the set rebuilds per worker request.
 #[test]
 fn response_header_edges_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("ported_tests/headers-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("ported_tests/headers-worker.php")).spawn();
     for i in [42, 43] {
-        let resp = drain_resp(tests::submit(
-            &h,
+        let resp = drain_resp(submit(
+            srv.addr,
             req(&format!("/headers-worker.php?i={i}")),
         )?);
         assert_eq!(
@@ -454,8 +380,6 @@ fn response_header_edges_worker() -> anyhow::Result<()> {
         );
         assert_eq!(resp.body_string(), "Hello");
     }
-    drop(h);
-    drop(r);
     Ok(())
 }
 
@@ -481,17 +405,8 @@ fn assert_headers_list_response(resp: &Resp, i: u16) {
 
 #[test]
 fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("ported_tests/response-headers.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let resp = drain_resp(tests::submit(&h, req("/response-headers.php?i=1"))?);
-    drop(h);
-    drop(r);
+    let srv = Spawn::http(Mode::Classic, fixture("ported_tests/response-headers.php")).spawn();
+    let resp = drain_resp(submit(srv.addr, req("/response-headers.php?i=1"))?);
     assert_headers_list_response(&resp, 1);
     Ok(())
 }
@@ -499,41 +414,28 @@ fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
 /// Worker requests must also carry the expose_php X-Powered-By header a full per-request startup adds.
 #[test]
 fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let srv = Spawn::http(
         Mode::Worker,
         fixture("ported_tests/response-headers-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    )
+    .spawn();
     for i in [1u16, 2] {
-        let resp = drain_resp(tests::submit(
-            &h,
+        let resp = drain_resp(submit(
+            srv.addr,
             req(&format!("/response-headers-worker.php?i={i}")),
         )?);
         assert_headers_list_response(&resp, i);
     }
-    drop(h);
-    drop(r);
     Ok(())
 }
 
-/// Unbuffered writes split by an explicit flush() arrive whole and in order in one sealed frame.
+/// Unbuffered writes split by an explicit flush() arrive whole and in order.
 #[test]
 fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("ported_tests/flush-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("ported_tests/flush-worker.php")).spawn();
     for i in [42, 43] {
-        let rx = tests::submit(&h, req(&format!("/flush-worker.php?i={i}")))?;
+        let rx = submit(srv.addr, req(&format!("/flush-worker.php?i={i}")))?;
         let resp = drain_resp(rx);
-        assert_eq!(resp.heads, 1, "exactly one head per response");
         assert_eq!(resp.status(), 200);
         assert_eq!(
             resp.body_string(),
@@ -542,50 +444,35 @@ fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
         );
         assert!(!resp.truncated, "clean completion is not truncated");
     }
-    drop(h);
-    drop(r);
     Ok(())
 }
 
-/// A raw status line drives the head status, and the SAPI never suppresses the body for a 204.
+/// A raw status line drives the head status.
 #[test]
 fn raw_status_line_204_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("ported_tests/only-headers.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let resp = drain_resp(tests::submit(&h, req("/only-headers.php"))?);
-    drop(h);
-    drop(r);
+    let srv = Spawn::http(Mode::Classic, fixture("ported_tests/only-headers.php")).spawn();
+    let resp = drain_resp(submit(srv.addr, req("/only-headers.php"))?);
 
-    assert_eq!(resp.heads, 1);
     assert_eq!(resp.status(), 204);
     assert_eq!(
         resp.header("Content-Type").as_deref(),
         Some("application/json")
     );
-    assert_eq!(resp.body_string(), r#"{"status": "test"}"#);
+    assert_eq!(resp.body_string(), "", "a 204 carries no body on the wire");
     Ok(())
 }
 
 /// A 6MB body with no content type travels intact through php://input, leaving the next request unaffected.
 #[test]
 fn large_post_body_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let srv = Spawn::http(
         Mode::Worker,
         fixture("ported_tests/large-request-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    )
+    .spawn();
     for _ in 0..2 {
-        let (status, body) = drain(tests::submit(
-            &h,
+        let (status, body) = drain(submit(
+            srv.addr,
             post(
                 "ported_tests/large-request-worker.php",
                 "",
@@ -596,8 +483,6 @@ fn large_post_body_worker() -> anyhow::Result<()> {
         assert_eq!(status, 200);
         assert_eq!(body, "Request body size: 6048576");
     }
-    drop(h);
-    drop(r);
     Ok(())
 }
 
@@ -638,16 +523,9 @@ fn assert_upload_and_cleanup(status: u16, body: &str) {
 
 #[test]
 fn multipart_upload_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("ported_tests/upload.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let (status, body) = drain(tests::submit(
-        &h,
+    let mut srv = Spawn::http(Mode::Classic, fixture("ported_tests/upload.php")).spawn();
+    let (status, body) = drain(submit(
+        srv.addr,
         post(
             "ported_tests/upload.php",
             "",
@@ -655,25 +533,18 @@ fn multipart_upload_classic() -> anyhow::Result<()> {
             multipart_body(),
         ),
     )?);
-    drop(h);
-    drop(r);
+    // The stop waits for the worker exit, so the request shutdown has deleted the tmp file.
+    srv.stop();
     assert_upload_and_cleanup(status, &body);
     Ok(())
 }
 
 #[test]
 fn multipart_upload_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("ported_tests/upload-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("ported_tests/upload-worker.php")).spawn();
     for _ in 0..2 {
-        let (status, body) = drain(tests::submit(
-            &h,
+        let (status, body) = drain(submit(
+            srv.addr,
             post(
                 "ported_tests/upload-worker.php",
                 "",
@@ -683,24 +554,15 @@ fn multipart_upload_worker() -> anyhow::Result<()> {
         )?);
         assert_upload_and_cleanup(status, &body);
     }
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// $_FILES has no self-healing create callback, so without a per-request dtor of TRACK_VARS_FILES a no-upload request re-exposes the previous upload.
 #[test]
 fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("ported_tests/upload-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let (s1, b1) = drain(tests::submit(
-        &h,
+    let srv = Spawn::http(Mode::Worker, fixture("ported_tests/upload-worker.php")).spawn();
+    let (s1, b1) = drain(submit(
+        srv.addr,
         post(
             "ported_tests/upload-worker.php",
             "",
@@ -714,34 +576,24 @@ fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<(
         "req1 must see the upload (got {b1:?})"
     );
 
-    let (s2, b2) = drain(tests::submit(&h, req("/upload-worker.php"))?);
+    let (s2, b2) = drain(submit(srv.addr, req("/upload-worker.php"))?);
     assert_eq!(s2, 200);
     assert_eq!(
         b2, "NO FILE",
         "TRACK_VARS_FILES must reset; req2 must not see req1's upload (got {b2:?})"
     );
-    drop(h);
-    drop(r);
     Ok(())
 }
 
-/// An uncaught throw after output keeps the single head and echo-committed 200, appends the fatal text, and the worker survives.
+/// An uncaught throw after output keeps the echo-committed 200, appends the fatal text, and the worker survives.
 #[test]
 fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("shared/output-then-throw-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("shared/output-then-throw-worker.php")).spawn();
     for i in [1, 2] {
-        let resp = drain_resp(tests::submit(
-            &h,
+        let resp = drain_resp(submit(
+            srv.addr,
             req(&format!("/output-then-throw-worker.php?i={i}")),
         )?);
-        assert_eq!(resp.heads, 1, "exactly one head frame (got {})", resp.heads);
         assert_eq!(resp.status(), 200, "headers were committed by the echo");
         let body = resp.body_string();
         let hello = body.find("hello");
@@ -751,26 +603,19 @@ fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
             "echo output must precede the fatal text (got: {body:?})"
         );
     }
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 /// Per-job teardown must not destruct bootstrap-resident objects and must keep object-store handles reusable across jobs.
 #[test]
 fn no_destructor_sweep_between_jobs_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let srv = Spawn::http(
         Mode::Worker,
         fixture("ported_tests/preloop-destruct-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let (s1, b1) = drain(tests::submit(&h, req("/preloop-destruct-worker.php"))?);
-    let (s2, b2) = drain(tests::submit(&h, req("/preloop-destruct-worker.php"))?);
-    drop(h);
-    drop(r);
+    )
+    .spawn();
+    let (s1, b1) = drain(submit(srv.addr, req("/preloop-destruct-worker.php"))?);
+    let (s2, b2) = drain(submit(srv.addr, req("/preloop-destruct-worker.php"))?);
 
     assert_eq!((s1, s2), (200, 200));
     assert!(b1.contains("write=ok dtors=0"), "req1 (got {b1:?})");
@@ -790,18 +635,13 @@ fn no_destructor_sweep_between_jobs_worker() -> anyhow::Result<()> {
 /// A destructor that throws while the job's shutdown-function table is freed must not leak a pending exception into the resident loop.
 #[test]
 fn throwing_destructor_after_job_stays_contained_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let srv = Spawn::http(
         Mode::Worker,
         fixture("ported_tests/dtor-throw-shutdown-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let (s1, b1) = drain(tests::submit(&h, req("/dtor-throw-shutdown-worker.php"))?);
-    let (s2, b2) = drain(tests::submit(&h, req("/dtor-throw-shutdown-worker.php"))?);
-    drop(h);
-    drop(r);
+    )
+    .spawn();
+    let (s1, b1) = drain(submit(srv.addr, req("/dtor-throw-shutdown-worker.php"))?);
+    let (s2, b2) = drain(submit(srv.addr, req("/dtor-throw-shutdown-worker.php"))?);
 
     assert_eq!((s1, b1.as_str()), (200, "served=1"));
     assert_eq!(
@@ -815,19 +655,14 @@ fn throwing_destructor_after_job_stays_contained_worker() -> anyhow::Result<()> 
 /// A boot-registered shutdown function runs once, at cycle end.
 #[test]
 fn boot_shutdown_function_fires_once_at_worker_exit() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    init_log_capture();
-    captured().clear();
-
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let mut srv = Spawn::http(
         Mode::Worker,
         fixture("ported_tests/boot-shutdown-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    )
+    .json_log()
+    .spawn();
     for _ in 0..2 {
-        let (status, body) = drain(tests::submit(&h, req("/boot-shutdown-worker.php"))?);
+        let (status, body) = drain(submit(srv.addr, req("/boot-shutdown-worker.php"))?);
         assert_eq!(status, 200);
         assert_eq!(
             body, "fired=0",
@@ -836,15 +671,14 @@ fn boot_shutdown_function_fires_once_at_worker_exit() -> anyhow::Result<()> {
     }
 
     assert_eq!(
-        app_messages("boot-shutdown fired="),
+        app_messages(&srv.log_file(), "boot-shutdown fired="),
         Vec::<String>::new(),
         "the boot function must not run while the worker serves jobs"
     );
 
-    drop(h);
-    drop(r);
+    srv.stop();
     assert_eq!(
-        app_messages("boot-shutdown fired="),
+        app_messages(&srv.log_file(), "boot-shutdown fired="),
         vec!["boot-shutdown fired=1".to_owned()],
         "the boot-registered shutdown function must fire exactly once, at worker exit"
     );
@@ -854,36 +688,30 @@ fn boot_shutdown_function_fires_once_at_worker_exit() -> anyhow::Result<()> {
 /// A shutdown function registered during a job runs at the end of that job, exactly once. The boot-registered one fires once, at cycle end.
 #[test]
 fn job_shutdown_function_fires_at_end_of_its_job() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    init_log_capture();
-    captured().clear();
-
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let mut srv = Spawn::http(
         Mode::Worker,
         fixture("ported_tests/job-shutdown-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    )
+    .json_log()
+    .spawn();
     for want in [
         "req=1 job_fired=0 boot_fired=0",
         "req=2 job_fired=1 boot_fired=0",
         "req=3 job_fired=1 boot_fired=0",
     ] {
-        let (status, body) = drain(tests::submit(&h, req("/job-shutdown-worker.php"))?);
+        let (status, body) = drain(submit(srv.addr, req("/job-shutdown-worker.php"))?);
         assert_eq!((status, body.as_str()), (200, want));
     }
 
     assert_eq!(
-        app_messages("job-fixture "),
+        app_messages(&srv.log_file(), "job-fixture "),
         vec!["job-fixture job fired=1".to_owned()],
         "only the job-registered function runs while the worker serves jobs"
     );
 
-    drop(h);
-    drop(r);
+    srv.stop();
     assert_eq!(
-        app_messages("job-fixture "),
+        app_messages(&srv.log_file(), "job-fixture "),
         vec![
             "job-fixture job fired=1".to_owned(),
             "job-fixture boot fired=1".to_owned(),
@@ -896,32 +724,26 @@ fn job_shutdown_function_fires_at_end_of_its_job() -> anyhow::Result<()> {
 /// Boot entries run first at cycle end; a post-loop registration runs after them.
 #[test]
 fn late_shutdown_function_runs_after_boot_entries() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    init_log_capture();
-    captured().clear();
-
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let mut srv = Spawn::http(
         Mode::Worker,
         fixture("ported_tests/late-shutdown-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    )
+    .json_log()
+    .spawn();
     for _ in 0..2 {
-        let (status, body) = drain(tests::submit(&h, req("/late-shutdown-worker.php"))?);
+        let (status, body) = drain(submit(srv.addr, req("/late-shutdown-worker.php"))?);
         assert_eq!((status, body.as_str()), (200, "ok"));
     }
 
     assert_eq!(
-        app_messages("sd "),
+        app_messages(&srv.log_file(), "sd "),
         Vec::<String>::new(),
         "no shutdown function runs while the worker serves jobs"
     );
 
-    drop(h);
-    drop(r);
+    srv.stop();
     assert_eq!(
-        app_messages("sd "),
+        app_messages(&srv.log_file(), "sd "),
         vec![
             "sd boot-a".to_owned(),
             "sd boot-b".to_owned(),
@@ -935,24 +757,18 @@ fn late_shutdown_function_runs_after_boot_entries() -> anyhow::Result<()> {
 /// A fatal inside a boot shutdown function leaves the worker's exit path clean.
 #[test]
 fn fatal_in_boot_shutdown_function_exits_clean() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    init_log_capture();
-    captured().clear();
-
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let mut srv = Spawn::http(
         Mode::Worker,
         fixture("ported_tests/shutdown-fatal-boot-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let (status, body) = drain(tests::submit(&h, req("/shutdown-fatal-boot-worker.php"))?);
+    )
+    .json_log()
+    .spawn();
+    let (status, body) = drain(submit(srv.addr, req("/shutdown-fatal-boot-worker.php"))?);
     assert_eq!((status, body.as_str()), (200, "ok"));
 
-    drop(h);
-    drop(r);
+    srv.stop();
     assert!(
-        captured()
+        server_log::records(&srv.log_file())
             .iter()
             .any(|c| c.message.contains("boot shutdown bomb")),
         "the fatal from the boot shutdown function must reach the log"
@@ -963,35 +779,26 @@ fn fatal_in_boot_shutdown_function_exits_clean() -> anyhow::Result<()> {
 /// A refcount-1 object in a bare boot-level global must stay in the symbol table across jobs; its __destruct runs once, at cycle end.
 #[test]
 fn boot_global_object_survives_requests() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    init_log_capture();
-    captured().clear();
-
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("ported_tests/boot-global-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let mut srv = Spawn::http(Mode::Worker, fixture("ported_tests/boot-global-worker.php"))
+        .json_log()
+        .spawn();
     for want in [
         "kernel=ok calls=1",
         "kernel=ok calls=2",
         "kernel=ok calls=3",
     ] {
-        let (status, body) = drain(tests::submit(&h, req("/boot-global-worker.php"))?);
+        let (status, body) = drain(submit(srv.addr, req("/boot-global-worker.php"))?);
         assert_eq!((status, body.as_str()), (200, want));
     }
     assert_eq!(
-        app_messages("boot-kernel destructed").len(),
+        app_messages(&srv.log_file(), "boot-kernel destructed").len(),
         0,
         "no __destruct while the worker serves jobs"
     );
 
-    drop(h);
-    drop(r);
+    srv.stop();
     assert_eq!(
-        app_messages("boot-kernel destructed").len(),
+        app_messages(&srv.log_file(), "boot-kernel destructed").len(),
         1,
         "the boot object must destruct exactly once, at worker exit"
     );
@@ -1001,17 +808,8 @@ fn boot_global_object_survives_requests() -> anyhow::Result<()> {
 /// A truncated response must not carry a synthesized Content-Length: its absence is what lets clients detect the cut.
 #[test]
 fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("shared/output-then-throw-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let resp = drain_resp(tests::submit(&h, req("/output-then-throw-worker.php?i=1"))?);
-    drop(h);
-    drop(r);
+    let srv = Spawn::http(Mode::Worker, fixture("shared/output-then-throw-worker.php")).spawn();
+    let resp = drain_resp(submit(srv.addr, req("/output-then-throw-worker.php?i=1"))?);
 
     assert!(resp.truncated, "uncaught throw after output must truncate");
     assert_eq!(resp.content_length, None, "got: {:?}", resp.content_length);
@@ -1021,17 +819,12 @@ fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
 /// exit() ends a classic script cleanly: complete response, not an error.
 #[test]
 fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let srv = Spawn::http(
         Mode::Classic,
         fixture("ported_tests/exit-after-output-classic.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let resp = drain_resp(tests::submit(&h, req("/exit-after-output-classic.php"))?);
-    drop(h);
-    drop(r);
+    )
+    .spawn();
+    let resp = drain_resp(submit(srv.addr, req("/exit-after-output-classic.php"))?);
 
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.body_string(), "complete page");
@@ -1043,17 +836,12 @@ fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
 /// An uncaught throw mid-stream in classic mode stays truncated, with no length.
 #[test]
 fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let srv = Spawn::http(
         Mode::Classic,
         fixture("ported_tests/throw-after-output-classic.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let resp = drain_resp(tests::submit(&h, req("/throw-after-output-classic.php"))?);
-    drop(h);
-    drop(r);
+    )
+    .spawn();
+    let resp = drain_resp(submit(srv.addr, req("/throw-after-output-classic.php"))?);
 
     assert_eq!(resp.status(), 200, "the echo committed the head");
     assert!(resp.truncated, "uncaught throw after output must truncate");
@@ -1064,41 +852,26 @@ fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
 /// Streams opened before the worker loop keep identity and read position: between-request cleanup must not touch live resources.
 #[test]
 fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("ported_tests/file-stream-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Worker, fixture("ported_tests/file-stream-worker.php")).spawn();
     for expected in ["word1", "word2", "word3"] {
-        let (status, body) = drain(tests::submit(&h, req("/file-stream-worker.php"))?);
+        let (status, body) = drain(submit(srv.addr, req("/file-stream-worker.php"))?);
         assert_eq!(status, 200);
         assert_eq!(
             body, expected,
             "pre-loop stream must keep advancing cleanly"
         );
     }
-    drop(h);
-    drop(r);
     Ok(())
 }
 
 #[test]
 fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
+    let srv = Spawn::http(
         Mode::Worker,
         fixture("shared/error-keeps-headers-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let resp = drain_resp(tests::submit(&h, req("/"))?);
-    drop(h);
-    drop(r);
-    assert_eq!(resp.heads, 1);
+    )
+    .spawn();
+    let resp = drain_resp(submit(srv.addr, req("/"))?);
     assert_eq!(
         resp.status(),
         404,
@@ -1114,21 +887,12 @@ fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
 /// A pre-joined single Cookie line passes through the join unchanged.
 #[test]
 fn multi_cookie_headers_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("ported_tests/multi-cookie.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Classic, fixture("ported_tests/multi-cookie.php")).spawn();
     let mut request = req("/multi-cookie.php");
     request
         .headers
         .append(COOKIE, HeaderValue::from_static("a=1; b=2"));
-    let (status, body) = drain(tests::submit(&h, request)?);
-    drop(h);
-    drop(r);
+    let (status, body) = drain(submit(srv.addr, request)?);
     assert_eq!((status, body.as_str()), (200, "1,2,a=1; b=2"));
     Ok(())
 }
@@ -1136,14 +900,7 @@ fn multi_cookie_headers_classic() -> anyhow::Result<()> {
 /// Per-line repeats join for the superglobals: list fields join on their separators (Cookie on `; `, X-Forwarded-For on `, `), a singleton field keeps its first line.
 #[test]
 fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("ported_tests/fold-check.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let srv = Spawn::http(Mode::Classic, fixture("ported_tests/fold-check.php")).spawn();
     let mut request = req("/fold-check.php");
     let forwarded_for = http::HeaderName::from_static("x-forwarded-for");
     for (name, value) in [
@@ -1158,9 +915,7 @@ fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
             .headers
             .append(name, HeaderValue::from_static(value));
     }
-    let (status, body) = drain(tests::submit(&h, request)?);
-    drop(h);
-    drop(r);
+    let (status, body) = drain(submit(srv.addr, request)?);
     assert_eq!(
         (status, body.as_str()),
         (200, "1,2,a=1; b=2,1.2.3.4, 5.6.7.8,Bearer one")
@@ -1170,17 +925,8 @@ fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
 
 #[test]
 fn latin1_header_value_passes_through() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("ported_tests/latin1-header.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let resp = drain_resp(tests::submit(&h, req("/"))?);
-    drop(h);
-    drop(r);
+    let srv = Spawn::http(Mode::Classic, fixture("ported_tests/latin1-header.php")).spawn();
+    let resp = drain_resp(submit(srv.addr, req("/"))?);
     let v = resp
         .head
         .as_ref()
@@ -1195,18 +941,8 @@ fn latin1_header_value_passes_through() -> anyhow::Result<()> {
 
 #[test]
 fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Classic,
-        fixture("shared/error-keeps-headers.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let resp = drain_resp(tests::submit(&h, req("/error-keeps-headers.php"))?);
-    drop(h);
-    drop(r);
-    assert_eq!(resp.heads, 1, "exactly one head");
+    let srv = Spawn::http(Mode::Classic, fixture("shared/error-keeps-headers.php")).spawn();
+    let resp = drain_resp(submit(srv.addr, req("/error-keeps-headers.php"))?);
     assert_eq!(
         resp.status(),
         404,
@@ -1223,14 +959,7 @@ fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
 /// Content-Type must reach php-src byte for byte: a lossily decoded boundary leaves rfc1867 hunting for one the body never contains and the upload vanishes.
 #[test]
 fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("ported_tests/upload-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
+    let mut srv = Spawn::http(Mode::Worker, fixture("ported_tests/upload-worker.php")).spawn();
     let boundary: &[u8] = b"RAP\xff\xfeIRA";
     let mut request = post(
         "ported_tests/upload-worker.php",
@@ -1241,9 +970,8 @@ fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     let mut ctype = b"multipart/form-data; boundary=".to_vec();
     ctype.extend_from_slice(boundary);
     request.content_type = Some(ctype);
-    let (status, body) = drain(tests::submit(&h, request)?);
-    drop(h);
-    drop(r);
+    let (status, body) = drain(submit(srv.addr, request)?);
+    srv.stop();
     assert_upload_and_cleanup(status, &body);
     Ok(())
 }
@@ -1251,19 +979,9 @@ fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
 /// sapi_header_op screens only CR, LF and NUL, so dropping the headers it lets through must not cost the status, the other headers, or the body.
 #[test]
 fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<()> {
-    let _guard = php_lock();
-    let r = Rapira::start(
-        &tests::PHP_PARTS,
-        Mode::Worker,
-        fixture("ported_tests/bad-header-worker.php"),
-        None,
-    )?;
-    let h = r.sink();
-    let resp = drain_resp(tests::submit(&h, req("/bad-header-worker.php"))?);
-    drop(h);
-    drop(r);
+    let srv = Spawn::http(Mode::Worker, fixture("ported_tests/bad-header-worker.php")).spawn();
+    let resp = drain_resp(submit(srv.addr, req("/bad-header-worker.php"))?);
 
-    assert_eq!(resp.heads, 1, "a head must still be produced");
     assert_eq!(resp.status(), 201);
     assert_eq!(resp.body_string(), "body");
     assert_eq!(resp.header("X-Keep").as_deref(), Some("kept"));

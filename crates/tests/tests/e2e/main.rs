@@ -11,6 +11,7 @@ mod ini;
 mod lifecycle;
 mod logging;
 mod mode;
+mod ported_tests;
 mod reload;
 mod scaling;
 mod static_files;
