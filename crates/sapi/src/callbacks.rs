@@ -125,12 +125,14 @@ pub(crate) fn joined_field<'a>(
 }
 
 /// Writes the NUL-terminated `HTTP_` meta-variable name of `field` into `buf`.
+/// A field name is an RFC 9110 token, so it has no NUL, ' ' or '['. '.' maps to '_' as php_register_variable_ex mangles it, so the name is valid for php_register_known_variable.
 /// https://www.rfc-editor.org/rfc/rfc3875#section-4.1.18
+/// https://www.rfc-editor.org/rfc/rfc9110#section-5.1
 fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
     buf.clear();
     buf.extend_from_slice(b"HTTP_");
     for &b in field.as_bytes() {
-        buf.push(if b == b'-' {
+        buf.push(if b == b'-' || b == b'.' {
             b'_'
         } else {
             b.to_ascii_uppercase()
@@ -140,7 +142,7 @@ fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
     CStr::from_bytes_until_nul(buf).unwrap_or_default()
 }
 
-/// php_register_variable_safe is last-write-wins, so the call order is the precedence rule: CONTENT_LENGTH, then HTTP_*.
+/// php_register_known_variable is last-write-wins, so the call order is the precedence rule: CONTENT_LENGTH, then HTTP_*.
 /// Each name registers once, with its repeats joined.
 /// Owned buffers stay in ManuallyDrop because `put` can bail out over this frame.
 fn cgi_header_vars(headers: &HeaderMap, content_length: i64, mut put: impl FnMut(&CStr, &[u8])) {
@@ -263,12 +265,20 @@ pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
             .map_or(null_mut(), |c| c.as_ptr() as *mut c_char)
     })
 }
+/// The upper bound of $_SERVER entries besides HTTP_*: 23 names of register_server_variables, then PHP_AUTH_USER, PHP_AUTH_PW, PHP_AUTH_DIGEST, REQUEST_TIME_FLOAT and REQUEST_TIME from php_register_server_variables (main/php_variables.c).
+const SERVER_VARS_MAX: u32 = 28;
+
 pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut zval) {
     with_ctx((), |ctx| {
         let Some(reqc) = ctx.c.as_ref() else { return };
+        // One allocation for the whole array: the names below, one HTTP_* name per field, and the entries php_register_server_variables adds after this callback.
+        let size = SERVER_VARS_MAX + ctx.req.headers.keys_len() as u32;
+        unsafe { zend_hash_extend((*track_vars_array).value.arr, size, false) };
+        // Every name is valid for php_register_known_variable: the fixed names as written, HTTP_* through cgi_header_name.
         let put_bytes = |name: &CStr, val: &[u8]| unsafe {
-            php_register_variable_safe(
+            rapira_register_known_stringl(
                 name.as_ptr(),
+                name.to_bytes().len(),
                 val.as_ptr() as *const c_char,
                 val.len(),
                 track_vars_array,
@@ -498,14 +508,14 @@ mod tests {
         assert_eq!(got, want);
     }
 
-    /// The http plugin screens field names against `[A-Za-z0-9-]`; that screen is complete only while this mapper rewrites nothing but `-`.
+    /// The http plugin screens field names against `[A-Za-z0-9-]`; that screen is complete only while this mapper rewrites no byte of that set but `-`.
     /// One buffer serves every name of a request, so a shorter name after a longer one must not keep the old tail.
     #[test]
-    fn cgi_header_name_rewrites_only_dash() {
+    fn cgi_header_name_rewrites_only_dash_and_dot() {
         let mut buf = Vec::new();
         assert_eq!(cgi_header_name(&mut buf, "x-foo").to_bytes(), b"HTTP_X_FOO");
         assert_eq!(cgi_header_name(&mut buf, "x_foo").to_bytes(), b"HTTP_X_FOO");
-        assert_eq!(cgi_header_name(&mut buf, "x.foo").to_bytes(), b"HTTP_X.FOO");
+        assert_eq!(cgi_header_name(&mut buf, "x.foo").to_bytes(), b"HTTP_X_FOO");
         assert_eq!(cgi_header_name(&mut buf, "x~foo").to_bytes(), b"HTTP_X~FOO");
         assert_eq!(
             cgi_header_name(&mut buf, "accept-language").to_bytes(),

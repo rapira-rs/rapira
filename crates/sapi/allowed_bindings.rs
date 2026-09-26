@@ -5,7 +5,7 @@ bind! {
     zend_fcall_info, zend_fcall_info_cache,
     sapi_startup, sapi_shutdown, php_module_startup, php_module_shutdown, php_request_startup,
     php_execute_script, zend_error, zend_stream_init_filename, zend_destroy_file_handle,
-    php_register_variable_safe, rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER,
+    rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER,
     RAPIRA_MODE_DISPATCHER,
     // the two halves of the linked-libphp version check
     PHP_VERSION_ID, php_version_id,
@@ -43,6 +43,8 @@ bind! {
     rapira_zval_enum_case,
     // zend_hash_str_find_ptr is inline; class_exists (zend.rs) calls its exported half
     zend_hash_str_find,
+    // $_SERVER registration: ZVAL_STRINGL_FAST is a macro -> rapira_register_known_stringl shim in wrapper.c
+    rapira_register_known_stringl, zend_hash_extend,
     // slot writes of declared properties (zend.rs): ZVAL_STRINGL is a macro -> rapira_zval_stringl shim in wrapper.c
     zend_property_info, rapira_zval_stringl, IS_LONG, IS_DOUBLE, IS_PROP_UNINIT, IS_PROP_REINITABLE,
     // zend_symtable_str_update is inline; add_assoc_zval_ex is its exported caller (zend_API.c)
