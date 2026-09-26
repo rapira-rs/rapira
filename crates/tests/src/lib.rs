@@ -1,5 +1,5 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
-use rapira_grpc::{Call, MethodInfo, RpcProtocol, ServiceInfo, UnaryCall, UnaryReply};
+use rapira_grpc::{Call, RpcProtocol, UnaryCall, UnaryReply};
 use rapira_http::Exchange;
 use rapira_sapi::plugin::PhpPart;
 use rapira_sapi::work::{Intake, Refused, Sink};
@@ -166,28 +166,9 @@ pub fn echo_descriptor_set() -> PathBuf {
     fixture("grpc/echo.binpb")
 }
 
-/// The services of `fixtures/grpc/echo.proto`, in descriptor order.
-pub fn echo_services() -> Vec<ServiceInfo> {
-    let method = |name: &str, server_streaming: bool| MethodInfo {
-        name: name.into(),
-        input_type: "rapira.test.v1.EchoRequest".into(),
-        output_type: "rapira.test.v1.EchoResponse".into(),
-        client_streaming: false,
-        server_streaming,
-    };
-    vec![ServiceInfo {
-        name: "rapira.test.v1.EchoService".into(),
-        methods: vec![
-            method("Echo", false),
-            method("Get", false),
-            method("Watch", true),
-        ],
-    }]
-}
-
 /// Boots a gRPC dispatcher worker on `script` that serves the services of `fixtures/grpc/echo.proto`.
 pub fn start_grpc(script: PathBuf) -> anyhow::Result<Rapira> {
-    rapira_grpc::set_services(echo_services())?;
+    rapira_grpc::set_services(grpc::schema().services().to_vec())?;
     Rapira::start(
         &PHP_PARTS,
         Mode::Dispatcher,
@@ -197,7 +178,7 @@ pub fn start_grpc(script: PathBuf) -> anyhow::Result<Rapira> {
 }
 
 /// A response stream collected to its `End` (or to the producer dying).
-#[derive(Default)]
+#[derive(Debug, Default)]
 pub struct Resp {
     pub interim: Vec<rapira_sapi::ResponseHead>,
     pub head: Option<rapira_sapi::ResponseHead>,
@@ -276,54 +257,18 @@ fn read_slice(file: &std::fs::File, offset: u64, len: u64) -> std::io::Result<Ve
     Ok(out)
 }
 
-/// A reply stream collected to its `End`.
-#[derive(Debug)]
-pub struct Response {
-    pub status: u16,
-    pub headers: HeaderMap,
-    pub body: Vec<u8>,
-}
-
 /// Drains `reply` to its `End`; a missing head, a missing `End` or a truncated `End` is an error.
-pub async fn collect(mut reply: mpsc::Receiver<Frame>) -> anyhow::Result<Response> {
-    let mut response: Option<Response> = None;
-    let mut end: Option<bool> = None;
-    while let Some(ev) = reply.recv().await {
-        match ev {
-            Frame::Interim(_) => {}
-            Frame::Head { head, .. } => {
-                response = Some(Response {
-                    status: head.status,
-                    headers: head.headers,
-                    body: Vec::new(),
-                });
-            }
-            Frame::Chunk(b) => {
-                if let Some(r) = response.as_mut() {
-                    r.body.extend_from_slice(&b);
-                }
-            }
-            Frame::File { file, offset, len } => {
-                if let Some(r) = response.as_mut() {
-                    r.body.extend_from_slice(&read_slice(&file, offset, len)?);
-                }
-            }
-            Frame::End { truncated, .. } => {
-                end = Some(truncated);
-                break;
-            }
-        }
+pub async fn collect(reply: mpsc::Receiver<Frame>) -> anyhow::Result<Resp> {
+    let r = drain_resp_async(reply).await;
+    if r.head.is_none() && !r.ended {
+        anyhow::bail!("php worker died mid-response (channel closed without a response)");
     }
-    match (response, end) {
-        (None, None) => Err(anyhow::anyhow!(
-            "php worker died mid-response (channel closed without a response)"
-        )),
-        (Some(_), None) | (_, Some(true)) => {
-            Err(anyhow::anyhow!("php crashed mid-response; body truncated"))
-        }
-        (None, Some(false)) => Err(anyhow::anyhow!("php produced no response head")),
-        (Some(r), Some(false)) => Ok(r),
-    }
+    anyhow::ensure!(
+        r.ended && !r.truncated,
+        "php crashed mid-response; body truncated"
+    );
+    anyhow::ensure!(r.head.is_some(), "php produced no response head");
+    Ok(r)
 }
 
 /// Poll for a first frame until `deadline`: None = nothing arrived in time, a producer that died with no frames yields `Resp::default()`.
@@ -689,8 +634,8 @@ mod tests {
         ]))
         .await
         .unwrap();
-        assert_eq!(r.status, 200);
-        assert_eq!(r.headers, fields(&[("x-a", "1")]));
+        assert_eq!(r.status(), 200);
+        assert_eq!(r.head.unwrap().headers, fields(&[("x-a", "1")]));
         assert_eq!(r.body, b"one,two");
     }
 

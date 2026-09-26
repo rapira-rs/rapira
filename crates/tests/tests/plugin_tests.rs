@@ -7,7 +7,7 @@ use rapira_sapi::work::{Intake, Work};
 use rapira_sapi::{Addr, Rapira, Request};
 use std::future::Future;
 use std::time::{Duration, Instant};
-use tests::{Fields, Response, collect, fields, fixture, php_lock, req};
+use tests::{Fields, Resp, collect, fields, fixture, php_lock, req};
 
 const GRACE: Duration = Duration::from_secs(30);
 /// The test plugins do not drain.
@@ -62,14 +62,14 @@ fn run_to_end(plugin: Box<TestPlugin>, rapira: &Rapira) -> anyhow::Result<()> {
     run_plugin(plugin, rapira.sink(), GRACE, DRAIN_GRACE)?.join()
 }
 
-async fn exchange(intake: &Intake<Exchange>, req: Request) -> anyhow::Result<Response> {
+async fn exchange(intake: &Intake<Exchange>, req: Request) -> anyhow::Result<Resp> {
     let (exchange, reply) = Exchange::new(req, true);
     intake.submit(exchange).await?;
     collect(reply).await
 }
 
-fn check(res: &Response, want: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(res.status == 200, "expected 200, got {}", res.status);
+fn check(res: &Resp, want: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(res.status() == 200, "expected 200, got {}", res.status());
     anyhow::ensure!(
         res.body == want.as_bytes(),
         "expected body {want:?}, got {:?}",
@@ -208,9 +208,9 @@ fn classic_mode_serves_exchanges() -> anyhow::Result<()> {
 fn error_path_driver() -> Box<TestPlugin> {
     driver(|intake: Intake<Exchange>| async move {
         let resp = exchange(&intake, req("/")).await?;
-        anyhow::ensure!(resp.status == 404, "expected 404, got {}", resp.status);
+        anyhow::ensure!(resp.status() == 404, "expected 404, got {}", resp.status());
         anyhow::ensure!(
-            resp.headers.contains_key(SET_COOKIE),
+            resp.header(SET_COOKIE.as_str()).is_some(),
             "the session Set-Cookie must survive the buffered error path"
         );
         Ok(())
@@ -247,8 +247,8 @@ fn truncated_response_ends_as_truncated_worker() -> anyhow::Result<()> {
         let err = match exchange(&intake, req("/")).await {
             Ok(resp) => anyhow::bail!(
                 "the reply must end as truncated, got {} with body {:?}",
-                resp.status,
-                String::from_utf8_lossy(&resp.body)
+                resp.status(),
+                resp.body_string()
             ),
             Err(e) => e,
         };

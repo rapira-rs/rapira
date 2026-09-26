@@ -152,6 +152,7 @@ pub struct Request {
     pub tls: Option<Tls>,
 }
 
+#[derive(Debug)]
 pub struct ResponseHead {
     pub status: u16,
     pub headers: HeaderMap,
