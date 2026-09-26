@@ -5,7 +5,12 @@ use tests::{drain_async, fixture, php_lock_async, req};
 async fn worker_survives_exit() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
-    let r = Rapira::start(Mode::Worker, fixture("shared/bailout-worker.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("shared/bailout-worker.php"),
+        None,
+    )?;
     let h = r.sink();
     let (s1, b1) = drain_async(tests::submit_async(&h, req("/?boom=0")).await?).await;
     let (s2, b2) = drain_async(tests::submit_async(&h, req("/?boom=1")).await?).await;
@@ -37,7 +42,12 @@ async fn worker_survives_exit() -> anyhow::Result<()> {
 async fn many_producers_test() -> anyhow::Result<()> {
     let _guard = php_lock_async().await;
 
-    let r = Rapira::start(Mode::Worker, fixture("shared/worker.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("shared/worker.php"),
+        None,
+    )?;
 
     let producers: Vec<_> = (0..24)
         .map(|t| {

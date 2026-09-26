@@ -248,7 +248,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn sink_counts_pending_until_the_consumer_pulls() {
+    async fn sink_counts_a_submitted_unit_as_pending() {
         let (sink, _rx) = Sink::channel(1);
         sink.submit(Box::new(Probe)).await.unwrap();
         assert_eq!(sink.pending(), 1);

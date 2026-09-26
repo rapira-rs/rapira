@@ -12,6 +12,7 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
         "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Dispatcher,
         fixture("dispatcher/echo-loop-worker.php"),
         Some(rapira_sapi::http::DISPATCHER_CLASSES),
@@ -42,6 +43,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
         "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Dispatcher,
         fixture("dispatcher/verbs-worker.php"),
         Some(rapira_sapi::http::DISPATCHER_CLASSES),
@@ -81,6 +83,7 @@ fn max_execution_time_fires_on_rearmed_jobs() -> anyhow::Result<()> {
         "/fixtures/ini/timeout_tests/timeout.php.ini"
     )));
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("timeout_tests/timeout-worker.php"),
         None,

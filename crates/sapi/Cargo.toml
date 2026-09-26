@@ -3,6 +3,7 @@ name = "rapira_sapi"
 version = "0.8.1"
 edition.workspace = true
 build = "build.rs"
+links = "rapira_sapi"
 
 [lints]
 workspace = true
@@ -26,7 +27,7 @@ tempfile = "3"
 [build-dependencies]
 anyhow = { workspace = true }
 bindgen = "0"
-cc = "1.2"
+rapira_php_build = { workspace = true }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["test-util"] }

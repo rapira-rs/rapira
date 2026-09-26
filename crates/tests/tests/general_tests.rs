@@ -19,6 +19,7 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     init_log_capture();
     captured().clear();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("general_tests/abort-worker.php"),
         None,
@@ -50,6 +51,7 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
 fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("general_tests/resources-worker.php"),
         None,
@@ -80,7 +82,12 @@ fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
 #[test]
 fn https_server_vars() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Worker, fixture("shared/server-variables.php"), None)?;
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("shared/server-variables.php"),
+        None,
+    )?;
     let h = r.sink();
     let mut request = req("/");
     request.https = true;
@@ -105,6 +112,7 @@ fn https_server_vars() -> anyhow::Result<()> {
 fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("general_tests/exception-handler-worker.php"),
         None,
@@ -135,6 +143,7 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
 fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("general_tests/throw-quiet-worker.php"),
         None,
@@ -163,6 +172,7 @@ fn error_response_sends_exactly_one_head() -> anyhow::Result<()> {
 fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("shared/session-bailout-worker.php"),
         None,
@@ -193,6 +203,7 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
 fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("general_tests/fatal-exception-handler-worker.php"),
         None,
@@ -214,6 +225,7 @@ fn fatal_in_exception_handler_keeps_worker_alive() -> anyhow::Result<()> {
 fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("general_tests/fatal-backtrace-worker.php"),
         None,
@@ -245,6 +257,7 @@ fn fatal_backtrace_freed_between_requests() -> anyhow::Result<()> {
 fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("shared/shutdown-fatal-worker.php"),
         None,
@@ -269,6 +282,7 @@ fn client_disconnect_respects_ignore_user_abort() -> anyhow::Result<()> {
     init_log_capture();
     captured().clear();
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Worker,
         fixture("general_tests/abort-ignore-worker.php"),
         None,

@@ -25,6 +25,14 @@ impl std::fmt::Display for Mode {
     }
 }
 
+/// One plugin's PHP surface.
+#[derive(Clone, Copy)]
+pub struct PhpPart {
+    /// Registers the plugin's classes. Runs in MINIT after the base classes.
+    pub register: unsafe extern "C" fn(),
+    pub dispatcher: Option<DispatcherClasses>,
+}
+
 /// What the worker hands to [`Plugin::serve`].
 pub struct Worker {
     pub handle: tokio::runtime::Handle,
@@ -41,8 +49,8 @@ pub trait Plugin: Send + 'static {
     fn name(&self) -> &'static str;
     /// The pool modes this plugin serves. The root refuses another mode at boot.
     fn modes(&self) -> &'static [Mode];
-    /// The classes receive() allocates from. None for a plugin with no dispatcher surface.
-    fn dispatcher_classes(&self) -> Option<DispatcherClasses>;
+    /// The plugin's PHP surface. None for a plugin without one.
+    fn php(&self) -> Option<PhpPart>;
     /// Master side, before the fork, no runtime.
     fn prepare(&mut self, ctx: &mut rapira_net::PrepareCtx) -> anyhow::Result<()>;
     /// Worker side, on the plugin thread. Returns after the stop signal and the drain.

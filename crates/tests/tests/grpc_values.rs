@@ -75,6 +75,7 @@ fn value_types_follow_the_contract() -> anyhow::Result<()> {
     captured().clear();
 
     let r = Rapira::start(
+        &tests::PHP_PARTS,
         Mode::Dispatcher,
         fixture("grpc/values.php"),
         Some(rapira_sapi::http::DISPATCHER_CLASSES),

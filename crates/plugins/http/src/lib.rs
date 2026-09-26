@@ -7,8 +7,8 @@ use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
 use rapira_sapi::http::Exchange;
 use rapira_sapi::middleware::Middleware;
 use rapira_sapi::multipart;
-use rapira_sapi::plugin::{Mode, Plugin, Worker};
-use rapira_sapi::work::{DispatcherClasses, Intake};
+use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
+use rapira_sapi::work::Intake;
 
 mod bridge;
 mod check;
@@ -94,8 +94,8 @@ impl Plugin for Server {
         &[Mode::Classic, Mode::Worker, Mode::Dispatcher]
     }
 
-    fn dispatcher_classes(&self) -> Option<DispatcherClasses> {
-        Some(rapira_sapi::http::DISPATCHER_CLASSES)
+    fn php(&self) -> Option<PhpPart> {
+        Some(rapira_sapi::http::PHP_PART)
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {

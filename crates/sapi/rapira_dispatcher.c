@@ -1,6 +1,4 @@
-#include "rapira_classes.h"
-
-#include "wrapper.h"
+#include "rapira_sapi.h"
 #include "zend.h"
 #include "zend_API.h"
 #include "zend_enum.h"
@@ -105,26 +103,7 @@ ZEND_FUNCTION(Rapira_log) {
     }
 }
 
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, name) {
-    ZEND_PARSE_PARAMETERS_NONE();
-    // the plugin's root TOML section
-    RETURN_STRING("http");
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, __construct) {
-    (void)execute_data;
-    (void)return_value;
-    zend_throw_error(NULL,
-                     "host-created; obtain it from \\Rapira\\get_dispatcher()");
-}
-
-ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, __construct) {
-    (void)execute_data;
-    (void)return_value;
-    zend_throw_error(NULL, "host-created");
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, receive) {
+void rapira_sapi_receive(INTERNAL_FUNCTION_PARAMETERS) {
     zend_long timeout = -1;
     ZEND_PARSE_PARAMETERS_START(0, 1)
     Z_PARAM_OPTIONAL
@@ -137,7 +116,7 @@ ZEND_METHOD(Rapira_Internal_Http_Dispatcher, receive) {
     }
 }
 
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, tryReceive) {
+void rapira_sapi_try_receive(INTERNAL_FUNCTION_PARAMETERS) {
     ZEND_PARSE_PARAMETERS_NONE();
     if (!rapira_rs_try_receive(return_value)) {
         rapira_throw_or_backstop("tryReceive");
@@ -145,7 +124,7 @@ ZEND_METHOD(Rapira_Internal_Http_Dispatcher, tryReceive) {
     }
 }
 
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, getInfo) {
+void rapira_sapi_get_info(INTERNAL_FUNCTION_PARAMETERS) {
     ZEND_PARSE_PARAMETERS_NONE();
     if (!rapira_rs_dispatcher_info(return_value)) {
         rapira_throw_or_backstop("getInfo");
@@ -153,12 +132,12 @@ ZEND_METHOD(Rapira_Internal_Http_Dispatcher, getInfo) {
     }
 }
 
-ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, pendingCount) {
+void rapira_sapi_pending_count(INTERNAL_FUNCTION_PARAMETERS) {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_LONG(rapira_dispatcher_info_from(Z_OBJ_P(ZEND_THIS))->pending);
 }
 
-ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, activeCount) {
+void rapira_sapi_active_count(INTERNAL_FUNCTION_PARAMETERS) {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_LONG(rapira_dispatcher_info_from(Z_OBJ_P(ZEND_THIS))->active);
 }

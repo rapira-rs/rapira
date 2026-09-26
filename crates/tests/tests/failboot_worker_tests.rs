@@ -13,6 +13,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
 
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
         let r = Rapira::start(
+            &tests::PHP_PARTS,
             Mode::Dispatcher,
             fixture("failboot_worker_tests/failboot-worker.php"),
             Some(rapira_sapi::http::DISPATCHER_CLASSES),
@@ -67,6 +68,7 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
 
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
         let r = Rapira::start(
+            &tests::PHP_PARTS,
             Mode::Dispatcher,
             fixture("failboot_worker_tests/failboot-worker.php"),
             Some(rapira_sapi::http::DISPATCHER_CLASSES),

@@ -989,6 +989,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "rapira_php_build"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "cc",
+]
+
+[[package]]
 name = "rapira_sapi"
 version = "0.8.1"
 dependencies = [
@@ -996,13 +1004,13 @@ dependencies = [
  "base64",
  "bindgen",
  "bytes",
- "cc",
  "http",
  "http-body-util",
  "httparse",
  "libc",
  "memchr",
  "rapira_net",
+ "rapira_php_build",
  "rapira_scoreboard",
  "tempfile",
  "tokio",
