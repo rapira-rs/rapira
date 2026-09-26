@@ -4,6 +4,7 @@ mod classic;
 mod concurrency;
 mod dispatcher_loop;
 mod extensions;
+mod general_tests;
 mod grpc;
 mod harness;
 mod http_values;
