@@ -790,16 +790,12 @@ async fn health_and_reflection_answer_from_the_plugin() {
     stop(reflecting).await;
 }
 
-/// Stop ends the accept loop and the drain, and the worker drops every intake clone.
+/// A graceful stop ends the plugin with no error, and the worker drops every intake clone.
 #[tokio::test]
 async fn shutdown_joins_the_server_and_drops_every_intake_clone() {
     let srv = Spawn::grpc(wire_worker()).json_log().spawn();
-    let open = tokio::net::TcpStream::connect(srv.addr)
-        .await
-        .expect("the server accepts before shutdown");
-    drop(open);
-
     let srv = stop(srv).await;
+    assert_eq!(plugin_error(&srv), None);
 
     // The last intake clone goes with the worker's sink, and receive() then throws ClosedException.
     assert!(

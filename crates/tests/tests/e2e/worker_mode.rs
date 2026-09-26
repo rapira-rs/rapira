@@ -6,7 +6,7 @@ use serde_json::Value;
 use tests::wire::submit;
 use tests::{drain, drain_resp, drain_resp_deadline, fixture, req, server_log};
 
-use crate::harness::Spawn;
+use crate::harness::{Spawn, slot_line};
 
 /// Superglobals are rebuilt per job over the resident loop: query state must not leak.
 #[test]
@@ -205,6 +205,8 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
 
     let resp = drain_resp(submit(srv.addr, req("/?probe=count"))?);
     assert_eq!(resp.body_string(), "runs=1");
+    // A unit discarded at handout counts as handled with an error, so this line shows that B reached the intake.
+    slot_line(&srv, "handled 3 errors 1 ");
     Ok(())
 }
 
