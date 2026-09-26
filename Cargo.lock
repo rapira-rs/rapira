@@ -1021,7 +1021,6 @@ dependencies = [
  "bindgen",
  "bytes",
  "http",
- "libc",
  "rapira_config",
  "rapira_net",
  "rapira_php_build",
