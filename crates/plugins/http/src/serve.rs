@@ -8,7 +8,7 @@ use anyhow::{Result, anyhow};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
-use rapira_net::{Acceptor, ListenAddr, PreparedListener, Serve, Stop};
+use rapira_net::{Acceptor, ListenAddr, PreparedListener, Serve};
 use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
@@ -162,13 +162,7 @@ pub(crate) fn serve(
     prepared: PreparedListener,
     worker: Worker,
 ) -> Result<()> {
-    let stop = Stop::new().map_err(|e| anyhow!("creating the http stop handle: {e}"))?;
-    let acceptor = Acceptor::adopt(prepared, stop.handle(), &worker.handle)?;
-    let mut flag = worker.stop.clone();
-    worker.handle.spawn(async move {
-        let _ = flag.wait_for(|stop| *stop).await;
-        stop.stop();
-    });
+    let acceptor = Acceptor::adopt(prepared, worker.stop.clone(), &worker.handle)?;
     // The plugin parses multipart in dispatcher mode only: the other modes feed php-src's own rfc1867 through read_post.
     let dispatcher: bool = !config.superglobals;
     // Each worker spools in its own dir under the configured one.

@@ -8,7 +8,7 @@ use connectrpc::{
     ConnectionInfo, DeadlinePolicy, GzipProvider, Router,
 };
 use connectrpc_health::StaticChecker;
-use rapira_net::{Acceptor, Serve, Stop};
+use rapira_net::{Acceptor, Serve};
 use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
@@ -154,13 +154,7 @@ pub(crate) fn serve(
     prepared: Prepared,
     worker: Worker,
 ) -> Result<()> {
-    let stop = Stop::new().map_err(|e| anyhow!("creating the grpc stop handle: {e}"))?;
-    let acceptor = Acceptor::adopt(prepared.listener, stop.handle(), &worker.handle)?;
-    let mut flag = worker.stop.clone();
-    worker.handle.spawn(async move {
-        let _ = flag.wait_for(|stop| *stop).await;
-        stop.stop();
-    });
+    let acceptor = Acceptor::adopt(prepared.listener, worker.stop.clone(), &worker.handle)?;
     let serving = Serving::start(intake, &config, prepared.router, prepared.health);
     let fatal = acceptor.run(&worker.handle, &serving);
     worker

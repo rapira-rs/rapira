@@ -4,7 +4,6 @@ use anyhow::anyhow;
 #[cfg(not(target_os = "linux"))]
 use tokio::net::{TcpListener, UnixListener};
 use tokio::runtime::Handle;
-#[cfg(not(target_os = "linux"))]
 use tokio::sync::watch;
 
 #[cfg(target_os = "linux")]
@@ -15,35 +14,6 @@ pub use listen::{ListenAddr, PrepareCtx, PreparedListener};
 
 #[cfg(target_os = "linux")]
 use accept_linux::{TcpListener, UnixListener};
-
-/// Stops the accept loop. The blocked acceptor waits on this eventfd.
-#[cfg(target_os = "linux")]
-pub type Stop = accept_linux::Wake;
-
-#[cfg(target_os = "linux")]
-pub type StopHandle = accept_linux::Wake;
-
-/// Stops the accept loop. The async acceptor selects on this flag.
-#[cfg(not(target_os = "linux"))]
-pub struct Stop(watch::Sender<bool>);
-
-#[cfg(not(target_os = "linux"))]
-pub type StopHandle = watch::Receiver<bool>;
-
-#[cfg(not(target_os = "linux"))]
-impl Stop {
-    pub fn new() -> std::io::Result<Self> {
-        Ok(Self(watch::channel(false).0))
-    }
-
-    pub fn handle(&self) -> StopHandle {
-        self.0.subscribe()
-    }
-
-    pub fn stop(&self) {
-        let _ = self.0.send(true);
-    }
-}
 
 /// Takes the accepted connections. [`Acceptor::run`] calls it inside its runtime.
 pub trait Serve {
@@ -56,7 +26,7 @@ pub struct Acceptor {
     socket: Socket,
     addr: ListenAddr,
     #[cfg(not(target_os = "linux"))]
-    stop: StopHandle,
+    stop: watch::Receiver<bool>,
 }
 
 enum Socket {
@@ -65,12 +35,24 @@ enum Socket {
 }
 
 impl Acceptor {
+    /// `stop` set to true ends [`Acceptor::run`].
     pub fn adopt(
         prepared: PreparedListener,
-        stop: StopHandle,
+        stop: watch::Receiver<bool>,
         rt: &Handle,
     ) -> std::io::Result<Self> {
         use std::os::fd::{FromRawFd, IntoRawFd};
+        // The blocked acceptor waits on an eventfd, so a task on rt passes the flag on to it.
+        #[cfg(target_os = "linux")]
+        let stop = {
+            let wake = accept_linux::Wake::new()?;
+            let (bridge, mut flag) = (wake.clone(), stop);
+            rt.spawn(async move {
+                let _ = flag.wait_for(|stop| *stop).await;
+                bridge.stop();
+            });
+            wake
+        };
         let addr = prepared.addr().clone();
         let tcp: bool = matches!(addr, ListenAddr::Tcp(_));
         // On other OSes from_std registers the tokio listener with the reactor of rt.
@@ -101,7 +83,7 @@ impl Acceptor {
         })
     }
 
-    /// Runs the accept loop on the calling thread until the stop handle fires. A blocked
+    /// Runs the accept loop on the calling thread until the stop flag is set. A blocked
     /// accept is what lets the kernel hand each connection to one worker. Returns the
     /// listener failure, if any. The listener is closed when this returns.
     #[cfg(target_os = "linux")]
@@ -129,7 +111,7 @@ impl Acceptor {
         fatal
     }
 
-    /// Runs the accept loop on rt until the stop handle fires. Returns the listener
+    /// Runs the accept loop on rt until the stop flag is set. Returns the listener
     /// failure, if any. The listener is closed when this returns.
     #[cfg(not(target_os = "linux"))]
     pub fn run(self, rt: &Handle, serve: &impl Serve) -> Option<anyhow::Error> {

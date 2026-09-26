@@ -31,10 +31,6 @@ impl Wake {
         Ok(Self(Arc::new(unsafe { OwnedFd::from_raw_fd(fd) })))
     }
 
-    pub fn handle(&self) -> Self {
-        self.clone()
-    }
-
     /// Makes the current or next [`Listener::accept_blocking`] return `None`.
     pub fn stop(&self) {
         let value: u64 = 1;
@@ -277,7 +273,7 @@ mod tests {
         let bound = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
         bound.set_nonblocking(true).unwrap();
         let wake = Wake::new().unwrap();
-        let listener = TcpListener::from_std(bound, wake.handle()).unwrap();
+        let listener = TcpListener::from_std(bound, wake.clone()).unwrap();
 
         wake.stop();
         assert!(listener.accept_blocking().unwrap().is_none());
