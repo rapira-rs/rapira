@@ -365,7 +365,7 @@ fn error_levels_worker() -> Server {
         .spawn()
 }
 
-fn php_levels(logged: &[tests::Captured], mark: &str) -> Vec<tracing::Level> {
+fn php_levels(logged: &[server_log::Captured], mark: &str) -> Vec<tracing::Level> {
     logged
         .iter()
         .filter(|c| c.target == "php" && c.message.contains(mark))

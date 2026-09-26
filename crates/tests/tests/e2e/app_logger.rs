@@ -1,6 +1,7 @@
 use rapira_sapi::Mode;
+use tests::server_log::{self, AppRecord};
 use tests::wire::submit;
-use tests::{AppRecord, drain, fixture, req, server_log};
+use tests::{drain, fixture, req};
 use tracing::Level;
 
 use crate::harness::Spawn;

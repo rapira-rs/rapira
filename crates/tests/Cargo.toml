@@ -11,16 +11,11 @@ workspace = true
 anyhow = { workspace = true }
 http = { workspace = true }
 rapira_sapi = { workspace = true }
-# The http unit and its PHP part.
-rapira_http = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "net"] }
 tracing = { workspace = true }
-# Capture layer (init_log_capture).
-tracing-subscriber = "0.3"
 # App-record helpers (case_results, dispatcher_record).
 serde_json = "1"
-# The gRPC harness (src/grpc.rs): rapira_grpc behind a channel intake, and hyper clients for gRPC, gRPC-Web and Connect.
-rapira_grpc = { workspace = true }
+# The wire clients (src/wire.rs, src/grpc.rs): hyper clients for HTTP/1.1, gRPC, gRPC-Web and Connect.
 rapira_net = { workspace = true }
 bytes = { workspace = true }
 base64 = { workspace = true }
@@ -31,8 +26,6 @@ hyper-util = { workspace = true, features = ["tokio"] }
 [dev-dependencies]
 # E2E harness (tests/e2e): process control for the spawned rapira binary.
 libc = { workspace = true }
-# The e2e middleware layer (tests/e2e/streaming.rs).
-tower = { workspace = true }
 
 # The spawn-the-binary E2E suite forks worker processes and runs request storms;
 # gated behind a feature so `cargo test --workspace` skips it. Run it isolated

@@ -1,4 +1,4 @@
-//! The records of a spawned server's log in JSON format (`[log] format = "json"`), for the assertions that the in-process capture served.
+//! The records of a spawned server's log in JSON format (`[log] format = "json"`).
 //!
 //! A record line is `{"level", "target", "fields": {"message", "context"}}`. The RUST_LOG filter of the server decides which records the log holds.
 
@@ -8,7 +8,26 @@ use std::time::{Duration, Instant};
 
 use serde_json::Value;
 
-use crate::{AppRecord, Captured, result_text};
+/// One log record. PHP diagnostics are asserted on level and target, not just text.
+#[derive(Debug)]
+pub struct Captured {
+    pub level: tracing::Level,
+    pub target: String,
+    pub message: String,
+    /// The `context` field, empty when the record carries none; Rapira\log() puts its JSON-encoded context array here.
+    pub context: String,
+}
+
+/// One `app`-target record left by `\Rapira\log()`: level, message, context JSON.
+pub type AppRecord = (tracing::Level, String, String);
+
+/// The `result` field of a record's context as text; a JSON string stays bare.
+fn result_text(ctx: &Value) -> String {
+    match &ctx["result"] {
+        Value::String(s) => s.clone(),
+        other => other.to_string(),
+    }
+}
 
 /// The records of `log` in file order. A line that is not a JSON record is skipped, for example a line that the server still writes.
 pub fn records(log: &Path) -> Vec<Captured> {
@@ -123,12 +142,15 @@ fn case_map(all: &[Captured]) -> HashMap<String, String> {
 
 /// One `case` record per (name, expected result) row, and no stray one; every mismatch is listed at once.
 pub fn assert_case_records(log: &Path, cases: &[(&str, &str)]) {
-    let all = records(log);
+    assert_cases(&records(log), cases);
+}
+
+fn assert_cases(all: &[Captured], cases: &[(&str, &str)]) {
     let count = all
         .iter()
         .filter(|c| c.target == "app" && c.message == "case")
         .count();
-    let results = case_map(&all);
+    let results = case_map(all);
     assert_eq!(count, cases.len(), "one record per case (got {results:?})");
     let mismatches: Vec<String> = cases
         .iter()
@@ -141,4 +163,22 @@ pub fn assert_case_records(log: &Path, cases: &[(&str, &str)]) {
         })
         .collect();
     assert!(mismatches.is_empty(), "{mismatches:#?}");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A repeated name is a stray record, even when it repeats the expected result.
+    #[test]
+    #[should_panic(expected = "one record per case")]
+    fn case_records_reject_a_repeated_name() {
+        let record = || Captured {
+            level: tracing::Level::INFO,
+            target: "app".to_owned(),
+            message: "case".to_owned(),
+            context: r#"{"name":"a","result":"ok"}"#.to_owned(),
+        };
+        assert_cases(&[record(), record()], &[("a", "ok")]);
+    }
 }

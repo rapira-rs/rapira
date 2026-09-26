@@ -1272,15 +1272,11 @@ dependencies = [
  "hyper",
  "hyper-util",
  "libc",
- "rapira_grpc",
- "rapira_http",
  "rapira_net",
  "rapira_sapi",
  "serde_json",
  "tokio",
- "tower",
  "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

@@ -1,10 +1,4 @@
-//! A harness for the rapira_grpc server: the test plays PHP through a channel intake, and clients speak gRPC, gRPC-Web and Connect over the wire.
-
-use std::net::SocketAddr;
-use std::os::fd::BorrowedFd;
-use std::path::PathBuf;
-use std::sync::Arc;
-use std::time::Duration;
+//! Clients that speak gRPC, gRPC-Web and Connect over the wire.
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
@@ -12,13 +6,9 @@ use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::{TokioExecutor, TokioIo};
-use rapira_grpc::{Call, Config, RpcStatus, Schema, Server, UnaryReply};
-use rapira_net::{ListenAddr, PrepareCtx};
+use rapira_net::ListenAddr;
 use rapira_sapi::Addr;
-use rapira_sapi::plugin::{Plugin as _, run_plugin};
-use rapira_sapi::work::{Intake, Sink};
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::mpsc;
 
 pub const ECHO_SERVICE: &str = "rapira.test.v1.EchoService";
 pub const ECHO_PATH: &str = "/rapira.test.v1.EchoService/Echo";
@@ -33,45 +23,6 @@ pub const HI: &[u8] = &[0x0a, 0x02, 0x68, 0x69];
 pub const HI_FRAME: &[u8] = &[0x00, 0x00, 0x00, 0x00, 0x04, 0x0a, 0x02, 0x68, 0x69];
 
 pub use crate::{Fields, fields};
-
-/// The set of `fixtures/grpc/echo.proto`, narrowed to `EchoService`; `OtherService` stays unserved.
-pub fn schema() -> Arc<Schema> {
-    let path = crate::echo_descriptor_set();
-    Arc::new(Schema::load(&path, Some(&[ECHO_SERVICE.to_owned()])).expect("echo.binpb loads"))
-}
-
-pub fn config(listen: ListenAddr) -> Config {
-    Config {
-        listen,
-        schema: schema(),
-        reflection: false,
-        default_timeout: None,
-        max_timeout: None,
-        keepalive_interval: Duration::from_secs(10),
-        keepalive_timeout: Duration::from_secs(10),
-        interceptors: Vec::new(),
-    }
-}
-
-pub fn tcp() -> ListenAddr {
-    ListenAddr::Tcp(([127, 0, 0, 1], 0).into())
-}
-
-/// A fresh directory under the system temp dir, named after this process. The caller removes it.
-pub fn scratch_dir(name: &str) -> PathBuf {
-    let dir = std::env::temp_dir().join(format!("rapira-test-grpc-{name}-{}", std::process::id()));
-    std::fs::create_dir_all(&dir).expect("scratch dir");
-    dir
-}
-
-/// The address of the TCP listener at `index` in `ctx`, so a `:0` bind resolves.
-pub fn tcp_addr(ctx: &PrepareCtx, index: usize) -> SocketAddr {
-    let fd = ctx.listener_fds()[index];
-    // SAFETY: `ctx` owns the descriptor for as long as it is borrowed here.
-    let fd = unsafe { BorrowedFd::borrow_raw(fd) };
-    let listener = std::net::TcpListener::from(fd.try_clone_to_owned().expect("dup the listener"));
-    listener.local_addr().expect("local addr")
-}
 
 /// The `google.rpc.Status` of NOT_FOUND `no invoice` with one detail: `url` packing `0a 01 78`.
 ///
@@ -91,98 +42,6 @@ pub fn status_bytes(url: &str) -> Vec<u8> {
         &any,
     ]
     .concat()
-}
-
-/// The response metadata of [`respond_with_halves`]: headers `x-h: v`, trailers `x-t: w` and `x-b-bin: AQI`.
-pub fn halves() -> (HeaderMap, HeaderMap) {
-    (
-        fields(&[("x-h", "v")]),
-        fields(&[("x-t", "w"), ("x-b-bin", "AQI")]),
-    )
-}
-
-/// NOT_FOUND `no invoice` with one detail: `url` packing `0a 01 78`.
-pub fn not_found(url: &str) -> RpcStatus {
-    RpcStatus {
-        code: 5,
-        message: "no invoice".into(),
-        details: vec![(url.into(), Bytes::from_static(&[0x0a, 0x01, 0x78]))],
-    }
-}
-
-/// Commits `outcome` with no response metadata, as PHP does.
-pub fn respond(call: Call, outcome: Result<Bytes, RpcStatus>) {
-    call.respond(UnaryReply {
-        headers: HeaderMap::new(),
-        trailers: HeaderMap::new(),
-        outcome,
-    });
-}
-
-/// Commits `outcome` with the [`halves`].
-pub fn respond_with_halves(call: Call, outcome: Result<Bytes, RpcStatus>) {
-    let (headers, trailers) = halves();
-    call.respond(UnaryReply {
-        headers,
-        trailers,
-        outcome,
-    });
-}
-
-/// Replies with the request message.
-pub fn echo(call: Call) {
-    let message = call.message().clone();
-    respond(call, Ok(message));
-}
-
-/// A server on its own plugin thread.
-pub struct Running {
-    running: Option<rapira_sapi::plugin::Running>,
-    /// Where the server listens; a `:0` bind is resolved.
-    pub listen: ListenAddr,
-}
-
-impl Running {
-    /// Stops the server and joins it. The join runs off the test runtime, so the clients on it keep running through the drain.
-    pub async fn shutdown(&mut self) -> anyhow::Result<()> {
-        let running = self.running.take().expect("shut down once");
-        running.stop();
-        tokio::task::spawn_blocking(move || running.join()).await?
-    }
-}
-
-/// Binds and starts the server with a drain grace of 5 seconds. The receiver plays PHP: the test pulls each call and answers it. A dropped receiver refuses every call.
-pub fn start(config: Config) -> (Running, mpsc::Receiver<Call>) {
-    start_with_drain_grace(config, Duration::from_secs(5))
-}
-
-/// [`start`] with `drain_grace` as the bound of the plugin's drain.
-pub fn start_with_drain_grace(
-    config: Config,
-    drain_grace: Duration,
-) -> (Running, mpsc::Receiver<Call>) {
-    let (intake, calls) = Intake::<Call>::channel(16);
-    let listen = config.listen.clone();
-    // Past the drain grace, so a drain error surfaces from serve.
-    let grace = drain_grace + Duration::from_secs(5);
-    let mut server = Server::with_intake(config, intake);
-    let mut ctx = PrepareCtx::new();
-    server.prepare(&mut ctx).expect("bind");
-    let listen = match listen {
-        ListenAddr::Tcp(_) => ListenAddr::Tcp(tcp_addr(&ctx, 0)),
-        unix => unix,
-    };
-    // The context holds a dup of the listener. From here on only the server keeps the socket open.
-    drop(ctx);
-    // The server submits to the injected intake, so nothing reads this sink.
-    let (sink, _) = Sink::channel(1);
-    let running =
-        run_plugin(Box::new(server), sink, grace, drain_grace).expect("start the plugin thread");
-    let running = Running {
-        running: Some(running),
-        listen,
-    };
-    (running, calls)
 }
 
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}

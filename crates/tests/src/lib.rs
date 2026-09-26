@@ -1,26 +1,11 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
-use rapira_grpc::{Call, RpcProtocol, UnaryCall, UnaryReply};
-use rapira_http::Exchange;
-use rapira_sapi::plugin::PhpPart;
-use rapira_sapi::work::{Intake, Refused, Sink};
-use rapira_sapi::{Addr, Frame, Mode, Rapira, Request};
-use serde_json::Value;
-use std::collections::HashMap;
-use std::env::set_var;
+use rapira_sapi::{Addr, Frame, Request};
 use std::path::{Path, PathBuf};
-use std::sync::{self, Mutex, Once, OnceLock, PoisonError};
-use tokio::sync::{mpsc, oneshot};
+use tokio::sync::mpsc;
 
 pub mod grpc;
 pub mod server_log;
 pub mod wire;
-
-/// Every test boot registers both parts, as the root does.
-pub static PHP_PARTS: [PhpPart; 2] = [rapira_http::PHP_PART, rapira_grpc::PHP_PART];
-
-static PHP_LOCK: Mutex<()> = Mutex::new(());
-static PHP_ENV: Once = Once::new();
-static PHP_LOCK_ASYNC: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
 
 /// Absolute path to a PHP fixture shipped with this crate (robust to the test's cwd).
 pub fn fixture(name: &str) -> PathBuf {
@@ -37,95 +22,6 @@ pub fn fields(lines: Fields) -> HeaderMap {
         .iter()
         .map(|&(k, v)| (HeaderName::from_static(k), HeaderValue::from_static(v)))
         .collect()
-}
-
-pub fn php_lock() -> sync::MutexGuard<'static, ()> {
-    init_php_env();
-    PHP_LOCK.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-pub fn set_phprc(_php: &sync::MutexGuard<'static, ()>, ini: &Path) {
-    // SAFETY: PHP_LOCK is held while `_php` lives, so nothing reads the environment concurrently.
-    unsafe { set_var("PHPRC", ini) };
-}
-
-/// `php_lock()` plus a PHPRC override for this whole test binary.
-pub fn php_lock_with_ini(ini: &Path) -> sync::MutexGuard<'static, ()> {
-    let guard = php_lock();
-    set_phprc(&guard, ini);
-    guard
-}
-
-/// One resident worker serves every request; `ini` overrides PHPRC for this whole test binary, like [`php_lock_with_ini`].
-pub fn run_worker(
-    name: &str,
-    uris: &[&str],
-    ini: Option<&Path>,
-) -> anyhow::Result<Vec<(u16, String)>> {
-    let guard = php_lock();
-    if let Some(ini) = ini {
-        set_phprc(&guard, ini);
-    }
-    let r = Rapira::start(&PHP_PARTS, Mode::Worker, fixture(name), None)?;
-    let h = r.sink();
-    let mut out = Vec::with_capacity(uris.len());
-    for uri in uris {
-        out.push(drain(submit(&h, req(uri))?));
-    }
-    drop(h);
-    drop(r);
-    Ok(out)
-}
-
-fn runtime() -> &'static tokio::runtime::Runtime {
-    static RT: OnceLock<tokio::runtime::Runtime> = OnceLock::new();
-    RT.get_or_init(|| {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_time()
-            .build()
-            .expect("tokio runtime")
-    })
-}
-
-/// Submits `req` through the async intake of `h` and blocks until the exchange is queued.
-pub fn submit(h: &Sink, req: Request) -> Result<mpsc::Receiver<Frame>, Refused> {
-    runtime().block_on(submit_async(h, req))
-}
-
-/// Submits `req` through the async intake of `h`. The exchange carries the CGI view in every mode: dispatcher mode drops it at attach.
-pub async fn submit_async(h: &Sink, req: Request) -> Result<mpsc::Receiver<Frame>, Refused> {
-    let (exchange, rx) = Exchange::new(req, true);
-    Intake::new(h.clone()).submit(exchange).await?;
-    Ok(rx)
-}
-
-/// A unary call to `rapira.test.v1.EchoService/Echo` from a gRPC client on 127.0.0.1, with `message` as the request bytes.
-pub fn grpc_request(message: &str) -> UnaryCall {
-    UnaryCall {
-        method: "rapira.test.v1.EchoService/Echo".into(),
-        protocol: RpcProtocol::Grpc,
-        metadata: HeaderMap::new(),
-        deadline: None,
-        remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
-        message: message.as_bytes().to_vec().into(),
-    }
-}
-
-/// Submits `req` through the async intake of `h` and blocks until the call is queued.
-pub fn call(h: &Sink, req: UnaryCall) -> Result<oneshot::Receiver<UnaryReply>, Refused> {
-    let (call, rx) = Call::new(req);
-    runtime().block_on(Intake::new(h.clone()).submit(call))?;
-    Ok(rx)
-}
-
-/// Waits at most 10 s for the outcome of a call. None means that the call was lost: PHP dropped it unfinalized.
-pub fn outcome(rx: oneshot::Receiver<UnaryReply>) -> Option<UnaryReply> {
-    runtime().block_on(async {
-        tokio::time::timeout(std::time::Duration::from_secs(10), rx)
-            .await
-            .expect("no outcome within 10 s")
-            .ok()
-    })
 }
 
 /// Panics when RAPIRA_REQUIRE_EXTS names an extension this fixture covers: a skip where CI installs the extension is a broken install.
@@ -166,17 +62,6 @@ pub fn req(uri: &str) -> Request {
 /// The FileDescriptorSet of `fixtures/grpc/echo.proto`.
 pub fn echo_descriptor_set() -> PathBuf {
     fixture("grpc/echo.binpb")
-}
-
-/// Boots a gRPC dispatcher worker on `script` that serves the services of `fixtures/grpc/echo.proto`.
-pub fn start_grpc(script: PathBuf) -> anyhow::Result<Rapira> {
-    rapira_grpc::set_services(grpc::schema().services().to_vec())?;
-    Rapira::start(
-        &PHP_PARTS,
-        Mode::Dispatcher,
-        script,
-        Some(rapira_grpc::DISPATCHER_CLASSES),
-    )
 }
 
 /// A response stream collected to its `End` (or to the producer dying).
@@ -318,11 +203,6 @@ pub fn drain(rx: mpsc::Receiver<Frame>) -> (u16, String) {
     (r.status(), r.body_string())
 }
 
-pub async fn php_lock_async() -> tokio::sync::MutexGuard<'static, ()> {
-    init_php_env();
-    PHP_LOCK_ASYNC.lock().await
-}
-
 pub async fn drain_resp_async(mut rx: mpsc::Receiver<Frame>) -> Resp {
     let mut resp = Resp::default();
     while let Some(frame) = rx.recv().await {
@@ -336,238 +216,6 @@ pub async fn drain_resp_async(mut rx: mpsc::Receiver<Frame>) -> Resp {
 pub async fn drain_async(rx: mpsc::Receiver<Frame>) -> (u16, String) {
     let r = drain_resp_async(rx).await;
     (r.status(), r.body_string())
-}
-
-/// Sets PHPRC once, before any `Rapira::start`: https://www.php.net/manual/en/configuration.file.php
-fn init_php_env() {
-    PHP_ENV.call_once(|| {
-        // SAFETY: the Once runs this exactly once, before any Rapira::start / php_module_startup.
-        unsafe {
-            set_var(
-                "PHPRC",
-                concat!(env!("CARGO_MANIFEST_DIR"), "/fixtures/ini/shared/php.ini"),
-            );
-        }
-    });
-}
-
-/// One captured record. PHP diagnostics are asserted on level and target, not just text.
-#[derive(Debug)]
-pub struct Captured {
-    pub level: tracing::Level,
-    pub target: String,
-    pub message: String,
-    /// The `context` field, empty when the record carries none; Rapira\log() puts its JSON-encoded context array here.
-    pub context: String,
-}
-
-static LOG_CAPTURE: Mutex<Vec<Captured>> = Mutex::new(Vec::new());
-
-/// The captured records; the lock is poison-recovered so one failing assertion cannot make every later test in the binary die on `PoisonError`.
-pub fn captured() -> sync::MutexGuard<'static, Vec<Captured>> {
-    LOG_CAPTURE.lock().unwrap_or_else(PoisonError::into_inner)
-}
-
-/// Collects the `message` and `context` fields; other fields are ignored.
-#[derive(Default)]
-struct Msg {
-    message: String,
-    context: String,
-}
-
-impl Msg {
-    fn slot(&mut self, name: &str) -> Option<&mut String> {
-        match name {
-            "message" => Some(&mut self.message),
-            "context" => Some(&mut self.context),
-            _ => None,
-        }
-    }
-}
-
-impl tracing::field::Visit for Msg {
-    fn record_str(&mut self, f: &tracing::field::Field, v: &str) {
-        if let Some(slot) = self.slot(f.name()) {
-            *slot = v.to_owned();
-        }
-    }
-    // A `%value` field lands here: tracing wraps Display in a format_args! whose Debug forwards to it.
-    fn record_debug(&mut self, f: &tracing::field::Field, v: &dyn std::fmt::Debug) {
-        if let Some(slot) = self.slot(f.name()) {
-            *slot = format!("{v:?}");
-        }
-    }
-}
-
-struct CaptureLayer;
-
-impl<S: tracing::Subscriber> tracing_subscriber::layer::Layer<S> for CaptureLayer {
-    fn on_event(&self, event: &tracing::Event<'_>, _: tracing_subscriber::layer::Context<'_, S>) {
-        let meta = event.metadata();
-        let mut msg = Msg::default();
-        event.record(&mut msg);
-        captured().push(Captured {
-            level: *meta.level(),
-            target: meta.target().to_owned(),
-            message: msg.message,
-            context: msg.context,
-        });
-    }
-}
-
-/// One `app`-target record left by `\Rapira\log()`: level, message, context JSON.
-pub type AppRecord = (tracing::Level, String, String);
-
-/// Runs `script` in classic mode and returns its `app`-target records and its `php`-target messages, both read under the PHP lock; the fixture must echo `logged` last, so a script that died half way cannot masquerade as one that logged nothing.
-pub fn app_records(script: &str) -> (Vec<AppRecord>, Vec<String>) {
-    let _guard = php_lock();
-    init_log_capture();
-    captured().clear();
-
-    let r = Rapira::start(&PHP_PARTS, Mode::Classic, fixture(script), None).expect("classic boot");
-    let h = r.sink();
-    let (status, body) = drain(submit(&h, req("/")).expect("dispatch"));
-    drop(h);
-    drop(r);
-
-    assert_eq!(status, 200, "{script} must run clean (body: {body:?})");
-    assert!(body.contains("logged"), "{script} ran to the end: {body:?}");
-
-    let all = captured();
-    let app = all
-        .iter()
-        .filter(|c| c.target == "app")
-        .map(|c| (c.level, c.message.clone(), c.context.clone()))
-        .collect();
-    let php = all
-        .iter()
-        .filter(|c| c.target == "php")
-        .map(|c| c.message.clone())
-        .collect();
-    (app, php)
-}
-
-/// The one `app` record `script` must leave; asserting the count fails the test on a stray extra record instead of ignoring it.
-pub fn app_record(script: &str) -> AppRecord {
-    let (records, _) = app_records(script);
-    assert_eq!(
-        records.len(),
-        1,
-        "{script} must log exactly one app record (got {records:?})"
-    );
-    records.into_iter().next().expect("checked above")
-}
-
-/// Polls the captured records until an `app` record with `message` appears, for at most 10 s; returns its context.
-pub fn wait_app_record(message: &str) -> String {
-    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
-    loop {
-        if let Some(ctx) = captured()
-            .iter()
-            .find(|c| c.target == "app" && c.message == message)
-            .map(|c| c.context.clone())
-        {
-            return ctx;
-        }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "no {message:?} app record within 10s"
-        );
-        std::thread::sleep(std::time::Duration::from_millis(20));
-    }
-}
-
-/// Boots a worker with `boot`, runs it to its end and returns the context of its one `dispatcher` app record. The caller holds the PHP lock.
-pub fn dispatcher_record(boot: impl FnOnce() -> anyhow::Result<Rapira>) -> anyhow::Result<Value> {
-    init_log_capture();
-    captured().clear();
-
-    let r = boot()?;
-    drop(r);
-
-    let all = captured();
-    let records: Vec<&str> = all
-        .iter()
-        .filter(|c| c.target == "app" && c.message == "dispatcher")
-        .map(|c| c.context.as_str())
-        .collect();
-    let php: Vec<&str> = all
-        .iter()
-        .filter(|c| c.target == "php")
-        .map(|c| c.message.as_str())
-        .collect();
-    assert_eq!(
-        records.len(),
-        1,
-        "one dispatcher record (got {records:?}, php: {php:?})"
-    );
-    Ok(serde_json::from_str(records[0])?)
-}
-
-/// The `result` field of a record's context as text; a JSON string stays bare.
-fn result_text(ctx: &Value) -> String {
-    match &ctx["result"] {
-        Value::String(s) => s.clone(),
-        other => other.to_string(),
-    }
-}
-
-/// The `result` field of each app record named `message`, in log order.
-pub fn app_results(message: &str) -> Vec<String> {
-    captured()
-        .iter()
-        .filter(|c| c.target == "app" && c.message == message)
-        .filter_map(|c| serde_json::from_str::<Value>(&c.context).ok())
-        .map(|ctx| result_text(&ctx))
-        .collect()
-}
-
-/// A fixture that probes one case at a time logs `case {name, result}`; this is name to result.
-pub fn case_results() -> HashMap<String, String> {
-    captured()
-        .iter()
-        .filter(|c| c.target == "app" && c.message == "case")
-        .filter_map(|c| serde_json::from_str::<Value>(&c.context).ok())
-        .map(|ctx| {
-            let name = ctx["name"].as_str().unwrap_or_default().to_owned();
-            (name, result_text(&ctx))
-        })
-        .collect()
-}
-
-/// One `case` record per (name, expected result) row, and no stray one; every mismatch is listed at once.
-pub fn assert_case_records(cases: &[(&str, &str)]) {
-    let records = captured()
-        .iter()
-        .filter(|c| c.target == "app" && c.message == "case")
-        .count();
-    let results = case_results();
-    assert_eq!(
-        records,
-        cases.len(),
-        "one record per case (got {results:?})"
-    );
-    let mismatches: Vec<String> = cases
-        .iter()
-        .filter(|(name, expected)| results.get(*name).map(String::as_str) != Some(*expected))
-        .map(|(name, expected)| {
-            format!(
-                "{name}: expected {expected:?}, got {:?}",
-                results.get(*name)
-            )
-        })
-        .collect();
-    assert!(mismatches.is_empty(), "{mismatches:#?}");
-}
-
-/// Installs the capturing subscriber once, unfiltered, so even trace-level records reach `LOG_CAPTURE`.
-pub fn init_log_capture() {
-    static ONCE: Once = Once::new();
-    ONCE.call_once(|| {
-        use tracing_subscriber::layer::SubscriberExt;
-        use tracing_subscriber::util::SubscriberInitExt;
-        let _ = tracing_subscriber::registry().with(CaptureLayer).try_init();
-    });
 }
 
 #[cfg(test)]
@@ -639,22 +287,5 @@ mod tests {
         assert_eq!(r.status(), 200);
         assert_eq!(r.head.unwrap().headers, fields(&[("x-a", "1")]));
         assert_eq!(r.body, b"one,two");
-    }
-
-    /// A repeated name is a stray record, even when it repeats the expected result.
-    #[test]
-    #[should_panic(expected = "one record per case")]
-    fn case_records_reject_a_repeated_name() {
-        let record = || Captured {
-            level: tracing::Level::INFO,
-            target: "app".to_owned(),
-            message: "case".to_owned(),
-            context: r#"{"name":"a","result":"ok"}"#.to_owned(),
-        };
-        let mut records = captured();
-        records.clear();
-        records.extend([record(), record()]);
-        drop(records);
-        assert_case_records(&[("a", "ok")]);
     }
 }
