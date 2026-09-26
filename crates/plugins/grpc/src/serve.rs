@@ -14,17 +14,14 @@ use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
-use tower::Layer;
-use tower::util::{Either, MapResponse};
+use tower::util::MapResponse;
 
 use crate::dispatch::PhpDispatcher;
-use crate::interceptor::Service;
-use crate::{Call, Config, Interceptor, Prepared};
+use crate::{Call, Config, Prepared};
 
 /// Everything the accept loop hands to a connection, and the drain that follows it.
 struct Serving {
     service: ConnectRpcService<Chain<Router, PhpDispatcher>>,
-    interceptors: Vec<Interceptor>,
     connection: ConnectionConfig,
     health: Arc<StaticChecker>,
     /// Each connection holds a receiver until it ends, so `closed()` resolves when the last connection is gone.
@@ -57,7 +54,6 @@ impl Serving {
             .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
         Self {
             service,
-            interceptors: config.interceptors.clone(),
             connection: ConnectionConfig::new()
                 .with_http2_keepalive_interval(config.keepalive_interval)
                 .with_http2_keepalive_timeout(config.keepalive_timeout),
@@ -72,13 +68,7 @@ impl Serving {
     {
         let open = self.shutdown.subscribe();
         let mut stop = open.clone();
-        let base = MapResponse::new(self.service.clone(), status_in_trailers);
-        // Without interceptors, the connection serves the connectrpc service unboxed.
-        let service = if self.interceptors.is_empty() {
-            Either::Left(base)
-        } else {
-            Either::Right(intercept(Service::new(base), &self.interceptors))
-        };
+        let service = MapResponse::new(self.service.clone(), status_in_trailers);
         let connection = serve_connection(io, info, service, self.connection.clone(), async move {
             let _ = stop.wait_for(|stop| *stop).await;
         });
@@ -129,14 +119,6 @@ impl Serve for Serving {
     }
 }
 
-/// Wraps `service` in `interceptors`, the first listed outermost.
-fn intercept<S>(service: S, interceptors: &[impl Layer<S, Service = S>]) -> S {
-    interceptors
-        .iter()
-        .rev()
-        .fold(service, |inner, interceptor| interceptor.layer(inner))
-}
-
 /// A gRPC error carries its whole status in the trailers. connectrpc also copies the code and the message into the head, and a client that takes the status from the head, such as tonic, then drops the details and the trailers: https://github.com/connectrpc/connect-rust/issues/286. Only that copy puts these fields in a head, because PHP cannot set a `grpc-` field.
 fn status_in_trailers(
     mut response: http::Response<ConnectRpcBody>,
@@ -160,61 +142,4 @@ pub(crate) fn serve(
     worker
         .handle
         .block_on(serving.drain(fatal, worker.drain_grace))
-}
-
-#[cfg(test)]
-mod tests {
-    use std::convert::Infallible;
-
-    use tower::ServiceExt;
-    use tower::layer::layer_fn;
-    use tower::service_fn;
-    use tower::util::{BoxCloneService, BoxCloneServiceLayer};
-
-    use super::intercept;
-
-    type Service = BoxCloneService<http::Request<()>, http::Response<()>, Infallible>;
-    type Layer = BoxCloneServiceLayer<Service, http::Request<()>, http::Response<()>, Infallible>;
-
-    /// Appends `{name}-in` to the request and `{name}-out` to the response.
-    fn tag(name: &'static str) -> Layer {
-        Layer::new(layer_fn(move |inner: Service| {
-            service_fn(move |mut req: http::Request<()>| {
-                req.headers_mut()
-                    .append("x-trace", format!("{name}-in").parse().unwrap());
-                let inner = inner.clone();
-                async move {
-                    let mut res = inner.oneshot(req).await?;
-                    res.headers_mut()
-                        .append("x-trace", format!("{name}-out").parse().unwrap());
-                    Ok(res)
-                }
-            })
-        }))
-    }
-
-    /// Answers with the `x-trace` values of the request.
-    fn echo() -> Service {
-        Service::new(service_fn(|req: http::Request<()>| async move {
-            let mut res = http::Response::new(());
-            for v in req.headers().get_all("x-trace") {
-                res.headers_mut().append("x-trace", v.clone());
-            }
-            Ok(res)
-        }))
-    }
-
-    /// `Serving::spawn` wraps the connectrpc service with this fold.
-    #[tokio::test(flavor = "current_thread")]
-    async fn interceptors_wrap_the_service_outermost_first() {
-        let service = intercept(echo(), &[tag("a"), tag("b")]);
-        let res = service.oneshot(http::Request::new(())).await.unwrap();
-        let trace: Vec<&str> = res
-            .headers()
-            .get_all("x-trace")
-            .iter()
-            .map(|v| v.to_str().unwrap())
-            .collect();
-        assert_eq!(trace, ["a-in", "b-in", "b-out", "a-out"]);
-    }
 }

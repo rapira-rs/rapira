@@ -10,7 +10,7 @@ use rapira_config::{
 };
 use serde::Deserialize;
 
-use crate::{Config, Interceptor, Schema, Server};
+use crate::{Config, Schema, Server};
 
 /// The `[grpc]` table.
 #[derive(Debug, Deserialize)]
@@ -22,8 +22,6 @@ pub struct Section {
     pub reflection: Option<bool>,
     pub default_timeout_secs: Option<u64>,
     pub max_timeout_secs: Option<u64>,
-    #[serde(default)]
-    pub interceptors: Vec<String>,
     #[serde(default)]
     pub pool: PoolSection,
 }
@@ -39,8 +37,6 @@ pub struct Settings {
     pub default_timeout: Option<Duration>,
     /// Upper bound on the deadline a client asks for.
     pub max_timeout: Option<Duration>,
-    /// `[grpc].interceptors` in list order.
-    pub interceptors: Vec<Interceptor>,
     pub pool: PoolSettings,
 }
 
@@ -53,11 +49,6 @@ pub fn resolve(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
 
 /// The settings of `section`. Reads no file.
 fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
-    // No interceptor ships, so every name is unknown.
-    if let Some(name) = section.interceptors.first() {
-        bail!("grpc.interceptors: unknown interceptor \"{name}\"");
-    }
-
     let listen = parse_listen(
         "grpc",
         section.listen.as_deref(),
@@ -94,7 +85,6 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
         reflection: section.reflection.unwrap_or(false),
         default_timeout,
         max_timeout,
-        interceptors: Vec::new(),
         pool,
     })
 }
@@ -119,7 +109,6 @@ impl Server {
             max_timeout: settings.max_timeout,
             keepalive_interval: Duration::from_secs(10),
             keepalive_timeout: Duration::from_secs(10),
-            interceptors: settings.interceptors,
         }))
     }
 }
@@ -284,12 +273,5 @@ mod tests {
                 (got, _) => panic!("{}: unexpected {got:?}", case.name),
             }
         }
-    }
-
-    #[test]
-    fn any_interceptor_name_fails_the_boot_because_none_ships() {
-        let section: Section = toml::from_str("interceptors = [\"auth\"]\ndescriptor_set = \"echo.binpb\"\n[pool]\nentrypoint = \"w.php\"").unwrap();
-        let err = resolve(section, &ctx()).unwrap_err().to_string();
-        assert_eq!(err, "grpc.interceptors: unknown interceptor \"auth\"");
     }
 }

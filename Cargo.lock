@@ -942,7 +942,6 @@ dependencies = [
  "connectrpc-health",
  "connectrpc-reflection",
  "http",
- "hyper",
  "rapira_config",
  "rapira_net",
  "rapira_php_build",

@@ -69,7 +69,7 @@ C sources (`*.c`, `*.h` under `crates/`) follow `.clang-format`.
 
 - A dispatcher plugin owns a pool and turns each request into a work unit that PHP pulls with `receive()`: the http plugin makes a `Rapira\Http\Exchange`, the grpc plugin makes a `Rapira\Grpc\UnaryCall`.
 - A plugin without a pool, such as a KV client, has no support, and the contract lists its PHP acquisition path as open.
-- A middleware (http) or an interceptor (grpc) is a tower layer that one plugin applies around its inner service in config order. It never touches PHP.
+- A middleware is a tower layer that the http plugin applies around its inner service in config order. It never touches PHP.
 
 A plugin is one crate under `crates/plugins` that implements `rapira_sapi::plugin::Plugin`. It owns its config table, its PHP stub, its C method shells, the Rust behind those methods, its work unit and its transport. The two plugin READMEs describe the crate layout.
 

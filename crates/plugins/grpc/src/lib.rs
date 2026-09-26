@@ -12,13 +12,11 @@ use rapira_sapi::work::Intake;
 mod call;
 pub mod config;
 mod dispatch;
-pub mod interceptor;
 mod php;
 mod schema;
 mod serve;
 
 use call::{Call, RpcProtocol, RpcStatus, UnaryCall, UnaryReply};
-pub use interceptor::Interceptor;
 pub use php::PHP_PART;
 use schema::{MethodInfo, Schema, set_services};
 
@@ -35,8 +33,6 @@ pub(crate) struct Config {
     /// HTTP/2 PING cadence and the wait for its ACK. A peer that is gone without a FIN sends no ACK, so its connection closes within the sum and does not hold a later drain.
     pub keepalive_interval: Duration,
     pub keepalive_timeout: Duration,
-    /// `[grpc].interceptors` in config order, the first listed outermost.
-    pub interceptors: Vec<Interceptor>,
 }
 
 pub struct Server {

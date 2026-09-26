@@ -32,8 +32,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `rapira_grpc.c`: the other method shells: the value classes, `name()` and `getServices()` of the dispatcher, the call and the response metadata.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, and `Server::from_settings`, which loads the descriptor set.
-- `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, the interceptor chain, and the drain.
-- `src/interceptor.rs`: the chain types `Request`, `Response`, `Service` and `Interceptor`.
+- `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
 - `src/call.rs`: the `Call` unit and its `Work` impl, and the `UnaryCall`, `UnaryReply` and `RpcStatus` types.
@@ -54,15 +53,9 @@ connect-rust handles the framing, the compression, the timeout headers and the e
 - A method with `option idempotency_level = NO_SIDE_EFFECTS;` also accepts a Connect GET request. A GET to any other method answers 405.
 - Messages can use gzip compression. A request with a different message encoding answers UNIMPLEMENTED.
 
-## Interceptors
+## Remote address
 
-`[grpc].interceptors` lists the interceptor names in chain order. The plugin applies the chain around the connect-rust service of each connection, the first listed outermost. The chain sees each request of the connection: health, reflection and the PHP methods. Without interceptors, the connection serves the connect-rust service directly.
-
-An interceptor is `interceptor::Interceptor`: a `tower::util::BoxCloneServiceLayer` over `http::Request<hyper::body::Incoming>` and `http::Response<ConnectRpcBody>`, with the error type `Infallible`. An interceptor answers a request itself or calls the inner service.
-
-The remote address is in the request extensions as `rapira_sapi::Addr`. PHP gets it as `Context::$remote`. An interceptor can replace it.
-
-No interceptor ships, so each name in the list fails the boot. To add an interceptor, match its name in `settings` in `src/config.rs` and push its layer to `Settings::interceptors`.
+The remote address is in the request extensions as `rapira_sapi::Addr`. PHP gets it as `Context::$remote`.
 
 ## Schemas
 
@@ -158,14 +151,9 @@ The `[grpc]` table. Unknown keys fail the boot.
 - `reflection`: serve server reflection. Default `false`.
 - `default_timeout_secs`: the timeout of a call that has none. Default: unset, no deadline.
 - `max_timeout_secs`: the upper limit for a client timeout. Default: unset, no limit. `default_timeout_secs` must not be larger.
-- `interceptors`: the interceptor names in chain order, the first listed outermost. Default: none.
 - `[grpc.pool]`: the worker pool. It takes the keys of `[http.pool]`, and its `mode` must be `"dispatcher"`.
 
 The drain window is not a key of this table. It is `[supervisor].process_control_timeout_secs` minus 5 seconds, or minus half of it when it is below 10 seconds. The drain therefore ends before the master sends SIGTERM. The HTTP/2 keepalive interval and its timeout are 10 seconds each, and no key changes them.
-
-Each name in the interceptor list fails the boot with exit code 1:
-
-- `grpc.interceptors: unknown interceptor "<name>"`
 
 ## Build
 
