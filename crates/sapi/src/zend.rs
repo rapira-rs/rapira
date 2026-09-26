@@ -2,10 +2,10 @@ use std::ffi::{CStr, c_char};
 
 use crate::{
     IS_DOUBLE, IS_LONG, IS_NULL, IS_PROP_REINITABLE, IS_PROP_UNINIT, IS_REFERENCE, IS_UNDEF,
-    rapira_cg, rapira_eg, rapira_zval_stringl, zend_class_entry, zend_object, zend_property_info,
-    zend_string, zend_throw_error, zend_throw_exception, zend_update_property,
-    zend_update_property_double, zend_update_property_long, zend_update_property_null,
-    zend_update_property_stringl, zend_value_error, zval,
+    rapira_eg, rapira_zval_stringl, zend_class_entry, zend_object, zend_property_info, zend_string,
+    zend_throw_error, zend_throw_exception, zend_update_property, zend_update_property_double,
+    zend_update_property_long, zend_update_property_null, zend_update_property_stringl,
+    zend_value_error, zval,
 };
 
 pub fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
@@ -271,39 +271,5 @@ pub unsafe fn throw_value_error(msg: &CStr) {
 pub unsafe fn throw_exception(ce: *mut zend_class_entry, msg: &CStr) {
     unsafe {
         zend_throw_exception(ce, msg.as_ptr(), 0);
-    }
-}
-
-/// The class entry of `name`, given without the leading backslash, or null.
-/// # Safety
-/// As `class_exists`.
-unsafe fn find_class(name: &str) -> *mut zend_class_entry {
-    let key = name.to_ascii_lowercase();
-    // CG(class_table): EG(class_table) is set only when a request starts (init_executor), so the master has none.
-    unsafe {
-        let zv =
-            crate::zend_hash_str_find((*rapira_cg()).class_table, key.as_ptr().cast(), key.len());
-        if zv.is_null() {
-            std::ptr::null_mut()
-        } else {
-            (*zv).value.ptr.cast()
-        }
-    }
-}
-
-/// Whether the class table holds `name`, given without the leading backslash.
-/// # Safety
-/// Call it between `boot_master` and the drop of the module it returned: CG(class_table) is live only in that window.
-pub unsafe fn class_exists(name: &str) -> bool {
-    unsafe { !find_class(name).is_null() }
-}
-
-/// Whether `child` is `parent`, extends it or implements it. False when either class is missing.
-/// # Safety
-/// As `class_exists`.
-pub unsafe fn class_extends(child: &str, parent: &str) -> bool {
-    unsafe {
-        let (child, parent) = (find_class(child), find_class(parent));
-        !child.is_null() && !parent.is_null() && instanceof(child, parent)
     }
 }

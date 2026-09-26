@@ -41,7 +41,7 @@ bind! {
     rapira_symtable_str_find,
     // ZVAL_OBJ_COPY is a macro -> rapira_zval_enum_case shim in wrapper.c
     rapira_zval_enum_case,
-    // zend_hash_str_find_ptr is inline; class_exists (zend.rs) calls its exported half
+    // zend_hash_str_find_ptr is inline; prop_offset (zend.rs) calls its exported half
     zend_hash_str_find,
     // $_SERVER registration: ZVAL_STRINGL_FAST is a macro -> rapira_register_known_stringl shim in wrapper.c
     rapira_register_known_stringl, zend_hash_extend,

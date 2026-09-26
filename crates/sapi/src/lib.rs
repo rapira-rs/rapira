@@ -25,7 +25,6 @@ pub use plugin::Mode;
 pub use quota::WorkerHooks;
 pub use start::{PhpModule, Rapira, boot_master};
 pub use types::{Addr, ClientCert, Frame, Request, ResponseHead, Tls};
-pub use zend::{class_exists, class_extends};
 
 // bindgen names the Zend SUCCESS/FAILURE constants differently across php-src versions, so the values are hardcoded.
 pub const SUCCESS: c_int = 0;
