@@ -1,7 +1,15 @@
-use tests::{assert_skip_allowed, run_worker};
+use rapira_sapi::Mode;
+use tests::wire::submit;
+use tests::{assert_skip_allowed, drain, fixture, req};
 
+use crate::harness::Spawn;
+
+/// One worker process serves every uri in order.
 fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
-    run_worker(name, uris, None)
+    let srv = Spawn::http(Mode::Worker, fixture(name)).spawn();
+    uris.iter()
+        .map(|uri| Ok(drain(submit(srv.addr, req(uri))?)))
+        .collect()
 }
 
 fn success(name: &str, token: &str) -> anyhow::Result<()> {
@@ -235,7 +243,7 @@ fn opcache_success() -> anyhow::Result<()> {
 /// ext/openssl has no RINIT or RSHUTDOWN (openssl.c), in php-fpm and in rapira alike, so an undrained error in the persistent ring outlives its request.
 #[test]
 fn openssl_error_ring_outlives_the_request() -> anyhow::Result<()> {
-    // the first drain empties whatever earlier tests left on the process-global ring
+    // the first drain starts the test from an empty ring
     let out = run(
         "php_ext/openssl-worker.php",
         &[

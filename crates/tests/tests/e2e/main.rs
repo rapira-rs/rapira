@@ -12,6 +12,7 @@ mod ini;
 mod lifecycle;
 mod logging;
 mod mode;
+mod php_ext_tests;
 mod ported_tests;
 mod reload;
 mod scaling;
