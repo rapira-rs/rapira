@@ -37,7 +37,7 @@ make test   # runs test_nts, then test_e2e - sequentially on purpose
 - `make coverage` - needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
 - `make stubs` - maintainers only: regenerates each `*_arginfo.h` header under `crates/` from the `*.stub.php` stub next to it with PHP's `gen_stub.php`. Never edit the generated headers by hand.
 
-Test placement: a unit test that needs no fixture, no test double and no socket lives inside its crate. Every other test spawns the `rapira` binary and lives under `crates/tests/tests/e2e/` behind the `e2e` feature. The shared harness (the wire clients and the log readers) is in `crates/tests/src/`, and the fixtures are in `crates/tests/fixtures/` and `crates/tests/tests/e2e/fixtures/`.
+Test placement: unit tests live inside their crate and do not start PHP. Every test that needs PHP spawns the `rapira` binary and lives under `crates/tests/tests/e2e/` behind the `e2e` feature. The shared harness (the wire clients and the log readers) is in `crates/tests/src/`, and the fixtures are in `crates/tests/fixtures/` and `crates/tests/tests/e2e/fixtures/`.
 
 ## Lint and format
 
