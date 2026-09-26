@@ -1,8 +1,7 @@
-use extension_api::{Reply, ReplyEvent};
 use http::{HeaderMap, HeaderName, HeaderValue};
+use rapira_sapi::api::{Addr, Reply, RpcProtocol, UnaryCall, UnaryReply};
 use rapira_sapi::{
-    Frame, GrpcMethod, GrpcOutcome, GrpcProtocol, GrpcRequest, GrpcService, HandleError, Mode,
-    Rapira, RapiraHandle, Request,
+    Frame, GrpcMethod, GrpcService, HandleError, Mode, Rapira, RapiraHandle, Request,
 };
 use serde_json::Value;
 use std::collections::HashMap;
@@ -88,13 +87,13 @@ pub fn submit(h: &RapiraHandle, req: Request) -> Result<mpsc::Receiver<Frame>, H
 }
 
 /// A unary call to `rapira.test.v1.EchoService/Echo` from a gRPC client on 127.0.0.1, with `message` as the request bytes.
-pub fn grpc_request(message: &str) -> GrpcRequest {
-    GrpcRequest {
+pub fn grpc_request(message: &str) -> UnaryCall {
+    UnaryCall {
         method: "rapira.test.v1.EchoService/Echo".into(),
-        protocol: GrpcProtocol::Grpc,
+        protocol: RpcProtocol::Grpc,
         metadata: HeaderMap::new(),
         deadline: None,
-        remote: rapira_sapi::types::Addr::Inet(([127, 0, 0, 1], 50051).into()),
+        remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
         message: message.as_bytes().to_vec().into(),
     }
 }
@@ -102,13 +101,13 @@ pub fn grpc_request(message: &str) -> GrpcRequest {
 /// Submits `req` through the async intake of `h` and blocks until the call is queued.
 pub fn call(
     h: &RapiraHandle,
-    req: GrpcRequest,
-) -> Result<oneshot::Receiver<GrpcOutcome>, HandleError> {
+    req: UnaryCall,
+) -> Result<oneshot::Receiver<UnaryReply>, HandleError> {
     runtime().block_on(h.call(req))
 }
 
 /// Waits at most 10 s for the outcome of a call. None means that the call was lost: PHP dropped it unfinalized.
-pub fn outcome(rx: oneshot::Receiver<GrpcOutcome>) -> Option<GrpcOutcome> {
+pub fn outcome(rx: oneshot::Receiver<UnaryReply>) -> Option<UnaryReply> {
     runtime().block_on(async {
         tokio::time::timeout(std::time::Duration::from_secs(10), rx)
             .await
@@ -140,8 +139,8 @@ pub fn req(uri: &str, fixture_name: &str) -> Request {
         target: None,
         authority: None,
         protocol: "HTTP/1.1".into(),
-        remote: rapira_sapi::types::Addr::Inet(([127, 0, 0, 1], 8080).into()),
-        server: rapira_sapi::types::Addr::Inet(([127, 0, 0, 1], 8080).into()),
+        remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
+        server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server_name: "localhost".into(),
         server_port: 8080,
         headers: HeaderMap::new(),
@@ -271,27 +270,25 @@ pub async fn collect(mut reply: Reply) -> anyhow::Result<Response> {
     let mut end: Option<bool> = None;
     while let Some(ev) = reply.next().await {
         match ev {
-            ReplyEvent::Interim { .. } => {}
-            ReplyEvent::Head {
-                status, headers, ..
-            } => {
+            Frame::Interim(_) => {}
+            Frame::Head { head, .. } => {
                 response = Some(Response {
-                    status,
-                    headers,
+                    status: head.status,
+                    headers: head.headers,
                     body: Vec::new(),
                 });
             }
-            ReplyEvent::Chunk(b) => {
+            Frame::Chunk(b) => {
                 if let Some(r) = response.as_mut() {
                     r.body.extend_from_slice(&b);
                 }
             }
-            ReplyEvent::File { file, offset, len } => {
+            Frame::File { file, offset, len } => {
                 if let Some(r) = response.as_mut() {
                     r.body.extend_from_slice(&read_slice(&file, offset, len)?);
                 }
             }
-            ReplyEvent::End { truncated, .. } => {
+            Frame::End { truncated, .. } => {
                 end = Some(truncated);
                 break;
             }
@@ -609,34 +606,30 @@ pub fn init_log_capture() {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_api::ReplySource;
+    use rapira_sapi::ResponseHead;
 
-    struct VecSource(std::collections::VecDeque<ReplyEvent>);
-
-    impl ReplySource for VecSource {
-        fn poll_next(
-            &mut self,
-            _cx: &mut std::task::Context<'_>,
-        ) -> std::task::Poll<Option<ReplyEvent>> {
-            std::task::Poll::Ready(self.0.pop_front())
+    /// A reply that yields `events` and then closes.
+    fn reply(events: Vec<Frame>) -> Reply {
+        let (tx, rx) = mpsc::channel(events.len().max(1));
+        for ev in events {
+            tx.try_send(ev).unwrap();
         }
+        Reply::new(rx)
     }
 
-    fn reply(events: Vec<ReplyEvent>) -> Reply {
-        Reply::new(Box::new(VecSource(events.into())))
-    }
-
-    fn head() -> ReplyEvent {
-        ReplyEvent::Head {
-            status: 200,
-            headers: fields(&[("x-a", "1")]),
+    fn head() -> Frame {
+        Frame::Head {
+            head: ResponseHead {
+                status: 200,
+                headers: fields(&[("x-a", "1")]),
+            },
             content_length: None,
             bodiless: false,
         }
     }
 
-    fn end(truncated: bool) -> ReplyEvent {
-        ReplyEvent::End {
+    fn end(truncated: bool) -> Frame {
+        Frame::End {
             trailers: HeaderMap::new(),
             truncated,
         }
@@ -665,13 +658,13 @@ mod tests {
     #[tokio::test]
     async fn collect_concatenates_the_stream() {
         let r = collect(reply(vec![
-            ReplyEvent::Interim {
+            Frame::Interim(ResponseHead {
                 status: 103,
                 headers: HeaderMap::new(),
-            },
+            }),
             head(),
-            ReplyEvent::Chunk(b"one,"[..].into()),
-            ReplyEvent::Chunk(b"two"[..].into()),
+            Frame::Chunk(b"one,"[..].into()),
+            Frame::Chunk(b"two"[..].into()),
             end(false),
         ]))
         .await

@@ -1,5 +1,6 @@
 pub mod bindings;
 
+pub mod api;
 pub mod callbacks;
 pub mod classic_worker;
 pub mod context;
@@ -8,9 +9,12 @@ pub mod dispatcher;
 pub mod exchange;
 pub mod executor;
 pub mod handler;
+pub mod middleware;
 pub mod module;
+pub mod multipart;
 pub mod quota;
 pub mod rapira_worker;
+pub mod runtime;
 pub mod scoreboard;
 pub mod start;
 pub mod types;
@@ -25,10 +29,7 @@ pub use exchange::set_sendfile_root;
 pub use handler::{HandleError, RapiraHandle};
 pub use quota::WorkerHooks;
 pub use start::{PhpModule, Rapira};
-pub use types::{
-    Frame, GrpcMethod, GrpcOutcome, GrpcProtocol, GrpcRequest, GrpcService, GrpcStatus, Mode,
-    Request, ResponseHead,
-};
+pub use types::{Frame, GrpcMethod, GrpcService, Mode, Request, ResponseHead};
 
 // bindgen names the Zend SUCCESS/FAILURE constants differently across php-src versions, so the values are hardcoded.
 pub const SUCCESS: c_int = 0;

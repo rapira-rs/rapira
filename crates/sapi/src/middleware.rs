@@ -4,7 +4,7 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 
-use crate::Addr;
+use crate::api::Addr;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 pub type BoxFuture<'a, T> = Pin<Box<dyn Future<Output = T> + Send + 'a>>;

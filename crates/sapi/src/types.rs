@@ -1,3 +1,4 @@
+use crate::api::{Addr, RpcStatus, Tls, UnaryCall, UnaryReply};
 use bytes::Bytes;
 use http::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderName};
 use std::ffi::{CStr, CString};
@@ -117,6 +118,7 @@ pub enum Frame {
     File {
         file: std::fs::File,
         offset: u64,
+        /// Never zero: a producer does not emit an empty slice.
         len: u64,
     },
     End {
@@ -162,10 +164,10 @@ impl Unit {
                 job.ctx.finish(false);
             }
             Self::Grpc(job) => {
-                let _ = job.reply.send(GrpcOutcome {
+                let _ = job.reply.send(UnaryReply {
                     headers: HeaderMap::new(),
                     trailers: HeaderMap::new(),
-                    result: Err(GrpcStatus {
+                    outcome: Err(RpcStatus {
                         code: GRPC_UNAVAILABLE,
                         message: "the worker failed to boot".into(),
                         details: Vec::new(),
@@ -184,72 +186,11 @@ impl Unit {
     }
 }
 
-/// The protocol that the client of a gRPC call used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum GrpcProtocol {
-    Grpc,
-    GrpcWeb,
-    Connect,
-}
-
-/// One unary gRPC call for PHP.
-pub struct GrpcRequest {
-    /// The full method name, `package.Service/Method`.
-    pub method: String,
-    pub protocol: GrpcProtocol,
-    /// The request metadata as it arrived. PHP gets the application keys only, with `-bin` values decoded.
-    pub metadata: HeaderMap,
-    /// Unix timestamp after which the outcome is no longer wanted.
-    pub deadline: Option<f64>,
-    pub remote: Addr,
-    /// The binary protobuf encoding of the input message.
-    pub message: Bytes,
-}
-
-/// The one outcome of a unary call. The metadata is in wire form: `-bin` values are base64 without padding.
-#[derive(Debug, PartialEq)]
-pub struct GrpcOutcome {
-    pub headers: HeaderMap,
-    pub trailers: HeaderMap,
-    /// The output message, or the status the call failed with.
-    pub result: Result<Bytes, GrpcStatus>,
-}
-
-/// The `google.rpc.Status` triple. `details` holds `google.protobuf.Any` pairs: the type URL and the packed bytes.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct GrpcStatus {
-    pub code: u32,
-    pub message: String,
-    pub details: Vec<(String, Bytes)>,
-}
-
 pub(crate) struct GrpcJob {
-    pub(crate) req: GrpcRequest,
+    pub(crate) req: UnaryCall,
     /// Unix timestamp of the enqueue.
     pub(crate) received_at: f64,
-    pub(crate) reply: tokio::sync::oneshot::Sender<GrpcOutcome>,
-}
-
-/// Mirror of `extension_api::Addr`: rapira_sapi does not depend on extension_api, the runtime maps between them.
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Addr {
-    Inet(std::net::SocketAddr),
-    /// None is an unnamed endpoint, the usual case for a unix peer.
-    Unix(Option<PathBuf>),
-}
-
-pub struct ClientCertView {
-    pub serial: String,
-    pub organization: Option<String>,
-    pub fingerprint: String,
-}
-
-pub struct TlsView {
-    pub version: String,
-    pub cipher: String,
-    pub alpn: Option<String>,
-    pub server_name: Option<String>,
-    pub cert: Option<ClientCertView>,
+    pub(crate) reply: tokio::sync::oneshot::Sender<UnaryReply>,
 }
 
 /// `unlink` is the one remover: seal calls it at finalize, Drop is the abnormal-path net.
@@ -328,7 +269,7 @@ pub struct Request {
     pub body: Body,
     /// Unix seconds; None = not yet stamped.
     pub received_at: Option<f64>,
-    pub tls: Option<TlsView>,
+    pub tls: Option<Tls>,
 }
 
 pub struct ResponseHead {

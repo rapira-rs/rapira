@@ -1,6 +1,6 @@
-use extension_api::{Extension, Php, PrepareCtx};
+use crate::RapiraHandle;
+use crate::api::{Extension, Php, PrepareCtx};
 use http::header::CONTENT_TYPE;
-use rapira_sapi::RapiraHandle;
 use std::future::Future;
 use std::io::Cursor;
 use std::path::{Path, PathBuf};
@@ -11,7 +11,7 @@ use tokio::runtime::Runtime;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 
-pub mod multipart;
+use crate::multipart;
 
 type Outcome = std::result::Result<(), String>;
 type BoxFuture = Pin<Box<dyn Future<Output = Outcome> + Send>>;
@@ -133,33 +133,12 @@ struct RapiraBackend {
     uploads: Arc<multipart::Limits>,
 }
 
-fn map_addr(a: extension_api::Addr) -> rapira_sapi::types::Addr {
-    match a {
-        extension_api::Addr::Inet(sa) => rapira_sapi::types::Addr::Inet(sa),
-        extension_api::Addr::Unix(p) => rapira_sapi::types::Addr::Unix(p),
-    }
-}
-
-fn map_tls(t: extension_api::Tls) -> rapira_sapi::types::TlsView {
-    rapira_sapi::types::TlsView {
-        version: t.version,
-        cipher: t.cipher,
-        alpn: t.alpn,
-        server_name: t.server_name,
-        cert: t.cert.map(|c| rapira_sapi::types::ClientCertView {
-            serial: c.serial,
-            organization: c.organization,
-            fingerprint: c.fingerprint,
-        }),
-    }
-}
-
 /// A refusal before dispatch: PHP never saw the work.
-fn refused(e: rapira_sapi::HandleError) -> anyhow::Error {
-    anyhow::Error::new(extension_api::Rejected {
+fn refused(e: crate::HandleError) -> anyhow::Error {
+    anyhow::Error::new(crate::api::Rejected {
         status: match e {
-            rapira_sapi::HandleError::Saturated => 503,
-            rapira_sapi::HandleError::Stopped => 500,
+            crate::HandleError::Saturated => 503,
+            crate::HandleError::Stopped => 500,
         },
         reason: e.to_string(),
     })
@@ -174,7 +153,7 @@ fn parse_err(e: multipart::ParseError) -> anyhow::Error {
 
 impl RapiraBackend {
     fn new(rapira: RapiraHandle, filename: &Path, opts: RuntimeOptions) -> Self {
-        rapira_sapi::set_script(filename);
+        crate::set_script(filename);
         Self {
             rapira,
             uploads: opts.uploads,
@@ -182,10 +161,7 @@ impl RapiraBackend {
     }
 
     /// Multipart parses here, pre-enqueue: a rejected body never reaches the pending/active counters.
-    async fn to_request(
-        &self,
-        mut req: extension_api::Request,
-    ) -> anyhow::Result<rapira_sapi::Request> {
+    async fn to_request(&self, mut req: crate::api::Request) -> anyhow::Result<crate::Request> {
         let content_type = req.headers.get(CONTENT_TYPE).map(|v| v.as_bytes().to_vec());
         let content_length = req.body.len() as i64;
 
@@ -196,7 +172,7 @@ impl RapiraBackend {
             if lines.iter().nth(1).is_some()
                 && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
             {
-                return Err(anyhow::Error::new(extension_api::Rejected {
+                return Err(anyhow::Error::new(crate::api::Rejected {
                     status: 400,
                     reason: "repeated content-type field lines with a multipart body".into(),
                 }));
@@ -215,19 +191,19 @@ impl RapiraBackend {
                 tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
                     .await
                     .map_err(|e| anyhow::anyhow!("multipart parse task failed: {e}"))?;
-            rapira_sapi::types::Body::Multipart(parsed.map_err(parse_err)?)
+            crate::types::Body::Multipart(parsed.map_err(parse_err)?)
         } else {
-            rapira_sapi::types::Body::Raw(Cursor::new(std::mem::take(&mut req.body)))
+            crate::types::Body::Raw(Cursor::new(std::mem::take(&mut req.body)))
         };
 
-        Ok(rapira_sapi::Request {
+        Ok(crate::Request {
             method: req.method,
             https: req.https,
             protocol: req.protocol,
             target: req.target,
             authority: req.authority,
-            remote: map_addr(req.remote),
-            server: map_addr(req.server),
+            remote: req.remote,
+            server: req.server,
             server_name: req.server_name,
             server_port: req.server_port,
             content_type,
@@ -236,98 +212,33 @@ impl RapiraBackend {
             headers: req.headers,
             uri: req.uri,
             received_at: req.received_at,
-            tls: req.tls.map(map_tls),
+            tls: req.tls,
         })
     }
 }
 
-impl extension_api::Backend for RapiraBackend {
+impl crate::api::Backend for RapiraBackend {
     /// The Reply wraps the frame receiver directly, so dropping it is the client-gone signal the exchange layer observes.
     fn exec(
         &self,
-        req: extension_api::Request,
-    ) -> Pin<Box<dyn Future<Output = extension_api::Result<extension_api::Reply>> + Send + '_>>
-    {
+        req: crate::api::Request,
+    ) -> Pin<Box<dyn Future<Output = crate::api::Result<crate::api::Reply>> + Send + '_>> {
         Box::pin(async move {
             let req = self.to_request(req).await?;
             let rx = self.rapira.handle(req).await.map_err(refused)?;
-            Ok(extension_api::Reply::new(Box::new(FrameSource(rx))))
+            Ok(crate::api::Reply::new(rx))
         })
     }
 
     fn unary(
         &self,
-        call: extension_api::UnaryCall,
-    ) -> Pin<
-        Box<
-            dyn Future<Output = extension_api::Result<Option<extension_api::UnaryReply>>>
-                + Send
-                + '_,
-        >,
-    > {
+        call: crate::api::UnaryCall,
+    ) -> Pin<Box<dyn Future<Output = crate::api::Result<Option<crate::api::UnaryReply>>> + Send + '_>>
+    {
         Box::pin(async move {
-            let req = rapira_sapi::GrpcRequest {
-                method: call.method,
-                protocol: match call.protocol {
-                    extension_api::RpcProtocol::Grpc => rapira_sapi::GrpcProtocol::Grpc,
-                    extension_api::RpcProtocol::GrpcWeb => rapira_sapi::GrpcProtocol::GrpcWeb,
-                    extension_api::RpcProtocol::Connect => rapira_sapi::GrpcProtocol::Connect,
-                },
-                metadata: call.metadata,
-                deadline: call.deadline,
-                remote: map_addr(call.remote),
-                message: call.message,
-            };
-            let rx = self.rapira.call(req).await.map_err(refused)?;
+            let rx = self.rapira.call(call).await.map_err(refused)?;
             // A closed channel means that PHP lost the call.
-            Ok(rx.await.ok().map(|o| extension_api::UnaryReply {
-                headers: o.headers,
-                trailers: o.trailers,
-                outcome: o.result.map_err(|s| extension_api::RpcStatus {
-                    code: s.code,
-                    message: s.message,
-                    details: s.details,
-                }),
-            }))
-        })
-    }
-}
-
-struct FrameSource(tokio::sync::mpsc::Receiver<rapira_sapi::Frame>);
-
-impl extension_api::ReplySource for FrameSource {
-    fn poll_next(
-        &mut self,
-        cx: &mut std::task::Context<'_>,
-    ) -> std::task::Poll<Option<extension_api::ReplyEvent>> {
-        self.0.poll_recv(cx).map(|opt| {
-            opt.map(|frame| match frame {
-                rapira_sapi::Frame::Interim(h) => extension_api::ReplyEvent::Interim {
-                    status: h.status,
-                    headers: h.headers,
-                },
-                rapira_sapi::Frame::Head {
-                    head,
-                    content_length,
-                    bodiless,
-                } => extension_api::ReplyEvent::Head {
-                    status: head.status,
-                    headers: head.headers,
-                    content_length,
-                    bodiless,
-                },
-                rapira_sapi::Frame::Chunk(b) => extension_api::ReplyEvent::Chunk(b),
-                rapira_sapi::Frame::File { file, offset, len } => {
-                    extension_api::ReplyEvent::File { file, offset, len }
-                }
-                rapira_sapi::Frame::End {
-                    trailers,
-                    truncated,
-                } => extension_api::ReplyEvent::End {
-                    trailers,
-                    truncated,
-                },
-            })
+            Ok(rx.await.ok())
         })
     }
 }
@@ -458,15 +369,15 @@ mod tests {
             "disk full",
         )));
         assert!(io.chain().any(|c| c.is::<std::io::Error>()));
-        assert!(io.downcast_ref::<extension_api::Rejected>().is_none());
+        assert!(io.downcast_ref::<crate::api::Rejected>().is_none());
 
-        let rejected = parse_err(multipart::ParseError::Rejected(extension_api::Rejected {
+        let rejected = parse_err(multipart::ParseError::Rejected(crate::api::Rejected {
             status: 413,
             reason: "too big".into(),
         }));
         assert_eq!(
             rejected
-                .downcast_ref::<extension_api::Rejected>()
+                .downcast_ref::<crate::api::Rejected>()
                 .map(|r| r.status),
             Some(413)
         );

@@ -1,8 +1,8 @@
-use extension_api::{HttpResponse, empty_body};
 use http::header::{
     CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, TE, TRAILER,
     TRANSFER_ENCODING, UPGRADE,
 };
+use rapira_sapi::api::{HttpResponse, empty_body};
 
 pub(crate) fn error_response(status: http::StatusCode) -> HttpResponse {
     let mut res = http::Response::new(empty_body());

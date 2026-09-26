@@ -1,5 +1,6 @@
 use http::HeaderMap;
-use rapira_sapi::{GrpcOutcome, GrpcStatus, Mode, Rapira};
+use rapira_sapi::api::{RpcStatus, UnaryReply};
+use rapira_sapi::{Mode, Rapira};
 use std::sync::mpsc;
 use std::time::Duration;
 use tests::{drain, fixture, php_lock, req};
@@ -46,10 +47,10 @@ fn failboot_grpc_worker_sheds_with_unavailable() -> anyhow::Result<()> {
 
     assert_eq!(
         got,
-        Some(GrpcOutcome {
+        Some(UnaryReply {
             headers: HeaderMap::new(),
             trailers: HeaderMap::new(),
-            result: Err(GrpcStatus {
+            outcome: Err(RpcStatus {
                 code: 14,
                 message: "the worker failed to boot".into(),
                 details: Vec::new(),

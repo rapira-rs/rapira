@@ -10,7 +10,7 @@ description = "Static file middleware for the rapira HTTP front"
 workspace = true
 
 [dependencies]
-extension_api = { workspace = true }
+rapira_sapi = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }

@@ -1,4 +1,4 @@
-use extension_api::{Peer, Request};
+use rapira_sapi::api::{Peer, Request};
 
 use crate::Config;
 
@@ -49,7 +49,7 @@ pub(crate) fn build(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use extension_api::Addr;
+    use rapira_sapi::api::Addr;
 
     fn peer() -> Peer {
         Peer {

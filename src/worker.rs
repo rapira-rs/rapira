@@ -4,7 +4,7 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
-use rapira_runtime::{ExtensionRuntime, Stopper};
+use rapira_sapi::runtime::{ExtensionRuntime, Stopper};
 use rapira_sapi::{Mode, Rapira, WorkerHooks};
 
 /// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset, so the extension outcomes set the exit code.
@@ -51,7 +51,7 @@ pub struct PoolArgs {
 #[derive(Clone)]
 pub struct HttpArgs {
     /// Multipart limits, with a per-worker spool dir under `dir`; None outside dispatcher mode, which parses no uploads.
-    pub uploads: Option<rapira_runtime::multipart::Limits>,
+    pub uploads: Option<rapira_sapi::multipart::Limits>,
     /// sendFile() containment root, canonicalized per worker.
     pub sendfile_root: PathBuf,
 }
@@ -79,7 +79,7 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         );
         return WORKER_EXIT_UNHEALTHY;
     }
-    let mut uploads: Option<rapira_runtime::multipart::Limits> = http.and_then(|http| {
+    let mut uploads: Option<rapira_sapi::multipart::Limits> = http.and_then(|http| {
         rapira_sapi::set_sendfile_root(http.sendfile_root);
         http.uploads
     });
@@ -126,10 +126,10 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         }
         spool_dir = Some(uploads.dir.clone());
     }
-    let running: rapira_runtime::Running = host.run_with_options(
+    let running: rapira_sapi::runtime::Running = host.run_with_options(
         handle,
         entrypoint,
-        rapira_runtime::RuntimeOptions {
+        rapira_sapi::runtime::RuntimeOptions {
             uploads: Arc::new(uploads.unwrap_or_default()),
             grace,
         },

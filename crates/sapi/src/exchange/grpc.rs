@@ -10,16 +10,14 @@ use super::request::{add_list, build_address, header_key};
 use super::respond::{Verb, throw_verb};
 use super::*;
 use crate::{
-    IS_OBJECT, rapira_ce_already_finalized_error, rapira_ce_grpc_context,
-    rapira_ce_grpc_error_detail, rapira_ce_grpc_metadata, rapira_ce_grpc_method_info,
-    rapira_ce_grpc_method_kind, rapira_ce_grpc_protocol, rapira_ce_grpc_service_info,
-    rapira_ce_grpc_status, rapira_ce_internal_grpc_response_metadata,
-    rapira_ce_work_discarded_exception, rapira_grpc_call_obj, rapira_grpc_metadata_obj,
-    rapira_zval_enum_case,
-    types::{
-        GrpcJob, GrpcMethod, GrpcOutcome, GrpcProtocol, GrpcRequest, GrpcService, GrpcStatus,
-        MethodKind,
-    },
+    IS_OBJECT,
+    api::{RpcProtocol, RpcStatus, UnaryCall, UnaryReply},
+    rapira_ce_already_finalized_error, rapira_ce_grpc_context, rapira_ce_grpc_error_detail,
+    rapira_ce_grpc_metadata, rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind,
+    rapira_ce_grpc_protocol, rapira_ce_grpc_service_info, rapira_ce_grpc_status,
+    rapira_ce_internal_grpc_response_metadata, rapira_ce_work_discarded_exception,
+    rapira_grpc_call_obj, rapira_grpc_metadata_obj, rapira_zval_enum_case,
+    types::{GrpcJob, GrpcMethod, GrpcService, MethodKind},
     zend_argument_type_error, zend_read_property, zend_zval_value_name,
 };
 
@@ -186,10 +184,10 @@ struct ContextView {
 }
 
 pub(crate) struct GrpcState {
-    req: GrpcRequest,
+    req: UnaryCall,
     received_at: f64,
     /// None after the outcome went out or the call was discarded: the call is then finalized.
-    reply: Option<oneshot::Sender<GrpcOutcome>>,
+    reply: Option<oneshot::Sender<UnaryReply>>,
     discarded: bool,
     headers: Fields,
     trailers: Fields,
@@ -294,7 +292,7 @@ fn add_core(
 }
 
 /// Sends the one outcome of the call, with both metadata halves in wire form.
-fn finish(st: &mut GrpcState, result: Result<Bytes, GrpcStatus>) -> Verb {
+fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
     if st.host_closed() {
         st.discard();
         return Verb::Discarded;
@@ -302,10 +300,10 @@ fn finish(st: &mut GrpcState, result: Result<Bytes, GrpcStatus>) -> Verb {
     if st.finalized() {
         return Verb::Finalized;
     }
-    let outcome = GrpcOutcome {
+    let outcome = UnaryReply {
         headers: wire(&st.headers),
         trailers: wire(&st.trailers),
-        result,
+        outcome: result,
     };
     // the receiver can drop after the host_closed() check
     if st
@@ -370,11 +368,11 @@ unsafe fn build_metadata(dst: *mut zval, fields: &[Field]) {
     }
 }
 
-fn protocol_case(protocol: GrpcProtocol) -> &'static CStr {
+fn protocol_case(protocol: RpcProtocol) -> &'static CStr {
     match protocol {
-        GrpcProtocol::Grpc => c"Grpc",
-        GrpcProtocol::GrpcWeb => c"GrpcWeb",
-        GrpcProtocol::Connect => c"Connect",
+        RpcProtocol::Grpc => c"Grpc",
+        RpcProtocol::GrpcWeb => c"GrpcWeb",
+        RpcProtocol::Connect => c"Connect",
     }
 }
 
@@ -591,7 +589,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_fail(state: *mut c_void, status: *mut ze
                 return false;
             }
         };
-        let status = GrpcStatus {
+        let status = RpcStatus {
             code: (*code).value.lval as u32,
             message: String::from_utf8_lossy(zend::zstr_bytes((*message).value.str_)).into_owned(),
             details,
@@ -657,11 +655,11 @@ pub unsafe extern "C" fn rapira_rs_grpc_drop(state: *mut c_void) {
 mod tests {
     use super::*;
 
-    fn state() -> (GrpcState, oneshot::Receiver<GrpcOutcome>) {
+    fn state() -> (GrpcState, oneshot::Receiver<UnaryReply>) {
         let (reply, rx) = oneshot::channel();
-        let req = GrpcRequest {
+        let req = UnaryCall {
             method: "rapira.test.v1.EchoService/Echo".into(),
-            protocol: GrpcProtocol::Grpc,
+            protocol: RpcProtocol::Grpc,
             metadata: HeaderMap::new(),
             deadline: None,
             remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
@@ -1086,8 +1084,8 @@ mod tests {
         Nothing,
     }
 
-    fn status(code: u32, message: &str, details: &[(&str, &[u8])]) -> GrpcStatus {
-        GrpcStatus {
+    fn status(code: u32, message: &str, details: &[(&str, &[u8])]) -> RpcStatus {
+        RpcStatus {
             code,
             message: message.to_owned(),
             details: details
@@ -1219,10 +1217,10 @@ mod tests {
                     trailers,
                     result,
                 } => {
-                    let want = GrpcOutcome {
+                    let want = UnaryReply {
                         headers: map(headers),
                         trailers: map(trailers),
-                        result: result
+                        outcome: result
                             .map(Bytes::from_static)
                             .map_err(|(code, message, details)| status(code, message, details)),
                     };

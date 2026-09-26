@@ -72,7 +72,7 @@ pub(super) unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
     }
 }
 
-unsafe fn build_tls(dst: *mut zval, t: &TlsView) {
+unsafe fn build_tls(dst: *mut zval, t: &Tls) {
     unsafe {
         let ce = rapira_ce_tls;
         let _ = object_init_ex(dst, ce);

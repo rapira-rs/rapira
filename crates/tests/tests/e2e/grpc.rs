@@ -1,8 +1,8 @@
 use std::net::SocketAddr;
 
-use extension_api::{ListenAddr, PrepareCtx};
 use http::Method;
-use rapira_runtime::ExtensionRuntime;
+use rapira_sapi::api::{ListenAddr, PrepareCtx};
+use rapira_sapi::runtime::ExtensionRuntime;
 use rapira_sapi::{Mode, Rapira};
 use serde_json::Value;
 use tests::grpc::{Conn, ECHO_PATH as ECHO, Fields, Wire, config, envelope, fields, tcp_addr};
@@ -23,7 +23,7 @@ fn echo_request(text: &str) -> Vec<u8> {
 /// A rapira_grpc server in this process. `echo-worker.php` answers.
 struct Host {
     rapira: Rapira,
-    running: rapira_runtime::Running,
+    running: rapira_sapi::runtime::Running,
     tcp: ListenAddr,
     _prepared: PrepareCtx,
 }

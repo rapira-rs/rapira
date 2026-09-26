@@ -355,18 +355,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "extension_api"
-version = "0.8.1"
-dependencies = [
- "anyhow",
- "bytes",
- "http",
- "http-body-util",
- "rapira_net",
- "tokio",
-]
-
-[[package]]
 name = "fastrand"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -926,14 +914,12 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "clap",
- "extension_api",
  "libc",
  "mimalloc",
  "rapira_config",
  "rapira_grpc",
  "rapira_http",
  "rapira_master",
- "rapira_runtime",
  "rapira_sapi",
  "rapira_static_files",
  "serde_json",
@@ -953,9 +939,9 @@ dependencies = [
  "connectrpc",
  "connectrpc-health",
  "connectrpc-reflection",
- "extension_api",
  "http",
  "rapira_net",
+ "rapira_sapi",
  "tokio",
  "tower",
  "tracing",
@@ -967,13 +953,13 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "bytes",
- "extension_api",
  "http",
  "http-body",
  "http-body-util",
  "hyper",
  "hyper-util",
  "rapira_net",
+ "rapira_sapi",
  "tempfile",
  "tokio",
  "tracing",
@@ -1002,22 +988,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "rapira_runtime"
-version = "0.8.1"
-dependencies = [
- "anyhow",
- "extension_api",
- "http",
- "httparse",
- "libc",
- "memchr",
- "rapira_sapi",
- "tempfile",
- "tokio",
- "tracing",
-]
-
-[[package]]
 name = "rapira_sapi"
 version = "0.8.1"
 dependencies = [
@@ -1027,7 +997,13 @@ dependencies = [
  "bytes",
  "cc",
  "http",
+ "http-body-util",
+ "httparse",
+ "libc",
+ "memchr",
+ "rapira_net",
  "rapira_scoreboard",
+ "tempfile",
  "tokio",
  "tracing",
 ]
@@ -1045,10 +1021,10 @@ name = "rapira_static_files"
 version = "0.8.1"
 dependencies = [
  "bytes",
- "extension_api",
  "http",
  "http-body-util",
  "percent-encoding",
+ "rapira_sapi",
  "tempfile",
  "tokio",
  "tower-http 0.7.1",
@@ -1267,7 +1243,6 @@ dependencies = [
  "anyhow",
  "base64",
  "bytes",
- "extension_api",
  "http",
  "http-body-util",
  "hyper",
@@ -1275,7 +1250,6 @@ dependencies = [
  "libc",
  "rapira_grpc",
  "rapira_http",
- "rapira_runtime",
  "rapira_sapi",
  "serde_json",
  "tokio",

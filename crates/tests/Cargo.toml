@@ -9,7 +9,6 @@ workspace = true
 
 [dependencies]
 anyhow = { workspace = true }
-extension_api = { workspace = true }
 http = { workspace = true }
 rapira_sapi = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "net"] }
@@ -28,7 +27,6 @@ hyper-util = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
 rapira_http = { workspace = true }
-rapira_runtime = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # E2E harness (tests/e2e): process control for the spawned rapira binary.
 libc = { workspace = true }

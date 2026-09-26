@@ -5,8 +5,8 @@ use anyhow::anyhow;
 use connectrpc::Router;
 use connectrpc_health::StaticChecker;
 use connectrpc_reflection::Reflector;
-use extension_api::{Extension, ListenAddr, Php, PrepareCtx, PreparedListener, Result};
 use rapira_net::ServerThread;
+use rapira_sapi::api::{Extension, ListenAddr, Php, PrepareCtx, PreparedListener, Result};
 
 mod dispatch;
 mod schema;

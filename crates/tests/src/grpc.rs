@@ -13,14 +13,14 @@ use std::time::Duration;
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
 use bytes::Bytes;
-use extension_api::{
-    Addr, Backend, Extension as _, ListenAddr, Php, PrepareCtx, Rejected, Reply, Request,
-    RpcStatus, UnaryCall, UnaryReply,
-};
 use http::{HeaderMap, HeaderName, HeaderValue, Method};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rapira_grpc::{Config, Schema, Server};
+use rapira_sapi::api::{
+    Addr, Backend, Extension as _, ListenAddr, Php, PrepareCtx, Rejected, Reply, Request,
+    RpcStatus, UnaryCall, UnaryReply,
+};
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub const ECHO_SERVICE: &str = "rapira.test.v1.EchoService";

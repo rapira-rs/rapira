@@ -10,7 +10,7 @@ description = "HTTP front for rapira - terminates HTTP and answers every request
 workspace = true
 
 [dependencies]
-extension_api = { workspace = true }
+rapira_sapi = { workspace = true }
 rapira_net = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }

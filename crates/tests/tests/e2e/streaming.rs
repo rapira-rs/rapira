@@ -218,11 +218,11 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
     use std::os::fd::BorrowedFd;
     use std::sync::Arc;
 
-    use extension_api::{
+    use http_body_util::BodyExt;
+    use rapira_sapi::api::{
         BoxFuture, HttpRequest, HttpResponse, ListenAddr, Middleware, Next, PrepareCtx,
     };
-    use http_body_util::BodyExt;
-    use rapira_runtime::ExtensionRuntime;
+    use rapira_sapi::runtime::ExtensionRuntime;
     use rapira_sapi::{Mode, Rapira};
 
     struct PrefixBody;

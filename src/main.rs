@@ -1,5 +1,4 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use extension_api::{ListenAddr, Middleware, PrepareCtx};
 use rapira_config::{
     GrpcSettings, HttpSettings, Listen, MiddlewareSettings, PoolSettings, RunMode, Scaling,
     Settings, SupervisorSettings, UnsafeFieldNames,
@@ -9,7 +8,8 @@ use rapira_http::{
     Config as HttpConfig, Server as HttpServer, UnsafeFieldNames as HttpUnsafeFieldNames,
 };
 use rapira_master::PoolConfig;
-use rapira_runtime::ExtensionRuntime;
+use rapira_sapi::api::{ListenAddr, Middleware, PrepareCtx};
+use rapira_sapi::runtime::ExtensionRuntime;
 use rapira_sapi::{GrpcMethod, GrpcService, Mode, Rapira};
 use std::{
     fs::{File, OpenOptions, read_dir, remove_file},
@@ -252,7 +252,7 @@ fn http_pool(
     // uploads: dispatcher mode only ---------------------------------
     let uploads = if dispatcher {
         prepare_uploads_dir(&http.uploads.dir)?;
-        Some(rapira_runtime::multipart::Limits {
+        Some(rapira_sapi::multipart::Limits {
             dir: http.uploads.dir,
             max_file_size: http.uploads.max_file_size,
             max_field_size: http.uploads.max_field_size,
@@ -416,9 +416,9 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{prepare_pool, spool_dir_reclaimable};
-    use extension_api::{ListenAddr, PrepareCtx};
     use rapira_http::{Config as HttpConfig, Server as HttpServer};
-    use rapira_runtime::ExtensionRuntime;
+    use rapira_sapi::api::{ListenAddr, PrepareCtx};
+    use rapira_sapi::runtime::ExtensionRuntime;
 
     fn ephemeral_host() -> ExtensionRuntime {
         let mut host = ExtensionRuntime::new();

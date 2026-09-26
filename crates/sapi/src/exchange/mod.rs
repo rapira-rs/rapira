@@ -12,6 +12,7 @@ pub(crate) use tokio::sync::mpsc::{Sender, error::TrySendError};
 pub(crate) use crate::{
     HashPosition, HashTable, IS_ARRAY, IS_STRING, RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
     add_next_index_object,
+    api::{Addr, Tls},
     callbacks::{MAX_BUFFERED_BODY, guard},
     object_init_ex, rapira_array_init, rapira_ce_already_finalized_error,
     rapira_ce_closed_exception, rapira_ce_http_content_length_exceeded_error,
@@ -27,9 +28,7 @@ pub(crate) use crate::{
     rapira_receive_untimed,
     scoreboard::{Event, sb_update},
     start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
-    types::{
-        Addr, Body, FormField, Frame, Job, Request, ResponseHead, TlsView, Unit, UploadedFile,
-    },
+    types::{Body, FormField, Frame, Job, Request, ResponseHead, Unit, UploadedFile},
     zend, zend_class_entry, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_set_timeout,
     zend_string, zend_unset_timeout, zval, zval_add_ref, zval_ptr_dtor,

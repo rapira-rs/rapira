@@ -10,7 +10,7 @@ description = "gRPC front for rapira - serves unary gRPC, gRPC-Web and Connect c
 workspace = true
 
 [dependencies]
-extension_api = { workspace = true }
+rapira_sapi = { workspace = true }
 rapira_net = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
