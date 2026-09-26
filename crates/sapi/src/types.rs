@@ -1,4 +1,4 @@
-use crate::api::{Addr, RpcStatus, Tls, UnaryCall, UnaryReply};
+use crate::api::{Addr, Tls};
 use bytes::Bytes;
 use http::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderName};
 use std::ffi::{CStr, CString};
@@ -11,11 +11,6 @@ pub enum Mode {
     Classic,
     Worker(PathBuf),
     Dispatcher(PathBuf),
-    /// Dispatcher mode for a gRPC pool: `get_dispatcher()` gives the gRPC dispatcher.
-    GrpcDispatcher {
-        script: PathBuf,
-        services: Vec<GrpcService>,
-    },
 }
 
 /// One service of a gRPC pool. `name` is fully qualified.
@@ -125,72 +120,6 @@ pub enum Frame {
         trailers: HeaderMap,
         truncated: bool,
     },
-}
-
-pub struct Job {
-    pub ctx: Context,
-}
-
-/// One unit of work on the worker intake.
-pub(crate) enum Unit {
-    Http(Box<Job>),
-    Grpc(Box<GrpcJob>),
-}
-
-/// The gRPC status of a boot-failed worker's shed call: https://github.com/grpc/grpc/blob/master/doc/statuscodes.md
-const GRPC_UNAVAILABLE: u32 = 14;
-
-impl Unit {
-    pub(crate) fn front(&self) -> crate::exchange::Front {
-        match self {
-            Self::Http(_) => crate::exchange::Front::Http,
-            Self::Grpc(_) => crate::exchange::Front::Grpc,
-        }
-    }
-
-    /// The client left while the unit was queued.
-    pub(crate) fn is_closed(&self) -> bool {
-        match self {
-            Self::Http(job) => job.ctx.sender.as_ref().is_some_and(Sender::is_closed),
-            Self::Grpc(job) => job.reply.is_closed(),
-        }
-    }
-
-    /// Answers for a worker that cannot serve: 503 or UNAVAILABLE.
-    pub(crate) fn shed(self) {
-        match self {
-            Self::Http(mut job) => {
-                crate::callbacks::send_error_head(&mut job.ctx, 503);
-                job.ctx.finish(false);
-            }
-            Self::Grpc(job) => {
-                let _ = job.reply.send(UnaryReply {
-                    headers: HeaderMap::new(),
-                    trailers: HeaderMap::new(),
-                    outcome: Err(RpcStatus {
-                        code: GRPC_UNAVAILABLE,
-                        message: "the worker failed to boot".into(),
-                        details: Vec::new(),
-                    }),
-                });
-            }
-        }
-    }
-
-    /// The HTTP job, for the modes that serve nothing else.
-    pub(crate) fn into_http(self) -> Option<Box<Job>> {
-        match self {
-            Self::Http(job) => Some(job),
-            Self::Grpc(_) => None,
-        }
-    }
-}
-
-pub(crate) struct GrpcJob {
-    pub(crate) req: UnaryCall,
-    /// Unix timestamp of the enqueue.
-    pub(crate) received_at: f64,
-    pub(crate) reply: tokio::sync::oneshot::Sender<UnaryReply>,
 }
 
 /// `unlink` is the one remover: seal calls it at finalize, Drop is the abnormal-path net.

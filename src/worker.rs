@@ -5,7 +5,8 @@ use std::time::Duration;
 
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
 use rapira_sapi::runtime::{ExtensionRuntime, Stopper};
-use rapira_sapi::{Mode, Rapira, WorkerHooks};
+use rapira_sapi::work::DispatcherClasses;
+use rapira_sapi::{GrpcService, Mode, Rapira, WorkerHooks};
 
 /// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset, so the extension outcomes set the exit code.
 static WORKER_EXIT: AtomicI32 = AtomicI32::new(-1);
@@ -45,6 +46,8 @@ pub struct PoolArgs {
     pub grace: Duration,
     /// None for a gRPC pool.
     pub http: Option<HttpArgs>,
+    /// The services a gRPC pool serves; None for an http pool.
+    pub services: Option<Vec<GrpcService>>,
 }
 
 /// The worker settings of an http pool.
@@ -64,6 +67,7 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         max_requests,
         grace,
         http,
+        services,
     } = args;
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { rapira_sapi::rapira_child_init() };
@@ -83,6 +87,11 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         rapira_sapi::set_sendfile_root(http.sendfile_root);
         http.uploads
     });
+    let classes: Option<DispatcherClasses> = if services.is_some() {
+        Some(rapira_sapi::grpc::DISPATCHER_CLASSES)
+    } else {
+        matches!(mode, Mode::Dispatcher(_)).then_some(rapira_sapi::http::DISPATCHER_CLASSES)
+    };
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());
     let hooks: WorkerHooks = WorkerHooks {
         max_requests: effective_quota(max_requests),
@@ -95,16 +104,18 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
             move || request_worker_exit(WORKER_EXIT_UNHEALTHY, &stopper)
         })),
         slot: Some(env.slot_view),
+        on_thread_start: services.map(|services| {
+            Box::new(move || rapira_sapi::grpc::set_services(services)) as Box<dyn FnOnce() + Send>
+        }),
     };
 
-    let rapira = match Rapira::start_worker(mode, hooks) {
+    let rapira = match Rapira::start_worker(mode, hooks, classes) {
         Ok(r) => r,
         Err(e) => {
             tracing::error!(target: "rapira", "worker PHP boot failed: {e:#}");
             return WORKER_EXIT_UNHEALTHY;
         }
     };
-    let handle = rapira.handle();
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
@@ -127,7 +138,7 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         spool_dir = Some(uploads.dir.clone());
     }
     let running: rapira_sapi::runtime::Running = host.run_with_options(
-        handle,
+        &rapira,
         entrypoint,
         rapira_sapi::runtime::RuntimeOptions {
             uploads: Arc::new(uploads.unwrap_or_default()),

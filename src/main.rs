@@ -301,6 +301,7 @@ fn pool_run(
                 max_requests: pool.max_requests,
                 grace: supervisor.process_control_timeout,
                 http,
+                services: None,
             },
         },
         pool_config(name, pool, listeners),
@@ -349,18 +350,17 @@ fn grpc_pool(
         keepalive_interval: Duration::from_secs(10),
         keepalive_timeout: Duration::from_secs(10),
     });
-    pool_run(
+    let (mut run, config) = pool_run(
         "grpc",
         &grpc.pool,
-        Mode::GrpcDispatcher {
-            script: entrypoint,
-            services,
-        },
+        Mode::Dispatcher(entrypoint),
         host,
         prepare,
         supervisor,
         None,
-    )
+    )?;
+    run.args.services = Some(services);
+    Ok((run, config))
 }
 
 fn serve(args: ServeArgs) -> anyhow::Result<()> {

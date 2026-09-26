@@ -12,10 +12,11 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
     let (done_tx, done_rx) = mpsc::sync_channel::<(u16, String)>(1);
 
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
-        let r = Rapira::start(Mode::Dispatcher(fixture(
-            "failboot_worker_tests/failboot-worker.php",
-        )))?;
-        let h = r.handle();
+        let r = Rapira::start(
+            Mode::Dispatcher(fixture("failboot_worker_tests/failboot-worker.php")),
+            Some(rapira_sapi::http::DISPATCHER_CLASSES),
+        )?;
+        let h = r.sink();
         let rx = tests::submit(&h, req("/", "failboot_worker_tests/failboot-worker.php"))?;
         drop(h);
         let (status, body) = drain(rx);
@@ -36,11 +37,8 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
 #[test]
 fn failboot_grpc_worker_sheds_with_unavailable() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::GrpcDispatcher {
-        script: fixture("failboot_worker_tests/failboot-worker.php"),
-        services: tests::echo_services(),
-    })?;
-    let h = r.handle();
+    let r = tests::start_grpc(fixture("failboot_worker_tests/failboot-worker.php"))?;
+    let h = r.sink();
     let got = tests::outcome(tests::call(&h, tests::grpc_request("echo:hi"))?);
     drop(h);
     drop(r);
@@ -67,10 +65,11 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
     let (done_tx, done_rx) = mpsc::sync_channel::<(bool, Vec<u16>)>(1);
 
     let scenario = std::thread::spawn(move || -> anyhow::Result<()> {
-        let r = Rapira::start(Mode::Dispatcher(fixture(
-            "failboot_worker_tests/failboot-worker.php",
-        )))?;
-        let h = r.handle();
+        let r = Rapira::start(
+            Mode::Dispatcher(fixture("failboot_worker_tests/failboot-worker.php")),
+            Some(rapira_sapi::http::DISPATCHER_CLASSES),
+        )?;
+        let h = r.sink();
         let mut statuses = Vec::new();
         for _ in 0..5 {
             let (s, _) = drain(tests::submit(

@@ -1,8 +1,9 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::api::{Addr, Reply, RpcProtocol, UnaryCall, UnaryReply};
-use rapira_sapi::{
-    Frame, GrpcMethod, GrpcService, HandleError, Mode, Rapira, RapiraHandle, Request,
-};
+use rapira_sapi::grpc::Call;
+use rapira_sapi::http::Exchange;
+use rapira_sapi::work::{Intake, Refused, Sink};
+use rapira_sapi::{Frame, GrpcMethod, GrpcService, Mode, Rapira, Request, WorkerHooks};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::env::set_var;
@@ -60,8 +61,8 @@ pub fn run_worker(
     if let Some(ini) = ini {
         set_phprc(&guard, ini);
     }
-    let r = Rapira::start(Mode::Worker(fixture(name)))?;
-    let h = r.handle();
+    let r = Rapira::start(Mode::Worker(fixture(name)), None)?;
+    let h = r.sink();
     let mut out = Vec::with_capacity(uris.len());
     for uri in uris {
         out.push(drain(submit(&h, req(uri, name))?));
@@ -81,9 +82,16 @@ fn runtime() -> &'static tokio::runtime::Runtime {
     })
 }
 
-/// Submits `req` through the async intake of `h` and blocks until the job is queued.
-pub fn submit(h: &RapiraHandle, req: Request) -> Result<mpsc::Receiver<Frame>, HandleError> {
-    runtime().block_on(h.handle(req))
+/// Submits `req` through the async intake of `h` and blocks until the exchange is queued.
+pub fn submit(h: &Sink, req: Request) -> Result<mpsc::Receiver<Frame>, Refused> {
+    runtime().block_on(submit_async(h, req))
+}
+
+/// Submits `req` through the async intake of `h`.
+pub async fn submit_async(h: &Sink, req: Request) -> Result<mpsc::Receiver<Frame>, Refused> {
+    let (exchange, rx) = Exchange::new(req);
+    Intake::new(h.clone()).submit(exchange).await?;
+    Ok(rx)
 }
 
 /// A unary call to `rapira.test.v1.EchoService/Echo` from a gRPC client on 127.0.0.1, with `message` as the request bytes.
@@ -99,11 +107,10 @@ pub fn grpc_request(message: &str) -> UnaryCall {
 }
 
 /// Submits `req` through the async intake of `h` and blocks until the call is queued.
-pub fn call(
-    h: &RapiraHandle,
-    req: UnaryCall,
-) -> Result<oneshot::Receiver<UnaryReply>, HandleError> {
-    runtime().block_on(h.call(req))
+pub fn call(h: &Sink, req: UnaryCall) -> Result<oneshot::Receiver<UnaryReply>, Refused> {
+    let (call, rx) = Call::new(req);
+    runtime().block_on(Intake::new(h.clone()).submit(call))?;
+    Ok(rx)
 }
 
 /// Waits at most 10 s for the outcome of a call. None means that the call was lost: PHP dropped it unfinalized.
@@ -174,6 +181,20 @@ pub fn echo_services() -> Vec<GrpcService> {
             method("Watch", true),
         ],
     }]
+}
+
+/// Boots a gRPC dispatcher worker on `script` that serves the services of `fixtures/grpc/echo.proto`.
+pub fn start_grpc(script: PathBuf) -> anyhow::Result<Rapira> {
+    let services = echo_services();
+    let hooks = WorkerHooks {
+        on_thread_start: Some(Box::new(move || rapira_sapi::grpc::set_services(services))),
+        ..WorkerHooks::default()
+    };
+    Rapira::start_with_hooks(
+        Mode::Dispatcher(script),
+        hooks,
+        Some(rapira_sapi::grpc::DISPATCHER_CLASSES),
+    )
 }
 
 /// A response stream collected to its `End` (or to the producer dying).
@@ -457,8 +478,8 @@ pub fn app_records(script: &str) -> (Vec<AppRecord>, Vec<String>) {
     init_log_capture();
     captured().clear();
 
-    let r = Rapira::start(Mode::Classic).expect("classic boot");
-    let h = r.handle();
+    let r = Rapira::start(Mode::Classic, None).expect("classic boot");
+    let h = r.sink();
     let (status, body) = drain(submit(&h, req("/", script)).expect("dispatch"));
     drop(h);
     drop(r);
@@ -510,12 +531,12 @@ pub fn wait_app_record(message: &str) -> String {
     }
 }
 
-/// Boots `mode`, runs the worker to its end and returns the context of its one `dispatcher` app record. The caller holds the PHP lock.
-pub fn dispatcher_record(mode: Mode) -> anyhow::Result<Value> {
+/// Boots a worker with `boot`, runs it to its end and returns the context of its one `dispatcher` app record. The caller holds the PHP lock.
+pub fn dispatcher_record(boot: impl FnOnce() -> anyhow::Result<Rapira>) -> anyhow::Result<Value> {
     init_log_capture();
     captured().clear();
 
-    let r = Rapira::start(mode)?;
+    let r = boot()?;
     drop(r);
 
     let all = captured();

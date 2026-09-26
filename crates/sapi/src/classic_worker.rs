@@ -4,33 +4,33 @@ use crate::{
     executor::run_script,
     scoreboard::{Event, sb_update},
     start::pull_job,
-    types::Job,
+    types::Context,
     *,
 };
 
 pub(crate) fn classic_worker() {
     while let Some(unit) = pull_job() {
-        let Some(mut job) = unit.into_http() else {
-            unreachable!("gRPC units go to dispatcher-mode workers only");
+        let Some(mut ctx) = unit.into_cgi() else {
+            unreachable!("a unit with no CGI form goes to dispatcher-mode workers only");
         };
-        let (event, truncated) = classic_executor(&mut job);
+        let (event, truncated) = classic_executor(&mut ctx);
         sb_update(event);
-        job.ctx.finish(truncated);
+        ctx.finish(truncated);
     }
 }
 
 // run_script is also false for exit()/die(), so only unclean_shutdown or a fresh last_error_message marks a real failure.
-fn classic_executor(job: &mut Job) -> (Event, bool) {
-    bind_server_context(&mut job.ctx);
+fn classic_executor(ctx: &mut Context) -> (Event, bool) {
+    bind_server_context(ctx);
     let (is_errored, truncated) = unsafe {
-        populate_request_context(&mut job.ctx);
+        populate_request_context(ctx);
         if php_request_startup() == FAILURE {
-            send_error_head(&mut job.ctx, 500);
+            send_error_head(ctx, 500);
             rapira_request_shutdown();
             unbind_server_context();
             return (Event::Handled(true), false);
         }
-        crate::context::apply_proto_num(&job.ctx);
+        crate::context::apply_proto_num(ctx);
 
         let failed = !run_script(std::path::Path::new(crate::context::script().filename));
         let pg = rapira_pg();
@@ -38,10 +38,10 @@ fn classic_executor(job: &mut Job) -> (Event, bool) {
             && ((*rapira_cg()).unclean_shutdown
                 || (!(*pg).last_error_message.is_null()
                     && (*pg).last_error_type & E_FATAL_ERRORS as i32 != 0));
-        job.ctx.tearing_down = true;
+        ctx.tearing_down = true;
         rapira_request_shutdown();
 
-        let truncated = finalize_response(&mut job.ctx, exec_err);
+        let truncated = finalize_response(ctx, exec_err);
 
         (exec_err, truncated)
     };

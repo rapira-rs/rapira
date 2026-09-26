@@ -9,6 +9,7 @@ pub(crate) use bytes::Bytes;
 pub(crate) use http::header::{HeaderMap, HeaderName, HeaderValue};
 pub(crate) use tokio::sync::mpsc::{Sender, error::TrySendError};
 
+pub(crate) use crate::work::{DispatcherClasses, Held, release};
 pub(crate) use crate::{
     HashPosition, HashTable, IS_ARRAY, IS_STRING, RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
     add_next_index_object,
@@ -19,16 +20,13 @@ pub(crate) use crate::{
     rapira_ce_http_file_not_sendable_exception, rapira_ce_http_form_field,
     rapira_ce_http_head_already_written_error, rapira_ce_http_head_not_written_error,
     rapira_ce_http_multipart, rapira_ce_http_request, rapira_ce_http_uploaded_file,
-    rapira_ce_inet_address, rapira_ce_internal_grpc_dispatcher,
-    rapira_ce_internal_grpc_dispatcher_info, rapira_ce_internal_grpc_unary_call,
-    rapira_ce_internal_http_dispatcher, rapira_ce_internal_http_dispatcher_info,
-    rapira_ce_internal_http_exchange, rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception,
+    rapira_ce_inet_address, rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception,
     rapira_ce_tls, rapira_ce_unix_address, rapira_ce_work_discarded_exception,
     rapira_dispatcher_info_obj, rapira_eg, rapira_exchange_obj, rapira_receive_timed,
     rapira_receive_untimed,
     scoreboard::{Event, sb_update},
     start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
-    types::{Body, FormField, Frame, Job, Request, ResponseHead, Unit, UploadedFile},
+    types::{Body, Context, FormField, Frame, Request, ResponseHead, UploadedFile},
     zend, zend_class_entry, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_set_timeout,
     zend_string, zend_unset_timeout, zval, zval_add_ref, zval_ptr_dtor,
@@ -43,106 +41,31 @@ mod sendfile;
 #[cfg(test)]
 mod tests;
 
-use grpc::GrpcState;
-pub(crate) use grpc::{is_binary, printable};
+pub(crate) use grpc::{GrpcState, grpc_call_from, is_binary, printable};
 pub use sendfile::set_sendfile_root;
 
-/// The protocol a worker thread serves, fixed at boot. It picks the dispatcher, its info and its unit classes.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Front {
-    Http,
-    Grpc,
-}
-
-impl Front {
-    /// # Safety
-    /// MINIT ran: the class entries are assigned.
-    unsafe fn dispatcher_ce(self) -> *mut zend_class_entry {
-        unsafe {
-            match self {
-                Self::Http => rapira_ce_internal_http_dispatcher,
-                Self::Grpc => rapira_ce_internal_grpc_dispatcher,
-            }
-        }
-    }
-
-    /// # Safety
-    /// As `dispatcher_ce`.
-    unsafe fn info_ce(self) -> *mut zend_class_entry {
-        unsafe {
-            match self {
-                Self::Http => rapira_ce_internal_http_dispatcher_info,
-                Self::Grpc => rapira_ce_internal_grpc_dispatcher_info,
-            }
-        }
-    }
-
-    /// # Safety
-    /// As `dispatcher_ce`.
-    unsafe fn unit_ce(self) -> *mut zend_class_entry {
-        unsafe {
-            match self {
-                Self::Http => rapira_ce_internal_http_exchange,
-                Self::Grpc => rapira_ce_internal_grpc_unary_call,
-            }
-        }
-    }
-
-    /// The receive() error while a unit is unfinalized.
-    fn busy(self) -> &'static CStr {
-        match self {
-            Self::Http => {
-                c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first"
-            }
-            Self::Grpc => {
-                c"receive() while a Rapira\\Grpc\\UnaryCall is unfinalized; finalize it first"
-            }
-        }
-    }
-}
-
 thread_local! {
-    static FRONT: Cell<Front> = const { Cell::new(Front::Http) };
+    /// The dispatcher classes of the plugin this PHP thread serves; None outside dispatcher mode.
+    static CLASSES: Cell<Option<DispatcherClasses>> = const { Cell::new(None) };
 }
 
-pub(crate) fn front() -> Front {
-    FRONT.get()
+pub(crate) fn set_classes(classes: Option<DispatcherClasses>) {
+    CLASSES.set(classes);
 }
 
-/// Makes this PHP thread serve a gRPC pool with `services`.
-pub(crate) fn serve_grpc(services: Vec<crate::types::GrpcService>) {
-    FRONT.set(Front::Grpc);
-    grpc::set_services(services);
+fn classes() -> DispatcherClasses {
+    CLASSES
+        .get()
+        .expect("a dispatcher-mode worker started with no DispatcherClasses")
 }
 
-/// The cycle bookkeeping view of a unit that receive() handed out.
-pub(crate) trait Held {
-    /// The worker committed the outcome, or discarded the unit.
-    fn finalized(&self) -> bool;
-    /// The host no longer takes an outcome: Work::isCancelled().
-    fn host_closed(&self) -> bool;
-    fn discard(&mut self);
-
-    /// Work::isFinalized().
-    fn is_finalized(&self) -> bool {
-        self.finalized() || self.host_closed()
-    }
-}
-
-/// Reclaims the Box that receive() handed out: clears the cycle slot if it still points here, and counts an unfinalized unit as handled.
-/// # Safety
-/// `ptr` came from `Box::into_raw` in receive and was not reclaimed before.
-pub(crate) unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
+/// Clears the cycle slot if it still points at `ptr`.
+pub(crate) fn forget_held(ptr: *const ()) {
     update(|c| {
         if c.unit.is_some_and(|u| std::ptr::addr_eq(u, ptr)) {
             c.unit = None;
         }
     });
-    let st = unsafe { Box::from_raw(ptr) };
-    if !st.finalized() {
-        sb_update(Event::Handled(true));
-    }
-    st
 }
 
 #[derive(Clone, Copy)]
@@ -332,9 +255,9 @@ impl RequestView {
 }
 
 pub struct ExchangeState {
-    // body above job: declaration drop order unlinks the spool files before the frame sender closes
+    // body above ctx: declaration drop order unlinks the spool files before the frame sender closes
     body: BodyState,
-    job: Box<Job>,
+    ctx: Context,
     /// Filled by the first `getRequest()`.
     view: Option<RequestView>,
     stage: Stage,
@@ -351,9 +274,10 @@ pub struct ExchangeState {
 }
 
 impl ExchangeState {
-    fn new(mut job: Box<Job>) -> Self {
+    pub(crate) fn new(req: Request, tx: Sender<Frame>) -> Self {
+        let mut ctx = Context::new(req, tx, false);
         let taken = std::mem::replace(
-            &mut job.ctx.req.body,
+            &mut ctx.req.body,
             Body::Raw(std::io::Cursor::new(Vec::new())),
         );
         let body = match taken {
@@ -378,10 +302,10 @@ impl ExchangeState {
                     .collect(),
             },
         };
-        let bodiless = job.ctx.req.method.eq_ignore_ascii_case("HEAD");
+        let bodiless = ctx.req.method.eq_ignore_ascii_case("HEAD");
 
         Self {
-            job,
+            ctx,
             body,
             view: None,
             stage: Stage::Open,
@@ -404,7 +328,7 @@ impl Held for ExchangeState {
     fn host_closed(&self) -> bool {
         self.discarded
             || (self.stage != Stage::Finalized
-                && self.job.ctx.sender.as_ref().is_some_and(Sender::is_closed))
+                && self.ctx.sender.as_ref().is_some_and(Sender::is_closed))
     }
 
     fn discard(&mut self) {
@@ -422,5 +346,5 @@ macro_rules! container_of {
 }
 pub(crate) use container_of;
 
-container_of!(exchange_from, rapira_exchange_obj);
+container_of!(pub(crate) exchange_from, rapira_exchange_obj);
 container_of!(info_from, rapira_dispatcher_info_obj);

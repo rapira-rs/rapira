@@ -5,8 +5,8 @@ use tests::{drain, php_lock, req};
 #[test]
 fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic)?;
-    let h = r.handle();
+    let r = Rapira::start(Mode::Classic, None)?;
+    let h = r.sink();
     let (status, body) = drain(tests::submit(&h, req("/", "http_values/construct.php"))?);
     drop(h);
     drop(r);

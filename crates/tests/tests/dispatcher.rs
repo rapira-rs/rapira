@@ -6,8 +6,8 @@ use tests::{dispatcher_record, drain, fixture, php_lock, req};
 #[test]
 fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic)?;
-    let h = r.handle();
+    let r = Rapira::start(Mode::Classic, None)?;
+    let h = r.sink();
     let (status, body) = drain(tests::submit(
         &h,
         req("/", "dispatcher/not-in-dispatcher-mode.php"),
@@ -34,7 +34,12 @@ fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
 #[test]
 fn worker_singleton() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let ctx = dispatcher_record(Mode::Dispatcher(fixture("dispatcher/worker-singleton.php")))?;
+    let ctx = dispatcher_record(|| {
+        Rapira::start(
+            Mode::Dispatcher(fixture("dispatcher/worker-singleton.php")),
+            Some(rapira_sapi::http::DISPATCHER_CLASSES),
+        )
+    })?;
     for (key, want) in [
         ("class", json!("Rapira\\Internal\\Http\\Dispatcher")),
         ("name", json!("http")),
@@ -52,8 +57,8 @@ fn worker_singleton() -> anyhow::Result<()> {
 #[test]
 fn host_created_only() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let r = Rapira::start(Mode::Classic)?;
-    let h = r.handle();
+    let r = Rapira::start(Mode::Classic, None)?;
+    let h = r.sink();
     let (status, body) = drain(tests::submit(
         &h,
         req("/", "dispatcher/host-created-only.php"),

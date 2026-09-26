@@ -28,3 +28,5 @@ anyhow = { workspace = true }
 bindgen = "0"
 cc = "1.2"
 
+[dev-dependencies]
+tokio = { workspace = true, features = ["test-util"] }

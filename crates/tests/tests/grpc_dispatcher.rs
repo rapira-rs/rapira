@@ -4,22 +4,15 @@ use rapira_sapi::api::{Addr, RpcProtocol, RpcStatus, UnaryReply};
 use rapira_sapi::{Mode, Rapira};
 use serde_json::{Value, json};
 use tests::{
-    Fields, app_results, assert_case_records, call, captured, dispatcher_record, echo_services,
-    fields, fixture, grpc_request, init_log_capture, outcome, php_lock, wait_app_record,
+    Fields, app_results, assert_case_records, call, captured, dispatcher_record, fields, fixture,
+    grpc_request, init_log_capture, outcome, php_lock, start_grpc, wait_app_record,
 };
-
-fn grpc_mode(script: &str) -> Mode {
-    Mode::GrpcDispatcher {
-        script: fixture(script),
-        services: echo_services(),
-    }
-}
 
 /// Boots a gRPC worker on unary-worker.php and waits for its boot probe, so no call races the boot. The caller holds the PHP lock.
 fn unary_worker() -> anyhow::Result<Rapira> {
     init_log_capture();
     captured().clear();
-    let r = Rapira::start(grpc_mode("grpc/unary-worker.php"))?;
+    let r = start_grpc(fixture("grpc/unary-worker.php"))?;
     wait_app_record("try");
     Ok(r)
 }
@@ -28,7 +21,7 @@ fn unary_worker() -> anyhow::Result<Rapira> {
 #[test]
 fn dispatcher_identity_and_services() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let ctx = dispatcher_record(grpc_mode("grpc/identity.php"))?;
+    let ctx = dispatcher_record(|| start_grpc(fixture("grpc/identity.php")))?;
 
     let method = |name: &str, kind: &str| {
         json!({
@@ -68,10 +61,15 @@ fn dispatcher_identity_and_services() -> anyhow::Result<()> {
 #[test]
 fn an_http_worker_after_a_grpc_worker_keeps_the_http_dispatcher() -> anyhow::Result<()> {
     let _guard = php_lock();
-    let grpc = dispatcher_record(grpc_mode("grpc/identity.php"))?;
+    let grpc = dispatcher_record(|| start_grpc(fixture("grpc/identity.php")))?;
     assert_eq!(grpc["name"], "grpc");
 
-    let http = dispatcher_record(Mode::Dispatcher(fixture("dispatcher/worker-singleton.php")))?;
+    let http = dispatcher_record(|| {
+        Rapira::start(
+            Mode::Dispatcher(fixture("dispatcher/worker-singleton.php")),
+            Some(rapira_sapi::http::DISPATCHER_CLASSES),
+        )
+    })?;
     assert_eq!(http["class"], "Rapira\\Internal\\Http\\Dispatcher");
     assert_eq!(http["name"], "http");
     Ok(())
@@ -195,7 +193,7 @@ const OUTCOME_CASES: &[OutcomeCase] = &[
 fn unary_outcomes() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = unary_worker()?;
-    let h = r.handle();
+    let h = r.sink();
 
     let mut mismatches = Vec::new();
     for c in OUTCOME_CASES {
@@ -296,7 +294,7 @@ const CONTEXT_CASES: &[ContextCase] = &[
 fn call_context_reports_the_request_facts() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = unary_worker()?;
-    let h = r.handle();
+    let h = r.sink();
 
     for c in CONTEXT_CASES {
         captured().clear();
@@ -358,7 +356,7 @@ const METADATA_CASES: &[(&str, &str)] = &[
 fn response_metadata_is_call_scoped() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = unary_worker()?;
-    let h = r.handle();
+    let h = r.sink();
     let got = outcome(call(&h, grpc_request("md-rules"))?);
     drop(h);
     drop(r);
@@ -372,7 +370,7 @@ fn response_metadata_is_call_scoped() -> anyhow::Result<()> {
 fn cancel_is_visible_to_php() -> anyhow::Result<()> {
     let _guard = php_lock();
     let r = unary_worker()?;
-    let h = r.handle();
+    let h = r.sink();
 
     let rx = call(&h, grpc_request("cancel"))?;
     wait_app_record("got");
@@ -399,7 +397,7 @@ fn a_call_closed_before_the_pull_never_reaches_php() -> anyhow::Result<()> {
     let marker = std::env::temp_dir().join(format!("rapira-test-grpc-hold-{}", std::process::id()));
     let _ = std::fs::remove_file(&marker);
     let r = unary_worker()?;
-    let h = r.handle();
+    let h = r.sink();
 
     let held = call(&h, grpc_request(&format!("hold:{}", marker.display())))?;
     wait_app_record("held");

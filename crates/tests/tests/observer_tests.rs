@@ -14,8 +14,11 @@ fn observer_lock() -> std::sync::MutexGuard<'static, ()> {
 #[test]
 fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
     let _guard = observer_lock();
-    let r = Rapira::start(Mode::Worker(fixture("observer_tests/observer-bailout.php")))?;
-    let h = r.handle();
+    let r = Rapira::start(
+        Mode::Worker(fixture("observer_tests/observer-bailout.php")),
+        None,
+    )?;
+    let h = r.sink();
 
     let (_, probe) = drain(tests::submit(
         &h,
