@@ -18,12 +18,6 @@ extern bool rapira_rs_exchange_send_file(void *job, const char *path,
                                          bool eos);
 extern bool rapira_rs_exchange_write_trailers(void *job, HashTable *trailers);
 
-ZEND_METHOD(Rapira_Internal_Http_Exchange, __construct) {
-    (void)execute_data;
-    (void)return_value;
-    zend_throw_error(NULL, "host-created");
-}
-
 // receive() sets job before PHP code can reach the object
 static void *exchange_job(zval *this_ptr) {
     void *job = rapira_exchange_from(Z_OBJ_P(this_ptr))->job;

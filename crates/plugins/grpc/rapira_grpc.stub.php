@@ -403,7 +403,11 @@ namespace Rapira\Internal\Grpc {
      */
     final class UnaryCall implements \Rapira\Grpc\UnaryCall
     {
-        /** Host-created. */
+        /**
+         * Host-created.
+         *
+         * @implementation-alias Rapira\Internal\Grpc\DispatcherInfo::__construct
+         */
         private function __construct() {}
 
         public function isFinalized(): bool {}
@@ -429,7 +433,11 @@ namespace Rapira\Internal\Grpc {
      */
     final class ResponseMetadata implements \Rapira\Grpc\Responder\ResponseMetadata
     {
-        /** Host-created. */
+        /**
+         * Host-created.
+         *
+         * @implementation-alias Rapira\Internal\Grpc\DispatcherInfo::__construct
+         */
         private function __construct() {}
 
         public function addHeader(string $name, string $value): void {}

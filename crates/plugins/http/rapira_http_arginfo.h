@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 4be1c0c50967284db50c48ab6bb26121d2178a62 */
+ * Stub hash: 5b83231d20feb13e26c55e66f1adfdf0da477bf4 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_FormField___construct, 0, 0, 3)
 	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
@@ -122,7 +122,6 @@ ZEND_METHOD(Rapira_Internal_Http_Dispatcher, getInfo);
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, __construct);
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, pendingCount);
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, activeCount);
-ZEND_METHOD(Rapira_Internal_Http_Exchange, __construct);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, isFinalized);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, isCancelled);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest);
@@ -186,7 +185,7 @@ static const zend_function_entry class_Rapira_Internal_Http_DispatcherInfo_metho
 };
 
 static const zend_function_entry class_Rapira_Internal_Http_Exchange_methods[] = {
-	ZEND_ME(Rapira_Internal_Http_Exchange, __construct, arginfo_class_Rapira_Internal_Http_Exchange___construct, ZEND_ACC_PRIVATE)
+	ZEND_RAW_FENTRY("__construct", zim_Rapira_Internal_Http_DispatcherInfo___construct, arginfo_class_Rapira_Internal_Http_Exchange___construct, ZEND_ACC_PRIVATE, NULL, NULL)
 	ZEND_ME(Rapira_Internal_Http_Exchange, isFinalized, arginfo_class_Rapira_Internal_Http_Exchange_isFinalized, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Http_Exchange, isCancelled, arginfo_class_Rapira_Internal_Http_Exchange_isCancelled, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Http_Exchange, getRequest, arginfo_class_Rapira_Internal_Http_Exchange_getRequest, ZEND_ACC_PUBLIC)

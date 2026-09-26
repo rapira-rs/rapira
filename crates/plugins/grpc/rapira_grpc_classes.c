@@ -80,18 +80,6 @@ ZEND_METHOD(Rapira_Internal_Grpc_DispatcherInfo, __construct) {
     zend_throw_error(NULL, "host-created");
 }
 
-ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, __construct) {
-    (void)execute_data;
-    (void)return_value;
-    zend_throw_error(NULL, "host-created");
-}
-
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, __construct) {
-    (void)execute_data;
-    (void)return_value;
-    zend_throw_error(NULL, "host-created");
-}
-
 ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, receive) {
     rapira_sapi_receive(INTERNAL_FUNCTION_PARAM_PASSTHRU);
 }

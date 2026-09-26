@@ -225,7 +225,11 @@ namespace Rapira\Internal\Http {
      */
     final class Exchange implements \Rapira\Http\Exchange
     {
-        /** Host-created. */
+        /**
+         * Host-created.
+         *
+         * @implementation-alias Rapira\Internal\Http\DispatcherInfo::__construct
+         */
         private function __construct() {}
 
         public function isFinalized(): bool {}
