@@ -1220,7 +1220,7 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A file that shrinks after sendFile() committed its slice ends the body with an error after the bytes that exist: the chunked body has no last chunk, and the plugin logs the cut.
+/// A file that shrinks after sendFile() committed its slice ends the body with an error: the chunked body has no last chunk, and the plugin logs the cut. The bytes before the error are a prefix of the file up to the cut. The error gives hyper one flush pass, so a client that reads slowly can get fewer bytes than the file holds.
 #[test]
 fn sendfile_of_a_shrunken_file_ends_short() -> anyhow::Result<()> {
     const SIZE: u64 = 64 * 1024 * 1024;
@@ -1262,7 +1262,16 @@ fn sendfile_of_a_shrunken_file_ends_short() -> anyhow::Result<()> {
         "head: {head:?}"
     );
     let (body, last_chunk) = dechunk(&raw[split + 4..])?;
-    assert_eq!(body.len() as u64, CUT, "the body ends where the file ends");
+    assert!(
+        body.len() as u64 <= CUT,
+        "the body stops at the cut: {} bytes",
+        body.len()
+    );
+    // The sparse file holds zeros only.
+    assert!(
+        body.iter().all(|&b| b == 0),
+        "the body carries the file bytes"
+    );
     assert!(!last_chunk, "a cut body must not end cleanly");
     assert!(
         wait_log_contains(&srv, "the file shrank mid-send", READ),
