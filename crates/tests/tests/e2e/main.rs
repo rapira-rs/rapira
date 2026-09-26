@@ -13,6 +13,7 @@ mod general_tests;
 mod grpc;
 mod harness;
 mod http_values;
+mod imap_tests;
 mod ini;
 mod lifecycle;
 mod logging;

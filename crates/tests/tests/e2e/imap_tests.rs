@@ -1,10 +1,8 @@
-use std::path::Path;
+use rapira_sapi::Mode;
+use tests::wire::submit;
+use tests::{assert_skip_allowed, drain, fixture, req, server_log};
 
-use rapira_sapi::{Mode, Rapira};
-use tests::{
-    assert_skip_allowed, captured, drain, fixture, init_log_capture, php_lock_with_ini, req,
-    run_worker,
-};
+use crate::harness::Spawn;
 
 // ext/imap (PECL imap) reads default_socket_timeout at module startup only; the ini value 17 differs from the built-in 60, so the snapshot is provable.
 const IMAP_INI: &str = concat!(
@@ -13,7 +11,12 @@ const IMAP_INI: &str = concat!(
 );
 
 fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
-    run_worker(name, uris, Some(Path::new(IMAP_INI)))
+    let srv = Spawn::http(Mode::Worker, fixture(name))
+        .php_ini(&std::fs::read_to_string(IMAP_INI)?)
+        .spawn();
+    uris.iter()
+        .map(|uri| Ok(drain(submit(srv.addr, req(uri))?)))
+        .collect()
 }
 
 /// MINIT stores FG(default_socket_timeout) into c-client once (PECL imap php_imap.c, SET_*TIMEOUT): no request can change the imap socket timeouts.
@@ -40,20 +43,17 @@ fn imap_timeout_is_snapshotted_at_minit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The per-job RSHUTDOWN reports each undrained entry as an E_NOTICE through the SAPI log_message hook; the lock stays held through the capture read (the app_records pattern).
+/// The per-job RSHUTDOWN reports each undrained entry as an E_NOTICE through the SAPI log_message hook; the log is read after the stop, so it holds every record of the worker.
 #[test]
 fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
     let name = "imap_tests/imap-errors-worker.php";
-    let _guard = php_lock_with_ini(Path::new(IMAP_INI));
-    init_log_capture();
-    captured().clear();
+    let mut srv = Spawn::http(Mode::Worker, fixture(name))
+        .php_ini(&std::fs::read_to_string(IMAP_INI)?)
+        .json_log()
+        .spawn();
 
-    let r = Rapira::start(&tests::PHP_PARTS, Mode::Worker, fixture(name), None)?;
-    let h = r.sink();
-    let (s1, b1) = drain(tests::submit(&h, req("/?step=leak"))?);
+    let (s1, b1) = drain(submit(srv.addr, req("/?step=leak"))?);
     if b1 == "skip" {
-        drop(h);
-        drop(r);
         assert_skip_allowed(name);
         return Ok(());
     }
@@ -62,16 +62,15 @@ fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
         (200, "imap:leaked:1"),
         "the leak request must push one entry and keep it undrained"
     );
-    let (s2, b2) = drain(tests::submit(&h, req("/"))?);
+    let (s2, b2) = drain(submit(srv.addr, req("/"))?);
     assert_eq!(
         (s2, b2.as_str()),
         (200, "imap:errors:empty"),
         "the follow-up must see a reset stack"
     );
-    drop(h);
-    drop(r);
+    srv.stop();
 
-    let seen = captured()
+    let seen = server_log::records(&srv.log_file())
         .iter()
         .any(|c| c.target == "php" && c.message.contains("invalid remote specification (errflg="));
     assert!(
