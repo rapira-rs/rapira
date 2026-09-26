@@ -441,6 +441,12 @@ fn server_keys_keep_order_and_mangling() -> anyhow::Result<()> {
         }
         let resp = drain_resp(tests::submit(&h, rq)?);
         let pairs: Vec<(String, Value)> = serde_json::from_str(&resp.body_string())?;
+        // With register_argc_argv = 1 (the PHP 8.4 default; 8.5 defaults to 0) the engine appends argv and argc after REQUEST_TIME.
+        // https://www.php.net/manual/en/ini.core.php#ini.register-argc-argv
+        let pairs: Vec<(String, Value)> = pairs
+            .into_iter()
+            .filter(|(k, _)| k != "argv" && k != "argc")
+            .collect();
 
         let got: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
         let want: Vec<&str> = [CGI, case.keys, TIME].concat();
