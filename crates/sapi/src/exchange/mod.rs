@@ -139,9 +139,7 @@ pub fn push_dec(out: &mut String, mut n: u16) {
             break;
         }
     }
-    for &d in &buf[at..] {
-        out.push(char::from(d));
-    }
+    out.push_str(std::str::from_utf8(&buf[at..]).expect("ascii digits"));
 }
 
 /// Appends the dotted form of `ip`, the same bytes as its `Display`.
