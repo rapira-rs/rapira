@@ -25,12 +25,7 @@ pub const WORKER_EXIT_UNHEALTHY: i32 = 89;
 /// Exit code the caller uses when [`run`] returns a boot-failure error.
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scaling {
-    Static,
-    Dynamic { min_spare: usize, max_spare: usize },
-    Ondemand,
-}
+pub use rapira_config::Scaling;
 
 /// One plugin's worker set. The master supervises every pool independently.
 pub struct PoolConfig {

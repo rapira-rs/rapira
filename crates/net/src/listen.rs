@@ -1,28 +1,15 @@
 use std::net::SocketAddr;
 use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use anyhow::Context;
 use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
+pub use rapira_config::ListenAddr;
+
 /// The backlog of every master-bound listener. The master binds before the fork, and the workers inherit the queue. The kernel caps the value at `net.core.somaxconn`. https://man7.org/linux/man-pages/man2/listen.2.html
 const LISTEN_BACKLOG: i32 = 65535;
-
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum ListenAddr {
-    Tcp(SocketAddr),
-    Unix(PathBuf),
-}
-
-impl std::fmt::Display for ListenAddr {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::Tcp(a) => write!(f, "{a}"),
-            Self::Unix(p) => write!(f, "unix:{}", p.display()),
-        }
-    }
-}
 
 /// Exactly one closer per process: the master holds its copy for its whole life so respawned workers keep inheriting it, a worker hands its copy to the adopter.
 #[derive(Debug)]

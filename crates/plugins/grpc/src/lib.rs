@@ -10,6 +10,7 @@ use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
 use rapira_sapi::work::Intake;
 
 mod call;
+pub mod config;
 mod dispatch;
 mod php;
 mod schema;

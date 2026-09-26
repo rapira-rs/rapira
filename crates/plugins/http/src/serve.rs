@@ -1,3 +1,4 @@
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -143,18 +144,29 @@ pub(crate) fn serve(
         stop.stop();
     });
     // The plugin parses multipart in dispatcher mode only: the other modes feed php-src's own rfc1867 through read_post.
-    let uploads = (worker.mode == Mode::Dispatcher).then(|| {
-        Arc::new(match config.uploads.clone() {
-            Some(mut limits) => {
-                limits.dir = multipart::worker_spool_dir(&limits.dir);
-                limits
-            }
-            None => multipart::Limits::default(),
-        })
+    let dispatcher: bool = worker.mode == Mode::Dispatcher;
+    // Each worker spools in its own dir under the configured one.
+    let spool_dir: Option<PathBuf> = match &config.uploads {
+        Some(limits) if dispatcher => Some(multipart::create_worker_spool_dir(&limits.dir)?),
+        _ => None,
+    };
+    let uploads = dispatcher.then(|| {
+        let mut limits = config.uploads.clone().unwrap_or_default();
+        if let Some(dir) = &spool_dir {
+            limits.dir = dir.clone();
+        }
+        Arc::new(limits)
     });
     let serving = Serving::start(intake, uploads, config);
     let fatal = acceptor.run(&worker.handle, &serving);
-    worker.handle.block_on(serving.drain(fatal))
+    let drained = worker.handle.block_on(serving.drain(fatal));
+    // The contract keeps a spooled file only until its exchange finalizes, so the dir goes after the drain.
+    if let Some(dir) = &spool_dir
+        && let Err(e) = std::fs::remove_dir_all(dir)
+    {
+        tracing::warn!(target: "rapira", "removing spool dir {}: {e}", dir.display());
+    }
+    drained
 }
 
 fn listen_addr(listen: &ListenAddr) -> Addr {

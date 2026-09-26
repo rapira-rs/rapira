@@ -10,6 +10,7 @@ use rapira_sapi::work::Intake;
 
 mod bridge;
 mod check;
+pub mod config;
 mod exchange;
 mod handler;
 pub mod multipart;
@@ -33,14 +34,17 @@ pub struct Config {
     pub drain_grace: Duration,
     pub keepalive_timeout: Duration,
     pub middleware: Vec<Arc<dyn Middleware>>,
-    /// Multipart limits of a dispatcher pool. Each worker spools in `multipart::worker_spool_dir(dir)`, which the worker creates. None: the default limits.
+    /// Multipart limits of a dispatcher pool. Each worker spools in its own dir under `dir`, which `serve` creates. None: the default limits.
     pub uploads: Option<multipart::Limits>,
     /// sendFile() containment root.
     pub sendfile_root: PathBuf,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// The `HTTP_*` mapping rewrites `-` to `_` and PHP rewrites `.` to `_`, so `X_Forwarded_For` and `X.Forwarded.For` both land on `HTTP_X_FORWARDED_FOR`.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum UnsafeFieldNames {
+    #[default]
     Drop,
     Reject,
 }
@@ -103,6 +107,9 @@ impl Plugin for Server {
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
+        if let Some(uploads) = &self.config.uploads {
+            multipart::sweep_spool_dirs(&uploads.dir);
+        }
         let prepared = ctx.bind(&self.config.listen)?;
         tracing::info!(target: "http", "prepared listener on {}", prepared.addr());
         self.prepared = Some(prepared);

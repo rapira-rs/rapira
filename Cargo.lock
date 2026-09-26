@@ -922,8 +922,9 @@ dependencies = [
  "rapira_master",
  "rapira_net",
  "rapira_sapi",
- "rapira_static_files",
+ "serde",
  "serde_json",
+ "toml",
  "tracing",
  "tracing-subscriber",
 ]
@@ -941,10 +942,13 @@ dependencies = [
  "connectrpc-health",
  "connectrpc-reflection",
  "http",
+ "rapira_config",
  "rapira_net",
  "rapira_php_build",
  "rapira_sapi",
+ "serde",
  "tokio",
+ "toml",
  "tower",
  "tracing",
 ]
@@ -961,12 +965,17 @@ dependencies = [
  "httparse",
  "hyper",
  "hyper-util",
+ "libc",
  "memchr",
+ "rapira_config",
  "rapira_net",
  "rapira_php_build",
  "rapira_sapi",
+ "rapira_static_files",
+ "serde",
  "tempfile",
  "tokio",
+ "toml",
  "tracing",
 ]
 
@@ -976,6 +985,7 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "libc",
+ "rapira_config",
  "rapira_scoreboard",
  "tracing",
 ]
@@ -986,6 +996,7 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "libc",
+ "rapira_config",
  "socket2",
  "tempfile",
  "tokio",
@@ -1010,6 +1021,7 @@ dependencies = [
  "http",
  "http-body-util",
  "libc",
+ "rapira_config",
  "rapira_net",
  "rapira_php_build",
  "rapira_scoreboard",
@@ -1029,11 +1041,14 @@ dependencies = [
 name = "rapira_static_files"
 version = "0.8.1"
 dependencies = [
+ "anyhow",
  "bytes",
  "http",
  "http-body-util",
  "percent-encoding",
+ "rapira_config",
  "rapira_sapi",
+ "serde",
  "tempfile",
  "tokio",
  "tower-http 0.7.1",

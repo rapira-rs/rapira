@@ -6,7 +6,7 @@ use std::path::{Path, PathBuf};
 use memchr::memmem;
 use rapira_sapi::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct Limits {
     pub dir: PathBuf,
     pub max_file_size: u64,
@@ -30,8 +30,52 @@ impl Default for Limits {
 }
 
 /// The spool dir of this worker process under `base`. The master sweeps the dirs whose process is gone.
-pub fn worker_spool_dir(base: &Path) -> PathBuf {
+fn worker_spool_dir(base: &Path) -> PathBuf {
     base.join(format!("rapira-spool-{}", std::process::id()))
+}
+
+/// Creates the spool dir of this worker process under `base`, owner-only.
+pub(crate) fn create_worker_spool_dir(base: &Path) -> anyhow::Result<PathBuf> {
+    use std::os::unix::fs::DirBuilderExt;
+    let dir = worker_spool_dir(base);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&dir)
+        .map_err(|e| anyhow::anyhow!("creating spool dir {}: {e}", dir.display()))?;
+    Ok(dir)
+}
+
+/// kill(pid, 0) probes existence without signaling: ESRCH means the owner is gone, EPERM means it runs under another uid. https://man7.org/linux/man-pages/man2/kill.2.html
+fn spool_dir_reclaimable(name: &str) -> bool {
+    let Some(pid) = name
+        .strip_prefix("rapira-spool-")
+        .and_then(|p| p.parse::<i32>().ok())
+        .filter(|&p| p > 0)
+    else {
+        return false;
+    };
+    let gone = unsafe { libc::kill(pid, 0) } == -1;
+    gone && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
+}
+
+/// Removes the spool dirs under `base` whose process is gone.
+pub(crate) fn sweep_spool_dirs(base: &Path) {
+    match std::fs::read_dir(base) {
+        Ok(entries) => {
+            for entry in entries.flatten() {
+                if !spool_dir_reclaimable(&entry.file_name().to_string_lossy()) {
+                    continue;
+                }
+                let path = entry.path();
+                if let Err(e) = std::fs::remove_dir_all(&path) {
+                    tracing::warn!(target: "rapira", "sweeping spool dir {}: {e}", path.display());
+                }
+            }
+        }
+        Err(e) => {
+            tracing::warn!(target: "rapira", "listing {} for the spool sweep: {e}", base.display());
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -386,6 +430,25 @@ fn parse_part(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The sweep reclaims only dirs whose owning process is gone.
+    #[test]
+    fn spool_sweep_reclaims_only_dead_pid_dirs() {
+        assert!(!spool_dir_reclaimable("other-dir"));
+        assert!(!spool_dir_reclaimable("rapira-spool-"));
+        assert!(!spool_dir_reclaimable("rapira-spool-x"));
+        assert!(!spool_dir_reclaimable("rapira-spool--5"));
+        assert!(!spool_dir_reclaimable("rapira-spool-0"));
+        let live = std::process::id();
+        assert!(!spool_dir_reclaimable(&format!("rapira-spool-{live}")));
+
+        let mut child = std::process::Command::new("true")
+            .spawn()
+            .expect("spawn a short-lived child");
+        let dead = child.id();
+        let _ = child.wait();
+        assert!(spool_dir_reclaimable(&format!("rapira-spool-{dead}")));
+    }
 
     fn limits() -> Limits {
         Limits::default()

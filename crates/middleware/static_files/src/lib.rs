@@ -1,4 +1,7 @@
 mod cache;
+mod config;
+
+pub use config::{Section, Settings, resolve};
 
 use std::path::PathBuf;
 

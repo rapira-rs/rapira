@@ -1,26 +1,14 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
-use rapira_config::{
-    GrpcSettings, HttpSettings, Listen, MiddlewareSettings, PoolSettings, RunMode, Scaling,
-    Settings, SupervisorSettings, UnsafeFieldNames,
-};
-use rapira_grpc::{Config as GrpcConfig, Schema as GrpcSchema, Server as GrpcServer};
-use rapira_http::{
-    Config as HttpConfig, Server as HttpServer, UnsafeFieldNames as HttpUnsafeFieldNames,
-};
+use rapira_config::{PoolSettings, SupervisorSettings};
 use rapira_master::PoolConfig;
-use rapira_net::{ListenAddr, PrepareCtx};
-use rapira_sapi::middleware::Middleware;
+use rapira_net::PrepareCtx;
 use rapira_sapi::plugin::{Mode, Plugin};
-use std::{
-    fs::{File, OpenOptions, read_dir, remove_file},
-    os::fd::RawFd,
-    path::{Path, PathBuf},
-    sync::Arc,
-    time::Duration,
-};
+use std::{os::fd::RawFd, path::PathBuf};
 use tracing::info;
 
 mod logging;
+
+mod settings;
 
 mod worker;
 
@@ -69,50 +57,6 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// kill(pid, 0) probes existence without signaling: ESRCH means the owner is gone, EPERM means it runs under another uid. https://man7.org/linux/man-pages/man2/kill.2.html
-fn spool_dir_reclaimable(name: &str) -> bool {
-    let Some(pid) = name
-        .strip_prefix("rapira-spool-")
-        .and_then(|p| p.parse::<i32>().ok())
-        .filter(|&p| p > 0)
-    else {
-        return false;
-    };
-    let gone = unsafe { libc::kill(pid, 0) } == -1;
-    gone && std::io::Error::last_os_error().raw_os_error() == Some(libc::ESRCH)
-}
-
-/// Dispatcher mode only: the http plugin spools file parts here, so the dir must exist and accept a new file. The sweep reclaims the spool dirs of masters that are gone.
-fn prepare_uploads_dir(dir: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(dir)
-        .map_err(|e| anyhow::anyhow!("creating http.uploads.dir {}: {e}", dir.display()))?;
-    let probe = dir.join(format!(".rapira-probe-{}", std::process::id()));
-    let _ = remove_file(&probe);
-    OpenOptions::new()
-        .write(true)
-        .create_new(true)
-        .open(&probe)
-        .map_err(|e| anyhow::anyhow!("http.uploads.dir {} is not writable: {e}", dir.display()))?;
-    let _ = remove_file(&probe);
-    match read_dir(dir) {
-        Ok(entries) => {
-            for entry in entries.flatten() {
-                if !spool_dir_reclaimable(&entry.file_name().to_string_lossy()) {
-                    continue;
-                }
-                let path = entry.path();
-                if let Err(e) = std::fs::remove_dir_all(&path) {
-                    tracing::warn!(target: "rapira", "sweeping spool dir {}: {e}", path.display());
-                }
-            }
-        }
-        Err(e) => {
-            tracing::warn!(target: "rapira", "listing {} for the spool sweep: {e}", dir.display());
-        }
-    }
-    Ok(())
-}
-
 /// Returns the listeners this plugin bound. One context serves every pool, so it rejects an address two pools share; it only appends, so the tail of its fd list is this plugin's slice.
 fn prepare_pool(plugin: &mut dyn Plugin, prepare: &mut PrepareCtx) -> anyhow::Result<Vec<RawFd>> {
     use anyhow::Context;
@@ -137,240 +81,70 @@ fn check_mode(name: &str, plugin: &dyn Plugin, mode: Mode) -> anyhow::Result<()>
     )
 }
 
-/// `table` is the pool table that names the entrypoint, for the error text.
-fn check_entrypoint(table: &str, entrypoint: &Path) -> anyhow::Result<()> {
-    // The entrypoint is fixed for the pool's lifetime, so one open at boot covers every request.
-    // The open proves read permission; the metadata check rejects a directory.
-    let meta = File::open(entrypoint)
-        .and_then(|f| f.metadata())
-        .map_err(|e| {
-            anyhow::anyhow!(
-                "{table}.entrypoint {} is not readable: {e}",
-                entrypoint.display()
-            )
-        })?;
-    anyhow::ensure!(
-        meta.is_file(),
-        "{table}.entrypoint {} is not a regular file",
-        entrypoint.display()
-    );
-    Ok(())
-}
-
-fn listen_addr(listen: Listen) -> ListenAddr {
-    match listen {
-        Listen::Tcp(addr) => ListenAddr::Tcp(addr),
-        Listen::Unix(path) => ListenAddr::Unix(path),
-    }
-}
-
 /// The supervision config the master needs for one pool.
 fn pool_config(name: &'static str, pool: &PoolSettings, listeners: Vec<RawFd>) -> PoolConfig {
     PoolConfig {
         name,
         processes: pool.processes,
-        scaling: match pool.scaling {
-            Scaling::Static => rapira_master::Scaling::Static,
-            Scaling::Dynamic {
-                min_spare,
-                max_spare,
-            } => rapira_master::Scaling::Dynamic {
-                min_spare,
-                max_spare,
-            },
-            Scaling::Ondemand => rapira_master::Scaling::Ondemand,
-        },
+        scaling: pool.scaling,
         process_idle_timeout: pool.process_idle_timeout,
         request_terminate_timeout: pool.request_terminate_timeout,
         listeners,
     }
 }
 
-/// Builds the http pool: its plugin, its listeners, and the supervision config the master needs.
-fn http_pool(
-    http: HttpSettings,
-    supervisor: &SupervisorSettings,
-    prepare: &mut PrepareCtx,
-) -> anyhow::Result<(PoolRun, PoolConfig)> {
-    let entrypoint: PathBuf = http.pool.entrypoint.clone();
-    check_entrypoint("http.pool", &entrypoint)?;
-    let mode: Mode = match http.pool.mode {
-        RunMode::Classic => Mode::Classic,
-        RunMode::Worker => Mode::Worker,
-        RunMode::Dispatcher => Mode::Dispatcher,
-    };
-    let dispatcher: bool = mode == Mode::Dispatcher;
-
-    // middleware ---------------------------------------------------
-    let mut middleware: Vec<Arc<dyn Middleware>> = Vec::new();
-    for mw in http.middleware {
-        match mw {
-            MiddlewareSettings::Static(st) => {
-                // is_dir() folds every stat error into false; metadata keeps the errno visible.
-                let meta = std::fs::metadata(&st.root).map_err(|e| {
-                    anyhow::anyhow!(
-                        "http.static.root {} is not accessible: {e}",
-                        st.root.display()
-                    )
-                })?;
-                anyhow::ensure!(
-                    meta.is_dir(),
-                    "http.static.root {} is not a directory",
-                    st.root.display()
-                );
-                // Serving needs search permission, not read; resolving `.` inside the root proves it.
-                std::fs::metadata(st.root.join(".")).map_err(|e| {
-                    anyhow::anyhow!(
-                        "http.static.root {} is not accessible: {e}",
-                        st.root.display()
-                    )
-                })?;
-                info!(target: "rapira", "static files from {}, forbid {:?}", st.root.display(), st.forbid);
-                middleware.push(Arc::new(rapira_static_files::StaticFiles::new(
-                    st.root, st.forbid,
-                )));
-            }
-        }
-    }
-    //----------------------------------------------------------------
-
-    // sendFile() root: a boot-time diagnostic so a bad path is caught before the first request,
-    // even under ondemand scaling where no worker forks at boot.
-    if let Err(e) = std::fs::metadata(&http.sendfile_root) {
-        tracing::warn!(
-            target: "rapira",
-            "http.sendfile.root {} is not accessible: {e}; sendFile() will reject every path",
-            http.sendfile_root.display()
-        );
-    }
-
-    // uploads: dispatcher mode only ---------------------------------
-    let uploads = if dispatcher {
-        prepare_uploads_dir(&http.uploads.dir)?;
-        Some(rapira_http::multipart::Limits {
-            dir: http.uploads.dir,
-            max_file_size: http.uploads.max_file_size,
-            max_field_size: http.uploads.max_field_size,
-            max_files: http.uploads.max_files,
-            max_parts: http.uploads.max_parts,
-            max_part_headers: http.uploads.max_part_headers,
-        })
-    } else {
-        None
-    };
-    // ---------------------------------------------------------------------
-
-    // parse HTTP configuration -------------------------------------
-    let uploads_dir: Option<PathBuf> = uploads.as_ref().map(|u| u.dir.clone());
-    let http_cfg: HttpConfig = HttpConfig {
-        listen: listen_addr(http.listen),
-        server_name: http.server_name,
-        server_port: http.server_port,
-        max_body_size: http.max_body_size,
-        write_timeout: http.write_timeout,
-        drain_grace: supervisor.drain_grace(),
-        unsafe_field_names: match http.unsafe_field_names {
-            UnsafeFieldNames::Drop => HttpUnsafeFieldNames::Drop,
-            UnsafeFieldNames::Reject => HttpUnsafeFieldNames::Reject,
-        },
-        superglobals: !dispatcher,
-        keepalive_timeout: http.keepalive_timeout,
-        middleware,
-        uploads,
-        sendfile_root: http.sendfile_root,
-    };
-    //----------------------------------------------------------------
-
-    pool_run(
-        "http",
-        &http.pool,
-        mode,
-        Box::new(HttpServer::init(http_cfg)),
-        prepare,
-        supervisor,
-        Some(worker::HttpArgs { uploads_dir }),
-    )
-}
-
 /// Checks the pool mode, binds the pool's listeners and packs what the master forks with.
 fn pool_run(
-    name: &'static str,
-    pool: &PoolSettings,
-    mode: Mode,
     mut plugin: Box<dyn Plugin>,
+    pool: &PoolSettings,
     prepare: &mut PrepareCtx,
     supervisor: &SupervisorSettings,
-    http: Option<worker::HttpArgs>,
 ) -> anyhow::Result<(PoolRun, PoolConfig)> {
-    check_mode(name, plugin.as_ref(), mode)?;
+    let name: &'static str = plugin.name();
+    check_mode(name, plugin.as_ref(), pool.mode)?;
     let listeners: Vec<RawFd> = prepare_pool(plugin.as_mut(), prepare)?;
     Ok((
         PoolRun {
             plugin: Some(plugin),
             args: worker::PoolArgs {
-                mode,
+                mode: pool.mode,
                 entrypoint: pool.entrypoint.clone(),
                 max_requests: pool.max_requests,
                 grace: supervisor.process_control_timeout,
-                http,
             },
         },
         pool_config(name, pool, listeners),
     ))
 }
 
-/// Builds the grpc pool. The schema loads here, in the master, so a bad descriptor set or service name stops the boot before the fork.
-fn grpc_pool(
-    grpc: GrpcSettings,
-    supervisor: &SupervisorSettings,
-    prepare: &mut PrepareCtx,
-) -> anyhow::Result<(PoolRun, PoolConfig)> {
-    let entrypoint: PathBuf = grpc.pool.entrypoint.clone();
-    check_entrypoint("grpc.pool", &entrypoint)?;
-    let schema = Arc::new(GrpcSchema::load(
-        &grpc.descriptor_set,
-        grpc.services.as_deref(),
-    )?);
-    let plugin = GrpcServer::init(GrpcConfig {
-        listen: listen_addr(grpc.listen),
-        schema,
-        reflection: grpc.reflection,
-        default_timeout: grpc.default_timeout,
-        max_timeout: grpc.max_timeout,
-        drain_grace: supervisor.drain_grace(),
-        keepalive_interval: Duration::from_secs(10),
-        keepalive_timeout: Duration::from_secs(10),
-    });
-    pool_run(
-        "grpc",
-        &grpc.pool,
-        Mode::Dispatcher,
-        Box::new(plugin),
-        prepare,
-        supervisor,
-        None,
-    )
-}
-
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
-    let settings: Settings = rapira_config::resolve(&args.config)?;
+    let settings: settings::Settings = settings::resolve(&args.config)?;
 
     logging::init(&settings.log);
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
+    // One plugin per configured table, with its pool.
+    let mut plugins: Vec<(Box<dyn Plugin>, PoolSettings)> = Vec::new();
+    if let Some(http) = settings.http {
+        let pool: PoolSettings = http.pool.clone();
+        let plugin = rapira_http::Server::from_settings(http, &settings.supervisor);
+        plugins.push((Box::new(plugin), pool));
+    }
+    if let Some(grpc) = settings.grpc {
+        let pool: PoolSettings = grpc.pool.clone();
+        let plugin = rapira_grpc::Server::from_settings(grpc, &settings.supervisor)?;
+        plugins.push((Box::new(plugin), pool));
+    }
+
     // One context for every pool, kept alive past `run` so the master keeps its listener dups.
     let mut prepare: PrepareCtx = PrepareCtx::new();
-    let http: Option<(PoolRun, PoolConfig)> = settings
-        .http
-        .map(|http| http_pool(http, &settings.supervisor, &mut prepare))
-        .transpose()?;
-    let grpc: Option<(PoolRun, PoolConfig)> = settings
-        .grpc
-        .map(|grpc| grpc_pool(grpc, &settings.supervisor, &mut prepare))
-        .transpose()?;
     // `WorkerEnv::pool` indexes both lists, so they keep one order.
-    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) =
-        http.into_iter().chain(grpc).unzip();
+    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = plugins
+        .into_iter()
+        .map(|(plugin, pool)| pool_run(plugin, &pool, &mut prepare, &settings.supervisor))
+        .collect::<anyhow::Result<Vec<_>>>()?
+        .into_iter()
+        .unzip();
 
     // MINIT once, after every pool bound its listeners. Every linked plugin registers its classes, whatever pools are configured.
     let module: rapira_sapi::PhpModule =
@@ -408,7 +182,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_mode, prepare_pool, spool_dir_reclaimable};
+    use super::{check_mode, prepare_pool};
     use rapira_http::{Config as HttpConfig, Server as HttpServer};
     use rapira_net::{ListenAddr, PrepareCtx};
 
@@ -460,24 +234,5 @@ mod tests {
             err.to_string(),
             "grpc.pool.mode = worker: this plugin serves dispatcher"
         );
-    }
-
-    /// The sweep reclaims only dirs whose owning process is gone.
-    #[test]
-    fn spool_sweep_reclaims_only_dead_pid_dirs() {
-        assert!(!spool_dir_reclaimable("other-dir"));
-        assert!(!spool_dir_reclaimable("rapira-spool-"));
-        assert!(!spool_dir_reclaimable("rapira-spool-x"));
-        assert!(!spool_dir_reclaimable("rapira-spool--5"));
-        assert!(!spool_dir_reclaimable("rapira-spool-0"));
-        let live = std::process::id();
-        assert!(!spool_dir_reclaimable(&format!("rapira-spool-{live}")));
-
-        let mut child = std::process::Command::new("true")
-            .spawn()
-            .expect("spawn a short-lived child");
-        let dead = child.id();
-        let _ = child.wait();
-        assert!(spool_dir_reclaimable(&format!("rapira-spool-{dead}")));
     }
 }
