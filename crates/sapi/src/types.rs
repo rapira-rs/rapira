@@ -1,6 +1,6 @@
 use bytes::Bytes;
 use http::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderName};
-use std::ffi::{CStr, CString};
+use std::ffi::CString;
 use std::os::raw::c_int;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -28,72 +28,6 @@ pub struct Tls {
     /// PHP `Tls::$requestedServerName`.
     pub server_name: Option<String>,
     pub cert: Option<ClientCert>,
-}
-
-/// One service of a gRPC pool. `name` is fully qualified.
-#[derive(Debug, Clone)]
-pub struct GrpcService {
-    pub name: String,
-    /// In descriptor order.
-    pub methods: Vec<GrpcMethod>,
-}
-
-/// One method of a `GrpcService`. `name` is the bare method name; the two types are fully qualified message names.
-#[derive(Debug, Clone)]
-pub struct GrpcMethod {
-    pub name: String,
-    pub input_type: String,
-    pub output_type: String,
-    pub client_streaming: bool,
-    pub server_streaming: bool,
-}
-
-/// `Rapira\Grpc\MethodKind`: client streaming streams the request, server streaming streams the response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MethodKind {
-    Unary,
-    ServerStreaming,
-    ClientStreaming,
-    BidiStreaming,
-}
-
-impl MethodKind {
-    pub(crate) fn of(m: &GrpcMethod) -> Self {
-        match (m.client_streaming, m.server_streaming) {
-            (false, false) => Self::Unary,
-            (false, true) => Self::ServerStreaming,
-            (true, false) => Self::ClientStreaming,
-            (true, true) => Self::BidiStreaming,
-        }
-    }
-
-    /// From the backing value of a case.
-    pub(crate) fn from_value(value: &[u8]) -> Option<Self> {
-        Some(match value {
-            b"unary" => Self::Unary,
-            b"server-streaming" => Self::ServerStreaming,
-            b"client-streaming" => Self::ClientStreaming,
-            b"bidi-streaming" => Self::BidiStreaming,
-            _ => return None,
-        })
-    }
-
-    pub(crate) fn case(self) -> &'static CStr {
-        match self {
-            Self::Unary => c"Unary",
-            Self::ServerStreaming => c"ServerStreaming",
-            Self::ClientStreaming => c"ClientStreaming",
-            Self::BidiStreaming => c"BidiStreaming",
-        }
-    }
-
-    pub(crate) fn streams_request(self) -> bool {
-        matches!(self, Self::ClientStreaming | Self::BidiStreaming)
-    }
-
-    pub(crate) fn streams_response(self) -> bool {
-        matches!(self, Self::ServerStreaming | Self::BidiStreaming)
-    }
 }
 
 #[repr(C)]

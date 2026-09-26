@@ -11,7 +11,6 @@ use rapira_master::PoolConfig;
 use rapira_net::{ListenAddr, PrepareCtx};
 use rapira_sapi::middleware::Middleware;
 use rapira_sapi::plugin::{Mode, Plugin};
-use rapira_sapi::{GrpcMethod, GrpcService};
 use std::{
     fs::{File, OpenOptions, read_dir, remove_file},
     os::fd::RawFd,
@@ -314,7 +313,6 @@ fn pool_run(
                 max_requests: pool.max_requests,
                 grace: supervisor.process_control_timeout,
                 http,
-                services: None,
             },
         },
         pool_config(name, pool, listeners),
@@ -333,25 +331,6 @@ fn grpc_pool(
         &grpc.descriptor_set,
         grpc.services.as_deref(),
     )?);
-    let services: Vec<GrpcService> = schema
-        .services()
-        .iter()
-        .map(|s| GrpcService {
-            name: s.name.clone(),
-            methods: s
-                .methods
-                .iter()
-                .map(|m| GrpcMethod {
-                    name: m.name.clone(),
-                    input_type: m.input_type.clone(),
-                    output_type: m.output_type.clone(),
-                    client_streaming: m.client_streaming,
-                    server_streaming: m.server_streaming,
-                })
-                .collect(),
-        })
-        .collect();
-
     let plugin = GrpcServer::init(GrpcConfig {
         listen: listen_addr(grpc.listen),
         schema,
@@ -362,7 +341,7 @@ fn grpc_pool(
         keepalive_interval: Duration::from_secs(10),
         keepalive_timeout: Duration::from_secs(10),
     });
-    let (mut run, config) = pool_run(
+    pool_run(
         "grpc",
         &grpc.pool,
         Mode::Dispatcher,
@@ -370,9 +349,7 @@ fn grpc_pool(
         prepare,
         supervisor,
         None,
-    )?;
-    run.args.services = Some(services);
-    Ok((run, config))
+    )
 }
 
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
@@ -397,7 +374,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     // MINIT once, after every pool bound its listeners. Every linked plugin registers its classes, whatever pools are configured.
     let module: rapira_sapi::PhpModule =
-        rapira_sapi::boot_master(&[rapira_http::PHP_PART, rapira_sapi::grpc::PHP_PART])?;
+        rapira_sapi::boot_master(&[rapira_http::PHP_PART, rapira_grpc::PHP_PART])?;
 
     // forks ------------------------------------------------------------------
     let cfg: rapira_master::MasterConfig = rapira_master::MasterConfig {

@@ -4,8 +4,7 @@ use tests::php_lock;
 #[test]
 fn every_plugin_class_exists_after_boot_with_both_parts() {
     let _g = php_lock();
-    let module =
-        rapira_sapi::boot_master(&[rapira_http::PHP_PART, rapira_sapi::grpc::PHP_PART]).unwrap();
+    let module = rapira_sapi::boot_master(&[rapira_http::PHP_PART, rapira_grpc::PHP_PART]).unwrap();
     for class in [
         "Rapira\\Work",
         "Rapira\\Http\\Exchange",
@@ -33,17 +32,20 @@ fn every_plugin_class_exists_after_boot_with_both_parts() {
 #[test]
 fn a_later_boot_registers_its_own_parts() {
     let _g = php_lock();
-    let module = rapira_sapi::boot_master(&[]).unwrap();
+    let module = rapira_sapi::boot_master(&[rapira_http::PHP_PART]).unwrap();
     // SAFETY: between boot_master and the module drop.
     let before = unsafe { rapira_sapi::class_exists("Rapira\\Http\\Exchange") };
     drop(module);
-    let module = rapira_sapi::boot_master(&[rapira_http::PHP_PART]).unwrap();
+    let module = rapira_sapi::boot_master(&[]).unwrap();
     // SAFETY: as above.
     let after = unsafe { rapira_sapi::class_exists("Rapira\\Http\\Exchange") };
     drop(module);
-    assert!(!before, "a boot with no parts registered the http classes");
     assert!(
-        after,
+        before,
         "a boot with the http part did not register its classes"
+    );
+    assert!(
+        !after,
+        "a boot with no parts kept the http classes of the earlier boot"
     );
 }

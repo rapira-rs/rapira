@@ -10,7 +10,6 @@ use connectrpc::{
 use connectrpc_health::StaticChecker;
 use rapira_net::{Acceptor, Serve, Stop};
 use rapira_sapi::Addr;
-use rapira_sapi::grpc::Call;
 use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -18,7 +17,7 @@ use tokio::sync::watch;
 use tower::util::MapResponse;
 
 use crate::dispatch::PhpDispatcher;
-use crate::{Config, Prepared};
+use crate::{Call, Config, Prepared};
 
 /// Everything the accept loop hands to a connection, and the drain that follows it.
 struct Serving {

@@ -942,6 +942,7 @@ dependencies = [
  "connectrpc-reflection",
  "http",
  "rapira_net",
+ "rapira_php_build",
  "rapira_sapi",
  "tokio",
  "tower",
@@ -1004,7 +1005,6 @@ name = "rapira_sapi"
 version = "0.8.1"
 dependencies = [
  "anyhow",
- "base64",
  "bindgen",
  "bytes",
  "http",

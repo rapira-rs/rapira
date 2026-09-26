@@ -6,15 +6,18 @@ use connectrpc::Router;
 use connectrpc_health::StaticChecker;
 use connectrpc_reflection::Reflector;
 use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
-use rapira_sapi::grpc::Call;
 use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
 use rapira_sapi::work::Intake;
 
+mod call;
 mod dispatch;
+mod php;
 mod schema;
 mod serve;
 
-pub use schema::{MethodInfo, Schema, ServiceInfo};
+pub use call::{Call, RpcProtocol, RpcStatus, UnaryCall, UnaryReply};
+pub use php::{DISPATCHER_CLASSES, PHP_PART};
+pub use schema::{MethodInfo, Schema, ServiceInfo, set_services};
 
 #[derive(Clone)]
 pub struct Config {
@@ -74,10 +77,11 @@ impl Plugin for Server {
     }
 
     fn php(&self) -> Option<PhpPart> {
-        Some(rapira_sapi::grpc::PHP_PART)
+        Some(PHP_PART)
     }
 
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
+        set_services(self.config.schema.services().to_vec())?;
         let listener = ctx.bind(&self.config.listen)?;
         tracing::info!(target: "grpc", "prepared listener on {}", listener.addr());
 

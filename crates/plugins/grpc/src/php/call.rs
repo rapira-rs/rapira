@@ -1,26 +1,35 @@
+use std::ffi::{CStr, c_char, c_void};
+
 use base64::Engine as _;
 use base64::alphabet;
 use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD_NO_PAD};
+use bytes::Bytes;
+use http::header::{HeaderMap, HeaderName, HeaderValue};
+use rapira_sapi::callbacks::guard;
+use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key, note_served};
+use rapira_sapi::scoreboard::{Event, sb_update};
+use rapira_sapi::work::{Held, release};
+use rapira_sapi::{
+    HashPosition, HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex,
+    rapira_array_init, rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception,
+    rapira_zval_enum_case, zend, zend_argument_type_error, zend_class_entry,
+    zend_hash_get_current_data_ex, zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex,
+    zend_object, zend_read_property, zend_zval_value_name, zval, zval_add_ref, zval_ptr_dtor,
+};
 use tokio::sync::oneshot;
 
-use super::*;
-use crate::{
-    IS_OBJECT,
-    grpc::Call,
-    grpc::{RpcProtocol, RpcStatus, UnaryCall, UnaryReply},
-    rapira_ce_already_finalized_error, rapira_ce_grpc_context, rapira_ce_grpc_error_detail,
+use super::{
+    CallObj, MetadataObj, MethodKind, rapira_ce_grpc_context, rapira_ce_grpc_error_detail,
     rapira_ce_grpc_metadata, rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind,
     rapira_ce_grpc_protocol, rapira_ce_grpc_service_info, rapira_ce_grpc_status,
-    rapira_ce_internal_grpc_response_metadata, rapira_ce_work_discarded_exception,
-    rapira_grpc_call_obj, rapira_grpc_metadata_obj, rapira_zval_enum_case,
-    types::{GrpcMethod, MethodKind},
-    zend_argument_type_error, zend_read_property, zend_zval_value_name,
+    rapira_ce_internal_grpc_response_metadata,
 };
+use crate::{Call, MethodInfo, RpcProtocol, RpcStatus, UnaryCall, UnaryReply};
 
 /// # Safety
 /// `dst` writable; engine active on this thread.
-unsafe fn method_info(dst: *mut zval, m: &GrpcMethod) {
+unsafe fn method_info(dst: *mut zval, m: &MethodInfo) {
     unsafe {
         let ce = rapira_ce_grpc_method_info;
         let _ = object_init_ex(dst, ce);
@@ -45,26 +54,24 @@ unsafe fn method_info(dst: *mut zval, m: &GrpcMethod) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_services(rv: *mut zval) -> bool {
     guard(false, || unsafe {
-        crate::grpc::SERVICES.with_borrow(|services| {
-            let services = services.as_deref().unwrap_or_default();
-            rapira_array_init(rv, services.len() as u32);
-            for s in services {
-                let mut methods: zval = std::mem::zeroed();
-                rapira_array_init(&mut methods, s.methods.len() as u32);
-                for m in &s.methods {
-                    let mut info: zval = std::mem::zeroed();
-                    method_info(&mut info, m);
-                    let _ = add_next_index_object(&mut methods, info.value.obj);
-                }
-                let ce = rapira_ce_grpc_service_info;
-                let mut service: zval = std::mem::zeroed();
-                let _ = object_init_ex(&mut service, ce);
-                zend::prop_stringl(ce, service.value.obj, c"name", s.name.as_bytes());
-                zend::prop_zval(ce, service.value.obj, c"methods", &mut methods);
-                zval_ptr_dtor(&mut methods);
-                let _ = add_next_index_object(rv, service.value.obj);
+        let services = crate::schema::services();
+        rapira_array_init(rv, services.len() as u32);
+        for s in services {
+            let mut methods: zval = std::mem::zeroed();
+            rapira_array_init(&mut methods, s.methods.len() as u32);
+            for m in &s.methods {
+                let mut info: zval = std::mem::zeroed();
+                method_info(&mut info, m);
+                let _ = add_next_index_object(&mut methods, info.value.obj);
             }
-        });
+            let ce = rapira_ce_grpc_service_info;
+            let mut service: zval = std::mem::zeroed();
+            let _ = object_init_ex(&mut service, ce);
+            zend::prop_stringl(ce, service.value.obj, c"name", s.name.as_bytes());
+            zend::prop_zval(ce, service.value.obj, c"methods", &mut methods);
+            zval_ptr_dtor(&mut methods);
+            let _ = add_next_index_object(rv, service.value.obj);
+        }
         true
     })
 }
@@ -339,8 +346,8 @@ unsafe fn thrown(v: Verb) -> bool {
     false
 }
 
-container_of!(pub(crate) grpc_call_from, rapira_grpc_call_obj);
-container_of!(metadata_from, rapira_grpc_metadata_obj);
+rapira_sapi::container_of!(pub(crate) grpc_call_from, CallObj);
+rapira_sapi::container_of!(metadata_from, MetadataObj);
 
 /// A `Rapira\Grpc\Metadata` object over `fields`.
 /// # Safety
@@ -512,10 +519,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_message(
 /// # Safety
 /// `call` a live call object with a state; `rv` writable; engine active.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_grpc_context(
-    call: *mut rapira_grpc_call_obj,
-    rv: *mut zval,
-) -> bool {
+pub unsafe extern "C" fn rapira_rs_grpc_context(call: *mut CallObj, rv: *mut zval) -> bool {
     guard(false, || unsafe {
         if zend::is_undef(&(*call).context) {
             build_context(
@@ -534,7 +538,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_context(
 /// As `rapira_rs_grpc_context`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_response_metadata(
-    call: *mut rapira_grpc_call_obj,
+    call: *mut CallObj,
     rv: *mut zval,
 ) -> bool {
     guard(false, || unsafe {
@@ -650,6 +654,8 @@ pub unsafe extern "C" fn rapira_rs_grpc_drop(state: *mut c_void) {
 
 #[cfg(test)]
 mod tests {
+    use rapira_sapi::types::Addr;
+
     use super::*;
 
     fn state() -> (GrpcState, oneshot::Receiver<UnaryReply>) {

@@ -5,9 +5,8 @@ use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use bytes::Bytes;
 use http::Method;
 use http_body_util::BodyExt;
-use rapira_grpc::Config;
+use rapira_grpc::{Call, Config, RpcProtocol};
 use rapira_net::ListenAddr;
-use rapira_sapi::grpc::{Call, RpcProtocol};
 use rapira_sapi::work::Work as _;
 use serde_json::Value;
 use tests::grpc::{

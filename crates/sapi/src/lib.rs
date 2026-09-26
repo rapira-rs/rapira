@@ -7,7 +7,6 @@ pub mod diagnostics;
 pub mod dispatcher;
 pub mod exchange;
 pub mod executor;
-pub mod grpc;
 pub mod middleware;
 pub mod module;
 pub mod plugin;
@@ -26,7 +25,7 @@ pub use bindings::*;
 pub use plugin::Mode;
 pub use quota::WorkerHooks;
 pub use start::{PhpModule, Rapira, boot_master};
-pub use types::{Addr, ClientCert, Frame, GrpcMethod, GrpcService, Request, ResponseHead, Tls};
+pub use types::{Addr, ClientCert, Frame, Request, ResponseHead, Tls};
 pub use zend::{class_exists, class_extends};
 
 // bindgen names the Zend SUCCESS/FAILURE constants differently across php-src versions, so the values are hardcoded.

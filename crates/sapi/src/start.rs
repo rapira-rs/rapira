@@ -119,7 +119,6 @@ impl Rapira {
             on_quota,
             on_unhealthy,
             slot,
-            on_thread_start,
         } = hooks;
         let (board, slot) = match slot {
             Some(s) => (None, s),
@@ -155,7 +154,6 @@ impl Rapira {
                     pending,
                 },
                 classes,
-                on_thread_start,
             )
         });
 
@@ -167,26 +165,16 @@ impl Rapira {
         })
     }
 
+    /// Boots the master and one worker in this process.
     pub fn start(
         parts: &[PhpPart],
         mode: Mode,
         entrypoint: PathBuf,
         classes: Option<DispatcherClasses>,
     ) -> anyhow::Result<Self> {
-        Self::start_with_hooks(parts, mode, entrypoint, WorkerHooks::default(), classes)
-    }
-
-    /// Boots the master and one worker in this process.
-    pub fn start_with_hooks(
-        parts: &[PhpPart],
-        mode: Mode,
-        entrypoint: PathBuf,
-        hooks: WorkerHooks,
-        classes: Option<DispatcherClasses>,
-    ) -> anyhow::Result<Self> {
         info!(target: "rapira", "booting with mode: {mode:?}");
         let module = boot_master(parts)?;
-        let mut rapira = Self::start_worker(mode, entrypoint, hooks, classes)?;
+        let mut rapira = Self::start_worker(mode, entrypoint, WorkerHooks::default(), classes)?;
         rapira.module = Some(module);
         Ok(rapira)
     }
@@ -230,18 +218,9 @@ impl Drop for Rapira {
 }
 
 /// NTS inits module and request on different threads, so the call stack is re-initialized on this thread: https://github.com/php/php-src/pull/9104
-fn worker_main(
-    mode: Mode,
-    entrypoint: PathBuf,
-    rx: JobRx,
-    classes: Option<DispatcherClasses>,
-    on_thread_start: Option<Box<dyn FnOnce() + Send>>,
-) {
+fn worker_main(mode: Mode, entrypoint: PathBuf, rx: JobRx, classes: Option<DispatcherClasses>) {
     JOB_RX.with_borrow_mut(|slot| *slot = Some(rx));
     crate::exchange::set_classes(classes);
-    if let Some(f) = on_thread_start {
-        f();
-    }
     loop {
         unsafe {
             rapira_init_call_stack();
