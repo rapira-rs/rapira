@@ -923,7 +923,6 @@ dependencies = [
  "rapira_net",
  "rapira_sapi",
  "serde",
- "serde_json",
  "toml",
  "tracing",
  "tracing-subscriber",
