@@ -1,6 +1,6 @@
 use std::net::{Ipv4Addr, SocketAddr, SocketAddrV4};
 
-use rapira_sapi::grpc::{RpcProtocol, RpcStatus, UnaryReply};
+use rapira_grpc::{RpcProtocol, RpcStatus, UnaryReply};
 use rapira_sapi::{Addr, Mode, Rapira};
 use serde_json::{Value, json};
 use tests::{

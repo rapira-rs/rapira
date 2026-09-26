@@ -4,7 +4,7 @@
 #include "zend_enum.h"
 #include "zend_types.h"
 
-// rust glue (src/values.rs): false means a PHP exception is pending
+// rust glue (src/php/values.rs): false means a PHP exception is pending
 extern bool rapira_rs_ctor_grpc_error_detail(zend_object *obj,
                                              zend_string *type_url,
                                              zend_string *value);
@@ -28,7 +28,7 @@ extern bool rapira_rs_ctor_grpc_exception(zend_object *obj, zval *code,
 extern bool rapira_rs_grpc_kind_streams(const char *value, size_t len,
                                         bool request);
 
-// rust glue (src/exchange/grpc.rs): false means a PHP exception is pending
+// rust glue (src/php/call.rs): false means a PHP exception is pending
 extern bool rapira_rs_grpc_services(zval *rv);
 extern bool rapira_rs_grpc_is_finalized(const void *state);
 extern bool rapira_rs_grpc_is_cancelled(const void *state);

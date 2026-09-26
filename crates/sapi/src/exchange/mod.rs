@@ -1,17 +1,13 @@
 pub(crate) use std::{
     cell::Cell,
-    ffi::{CStr, c_char, c_int, c_void},
+    ffi::{c_char, c_int},
     path::Path,
     time::Duration,
 };
 
-pub(crate) use bytes::Bytes;
-pub(crate) use http::header::{HeaderMap, HeaderName, HeaderValue};
-
 pub(crate) use crate::work::{DispatcherClasses, Held, release};
 pub(crate) use crate::{
-    HashPosition, HashTable, IS_STRING, RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
-    add_next_index_object,
+    RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
     callbacks::guard,
     object_init_ex, rapira_array_init, rapira_ce_closed_exception, rapira_ce_inet_address,
     rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
@@ -19,14 +15,10 @@ pub(crate) use crate::{
     scoreboard::{Event, sb_update},
     start::{Pulled, pending_depth, pull_job_try, pull_job_wait},
     types::Addr,
-    zend, zend_class_entry, zend_hash_get_current_data_ex, zend_hash_internal_pointer_reset_ex,
-    zend_hash_move_forward_ex, zend_object, zval, zval_add_ref, zval_ptr_dtor,
+    zend, zval, zval_add_ref, zval_ptr_dtor,
 };
 
-mod grpc;
 mod receive;
-
-pub(crate) use grpc::{GrpcState, grpc_call_from, is_binary, printable};
 
 thread_local! {
     /// The dispatcher classes of the plugin this PHP thread serves; None outside dispatcher mode.
@@ -192,7 +184,7 @@ pub unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
     }
 }
 
-/// `fn $name(obj) -> *mut $t` recovers the enclosing C struct: the C fields sit before `std` (the layouts in rapira_sapi.h, rapira_http.h and rapira_grpc.h).
+/// `fn $name(obj) -> *mut $t` recovers the enclosing C struct: the C fields sit before `std` (the layouts in rapira_sapi.h and the plugin headers).
 #[macro_export]
 macro_rules! container_of {
     ($vis:vis $name:ident, $t:ty) => {
@@ -201,6 +193,5 @@ macro_rules! container_of {
         }
     };
 }
-pub(crate) use container_of;
 
 container_of!(info_from, rapira_dispatcher_info_obj);

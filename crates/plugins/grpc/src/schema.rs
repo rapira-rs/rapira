@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::{Arc, OnceLock};
 
 use anyhow::anyhow;
 use buffa_descriptor::generated::descriptor::method_options::IdempotencyLevel;
@@ -15,20 +15,40 @@ pub struct Schema {
 }
 
 /// A configured service with every method it declares.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ServiceInfo {
     pub name: String,
     pub methods: Vec<MethodInfo>,
 }
 
 /// A method with fully qualified message type names.
-#[derive(Debug, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct MethodInfo {
     pub name: String,
     pub input_type: String,
     pub output_type: String,
     pub client_streaming: bool,
     pub server_streaming: bool,
+}
+
+/// The services that `getServices()` reports. The master sets them in `prepare`, before the fork, so every worker inherits them.
+static SERVICES: OnceLock<Vec<ServiceInfo>> = OnceLock::new();
+
+/// Sets the services that `getServices()` reports. A later call with an equal list is accepted; a different list is an error.
+pub fn set_services(services: Vec<ServiceInfo>) -> anyhow::Result<()> {
+    match SERVICES.set(services) {
+        Ok(()) => Ok(()),
+        Err(services) if services == self::services() => Ok(()),
+        Err(services) => Err(anyhow!(
+            "the grpc services are already set to {:?}; the new list is {services:?}",
+            self::services()
+        )),
+    }
+}
+
+/// The services that `getServices()` reports; empty before `set_services`.
+pub(crate) fn services() -> &'static [ServiceInfo] {
+    SERVICES.get().map_or(&[], Vec::as_slice)
 }
 
 /// A unary method that rapira routes to PHP.
@@ -218,5 +238,29 @@ fn service_info(
     ServiceInfo {
         name: service.full_name().to_owned(),
         methods: infos,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn listing(name: &str) -> Vec<ServiceInfo> {
+        vec![ServiceInfo {
+            name: name.to_owned(),
+            methods: Vec::new(),
+        }]
+    }
+
+    /// A later call with an equal list is accepted; a different list is refused and names both lists.
+    #[test]
+    fn set_services_accepts_only_an_equal_list_again() {
+        set_services(listing("a.v1.A")).expect("the first list sets");
+        set_services(listing("a.v1.A")).expect("an equal list is accepted");
+        let err = set_services(listing("b.v1.B"))
+            .expect_err("a different list is refused")
+            .to_string();
+        assert!(err.contains("a.v1.A") && err.contains("b.v1.B"), "{err}");
+        assert_eq!(services(), listing("a.v1.A"), "the first list stays");
     }
 }

@@ -11,8 +11,6 @@ const C_FILES: &[&str] = &[
     "module.c",
     "rapira_classes.c",
     "rapira_dispatcher.c",
-    "rapira_grpc.c",
-    "rapira_grpc_classes.c",
 ];
 
 // bindgen panics on php-src master's `preserve_none` opcode handlers, so `_zend_op` stays opaque: https://clang.llvm.org/docs/AttributeReference.html#preserve-none
@@ -36,7 +34,7 @@ fn main() -> anyhow::Result<()> {
     rapira_php_build::compile("rapira_sapi", C_FILES, &php, &[]);
 
     let mut bindings = bindgen::Builder::default()
-        .header("bindgen.h")
+        .header("rapira_sapi.h")
         .clang_args(php.includes.iter().map(|d| format!("-I{d}")))
         .opaque_type("_zend_op");
     #[cfg(target_os = "macos")]
@@ -59,16 +57,12 @@ fn main() -> anyhow::Result<()> {
     println!("cargo:include={}", env::var("CARGO_MANIFEST_DIR")?);
 
     let inputs: &[&str] = &[
-        "bindgen.h",
         "rapira_sapi.h",
-        "rapira_grpc.h",
         "allowed_bindings.rs",
         "rapira.stub.php",
         "rapira_arginfo.h",
         "rapira_exception.stub.php",
         "rapira_exception_arginfo.h",
-        "rapira_grpc.stub.php",
-        "rapira_grpc_arginfo.h",
     ];
     rapira_php_build::rerun_if_changed(&[C_FILES, inputs].concat());
 

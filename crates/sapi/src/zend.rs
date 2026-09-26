@@ -7,7 +7,7 @@ use crate::{
     zend_update_property_stringl, zend_value_error, zval,
 };
 
-pub(crate) fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
+pub fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
     if bytes.is_empty() {
         c"".as_ptr()
     } else {
@@ -133,10 +133,7 @@ pub unsafe fn exception_pending() -> bool {
 /// instanceof_function is inline; this is its two-halves replication.
 /// # Safety
 /// Both class entries registered.
-pub(crate) unsafe fn instanceof(
-    ce: *const zend_class_entry,
-    base: *const zend_class_entry,
-) -> bool {
+pub unsafe fn instanceof(ce: *const zend_class_entry, base: *const zend_class_entry) -> bool {
     ce == base || unsafe { crate::instanceof_function_slow(ce, base) }
 }
 

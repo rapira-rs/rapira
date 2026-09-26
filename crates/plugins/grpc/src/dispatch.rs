@@ -10,10 +10,10 @@ use connectrpc::{
     MethodDescriptor, Payload, Protocol, RequestContext,
 };
 use rapira_sapi::Addr;
-use rapira_sapi::grpc::{Call, RpcProtocol, RpcStatus, UnaryCall};
 use rapira_sapi::work::Intake;
 
 use crate::schema::Schema;
+use crate::{Call, RpcProtocol, RpcStatus, UnaryCall};
 
 /// Routes the unary methods of the configured services to PHP.
 pub(crate) struct PhpDispatcher {

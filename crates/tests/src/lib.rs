@@ -1,9 +1,9 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
+use rapira_grpc::{Call, MethodInfo, RpcProtocol, ServiceInfo, UnaryCall, UnaryReply};
 use rapira_http::Exchange;
-use rapira_sapi::grpc::{Call, RpcProtocol, UnaryCall, UnaryReply};
 use rapira_sapi::plugin::PhpPart;
 use rapira_sapi::work::{Intake, Refused, Sink};
-use rapira_sapi::{Addr, Frame, GrpcMethod, GrpcService, Mode, Rapira, Request, WorkerHooks};
+use rapira_sapi::{Addr, Frame, Mode, Rapira, Request};
 use serde_json::Value;
 use std::collections::HashMap;
 use std::env::set_var;
@@ -14,7 +14,7 @@ use tokio::sync::{mpsc, oneshot};
 pub mod grpc;
 
 /// Every test boot registers both parts, as the root does.
-pub static PHP_PARTS: [PhpPart; 2] = [rapira_http::PHP_PART, rapira_sapi::grpc::PHP_PART];
+pub static PHP_PARTS: [PhpPart; 2] = [rapira_http::PHP_PART, rapira_grpc::PHP_PART];
 
 static PHP_LOCK: Mutex<()> = Mutex::new(());
 static PHP_ENV: Once = Once::new();
@@ -167,15 +167,15 @@ pub fn echo_descriptor_set() -> PathBuf {
 }
 
 /// The services of `fixtures/grpc/echo.proto`, in descriptor order.
-pub fn echo_services() -> Vec<GrpcService> {
-    let method = |name: &str, server_streaming: bool| GrpcMethod {
+pub fn echo_services() -> Vec<ServiceInfo> {
+    let method = |name: &str, server_streaming: bool| MethodInfo {
         name: name.into(),
         input_type: "rapira.test.v1.EchoRequest".into(),
         output_type: "rapira.test.v1.EchoResponse".into(),
         client_streaming: false,
         server_streaming,
     };
-    vec![GrpcService {
+    vec![ServiceInfo {
         name: "rapira.test.v1.EchoService".into(),
         methods: vec![
             method("Echo", false),
@@ -187,17 +187,12 @@ pub fn echo_services() -> Vec<GrpcService> {
 
 /// Boots a gRPC dispatcher worker on `script` that serves the services of `fixtures/grpc/echo.proto`.
 pub fn start_grpc(script: PathBuf) -> anyhow::Result<Rapira> {
-    let services = echo_services();
-    let hooks = WorkerHooks {
-        on_thread_start: Some(Box::new(move || rapira_sapi::grpc::set_services(services))),
-        ..WorkerHooks::default()
-    };
-    Rapira::start_with_hooks(
+    rapira_grpc::set_services(echo_services())?;
+    Rapira::start(
         &PHP_PARTS,
         Mode::Dispatcher,
         script,
-        hooks,
-        Some(rapira_sapi::grpc::DISPATCHER_CLASSES),
+        Some(rapira_grpc::DISPATCHER_CLASSES),
     )
 }
 

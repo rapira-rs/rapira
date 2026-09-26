@@ -1,5 +1,5 @@
 use http::HeaderMap;
-use rapira_sapi::grpc::{RpcStatus, UnaryReply};
+use rapira_grpc::{RpcStatus, UnaryReply};
 use rapira_sapi::{Mode, Rapira};
 use std::sync::mpsc;
 use std::time::Duration;

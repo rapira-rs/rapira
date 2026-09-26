@@ -6,7 +6,7 @@ use std::time::Duration;
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
 use rapira_sapi::plugin::{Mode, Plugin, Stopper, run_plugin};
 use rapira_sapi::work::DispatcherClasses;
-use rapira_sapi::{GrpcService, Rapira, WorkerHooks};
+use rapira_sapi::{Rapira, WorkerHooks};
 
 /// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset, so the plugin outcome sets the exit code.
 static WORKER_EXIT: AtomicI32 = AtomicI32::new(-1);
@@ -46,8 +46,6 @@ pub struct PoolArgs {
     pub grace: Duration,
     /// None for a gRPC pool.
     pub http: Option<HttpArgs>,
-    /// The services a gRPC pool serves; None for an http pool.
-    pub services: Option<Vec<GrpcService>>,
 }
 
 /// The worker settings of an http pool.
@@ -65,7 +63,6 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
         max_requests,
         grace,
         http,
-        services,
     } = args;
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { rapira_sapi::rapira_child_init() };
@@ -98,9 +95,6 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
             move || request_worker_exit(WORKER_EXIT_UNHEALTHY, &stopper)
         })),
         slot: Some(env.slot_view),
-        on_thread_start: services.map(|services| {
-            Box::new(move || rapira_sapi::grpc::set_services(services)) as Box<dyn FnOnce() + Send>
-        }),
     };
 
     let rapira = match Rapira::start_worker(mode, entrypoint.clone(), hooks, classes) {
