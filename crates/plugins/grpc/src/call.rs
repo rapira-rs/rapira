@@ -117,7 +117,7 @@ impl Work for Call {
     }
 
     fn shed(self: Box<Self>) {
-        let _ = self.reply.send(UnaryReply {
+        self.respond(UnaryReply {
             headers: HeaderMap::new(),
             trailers: HeaderMap::new(),
             outcome: Err(RpcStatus {
