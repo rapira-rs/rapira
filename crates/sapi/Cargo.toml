@@ -24,4 +24,4 @@ bindgen = "0"
 rapira_php_build = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "test-util"] }
+tokio = { workspace = true, features = ["macros"] }

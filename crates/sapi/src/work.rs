@@ -1,4 +1,5 @@
 use std::ffi::CStr;
+use std::marker::PhantomData;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
@@ -144,12 +145,6 @@ impl Sink {
         }
     }
 
-    /// A sink with no PHP thread. The receiver plays the PHP thread.
-    pub fn channel(cap: usize) -> (Sink, std::sync::mpsc::Receiver<Box<dyn Work>>) {
-        let (tx, rx) = std::sync::mpsc::sync_channel(cap);
-        (Self::new(tx, Arc::new(AtomicUsize::new(0))), rx)
-    }
-
     #[cfg(test)]
     fn pending(&self) -> usize {
         self.pending.load(Ordering::Relaxed)
@@ -158,21 +153,13 @@ impl Sink {
 
 /// The typed handle a plugin's transport submits to.
 pub struct Intake<U: Work> {
-    route: Route<U>,
-}
-
-enum Route<U> {
-    Sink(Sink),
-    Channel(tokio::sync::mpsc::Sender<U>),
+    sink: Sink,
+    unit: PhantomData<fn(U)>,
 }
 
 impl<U: Work> Clone for Intake<U> {
     fn clone(&self) -> Self {
-        let route = match &self.route {
-            Route::Sink(sink) => Route::Sink(sink.clone()),
-            Route::Channel(tx) => Route::Channel(tx.clone()),
-        };
-        Self { route }
+        Self::new(self.sink.clone())
     }
 }
 
@@ -180,28 +167,13 @@ impl<U: Work> Intake<U> {
     /// The worker behind `sink` must have started with the `DispatcherClasses` of the plugin that owns `U`.
     pub fn new(sink: Sink) -> Self {
         Self {
-            route: Route::Sink(sink),
+            sink,
+            unit: PhantomData,
         }
-    }
-
-    /// A test intake with no PHP thread. The receiver plays the PHP thread.
-    pub fn channel(cap: usize) -> (Self, tokio::sync::mpsc::Receiver<U>) {
-        let (tx, rx) = tokio::sync::mpsc::channel(cap);
-        let intake = Self {
-            route: Route::Channel(tx),
-        };
-        (intake, rx)
     }
 
     pub async fn submit(&self, unit: U) -> Result<(), Refused> {
-        match &self.route {
-            Route::Sink(sink) => sink.submit(Box::new(unit)).await,
-            Route::Channel(tx) => match tokio::time::timeout(INTAKE_WAIT, tx.send(unit)).await {
-                Ok(Ok(())) => Ok(()),
-                Ok(Err(_)) => Err(Refused::Stopped),
-                Err(_) => Err(Refused::Saturated),
-            },
-        }
+        self.sink.submit(Box::new(unit)).await
     }
 }
 
@@ -223,35 +195,22 @@ mod tests {
         fn shed(self: Box<Self>) {}
     }
 
-    #[tokio::test(flavor = "current_thread")]
-    async fn channel_intake_delivers_in_order() {
-        let (intake, mut rx) = Intake::<Probe>::channel(2);
-        intake.submit(Probe).await.unwrap();
-        intake.submit(Probe).await.unwrap();
-        assert!(rx.recv().await.is_some());
-        assert!(rx.recv().await.is_some());
+    fn sink() -> (Sink, std::sync::mpsc::Receiver<Box<dyn Work>>) {
+        let (tx, rx) = std::sync::mpsc::sync_channel(1);
+        (Sink::new(tx, Arc::new(AtomicUsize::new(0))), rx)
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn channel_intake_reports_stopped_after_the_receiver_is_gone() {
-        let (intake, rx) = Intake::<Probe>::channel(1);
+    async fn intake_reports_stopped_after_the_receiver_is_gone() {
+        let (sink, rx) = sink();
+        let intake = Intake::<Probe>::new(sink);
         drop(rx);
         assert_eq!(intake.submit(Probe).await.unwrap_err(), Refused::Stopped);
     }
 
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn channel_intake_reports_saturated_when_nothing_drains() {
-        let (intake, _rx) = Intake::<Probe>::channel(1);
-        intake.submit(Probe).await.unwrap();
-        let second = tokio::spawn(async move { intake.submit(Probe).await });
-        tokio::task::yield_now().await;
-        tokio::time::advance(INTAKE_WAIT + std::time::Duration::from_secs(1)).await;
-        assert_eq!(second.await.unwrap().unwrap_err(), Refused::Saturated);
-    }
-
     #[tokio::test(flavor = "current_thread")]
     async fn sink_counts_a_submitted_unit_as_pending() {
-        let (sink, _rx) = Sink::channel(1);
+        let (sink, _rx) = sink();
         sink.submit(Box::new(Probe)).await.unwrap();
         assert_eq!(sink.pending(), 1);
     }
