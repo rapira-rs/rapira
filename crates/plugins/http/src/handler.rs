@@ -96,7 +96,7 @@ pub(crate) struct RespBody {
     kind: BodyKind,
     guard: Arc<InflightReqCount>,
     /// Declared body bytes still to pass through, with the connection state that holds the flush count.
-    /// Armed by `call` once every middleware has returned.
+    /// Armed by [`respond`] once every middleware has returned.
     transport: Option<(u64, tokio::sync::watch::Receiver<bridge::ConnectionState>)>,
 }
 
@@ -743,12 +743,8 @@ mod tests {
         builder.timer(hyper_util::rt::TokioTimer::new());
         // Dropping the shutdown handle would start a graceful shutdown, so it lives until the connection closes.
         let graceful = hyper_util::server::graceful::GracefulShutdown::new();
-        let conn = crate::serve::connection(&builder, &graceful, io, handler);
         let mut closed = closed_tx.subscribe();
-        tokio::spawn(async move {
-            let _ = conn.await;
-            closed_tx.send_modify(|s| s.closed = true);
-        });
+        crate::serve::spawn_connection(&builder, &graceful, io, handler, closed_tx);
         client.write_all(request).await.unwrap();
         let mut response = Vec::new();
         client.read_to_end(&mut response).await.unwrap();

@@ -15,7 +15,7 @@ use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 use tower::Layer;
-use tower::util::MapResponse;
+use tower::util::{Either, MapResponse};
 
 use crate::dispatch::PhpDispatcher;
 use crate::interceptor::Service;
@@ -72,10 +72,13 @@ impl Serving {
     {
         let open = self.shutdown.subscribe();
         let mut stop = open.clone();
-        let service = intercept(
-            Service::new(MapResponse::new(self.service.clone(), status_in_trailers)),
-            &self.interceptors,
-        );
+        let base = MapResponse::new(self.service.clone(), status_in_trailers);
+        // Without interceptors, the connection serves the connectrpc service unboxed.
+        let service = if self.interceptors.is_empty() {
+            Either::Left(base)
+        } else {
+            Either::Right(intercept(Service::new(base), &self.interceptors))
+        };
         let connection = serve_connection(io, info, service, self.connection.clone(), async move {
             let _ = stop.wait_for(|stop| *stop).await;
         });
