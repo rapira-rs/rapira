@@ -46,6 +46,11 @@ zval *rapira_symtable_str_find(HashTable *ht, const char *str, size_t len);
 void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name);
 // ZVAL_STRINGL is a macro; the shim writes a new non-interned string into `zv`
 void rapira_zval_stringl(zval *zv, const char *s, size_t len);
+// ZVAL_STRINGL_FAST is a macro; the shim registers the string `val` as `name` through php_register_known_variable.
+// `name` must be non-empty and non-numeric, have no NUL, ' ', '.' or '[', and not be "this" or "GLOBALS".
+void rapira_register_known_stringl(const char *name, size_t name_len,
+                                   const char *val, size_t val_len,
+                                   zval *track_vars_array);
 
 // Mode in rapira_config (crates/config/src/pool.rs), mapped in start.rs (start_worker) - keep in sync
 enum {

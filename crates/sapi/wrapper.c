@@ -38,6 +38,14 @@ void rapira_zval_stringl(zval *zv, const char *s, size_t len) {
     ZVAL_STRINGL(zv, s, len);
 }
 
+void rapira_register_known_stringl(const char *name, size_t name_len,
+                                   const char *val, size_t val_len,
+                                   zval *track_vars_array) {
+    zval value;
+    ZVAL_STRINGL_FAST(&value, val, val_len);
+    php_register_known_variable(name, name_len, &value, track_vars_array);
+}
+
 void rapira_init_call_stack(void) {
 #ifdef ZEND_CHECK_STACK_LIMIT
     zend_call_stack_init();

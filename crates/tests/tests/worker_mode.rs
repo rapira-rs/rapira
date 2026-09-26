@@ -1,4 +1,6 @@
+use http::header::{HeaderName, HeaderValue};
 use rapira_sapi::{Mode, Rapira};
+use serde_json::Value;
 use tests::{
     captured, drain, drain_resp, fixture, init_log_capture, php_lock, req, wait_app_record,
 };
@@ -324,6 +326,138 @@ fn nested_handle_request_is_refused() -> anyhow::Result<()> {
         "got {:?}",
         resp.body_string()
     );
+    drop(h);
+    drop(r);
+    Ok(())
+}
+
+/// $_SERVER keys in registration order: the CGI names of register_server_variables, then HTTP_*, then the keys php_register_server_variables adds.
+/// Header names map as php_register_variable_ex mangles them ('.' to '_'), and a later name that maps to the same key overwrites the value in place.
+#[test]
+fn server_keys_keep_order_and_mangling() -> anyhow::Result<()> {
+    const CGI: &[&str] = &[
+        "PHP_SELF",
+        "DOCUMENT_URI",
+        "DOCUMENT_ROOT",
+        "REQUEST_SCHEME",
+        "REMOTE_HOST",
+        "REMOTE_PORT",
+        "REMOTE_IDENT",
+        "REQUEST_METHOD",
+        "REQUEST_URI",
+        "QUERY_STRING",
+        "SCRIPT_FILENAME",
+        "SCRIPT_NAME",
+        "SERVER_PROTOCOL",
+        "SERVER_SOFTWARE",
+        "SERVER_NAME",
+        "SERVER_PORT",
+        "REMOTE_ADDR",
+        "GATEWAY_INTERFACE",
+        "HTTPS",
+        "AUTH_TYPE",
+    ];
+    const TIME: &[&str] = &["REQUEST_TIME_FLOAT", "REQUEST_TIME"];
+
+    struct Case {
+        name: &'static str,
+        content_type: Option<&'static str>,
+        headers: &'static [(&'static str, &'static str)],
+        // The keys between AUTH_TYPE and REQUEST_TIME_FLOAT.
+        keys: &'static [&'static str],
+        values: &'static [(&'static str, &'static str)],
+    }
+    let cases = [
+        Case {
+            name: "no header gives only the CGI keys",
+            content_type: None,
+            headers: &[],
+            keys: &["CONTENT_LENGTH"],
+            values: &[("CONTENT_LENGTH", "0"), ("AUTH_TYPE", "")],
+        },
+        Case {
+            name: "dot in a field name maps to underscore",
+            content_type: None,
+            headers: &[("x.dot", "a")],
+            keys: &["CONTENT_LENGTH", "HTTP_X_DOT"],
+            values: &[("HTTP_X_DOT", "a")],
+        },
+        Case {
+            name: "dot and dash names share one key and the later one wins",
+            content_type: None,
+            headers: &[("x.dot", "a"), ("x-dot", "b")],
+            keys: &["CONTENT_LENGTH", "HTTP_X_DOT"],
+            values: &[("HTTP_X_DOT", "b")],
+        },
+        Case {
+            name: "repeated field lines join into one value",
+            content_type: None,
+            headers: &[("x-rep", "1"), ("x-rep", "2")],
+            keys: &["CONTENT_LENGTH", "HTTP_X_REP"],
+            values: &[("HTTP_X_REP", "1, 2")],
+        },
+        Case {
+            name: "every optional key in its place",
+            content_type: Some("text/plain"),
+            headers: &[
+                ("authorization", "Basic dmFsZXJ5OnBhc3N3b3Jk"),
+                ("x-a", "1"),
+            ],
+            keys: &[
+                "REMOTE_USER",
+                "CONTENT_TYPE",
+                "CONTENT_LENGTH",
+                "HTTP_AUTHORIZATION",
+                "HTTP_X_A",
+                "PHP_AUTH_USER",
+                "PHP_AUTH_PW",
+            ],
+            values: &[
+                ("AUTH_TYPE", "Basic"),
+                ("REMOTE_USER", "valery"),
+                ("CONTENT_TYPE", "text/plain"),
+                ("PHP_AUTH_USER", "valery"),
+                ("PHP_AUTH_PW", "password"),
+            ],
+        },
+    ];
+
+    let _guard = php_lock();
+    let r = Rapira::start(
+        &tests::PHP_PARTS,
+        Mode::Worker,
+        fixture("worker/server-pairs-worker.php"),
+        None,
+    )?;
+    let h = r.sink();
+    for case in &cases {
+        let mut rq = req("/");
+        rq.content_type = case.content_type.map(Into::into);
+        for &(field, value) in case.headers {
+            rq.headers.append(
+                HeaderName::from_static(field),
+                HeaderValue::from_static(value),
+            );
+        }
+        let resp = drain_resp(tests::submit(&h, rq)?);
+        let pairs: Vec<(String, Value)> = serde_json::from_str(&resp.body_string())?;
+
+        let got: Vec<&str> = pairs.iter().map(|(k, _)| k.as_str()).collect();
+        let want: Vec<&str> = [CGI, case.keys, TIME].concat();
+        assert_eq!(got, want, "{}", case.name);
+
+        for (key, value) in &pairs {
+            match key.as_str() {
+                "REQUEST_TIME_FLOAT" => assert!(value.is_f64(), "{}: {key}", case.name),
+                "REQUEST_TIME" => assert!(value.is_i64(), "{}: {key}", case.name),
+                _ => assert!(value.is_string(), "{}: {key}", case.name),
+            }
+        }
+        for &(key, want) in case.values {
+            let got = pairs.iter().find(|(k, _)| k == key).map(|(_, v)| v);
+            assert_eq!(got, Some(&Value::from(want)), "{}: {key}", case.name);
+        }
+    }
     drop(h);
     drop(r);
     Ok(())
