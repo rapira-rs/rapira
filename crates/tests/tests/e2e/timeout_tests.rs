@@ -6,31 +6,11 @@ use rapira_sapi::Mode;
 use tests::wire::submit;
 use tests::{drain, drain_resp_deadline, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn, signal};
+use crate::harness::{Spawn, slot_line};
 
 fn timeout_ini() -> String {
     std::fs::read_to_string(fixture("ini/timeout_tests/timeout.php.ini"))
         .expect("read timeout.php.ini")
-}
-
-/// Sends SIGUSR1 until the master logs a scoreboard line of slot 0 that contains `fragment`, for at most 10 s; returns that line.
-fn slot_line(srv: &Server, fragment: &str) -> String {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        signal(srv.pid(), libc::SIGUSR1);
-        std::thread::sleep(Duration::from_millis(20));
-        let log = std::fs::read_to_string(srv.log_file()).unwrap_or_default();
-        if let Some(line) = log
-            .lines()
-            .find(|l| l.contains("slot 0 pid") && l.contains(fragment))
-        {
-            return line.to_owned();
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no slot 0 line with {fragment:?} within 10s\n{log}"
-        );
-    }
 }
 
 /// Pins that receive() disarms the wall timer while parked: a worker parked past the 1s budget still serves instead of fataling and being 503-shed.

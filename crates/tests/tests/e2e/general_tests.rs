@@ -1,10 +1,8 @@
-use std::time::{Duration, Instant};
-
 use rapira_sapi::{Mode, Request};
 use tests::wire::submit;
 use tests::{drain, drain_resp, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn, signal};
+use crate::harness::{Server, Spawn, slot_line};
 
 fn post(body: Vec<u8>) -> Request {
     let mut r: Request = req("/");
@@ -12,26 +10,6 @@ fn post(body: Vec<u8>) -> Request {
     r.content_type = Some("text/plain".into());
     r.body = rapira_sapi::types::Body::Raw(std::io::Cursor::new(body));
     r
-}
-
-/// Sends SIGUSR1 until the master logs a scoreboard line of slot 0 that contains `fragment`, for at most 10 s; returns that line.
-fn slot_line(srv: &Server, fragment: &str) -> String {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        signal(srv.pid(), libc::SIGUSR1);
-        std::thread::sleep(Duration::from_millis(20));
-        let log = std::fs::read_to_string(srv.log_file()).unwrap_or_default();
-        if let Some(line) = log
-            .lines()
-            .find(|l| l.contains("slot 0 pid") && l.contains(fragment))
-        {
-            return line.to_owned();
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no slot 0 line with {fragment:?} within 10s\n{log}"
-        );
-    }
 }
 
 // PHP core ignores ub_write's return value, so the SAPI must raise php_handle_aborted_connection() itself, and the aborted status must not leak into the next request.

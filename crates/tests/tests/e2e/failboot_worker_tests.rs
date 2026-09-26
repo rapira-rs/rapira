@@ -1,13 +1,14 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use rapira_net::ListenAddr;
 use rapira_sapi::Mode;
 use tests::grpc::{Conn, ECHO_PATH, HI_FRAME, Wire, status_details};
 use tests::wire::submit;
 use tests::{drain_resp_deadline, fixture, req};
 
-use crate::harness::{MASTER_EXIT_FAILBOOT, MASTER_EXIT_OK, Spawn, assert_exit_code, signal};
+use crate::harness::{
+    MASTER_EXIT_FAILBOOT, MASTER_EXIT_OK, Spawn, assert_exit_code, listen, signal,
+};
 
 // A worker that fatals before its receive loop must 503 the queued job, and the graceful stop must not wait on a boot that retries forever.
 #[test]
@@ -38,7 +39,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
 #[test]
 fn failboot_grpc_worker_sheds_with_unavailable() -> anyhow::Result<()> {
     let srv = Spawn::grpc(fixture("failboot_worker_tests/failboot-worker.php")).spawn();
-    let listen = ListenAddr::Tcp(srv.grpc.expect("the grpc listener"));
+    let listen = listen(&srv);
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()?;

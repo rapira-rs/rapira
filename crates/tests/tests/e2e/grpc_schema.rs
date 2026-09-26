@@ -4,45 +4,30 @@ use std::path::{Path, PathBuf};
 use std::process::ExitStatus;
 
 use http::Method;
-use rapira_net::ListenAddr;
 use serde_json::{Value, json};
 use tests::grpc::{Conn, ECHO_PATH, ECHO_SERVICE, HI, Wire};
 use tests::{fixture, server_log};
 
-use crate::grpc_server::{calls, grpc_table, stop};
-use crate::harness::{Spawn, scratch_dir};
+use crate::harness::{Spawn, calls, listen, scratch_dir, stop};
 
 /// The services that `getServices()` lists in a pool over echo.binpb that serves `services`.
 fn services_of(services: Option<&[&str]>) -> Vec<Value> {
-    let dir = scratch_dir();
-    let srv = grpc_table(
-        &fixture("grpc/identity.php"),
-        &dir.join("grpc.sock"),
-        &tests::echo_descriptor_set(),
-        services,
-    )
-    .json_log()
-    .spawn();
+    let srv = Spawn::grpc(fixture("grpc/identity.php"))
+        .services(services)
+        .json_log()
+        .spawn();
     let ctx: Value =
         serde_json::from_str(&server_log::wait_app_record(&srv.log_file(), "dispatcher"))
             .expect("the dispatcher record holds JSON");
-    drop(srv);
-    let _ = std::fs::remove_dir_all(dir);
     ctx["services"].as_array().expect("a service list").clone()
 }
 
-/// The exit status and the log of a boot over `path` that serves `services`. The schema loads before the bind, so the socket path stays unused.
+/// The exit status and the log of a boot over `path` that serves `services`.
 fn boot_failure(path: &Path, services: &[&str]) -> (ExitStatus, String) {
-    let dir = scratch_dir();
-    let failed = grpc_table(
-        &fixture("grpc/identity.php"),
-        &dir.join("grpc.sock"),
-        path,
-        Some(services),
-    )
-    .boot_failure();
-    let _ = std::fs::remove_dir_all(dir);
-    failed
+    Spawn::grpc(fixture("grpc/identity.php"))
+        .descriptor_set(path)
+        .services(Some(services))
+        .boot_failure()
 }
 
 /// The listing keeps streaming methods, in echo.proto order. echo.proto imports dep.proto, so the default list skips DepService.
@@ -285,8 +270,9 @@ async fn json_transcodes_by_descriptor() {
     let srv = Spawn::grpc(fixture("grpc/wire-worker.php"))
         .json_log()
         .spawn();
-    let listen = ListenAddr::Tcp(srv.grpc.expect("the config has a [grpc] pool"));
-    let mut conn = Conn::open(&listen, Wire::Http1).await.expect("connect");
+    let mut conn = Conn::open(&listen(&srv), Wire::Http1)
+        .await
+        .expect("connect");
     for case in cases {
         let before = calls(&srv).len();
         let mut headers = vec![("content-type", "application/json")];

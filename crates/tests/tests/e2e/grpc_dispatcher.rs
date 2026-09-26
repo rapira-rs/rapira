@@ -10,8 +10,7 @@ use tests::grpc::{
 };
 use tests::{fixture, server_log};
 
-use crate::grpc_server::{grpc_table, listen, logged_remote, stop};
-use crate::harness::{ECHO_SERVICE, Server, Spawn, scratch_dir};
+use crate::harness::{Server, Spawn, listen, logged_remote, scratch_dir, stop};
 
 /// Waits for the boot probe of unary-worker.php, so no call races the boot.
 fn booted(srv: Server) -> Server {
@@ -376,24 +375,20 @@ const CONTEXT_CASES: &[ContextCase] = &[
 #[tokio::test]
 async fn call_context_reports_the_request_facts() -> anyhow::Result<()> {
     let dir = scratch_dir();
-    let sock = dir.join("grpc.sock");
     let on_tcp = unary_worker();
     let on_unix = booted(
-        grpc_table(
-            &fixture("grpc/unary-worker.php"),
-            &sock,
-            &tests::echo_descriptor_set(),
-            Some(&[ECHO_SERVICE]),
-        )
-        .json_log()
-        .spawn(),
+        Spawn::grpc(fixture("grpc/unary-worker.php"))
+            .grpc_unix(&dir.join("grpc.sock"))
+            .json_log()
+            .spawn(),
     );
 
     for c in CONTEXT_CASES {
-        let (srv, listen) = match c.on {
-            On::Tcp => (&on_tcp, listen(&on_tcp)),
-            On::Unix => (&on_unix, ListenAddr::Unix(sock.clone())),
+        let srv = match c.on {
+            On::Tcp => &on_tcp,
+            On::Unix => &on_unix,
         };
+        let listen = listen(srv);
         let mut conn = Conn::open(&listen, c.wire).await?;
         let before = UNIX_EPOCH.elapsed()?.as_secs_f64();
         let got = conn

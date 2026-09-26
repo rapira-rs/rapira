@@ -1,11 +1,9 @@
-use std::time::{Duration, Instant};
-
 use http::header::{AUTHORIZATION, HeaderValue};
 use rapira_sapi::Mode;
 use tests::wire::submit;
 use tests::{drain, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn, diagnostics, scratch_dir, signal};
+use crate::harness::{Server, Spawn, scratch_dir, slot_line};
 
 #[test]
 fn fibers_stress_classic() -> anyhow::Result<()> {
@@ -246,46 +244,27 @@ struct Slot {
     recycles: u64,
 }
 
-/// On SIGUSR1 the master logs one `slot {id} pid {pid} state {state} handled {n} errors {n} recycles {n}` line per slot; the server needs `.json_log()`.
+/// On SIGUSR1 the master logs one `slot {id} pid {pid} state {state} handled {n} errors {n} recycles {n}` line per slot; the server logs in the plain format, so the line ends with the counters.
 fn slot(srv: &Server) -> Slot {
-    signal(srv.pid(), libc::SIGUSR1);
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        let mut slots: Vec<Slot> = server_log::records(&srv.log_file())
-            .iter()
-            .filter(|c| c.target == "master")
-            .filter_map(|c| slot_line(&c.message))
-            .collect();
-        match slots.len() {
-            1 => return slots.remove(0),
-            0 if Instant::now() < deadline => std::thread::sleep(Duration::from_millis(20)),
-            _ => panic!(
-                "expected one slot line, got {slots:?}\n{}",
-                diagnostics(srv)
-            ),
-        }
-    }
-}
-
-fn slot_line(message: &str) -> Option<Slot> {
-    let rest = message.trim().strip_prefix("slot ")?;
-    let count = |name: &str| -> Option<u64> {
-        let mut words = rest.split_whitespace();
-        words.find(|w| *w == name)?;
-        words.next()?.parse().ok()
+    let line = slot_line(srv, "");
+    let count = |name: &str| -> u64 {
+        let mut words = line.split_whitespace();
+        words.find(|w| *w == name);
+        words
+            .next()
+            .and_then(|w| w.parse().ok())
+            .unwrap_or_else(|| panic!("no {name} count in {line:?}"))
     };
-    Some(Slot {
-        handled: count("handled")?,
-        errors: count("errors")?,
-        recycles: count("recycles")?,
-    })
+    Slot {
+        handled: count("handled"),
+        errors: count("errors"),
+        recycles: count("recycles"),
+    }
 }
 
 #[test]
 fn scoreboard_counts_worker() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Worker, fixture("shared/throw-worker.php"))
-        .json_log()
-        .spawn();
+    let srv = Spawn::http(Mode::Worker, fixture("shared/throw-worker.php")).spawn();
     let _ = drain(submit(srv.addr, req("/?boom=0"))?);
     let _ = drain(submit(srv.addr, req("/?boom=0"))?);
     let _ = drain(submit(srv.addr, req("/?boom=1"))?);
@@ -298,9 +277,7 @@ fn scoreboard_counts_worker() -> anyhow::Result<()> {
 
 #[test]
 fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Worker, fixture("shared/shutdown-fatal-worker.php"))
-        .json_log()
-        .spawn();
+    let srv = Spawn::http(Mode::Worker, fixture("shared/shutdown-fatal-worker.php")).spawn();
     let _ = drain(submit(srv.addr, req("/?boom=1"))?);
     let (s2, _) = drain(submit(srv.addr, req("/"))?);
     let snap = slot(&srv);
@@ -319,9 +296,7 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
 fn scoreboard_counts_classic() -> anyhow::Result<()> {
     // A classic worker runs one entrypoint, so each script gets its own worker: (handled, errors).
     let counts = |script: &str, requests: usize| -> anyhow::Result<(u64, u64)> {
-        let srv = Spawn::http(Mode::Classic, fixture(script))
-            .json_log()
-            .spawn();
+        let srv = Spawn::http(Mode::Classic, fixture(script)).spawn();
         for _ in 0..requests {
             let _ = drain(submit(srv.addr, req("/"))?);
         }

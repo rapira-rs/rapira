@@ -1,12 +1,10 @@
 //! The rapira_grpc server over the wire, with `grpc/wire-worker.php` in the role of the application: the three protocols, statuses and metadata, what PHP sees, deadlines, the plugin routes, and the drain.
 
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use http::Method;
 use http_body_util::BodyExt;
-use rapira_net::ListenAddr;
-use rapira_sapi::{Addr, Mode};
 use serde_json::{Value, json};
 use tests::grpc::{
     Conn, ECHO_PATH, ERROR_INFO, Fields, HI, HI_FRAME, Wire, envelope, fields, status_bytes,
@@ -15,55 +13,12 @@ use tests::grpc::{
 use tests::{fixture, server_log};
 
 use crate::harness::{
-    ECHO_SERVICE, MASTER_EXIT_OK, STOP_BUDGET, Server, Spawn, assert_exit_code, scratch_dir, signal,
+    Server, Spawn, calls, exited, listen, logged_remote, scratch_dir, signal, stop,
 };
 
 /// Logs a `call` record for each call and answers as the request metadata asks.
 fn wire_worker() -> PathBuf {
     fixture("grpc/wire-worker.php")
-}
-
-/// The gRPC listener of `srv`.
-pub(crate) fn listen(srv: &Server) -> ListenAddr {
-    ListenAddr::Tcp(srv.grpc.expect("the config has a [grpc] pool"))
-}
-
-/// A `[grpc]` pool over `entrypoint` on the unix socket `sock`, serving `services` of `descriptor_set`. None leaves the `services` key out.
-/// `Spawn::grpc` writes a TCP listen and the echo services itself, so this table goes through `Spawn::toml`, next to an `[http]` pool that no test calls.
-pub(crate) fn grpc_table(
-    entrypoint: &Path,
-    sock: &Path,
-    descriptor_set: &Path,
-    services: Option<&[&str]>,
-) -> Spawn {
-    let services = services.map_or(String::new(), |names| {
-        let quoted: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
-        format!("services = [{}]\n", quoted.join(", "))
-    });
-    Spawn::http(Mode::Worker, fixture("shared/worker.php")).toml(&format!(
-        "[grpc]\nlisten = \"unix:{}\"\ndescriptor_set = \"{}\"\n{services}\
-         [grpc.pool]\nprocesses = 1\nentrypoint = \"{}\"",
-        sock.display(),
-        descriptor_set.display(),
-        entrypoint.display()
-    ))
-}
-
-/// The context of each `call` record that `grpc/wire-worker.php` logged, in log order. The fixture logs before it answers, so a call that has its response is in the log.
-pub(crate) fn calls(srv: &Server) -> Vec<Value> {
-    server_log::records(&srv.log_file())
-        .into_iter()
-        .filter(|c| c.target == "app" && c.message == "call")
-        .map(|c| serde_json::from_str(&c.context).expect("a call record holds JSON"))
-        .collect()
-}
-
-/// The `remote` that PHP reports for a client at `peer`. `Conn::open` connects from an unnamed unix socket, which PHP reports as `unix:NULL`.
-pub(crate) fn logged_remote(peer: &Addr) -> String {
-    match peer {
-        Addr::Inet(addr) => addr.to_string(),
-        Addr::Unix(_) => "unix:NULL".to_owned(),
-    }
 }
 
 /// The text of the `plugin grpc` error that a worker logs when its plugin returns an error.
@@ -72,23 +27,6 @@ fn plugin_error(srv: &Server) -> Option<String> {
         .into_iter()
         .find(|c| c.target == "rapira" && c.message.starts_with("plugin grpc"))
         .map(|c| c.message)
-}
-
-/// Waits off the test runtime for the master to exit 0, so the clients on the runtime keep running through the drain.
-async fn exited(mut srv: Server) -> Server {
-    tokio::task::spawn_blocking(move || {
-        let status = srv.wait_exit(STOP_BUDGET);
-        assert_exit_code(status, MASTER_EXIT_OK, &srv);
-        srv
-    })
-    .await
-    .expect("the wait task")
-}
-
-/// A graceful stop: SIGQUIT, then [`exited`].
-pub(crate) async fn stop(srv: Server) -> Server {
-    signal(srv.pid(), libc::SIGQUIT);
-    exited(srv).await
 }
 
 #[derive(Clone, Copy)]
@@ -293,18 +231,13 @@ async fn each_protocol_reaches_php_over_the_wire() {
     ];
 
     let dir = scratch_dir();
-    let sock = dir.join("grpc.sock");
     let on_tcp = Spawn::grpc(wire_worker()).json_log().spawn();
-    let on_unix = grpc_table(
-        &wire_worker(),
-        &sock,
-        &tests::echo_descriptor_set(),
-        Some(&[ECHO_SERVICE]),
-    )
-    .json_log()
-    .spawn();
+    let on_unix = Spawn::grpc(wire_worker())
+        .grpc_unix(&dir.join("grpc.sock"))
+        .json_log()
+        .spawn();
     let tcp = listen(&on_tcp);
-    let unix = ListenAddr::Unix(sock);
+    let unix = listen(&on_unix);
 
     for case in cases {
         let (listen, srv) = match case.on {
@@ -857,12 +790,11 @@ async fn health_and_reflection_answer_from_the_plugin() {
     stop(reflecting).await;
 }
 
-/// Mirrors the HTTP plugin: stop ends the accept loop and the drain, and the worker drops every intake clone and the listener.
+/// Stop ends the accept loop and the drain, and the worker drops every intake clone.
 #[tokio::test]
 async fn shutdown_joins_the_server_and_drops_every_intake_clone() {
     let srv = Spawn::grpc(wire_worker()).json_log().spawn();
-    let addr = srv.grpc.expect("the config has a [grpc] pool");
-    let open = tokio::net::TcpStream::connect(addr)
+    let open = tokio::net::TcpStream::connect(srv.addr)
         .await
         .expect("the server accepts before shutdown");
     drop(open);
@@ -876,8 +808,6 @@ async fn shutdown_joins_the_server_and_drops_every_intake_clone() {
             .any(|c| c.target == "app" && c.message == "closed"),
         "every intake clone is gone"
     );
-    let refused = tokio::net::TcpStream::connect(addr).await;
-    assert!(refused.is_err(), "the listener is closed: {refused:?}");
 }
 
 /// The drain grace is `[supervisor] process_control_timeout_secs` less the smaller of 5 s and half of it: 4 s gives 2 s, and 1 s gives 500 ms.

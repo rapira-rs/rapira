@@ -11,7 +11,7 @@ use rapira_sapi::{Frame, Mode};
 use tests::wire::submit;
 use tests::{drain, drain_resp, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn, fixture_path};
+use crate::harness::{Server, Spawn};
 
 /// Read budget of a raw socket exchange.
 const READ: Duration = Duration::from_secs(10);
@@ -523,15 +523,9 @@ fn plugin_stamped_fields_pass_through() -> anyhow::Result<()> {
 #[test]
 fn unix_address_arms_reach_php() -> anyhow::Result<()> {
     let sock = std::env::temp_dir().join(format!("rapira-e2e-{}.sock", std::process::id()));
-    // The builder writes a TCP `[http]` listener, so this `[http]` table goes in as a top-level table next to the gRPC pool.
-    // The spawn waits for the gRPC listener, and the master binds the http listener before it.
-    let srv = Spawn::grpc(fixture_path("grpc/echo-worker.php"))
-        .toml(&format!(
-            "[http]\nlisten = \"unix:{}\"\nserver_port = 8080\n\
-             [http.pool]\nmode = \"dispatcher\"\nprocesses = 1\nentrypoint = \"{}\"",
-            sock.display(),
-            fixture("dispatcher/request-worker.php").display()
-        ))
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php"))
+        .http_unix(&sock)
+        .http_extra("server_port = 8080")
         .spawn();
 
     // An unbound client socket, so the server gets no peer path. HTTP/1.0 with no Host takes the `$uri` fallback.
