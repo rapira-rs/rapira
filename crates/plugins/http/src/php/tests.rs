@@ -147,6 +147,159 @@ fn view_normalizes_protocol_and_empty_unix_path() {
     ));
 }
 
+/// The view spells `$uri` and the address ips as the `Display` of the socket addresses: IPv6 in brackets with its scope id, the unix fallback as `server_name:server_port`.
+#[test]
+fn view_spells_uri_and_addresses() {
+    struct Case {
+        name: &'static str,
+        https: bool,
+        authority: Option<&'static [u8]>,
+        uri: &'static str,
+        server: Addr,
+        remote: Addr,
+        want_uri: &'static str,
+        want_remote: AddrOwned,
+    }
+    let v6 = |ip: &str, port, scope| {
+        Addr::Inet(std::net::SocketAddrV6::new(ip.parse().unwrap(), port, 0, scope).into())
+    };
+    let inet = |ip: &str| AddrOwned::Inet {
+        ip: ip.into(),
+        port: 0,
+    };
+    let cases = [
+        Case {
+            name: "ipv4 server, no authority",
+            https: false,
+            authority: None,
+            uri: "/a?b=1",
+            server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
+            remote: Addr::Inet(([10, 0, 0, 1], 5000).into()),
+            want_uri: "http://127.0.0.1:8080/a?b=1",
+            want_remote: AddrOwned::Inet {
+                ip: "10.0.0.1".into(),
+                port: 5000,
+            },
+        },
+        Case {
+            name: "ipv4 zero address and port",
+            https: false,
+            authority: None,
+            uri: "/",
+            server: Addr::Inet(([0, 0, 0, 0], 0).into()),
+            remote: Addr::Inet(([0, 0, 0, 0], 0).into()),
+            want_uri: "http://0.0.0.0:0/",
+            want_remote: inet("0.0.0.0"),
+        },
+        Case {
+            name: "ipv4 widest octets and port",
+            https: true,
+            authority: None,
+            uri: "/",
+            server: Addr::Inet(([255, 255, 255, 255], 65535).into()),
+            remote: Addr::Inet(([192, 168, 100, 9], 65535).into()),
+            want_uri: "https://255.255.255.255:65535/",
+            want_remote: AddrOwned::Inet {
+                ip: "192.168.100.9".into(),
+                port: 65535,
+            },
+        },
+        Case {
+            name: "ipv6 loopback server",
+            https: true,
+            authority: None,
+            uri: "/x",
+            server: v6("::1", 443, 0),
+            remote: v6("2001:db8::1", 0, 0),
+            want_uri: "https://[::1]:443/x",
+            want_remote: inet("2001:db8::1"),
+        },
+        Case {
+            name: "ipv6 scope id stays in the uri only",
+            https: false,
+            authority: None,
+            uri: "/",
+            server: v6("fe80::1", 80, 3),
+            remote: v6("fe80::1", 0, 3),
+            want_uri: "http://[fe80::1%3]:80/",
+            want_remote: inet("fe80::1"),
+        },
+        Case {
+            name: "ipv4-mapped ipv6",
+            https: false,
+            authority: None,
+            uri: "/",
+            server: v6("::ffff:1.2.3.4", 1, 0),
+            remote: v6("::ffff:1.2.3.4", 0, 0),
+            want_uri: "http://[::ffff:1.2.3.4]:1/",
+            want_remote: inet("::ffff:1.2.3.4"),
+        },
+        Case {
+            name: "authority wins over the server socket",
+            https: false,
+            authority: Some(b"example.com:8443"),
+            uri: "/x",
+            server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
+            remote: Addr::Inet(([127, 0, 0, 1], 0).into()),
+            want_uri: "http://example.com:8443/x",
+            want_remote: inet("127.0.0.1"),
+        },
+        Case {
+            name: "invalid utf-8 authority is replaced",
+            https: false,
+            authority: Some(b"h\xff"),
+            uri: "/",
+            server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
+            remote: Addr::Inet(([127, 0, 0, 1], 0).into()),
+            want_uri: "http://h\u{fffd}/",
+            want_remote: inet("127.0.0.1"),
+        },
+        Case {
+            name: "asterisk-form target collapses to the root",
+            https: false,
+            authority: Some(b"h"),
+            uri: "*",
+            server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
+            remote: Addr::Inet(([127, 0, 0, 1], 0).into()),
+            want_uri: "http://h/",
+            want_remote: inet("127.0.0.1"),
+        },
+        Case {
+            name: "unix server, no authority",
+            https: false,
+            authority: None,
+            uri: "/p",
+            server: Addr::Unix(Some("/run/r.sock".into())),
+            remote: Addr::Unix(Some("/run/peer.sock".into())),
+            want_uri: "http://localhost:80/p",
+            want_remote: AddrOwned::Unix(Some(b"/run/peer.sock".to_vec())),
+        },
+        Case {
+            name: "unnamed unix peer",
+            https: false,
+            authority: None,
+            uri: "/",
+            server: Addr::Unix(None),
+            remote: Addr::Unix(None),
+            want_uri: "http://localhost:80/",
+            want_remote: AddrOwned::Unix(None),
+        },
+    ];
+    for c in cases {
+        let mut req = base_req();
+        req.https = c.https;
+        req.authority = c.authority.map(<[u8]>::to_vec);
+        req.uri = c.uri.into();
+        req.server = c.server;
+        req.remote = c.remote;
+        req.server_name = "localhost".into();
+        req.server_port = 80;
+        let view = RequestView::new(&req);
+        assert_eq!(view.uri_abs, c.want_uri, "{}", c.name);
+        assert_eq!(view.remote, c.want_remote, "{}", c.name);
+    }
+}
+
 /// A one-shot write carries its computed length on the Head frame; a streamed write leaves framing to the plugin.
 #[test]
 fn head_frame_length_follows_the_write_shape() {

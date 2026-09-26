@@ -1,7 +1,8 @@
 use std::ffi::{CStr, c_char};
 
 use crate::{
-    IS_NULL, IS_REFERENCE, IS_UNDEF, rapira_cg, rapira_eg, zend_class_entry, zend_object,
+    IS_DOUBLE, IS_LONG, IS_NULL, IS_PROP_REINITABLE, IS_PROP_UNINIT, IS_REFERENCE, IS_UNDEF,
+    rapira_cg, rapira_eg, rapira_zval_stringl, zend_class_entry, zend_object, zend_property_info,
     zend_string, zend_throw_error, zend_throw_exception, zend_update_property,
     zend_update_property_double, zend_update_property_long, zend_update_property_null,
     zend_update_property_stringl, zend_value_error, zval,
@@ -121,6 +122,86 @@ pub unsafe fn prop_zstr_or_null(
         } else {
             prop_zstr(ce, obj, name, val);
         }
+    }
+}
+
+/// The slot offset of the property `name` declared on `ce`. Panics when `ce` declares no such property.
+/// # Safety
+/// `ce` a registered class.
+pub unsafe fn prop_offset(ce: *mut zend_class_entry, name: &CStr) -> u32 {
+    unsafe {
+        let zv = crate::zend_hash_str_find(
+            &raw const (*ce).properties_info,
+            name.as_ptr(),
+            name.count_bytes(),
+        );
+        assert!(!zv.is_null(), "{name:?} is not a declared property");
+        (*(*zv).value.ptr.cast::<zend_property_info>()).offset
+    }
+}
+
+/// Moves `value` into the property slot at `offset` (OBJ_PROP in Zend/zend_object_handlers.h) and clears IS_PROP_UNINIT and IS_PROP_REINITABLE, as the first write in zend_std_write_property does. The slot takes the caller's ref.
+/// # Safety
+/// `obj` a new object whose slot at `offset` is uninitialized; `value` holds the declared type of the property.
+pub unsafe fn slot_init(obj: *mut zend_object, offset: u32, value: *const zval) {
+    unsafe {
+        let slot = obj.byte_add(offset as usize).cast::<zval>();
+        (*slot).value = (*value).value;
+        (*slot).u1 = (*value).u1;
+        (*slot).u2.extra &= !(IS_PROP_UNINIT | IS_PROP_REINITABLE);
+    }
+}
+
+/// # Safety
+/// As `slot_init`; the property type accepts a string.
+pub unsafe fn slot_stringl(obj: *mut zend_object, offset: u32, bytes: &[u8]) {
+    unsafe {
+        let mut v: zval = std::mem::zeroed();
+        rapira_zval_stringl(&mut v, ptr_or_empty(bytes), bytes.len());
+        slot_init(obj, offset, &v);
+    }
+}
+
+/// # Safety
+/// As `slot_init`; the property type accepts a string and null.
+pub unsafe fn slot_str_or_null(obj: *mut zend_object, offset: u32, bytes: Option<&[u8]>) {
+    unsafe {
+        match bytes {
+            Some(b) => slot_stringl(obj, offset, b),
+            None => slot_null(obj, offset),
+        }
+    }
+}
+
+/// # Safety
+/// As `slot_init`; the property type accepts null.
+pub unsafe fn slot_null(obj: *mut zend_object, offset: u32) {
+    unsafe {
+        let mut v: zval = std::mem::zeroed();
+        v.u1.type_info = IS_NULL;
+        slot_init(obj, offset, &v);
+    }
+}
+
+/// # Safety
+/// As `slot_init`; the property type is int.
+pub unsafe fn slot_long(obj: *mut zend_object, offset: u32, n: i64) {
+    unsafe {
+        let mut v: zval = std::mem::zeroed();
+        v.value.lval = n;
+        v.u1.type_info = IS_LONG;
+        slot_init(obj, offset, &v);
+    }
+}
+
+/// # Safety
+/// As `slot_init`; the property type is float.
+pub unsafe fn slot_double(obj: *mut zend_object, offset: u32, d: f64) {
+    unsafe {
+        let mut v: zval = std::mem::zeroed();
+        v.value.dval = d;
+        v.u1.type_info = IS_DOUBLE;
+        slot_init(obj, offset, &v);
     }
 }
 

@@ -1,5 +1,6 @@
 use std::{
     ffi::{CStr, CString, c_char, c_void},
+    net::SocketAddr,
     time::{Duration, Instant},
 };
 
@@ -7,7 +8,7 @@ use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::{MAX_BUFFERED_BODY, guard};
 use rapira_sapi::exchange::{
-    AddrOwned, add_list, build_address, header_key, note_served, path_bytes,
+    AddrOwned, add_list, build_address, header_key, note_served, path_bytes, push_dec, push_ipv4,
 };
 use rapira_sapi::plugin::PhpPart;
 use rapira_sapi::scoreboard::{Event, sb_update};
@@ -146,21 +147,35 @@ struct RequestView {
 
 impl RequestView {
     fn new(req: &Request) -> Self {
-        let scheme = if req.https { "https" } else { "http" };
-        let host = match &req.authority {
-            Some(a) => String::from_utf8_lossy(a).into_owned(),
-            None => match &req.server {
-                Addr::Inet(sa) => sa.to_string(),
-                Addr::Unix(_) => format!("{}:{}", req.server_name, req.server_port),
-            },
-        };
+        let scheme = if req.https { "https://" } else { "http://" };
         let path = if req.uri.starts_with('/') {
             req.uri.as_str()
         } else {
             "/"
         };
+        // 21 bytes hold the longest IPv4 host, "255.255.255.255:65535".
+        let host_len = req.authority.as_ref().map_or(21, Vec::len);
+        let mut uri_abs = String::with_capacity(scheme.len() + host_len + path.len());
+        uri_abs.push_str(scheme);
+        match &req.authority {
+            Some(a) => uri_abs.push_str(&String::from_utf8_lossy(a)),
+            None => match &req.server {
+                Addr::Inet(SocketAddr::V4(sa)) => {
+                    push_ipv4(&mut uri_abs, *sa.ip());
+                    uri_abs.push(':');
+                    push_dec(&mut uri_abs, sa.port());
+                }
+                Addr::Inet(sa) => uri_abs.push_str(&sa.to_string()),
+                Addr::Unix(_) => {
+                    uri_abs.push_str(&req.server_name);
+                    uri_abs.push(':');
+                    push_dec(&mut uri_abs, req.server_port);
+                }
+            },
+        }
+        uri_abs.push_str(path);
         Self {
-            uri_abs: format!("{scheme}://{host}{path}"),
+            uri_abs,
             remote: AddrOwned::new(&req.remote),
             server: AddrOwned::new(&req.server),
         }

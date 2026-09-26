@@ -43,6 +43,8 @@ bind! {
     rapira_zval_enum_case,
     // zend_hash_str_find_ptr is inline; class_exists (zend.rs) calls its exported half
     zend_hash_str_find,
+    // slot writes of declared properties (zend.rs): ZVAL_STRINGL is a macro -> rapira_zval_stringl shim in wrapper.c
+    zend_property_info, rapira_zval_stringl, IS_LONG, IS_DOUBLE, IS_PROP_UNINIT, IS_PROP_REINITABLE,
     // zend_symtable_str_update is inline; add_assoc_zval_ex is its exported caller (zend_API.c)
     add_assoc_zval_ex, add_next_index_stringl, add_next_index_object,
     zval_add_ref,

@@ -601,6 +601,8 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
         "server-detail=127.0.0.1:8080",
         "tls=NULL",
         "received-at-positive=true",
+        "readonly-request=Cannot modify readonly property Rapira\\Http\\Request::$method",
+        "readonly-remote=Cannot modify readonly property Rapira\\InetAddress::$ip",
     ] {
         assert!(body.contains(line), "missing {line:?} in {body:?}");
     }
@@ -671,6 +673,7 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
         "server=Rapira\\UnixAddress",
         "server-detail='/run/rapira.sock'",
         "uri=http://localhost:8080/",
+        "readonly-remote=Cannot modify readonly property Rapira\\UnixAddress::$path",
     ] {
         assert!(body.contains(line), "missing {line:?} in {body:?}");
     }
