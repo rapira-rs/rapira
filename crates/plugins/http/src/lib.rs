@@ -143,6 +143,8 @@ mod tests {
         let mut server = Server::with_intake(
             Config {
                 listen: ListenAddr::Tcp(([127, 0, 0, 1], 0).into()),
+                // The root is process-global: send_file_validation_table sets the same one.
+                sendfile_root: std::env::temp_dir(),
                 ..Config::default()
             },
             intake,
