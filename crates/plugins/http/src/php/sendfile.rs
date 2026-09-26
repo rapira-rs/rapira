@@ -7,7 +7,7 @@ use super::*;
 static SENDFILE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
 /// The first call sets the root for the process; a later call changes nothing.
-pub fn set_sendfile_root(root: PathBuf) {
+pub(crate) fn set_sendfile_root(root: PathBuf) {
     let canonical = std::fs::canonicalize(&root).unwrap_or_else(|e| {
         tracing::warn!(
             target: "rapira",

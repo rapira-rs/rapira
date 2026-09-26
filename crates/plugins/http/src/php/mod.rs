@@ -34,7 +34,7 @@ mod sendfile;
 mod tests;
 mod values;
 
-pub use sendfile::set_sendfile_root;
+pub(crate) use sendfile::set_sendfile_root;
 
 // Class entries of the http stub; rapira_http_register_classes assigns them in MINIT (rapira_http.h).
 unsafe extern "C" {

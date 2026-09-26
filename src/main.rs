@@ -182,15 +182,22 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{check_mode, prepare_pool};
-    use rapira_http::{Config as HttpConfig, Server as HttpServer};
-    use rapira_net::{ListenAddr, PrepareCtx};
+    use rapira_config::ConfigCtx;
+    use rapira_http::Server as HttpServer;
+    use rapira_net::PrepareCtx;
     use rapira_sapi::plugin::Mode;
 
+    /// An `[http]` table on an ephemeral port. The boot check only opens the entrypoint, so the pool names this source file.
     fn ephemeral_plugin() -> HttpServer {
-        HttpServer::init(HttpConfig {
-            listen: ListenAddr::Tcp("127.0.0.1:0".parse().expect("loopback addr")),
-            ..HttpConfig::default()
-        })
+        let section: rapira_http::config::Section = toml::from_str(&format!(
+            "listen = \"127.0.0.1:0\"\n[pool]\nentrypoint = \"{}\"",
+            file!()
+        ))
+        .expect("an [http] table");
+        let ctx = ConfigCtx {
+            dir: env!("CARGO_MANIFEST_DIR").into(),
+        };
+        HttpServer::from_settings(rapira_http::config::resolve(section, &ctx).expect("resolve"))
     }
 
     /// Two plugins bind on one shared context; each call reports only the fd its own plugin bound.

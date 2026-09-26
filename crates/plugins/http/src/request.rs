@@ -58,6 +58,23 @@ mod tests {
     use super::*;
     use rapira_sapi::Addr;
 
+    /// build() reads only the server name and port.
+    fn config() -> Config {
+        Config {
+            listen: rapira_net::ListenAddr::Tcp(([127, 0, 0, 1], 8000).into()),
+            server_name: "localhost".to_owned(),
+            server_port: 8000,
+            max_body_size: 0,
+            unsafe_field_names: crate::UnsafeFieldNames::Drop,
+            superglobals: true,
+            write_timeout: std::time::Duration::ZERO,
+            keepalive_timeout: std::time::Duration::ZERO,
+            middleware: Vec::new(),
+            uploads: None,
+            sendfile_root: std::path::PathBuf::new(),
+        }
+    }
+
     fn peer() -> Peer {
         Peer {
             remote: Addr::Inet(([127, 0, 0, 1], 40000).into()),
@@ -83,7 +100,7 @@ mod tests {
             Some(b"e2e".to_vec()),
             Vec::new(),
             peer(),
-            &Config::default(),
+            &config(),
         );
         let probes: Vec<_> = built.headers.get_all("x-probe").iter().collect();
         assert_eq!(probes, ["one", "two"]);
@@ -101,7 +118,7 @@ mod tests {
             .body(())
             .unwrap();
         let (mut parts, ()) = req.into_parts();
-        build(&mut parts, None, Vec::new(), peer(), &Config::default())
+        build(&mut parts, None, Vec::new(), peer(), &config())
     }
 
     /// RFC 9112 §3.2.2 absolute-form: PHP gets the origin-form view; the target keeps the full form.

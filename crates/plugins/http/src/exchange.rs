@@ -11,7 +11,7 @@ use crate::php::{ExchangeState, exchange_from};
 const FRAME_CAP: usize = 4;
 
 /// One HTTP request on the intake.
-pub struct Exchange {
+pub(crate) struct Exchange {
     /// The request, the frame sender, and the CGI view when `new` built one.
     ctx: Context,
 }
@@ -19,7 +19,7 @@ pub struct Exchange {
 impl Exchange {
     /// `rx` is the reply the transport reads. Stamps received_at when the transport left it None.
     /// `superglobals` builds the CGI view here, on the transport thread: true in the classic and worker modes.
-    pub fn new(mut req: Request, superglobals: bool) -> (Self, mpsc::Receiver<Frame>) {
+    pub(crate) fn new(mut req: Request, superglobals: bool) -> (Self, mpsc::Receiver<Frame>) {
         req.received_at.get_or_insert_with(now_unix_f64);
         let (tx, rx) = mpsc::channel(FRAME_CAP);
         let ctx = Context::new(req, tx, superglobals);

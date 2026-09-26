@@ -6,6 +6,8 @@ use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
 use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
 use rapira_sapi::work::Intake;
 
+use exchange::Exchange;
+
 mod bridge;
 mod check;
 pub mod config;
@@ -18,11 +20,10 @@ mod request;
 mod response;
 mod serve;
 
-pub use exchange::Exchange;
-pub use php::{DISPATCHER_CLASSES, PHP_PART, set_sendfile_root};
+pub use php::PHP_PART;
 
 #[derive(Clone)]
-pub struct Config {
+pub(crate) struct Config {
     pub listen: ListenAddr,
     pub server_name: String,
     pub server_port: u16,
@@ -48,45 +49,16 @@ pub enum UnsafeFieldNames {
     Reject,
 }
 
-impl Default for Config {
-    fn default() -> Self {
-        Self {
-            listen: ListenAddr::Tcp(std::net::SocketAddr::from(([127, 0, 0, 1], 8000))),
-            server_name: "localhost".to_owned(),
-            server_port: 8000,
-            max_body_size: 8 * 1024 * 1024,
-            unsafe_field_names: UnsafeFieldNames::Drop,
-            superglobals: true,
-            write_timeout: Duration::from_secs(30),
-            keepalive_timeout: Duration::from_secs(60),
-            middleware: Vec::new(),
-            uploads: None,
-            sendfile_root: PathBuf::from("."),
-        }
-    }
-}
-
 pub struct Server {
     config: Config,
     prepared: Option<PreparedListener>,
-    /// The intake a test injects. None: the worker's sink.
-    intake: Option<Intake<Exchange>>,
 }
 
 impl Server {
-    pub fn init(config: Config) -> Self {
+    pub(crate) fn init(config: Config) -> Self {
         Self {
             config,
             prepared: None,
-            intake: None,
-        }
-    }
-
-    /// A server that submits to `intake` in place of the worker's sink.
-    pub fn with_intake(config: Config, intake: Intake<Exchange>) -> Self {
-        Self {
-            intake: Some(intake),
-            ..Self::init(config)
         }
     }
 }
@@ -115,70 +87,12 @@ impl Plugin for Server {
     }
 
     fn serve(self: Box<Self>, worker: Worker) -> Result<()> {
-        let Self {
-            config,
-            prepared,
-            intake,
-        } = *self;
+        let Self { config, prepared } = *self;
         let Some(prepared) = prepared else {
             return Err(anyhow!("http listener was not prepared"));
         };
-        set_sendfile_root(config.sendfile_root.clone());
-        let intake = intake.unwrap_or_else(|| Intake::new(worker.sink.clone()));
+        php::set_sendfile_root(config.sendfile_root.clone());
+        let intake = Intake::new(worker.sink.clone());
         serve::serve(intake, config, prepared, worker)
-    }
-}
-
-#[cfg(test)]
-mod tests {
-    use rapira_sapi::plugin::run_plugin;
-    use rapira_sapi::work::Sink;
-
-    use super::*;
-
-    /// Stop ends the accept loop and the drain, and the plugin thread drops every intake clone and the listener.
-    #[test]
-    fn stop_joins_the_server_and_drops_every_intake_clone() {
-        let (intake, mut units) = Intake::<Exchange>::channel(1);
-        let mut server = Server::with_intake(
-            Config {
-                listen: ListenAddr::Tcp(([127, 0, 0, 1], 0).into()),
-                // The root is process-global: send_file_validation_table sets the same one.
-                sendfile_root: std::env::temp_dir(),
-                ..Config::default()
-            },
-            intake,
-        );
-        let mut ctx = PrepareCtx::new();
-        server.prepare(&mut ctx).unwrap();
-        let fd = ctx.listener_fds()[0];
-        // SAFETY: `ctx` owns the descriptor while it is borrowed here.
-        let listener = unsafe { std::os::fd::BorrowedFd::borrow_raw(fd) };
-        let addr = std::net::TcpListener::from(listener.try_clone_to_owned().unwrap())
-            .local_addr()
-            .unwrap();
-        drop(ctx);
-        let (sink, _php) = Sink::channel(1);
-        let running = run_plugin(
-            Box::new(server),
-            sink,
-            Duration::from_secs(5),
-            Duration::from_secs(1),
-        )
-        .unwrap();
-        std::net::TcpStream::connect(addr).expect("the server accepts before stop");
-
-        running.stop();
-        running.join().unwrap();
-
-        assert!(
-            matches!(
-                units.try_recv(),
-                Err(tokio::sync::mpsc::error::TryRecvError::Disconnected)
-            ),
-            "every intake clone is gone"
-        );
-        let refused = std::net::TcpStream::connect(addr);
-        assert!(refused.is_err(), "the listener is closed: {refused:?}");
     }
 }

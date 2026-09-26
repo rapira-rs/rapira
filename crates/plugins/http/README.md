@@ -33,7 +33,7 @@ The client gets 503 when the intake of the worker stays full for 30 seconds, and
 - `rapira_http_classes.c`: `rapira_http_register_classes`, the object handlers, and the method shells of the dispatcher classes. MINIT calls `rapira_http_register_classes` after the base classes.
 - `rapira_http.c`: the method shells of the value classes `Request`, `FormField`, `UploadedFile` and `Multipart`.
 - `rapira_exchange.c`: the method shells of `Exchange`.
-- `src/lib.rs`: `Config`, `Server` and its `Plugin` impl. `Server::with_intake` takes a test `Intake<Exchange>` from `Intake::channel` in place of the worker's sink, so a test takes the role of PHP.
+- `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[http]` table), `Settings`, `resolve` with the boot checks, and `Server::from_settings`.
 - `src/serve.rs`: the accept loop, one hyper connection per accepted socket, and the drain.
 - `src/handler.rs`: the admission checks, the middleware chain, the body read, the submit to the intake and the response head.
