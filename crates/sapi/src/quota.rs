@@ -4,14 +4,13 @@ use tracing::info;
 
 use crate::scoreboard::{Event, sb_update};
 
-#[derive(Default)]
 pub struct WorkerHooks {
     /// 0 = unlimited; jitter already applied by the caller.
     pub max_requests: u64,
     pub on_quota: Option<Box<dyn FnOnce() + Send>>,
     pub on_unhealthy: Option<Box<dyn FnOnce() + Send>>,
-    /// None: report into a private single-slot board.
-    pub slot: Option<&'static rapira_scoreboard::SharedSlot>,
+    /// The scoreboard slot this worker reports into.
+    pub slot: &'static rapira_scoreboard::SharedSlot,
 }
 
 #[derive(Default)]

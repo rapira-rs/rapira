@@ -86,7 +86,7 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
             let stopper = stopper.clone();
             move || request_worker_exit(WORKER_EXIT_UNHEALTHY, &stopper)
         })),
-        slot: Some(env.slot_view),
+        slot: env.slot_view,
     };
 
     let rapira = match Rapira::start_worker(mode, entrypoint, hooks, classes) {

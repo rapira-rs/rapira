@@ -46,8 +46,6 @@ impl Drop for PhpModule {
 pub struct Rapira {
     sink: Option<Sink>,
     worker: Option<JoinHandle<()>>,
-    board: Option<rapira_scoreboard::Scoreboard>,
-    module: Option<PhpModule>,
 }
 
 /// Split a `PHP_VERSION_ID` (major * 10000 + minor * 100 + patch) into major and minor: https://www.php.net/manual/en/function.phpversion.php
@@ -120,13 +118,6 @@ impl Rapira {
             on_unhealthy,
             slot,
         } = hooks;
-        let (board, slot) = match slot {
-            Some(s) => (None, s),
-            None => {
-                let board = rapira_scoreboard::Scoreboard::create(1)?;
-                (Some(board), board.slot(0))
-            }
-        };
         slot.bind(std::process::id());
         let pending = Arc::new(AtomicUsize::new(0));
         let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
@@ -160,33 +151,12 @@ impl Rapira {
         Ok(Self {
             sink: Some(sink),
             worker: Some(worker),
-            board,
-            module: None,
         })
-    }
-
-    /// Boots the master and one worker in this process.
-    pub fn start(
-        parts: &[PhpPart],
-        mode: Mode,
-        entrypoint: PathBuf,
-        classes: Option<DispatcherClasses>,
-    ) -> anyhow::Result<Self> {
-        info!(target: "rapira", "booting with mode: {mode:?}");
-        let module = boot_master(parts)?;
-        let mut rapira = Self::start_worker(mode, entrypoint, WorkerHooks::default(), classes)?;
-        rapira.module = Some(module);
-        Ok(rapira)
     }
 
     /// The intake of this worker. The PHP thread sees the intake closed once `Rapira` and every clone are dropped.
     pub fn sink(&self) -> Sink {
         self.sink.clone().expect("the sink lives until Drop")
-    }
-
-    /// The slot of the private one-slot board. It is `None` when the master owns the slot.
-    pub fn scoreboard(&self) -> Option<rapira_scoreboard::SlotSnapshot> {
-        self.board?.snapshot_slots().pop()
     }
 }
 
@@ -195,7 +165,6 @@ impl Drop for Rapira {
         info!(target: "rapira", "shutting down, dropping");
         self.sink = None;
         let Some(worker) = self.worker.take() else {
-            std::mem::forget(self.module.take());
             return;
         };
 
@@ -204,16 +173,11 @@ impl Drop for Rapira {
             std::thread::sleep(std::time::Duration::from_millis(20));
         }
         if !worker.is_finished() {
-            error!(
-                target: "rapira",
-                "worker still running after grace; skipping PHP module shutdown to avoid UB on a live thread"
-            );
-            std::mem::forget(self.module.take());
+            error!(target: "rapira", "worker still running after grace; leaving it unjoined");
             return;
         }
 
         let _ = worker.join();
-        drop(self.module.take());
     }
 }
 
