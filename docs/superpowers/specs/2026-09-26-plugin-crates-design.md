@@ -20,7 +20,7 @@ A plugin author or a middleware author finds one place that says what to impleme
 ## Plugin kinds
 
 - A dispatcher plugin owns a pool and produces work units that PHP pulls with `receive()`: http, grpc, and later queues. It brings its own PHP unit class, as `Rapira\Http\Exchange` and `Rapira\Grpc\UnaryCall` do today.
-- A capability plugin owns no pool. A pool enables it, every worker of that pool initializes it after the fork, and PHP acquires it through the contract's second acquisition path: later kv and a richer logger. This PR adds no capability plugin and no trait for one. The `Plugin` trait leaves room for it: a plugin that returns no unit source is a capability.
+- A capability plugin owns no pool. A pool enables it, every worker of that pool initializes it after the fork, and PHP acquires it through the contract's second acquisition path: later kv and a richer logger. This PR adds no capability plugin and no trait for one. The `Plugin` trait leaves room for it: a capability plugin would return `None` from `php` and own no listener.
 - A middleware or an interceptor attaches to one plugin's connection pipeline, ordered by config, and never touches PHP.
 
 ## Crates after the rework
@@ -29,19 +29,19 @@ A plugin author or a middleware author finds one place that says what to impleme
 |---|---|---|
 | `rapira_php_build` | `crates/php_build` | Build helper: `php-config` discovery, C compile of method shells. A build dependency of `rapira_sapi` and of every plugin with a PHP surface. |
 | `rapira_net` | `crates/net` | Listeners: `ListenAddr`, `PrepareCtx`, `PreparedListener` (bind in the master before the fork), `Acceptor` (adopt and accept in the worker). No runtime of its own. |
-| `rapira_sapi` | `crates/sapi` | The embed SAPI, boot, the PHP thread, the intake, the base PHP contract, the classic and worker modes, the registry, the worker entry, the `Plugin` and `Work` traits. |
+| `rapira_sapi` | `crates/sapi` | The embed SAPI, boot, the PHP thread, the intake, the base PHP contract, the classic and worker modes, the registry, the plugin thread (`run_plugin`, `Running`, `Stopper`), the `Plugin` and `Work` traits. |
 | `rapira_config` | `crates/config` | The shared config shapes: `supervisor`, `log`, `pool`, `listen`, duration and path helpers, strict parsing helpers. |
-| `rapira_master` | `crates/master` | Unchanged. |
+| `rapira_master` | `crates/master` | Unchanged, except that it uses `rapira_config::Scaling`. |
 | `rapira_scoreboard` | `crates/scoreboard` | Unchanged. |
 | `rapira_http` | `crates/plugins/http` | The http plugin, self-contained. |
 | `rapira_grpc` | `crates/plugins/grpc` | The grpc plugin, self-contained. |
 | `rapira_static_files` | `crates/middleware/static_files` | An http middleware as a tower layer. |
 | `tests` | `crates/tests` | Integration and e2e suites. |
-| `rapira_core` | `src/` | The binary: CLI, config composition, the plugin list, boot, fork. |
+| `rapira_core` | `src/` | The binary: CLI, config composition, the plugin list, boot, fork, and the worker entry `worker_body(env, plugin, args)` in `src/worker.rs`. |
 
 Deleted: `crates/api`, `crates/runtime`, the `Backend` trait and its five test doubles, every mirror type and mapper, `ExtensionRuntime`, `ServerThread`, `PoolArgs.http`, `RuntimeOptions`.
 
-Dependency direction: `php_build` < `net` < `sapi` < plugins < root. `config` sits beside `net`. A plugin depends on `sapi`, `net` and `config`. `master` depends on `config` for `Scaling` and `PoolSettings`, which deletes that mirror.
+Dependency direction: `config` < `net` < `sapi` < plugins < root. `rapira_config` holds `ListenAddr` and `Mode`, and `rapira_net` and `rapira_sapi` depend on it. `php_build` is a build dependency of `sapi` and of each plugin with a PHP surface. A plugin depends on `sapi`, `net` and `config`. `master` depends on `config` for `Scaling`, which deletes that mirror.
 
 ## The SAPI crate
 
@@ -50,9 +50,9 @@ Dependency direction: `php_build` < `net` < `sapi` < plugins < root. `config` si
 - Embed and boot: the bindgen bindings, `wrapper.c`, `module.c`, `boot_master` (MINIT once), `start_worker` (the PHP thread), child init, quota, recycle, health, the scoreboard slot, the Zend timer disarm, the bailout guards at the FFI edge, the zval helpers, `Rapira\log`.
 - The intake: `Sink`, a bounded queue of `Box<dyn Work>` from the plugin thread to the PHP thread with the pending and active counters, the saturated and stopped refusals, shedding on a failed boot, cancel on drop. A plugin wraps the sink as `Intake<U: Work>`, which is the typed handle its transport submits to. `Intake::<U>::channel()` builds an intake that feeds a typed `mpsc::Receiver<U>` and no PHP thread, so a test can pull units and finalize them in the role of PHP. The test seams are `Intake::channel`, its erased form `Sink::channel`, and each plugin's `Server::with_intake`, which submits to such an intake in place of the worker's sink.
 - The base PHP contract: `Rapira\Work`, `Dispatcher`, `DispatcherInfo`, `Mode`, `LogLevel`, `InetAddress`, `UnixAddress`, `Tls`, the exception classes, `get_dispatcher()`, the generic `receive()` and `tryReceive()`, and the object-lifetime reclaim behind them. The stubs `rapira.stub.php` and `rapira_exception.stub.php` and the C file `rapira_classes.c` stay here.
-- The classic and worker modes: the CGI request lifecycle, superglobals, `read_post`, the header handler, output buffering. php-src's SAPI has one callback table per process and it is HTTP-shaped by design, so this stays in the SAPI crate. Only a unit that implements `Work::sapi_request` can run in those modes. Today that is the http unit.
-- The registry: `PhpClasses`, a function pointer that registers a plugin's classes, called from MINIT after the base classes. The root passes the list of parts to `boot_master`.
-- The worker entry: `serve_worker(env, plugin, pool)`: child init, chdir, `start_worker`, one tokio multi-thread runtime with two workers and the IO driver, the plugin thread, the signal thread (first QUIT or INT drains, second exits 131), the lifeline watch, drain with grace, the exit code protocol.
+- The classic and worker modes: the CGI request lifecycle, superglobals, `read_post`, the header handler, output buffering. php-src's SAPI has one callback table per process and it is HTTP-shaped by design, so this stays in the SAPI crate. Only a unit whose `Work::into_cgi` returns a context can run in those modes. Today that is the http unit.
+- The registry: `PhpPart { register, dispatcher }`. `register` registers a plugin's classes, and MINIT calls it after the base classes. `dispatcher` holds the class entries of the plugin's dispatcher surface. The root passes the list of parts to `boot_master`.
+- The PHP thread and the plugin thread: `Rapira::start_worker(mode, entrypoint, hooks, classes)` starts the PHP thread. `run_plugin(plugin, sink, grace, drain_grace, entrypoint, mode)` builds one tokio multi-thread runtime with two workers and the IO and time drivers, and runs `serve` on the plugin thread. It returns `Running`, which stops the plugin and joins it. A join past `grace` after the stop is an error. `Stopper` sets the stop flag from a plain thread. The worker entry `worker_body(env, plugin, args)` in `src/worker.rs` uses them: child init, chdir, `start_worker`, the lifeline watch, `run_plugin`, the signal thread (first QUIT or INT drains, second exits 131), the exit code protocol.
 - Shared types every plugin fills: `Addr`, `Tls`, `ClientCert`, and one conversion of each to its PHP object.
 
 The header `rapira_sapi.h` declares what a plugin's C shells need: the base class entries, `rapira_throw_or_backstop`, the object layouts of the base classes. The crate exports its include directory through cargo `links` metadata, so a plugin's `build.rs` finds it.
@@ -65,8 +65,8 @@ pub trait Plugin: Send + 'static {
     fn name(&self) -> &'static str;
     /// The pool modes this plugin can serve. A pool with another mode fails the boot.
     fn modes(&self) -> &'static [Mode];
-    /// The classes to register at MINIT. None for a plugin with no PHP surface.
-    fn php_classes(&self) -> Option<PhpClasses>;
+    /// The plugin's PHP surface. None for a plugin without one.
+    fn php(&self) -> Option<PhpPart>;
     /// Master side, before the fork, no runtime: bind listeners, validate config, load schemas.
     fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()>;
     /// Worker side, on the plugin thread. Returns after the stop signal and the drain.
@@ -74,7 +74,7 @@ pub trait Plugin: Send + 'static {
 }
 ```
 
-`Worker` carries what the worker entry built: the tokio `Handle`, the erased `Sink` that the plugin wraps as `Intake<U>` for its unit type, the stop signal, the drain grace, the entrypoint path, the pool `Mode`. The plugin does not build a runtime, a signal handler or a stop channel.
+`Worker` carries what `run_plugin` built and what the worker entry passed: the tokio `Handle`, the erased `Sink` of the worker's intake that the plugin wraps as `Intake<U>` for its unit type, the stop signal, `drain_grace` (the bound of the plugin's drain after the stop), the entrypoint path, the pool `Mode`. The plugin does not build a runtime, a signal handler or a stop channel.
 
 `prepare` has two flavors, and the trait does not distinguish them. A dispatcher plugin with a listener calls `ctx.bind`. A client plugin validates and resolves, and each worker connects after the fork, because a forked child cannot share a client connection.
 
@@ -82,14 +82,14 @@ pub trait Plugin: Send + 'static {
 
 ```rust
 pub trait Work: Send + 'static {
-    /// Builds the PHP object PHP gets from receive(). Dispatcher mode only.
-    unsafe fn materialize(self: Box<Self>) -> *mut zend_object;
-    /// The CGI-shaped request for the classic and worker modes. None for a unit that cannot run there.
-    fn sapi_request(&mut self) -> Option<&mut SapiRequest>;
-    /// The client is gone. receive() skips the unit and PHP sees isCancelled().
+    /// The client left while the unit was queued: receive() skips it.
     fn cancelled(&self) -> bool;
-    /// PHP dropped the unit without a finalize. The plugin answers 500, INTERNAL, or a retry.
-    fn discard(self: Box<Self>);
+    /// Dispatcher mode: attaches the unit to the object receive() allocated from `DispatcherClasses::unit`.
+    unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held;
+    /// The classic and worker modes. None: this unit cannot run there.
+    fn into_cgi(self: Box<Self>) -> Option<Context>;
+    /// A worker that cannot serve: the plugin's refusal, 503 or UNAVAILABLE.
+    fn shed(self: Box<Self>);
 }
 ```
 
@@ -138,7 +138,7 @@ Strictness stays: unknown keys, a listed middleware without its table, a table w
 
 ## Middleware and interceptors
 
-Both chains are `Vec<BoxLayer>` over `http::Request<Body>` and `http::Response<Body>`, applied around the plugin's inner tower service before hyper serves the connection. The peer record travels in the request extensions and a layer may replace it. The in-flight guard travels in the extensions as private state of the http plugin, as today. `rapira_static_files` becomes a `Layer` whose service answers a hit and forwards a miss. The `Middleware`, `Handler`, `Next` and `Protocol` types are deleted.
+Both chains are a `Vec` of tower's `BoxCloneServiceLayer`, applied around the plugin's inner tower service before hyper serves the connection. The http `Layer` is over `http::Request<Body>` and `http::Response<Body>`. The grpc `Interceptor` is over `http::Request<hyper::body::Incoming>` and `http::Response<ConnectRpcBody>`. The peer record travels in the request extensions and a layer may replace it. The in-flight guard travels in the extensions as private state of the http plugin, as today. `rapira_static_files` becomes a `Layer` whose service answers a hit and forwards a miss. The `Middleware`, `Handler`, `Next` and `Protocol` types are deleted.
 
 ## Boot and worker sequence
 
@@ -146,8 +146,8 @@ Both chains are `Vec<BoxLayer>` over `http::Request<Body>` and `http::Response<B
 2. The root builds one `Box<dyn Plugin>` per present section and one `PoolSettings` per plugin.
 3. One `PrepareCtx` for every pool: the root calls `prepare` on each plugin in order. The master keeps the listener dups.
 4. `boot_master(parts)`: MINIT once, base classes then each plugin's classes.
-5. `rapira_master::run` forks per pool. The child takes its plugin and calls `rapira_sapi::serve_worker(env, plugin, pool)`.
-6. `serve_worker`: child init, chdir, `start_worker(mode)`, the runtime, the intake, the plugin thread with `serve`, the signal thread, the lifeline watch. On stop, the plugin drains within the grace and `serve` returns. The worker exits with the code the master expects.
+5. `rapira_master::run` forks per pool. The child takes its plugin and calls `worker_body(env, plugin, args)` in `src/worker.rs`.
+6. `worker_body`: child init, chdir, `Rapira::start_worker(mode, entrypoint, hooks, classes)`, the lifeline watch, `run_plugin` with the runtime and the plugin thread that runs `serve`, the signal thread. On stop, the plugin drains within `drain_grace` and `serve` returns, and `Running::join` waits at most `grace` after the stop. The worker exits with the code the master expects.
 
 ## Tests
 
