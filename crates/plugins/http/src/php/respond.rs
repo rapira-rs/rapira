@@ -163,7 +163,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
 /// # Safety
 /// As `send_frame`.
 pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: HeaderMap) -> Verb {
-    if st.host_closed() {
+    if st.client_closed() {
         discard_unit(st);
         return Verb::Discarded;
     }
@@ -230,7 +230,7 @@ pub(super) unsafe fn write_head_core(
     status: u16,
     headers: HeaderMap,
 ) -> Verb {
-    if st.host_closed() {
+    if st.client_closed() {
         discard_unit(st);
         return Verb::Discarded;
     }
@@ -306,7 +306,7 @@ pub(super) unsafe fn write_body_core(
     len: usize,
     eos: bool,
 ) -> Verb {
-    if st.host_closed() {
+    if st.client_closed() {
         discard_unit(st);
         return Verb::Discarded;
     }
@@ -415,7 +415,7 @@ pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: Hea
 pub unsafe extern "C" fn rapira_rs_exchange_flush(job: *mut c_void) -> bool {
     guard(false, || unsafe {
         let st = &mut *job.cast::<ExchangeState>();
-        let v = if st.host_closed() {
+        let v = if st.client_closed() {
             discard_unit(st);
             Verb::Discarded
         } else if st.stage == Stage::Finalized {
@@ -454,11 +454,11 @@ pub unsafe extern "C" fn rapira_rs_exchange_is_finalized(job: *const c_void) -> 
 pub unsafe extern "C" fn rapira_rs_exchange_is_cancelled(job: *const c_void) -> bool {
     guard(false, || unsafe {
         let st = &*job.cast::<ExchangeState>();
-        st.host_closed()
+        st.client_closed()
     })
 }
 
-/// Reclaims the Box on free_obj; a unit lost to a bailout (fatal, timeout) skips the failure frames, so the host's deadline reports the worker death instead.
+/// Reclaims the Box on free_obj; a unit lost to a bailout (fatal, timeout) skips the failure frames, so the plugin reports the worker death when the sender drops.
 /// # Safety
 /// `job` is a non-null pointer produced by `Box::into_raw` in receive; free_obj checks for NULL before the call.
 #[unsafe(no_mangle)]

@@ -10,7 +10,7 @@ try {
 		parse_str(parse_url($req->target, PHP_URL_QUERY) ?: "", $q);
 		$probe = $q["probe"] ?? "";
 		if ($probe === "headers") {
-			// names arrive lowercased; the case-insensitive lookup keeps this fixture front-agnostic
+			// names arrive lowercased; the case-insensitive lookup keeps this fixture plugin-agnostic
 			$vals = [];
 			foreach ($req->headers as $k => $vs) {
 				if (strcasecmp((string) $k, "x-probe") === 0) {

@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail, ensure};
 use rapira_config::{
-    ConfigCtx, ListenAddr, Mode, PoolSection, PoolSettings, SupervisorSettings, check_entrypoint,
-    nonzero_timeout, parse_listen, resolve_pool,
+    ConfigCtx, ListenAddr, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout,
+    parse_listen, resolve_pool,
 };
 use serde::Deserialize;
 
@@ -284,7 +284,7 @@ fn check_uploads_dir(dir: &Path) -> Result<()> {
 
 impl Server {
     /// Builds the middleware layers in list order. Runs in the master after the logger starts, so the diagnostics here reach the log.
-    pub fn from_settings(settings: Settings, supervisor: &SupervisorSettings) -> Self {
+    pub fn from_settings(settings: Settings) -> Self {
         let mut middleware: Vec<crate::middleware::Layer> = Vec::new();
         for mw in settings.middleware {
             match mw {
@@ -312,7 +312,6 @@ impl Server {
             server_port: settings.server_port,
             max_body_size: settings.max_body_size,
             write_timeout: settings.write_timeout,
-            drain_grace: supervisor.drain_grace(),
             unsafe_field_names: settings.unsafe_field_names,
             superglobals: settings.pool.mode != Mode::Dispatcher,
             keepalive_timeout: settings.keepalive_timeout,

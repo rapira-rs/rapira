@@ -367,7 +367,7 @@ fn response_metadata_is_call_scoped() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A dropped receiver is the host closing the call: Work.php (cancelled, finalized) and Responder.php (WorkDiscardedException, "The host closed the call first").
+/// A dropped receiver is the plugin closing the call: Work.php (cancelled, finalized) and Responder.php (WorkDiscardedException, "The host closed the call first").
 #[test]
 fn cancel_is_visible_to_php() -> anyhow::Result<()> {
     let _guard = php_lock();

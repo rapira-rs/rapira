@@ -47,7 +47,6 @@ pub fn config(listen: ListenAddr) -> Config {
         reflection: false,
         default_timeout: None,
         max_timeout: None,
-        drain_grace: Duration::from_secs(5),
         keepalive_interval: Duration::from_secs(10),
         keepalive_timeout: Duration::from_secs(10),
         interceptors: Vec::new(),
@@ -152,12 +151,20 @@ impl Running {
     }
 }
 
-/// Binds and starts the server. The receiver plays PHP: the test pulls each call and answers it. A dropped receiver refuses every call.
+/// Binds and starts the server with a drain grace of 5 seconds. The receiver plays PHP: the test pulls each call and answers it. A dropped receiver refuses every call.
 pub fn start(config: Config) -> (Running, mpsc::Receiver<Call>) {
+    start_with_drain_grace(config, Duration::from_secs(5))
+}
+
+/// [`start`] with `drain_grace` as the bound of the plugin's drain.
+pub fn start_with_drain_grace(
+    config: Config,
+    drain_grace: Duration,
+) -> (Running, mpsc::Receiver<Call>) {
     let (intake, calls) = Intake::<Call>::channel(16);
     let listen = config.listen.clone();
     // Past the drain grace, so a drain error surfaces from serve.
-    let grace = config.drain_grace + Duration::from_secs(5);
+    let grace = drain_grace + Duration::from_secs(5);
     let mut server = Server::with_intake(config, intake);
     let mut ctx = PrepareCtx::new();
     server.prepare(&mut ctx).expect("bind");
@@ -173,6 +180,7 @@ pub fn start(config: Config) -> (Running, mpsc::Receiver<Call>) {
         Box::new(server),
         sink,
         grace,
+        drain_grace,
         PathBuf::from("index.php"),
         Mode::Dispatcher,
     )

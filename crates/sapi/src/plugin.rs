@@ -21,9 +21,10 @@ pub struct PhpPart {
 pub struct Worker {
     pub handle: tokio::runtime::Handle,
     pub sink: Sink,
-    /// Set to true once. The plugin stops accepting, drains within `grace`, and returns from `serve`.
+    /// Set to true once. The plugin stops accepting, drains within `drain_grace`, and returns from `serve`.
     pub stop: watch::Receiver<bool>,
-    pub grace: Duration,
+    /// The bound of the plugin's drain after the stop. The root sets it below the join bound of [`run_plugin`].
+    pub drain_grace: Duration,
     pub entrypoint: PathBuf,
     pub mode: Mode,
 }
@@ -107,10 +108,12 @@ impl Stopper {
 }
 
 /// Builds one two-worker tokio runtime with the IO and time drivers, spawns `rapira-{name}` and runs `serve` on it.
+/// `grace` bounds the join after the stop. `drain_grace` goes to [`Worker::drain_grace`].
 pub fn run_plugin(
     plugin: Box<dyn Plugin>,
     sink: Sink,
     grace: Duration,
+    drain_grace: Duration,
     entrypoint: PathBuf,
     mode: Mode,
 ) -> anyhow::Result<Running> {
@@ -126,7 +129,7 @@ pub fn run_plugin(
         handle: rt.handle().clone(),
         sink,
         stop: stop_rx,
-        grace,
+        drain_grace,
         entrypoint,
         mode,
     };

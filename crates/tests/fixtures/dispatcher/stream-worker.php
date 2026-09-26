@@ -111,7 +111,7 @@ try {
         }
         if ($probe === 'declared-cl') {
             $ex->writeHead(200, ['content-length' => ['10']]);
-            // under-run: legal here, the front closes the connection
+            // under-run: legal here, the plugin closes the connection
             $ex->writeBody('abc');
             continue;
         }

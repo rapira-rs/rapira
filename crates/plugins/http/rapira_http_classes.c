@@ -119,7 +119,7 @@ void rapira_http_register_classes(void) {
         register_class_Rapira_Internal_Http_Exchange(http_exchange);
 
     rapira_ce_internal_http_dispatcher->default_object_handlers =
-        &rapira_host_handlers;
+        &rapira_dispatcher_handlers;
 
     memcpy(&rapira_exchange_handlers, &std_object_handlers,
            sizeof(rapira_exchange_handlers));

@@ -214,8 +214,8 @@ impl Held for GrpcState {
         self.reply.is_none()
     }
 
-    /// The host dropped the receiver: the deadline passed or the client left.
-    fn host_closed(&self) -> bool {
+    /// The plugin dropped the receiver: the deadline passed or the client left.
+    fn client_closed(&self) -> bool {
         self.discarded || self.reply.as_ref().is_some_and(oneshot::Sender::is_closed)
     }
 
@@ -279,7 +279,7 @@ fn add_core(
     let Some(st) = st else {
         return Verb::Finalized;
     };
-    // a call that the host closed keeps the entry, and finish() gives WorkDiscardedException
+    // a call that the plugin closed keeps the entry, and finish() gives WorkDiscardedException
     if st.finalized() {
         return Verb::Finalized;
     }
@@ -297,7 +297,7 @@ fn add_core(
 
 /// Sends the one outcome of the call, with both metadata halves in wire form.
 fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
-    if st.host_closed() {
+    if st.client_closed() {
         st.discard();
         return Verb::Discarded;
     }
@@ -309,7 +309,7 @@ fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
         trailers: wire(&st.trailers),
         outcome: result,
     };
-    // the receiver can drop after the host_closed() check
+    // the receiver can drop after the client_closed() check
     if st
         .reply
         .take()
@@ -496,7 +496,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_is_finalized(state: *const c_void) -> bo
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_is_cancelled(state: *const c_void) -> bool {
     guard(false, || unsafe {
-        (*state.cast::<GrpcState>()).host_closed()
+        (*state.cast::<GrpcState>()).client_closed()
     })
 }
 
@@ -644,7 +644,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_snapshot(
     })
 }
 
-/// Reclaims the Box on free_obj. An unfinalized call drops its reply sender, and the host reports the call as lost.
+/// Reclaims the Box on free_obj. An unfinalized call drops its reply sender, and the plugin reports the call as lost.
 /// # Safety
 /// `state` a non-null pointer from `Box::into_raw` in receive; free_obj checks for NULL before the call.
 #[unsafe(no_mangle)]
@@ -1206,7 +1206,7 @@ mod tests {
                 .collect();
             assert_eq!(verbs, c.verbs, "{}", c.name);
             assert_eq!(st.is_finalized(), c.finalized, "{}: finalized", c.name);
-            assert_eq!(st.host_closed(), c.cancelled, "{}: cancelled", c.name);
+            assert_eq!(st.client_closed(), c.cancelled, "{}: cancelled", c.name);
             drop(st);
 
             match &c.sent {

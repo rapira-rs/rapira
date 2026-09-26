@@ -68,16 +68,15 @@ impl Serving {
     }
 
     /// Waits out the connections in flight. The acceptor is already gone.
-    async fn drain(self, fatal: Option<anyhow::Error>) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + self.shared.cfg.drain_grace;
+    async fn drain(self, fatal: Option<anyhow::Error>, grace: Duration) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + grace;
         if tokio::time::timeout_at(deadline, self.graceful.shutdown())
             .await
             .is_err()
         {
             tracing::warn!(
                 target: "http",
-                "graceful connection shutdown did not finish within {:?}",
-                self.shared.cfg.drain_grace
+                "graceful connection shutdown did not finish within {grace:?}"
             );
         }
         while self.shared.inflight.load(Ordering::Acquire) > 0
@@ -97,9 +96,8 @@ impl Serving {
         }
         if stranded > 0 {
             return Err(anyhow!(
-                "http drain timed out after {:?} with {stranded} request(s) in flight; \
-                 their responses were cut short",
-                self.shared.cfg.drain_grace
+                "http drain timed out after {grace:?} with {stranded} request(s) in flight; \
+                 their responses were cut short"
             ));
         }
         tracing::info!(target: "http", "drained cleanly; accept loop stopped");
@@ -191,7 +189,9 @@ pub(crate) fn serve(
     });
     let serving = Serving::start(intake, uploads, config);
     let fatal = acceptor.run(&worker.handle, &serving);
-    let drained = worker.handle.block_on(serving.drain(fatal));
+    let drained = worker
+        .handle
+        .block_on(serving.drain(fatal, worker.drain_grace));
     // The dir goes when the plugin drain ends. A spooled file of an exchange that still runs past the drain is lost with it.
     if let Some(dir) = &spool_dir
         && let Err(e) = std::fs::remove_dir_all(dir)

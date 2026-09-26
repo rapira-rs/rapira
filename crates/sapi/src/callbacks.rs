@@ -498,7 +498,7 @@ mod tests {
         assert_eq!(got, want);
     }
 
-    /// The front screens field names against `[A-Za-z0-9-]`; that screen is complete only while this mapper rewrites nothing but `-`.
+    /// The http plugin screens field names against `[A-Za-z0-9-]`; that screen is complete only while this mapper rewrites nothing but `-`.
     /// One buffer serves every name of a request, so a shorter name after a longer one must not keep the old tail.
     #[test]
     fn cgi_header_name_rewrites_only_dash() {

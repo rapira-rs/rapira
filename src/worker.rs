@@ -44,6 +44,7 @@ pub struct PoolArgs {
     pub entrypoint: PathBuf,
     pub max_requests: u64,
     pub grace: Duration,
+    pub drain_grace: Duration,
 }
 
 /// Returns the process exit code for the master's fork bracket; never runs PHP module teardown, MSHUTDOWN stays with the master.
@@ -53,6 +54,7 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
         entrypoint,
         max_requests,
         grace,
+        drain_grace,
     } = args;
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { rapira_sapi::rapira_child_init() };
@@ -98,8 +100,15 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
     let name: &str = plugin.name();
-    let outcome: anyhow::Result<()> =
-        serve_plugin(plugin, rapira.sink(), grace, entrypoint, mode, &stopper);
+    let outcome: anyhow::Result<()> = serve_plugin(
+        plugin,
+        rapira.sink(),
+        grace,
+        drain_grace,
+        entrypoint,
+        mode,
+        &stopper,
+    );
     if let Err(e) = &outcome {
         tracing::error!(target: "rapira", "plugin {name}: {e:#}");
     }
@@ -117,11 +126,12 @@ fn serve_plugin(
     plugin: Box<dyn Plugin>,
     sink: rapira_sapi::work::Sink,
     grace: Duration,
+    drain_grace: Duration,
     entrypoint: PathBuf,
     mode: Mode,
     stopper: &OnceLock<Stopper>,
 ) -> anyhow::Result<()> {
-    let running = run_plugin(plugin, sink, grace, entrypoint, mode)?;
+    let running = run_plugin(plugin, sink, grace, drain_grace, entrypoint, mode)?;
     let _ = stopper.set(running.stopper());
     if WORKER_EXIT.load(SeqCst) != -1 {
         running.stop();

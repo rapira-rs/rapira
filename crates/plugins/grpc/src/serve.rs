@@ -165,7 +165,7 @@ pub(crate) fn serve(
     let fatal = acceptor.run(&worker.handle, &serving);
     worker
         .handle
-        .block_on(serving.drain(fatal, config.drain_grace))
+        .block_on(serving.drain(fatal, worker.drain_grace))
 }
 
 #[cfg(test)]

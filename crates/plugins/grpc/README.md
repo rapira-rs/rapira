@@ -10,7 +10,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `modes()` accepts dispatcher mode only.
 - `php()` returns `PHP_PART`, the `PhpPart` of the plugin: `register`, the function that MINIT calls after the base classes to register the `Rapira\Grpc` classes, and `dispatcher`, the dispatcher classes.
 - `prepare()` runs in the master before the fork, with no runtime. It sets the service list that `getServices()` returns, binds the listener with `PrepareCtx::bind`, and builds the routes that the plugin answers without PHP: health, and reflection when it is on.
-- `serve()` runs in the worker on the plugin thread `rapira-grpc`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the sink to the PHP thread, the stop flag and the drain grace. It returns after the stop and the drain.
+- `serve()` runs in the worker on the plugin thread `rapira-grpc`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the sink to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
 
 `serve()` wraps the sink as `Intake<Call>`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. `PhpDispatcher` routes each unary method of a configured service to PHP: it builds a `Call` and submits it to the intake. PHP finalizes the call with `respond()` or `fail()`, and the plugin sends the outcome to the client.
 

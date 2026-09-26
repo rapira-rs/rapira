@@ -32,7 +32,6 @@ pub struct Config {
     pub default_timeout: Option<Duration>,
     /// The longest timeout that a client can set.
     pub max_timeout: Option<Duration>,
-    pub drain_grace: Duration,
     /// HTTP/2 PING cadence and the wait for its ACK. A peer that is gone without a FIN sends no ACK, so its connection closes within the sum and does not hold a later drain.
     pub keepalive_interval: Duration,
     pub keepalive_timeout: Duration,

@@ -11,8 +11,8 @@ use rapira_sapi::work::Work as _;
 use serde_json::Value;
 use tests::grpc::{
     Conn, ECHO_PATH, ERROR_INFO, Fields, HI, HI_FRAME, Wire, config, echo, envelope, fields,
-    not_found, respond, respond_with_halves, scratch_dir, start, status_bytes, status_details, tcp,
-    web_trailers,
+    not_found, respond, respond_with_halves, scratch_dir, start, start_with_drain_grace,
+    status_bytes, status_details, tcp, web_trailers,
 };
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
@@ -899,11 +899,7 @@ async fn drain_waits_for_calls_within_the_grace() {
         },
     ];
     for case in cases {
-        let config = Config {
-            drain_grace: case.grace,
-            ..config(tcp())
-        };
-        let (mut running, mut calls) = start(config);
+        let (mut running, mut calls) = start_with_drain_grace(config(tcp()), case.grace);
         let mut conn = Conn::open(&running.listen, Wire::H2)
             .await
             .expect("connect");
@@ -946,11 +942,7 @@ async fn drain_waits_for_calls_within_the_grace() {
 #[tokio::test]
 async fn drain_ends_health_watch_streams() {
     let grace = Duration::from_secs(2);
-    let config = Config {
-        drain_grace: grace,
-        ..config(tcp())
-    };
-    let (mut running, _calls) = start(config);
+    let (mut running, _calls) = start_with_drain_grace(config(tcp()), grace);
     let mut conn = Conn::open(&running.listen, Wire::H2)
         .await
         .expect("connect");

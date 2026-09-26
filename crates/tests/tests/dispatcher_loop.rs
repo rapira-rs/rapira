@@ -157,7 +157,7 @@ fn double_head_throws_head_already_written() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Out-of-range statuses and malformed header names, values, and shapes raise `\ValueError` before anything reaches the host.
+/// Out-of-range statuses and malformed header names, values, and shapes raise `\ValueError` before anything reaches the plugin.
 #[test]
 fn status_range_and_header_shape_value_errors() -> anyhow::Result<()> {
     let (status, body) = verbs_probe("/?probe=value-errors")?;
@@ -344,7 +344,7 @@ fn receive_while_unfinalized_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An Exchange dropped without finalizing fails that unit only: the host answers 500 and the worker serves the next unit.
+/// An Exchange dropped without finalizing fails that unit only: the plugin answers 500 and the worker serves the next unit.
 #[test]
 fn abandoned_exchange_fails_that_unit_only() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -365,7 +365,7 @@ fn abandoned_exchange_fails_that_unit_only() -> anyhow::Result<()> {
             resp.ended
         ),
         (500, &b""[..], false, true),
-        "an abandoned unit is failed by the host with a complete 500"
+        "an abandoned unit is failed by the plugin with a complete 500"
     );
 
     let (status, body) = drain(tests::submit(&h, req("/"))?);
@@ -411,7 +411,7 @@ fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An Exchange abandoned after the head reached the wire cannot become a 500: the host ends the stream truncated so the client detects it.
+/// An Exchange abandoned after the head reached the wire cannot become a 500: the plugin ends the stream truncated so the client detects it.
 #[test]
 fn abandoned_mid_stream_exchange_truncates() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -436,7 +436,7 @@ fn abandoned_mid_stream_exchange_truncates() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An abandoned unit holding a host-parsed multipart body must unlink its spool the moment the exchange dies.
+/// An abandoned unit holding a plugin-parsed multipart body must unlink its spool the moment the exchange dies.
 #[test]
 fn abandoned_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -468,7 +468,7 @@ fn abandoned_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
     assert_eq!(
         (status, body.as_str()),
         (500, ""),
-        "the host fails the unit"
+        "the plugin fails the unit"
     );
     assert!(
         !spool.exists(),
@@ -769,7 +769,7 @@ fn tls_view_reaches_php() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A host-parsed Multipart reaches PHP as the object graph, and seal() unlinks the spool before the response frame is sent.
+/// A plugin-parsed Multipart reaches PHP as the object graph, and seal() unlinks the spool before the response frame is sent.
 #[test]
 fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
     let _guard = php_lock();
@@ -1076,7 +1076,7 @@ fn declared_content_length_rides_the_head_frame() -> anyhow::Result<()> {
     Ok(())
 }
 
-// ---- sendFile (stream-worker.php): host-streamed files
+// ---- sendFile (stream-worker.php): plugin-streamed files
 
 /// Write a temp payload and point the sendfile root at the temp dir.
 fn sendfile_setup(name: &str) -> std::path::PathBuf {

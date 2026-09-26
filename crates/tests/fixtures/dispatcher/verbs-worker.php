@@ -150,13 +150,13 @@ try {
             continue;
         }
         if ($probe === 'abandon') {
-            unset($ex); // never finalized: the host must fail this unit and keep serving
+            unset($ex); // never finalized: the plugin must fail this unit and keep serving
             continue;
         }
         if ($probe === 'abandon-mid') {
             $ex->writeHead(200);
             $ex->writeBody('partial', eos: false);
-            unset($ex); // head already on the wire: the host can only truncate
+            unset($ex); // head already on the wire: the plugin can only truncate
             continue;
         }
         if ($probe === 'bail-with-unit') {
@@ -170,7 +170,7 @@ try {
         }
         if ($probe === 'exit') {
             $ex->writeBody('bye');
-            exit(0); // served > 0: the host must recycle and keep serving
+            exit(0); // served > 0: the SAPI must recycle and keep serving
         }
         if ($probe === 'spin') {
             // never finalizes: the re-armed per-unit budget must kill this (timeout_tests.rs)

@@ -453,7 +453,7 @@ where
             // the connection; a 502 head keeps the connection coherent.
             tracing::error!(
                 target: "http",
-                "php committed status {status} as final; this front cannot forward it - serving 502"
+                "php committed status {status} as final; this plugin cannot forward it - serving 502"
             );
             http::StatusCode::BAD_GATEWAY
         }

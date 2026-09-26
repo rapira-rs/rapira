@@ -77,16 +77,16 @@ fn load_rejects_a_set_it_cannot_serve() {
             error: "grpc.services entry `rapira.test.v1.Missing` is not in",
         },
         Case {
-            name: "host health service",
+            name: "plugin health service",
             path: tests::echo_descriptor_set(),
             service: "grpc.health.v1.Health",
-            error: "grpc.services entry `grpc.health.v1.Health` is served by the host",
+            error: "grpc.services entry `grpc.health.v1.Health` is served by the plugin",
         },
         Case {
-            name: "host reflection service",
+            name: "plugin reflection service",
             path: tests::echo_descriptor_set(),
             service: "grpc.reflection.v1.ServerReflection",
-            error: "grpc.services entry `grpc.reflection.v1.ServerReflection` is served by the host",
+            error: "grpc.services entry `grpc.reflection.v1.ServerReflection` is served by the plugin",
         },
         Case {
             name: "missing file",

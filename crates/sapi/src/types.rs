@@ -129,7 +129,7 @@ pub enum Body {
 pub struct Request {
     pub method: String,
     pub uri: String,
-    /// Request-target bytes; a front can reconstruct them from its parsed URI. None falls back to `uri`'s bytes.
+    /// Request-target bytes; a plugin can reconstruct them from its parsed URI. None falls back to `uri`'s bytes.
     pub target: Option<Vec<u8>>,
     /// Byte-for-byte as the client named it; None = the client named none.
     pub authority: Option<Vec<u8>>,

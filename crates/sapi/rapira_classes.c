@@ -40,7 +40,7 @@ zend_class_entry *rapira_ce_tls;
 const zend_function_entry *rapira_php_functions(void) { return ext_functions; }
 
 // own copies: std_object_handlers is shared engine state
-zend_object_handlers rapira_host_handlers;
+zend_object_handlers rapira_dispatcher_handlers;
 zend_object_handlers rapira_info_handlers;
 
 zend_object *rapira_dispatcher_info_create(zend_class_entry *ce) {
@@ -132,9 +132,9 @@ void rapira_register_classes(void) {
     rapira_ce_tls = register_class_Rapira_Tls();
 
     // clone_obj = NULL: engine throws on clone (Zend/zend_vm_def.h:6050-6056)
-    memcpy(&rapira_host_handlers, &std_object_handlers,
-           sizeof(rapira_host_handlers));
-    rapira_host_handlers.clone_obj = NULL;
+    memcpy(&rapira_dispatcher_handlers, &std_object_handlers,
+           sizeof(rapira_dispatcher_handlers));
+    rapira_dispatcher_handlers.clone_obj = NULL;
 
     memcpy(&rapira_info_handlers, &std_object_handlers,
            sizeof(rapira_info_handlers));
