@@ -21,7 +21,7 @@
 ## Tests
 
 - A test proves a behavior from outside, through what a client or an operator sees. Its pass condition is simple: a response, a log record, an exit status or a scoreboard line.
-- No public API for tests only: no function, constructor, accessor, `Default` impl or feature flag that only tests call. A `#[cfg(test)]` gate does not make one acceptable. No production branch that only a test path takes.
+- Adding API for tests only, public or private, is forbidden: no function, method, constructor, accessor, `Default` impl or feature flag in production code that only tests call. A `#[cfg(test)]` gate or a `pub(crate)` visibility does not make one acceptable. No production branch that only a test path takes. Helpers inside a `#[cfg(test)] mod tests` block are test code, not API.
 - If no path from outside reaches a behavior, do not add a hook for it. Test its pure logic in a unit test, or leave it without a test. Drop a test of a sequence that production never runs.
 - Assert on the effect that a client sees, not on internal state such as a counter, a queue or a join handle.
 - Unit tests stay in their crate under `#[cfg(test)]`. They can call private items. They use no fixture, no test double, no socket and no PHP.
