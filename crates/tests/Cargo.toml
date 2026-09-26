@@ -13,7 +13,7 @@ http = { workspace = true }
 rapira_sapi = { workspace = true }
 # The http unit and its PHP part.
 rapira_http = { workspace = true }
-tokio = { workspace = true, features = ["rt", "time", "net"] }
+tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "net"] }
 tracing = { workspace = true }
 # Capture layer (init_log_capture).
 tracing-subscriber = "0.3"
@@ -29,7 +29,6 @@ hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
 # E2E harness (tests/e2e): process control for the spawned rapira binary.
 libc = { workspace = true }
 # The e2e middleware layer (tests/e2e/streaming.rs).

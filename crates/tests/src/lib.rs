@@ -12,6 +12,8 @@ use std::sync::{self, Mutex, Once, OnceLock, PoisonError};
 use tokio::sync::{mpsc, oneshot};
 
 pub mod grpc;
+pub mod server_log;
+pub mod wire;
 
 /// Every test boot registers both parts, as the root does.
 pub static PHP_PARTS: [PhpPart; 2] = [rapira_http::PHP_PART, rapira_grpc::PHP_PART];
