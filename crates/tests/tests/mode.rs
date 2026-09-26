@@ -1,4 +1,4 @@
-use php_sys::{Mode, Rapira};
+use rapira_sapi::{Mode, Rapira};
 use tests::{captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
 /// The mode is fixed for the process: each job over the resident loop gets the same Worker case.

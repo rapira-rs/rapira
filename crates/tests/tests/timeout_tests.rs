@@ -1,6 +1,6 @@
 #![cfg(not(target_os = "macos"))]
 
-use php_sys::{Mode, Rapira};
+use rapira_sapi::{Mode, Rapira};
 use std::path::Path;
 use tests::{drain, fixture, php_lock_with_ini, req};
 

@@ -1,5 +1,5 @@
 [package]
-name = "php_sys"
+name = "rapira_sapi"
 version = "0.8.1"
 edition.workspace = true
 build = "build.rs"

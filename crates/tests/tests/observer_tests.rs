@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use php_sys::{Mode, Rapira};
+use rapira_sapi::{Mode, Rapira};
 use tests::{drain, fixture, php_lock_with_ini, req};
 
 // Observer API registers only at module startup, so these tests run in their own process with their own ini; without --enable-zend-test the observer stays disabled (https://github.com/php/php-src/pull/5857).

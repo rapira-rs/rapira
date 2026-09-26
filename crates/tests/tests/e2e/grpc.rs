@@ -2,8 +2,8 @@ use std::net::SocketAddr;
 
 use extension_api::{ListenAddr, PrepareCtx};
 use http::Method;
-use php_sys::{Mode, Rapira};
 use rapira_runtime::ExtensionRuntime;
+use rapira_sapi::{Mode, Rapira};
 use serde_json::Value;
 use tests::grpc::{Conn, ECHO_PATH as ECHO, Fields, Wire, config, envelope, fields, tcp_addr};
 

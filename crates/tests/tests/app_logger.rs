@@ -172,7 +172,7 @@ fn log_survives_a_throwing_json_serializer() {
 /// exit() inside a serializer is an unwind-exit, not a serialization failure: log() must not eat it.
 #[test]
 fn log_preserves_exit_from_a_serializer() {
-    use php_sys::{Mode, Rapira};
+    use rapira_sapi::{Mode, Rapira};
     use tests::{drain, init_log_capture, php_lock, req};
 
     let _guard = php_lock();

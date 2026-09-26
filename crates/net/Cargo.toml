@@ -10,10 +10,10 @@ description = "Accept loop for rapira plugins - serves the listener that the mas
 workspace = true
 
 [dependencies]
-extension_api = { workspace = true }
 anyhow = { workspace = true }
 tracing = { workspace = true }
 libc = { workspace = true }
+socket2 = "0.6"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "macros"] }
 
 [dev-dependencies]

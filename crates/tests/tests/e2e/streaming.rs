@@ -222,8 +222,8 @@ fn middleware_body_change_preserves_php_finalization() -> anyhow::Result<()> {
         BoxFuture, HttpRequest, HttpResponse, ListenAddr, Middleware, Next, PrepareCtx,
     };
     use http_body_util::BodyExt;
-    use php_sys::{Mode, Rapira};
     use rapira_runtime::ExtensionRuntime;
+    use rapira_sapi::{Mode, Rapira};
 
     struct PrefixBody;
 

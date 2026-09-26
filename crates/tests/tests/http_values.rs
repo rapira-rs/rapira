@@ -1,4 +1,4 @@
-use php_sys::{Mode, Rapira};
+use rapira_sapi::{Mode, Rapira};
 use tests::{drain, php_lock, req};
 
 /// Pins that Http value objects construct and refuse readonly reassignment, wrong arity, and a bad address union.

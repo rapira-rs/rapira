@@ -1,5 +1,5 @@
 use http::HeaderMap;
-use php_sys::{GrpcOutcome, GrpcStatus, Mode, Rapira};
+use rapira_sapi::{GrpcOutcome, GrpcStatus, Mode, Rapira};
 use std::sync::mpsc;
 use std::time::Duration;
 use tests::{drain, fixture, php_lock, req};

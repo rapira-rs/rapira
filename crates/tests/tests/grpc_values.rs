@@ -1,4 +1,4 @@
-use php_sys::{Mode, Rapira};
+use rapira_sapi::{Mode, Rapira};
 use tests::{assert_case_records, captured, fixture, init_log_capture, php_lock};
 
 // Expected values come from the Rapira\Grpc contract classes, and the Metadata messages from the userland body of its constructor.

@@ -1,7 +1,7 @@
 use extension_api::{Extension, Php, Request, Result, RpcProtocol, RpcStatus, UnaryCall};
 use http::header::{CONTENT_TYPE, HeaderMap, HeaderValue, SET_COOKIE};
-use php_sys::{Mode, Rapira};
 use rapira_runtime::ExtensionRuntime;
+use rapira_sapi::{Mode, Rapira};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 use tests::{Fields, Response, collect, echo_services, fields, fixture, php_lock};

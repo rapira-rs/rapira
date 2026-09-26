@@ -3,9 +3,9 @@ use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
 use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
-use php_sys::{Mode, Rapira, WorkerHooks};
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
 use rapira_runtime::{ExtensionRuntime, Stopper};
+use rapira_sapi::{Mode, Rapira, WorkerHooks};
 
 /// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset, so the extension outcomes set the exit code.
 static WORKER_EXIT: AtomicI32 = AtomicI32::new(-1);
@@ -66,7 +66,7 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         http,
     } = args;
     // SAFETY: single-threaded here, before the PHP worker thread exists.
-    unsafe { php_sys::rapira_child_init() };
+    unsafe { rapira_sapi::rapira_child_init() };
     // The worker enters the entrypoint directory once and owns it from here; PHP keeps it over every script run.
     let entrypoint_dir: &Path = entrypoint
         .parent()
@@ -80,7 +80,7 @@ pub fn worker_body(env: WorkerEnv, host: ExtensionRuntime, args: PoolArgs) -> i3
         return WORKER_EXIT_UNHEALTHY;
     }
     let mut uploads: Option<rapira_runtime::multipart::Limits> = http.and_then(|http| {
-        php_sys::set_sendfile_root(http.sendfile_root);
+        rapira_sapi::set_sendfile_root(http.sendfile_root);
         http.uploads
     });
     let stopper: Arc<OnceLock<Stopper>> = Arc::new(OnceLock::new());

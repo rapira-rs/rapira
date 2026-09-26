@@ -1,6 +1,6 @@
 use extension_api::{Reply, ReplyEvent};
 use http::{HeaderMap, HeaderName, HeaderValue};
-use php_sys::{
+use rapira_sapi::{
     Frame, GrpcMethod, GrpcOutcome, GrpcProtocol, GrpcRequest, GrpcService, HandleError, Mode,
     Rapira, RapiraHandle, Request,
 };
@@ -94,7 +94,7 @@ pub fn grpc_request(message: &str) -> GrpcRequest {
         protocol: GrpcProtocol::Grpc,
         metadata: HeaderMap::new(),
         deadline: None,
-        remote: php_sys::types::Addr::Inet(([127, 0, 0, 1], 50051).into()),
+        remote: rapira_sapi::types::Addr::Inet(([127, 0, 0, 1], 50051).into()),
         message: message.as_bytes().to_vec().into(),
     }
 }
@@ -132,7 +132,7 @@ pub fn assert_skip_allowed(fixture: &str) {
 
 /// Build a minimal `GET` request for `uri`, and point the worker script paths at `fixture_name`.
 pub fn req(uri: &str, fixture_name: &str) -> Request {
-    php_sys::set_script(&fixture(fixture_name));
+    rapira_sapi::set_script(&fixture(fixture_name));
     Request {
         https: false,
         method: "GET".into(),
@@ -140,14 +140,14 @@ pub fn req(uri: &str, fixture_name: &str) -> Request {
         target: None,
         authority: None,
         protocol: "HTTP/1.1".into(),
-        remote: php_sys::types::Addr::Inet(([127, 0, 0, 1], 8080).into()),
-        server: php_sys::types::Addr::Inet(([127, 0, 0, 1], 8080).into()),
+        remote: rapira_sapi::types::Addr::Inet(([127, 0, 0, 1], 8080).into()),
+        server: rapira_sapi::types::Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server_name: "localhost".into(),
         server_port: 8080,
         headers: HeaderMap::new(),
         content_type: None,
         content_length: 0,
-        body: php_sys::types::Body::Raw(std::io::Cursor::new(Vec::new())),
+        body: rapira_sapi::types::Body::Raw(std::io::Cursor::new(Vec::new())),
         received_at: None,
         tls: None,
     }
@@ -180,8 +180,8 @@ pub fn echo_services() -> Vec<GrpcService> {
 /// A response stream collected to its `End` (or to the producer dying).
 #[derive(Default)]
 pub struct Resp {
-    pub interim: Vec<php_sys::ResponseHead>,
-    pub head: Option<php_sys::ResponseHead>,
+    pub interim: Vec<rapira_sapi::ResponseHead>,
+    pub head: Option<rapira_sapi::ResponseHead>,
     pub content_length: Option<u64>,
     pub bodiless: bool,
     pub body: Vec<u8>,

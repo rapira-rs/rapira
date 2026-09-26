@@ -11,7 +11,7 @@ workspace = true
 anyhow = { workspace = true }
 extension_api = { workspace = true }
 http = { workspace = true }
-php_sys = { workspace = true }
+rapira_sapi = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "net"] }
 tracing = { workspace = true }
 # Capture layer (init_log_capture).

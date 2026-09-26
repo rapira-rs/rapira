@@ -1,4 +1,4 @@
-use php_sys::{Mode, Rapira};
+use rapira_sapi::{Mode, Rapira};
 use serde_json::json;
 use tests::{dispatcher_record, drain, fixture, php_lock, req};
 

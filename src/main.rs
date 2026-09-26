@@ -1,6 +1,5 @@
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use extension_api::{ListenAddr, Middleware, PrepareCtx};
-use php_sys::{GrpcMethod, GrpcService, Mode, Rapira};
 use rapira_config::{
     GrpcSettings, HttpSettings, Listen, MiddlewareSettings, PoolSettings, RunMode, Scaling,
     Settings, SupervisorSettings, UnsafeFieldNames,
@@ -11,6 +10,7 @@ use rapira_http::{
 };
 use rapira_master::PoolConfig;
 use rapira_runtime::ExtensionRuntime;
+use rapira_sapi::{GrpcMethod, GrpcService, Mode, Rapira};
 use std::{
     fs::{File, OpenOptions, read_dir, remove_file},
     os::fd::RawFd,
@@ -384,7 +384,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         http.into_iter().chain(grpc).unzip();
 
     // MINIT once, after every pool bound its listeners.
-    let module: php_sys::PhpModule = Rapira::boot_master()?;
+    let module: rapira_sapi::PhpModule = Rapira::boot_master()?;
 
     // forks ------------------------------------------------------------------
     let cfg: rapira_master::MasterConfig = rapira_master::MasterConfig {

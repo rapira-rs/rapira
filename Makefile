@@ -15,7 +15,7 @@ stubs:
 	@test -x "$(PHP_BIN)" || { echo "php not found at $(PHP_BIN); set PHP_BIN=/path/to/php"; exit 1; }
 	@mkdir -p target/stubgen
 	@cp "$(GEN_STUB)" target/stubgen/gen_stub.php
-	@for stub in crates/php_sys/*.stub.php; do \
+	@for stub in $$(find crates -name '*.stub.php' -not -path '*/target/*'); do \
 		$(PHP_BIN) target/stubgen/gen_stub.php "$$stub" || exit 1; \
 	done
 

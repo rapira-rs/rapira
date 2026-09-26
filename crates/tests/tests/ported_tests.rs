@@ -1,7 +1,7 @@
 use std::{ops::Deref, path::Path};
 
 use http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE};
-use php_sys::{Mode, Rapira, Request};
+use rapira_sapi::{Mode, Rapira, Request};
 use tests::{Resp, captured, drain, drain_resp, fixture, init_log_capture, php_lock, req};
 
 fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u8>) -> Request {
@@ -9,7 +9,7 @@ fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u
     r.method = "POST".into();
     r.content_type = content_type.map(|s| s.as_bytes().to_vec());
     r.content_length = body.len() as i64;
-    r.body = php_sys::types::Body::Raw(std::io::Cursor::new(body));
+    r.body = rapira_sapi::types::Body::Raw(std::io::Cursor::new(body));
     r
 }
 

@@ -1,6 +1,6 @@
 use std::path::Path;
 
-use php_sys::{Mode, Rapira};
+use rapira_sapi::{Mode, Rapira};
 use tests::{
     assert_skip_allowed, captured, drain, fixture, init_log_capture, php_lock_with_ini, req,
     run_worker,

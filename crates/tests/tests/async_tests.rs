@@ -1,4 +1,4 @@
-use php_sys::{Mode, Rapira};
+use rapira_sapi::{Mode, Rapira};
 use tests::{drain_async, fixture, php_lock_async, req};
 
 #[tokio::test]
@@ -53,7 +53,7 @@ async fn many_producers_test() -> anyhow::Result<()> {
 
     let producers: Vec<_> = (0..24)
         .map(|t| {
-            let h: php_sys::RapiraHandle = r.handle();
+            let h: rapira_sapi::RapiraHandle = r.handle();
             tokio::spawn(async move {
                 for i in 0..256 {
                     let name: String = format!("t{t}-r{i}");
