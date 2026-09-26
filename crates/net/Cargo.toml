@@ -16,6 +16,3 @@ tracing = { workspace = true }
 libc = { workspace = true }
 socket2 = "0.6"
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "macros"] }
-
-[dev-dependencies]
-tempfile = "3"

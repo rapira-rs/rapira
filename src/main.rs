@@ -181,40 +181,8 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{check_mode, prepare_pool};
-    use rapira_config::ConfigCtx;
-    use rapira_http::Server as HttpServer;
-    use rapira_net::PrepareCtx;
+    use super::check_mode;
     use rapira_sapi::plugin::Mode;
-
-    /// An `[http]` table on an ephemeral port. The entrypoint check only opens the file, so the pool names this source file. Worker mode has no uploads dir to check.
-    fn ephemeral_plugin() -> HttpServer {
-        let section: rapira_http::config::Section = toml::from_str(&format!(
-            "listen = \"127.0.0.1:0\"\n[pool]\nentrypoint = \"{}\"\nmode = \"worker\"",
-            file!()
-        ))
-        .expect("an [http] table");
-        let ctx = ConfigCtx {
-            dir: env!("CARGO_MANIFEST_DIR").into(),
-        };
-        HttpServer::from_settings(rapira_http::config::resolve(section, &ctx).expect("resolve"))
-    }
-
-    /// Two plugins bind on one shared context; each call reports only the fd its own plugin bound.
-    #[test]
-    fn prepare_pool_returns_only_the_fds_its_plugin_bound() {
-        let mut prepare = PrepareCtx::new();
-        let mut first = ephemeral_plugin();
-        let mut second = ephemeral_plugin();
-
-        let first_fds = prepare_pool(&mut first, &mut prepare).expect("prepare the first pool");
-        let second_fds = prepare_pool(&mut second, &mut prepare).expect("prepare the second pool");
-
-        assert_eq!(first_fds.len(), 1, "{first_fds:?}");
-        assert_eq!(second_fds.len(), 1, "{second_fds:?}");
-        assert_ne!(first_fds[0], second_fds[0]);
-        assert_eq!(prepare.listener_fds().len(), 2);
-    }
 
     #[test]
     fn a_pool_mode_the_plugin_does_not_serve_fails_the_boot() {

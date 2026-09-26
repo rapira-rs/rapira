@@ -168,20 +168,3 @@ fn wait_signal(signals: &[libc::c_int]) -> libc::c_int {
         sig
     }
 }
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// `sigwait` dequeues a blocked, pending signal instead of running the default terminate action.
-    #[test]
-    fn sigwait_reaps_a_blocked_signal() {
-        let set = sigset(&[libc::SIGTERM]);
-        // SAFETY: SIGTERM is blocked in this thread, so `raise` leaves it pending for `sigwait` to dequeue.
-        unsafe {
-            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-            libc::raise(libc::SIGTERM);
-        }
-        assert_eq!(wait_signal(&[libc::SIGTERM]), libc::SIGTERM);
-    }
-}

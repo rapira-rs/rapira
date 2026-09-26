@@ -19,6 +19,7 @@ mod http_values;
 mod imap_tests;
 mod ini;
 mod lifecycle;
+mod listeners;
 mod logging;
 mod mode;
 mod observer_teardown_tests;

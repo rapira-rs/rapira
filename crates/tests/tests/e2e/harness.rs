@@ -405,17 +405,19 @@ pub fn spawn_grpc_boot_failure(descriptor_set: &str, service: &str) -> (ExitStat
 /// PHPRC names a `php.ini` in the scratch dir with the contents of `crates/tests/fixtures/ini/shared/php.ini`, unless [`Spawn::php_ini`] replaces them.
 pub struct Spawn {
     http: Option<(Mode, PathBuf)>,
-    /// The unix socket of the `[http]` pool; None listens on TCP.
-    http_unix: Option<PathBuf>,
+    /// The listener of the `[http]` pool; None listens on a TCP port that the harness picks.
+    http_listen: Option<ListenAddr>,
     grpc: Option<PathBuf>,
-    /// The unix socket of the `[grpc]` pool; None listens on TCP.
-    grpc_unix: Option<PathBuf>,
+    /// The listener of the `[grpc]` pool; None listens on a TCP port that the harness picks.
+    grpc_listen: Option<ListenAddr>,
     /// The `[grpc] services` list; None leaves the key out.
     services: Option<Vec<String>>,
     /// The `[grpc] descriptor_set`; None stages `echo.binpb`.
     descriptor_set: Option<PathBuf>,
     http_extra: String,
     grpc_extra: String,
+    http_pool: String,
+    grpc_pool: String,
     toml: String,
     php_ini: String,
     env: Vec<(String, String)>,
@@ -443,13 +445,15 @@ impl Spawn {
         let ini = tests::fixture("ini/shared/php.ini");
         Spawn {
             http: None,
-            http_unix: None,
+            http_listen: None,
             grpc: None,
-            grpc_unix: None,
+            grpc_listen: None,
             services: Some(vec![ECHO_SERVICE.to_owned()]),
             descriptor_set: None,
             http_extra: String::new(),
             grpc_extra: String::new(),
+            http_pool: String::new(),
+            grpc_pool: String::new(),
             toml: String::new(),
             php_ini: std::fs::read_to_string(&ini)
                 .unwrap_or_else(|e| panic!("read {}: {e}", ini.display())),
@@ -465,14 +469,24 @@ impl Spawn {
     }
 
     /// The `[http]` pool listens on the unix socket `sock`.
-    pub fn http_unix(mut self, sock: &Path) -> Spawn {
-        self.http_unix = Some(sock.to_owned());
+    pub fn http_unix(self, sock: &Path) -> Spawn {
+        self.http_listen(ListenAddr::Unix(sock.to_owned()))
+    }
+
+    /// The `[http]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
+    pub fn http_listen(mut self, listen: ListenAddr) -> Spawn {
+        self.http_listen = Some(listen);
         self
     }
 
     /// The `[grpc]` pool listens on the unix socket `sock`.
-    pub fn grpc_unix(mut self, sock: &Path) -> Spawn {
-        self.grpc_unix = Some(sock.to_owned());
+    pub fn grpc_unix(self, sock: &Path) -> Spawn {
+        self.grpc_listen(ListenAddr::Unix(sock.to_owned()))
+    }
+
+    /// The `[grpc]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
+    pub fn grpc_listen(mut self, listen: ListenAddr) -> Spawn {
+        self.grpc_listen = Some(listen);
         self
     }
 
@@ -499,6 +513,20 @@ impl Spawn {
     pub fn grpc_extra(mut self, keys: &str) -> Spawn {
         self.grpc_extra += keys;
         self.grpc_extra.push('\n');
+        self
+    }
+
+    /// Keys inside `[http.pool]`, for example `scaling = "ondemand"`.
+    pub fn http_pool(mut self, keys: &str) -> Spawn {
+        self.http_pool += keys;
+        self.http_pool.push('\n');
+        self
+    }
+
+    /// Keys inside `[grpc.pool]`, for example `scaling = "ondemand"`.
+    pub fn grpc_pool(mut self, keys: &str) -> Spawn {
+        self.grpc_pool += keys;
+        self.grpc_pool.push('\n');
         self
     }
 
@@ -546,22 +574,27 @@ impl Spawn {
             &self.env,
         );
         if self.grpc.is_some() {
-            srv.grpc = Some(match &self.grpc_unix {
-                Some(sock) => ListenAddr::Unix(sock.clone()),
+            srv.grpc = Some(match &self.grpc_listen {
+                Some(listen) => listen.clone(),
                 None => ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], grpc_port.get()))),
             });
         }
         srv
     }
 
-    /// The socket of the first pool when no pool listens on TCP.
+    /// The unix socket of the first pool that listens on one, when no pool listens on a port that the harness picks.
     fn unix_only(&self) -> Option<&Path> {
-        let tcp = (self.http.is_some() && self.http_unix.is_none())
-            || (self.grpc.is_some() && self.grpc_unix.is_none());
-        if tcp {
+        let picked = (self.http.is_some() && self.http_listen.is_none())
+            || (self.grpc.is_some() && self.grpc_listen.is_none());
+        if picked {
             return None;
         }
-        self.http_unix.as_deref().or(self.grpc_unix.as_deref())
+        [&self.http_listen, &self.grpc_listen]
+            .into_iter()
+            .find_map(|listen| match listen {
+                Some(ListenAddr::Unix(sock)) => Some(sock.as_path()),
+                _ => None,
+            })
     }
 
     /// Spawns a master that must fail its boot: returns the exit status with the whole log.
@@ -604,21 +637,21 @@ impl Spawn {
             (stage_dir(&dir, "grpc", fixture), descriptor_set)
         });
         let render = move |port| {
-            // The spawn waits for `port`, so it goes to the first pool on TCP.
+            // The spawn waits for `port`, so it goes to the first pool without a listen address.
             let mut port = Some(port);
             let mut config = String::new();
             if let Some((mode, entrypoint)) = &http {
-                let listen = match &self.http_unix {
-                    Some(sock) => format!("unix:{}", sock.display()),
+                let listen = match &self.http_listen {
+                    Some(listen) => listen.to_string(),
                     None => tcp(port.take().unwrap_or_else(free_port)),
                 };
-                let pool = format!("mode = \"{mode}\"");
+                let pool = format!("mode = \"{mode}\"\n{}", self.http_pool);
                 config += &render_config(&listen, 1, entrypoint, &self.http_extra, &pool);
                 config.push('\n');
             }
             if let Some((entrypoint, descriptor_set)) = &grpc {
-                let listen = match &self.grpc_unix {
-                    Some(sock) => format!("unix:{}", sock.display()),
+                let listen = match &self.grpc_listen {
+                    Some(listen) => listen.to_string(),
                     None => {
                         grpc_port.set(port.take().unwrap_or_else(free_port));
                         tcp(grpc_port.get())
@@ -632,6 +665,8 @@ impl Spawn {
                     self.services.as_deref(),
                     &self.grpc_extra,
                 );
+                // `render_grpc` ends in `[grpc.pool]`.
+                config += &self.grpc_pool;
                 config.push('\n');
             }
             config + &self.toml
@@ -1116,7 +1151,8 @@ pub fn wait_file_contains_all(
     }
 }
 
-fn free_port() -> u16 {
+/// A port that no listener holds when this returns.
+pub fn free_port() -> u16 {
     let l = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     l.local_addr().expect("local_addr").port()
 }

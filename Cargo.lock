@@ -998,7 +998,6 @@ dependencies = [
  "libc",
  "rapira_config",
  "socket2",
- "tempfile",
  "tokio",
  "tracing",
 ]
