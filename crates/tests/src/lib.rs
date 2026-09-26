@@ -69,7 +69,6 @@ pub fn echo_descriptor_set() -> PathBuf {
 pub struct Resp {
     pub head: Option<rapira_sapi::ResponseHead>,
     pub content_length: Option<u64>,
-    pub bodiless: bool,
     pub body: Vec<u8>,
     pub trailers: HeaderMap,
     pub truncated: bool,
@@ -98,12 +97,10 @@ impl Resp {
             Frame::Head {
                 head,
                 content_length,
-                bodiless,
                 ..
             } => {
                 self.head = Some(head);
                 self.content_length = content_length;
-                self.bodiless = bodiless;
             }
             Frame::Chunk(b) => self.body.extend_from_slice(&b),
             Frame::End {
