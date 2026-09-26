@@ -2,6 +2,7 @@ mod apm;
 mod basic_tests;
 mod classic;
 mod concurrency;
+mod dispatcher_loop;
 mod extensions;
 mod grpc;
 mod harness;
