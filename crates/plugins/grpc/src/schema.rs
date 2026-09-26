@@ -7,7 +7,7 @@ use buffa_descriptor::generated::descriptor::method_options::IdempotencyLevel;
 use buffa_descriptor::{DescriptorPool, DynamicMessage, MessageIndex, ServiceDescriptor};
 
 /// The services of a FileDescriptorSet that rapira serves.
-pub struct Schema {
+pub(crate) struct Schema {
     pool: Arc<DescriptorPool>,
     /// Keyed `package.Service/Method`, the request path without its leading slash.
     methods: HashMap<String, Method>,
@@ -16,14 +16,14 @@ pub struct Schema {
 
 /// A configured service with every method it declares.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ServiceInfo {
+pub(crate) struct ServiceInfo {
     pub name: String,
     pub methods: Vec<MethodInfo>,
 }
 
 /// A method with fully qualified message type names.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MethodInfo {
+pub(crate) struct MethodInfo {
     pub name: String,
     pub input_type: String,
     pub output_type: String,
@@ -35,7 +35,7 @@ pub struct MethodInfo {
 static SERVICES: OnceLock<Vec<ServiceInfo>> = OnceLock::new();
 
 /// Sets the services that `getServices()` reports. A later call with an equal list is accepted; a different list is an error.
-pub fn set_services(services: Vec<ServiceInfo>) -> anyhow::Result<()> {
+pub(crate) fn set_services(services: Vec<ServiceInfo>) -> anyhow::Result<()> {
     match SERVICES.set(services) {
         Ok(()) => Ok(()),
         Err(services) if services == self::services() => Ok(()),
@@ -68,7 +68,7 @@ const PLUGIN_SERVICES: [&str; 3] = [
 
 impl Schema {
     /// Loads the set at `path` and keeps the unary methods of `services` as routes. `None` serves the services of the files that no other file of the set imports.
-    pub fn load(path: &Path, services: Option<&[String]>) -> anyhow::Result<Schema> {
+    pub(crate) fn load(path: &Path, services: Option<&[String]>) -> anyhow::Result<Schema> {
         let bytes = std::fs::read(path)
             .map_err(|e| anyhow!("reading grpc.descriptor_set {}: {e}", path.display()))?;
         // The operator supplies the set, so the element memory limit for untrusted input does not apply.
@@ -176,7 +176,7 @@ impl Schema {
     }
 
     /// Every method of the configured services, streaming ones included, in descriptor order.
-    pub fn services(&self) -> &[ServiceInfo] {
+    pub(crate) fn services(&self) -> &[ServiceInfo] {
         &self.services
     }
 

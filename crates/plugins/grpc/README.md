@@ -30,7 +30,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `rapira_grpc.h`: the C layouts of the call object and the response metadata object, and the class entries.
 - `rapira_grpc_classes.c`: `rapira_grpc_register_classes`, the object handlers, the constructors of the internal classes, and the shells of `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters. MINIT calls `rapira_grpc_register_classes` after the base classes.
 - `rapira_grpc.c`: the other method shells: the value classes, `name()` and `getServices()` of the dispatcher, the call and the response metadata.
-- `src/lib.rs`: `Config`, `Server` and its `Plugin` impl. `Server::with_intake` takes a test `Intake<Call>` from `Intake::channel` in place of the worker's sink, so a test takes the role of PHP.
+- `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, and `Server::from_settings`, which loads the descriptor set.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, the interceptor chain, and the drain.
 - `src/interceptor.rs`: the chain types `Request`, `Response`, `Service` and `Interceptor`.
@@ -174,7 +174,7 @@ cargo build -p rapira_grpc
 cargo clippy -p rapira_grpc --all-targets
 ```
 
-The tests live in `crates/tests`: `tests/grpc_server.rs` and `tests/grpc_schema.rs` drive this crate over the wire, and the test takes the role of PHP through `Intake::channel` (`src/grpc.rs` is the harness), `tests/grpc_dispatcher.rs` and `tests/grpc_values.rs` cover the PHP side, and `tests/e2e/grpc.rs` runs the whole binary. `make grpc_fixtures` rebuilds the descriptor sets in `crates/tests/fixtures/grpc/` with a pinned `buf`.
+The tests that need PHP or a socket live in `crates/tests/tests/e2e/` and run the `rapira` binary: `grpc_server.rs` and `grpc_schema.rs` drive this crate over the wire with PHP fixtures in the role of the application, `grpc_dispatcher.rs` and `grpc_values.rs` cover the PHP side, and `grpc.rs` covers the `[grpc]` pool of `rapira.toml`. `crates/tests/src/grpc.rs` holds the gRPC, gRPC-Web and Connect clients. `make grpc_fixtures` rebuilds the descriptor sets in `crates/tests/fixtures/grpc/` with a pinned `buf`.
 
 ## License
 

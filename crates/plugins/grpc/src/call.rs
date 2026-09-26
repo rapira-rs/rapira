@@ -1,4 +1,3 @@
-use bytes::Bytes;
 use http::HeaderMap;
 use rapira_sapi::types::Addr;
 use rapira_sapi::work::{Held, Work, now_unix_f64};
@@ -9,7 +8,7 @@ use crate::php::{GrpcState, grpc_call_from};
 
 /// One unary RPC. `message` is the binary protobuf encoding of the method's input message.
 #[derive(Debug)]
-pub struct UnaryCall {
+pub(crate) struct UnaryCall {
     /// `package.Service/Method`, without a leading slash.
     pub method: String,
     pub protocol: RpcProtocol,
@@ -23,7 +22,7 @@ pub struct UnaryCall {
 
 /// The protocol that the client of an RPC used.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RpcProtocol {
+pub(crate) enum RpcProtocol {
     Grpc,
     GrpcWeb,
     Connect,
@@ -31,7 +30,7 @@ pub enum RpcProtocol {
 
 /// The outcome of a unary RPC. The metadata is in wire form: `-bin` values are unpadded base64.
 #[derive(Debug, PartialEq)]
-pub struct UnaryReply {
+pub(crate) struct UnaryReply {
     pub headers: http::HeaderMap,
     pub trailers: http::HeaderMap,
     /// The output message, or the status the call failed with.
@@ -40,7 +39,7 @@ pub struct UnaryReply {
 
 /// `google.rpc.Status`. `code` is 1..=16. Each detail is a (type URL, packed message) pair. https://github.com/googleapis/googleapis/blob/master/google/rpc/status.proto
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct RpcStatus {
+pub(crate) struct RpcStatus {
     pub code: u32,
     pub message: String,
     pub details: Vec<(String, bytes::Bytes)>,
@@ -50,7 +49,7 @@ pub struct RpcStatus {
 const GRPC_UNAVAILABLE: u32 = 14;
 
 /// One unary gRPC call on the intake.
-pub struct Call {
+pub(crate) struct Call {
     pub(crate) call: UnaryCall,
     /// Unix timestamp of the enqueue.
     pub(crate) received_at: f64,
@@ -59,7 +58,7 @@ pub struct Call {
 
 impl Call {
     /// A dropped sender means that PHP lost the call; dropping the receiver closes the call for PHP.
-    pub fn new(call: UnaryCall) -> (Self, oneshot::Receiver<UnaryReply>) {
+    pub(crate) fn new(call: UnaryCall) -> (Self, oneshot::Receiver<UnaryReply>) {
         let (reply, rx) = oneshot::channel();
         let call = Self {
             call,
@@ -69,33 +68,8 @@ impl Call {
         (call, rx)
     }
 
-    pub fn method(&self) -> &str {
-        &self.call.method
-    }
-
-    pub fn protocol(&self) -> RpcProtocol {
-        self.call.protocol
-    }
-
-    pub fn metadata(&self) -> &HeaderMap {
-        &self.call.metadata
-    }
-
-    /// Unix seconds.
-    pub fn deadline(&self) -> Option<f64> {
-        self.call.deadline
-    }
-
-    pub fn remote(&self) -> &Addr {
-        &self.call.remote
-    }
-
-    pub fn message(&self) -> &Bytes {
-        &self.call.message
-    }
-
     /// Commits the outcome, as a finalize from PHP does.
-    pub fn respond(self, reply: UnaryReply) {
+    pub(crate) fn respond(self, reply: UnaryReply) {
         let _ = self.reply.send(reply);
     }
 }

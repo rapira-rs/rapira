@@ -17,13 +17,13 @@ mod php;
 mod schema;
 mod serve;
 
-pub use call::{Call, RpcProtocol, RpcStatus, UnaryCall, UnaryReply};
+use call::{Call, RpcProtocol, RpcStatus, UnaryCall, UnaryReply};
 pub use interceptor::Interceptor;
-pub use php::{DISPATCHER_CLASSES, PHP_PART};
-pub use schema::{MethodInfo, Schema, ServiceInfo, set_services};
+pub use php::PHP_PART;
+use schema::{MethodInfo, Schema, set_services};
 
 #[derive(Clone)]
-pub struct Config {
+pub(crate) struct Config {
     pub listen: ListenAddr,
     pub schema: Arc<Schema>,
     /// Serve `grpc.reflection.v1` and `v1alpha` for the configured services.
@@ -42,8 +42,6 @@ pub struct Config {
 pub struct Server {
     config: Config,
     prepared: Option<Prepared>,
-    /// The intake a test injects. None: the worker's sink.
-    intake: Option<Intake<Call>>,
 }
 
 /// What `prepare` leaves for `serve`: the listener and the routes that the plugin answers without PHP.
@@ -54,19 +52,10 @@ pub(crate) struct Prepared {
 }
 
 impl Server {
-    pub fn init(config: Config) -> Self {
+    pub(crate) fn init(config: Config) -> Self {
         Self {
             config,
             prepared: None,
-            intake: None,
-        }
-    }
-
-    /// A server that submits to `intake` in place of the worker's sink.
-    pub fn with_intake(config: Config, intake: Intake<Call>) -> Self {
-        Self {
-            intake: Some(intake),
-            ..Self::init(config)
         }
     }
 }
@@ -112,15 +101,11 @@ impl Plugin for Server {
     }
 
     fn serve(self: Box<Self>, worker: Worker) -> Result<()> {
-        let Self {
-            config,
-            prepared,
-            intake,
-        } = *self;
+        let Self { config, prepared } = *self;
         let Some(prepared) = prepared else {
             return Err(anyhow!("grpc listener was not prepared"));
         };
-        let intake = intake.unwrap_or_else(|| Intake::new(worker.sink.clone()));
+        let intake = Intake::new(worker.sink.clone());
         serve::serve(intake, config, prepared, worker)
     }
 }
