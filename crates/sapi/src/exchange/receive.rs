@@ -26,10 +26,15 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
         }
         let mut obj: zval = std::mem::zeroed();
         let _ = object_init_ex(&mut obj, (classes.unit)());
-        // SAFETY: plain zend timer bookkeeping on this thread; no bailout path.
-        rapira_receive_untimed();
+        // The timer of the previous job still runs. A queued job re-arms it, so disarm it only before a wait.
+        let mut armed = matches!(mode, RecvMode::Wait(t) if t != 0);
+        if !armed {
+            // SAFETY: plain zend timer bookkeeping on this thread; no bailout path.
+            rapira_receive_untimed();
+        }
         loop {
             let pulled = match mode {
+                RecvMode::Wait(_) if armed => pull_job_try(),
                 RecvMode::Try | RecvMode::Wait(0) => pull_job_try(),
                 RecvMode::Wait(-1) => pull_job_wait(None),
                 RecvMode::Wait(t) => pull_job_wait(Some(Duration::from_micros(t as u64))),
@@ -50,6 +55,11 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                     });
                     *return_value = obj;
                     return true;
+                }
+                _ if armed => {
+                    armed = false;
+                    // SAFETY: plain zend timer bookkeeping; no bailout path.
+                    rapira_receive_untimed();
                 }
                 Pulled::Closed => {
                     update(|c| c.closed_seen = true);
