@@ -170,6 +170,21 @@ fn killed_master_leaves_workers_to_drain() {
     }
 }
 
+/// The master disables transparent huge pages, and the forked workers inherit the setting. https://man7.org/linux/man-pages/man2/PR_SET_THP_DISABLE.2const.html
+#[cfg(target_os = "linux")]
+#[test]
+fn workers_run_without_transparent_huge_pages() {
+    let srv = spawn_with_config("lifecycle/thp-status-worker.php", 1, "");
+    let (code, body) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        "0",
+        "THP_enabled of the worker\n{}",
+        diagnostics(&srv)
+    );
+}
+
 #[test]
 fn max_requests_recycles() {
     let srv = spawn_with_config("shared/echo-worker.php", 1, "max_requests = 5\n");
