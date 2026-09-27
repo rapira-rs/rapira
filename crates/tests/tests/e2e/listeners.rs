@@ -11,8 +11,8 @@ use rapira_net::ListenAddr;
 use rapira_sapi::Mode;
 
 use crate::harness::{
-    BOOT, Server, Spawn, diagnostics, fixture_path, free_port, http_get, listen,
-    parse_status_and_body, scratch_dir, spawn_with_config, wait_workers, worker_pids,
+    BOOT, Server, Spawn, diagnostics, fixture_path, free_port, http_get, parse_status_and_body,
+    scratch_dir, spawn_with_config, wait_workers,
 };
 
 const REQ: Duration = Duration::from_secs(10);
@@ -129,34 +129,6 @@ fn two_pools_on_one_address_fail_the_boot() {
         );
     }
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// Each pool gets only the listeners that it bound. An ondemand pool forks on a connection to its own listener: a connection to the `[http]` listener forks no `[grpc]` worker.
-#[test]
-fn an_ondemand_pool_forks_only_for_its_own_listener() {
-    let srv = Spawn::http(Mode::Dispatcher, fixture_path(ECHO))
-        .http_pool("scaling = \"ondemand\"")
-        .with_grpc(fixture_path(GRPC_ECHO))
-        .grpc_pool("scaling = \"ondemand\"")
-        .spawn();
-
-    // The master polls every listener of an idle ondemand pool, and one poll result forks every pool that owns a readable listener. So when the response arrives, a wrong listener list has already forked a [grpc] worker.
-    let (code, _) = http_get(srv.addr, "/", REQ).expect("GET /");
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    assert_eq!(
-        worker_pids(srv.pid()).len(),
-        1,
-        "a connection to [http] must fork the [http] worker only\n{}",
-        diagnostics(&srv)
-    );
-
-    let ListenAddr::Tcp(grpc) = listen(&srv) else {
-        panic!("the [grpc] pool listens on TCP");
-    };
-    let _client = TcpStream::connect_timeout(&grpc, REQ).expect("connect to [grpc]");
-    wait_workers(&srv, Duration::from_secs(20), "the [grpc] worker", |p| {
-        p.len() == 2
-    });
 }
 
 /// One worker takes every connection. The connections after the first wait in the backlog while the worker moves its listener entry to the tail of the wait queue after each accept, and no new connection arrives to wake it again.

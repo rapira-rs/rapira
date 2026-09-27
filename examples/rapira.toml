@@ -34,12 +34,8 @@ listen = "127.0.0.1:8000"    # host:port, ":port" (all interfaces), or "unix:/pa
 [http.pool]
 entrypoint = "dispatcher-sync.php" # relative paths resolve against this file's directory
 mode = "dispatcher"           # "classic" | "worker" | "dispatcher" (the default)
-processes = 16               # defaults to the CPU count; max_children for dynamic/ondemand
-# scaling = "static"          # "dynamic" (requires min_spare/max_spare) | "ondemand"
-# min_spare = 1
-# max_spare = 4
+processes = 16                # a fixed worker count; defaults to the CPU count
 # max_requests = 0            # recycle a worker after ~N requests (jittered); 0 = unlimited
-# process_idle_timeout_secs = 10      # ondemand: idle worker lifetime
 # request_terminate_timeout_secs = 0  # kill + replace a worker whose request runs longer; 0 = off
 
 # The gRPC listener: unary calls over gRPC, gRPC-Web and Connect (crates/plugins/grpc/README.md).

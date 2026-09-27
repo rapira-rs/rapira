@@ -12,19 +12,10 @@ pub struct PoolSettings {
     pub entrypoint: PathBuf,
     pub processes: usize,
     pub mode: Mode,
-    pub scaling: Scaling,
     /// Requests a worker serves before recycling itself (with jitter); 0 = unlimited.
     pub max_requests: u64,
-    pub process_idle_timeout: Duration,
     /// Wall-clock bound on a single request; zero = disabled.
     pub request_terminate_timeout: Duration,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Scaling {
-    Static,
-    Dynamic { min_spare: usize, max_spare: usize },
-    Ondemand,
 }
 
 /// The pool mode of a worker.
@@ -53,20 +44,8 @@ pub struct PoolSection {
     entrypoint: Option<String>,
     processes: Option<usize>,
     mode: Option<Mode>,
-    scaling: Option<ScalingKey>,
-    min_spare: Option<usize>,
-    max_spare: Option<usize>,
     max_requests: Option<u64>,
-    process_idle_timeout_secs: Option<u64>,
     request_terminate_timeout_secs: Option<u64>,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-enum ScalingKey {
-    Static,
-    Dynamic,
-    Ondemand,
 }
 
 fn default_processes() -> usize {
@@ -93,48 +72,11 @@ pub fn resolve_pool(
     };
     let entrypoint = ctx.resolve_path(ep)?;
 
-    let scaling = match section.scaling.unwrap_or(ScalingKey::Static) {
-        ScalingKey::Dynamic => {
-            let (Some(min_spare), Some(max_spare)) = (section.min_spare, section.max_spare) else {
-                bail!(
-                    "{table}.scaling = \"dynamic\" requires {table}.min_spare and {table}.max_spare"
-                );
-            };
-            if !(1..=max_spare).contains(&min_spare) || max_spare > processes {
-                bail!(
-                    "{table} spares must satisfy 1 <= min_spare ({min_spare}) <= max_spare ({max_spare}) <= {table}.processes ({processes})"
-                );
-            }
-            Scaling::Dynamic {
-                min_spare,
-                max_spare,
-            }
-        }
-        other => {
-            if section.min_spare.is_some() || section.max_spare.is_some() {
-                bail!(
-                    "{table}.min_spare/{table}.max_spare are only valid with {table}.scaling = \"dynamic\""
-                );
-            }
-            if other == ScalingKey::Static {
-                Scaling::Static
-            } else {
-                Scaling::Ondemand
-            }
-        }
-    };
-
     Ok(PoolSettings {
         entrypoint,
         processes,
         mode,
-        scaling,
         max_requests: section.max_requests.unwrap_or(0),
-        process_idle_timeout: capped_timeout(
-            table,
-            "process_idle_timeout_secs",
-            section.process_idle_timeout_secs.unwrap_or(10),
-        )?,
         request_terminate_timeout: capped_timeout(
             table,
             "request_terminate_timeout_secs",
@@ -185,9 +127,7 @@ mod tests {
             entrypoint: PathBuf::from("/w/a.php"),
             processes: 4,
             mode: Mode::Dispatcher,
-            scaling: Scaling::Static,
             max_requests: 0,
-            process_idle_timeout: Duration::from_secs(10),
             request_terminate_timeout: Duration::ZERO,
         }
     }
@@ -207,7 +147,6 @@ mod tests {
         want: PoolSettings,
     }
 
-    /// `ondemand` and `static` share one match arm that must still tell them apart.
     #[test]
     fn pool_keys_resolve() {
         let cases = [
@@ -225,26 +164,9 @@ mod tests {
                 },
             },
             Case {
-                name: "static scaling",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nscaling = \"static\"\n",
-                want: base(),
-            },
-            Case {
-                name: "ondemand scaling",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nscaling = \"ondemand\"\n",
+                name: "max requests",
+                toml: "entrypoint = \"a.php\"\nprocesses = 4\nmax_requests = 500\n",
                 want: PoolSettings {
-                    scaling: Scaling::Ondemand,
-                    ..base()
-                },
-            },
-            Case {
-                name: "dynamic scaling with spares",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nscaling = \"dynamic\"\nmin_spare = 1\nmax_spare = 3\nmax_requests = 500\n",
-                want: PoolSettings {
-                    scaling: Scaling::Dynamic {
-                        min_spare: 1,
-                        max_spare: 3,
-                    },
                     max_requests: 500,
                     ..base()
                 },
@@ -271,10 +193,10 @@ mod tests {
                 want: base(),
             },
             Case {
-                name: "idle timeout at the cap",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nprocess_idle_timeout_secs = 86400\n",
+                name: "request timeout at the cap",
+                toml: "entrypoint = \"a.php\"\nprocesses = 4\nrequest_terminate_timeout_secs = 86400\n",
                 want: PoolSettings {
-                    process_idle_timeout: Duration::from_secs(86_400),
+                    request_terminate_timeout: Duration::from_secs(86_400),
                     ..base()
                 },
             },
@@ -310,36 +232,6 @@ mod tests {
                 error: "http.pool.processes must be at least 1",
             },
             ErrCase {
-                name: "dynamic without spares",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nscaling = \"dynamic\"\n",
-                error: "http.pool.scaling = \"dynamic\" requires http.pool.min_spare and http.pool.max_spare",
-            },
-            ErrCase {
-                name: "min_spare above max_spare",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nscaling = \"dynamic\"\nmin_spare = 3\nmax_spare = 2\n",
-                error: "http.pool spares must satisfy 1 <= min_spare (3) <= max_spare (2) <= http.pool.processes (4)",
-            },
-            ErrCase {
-                name: "max_spare above processes",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nscaling = \"dynamic\"\nmin_spare = 1\nmax_spare = 5\n",
-                error: "http.pool spares must satisfy 1 <= min_spare (1) <= max_spare (5) <= http.pool.processes (4)",
-            },
-            ErrCase {
-                name: "spares under static scaling",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nscaling = \"static\"\nmin_spare = 1\nmax_spare = 2\n",
-                error: "http.pool.min_spare/http.pool.max_spare are only valid with http.pool.scaling = \"dynamic\"",
-            },
-            ErrCase {
-                name: "spares under ondemand scaling",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nscaling = \"ondemand\"\nmax_spare = 2\n",
-                error: "http.pool.min_spare/http.pool.max_spare are only valid with http.pool.scaling = \"dynamic\"",
-            },
-            ErrCase {
-                name: "idle timeout above the cap",
-                toml: "entrypoint = \"a.php\"\nprocess_idle_timeout_secs = 100000\n",
-                error: "http.pool.process_idle_timeout_secs 100000 is too large (max 86400)",
-            },
-            ErrCase {
                 name: "request timeout above the cap",
                 toml: "entrypoint = \"a.php\"\nrequest_terminate_timeout_secs = 100000\n",
                 error: "http.pool.request_terminate_timeout_secs 100000 is too large (max 86400)",
@@ -368,6 +260,16 @@ mod tests {
                 name: "pidfile belongs to the supervisor",
                 toml: "pidfile = \"r.pid\"\n",
                 error: "unknown field `pidfile`",
+            },
+            ErrCase {
+                name: "scaling is not a pool key",
+                toml: "entrypoint = \"a.php\"\nscaling = \"static\"\n",
+                error: "unknown field `scaling`",
+            },
+            ErrCase {
+                name: "process_idle_timeout_secs is not a pool key",
+                toml: "entrypoint = \"a.php\"\nprocess_idle_timeout_secs = 10\n",
+                error: "unknown field `process_idle_timeout_secs`",
             },
         ];
         for case in cases {

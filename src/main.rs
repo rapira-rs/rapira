@@ -1,9 +1,10 @@
+use anyhow::Context;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use rapira_config::{PoolSettings, SupervisorSettings};
 use rapira_master::PoolConfig;
 use rapira_net::PrepareCtx;
 use rapira_sapi::plugin::{Mode, Plugin};
-use std::{os::fd::RawFd, path::PathBuf};
+use std::path::PathBuf;
 use tracing::info;
 
 mod logging;
@@ -56,17 +57,6 @@ fn main() -> anyhow::Result<()> {
     }
 }
 
-/// Returns the listeners this plugin bound. One context serves every pool, so it rejects an address two pools share; it only appends, so the tail of its fd list is this plugin's slice.
-fn prepare_pool(plugin: &mut dyn Plugin, prepare: &mut PrepareCtx) -> anyhow::Result<Vec<RawFd>> {
-    use anyhow::Context;
-    let before: usize = prepare.listener_fds().len();
-    plugin
-        .prepare(prepare)
-        .with_context(|| format!("plugin {}: prepare failed", plugin.name()))?;
-    let mut fds: Vec<RawFd> = prepare.listener_fds();
-    Ok(fds.split_off(before))
-}
-
 /// `name` is the config table of the pool, for the error text. `served` is [`Plugin::modes`].
 fn check_mode(name: &str, served: &[Mode], mode: Mode) -> anyhow::Result<()> {
     if served.contains(&mode) {
@@ -80,14 +70,11 @@ fn check_mode(name: &str, served: &[Mode], mode: Mode) -> anyhow::Result<()> {
 }
 
 /// The supervision config the master needs for one pool.
-fn pool_config(name: &'static str, pool: &PoolSettings, listeners: Vec<RawFd>) -> PoolConfig {
+fn pool_config(name: &'static str, pool: &PoolSettings) -> PoolConfig {
     PoolConfig {
         name,
         processes: pool.processes,
-        scaling: pool.scaling,
-        process_idle_timeout: pool.process_idle_timeout,
         request_terminate_timeout: pool.request_terminate_timeout,
-        listeners,
     }
 }
 
@@ -100,7 +87,10 @@ fn pool_run(
 ) -> anyhow::Result<(PoolRun, PoolConfig)> {
     let name: &'static str = plugin.name();
     check_mode(name, plugin.modes(), pool.mode)?;
-    let listeners: Vec<RawFd> = prepare_pool(plugin.as_mut(), prepare)?;
+    // An address that an earlier pool bound fails here: that pool keeps its listener open.
+    plugin
+        .prepare(prepare)
+        .with_context(|| format!("plugin {name}: prepare failed"))?;
     Ok((
         PoolRun {
             plugin: Some(plugin),
@@ -112,7 +102,7 @@ fn pool_run(
                 drain_grace: supervisor.drain_grace(),
             },
         },
-        pool_config(name, pool, listeners),
+        pool_config(name, pool),
     ))
 }
 
@@ -135,7 +125,6 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         plugins.push((Box::new(plugin), pool));
     }
 
-    // One context for every pool, kept alive past `run` so the master keeps its listener dups.
     let mut prepare: PrepareCtx = PrepareCtx::new();
     // `WorkerEnv::pool` indexes both lists, so they keep one order.
     let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = plugins

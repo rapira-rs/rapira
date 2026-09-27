@@ -58,7 +58,7 @@ C sources (`*.c`, `*.h` under `crates/`) follow `.clang-format`.
 | `rapira_net`          | `crates/net`                     | listeners: `ListenAddr`, `PrepareCtx` and `PreparedListener` bind in the master before the fork, `Acceptor` adopts and accepts in the worker |
 | `rapira_sapi`         | `crates/sapi`                    | the embed SAPI: boot, the PHP thread, the intake, the base PHP contract, the classic and worker modes, the `Plugin` and `Work` traits        |
 | `rapira_config`       | `crates/config`                  | the shared config shapes: `[supervisor]`, `[log]`, the pool table, `listen`, the duration and path helpers                                   |
-| `rapira_master`       | `crates/master`                  | the pre-fork supervisor: forking, reaping, scaling, signals, reload                                                                          |
+| `rapira_master`       | `crates/master`                  | the pre-fork supervisor: forking, reaping, respawn, signals, reload                                                                          |
 | `rapira_scoreboard`   | `crates/scoreboard`              | shared per-worker counters                                                                                                                   |
 | `rapira_http`         | `crates/plugins/http`            | the http plugin: HTTP/1.1, the `Rapira\Http` classes, the `[http]` table ([README](crates/plugins/http/README.md))                           |
 | `rapira_grpc`         | `crates/plugins/grpc`            | the grpc plugin: gRPC, gRPC-Web and Connect, the `Rapira\Grpc` classes, the `[grpc]` table ([README](crates/plugins/grpc/README.md))         |

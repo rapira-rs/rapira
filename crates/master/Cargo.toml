@@ -10,5 +10,4 @@ workspace = true
 anyhow = { workspace = true }
 tracing = { workspace = true }
 libc = { workspace = true }
-rapira_config = { workspace = true }
 rapira_scoreboard = { workspace = true }

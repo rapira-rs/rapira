@@ -296,8 +296,7 @@ impl Server {
             }
         }
 
-        // sendFile() root: a boot-time diagnostic so a bad path is caught before the first request,
-        // even under ondemand scaling where no worker forks at boot.
+        // sendFile() root: a boot-time diagnostic so a bad path is caught before the first request.
         if let Err(e) = std::fs::metadata(&settings.sendfile_root) {
             tracing::warn!(
                 target: "rapira",

@@ -10,14 +10,6 @@ use crate::process::{ExitVerdict, Forker, ProcTable, WorkerProc, reap_all};
 use crate::signals::{SIG_CHLD, errno_get};
 use crate::{MasterConfig, StopReason};
 
-fn pollfd(fd: RawFd) -> libc::pollfd {
-    libc::pollfd {
-        fd,
-        events: libc::POLLIN,
-        revents: 0,
-    }
-}
-
 /// Milliseconds until `next`, rounded up so a sub-millisecond remainder never busy-spins `poll` with a 0 timeout.
 fn poll_timeout_ms(next: Instant, now: Instant) -> c_int {
     let d = next.saturating_duration_since(now);
@@ -186,33 +178,6 @@ impl<'w> Master<'w> {
         next
     }
 
-    /// `fds[0]` is the signal fd; `owners[k]` is the pool that owns `fds[k + 1]`.
-    fn poll_set(&self) -> (Vec<libc::pollfd>, Vec<usize>) {
-        let stopping = self.pctl.is_stopping();
-        let mut fds: Vec<libc::pollfd> = vec![pollfd(self.spawner.signal_fd())];
-        let mut owners: Vec<usize> = Vec::new();
-        for (i, p) in self.pools.iter().enumerate() {
-            if !p.armed(stopping) {
-                continue;
-            }
-            for &fd in &p.cfg.listeners {
-                fds.push(pollfd(fd));
-                owners.push(i);
-            }
-        }
-        (fds, owners)
-    }
-
-    /// Re-checks arming: this iteration's signals and reaps can disarm a pool after `poll` returned its listener readable, and a fork disarms its own pool.
-    fn fork_readable(&mut self, readable: &[usize], now: Instant) {
-        let stopping = self.pctl.is_stopping();
-        for &i in readable {
-            if self.pools[i].armed(stopping) {
-                self.pools[i].ondemand_fork_one(now, &mut self.spawner);
-            }
-        }
-    }
-
     fn log_status(&self) {
         for p in &self.pools {
             p.log_status();
@@ -225,11 +190,15 @@ impl<'w> Master<'w> {
             p.fork_initial(start, &mut self.spawner);
         }
         loop {
-            let (mut fds, owners) = self.poll_set();
+            let mut pfd = libc::pollfd {
+                fd: self.spawner.signal_fd(),
+                events: libc::POLLIN,
+                revents: 0,
+            };
 
             let timeout = poll_timeout_ms(self.next_deadline(), Instant::now());
-            // SAFETY: fds is a live slice; timeout is a valid millisecond count.
-            let n = unsafe { libc::poll(fds.as_mut_ptr(), fds.len() as _, timeout) };
+            // SAFETY: pfd is a live pollfd; timeout is a valid millisecond count.
+            let n = unsafe { libc::poll(&mut pfd, 1, timeout) };
             if n < 0 {
                 if errno_get() == libc::EINTR {
                     continue;
@@ -239,7 +208,7 @@ impl<'w> Master<'w> {
             let now = Instant::now();
 
             let mut got_chld: bool = false;
-            if n > 0 && (fds[0].revents & libc::POLLIN) != 0 {
+            if n > 0 && (pfd.revents & libc::POLLIN) != 0 {
                 let mut buf = [0u8; 64];
                 for b in drain_pipe(self.spawner.signal_fd(), &mut buf) {
                     if b == SIG_CHLD {
@@ -255,16 +224,6 @@ impl<'w> Master<'w> {
                 if self.pctl.is_stopping() && self.drained() {
                     return Ok(StopReason::Drained);
                 }
-            }
-
-            if n > 0 && !owners.is_empty() {
-                let readable: Vec<usize> = owners
-                    .iter()
-                    .enumerate()
-                    .filter(|&(k, _)| (fds[k + 1].revents & libc::POLLIN) != 0)
-                    .map(|(_, &i)| i)
-                    .collect();
-                self.fork_readable(&readable, now);
             }
 
             self.fire_due_deadlines(now);

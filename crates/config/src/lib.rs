@@ -9,7 +9,7 @@ mod supervisor;
 
 pub use listen::ListenAddr;
 pub use log::{LogFormat, LogLevel, LogSection, LogSettings, resolve_log};
-pub use pool::{Mode, PoolSection, PoolSettings, Scaling, check_entrypoint, resolve_pool};
+pub use pool::{Mode, PoolSection, PoolSettings, check_entrypoint, resolve_pool};
 pub use supervisor::{SupervisorSection, SupervisorSettings, resolve_supervisor};
 
 /// What every section resolves against.

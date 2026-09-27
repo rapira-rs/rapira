@@ -47,7 +47,6 @@ pub fn sb_update(event: Event) {
             } else {
                 SLOT_IDLE
             };
-            s.last_activity_ms.store(now_millis(), Relaxed);
             s.state.store(state, Release);
         }
         Event::Active => {

@@ -1,8 +1,5 @@
 use std::ops::Range;
-use std::sync::atomic::{
-    AtomicU32, AtomicU64,
-    Ordering::{Relaxed, Release},
-};
+use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
 
 pub const SB_MAX_SLOTS: usize = 4096;
 
@@ -20,6 +17,7 @@ pub struct SharedSlot {
     pub handled: AtomicU64,
     pub errors: AtomicU64,
     pub recycles: AtomicU64,
+    /// [`now_millis`] when the worker last went ACTIVE. The request watchdog measures the request age from it.
     pub last_activity_ms: AtomicU64,
 }
 
@@ -97,11 +95,9 @@ impl Scoreboard {
         self.slots
     }
 
-    /// Master-side at fork time. It reserves the slot so the scaling math sees the in-flight fork.
+    /// Master-side at fork time. It reserves the slot, so the next spawn cannot take it before the worker binds it.
     pub fn set_starting(&self, i: usize) {
-        let s = self.slot(i);
-        s.last_activity_ms.store(now_millis(), Relaxed);
-        s.state.store(SLOT_STARTING, Release);
+        self.slot(i).state.store(SLOT_STARTING, Relaxed);
     }
 
     /// Master-side, after the slot's worker is reaped. The slot can then go to a new fork.
@@ -135,7 +131,6 @@ impl SharedSlot {
         self.errors.store(0, Relaxed);
         self.recycles.store(0, Relaxed);
         self.pid.store(pid, Relaxed);
-        self.last_activity_ms.store(now_millis(), Relaxed);
         self.state.store(SLOT_IDLE, Relaxed);
     }
 }
