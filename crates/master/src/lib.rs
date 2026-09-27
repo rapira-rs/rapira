@@ -1,4 +1,4 @@
-use std::os::fd::{OwnedFd, RawFd};
+use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -10,7 +10,6 @@ mod pctl;
 mod pidfile;
 mod pool;
 mod process;
-mod scaling;
 mod signals;
 
 pub use lifeline::spawn_lifeline_watch;
@@ -25,21 +24,14 @@ pub const WORKER_EXIT_UNHEALTHY: i32 = 89;
 /// Exit code the caller uses when [`run`] returns a boot-failure error.
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
 
-pub use rapira_config::Scaling;
-
 /// One plugin's worker set. The master supervises every pool independently.
 pub struct PoolConfig {
     /// Config table the pool came from ("http"). Log lines carry it as `{name} pool:`; messages that quote a key use `{name}.pool.<key>`.
     pub name: &'static str,
-    /// Static worker count, or the max-children ceiling under dynamic/ondemand.
+    /// Worker count. The master keeps this many workers running.
     pub processes: usize,
-    pub scaling: Scaling,
-    /// Ondemand only: idle worker lifetime before a QUIT.
-    pub process_idle_timeout: Duration,
     /// Wall-clock bound on one request: the worker is TERM-killed, then KILLed, and replaced. Zero disables.
     pub request_terminate_timeout: Duration,
-    /// This pool's bound listener fds, polled only under `Ondemand`; the master never accepts on them.
-    pub listeners: Vec<RawFd>,
 }
 
 impl PoolConfig {
@@ -119,10 +111,7 @@ mod tests {
         PoolConfig {
             name,
             processes,
-            scaling: Scaling::Static,
-            process_idle_timeout: Duration::from_secs(10),
             request_terminate_timeout: Duration::ZERO,
-            listeners: Vec::new(),
         }
     }
 

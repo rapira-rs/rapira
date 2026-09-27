@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::os::fd::{AsRawFd, IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::{IntoRawFd, OwnedFd, RawFd};
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -32,18 +32,11 @@ impl IntoRawFd for PreparedListener {
 
 /// Runs before any fork and before a runtime exists: sync syscalls only, one context per boot.
 #[derive(Default)]
-pub struct PrepareCtx {
-    fds: Vec<OwnedFd>,
-}
+pub struct PrepareCtx;
 
 impl PrepareCtx {
     pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Backed by dups owned by this context, so the fds stay valid even if a plugin drops its `PreparedListener`.
-    pub fn listener_fds(&self) -> Vec<RawFd> {
-        self.fds.iter().map(|fd| fd.as_raw_fd()).collect()
+        Self
     }
 
     /// Sets O_NONBLOCK: tokio's `from_std` requires it, and the Linux acceptor needs `accept` to return WouldBlock when another worker takes the connection.
@@ -70,8 +63,6 @@ impl PrepareCtx {
             .as_socket()
             .expect("inet socket has an inet local addr");
         let addr = ListenAddr::Tcp(resolved);
-        let dup = socket.try_clone().context("dup listener fd")?;
-        self.fds.push(dup.into());
         Ok(PreparedListener {
             fd: socket.into(),
             addr,
@@ -113,8 +104,6 @@ impl PrepareCtx {
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o666))?;
         socket.set_nonblocking(true)?;
         let addr = ListenAddr::Unix(path.to_owned());
-        let dup = socket.try_clone().context("dup listener fd")?;
-        self.fds.push(dup.into());
         Ok(PreparedListener {
             fd: socket.into(),
             addr,

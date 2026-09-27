@@ -29,7 +29,6 @@ mod plugin_tests;
 mod ported_tests;
 mod registry;
 mod reload;
-mod scaling;
 mod static_files;
 mod streaming;
 mod timeout_tests;

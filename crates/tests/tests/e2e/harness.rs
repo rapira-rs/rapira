@@ -416,8 +416,6 @@ pub struct Spawn {
     descriptor_set: Option<PathBuf>,
     http_extra: String,
     grpc_extra: String,
-    http_pool: String,
-    grpc_pool: String,
     toml: String,
     php_ini: String,
     env: Vec<(String, String)>,
@@ -452,8 +450,6 @@ impl Spawn {
             descriptor_set: None,
             http_extra: String::new(),
             grpc_extra: String::new(),
-            http_pool: String::new(),
-            grpc_pool: String::new(),
             toml: String::new(),
             php_ini: std::fs::read_to_string(&ini)
                 .unwrap_or_else(|e| panic!("read {}: {e}", ini.display())),
@@ -513,20 +509,6 @@ impl Spawn {
     pub fn grpc_extra(mut self, keys: &str) -> Spawn {
         self.grpc_extra += keys;
         self.grpc_extra.push('\n');
-        self
-    }
-
-    /// Keys inside `[http.pool]`, for example `scaling = "ondemand"`.
-    pub fn http_pool(mut self, keys: &str) -> Spawn {
-        self.http_pool += keys;
-        self.http_pool.push('\n');
-        self
-    }
-
-    /// Keys inside `[grpc.pool]`, for example `scaling = "ondemand"`.
-    pub fn grpc_pool(mut self, keys: &str) -> Spawn {
-        self.grpc_pool += keys;
-        self.grpc_pool.push('\n');
         self
     }
 
@@ -645,7 +627,7 @@ impl Spawn {
                     Some(listen) => listen.to_string(),
                     None => tcp(port.take().unwrap_or_else(free_port)),
                 };
-                let pool = format!("mode = \"{mode}\"\n{}", self.http_pool);
+                let pool = format!("mode = \"{mode}\"\n");
                 config += &render_config(&listen, 1, entrypoint, &self.http_extra, &pool);
                 config.push('\n');
             }
@@ -665,8 +647,6 @@ impl Spawn {
                     self.services.as_deref(),
                     &self.grpc_extra,
                 );
-                // `render_grpc` ends in `[grpc.pool]`.
-                config += &self.grpc_pool;
                 config.push('\n');
             }
             config + &self.toml

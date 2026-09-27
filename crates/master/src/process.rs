@@ -12,20 +12,14 @@ use rapira_scoreboard::SharedSlot;
 pub(crate) const QUICK_CRASH: Duration = Duration::from_secs(10);
 pub(crate) const RESPAWN_BASE: Duration = Duration::from_millis(100);
 
-/// Idle trim and the request-timeout watchdog target disjoint worker states, so one field holds whichever kill is under way.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KillIntent {
-    Idle,
-    Timeout,
-}
-
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct WorkerProc {
     pub pid: libc::pid_t,
     pub slot: usize,
     pub generation: u32,
     pub spawned_at: Instant,
-    pub kill_intent: Option<KillIntent>,
+    /// The request watchdog sent SIGTERM: a SIGTERM or SIGKILL exit is a timeout kill, not a crash.
+    pub timeout_kill: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -63,15 +57,13 @@ pub(crate) enum ExitVerdict {
     Drain,
     Recycle,
     Unhealthy,
-    IdleKill,
     TimeoutKill,
     Crash,
 }
 
-pub(crate) fn classify(status: c_int, intent: Option<KillIntent>) -> ExitVerdict {
+pub(crate) fn classify(status: c_int, timeout_kill: bool) -> ExitVerdict {
     if libc::WIFEXITED(status) {
         match libc::WEXITSTATUS(status) {
-            WORKER_EXIT_DRAINED if intent == Some(KillIntent::Idle) => ExitVerdict::IdleKill,
             WORKER_EXIT_DRAINED => ExitVerdict::Drain,
             WORKER_EXIT_RECYCLE => ExitVerdict::Recycle,
             WORKER_EXIT_UNHEALTHY => ExitVerdict::Unhealthy,
@@ -79,14 +71,10 @@ pub(crate) fn classify(status: c_int, intent: Option<KillIntent>) -> ExitVerdict
         }
     } else if libc::WIFSIGNALED(status) {
         let sig = libc::WTERMSIG(status);
-        match intent {
-            Some(KillIntent::Idle) if sig == libc::SIGQUIT || sig == libc::SIGKILL => {
-                ExitVerdict::IdleKill
-            }
-            Some(KillIntent::Timeout) if sig == libc::SIGTERM || sig == libc::SIGKILL => {
-                ExitVerdict::TimeoutKill
-            }
-            _ => ExitVerdict::Crash,
+        if timeout_kill && (sig == libc::SIGTERM || sig == libc::SIGKILL) {
+            ExitVerdict::TimeoutKill
+        } else {
+            ExitVerdict::Crash
         }
     } else {
         ExitVerdict::Crash
@@ -126,7 +114,7 @@ pub(crate) fn bury(
 ) -> Option<(usize, WorkerProc, ExitVerdict)> {
     for (pool, table) in tables.iter_mut().enumerate() {
         if let Some(w) = table.remove(pid) {
-            let verdict = classify(status, w.kill_intent);
+            let verdict = classify(status, w.timeout_kill);
             return Some((pool, w, verdict));
         }
     }
@@ -255,70 +243,37 @@ mod tests {
 
     #[test]
     fn classify_exit_codes() {
-        assert_eq!(classify(exited(0), None), ExitVerdict::Drain);
-        assert_eq!(classify(exited(88), None), ExitVerdict::Recycle);
-        assert_eq!(classify(exited(89), None), ExitVerdict::Unhealthy);
-        assert_eq!(classify(exited(42), None), ExitVerdict::Crash);
-        assert_eq!(classify(exited(1), None), ExitVerdict::Crash);
+        assert_eq!(classify(exited(0), false), ExitVerdict::Drain);
+        assert_eq!(classify(exited(88), false), ExitVerdict::Recycle);
+        assert_eq!(classify(exited(89), false), ExitVerdict::Unhealthy);
+        assert_eq!(classify(exited(42), false), ExitVerdict::Crash);
+        assert_eq!(classify(exited(1), false), ExitVerdict::Crash);
     }
 
     #[test]
-    fn classify_exit_zero_under_kill_intent() {
-        assert_eq!(
-            classify(exited(0), Some(KillIntent::Idle)),
-            ExitVerdict::IdleKill
-        );
-        assert_eq!(
-            classify(exited(0), Some(KillIntent::Timeout)),
-            ExitVerdict::Drain
-        );
-        assert_eq!(
-            classify(exited(88), Some(KillIntent::Idle)),
-            ExitVerdict::Recycle
-        );
-        assert_eq!(
-            classify(exited(89), Some(KillIntent::Idle)),
-            ExitVerdict::Unhealthy
-        );
-    }
-
-    #[test]
-    fn classify_idle_kill_signals() {
-        assert_eq!(
-            classify(signaled(libc::SIGQUIT), Some(KillIntent::Idle)),
-            ExitVerdict::IdleKill
-        );
-        assert_eq!(
-            classify(signaled(libc::SIGKILL), Some(KillIntent::Idle)),
-            ExitVerdict::IdleKill
-        );
+    fn classify_exit_zero_after_a_timeout_kill() {
+        assert_eq!(classify(exited(0), true), ExitVerdict::Drain);
     }
 
     #[test]
     fn classify_timeout_kill_signals() {
         assert_eq!(
-            classify(signaled(libc::SIGTERM), Some(KillIntent::Timeout)),
+            classify(signaled(libc::SIGTERM), true),
             ExitVerdict::TimeoutKill
         );
         assert_eq!(
-            classify(signaled(libc::SIGKILL), Some(KillIntent::Timeout)),
+            classify(signaled(libc::SIGKILL), true),
             ExitVerdict::TimeoutKill
         );
-        assert_eq!(
-            classify(signaled(libc::SIGQUIT), Some(KillIntent::Timeout)),
-            ExitVerdict::Crash
-        );
+        assert_eq!(classify(signaled(libc::SIGQUIT), true), ExitVerdict::Crash);
     }
 
     #[test]
     fn classify_unexpected_signals_are_crashes() {
-        assert_eq!(classify(signaled(libc::SIGSEGV), None), ExitVerdict::Crash);
-        assert_eq!(classify(signaled(libc::SIGKILL), None), ExitVerdict::Crash);
-        assert_eq!(classify(signaled(libc::SIGTERM), None), ExitVerdict::Crash);
-        assert_eq!(
-            classify(signaled(libc::SIGSEGV), Some(KillIntent::Idle)),
-            ExitVerdict::Crash
-        );
+        assert_eq!(classify(signaled(libc::SIGSEGV), false), ExitVerdict::Crash);
+        assert_eq!(classify(signaled(libc::SIGKILL), false), ExitVerdict::Crash);
+        assert_eq!(classify(signaled(libc::SIGTERM), false), ExitVerdict::Crash);
+        assert_eq!(classify(signaled(libc::SIGSEGV), true), ExitVerdict::Crash);
     }
 
     #[test]
@@ -331,14 +286,14 @@ mod tests {
             slot: 0,
             generation: 0,
             spawned_at: at,
-            kill_intent: None,
+            timeout_kill: false,
         });
         grpc.procs.push(WorkerProc {
             pid: 2_000_000_002,
             slot: 1,
             generation: 3,
             spawned_at: at,
-            kill_intent: None,
+            timeout_kill: false,
         });
 
         let (pool, w, verdict) = {

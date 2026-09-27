@@ -111,7 +111,7 @@ The `[http]` table. Unknown keys fail the boot.
 - `[http.uploads]`: the multipart limits of dispatcher mode: `dir` (default: the system temp dir), `max_file_size_mb` (2), `max_field_size_kb` (256), `max_files` (20), `max_parts` (1024), `max_part_headers` (32). This table under another mode fails the boot.
 - `[http.sendfile]`: `root`, the directory that must contain each `sendFile()` path. Default: the entrypoint directory.
 - `[http.static]`: the settings of the `static` middleware: `root` (required, an existing directory) and `forbid` (the file-name suffixes it never serves, default `[".php"]`).
-- `[http.pool]`: the worker pool: `entrypoint` (required), `mode`, `processes`, `scaling`, `min_spare`, `max_spare`, `max_requests`, `process_idle_timeout_secs`, `request_terminate_timeout_secs`. `examples/rapira.toml` shows each key.
+- `[http.pool]`: the worker pool: `entrypoint` (required), `mode`, `processes`, `max_requests`, `request_terminate_timeout_secs`. `examples/rapira.toml` shows each key.
 
 The drain window is not a key of this table. It is `[supervisor].process_control_timeout_secs` minus 5 seconds, or minus half of it when it is below 10 seconds. The drain therefore ends before the master sends SIGTERM.
 

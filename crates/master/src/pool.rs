@@ -2,12 +2,11 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::time::{Duration, Instant};
 
 use libc::c_int;
-use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, SLOT_STARTING, Scoreboard, now_millis};
+use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, Scoreboard, now_millis};
 
+use crate::PoolConfig;
 use crate::pctl::KillPhase;
-use crate::process::{ExitVerdict, Forker, KillIntent, ProcTable, WorkerProc, kill};
-use crate::scaling::{DynAction, DynInput, dynamic_start_count, dynamic_tick, ondemand_armed};
-use crate::{PoolConfig, Scaling};
+use crate::process::{ExitVerdict, Forker, ProcTable, WorkerProc, kill};
 
 /// Re-check cadence for the overlap reload gate; the total wait is bounded by `process_control_timeout`.
 const RELOAD_GATE_POLL: Duration = Duration::from_millis(50);
@@ -37,8 +36,6 @@ pub(crate) struct Pool {
     pub board: Scoreboard,
     pub table: ProcTable,
     pub control_timeout: Duration,
-    pub spawn_rate: u32,
-    pub warned_max_children: bool,
     /// Latched history: scoreboard counters cannot carry it, a replacement `bind()` zeroes a slot's served count.
     pub ever_served: bool,
     /// This pool's overlap-reload chain; `None` once finished or never started.
@@ -59,8 +56,6 @@ impl Pool {
             board,
             table,
             control_timeout,
-            spawn_rate: 1,
-            warned_max_children: false,
             ever_served: false,
             reload: None,
         }
@@ -98,11 +93,6 @@ impl Pool {
         self.board.slot(i).state.load(Relaxed) == SLOT_FREE
     }
 
-    // Acquire: ondemand maintenance pairs this with a later timestamp read
-    fn slot_is_idle(&self, i: usize) -> bool {
-        self.board.slot(i).state.load(Acquire) == SLOT_IDLE
-    }
-
     /// Serving is IDLE or ACTIVE: under load a replacement may never be observed IDLE between requests.
     fn slot_is_serving(&self, i: usize) -> bool {
         let state = self.board.slot(i).state.load(Relaxed);
@@ -112,15 +102,6 @@ impl Pool {
     fn find_spawn_slot(&self) -> Option<usize> {
         (0..self.table.slots.len())
             .find(|&i| self.slot_is_free(i) && self.table.slots[i].respawn_at.is_none())
-    }
-
-    fn oldest_idle_pid(&self) -> Option<libc::pid_t> {
-        self.table
-            .procs
-            .iter()
-            .filter(|p| self.slot_is_idle(p.slot))
-            .min_by_key(|p| p.spawned_at)
-            .map(|p| p.pid)
     }
 
     fn has_old_gen(&self) -> bool {
@@ -137,7 +118,7 @@ impl Pool {
                 slot,
                 generation,
                 spawned_at: now,
-                kill_intent: None,
+                timeout_kill: false,
             }),
             Err(e) => {
                 tracing::error!(
@@ -152,15 +133,7 @@ impl Pool {
     }
 
     pub(crate) fn fork_initial(&mut self, now: Instant, spawner: &mut Forker<'_>) {
-        let count: usize = match self.cfg.scaling {
-            Scaling::Static => self.cfg.processes,
-            Scaling::Dynamic {
-                min_spare,
-                max_spare,
-            } => dynamic_start_count(min_spare, max_spare, self.cfg.processes),
-            Scaling::Ondemand => 0,
-        };
-        self.spawn_up_to(count, now, spawner);
+        self.spawn_up_to(self.cfg.processes, now, spawner);
     }
 
     fn spawn_up_to(&mut self, n: usize, now: Instant, spawner: &mut Forker<'_>) {
@@ -170,24 +143,6 @@ impl Pool {
             };
             self.spawn_into(slot, now, spawner);
         }
-    }
-
-    /// Arm only when a fork could land: a readable level-triggered listener would otherwise busy-spin poll through the backoff window.
-    pub(crate) fn armed(&self, stopping: bool) -> bool {
-        if !matches!(self.cfg.scaling, Scaling::Ondemand) {
-            return false;
-        }
-        ondemand_armed(
-            !stopping,
-            self.table.running(),
-            self.cfg.processes,
-            self.count_state(SLOT_IDLE),
-            self.count_state(SLOT_STARTING),
-        ) && self.find_spawn_slot().is_some()
-    }
-
-    pub(crate) fn ondemand_fork_one(&mut self, now: Instant, spawner: &mut Forker<'_>) {
-        self.spawn_up_to(1, now, spawner);
     }
 
     pub(crate) fn begin_stop(&mut self) {
@@ -215,10 +170,10 @@ impl Pool {
         self.reload_enter_await(slot, now, spawner);
     }
 
-    /// Ondemand (or no free slot) spawns no replacement and drains the next old worker directly: replacements come from demand.
+    /// Without a free slot, spawns no replacement and drains the next old worker directly.
     fn reload_enter_await(&mut self, slot: Option<usize>, now: Instant, spawner: &mut Forker<'_>) {
         match slot {
-            Some(s) if !matches!(self.cfg.scaling, Scaling::Ondemand) => {
+            Some(s) => {
                 self.spawn_into(s, now, spawner);
                 self.reload = Some(Reload {
                     phase: ReloadPhase::Await {
@@ -228,7 +183,7 @@ impl Pool {
                     deadline: now + RELOAD_GATE_POLL,
                 });
             }
-            _ => self.reload_quit_next(now),
+            None => self.reload_quit_next(now),
         }
     }
 
@@ -325,10 +280,8 @@ impl Pool {
         }
 
         match verdict {
-            ExitVerdict::IdleKill => {}
             ExitVerdict::Recycle | ExitVerdict::Drain | ExitVerdict::TimeoutKill => {
                 self.table.slots[slot].schedule_immediate(now);
-                self.apply_respawn_gate(slot);
             }
             ExitVerdict::Unhealthy => {
                 if w.generation == 0 && !self.ever_served {
@@ -347,24 +300,6 @@ impl Pool {
         Ok(())
     }
 
-    /// Ondemand re-forks from demand; crash and unhealthy backoff deadlines are kept as fork suppression until they expire, throttling a fork-crash loop.
-    fn apply_respawn_gate(&mut self, slot: usize) {
-        if matches!(self.cfg.scaling, Scaling::Ondemand) {
-            self.table.slots[slot].cancel_respawn();
-        }
-    }
-
-    fn idle_kill_pid(&mut self, pid: libc::pid_t) {
-        if let Some(p) = self.table.procs.iter_mut().find(|p| p.pid == pid) {
-            if p.kill_intent == Some(KillIntent::Idle) {
-                kill(pid, libc::SIGKILL);
-            } else {
-                kill(pid, libc::SIGQUIT);
-                p.kill_intent = Some(KillIntent::Idle);
-            }
-        }
-    }
-
     /// Sends SIGTERM after the request timeout. A later tick sends SIGKILL if the worker stays active. The Acquire load orders the timestamp read.
     fn watchdog_tick(&mut self) {
         let limit = self.cfg.request_terminate_timeout;
@@ -381,7 +316,7 @@ impl Pool {
             if age_ms < limit.as_millis() {
                 continue;
             }
-            if p.kill_intent == Some(KillIntent::Timeout) {
+            if p.timeout_kill {
                 kill(p.pid, libc::SIGKILL);
             } else {
                 tracing::warn!(
@@ -393,12 +328,12 @@ impl Pool {
                     limit.as_secs()
                 );
                 kill(p.pid, libc::SIGTERM);
-                p.kill_intent = Some(KillIntent::Timeout);
+                p.timeout_kill = true;
             }
         }
     }
 
-    /// Nothing runs while the master stops; the stop escalation bounds every worker. Scaling pauses while this pool drains a reload chain: a refill would race the chain for the slot it just freed. The served latch and the request watchdog keep running during the reload.
+    /// Nothing runs while the master stops; the stop escalation bounds every worker. The refill pauses while this pool drains a reload chain: it would race the chain for the slot it just freed. The served latch and the request watchdog keep running during the reload.
     pub(crate) fn maintenance_tick(
         &mut self,
         now: Instant,
@@ -413,83 +348,16 @@ impl Pool {
         if self.reload.is_some() {
             return;
         }
-        match self.cfg.scaling {
-            Scaling::Static => self.static_refill(now, spawner),
-            Scaling::Dynamic {
-                min_spare,
-                max_spare,
-            } => self.dynamic_maintenance(min_spare, max_spare, now, spawner),
-            Scaling::Ondemand => self.ondemand_maintenance(),
-        }
+        self.refill(now, spawner);
     }
 
-    fn static_refill(&mut self, now: Instant, spawner: &mut Forker<'_>) {
+    fn refill(&mut self, now: Instant, spawner: &mut Forker<'_>) {
         let running = self.table.running();
         let pending = (0..self.table.slots.len())
             .filter(|&i| self.table.slots[i].respawn_at.is_some())
             .count();
         let committed = running + pending;
         self.spawn_up_to(self.cfg.processes.saturating_sub(committed), now, spawner);
-    }
-
-    fn dynamic_maintenance(
-        &mut self,
-        min_spare: usize,
-        max_spare: usize,
-        now: Instant,
-        spawner: &mut Forker<'_>,
-    ) {
-        let inp = DynInput {
-            idle: self.count_state(SLOT_IDLE),
-            running: self.table.running(),
-            min_spare,
-            max_spare,
-            max_children: self.cfg.processes,
-        };
-        match dynamic_tick(&inp, &mut self.spawn_rate) {
-            DynAction::KillOldestIdle => {
-                if let Some(pid) = self.oldest_idle_pid() {
-                    self.idle_kill_pid(pid);
-                }
-            }
-            DynAction::Spawn(n) => {
-                self.spawn_up_to(n, now, spawner);
-                self.warned_max_children = false;
-            }
-            DynAction::ReachedMaxChildren => {
-                if !self.warned_max_children {
-                    self.warned_max_children = true;
-                    tracing::warn!(
-                        target: "master",
-                        "reached {}.pool.processes ceiling ({}), consider raising it",
-                        self.cfg.name,
-                        self.cfg.processes
-                    );
-                }
-            }
-            DynAction::Steady => {}
-        }
-    }
-
-    /// Trims the idle worker with the stalest activity: by process age, a busy older worker could shield a long-expired younger one indefinitely.
-    fn ondemand_maintenance(&mut self) {
-        let target = self
-            .table
-            .procs
-            .iter()
-            .filter(|p| self.slot_is_idle(p.slot))
-            .map(|p| {
-                let s = self.board.slot(p.slot);
-                (p.pid, s.last_activity_ms.load(Relaxed))
-            })
-            .min_by_key(|&(_, last)| last);
-        let Some((pid, last)) = target else {
-            return;
-        };
-        let age_ms = u128::from(now_millis().saturating_sub(last));
-        if age_ms >= self.cfg.process_idle_timeout.as_millis() {
-            self.idle_kill_pid(pid);
-        }
     }
 
     pub(crate) fn fire_due(&mut self, now: Instant, spawner: &mut Forker<'_>) {
@@ -503,9 +371,7 @@ impl Pool {
                 && now >= t
             {
                 self.table.slots[slot].cancel_respawn();
-                if !matches!(self.cfg.scaling, Scaling::Ondemand) {
-                    self.spawn_into(slot, now, spawner);
-                }
+                self.spawn_into(slot, now, spawner);
             }
         }
     }
@@ -542,59 +408,19 @@ impl Pool {
 mod tests {
     use super::*;
 
-    // Sentinel pid above PID_MAX_LIMIT: no live process holds it.
-    const P_OLD0: libc::pid_t = 2_000_000_001;
-
-    fn test_pool(processes: usize, scaling: Scaling) -> Pool {
+    fn test_pool(processes: usize) -> Pool {
         let board = Scoreboard::create(processes * 2).unwrap();
         let cfg = PoolConfig {
             name: "http",
             processes,
-            scaling,
-            process_idle_timeout: Duration::from_secs(10),
             request_terminate_timeout: Duration::ZERO,
-            listeners: Vec::new(),
         };
         Pool::new(0, cfg, board, Duration::from_secs(30))
     }
 
     #[test]
-    fn ondemand_arms_only_when_a_fork_can_land() {
-        let mut p = test_pool(1, Scaling::Ondemand);
-        assert!(p.armed(false));
-
-        let t0 = Instant::now();
-        for s in &mut p.table.slots {
-            s.schedule_backoff(Duration::ZERO, t0);
-        }
-        assert!(!p.armed(false));
-    }
-
-    #[test]
-    fn ondemand_stays_armed_while_this_pool_reloads() {
-        let mut p = test_pool(1, Scaling::Ondemand);
-        let t0 = Instant::now();
-        p.reload = Some(Reload {
-            phase: ReloadPhase::Drain {
-                draining: P_OLD0,
-                phase: KillPhase::Quit,
-            },
-            deadline: t0 + Duration::from_secs(1),
-        });
-        assert!(p.armed(false));
-        assert!(!p.armed(true));
-    }
-
-    /// Static and dynamic workers accept in the children; the master watches only its self-pipe.
-    #[test]
-    fn non_ondemand_never_arms_listeners() {
-        let p = test_pool(1, Scaling::Static);
-        assert!(!p.armed(false));
-    }
-
-    #[test]
     fn next_deadline_is_the_earliest_of_reload_and_respawns() {
-        let mut p = test_pool(3, Scaling::Static);
+        let mut p = test_pool(3);
         let t0 = Instant::now();
         assert_eq!(p.next_deadline(), None);
 

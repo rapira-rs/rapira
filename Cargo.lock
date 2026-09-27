@@ -985,7 +985,6 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "libc",
- "rapira_config",
  "rapira_scoreboard",
  "tracing",
 ]
