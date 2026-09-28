@@ -4,7 +4,7 @@
 - One interpreter per forked worker. Master is single-threaded, no tokio; workers inherit listener fds.
 - MINIT runs once in the master pre-fork so opcache SHM is inherited. Workers exit rather than tear the module down.
 - Foreground only, no daemonize. Pidfile stays.
-- Allocator is mimalloc v3.
+- Allocator is mimalloc v3, without THP.
 - New host logic in Rust via ZEND_API if that is reasonable. C only for ZPP shells, longjmp isolation, macro shims.
 - Pre 1.0 - do not preserve backwards compatibility.
 
@@ -13,10 +13,16 @@
 - The PHP contract ([rapira-rs/contract](https://github.com/rapira-rs/contract), local checkout `../contract`; update it before you read it) comes first. Read it before you plan, design or change anything that PHP can see: stubs, classes, functions, exceptions, messages and behavior.
 - The extension follows the contract. To improve the contract or deviate from it, ask first.
 
+## All text
+
+These rules apply to all text, such as comments and docs.
+
+- Write all English in ASD-STE100 Simplified Technical English (STE). Use short sentences, active voice, approved vocabulary, and one instruction per sentence. Avoid idioms, slang, and unnecessary synonyms. Do not write poems in the code comments.
+- Mannered prose substitutes metaphor and flourish for direct statement. Instead of "a parameter worth varying," the mannered writer produces "a dial worth turning." Instead of "this point still matters," they write "this point earns its keep." The phrases exist to display the writer, not to convey the idea, and readers can tell. That is why mannered prose irritates: it makes the reader work harder so the writer can perform. It is also imprecise. Metaphors drag in connotations the writer did not choose and cannot control. The fix is to say what you mean. When a literal phrase is available, use it.
+
 ## Comments
 
 - `make stubs` generates each `*_arginfo.h` header under `crates/` from the `*.stub.php` next to it.
-- Joke comments (`Rustttt`, "trust me, I'm a developer") are intentional. Do not flag them.
 
 ## Tests
 
@@ -30,6 +36,8 @@
 - Do not assert that a port refuses connections after a stop: another process can bind the free port.
 - New tests use worker or dispatcher mode, not classic.
 - Check PHP behavior against php-src or a short script rather than guessing.
+- To test a change on a PHP minor older than the system PHP, use Docker. Take the official `php:<minor>-cli-trixie` image at the digest in `.github/workflows/docker.yml`; it ships `libphp.so`. Add the Rust toolchain from `rust:1-trixie` (as the `Dockerfile` does), `clang`, `libclang-dev` and `procps` (`worker_pids` in `harness.rs` runs `ps`). Build with `RUSTFLAGS="-L native=/usr/local/lib"`, `LD_LIBRARY_PATH=/usr/local/lib` and a target dir outside the checkout.
+- The container differs from CI: PHP runs as root, and the image lacks some tools. A test can fail there for that reason alone. Run a failing test on `main` in the same container before you report it.
 
 `make test` (test_nts then test_e2e), `make test_nts`, `make test_e2e`, `make coverage`, `make stubs`. All derived from `php-config`, no hardcoded distro paths.
 
