@@ -124,7 +124,7 @@ pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::R
         regions,
         worker: Box::new(worker),
     };
-    let mut master = events::Master::new(cfg, scoreboard, regions, forker);
+    let mut master = events::Master::new(cfg, forker);
     master.run_loop()
 }
 

@@ -148,8 +148,9 @@ pub(crate) fn kill(pid: libc::pid_t, sig: c_int) {
 pub(crate) struct Forker<'w> {
     pub self_pipe: SelfPipe,
     pub lifeline: Lifeline,
-    /// The whole board and its regions, for every `WorkerEnv`.
+    /// The whole board, for every `WorkerEnv`.
     pub board: Scoreboard,
+    /// The slot range of each pool, in pool order, for every `WorkerEnv`.
     pub regions: &'static [PoolRegion],
     pub worker: Box<dyn FnMut(WorkerEnv) -> i32 + 'w>,
 }

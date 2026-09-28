@@ -38,7 +38,7 @@ pub struct Scoreboard {
 }
 
 /// The part of the board that one pool owns.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub struct PoolRegion {
     /// The config table of the pool ("http").
     pub name: &'static str,
