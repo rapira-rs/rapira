@@ -46,7 +46,8 @@ bind! {
     // zend_hash_str_find_ptr is inline; prop_offset (zend.rs) calls its exported half
     zend_hash_str_find,
     // $_SERVER registration: ZVAL_STRINGL_FAST is a macro -> rapira_register_known_stringl shim in wrapper.c
-    rapira_register_known_stringl, zend_hash_extend,
+    rapira_register_known_stringl, zend_hash_extend, php_import_environment_variables,
+    zend_is_auto_global_str,
     // slot writes of declared properties (zend.rs): ZVAL_STRINGL is a macro -> rapira_zval_stringl shim in wrapper.c
     zend_property_info, rapira_zval_stringl, IS_LONG, IS_DOUBLE, IS_PROP_UNINIT, IS_PROP_REINITABLE,
     // zend_symtable_str_update is inline; add_assoc_zval_ex is its exported caller (zend_API.c)

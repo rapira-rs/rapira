@@ -7,8 +7,10 @@ use crate::{
 use std::{
     borrow::Cow,
     cell::RefCell,
+    ffi::CString,
     os::raw::c_int,
     path::{Path, PathBuf},
+    ptr::null_mut,
 };
 
 use crate::{
@@ -63,10 +65,31 @@ fn set_worker_recycle() {
     });
 }
 
+/// Starts the boot request with the argv of `php entrypoint.php` and builds $_SERVER before the script runs, as the CLI does. PHP 8.4 adds argv to $_SERVER only with register_argc_argv = 1.
+/// argc is 0 again after this: with argc set, each later $_SERVER build adds a reference to the $argv global, and that crashes when $argv holds null, an int or [].
+/// https://github.com/php/php-src/blob/php-8.5.11/sapi/cli/php_cli.c#L941
+/// https://github.com/php/php-src/blob/php-8.5.11/main/php_variables.c#L881-L887
+fn boot_request_startup() -> bool {
+    let arg0 = CString::new(crate::context::script().filename.as_bytes()).unwrap_or_default();
+    let mut argv = [arg0.as_ptr().cast_mut()];
+    unsafe {
+        let sg = rapira_sg();
+        (*sg).request_info.argc = 1;
+        (*sg).request_info.argv = argv.as_mut_ptr();
+        let started = php_request_startup() == SUCCESS;
+        if started {
+            zend_is_auto_global_str(c"_SERVER".as_ptr(), c"_SERVER".count_bytes());
+        }
+        (*sg).request_info.argc = 0;
+        (*sg).request_info.argv = null_mut();
+        started
+    }
+}
+
 /// Logs PG(last_error_message) before php_request_shutdown frees it (main/main.c:2024).
 fn run_cycle(script: &Path) -> Cycle {
     crate::exchange::cycle_reset();
-    let started = unsafe { php_request_startup() } == SUCCESS;
+    let started = boot_request_startup();
     if started {
         unsafe { run_script(script) };
     } else {
