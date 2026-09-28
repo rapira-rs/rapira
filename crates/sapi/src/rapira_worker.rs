@@ -7,8 +7,10 @@ use crate::{
 use std::{
     borrow::Cow,
     cell::RefCell,
+    ffi::CString,
     os::raw::c_int,
     path::{Path, PathBuf},
+    ptr::null_mut,
 };
 
 use crate::{
@@ -63,10 +65,39 @@ fn set_worker_recycle() {
     });
 }
 
+/// Starts the boot request with the argv of `php entrypoint.php` and builds $_SERVER before the script runs, as the CLI does.
+/// argc is 0 again after this: with argc set, each later $_SERVER build adds a reference to the $argv global, and that crashes when $argv holds null, an int or [].
+/// https://github.com/php/php-src/blob/php-8.5.11/sapi/cli/php_cli.c#L941
+/// https://github.com/php/php-src/blob/php-8.5.11/main/php_variables.c#L881-L887
+fn boot_request_startup() -> bool {
+    let arg0 = CString::new(crate::context::script().filename.as_bytes()).unwrap_or_default();
+    let mut argv = [arg0.as_ptr().cast_mut()];
+    unsafe {
+        let sg = rapira_sg();
+        (*sg).request_info.argc = 1;
+        (*sg).request_info.argv = argv.as_mut_ptr();
+        // PHP 8.4 adds argv only with register_argc_argv on, so its CLI and embed SAPIs force it on; PHP 8.5 adds argv when argc is set.
+        // https://github.com/php/php-src/blob/php-8.4.26/sapi/embed/php_embed.c#L26-L32
+        #[cfg(php84)]
+        let register_argc_argv = std::mem::replace(&mut (*rapira_pg()).register_argc_argv, true);
+        let started = php_request_startup() == SUCCESS;
+        if started {
+            zend_is_auto_global_str(c"_SERVER".as_ptr(), c"_SERVER".count_bytes());
+        }
+        #[cfg(php84)]
+        {
+            (*rapira_pg()).register_argc_argv = register_argc_argv;
+        }
+        (*sg).request_info.argc = 0;
+        (*sg).request_info.argv = null_mut();
+        started
+    }
+}
+
 /// Logs PG(last_error_message) before php_request_shutdown frees it (main/main.c:2024).
 fn run_cycle(script: &Path) -> Cycle {
     crate::exchange::cycle_reset();
-    let started = unsafe { php_request_startup() } == SUCCESS;
+    let started = boot_request_startup();
     if started {
         unsafe { run_script(script) };
     } else {

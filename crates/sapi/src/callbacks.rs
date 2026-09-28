@@ -269,6 +269,11 @@ pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
 const SERVER_VARS_MAX: u32 = 28;
 
 pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut zval) {
+    // No bound request: the boot run of the entrypoint in worker and dispatcher mode.
+    if unsafe { ctx() }.is_none() {
+        guard((), || unsafe { register_boot_variables(track_vars_array) });
+        return;
+    }
     with_ctx((), |ctx| {
         let Some(reqc) = ctx.c.as_ref() else { return };
         // One allocation for the whole array: the names below, one HTTP_* name per field, and the entries php_register_server_variables adds after this callback.
@@ -341,6 +346,31 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
 
         cgi_header_vars(&ctx.req.headers, ctx.req.content_length, put_bytes);
     })
+}
+
+/// The variables of `php entrypoint.php`, in its order: the process environment, then the entrypoint path, which wins over an environment variable of the same name.
+/// https://github.com/php/php-src/blob/php-8.5.11/sapi/cli/php_cli.c#L316-L347
+unsafe fn register_boot_variables(track_vars_array: *mut zval) {
+    unsafe {
+        if let Some(import) = php_import_environment_variables {
+            import(track_vars_array);
+        }
+    }
+    let put = |name: &CStr, val: &[u8]| unsafe {
+        rapira_register_known_stringl(
+            name.as_ptr(),
+            name.to_bytes().len(),
+            val.as_ptr() as *const c_char,
+            val.len(),
+            track_vars_array,
+        );
+    };
+    let path = crate::context::script().filename.as_bytes();
+    put(c"PHP_SELF", path);
+    put(c"SCRIPT_NAME", path);
+    put(c"SCRIPT_FILENAME", path);
+    put(c"PATH_TRANSLATED", path);
+    put(c"DOCUMENT_ROOT", b"");
 }
 pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type: c_int) {
     guard((), || {
