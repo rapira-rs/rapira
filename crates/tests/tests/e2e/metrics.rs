@@ -176,25 +176,42 @@ fn a_reload_replaces_the_metrics_process() {
 #[cfg(target_os = "linux")]
 #[test]
 fn each_live_worker_reports_its_memory() {
+    struct Case {
+        name: &'static str,
+        family: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "rss",
+            family: "rapira_worker_rss_bytes",
+        },
+        Case {
+            name: "pss",
+            family: "rapira_worker_pss_bytes",
+        },
+    ];
     let (srv, metrics) = spawn("");
     let samples = scrape_until(&srv, metrics, "the memory of the worker", |s| {
         s.contains_key(r#"rapira_worker_pss_bytes{pool="http",worker="0"}"#)
     });
-    for family in ["rapira_worker_rss_bytes", "rapira_worker_pss_bytes"] {
+    for case in &cases {
         let series: Vec<(&String, &u64)> = samples
             .iter()
-            .filter(|(k, _)| k.starts_with(&format!("{family}{{")))
+            .filter(|(k, _)| k.starts_with(&format!("{}{{", case.family)))
             .collect();
         assert_eq!(
             series.len(),
             1,
-            "{family}: one worker, one series: {series:?}"
+            "{}: one worker, one series: {series:?}",
+            case.name
         );
         assert_eq!(
             series[0].0,
-            &format!(r#"{family}{{pool="http",worker="0"}}"#)
+            &format!(r#"{}{{pool="http",worker="0"}}"#, case.family),
+            "{}",
+            case.name
         );
-        assert!(*series[0].1 > 0, "{family}: {series:?}");
+        assert!(*series[0].1 > 0, "{}: {series:?}", case.name);
     }
 }
 
