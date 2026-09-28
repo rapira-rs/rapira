@@ -24,6 +24,7 @@ members = [
     "crates/master",
     "crates/php_build",
     "crates/middleware/static_files",
+    "crates/interceptors/auth",
     "crates/sapi",
     "crates/scoreboard",
     "crates/net",
@@ -39,6 +40,7 @@ rapira_sapi = { path = "crates/sapi" }
 rapira_php_build = { path = "crates/php_build" }
 rapira_config = { path = "crates/config" }
 rapira_static_files = { path = "crates/middleware/static_files" }
+rapira_grpc_auth = { path = "crates/interceptors/auth" }
 rapira_http = { path = "crates/plugins/http" }
 rapira_grpc = { path = "crates/plugins/grpc" }
 rapira_net = { path = "crates/net" }

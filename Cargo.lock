@@ -953,6 +953,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "rapira_grpc_auth"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "connectrpc",
+ "http",
+ "rapira_config",
+ "serde",
+]
+
+[[package]]
 name = "rapira_http"
 version = "0.8.1"
 dependencies = [
