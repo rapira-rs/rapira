@@ -109,18 +109,18 @@ fn serve_plugin(
     drain_grace: Duration,
 ) -> anyhow::Result<()> {
     let running = run_plugin(plugin, sink, stopper.clone(), grace, drain_grace)?;
-    spawn_signal_thread(stopper);
+    spawn_signal_thread(move || stopper.stop());
     running.join()
 }
 
-/// Requires the fork bracket to have masked exactly {QUIT, INT} in the child: the first signal drains, a second force-exits 131.
-fn spawn_signal_thread(stopper: Stopper) {
+/// Requires the fork bracket to have masked exactly {QUIT, INT} in the child: the first signal runs `stop`, a second force-exits 131.
+pub fn spawn_signal_thread(stop: impl FnOnce() + Send + 'static) {
     std::thread::Builder::new()
         .name("rapira-worker-signal".into())
         .spawn(move || {
             let sig = rapira_master::wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
             tracing::info!(target: "rapira", "signal {sig} received; draining worker");
-            stopper.stop();
+            stop();
             let _ = rapira_master::wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
             tracing::warn!(target: "rapira", "second signal; forcing worker exit");
             std::process::exit(131);

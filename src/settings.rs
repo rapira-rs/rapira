@@ -12,6 +12,7 @@ use std::path::Path;
 struct FileConfig {
     http: Option<rapira_http::config::Section>,
     grpc: Option<rapira_grpc::config::Section>,
+    metrics: Option<rapira_metrics::config::Section>,
     #[serde(default)]
     supervisor: SupervisorSection,
     #[serde(default)]
@@ -22,6 +23,7 @@ struct FileConfig {
 pub struct Settings {
     pub http: Option<rapira_http::config::Settings>,
     pub grpc: Option<rapira_grpc::config::Settings>,
+    pub metrics: Option<rapira_metrics::config::Settings>,
     pub supervisor: SupervisorSettings,
     pub log: LogSettings,
 }
@@ -49,12 +51,17 @@ fn settings(file: FileConfig, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
         .grpc
         .map(|section| rapira_grpc::config::resolve(section, ctx))
         .transpose()?;
+    let metrics = file
+        .metrics
+        .map(rapira_metrics::config::resolve)
+        .transpose()?;
     let supervisor = resolve_supervisor(file.supervisor, ctx)?;
     let log = resolve_log(file.log)?;
 
     Ok(Settings {
         http,
         grpc,
+        metrics,
         supervisor,
         log,
     })
@@ -110,6 +117,21 @@ mod tests {
                 error: None,
             },
             Case {
+                name: "metrics table",
+                toml: "[http.pool]\nentrypoint = \"a.php\"\n[metrics]\nlisten = \"127.0.0.1:9180\"\n",
+                error: None,
+            },
+            Case {
+                name: "metrics table without listen",
+                toml: "[metrics]\n",
+                error: Some("missing field `listen`"),
+            },
+            Case {
+                name: "unknown metrics key",
+                toml: "[metrics]\nlisten = \":9180\"\npath = \"/m\"\n",
+                error: Some("unknown field `path`"),
+            },
+            Case {
                 name: "shipped example",
                 toml: include_str!("../examples/rapira.toml"),
                 error: None,
@@ -152,8 +174,28 @@ mod tests {
 
     #[test]
     fn a_file_without_a_plugin_table_is_refused() {
-        let file: FileConfig = toml::from_str("[log]\nlevel = \"info\"\n").unwrap();
-        let err = settings(file, &ctx()).unwrap_err().to_string();
-        assert_eq!(err, "no plugin configured: add an [http] or a [grpc] table");
+        struct Case {
+            name: &'static str,
+            toml: &'static str,
+        }
+        let cases = [
+            Case {
+                name: "log table only",
+                toml: "[log]\nlevel = \"info\"\n",
+            },
+            Case {
+                name: "metrics table only",
+                toml: "[metrics]\nlisten = \"127.0.0.1:9180\"\n",
+            },
+        ];
+        for case in cases {
+            let file: FileConfig = toml::from_str(case.toml).unwrap();
+            let err = settings(file, &ctx()).unwrap_err().to_string();
+            assert_eq!(
+                err, "no plugin configured: add an [http] or a [grpc] table",
+                "{}",
+                case.name
+            );
+        }
     }
 }

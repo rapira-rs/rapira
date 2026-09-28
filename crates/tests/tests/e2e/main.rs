@@ -22,6 +22,7 @@ mod ini;
 mod lifecycle;
 mod listeners;
 mod logging;
+mod metrics;
 mod mode;
 mod observer_teardown_tests;
 mod observer_tests;

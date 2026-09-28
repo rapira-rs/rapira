@@ -70,6 +70,14 @@ fn check_linked_php() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The linked libphp as major.minor.patch.
+pub fn linked_php_version() -> String {
+    // SAFETY: php_version_id() returns a compile-time constant and touches no engine state, so this is valid pre-startup.
+    let id = unsafe { php_version_id() };
+    let (major, minor) = php_series(id);
+    format!("{major}.{minor}.{}", id % 100)
+}
+
 /// MINIT once in the master. Base classes first, then each part in order.
 pub fn boot_master(parts: &[PhpPart]) -> anyhow::Result<PhpModule> {
     check_linked_php()?;

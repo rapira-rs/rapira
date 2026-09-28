@@ -115,6 +115,34 @@ fn rapira_bin() -> PathBuf {
     bin
 }
 
+/// The version that `rapira --version` prints.
+pub fn rapira_version() -> String {
+    let out = Command::new(rapira_bin())
+        .arg("--version")
+        .output()
+        .expect("run rapira --version");
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.trim()
+        .strip_prefix("rapira ")
+        .unwrap_or_else(|| panic!("unexpected --version output {text:?}"))
+        .to_owned()
+}
+
+/// major.minor.patch of the PHP that `php-config` names. The build links the libphp of that PHP.
+pub fn php_version() -> String {
+    let bin = std::env::var("PHP_CONFIG").unwrap_or_else(|_| "php-config".into());
+    let out = Command::new(bin)
+        .arg("--version")
+        .output()
+        .expect("run php-config --version");
+    let text = String::from_utf8_lossy(&out.stdout);
+    text.trim()
+        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
+        .next()
+        .unwrap_or_default()
+        .to_owned()
+}
+
 /// `extra_toml` is appended inside `[http.pool]`, bare keys first; a `[log]` or `[supervisor]` header may follow, and it must not open `[http]` or `[http.*]`.
 pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> Server {
     spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), None)

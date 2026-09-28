@@ -23,7 +23,7 @@ use std::ffi::c_int;
 pub use bindings::*;
 pub use plugin::Mode;
 pub use quota::WorkerHooks;
-pub use start::{PhpModule, Rapira, boot_master};
+pub use start::{PhpModule, Rapira, boot_master, linked_php_version};
 pub use types::{Addr, ClientCert, Frame, Request, ResponseHead, Tls};
 
 // bindgen names the Zend SUCCESS/FAILURE constants differently across php-src versions, so the values are hardcoded.

@@ -56,6 +56,10 @@ processes = 16                # a fixed worker count; defaults to the CPU count
 # mode = "dispatcher"          # the only mode for a grpc pool
 # processes = 16               # defaults to the CPU count
 
+# The Prometheus endpoint. A process without PHP serves GET /metrics from the worker scoreboard.
+# [metrics]
+# listen = "127.0.0.1:9180"    # required; host:port, ":port" (all interfaces), or "unix:/path"
+
 # [supervisor]
 # pidfile = "rapira.pid"      # relative to this file's directory
 # process_control_timeout_secs = 30   # graceful-stop budget before QUIT -> TERM -> KILL

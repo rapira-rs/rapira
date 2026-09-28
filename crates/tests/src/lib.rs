@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
 pub mod grpc;
+pub mod metrics;
 pub mod server_log;
 pub mod wire;
 
