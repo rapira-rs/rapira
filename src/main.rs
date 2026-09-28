@@ -46,6 +46,18 @@ struct PoolRun {
 /// Signals are blocked first: USR1/USR2/HUP terminate by default until the master installs its handlers.
 fn main() -> anyhow::Result<()> {
     rapira_master::block_early_signals();
+    // Transparent huge pages put the allocator regions on 2 MiB pages and increase the memory use of each worker. The call runs before PHP MINIT, and the forked workers inherit the setting. https://man7.org/linux/man-pages/man2/PR_SET_THP_DISABLE.2const.html
+    #[cfg(target_os = "linux")]
+    // SAFETY: prctl with integer arguments only; the kernel reads all four as unsigned long.
+    unsafe {
+        libc::prctl(
+            libc::PR_SET_THP_DISABLE,
+            1 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+            0 as libc::c_ulong,
+        )
+    };
 
     match Cli::parse().command {
         Some(Commands::Serve(args)) => serve(args),
