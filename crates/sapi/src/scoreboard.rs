@@ -22,6 +22,12 @@ pub fn sb_set(slot: &'static SharedSlot) {
     SB.set(Some(slot));
 }
 
+/// Counts a unit that the host shed: one error, then one handled unit. It takes the slot, because only the PHP thread sets `SB`.
+pub(crate) fn count_shed(s: &SharedSlot) {
+    s.errors.fetch_add(1, Relaxed);
+    s.handled.fetch_add(1, Release);
+}
+
 /// Each Release store publishes the Relaxed write before it (errors, last_activity_ms) to the master's Acquire load.
 pub fn sb_update(event: Event) {
     let Some(s) = SB.get() else { return };
@@ -33,10 +39,7 @@ pub fn sb_update(event: Event) {
             s.handled.fetch_add(1, Release);
             crate::quota::tick();
         }
-        Event::Shed => {
-            s.errors.fetch_add(1, Relaxed);
-            s.handled.fetch_add(1, Release);
-        }
+        Event::Shed => count_shed(s),
         Event::Recycled => {
             s.recycles.fetch_add(1, Relaxed);
         }

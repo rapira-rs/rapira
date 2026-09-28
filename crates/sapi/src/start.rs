@@ -127,7 +127,7 @@ impl Rapira {
         slot.bind(std::process::id());
         let pending: &'static AtomicU64 = &slot.pending;
         let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
-        let sink = Sink::new(intake_tx, pending);
+        let sink = Sink::new(intake_tx, slot);
 
         crate::context::set_script(&entrypoint);
         // SAFETY: safe, trust me, I'm a developer

@@ -2,9 +2,12 @@ use std::ffi::CStr;
 use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
-use crate::scoreboard::{Event, sb_update};
+use rapira_scoreboard::SharedSlot;
+use tokio::time::Instant;
+
+use crate::scoreboard::{Event, count_shed, sb_update};
 use crate::{zend_class_entry, zend_object};
 
 pub(crate) const INTAKE_WAIT: Duration = Duration::from_secs(30);
@@ -87,8 +90,8 @@ pub fn now_unix_f64() -> f64 {
 #[derive(Clone)]
 pub struct Sink {
     tx: SyncSender<Box<dyn Work>>,
-    /// The `pending` field of this worker's scoreboard slot.
-    pending: &'static AtomicU64,
+    /// The scoreboard slot of this worker.
+    slot: &'static SharedSlot,
 }
 
 struct PendingGuard<'a>(Option<&'a AtomicU64>);
@@ -112,13 +115,13 @@ impl Drop for PendingGuard<'_> {
 }
 
 impl Sink {
-    pub(crate) fn new(tx: SyncSender<Box<dyn Work>>, pending: &'static AtomicU64) -> Self {
-        Self { tx, pending }
+    pub(crate) fn new(tx: SyncSender<Box<dyn Work>>, slot: &'static SharedSlot) -> Self {
+        Self { tx, slot }
     }
 
     /// pending is incremented before the send: the consumer decrements as soon as it wakes, so the reverse order could wrap the counter below zero.
     pub async fn submit(&self, mut unit: Box<dyn Work>) -> Result<(), Refused> {
-        let pending = PendingGuard::arm(self.pending);
+        let pending = PendingGuard::arm(&self.slot.pending);
         // The deadline starts at the first full intake: the common send needs no clock read.
         let mut deadline = None;
         loop {
@@ -133,8 +136,9 @@ impl Sink {
                         tracing::warn!(
                             target: "rapira",
                             "intake full for {INTAKE_WAIT:?} ({} pending); shedding the request",
-                            self.pending.load(Ordering::Relaxed)
+                            self.slot.pending.load(Ordering::Relaxed)
                         );
+                        count_shed(self.slot);
                         return Err(Refused::Saturated);
                     }
                     unit = u;
@@ -174,6 +178,10 @@ impl<U: Work> Intake<U> {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::mpsc::sync_channel;
+
+    use rapira_scoreboard::Scoreboard;
+
     use super::*;
 
     struct Probe;
@@ -190,17 +198,37 @@ mod tests {
         fn shed(self: Box<Self>) {}
     }
 
-    fn sink() -> (Sink, std::sync::mpsc::Receiver<Box<dyn Work>>) {
-        static PENDING: AtomicU64 = AtomicU64::new(0);
-        let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        (Sink::new(tx, &PENDING), rx)
+    /// A sink on slot 0 of a board in memory.
+    fn sink(tx: SyncSender<Box<dyn Work>>) -> (Sink, &'static SharedSlot) {
+        let slot = Scoreboard::create(1).unwrap().slot(0);
+        (Sink::new(tx, slot), slot)
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn intake_reports_stopped_after_the_receiver_is_gone() {
-        let (sink, rx) = sink();
+        let (tx, rx) = sync_channel(1);
+        let (sink, _) = sink(tx);
         let intake = Intake::<Probe>::new(sink);
         drop(rx);
         assert_eq!(intake.submit(Probe).await.unwrap_err(), Refused::Stopped);
+    }
+
+    /// The test fills the queue of one before the sink takes the sender, so `pending` does not count that unit. The receiver stays open, so the queue stays full. The paused clock passes `INTAKE_WAIT` at once.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_full_intake_sheds_and_counts_a_failed_unit() {
+        let (tx, _rx) = sync_channel::<Box<dyn Work>>(1);
+        tx.send(Box::new(Probe)).unwrap();
+        let (sink, slot) = sink(tx);
+        let intake = Intake::<Probe>::new(sink);
+        assert_eq!(intake.submit(Probe).await.unwrap_err(), Refused::Saturated);
+        assert_eq!(
+            (
+                slot.handled.load(Ordering::Relaxed),
+                slot.errors.load(Ordering::Relaxed),
+                slot.pending.load(Ordering::Relaxed),
+            ),
+            (1, 1, 0),
+            "handled, errors, pending"
+        );
     }
 }
