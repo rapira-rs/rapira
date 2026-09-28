@@ -28,7 +28,10 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
     struct Case {
         name: &'static str,
         wire: Wire,
-        content_type: &'static str,
+        method: Method,
+        path: &'static str,
+        /// None for a Connect GET: the request has no `content-type` and no `te`.
+        content_type: Option<&'static str>,
         body: &'static [u8],
         authorization: Option<&'static str>,
         status: u16,
@@ -41,11 +44,16 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
     const GRPC: &str = "application/grpc";
     const WEB: &str = "application/grpc-web+proto";
     const CONNECT: &str = "application/proto";
+    /// `Get` is idempotent, so it accepts a Connect GET.
+    const CONNECT_GET: &str =
+        "/rapira.test.v1.EchoService/Get?encoding=json&message=%7B%22text%22%3A%22hi%22%7D";
     let cases = [
         Case {
             name: "grpc, no token",
             wire: Wire::H2,
-            content_type: GRPC,
+            method: Method::POST,
+            path: ECHO_PATH,
+            content_type: Some(GRPC),
             body: HI_FRAME,
             authorization: None,
             status: 200,
@@ -56,7 +64,9 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
         Case {
             name: "grpc, wrong token",
             wire: Wire::H2,
-            content_type: GRPC,
+            method: Method::POST,
+            path: ECHO_PATH,
+            content_type: Some(GRPC),
             body: HI_FRAME,
             authorization: Some("Bearer gamma-token"),
             status: 200,
@@ -67,7 +77,9 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
         Case {
             name: "grpc, valid token",
             wire: Wire::H2,
-            content_type: GRPC,
+            method: Method::POST,
+            path: ECHO_PATH,
+            content_type: Some(GRPC),
             body: HI_FRAME,
             authorization: Some("Bearer alpha-token"),
             status: 200,
@@ -78,7 +90,9 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
         Case {
             name: "grpc, second token, lower-case scheme",
             wire: Wire::H2,
-            content_type: GRPC,
+            method: Method::POST,
+            path: ECHO_PATH,
+            content_type: Some(GRPC),
             body: HI_FRAME,
             authorization: Some("bearer  beta.token~/+=="),
             status: 200,
@@ -89,7 +103,9 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
         Case {
             name: "grpc-web, no token",
             wire: Wire::Http1,
-            content_type: WEB,
+            method: Method::POST,
+            path: ECHO_PATH,
+            content_type: Some(WEB),
             body: HI_FRAME,
             authorization: None,
             status: 200,
@@ -100,7 +116,9 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
         Case {
             name: "grpc-web, wrong token",
             wire: Wire::Http1,
-            content_type: WEB,
+            method: Method::POST,
+            path: ECHO_PATH,
+            content_type: Some(WEB),
             body: HI_FRAME,
             authorization: Some("Bearer gamma-token"),
             status: 200,
@@ -111,7 +129,9 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
         Case {
             name: "grpc-web, valid token",
             wire: Wire::Http1,
-            content_type: WEB,
+            method: Method::POST,
+            path: ECHO_PATH,
+            content_type: Some(WEB),
             body: HI_FRAME,
             authorization: Some("Bearer alpha-token"),
             status: 200,
@@ -122,7 +142,9 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
         Case {
             name: "connect, no token",
             wire: Wire::Http1,
-            content_type: CONNECT,
+            method: Method::POST,
+            path: ECHO_PATH,
+            content_type: Some(CONNECT),
             body: HI,
             authorization: None,
             status: 401,
@@ -133,7 +155,9 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
         Case {
             name: "connect, wrong token",
             wire: Wire::Http1,
-            content_type: CONNECT,
+            method: Method::POST,
+            path: ECHO_PATH,
+            content_type: Some(CONNECT),
             body: HI,
             authorization: Some("Bearer gamma-token"),
             status: 401,
@@ -144,8 +168,36 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
         Case {
             name: "connect, valid token",
             wire: Wire::Http1,
-            content_type: CONNECT,
+            method: Method::POST,
+            path: ECHO_PATH,
+            content_type: Some(CONNECT),
             body: HI,
+            authorization: Some("Bearer alpha-token"),
+            status: 200,
+            grpc_status: None,
+            connect_rejected: false,
+            reaches_php: true,
+        },
+        Case {
+            name: "connect get, no token",
+            wire: Wire::Http1,
+            method: Method::GET,
+            path: CONNECT_GET,
+            content_type: None,
+            body: b"",
+            authorization: None,
+            status: 401,
+            grpc_status: None,
+            connect_rejected: true,
+            reaches_php: false,
+        },
+        Case {
+            name: "connect get, valid token",
+            wire: Wire::Http1,
+            method: Method::GET,
+            path: CONNECT_GET,
+            content_type: None,
+            body: b"",
             authorization: Some("Bearer alpha-token"),
             status: 200,
             grpc_status: None,
@@ -161,16 +213,19 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
     for case in cases {
         let before = calls(&srv).len();
         let mut conn = Conn::open(&listen(&srv), case.wire).await.expect("connect");
-        let mut headers = vec![("content-type", case.content_type), ("te", "trailers")];
+        let mut headers = Vec::new();
+        if let Some(content_type) = case.content_type {
+            headers.extend([("content-type", content_type), ("te", "trailers")]);
+        }
         headers.extend(case.authorization.map(|a| ("authorization", a)));
         let got = conn
-            .send(Method::POST, ECHO_PATH, &headers, case.body)
+            .send(case.method, case.path, &headers, case.body)
             .await
             .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
 
         assert_eq!(got.status, case.status, "{}: {got:?}", case.name);
         if let Some(want) = case.grpc_status {
-            let trailers = if case.content_type == WEB {
+            let trailers = if case.content_type == Some(WEB) {
                 web_trailers(&got.body)
             } else {
                 got.trailers.clone()
