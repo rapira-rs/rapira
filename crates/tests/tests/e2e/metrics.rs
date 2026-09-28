@@ -9,7 +9,7 @@ use rapira_sapi::Mode;
 
 use crate::harness::{
     Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_get_raw, http_raw,
-    parse_status_and_body, php_version, rapira_version, signal,
+    parse_status_and_body, php_version, rapira_version, signal, wait_workers,
 };
 
 const REQ: Duration = Duration::from_secs(10);
@@ -17,6 +17,7 @@ const REQ: Duration = Duration::from_secs(10);
 const HANG: &str = "lifecycle/hang-worker.php";
 const REQUESTS: &str = r#"rapira_requests_total{pool="http"}"#;
 const CONFIGURED: &str = r#"rapira_workers_configured{pool="http"}"#;
+const QUEUED: &str = r#"rapira_requests_queued{pool="http"}"#;
 const STATES: [&str; 4] = ["starting", "idle", "active", "draining"];
 
 fn workers(state: &str) -> String {
@@ -150,6 +151,27 @@ fn a_metrics_listener_on_the_http_address_fails_the_boot() {
     );
 }
 
+/// A USR2 reload replaces the metrics process too. The metrics process never pulls PHP work, so its slot must be idle from the bind: otherwise the reload gate of its pool waits the whole control timeout, 30 s by default.
+#[test]
+fn a_reload_replaces_the_metrics_process() {
+    let (srv, metrics) = spawn("");
+    let before = wait_workers(
+        &srv,
+        Duration::from_secs(20),
+        "the worker and the metrics process",
+        |p| p.len() == 2,
+    );
+    signal(srv.pid(), libc::SIGUSR2);
+    wait_workers(
+        &srv,
+        Duration::from_secs(20),
+        "a new worker and a new metrics process",
+        |p| p.len() == 2 && p.iter().all(|pid| !before.contains(pid)),
+    );
+    let (status, _, _) = scrape(metrics);
+    assert_eq!(status, 200);
+}
+
 /// Linux only: the endpoint reads `/proc/<pid>/smaps_rollup` of each live worker.
 #[cfg(target_os = "linux")]
 #[test]
@@ -163,16 +185,20 @@ fn each_live_worker_reports_its_memory() {
             .iter()
             .filter(|(k, _)| k.starts_with(&format!("{family}{{")))
             .collect();
-        assert_eq!(series.len(), 1, "one worker, one series: {series:?}");
+        assert_eq!(
+            series.len(),
+            1,
+            "{family}: one worker, one series: {series:?}"
+        );
         assert_eq!(
             series[0].0,
             &format!(r#"{family}{{pool="http",worker="0"}}"#)
         );
-        assert!(*series[0].1 > 0, "{series:?}");
+        assert!(*series[0].1 > 0, "{family}: {series:?}");
     }
 }
 
-/// max_requests = 2 gives a quota of exactly 3: effective_quota adds 1 + hash % max(2 / 2, 1). Five requests recycle the worker once, and the new worker counts on in the same slot.
+/// max_requests = 2 gives a quota of exactly 3: effective_quota adds 1 + hash % max(2 / 2, 1). Five requests recycle the worker once.
 #[test]
 fn counts_survive_a_recycle() {
     let (srv, metrics) = spawn("max_requests = 2");
@@ -202,8 +228,6 @@ fn a_killed_worker_counts_as_crashed() {
         value(s, &exits("crashed")) == 1
     });
 }
-
-const QUEUED: &str = r#"rapira_requests_queued{pool="http"}"#;
 
 /// The held request takes the only PHP thread, so the next two requests wait in the worker queue.
 #[test]
