@@ -2,7 +2,7 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use rapira_scoreboard::{SB_MAX_SLOTS, Scoreboard, SharedSlot};
+use rapira_scoreboard::{PoolRegion, SB_MAX_SLOTS, Scoreboard, SharedSlot};
 
 mod events;
 mod lifeline;
@@ -65,6 +65,23 @@ impl MasterConfig {
         }
         Ok(slots)
     }
+
+    /// Two slots per worker, pools contiguous in `pools` order.
+    fn regions(&self) -> Vec<PoolRegion> {
+        let mut base: usize = 0;
+        self.pools
+            .iter()
+            .map(|p| {
+                let slots = base..base + p.slots();
+                base = slots.end;
+                PoolRegion {
+                    name: p.name,
+                    processes: p.processes,
+                    slots,
+                }
+            })
+            .collect()
+    }
 }
 
 /// Handed to the worker closure in the child, after post-fork hygiene.
@@ -74,6 +91,10 @@ pub struct WorkerEnv {
     /// Read end of the master lifeline: EOF means the master died, so drain.
     pub lifeline: OwnedFd,
     pub slot_view: &'static SharedSlot,
+    /// The whole board: the slots of every pool.
+    pub board: Scoreboard,
+    /// The part of `board` that each pool owns, in `MasterConfig::pools` order.
+    pub regions: &'static [PoolRegion],
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -87,6 +108,8 @@ pub enum StopReason {
 /// Returns in the parent on a clean or forced stop; in a forked child it never returns: the worker closure runs and the child `_exit`s.
 pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::Result<StopReason> {
     let scoreboard: Scoreboard = Scoreboard::create(cfg.scoreboard_slots()?)?;
+    // Built once per boot and never freed, as the board: every forked child reads the same regions.
+    let regions: &'static [PoolRegion] = Box::leak(cfg.regions().into_boxed_slice());
     let self_pipe: signals::SelfPipe = signals::install_master_signals()?;
     let lifeline: lifeline::Lifeline = lifeline::Lifeline::create()?;
     let _pidfile: Option<pidfile::PidFile> = match &cfg.pidfile {
@@ -97,9 +120,11 @@ pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::R
     let forker = process::Forker {
         self_pipe,
         lifeline,
+        board: scoreboard,
+        regions,
         worker: Box::new(worker),
     };
-    let mut master = events::Master::new(cfg, scoreboard, forker);
+    let mut master = events::Master::new(cfg, scoreboard, regions, forker);
     master.run_loop()
 }
 
@@ -154,6 +179,31 @@ mod tests {
                 SB_MAX_SLOTS / 2
             )),
             "{e}"
+        );
+    }
+
+    #[test]
+    fn regions_follow_the_pool_order_with_two_slots_per_worker() {
+        let regions = cfg(vec![pool("metrics", 1), pool("http", 3), pool("grpc", 2)]).regions();
+        assert_eq!(
+            regions,
+            [
+                PoolRegion {
+                    name: "metrics",
+                    processes: 1,
+                    slots: 0..2
+                },
+                PoolRegion {
+                    name: "http",
+                    processes: 3,
+                    slots: 2..8
+                },
+                PoolRegion {
+                    name: "grpc",
+                    processes: 2,
+                    slots: 8..12
+                },
+            ]
         );
     }
 }

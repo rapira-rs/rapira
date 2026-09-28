@@ -37,6 +37,17 @@ pub struct Scoreboard {
     slots: &'static [SharedSlot],
 }
 
+/// The part of the board that one pool owns.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PoolRegion {
+    /// The config table of the pool ("http").
+    pub name: &'static str,
+    /// The worker count of the pool.
+    pub processes: usize,
+    /// The indices of the pool's slots on the whole board.
+    pub slots: Range<usize>,
+}
+
 #[derive(Debug, Default, Clone)]
 pub struct SlotSnapshot {
     pub id: usize,

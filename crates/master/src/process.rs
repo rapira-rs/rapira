@@ -7,7 +7,7 @@ use crate::WorkerEnv;
 use crate::lifeline::Lifeline;
 use crate::signals::{MASTER_SIGNALS, SelfPipe, sigset};
 use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY};
-use rapira_scoreboard::SharedSlot;
+use rapira_scoreboard::{PoolRegion, Scoreboard, SharedSlot};
 
 pub(crate) const QUICK_CRASH: Duration = Duration::from_secs(10);
 pub(crate) const RESPAWN_BASE: Duration = Duration::from_millis(100);
@@ -148,6 +148,9 @@ pub(crate) fn kill(pid: libc::pid_t, sig: c_int) {
 pub(crate) struct Forker<'w> {
     pub self_pipe: SelfPipe,
     pub lifeline: Lifeline,
+    /// The whole board and its regions, for every `WorkerEnv`.
+    pub board: Scoreboard,
+    pub regions: &'static [PoolRegion],
     pub worker: Box<dyn FnMut(WorkerEnv) -> i32 + 'w>,
 }
 
@@ -203,6 +206,8 @@ impl Forker<'_> {
                         pool,
                         lifeline: lifeline_rd,
                         slot_view,
+                        board: self.board,
+                        regions: self.regions,
                     })
                 }));
                 let code = match outcome {
