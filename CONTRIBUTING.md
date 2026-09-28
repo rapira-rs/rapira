@@ -83,7 +83,7 @@ To add a plugin:
 
 ## Pull requests
 
-Sign off your commits (`git commit -s`) and fill in the PR template. Bug reports and feature requests go through the [issue forms](https://github.com/rapira-rs/rapira/issues/new/choose); questions belong in [discussions](https://github.com/rapira-rs/rapira/discussions).
+Sign off your commits (`git commit -s`) and fill in the PR template. Bug reports and feature requests go through the [issue forms](https://github.com/rapira-rs/rapira/issues/new/choose); questions belong in [discussions](https://github.com/orgs/rapira-rs/discussions).
 
 ## Releases
 
