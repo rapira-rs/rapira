@@ -52,7 +52,7 @@ impl Serving {
             .with_deadline_policy(deadlines)
             // The default registry offers every codec that the build compiles, zstd included.
             .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
-        // The interceptors cover every route: PHP methods, health, reflection and unknown paths.
+        // The interceptors cover GET and POST requests to every route: PHP methods, health, reflection and unknown paths.
         for interceptor in &config.interceptors {
             service = service.with_interceptor_arc(Arc::clone(interceptor));
         }

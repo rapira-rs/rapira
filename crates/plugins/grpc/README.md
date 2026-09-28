@@ -23,7 +23,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 
 ## Crate layout
 
-- `Cargo.toml`: depends on `rapira_sapi`, `rapira_net`, `rapira_config` and the connect-rust crates. `rapira_php_build` is a build dependency.
+- `Cargo.toml`: depends on `rapira_sapi`, `rapira_net`, `rapira_config`, `rapira_grpc_auth` and the connect-rust crates. `rapira_php_build` is a build dependency.
 - `build.rs`: compiles the C files with `rapira_php_build::compile`, against the PHP headers and the `rapira_sapi.h` directory from `DEP_RAPIRA_SAPI_INCLUDE`.
 - `rapira_grpc.stub.php`: the PHP stub of the `Rapira\Grpc` and `Rapira\Internal\Grpc` classes.
 - `rapira_grpc_arginfo.h`: generated from the stub by `make stubs`. Do not edit it.
@@ -61,9 +61,9 @@ The remote address is in the request extensions as `rapira_sapi::Addr`. PHP gets
 
 `[grpc].interceptors` lists the interceptor names in chain order. The master builds one `connectrpc::Interceptor` for each name before the fork. Each worker registers them on its `ConnectRpcService` with `with_interceptor_arc`, the first listed outermost. Without interceptors, connect-rust only checks that its chain is empty.
 
-The chain covers every route of the listener: the PHP methods, health, reflection, and paths that match no method. connect-rust runs the `intercept_head` of each interceptor before it reads the request body. A rejection in `intercept_head` reaches the client in the format of its protocol, and PHP does not see the call. An interceptor that must change the metadata that PHP sees uses `intercept_unary`, because `intercept_head` can read the headers but not change them.
+The chain covers every GET and POST request to the listener: the PHP methods, health, reflection, and paths that match no method. A request with another HTTP method gets 405 or 404 from connect-rust before any interceptor runs, and never reaches PHP. connect-rust runs the `intercept_head` of each interceptor before it reads the request body. A rejection in `intercept_head` reaches the client in the format of its protocol, and PHP does not see the call. An interceptor that must change the metadata that PHP sees uses `intercept_unary`, because `intercept_head` can read the headers but not change them.
 
-`rapira_grpc_auth::Auth` is the `auth` interceptor. It reads the bearer tokens from `[grpc.auth].tokens_file` in the master. Each call needs exactly one `authorization: Bearer <token>` value with a configured token. https://www.rfc-editor.org/rfc/rfc6750#section-2.1 `grpc.health.v1.Health` needs no token, because Kubernetes gRPC probes cannot send metadata. A call without a valid token gets UNAUTHENTICATED with `www-authenticate: Bearer`: the gRPC status 16, or the HTTP status 401 for Connect. PHP still sees the `authorization` metadata of a call that passes. A changed tokens file needs a stop and a start of rapira.
+`rapira_grpc_auth::Auth` is the `auth` interceptor. It reads the bearer tokens from `[grpc.auth].tokens_file` in the master. Each call needs exactly one `authorization: Bearer <token>` value with a configured token. https://www.rfc-editor.org/rfc/rfc6750#section-2.1 `grpc.health.v1.Health` needs no token, because Kubernetes gRPC probes cannot send metadata. A call without a valid token gets UNAUTHENTICATED with `www-authenticate: Bearer`: the gRPC status 16, or the HTTP status 401 for a Connect unary request. PHP still sees the `authorization` metadata of a call that passes. A token crosses the network in clear text, so put a TLS proxy in front of the listener when clients connect over a network that you do not trust. https://www.rfc-editor.org/rfc/rfc6750#section-5.3 A changed tokens file needs a stop and a start of rapira.
 
 To add a built-in interceptor:
 
