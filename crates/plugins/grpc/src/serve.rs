@@ -48,10 +48,14 @@ impl Serving {
             intake,
         };
         // The plugin routes come first, so a configured service cannot hide health or reflection.
-        let service = ConnectRpcService::new(Chain(router, dispatcher))
+        let mut service = ConnectRpcService::new(Chain(router, dispatcher))
             .with_deadline_policy(deadlines)
             // The default registry offers every codec that the build compiles, zstd included.
             .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
+        // The interceptors cover every route: PHP methods, health, reflection and unknown paths.
+        for interceptor in &config.interceptors {
+            service = service.with_interceptor_arc(Arc::clone(interceptor));
+        }
         Self {
             service,
             connection: ConnectionConfig::new()

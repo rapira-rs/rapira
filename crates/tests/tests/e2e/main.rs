@@ -11,6 +11,7 @@ mod extensions;
 mod failboot_worker_tests;
 mod general_tests;
 mod grpc;
+mod grpc_auth;
 mod grpc_dispatcher;
 mod grpc_schema;
 mod grpc_server;

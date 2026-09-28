@@ -942,6 +942,7 @@ dependencies = [
  "connectrpc-reflection",
  "http",
  "rapira_config",
+ "rapira_grpc_auth",
  "rapira_net",
  "rapira_php_build",
  "rapira_sapi",
