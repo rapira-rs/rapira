@@ -46,6 +46,13 @@ fn boot_server_follows_the_cli() -> anyhow::Result<()> {
             ini: "variables_order = \"GPCS\"",
         },
         Case {
+            name: "register_argc_argv = Off still gives argv, as in the CLI",
+            mode: Mode::Dispatcher,
+            fixture: "boot_server/dispatcher.php",
+            env: &[("BOOT_PROBE", "from-env")],
+            ini: "register_argc_argv = Off",
+        },
+        Case {
             name: "the entrypoint wins over an environment variable of the same name",
             mode: Mode::Dispatcher,
             fixture: "boot_server/dispatcher.php",
