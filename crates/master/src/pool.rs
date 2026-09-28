@@ -36,8 +36,6 @@ pub(crate) struct Pool {
     pub board: Scoreboard,
     pub table: ProcTable,
     pub control_timeout: Duration,
-    /// Latched history: scoreboard counters cannot carry it, a replacement `bind()` zeroes a slot's served count.
-    pub ever_served: bool,
     /// This pool's overlap-reload chain; `None` once finished or never started.
     pub reload: Option<Reload>,
 }
@@ -56,7 +54,6 @@ impl Pool {
             board,
             table,
             control_timeout,
-            ever_served: false,
             reload: None,
         }
     }
@@ -80,13 +77,6 @@ impl Pool {
                 handled.saturating_sub(errors)
             })
             .sum()
-    }
-
-    /// Must run before a replacement bind resets the slot counters.
-    fn latch_served(&mut self) {
-        if !self.ever_served && self.total_successful() > 0 {
-            self.ever_served = true;
-        }
     }
 
     fn slot_is_free(&self, i: usize) -> bool {
@@ -259,7 +249,6 @@ impl Pool {
     ) -> anyhow::Result<()> {
         let slot = w.slot;
         let lived = now.saturating_duration_since(w.spawned_at);
-        self.latch_served();
         self.board.clear(slot);
 
         if let Some(Reload {
@@ -284,7 +273,7 @@ impl Pool {
                 self.table.slots[slot].schedule_immediate(now);
             }
             ExitVerdict::Unhealthy => {
-                if w.generation == 0 && !self.ever_served {
+                if w.generation == 0 && self.total_successful() == 0 {
                     anyhow::bail!(
                         "{} pool: worker {} exited unhealthy before the pool served any request",
                         self.cfg.name,
@@ -333,7 +322,7 @@ impl Pool {
         }
     }
 
-    /// Nothing runs while the master stops; the stop escalation bounds every worker. The refill pauses while this pool drains a reload chain: it would race the chain for the slot it just freed. The served latch and the request watchdog keep running during the reload.
+    /// Nothing runs while the master stops; the stop escalation bounds every worker. The refill pauses while this pool drains a reload chain: it would race the chain for the slot it just freed. The request watchdog keeps running during the reload.
     pub(crate) fn maintenance_tick(
         &mut self,
         now: Instant,
@@ -343,7 +332,6 @@ impl Pool {
         if stopping {
             return;
         }
-        self.latch_served();
         self.watchdog_tick();
         if self.reload.is_some() {
             return;

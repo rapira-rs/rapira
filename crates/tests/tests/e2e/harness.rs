@@ -415,6 +415,8 @@ pub struct Spawn {
     /// The `[grpc] descriptor_set`; None stages `echo.binpb`.
     descriptor_set: Option<PathBuf>,
     http_extra: String,
+    /// Keys inside `[http.pool]`, after `mode`.
+    http_pool: String,
     grpc_extra: String,
     toml: String,
     php_ini: String,
@@ -449,6 +451,7 @@ impl Spawn {
             services: Some(vec![ECHO_SERVICE.to_owned()]),
             descriptor_set: None,
             http_extra: String::new(),
+            http_pool: String::new(),
             grpc_extra: String::new(),
             toml: String::new(),
             php_ini: std::fs::read_to_string(&ini)
@@ -502,6 +505,13 @@ impl Spawn {
     pub fn http_extra(mut self, keys: &str) -> Spawn {
         self.http_extra += keys;
         self.http_extra.push('\n');
+        self
+    }
+
+    /// Keys inside `[http.pool]`, for example `max_requests = 2`.
+    pub fn http_pool(mut self, keys: &str) -> Spawn {
+        self.http_pool += keys;
+        self.http_pool.push('\n');
         self
     }
 
@@ -627,7 +637,7 @@ impl Spawn {
                     Some(listen) => listen.to_string(),
                     None => tcp(port.take().unwrap_or_else(free_port)),
                 };
-                let pool = format!("mode = \"{mode}\"\n");
+                let pool = format!("mode = \"{mode}\"\n{}", self.http_pool);
                 config += &render_config(&listen, 1, entrypoint, &self.http_extra, &pool);
                 config.push('\n');
             }

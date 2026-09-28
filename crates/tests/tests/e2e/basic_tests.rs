@@ -1,9 +1,11 @@
+use std::time::Duration;
+
 use http::header::{AUTHORIZATION, HeaderValue};
 use rapira_sapi::Mode;
 use tests::wire::submit;
 use tests::{drain, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn, scratch_dir, slot_line};
+use crate::harness::{Server, Spawn, fixture_path, http_get, scratch_dir, slot_line};
 
 #[test]
 fn fibers_stress_classic() -> anyhow::Result<()> {
@@ -290,6 +292,19 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
         snap.recycles
     );
     Ok(())
+}
+
+/// A respawned worker takes the slot of the worker that it replaces, and the slot keeps the counts of both. max_requests = 2 gives a quota of exactly 3: effective_quota adds 1 + hash % max(2 / 2, 1).
+#[test]
+fn scoreboard_counts_survive_a_respawn() {
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+        .http_pool("max_requests = 2")
+        .spawn();
+    for _ in 0..5 {
+        let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+        assert_eq!(code, 200);
+    }
+    slot_line(&srv, "handled 5 errors 0");
 }
 
 #[test]
