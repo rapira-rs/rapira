@@ -47,6 +47,7 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         register_server_variables: Some(callbacks::register_server_variables),
         log_message: Some(callbacks::log_message),
         get_request_time: None,
+        #[cfg(not(php87))]
         terminate_process: None,
         php_ini_path_override: null_mut(),
         default_post_reader: Some(php_default_post_reader),
@@ -54,9 +55,13 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         executable_location: null_mut(),
         php_ini_ignore: 0,
         php_ini_ignore_cwd: 1,
+        #[cfg(not(php87))]
         get_fd: None,
+        #[cfg(not(php87))]
         force_http_10: None,
+        #[cfg(not(php87))]
         get_target_gid: None,
+        #[cfg(not(php87))]
         get_target_uid: None,
         input_filter: Some(php_default_input_filter),
         ini_defaults: Some(ini_defaults),

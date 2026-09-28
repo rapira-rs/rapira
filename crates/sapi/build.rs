@@ -17,6 +17,7 @@ const C_FILES: &[&str] = &[
 fn main() -> anyhow::Result<()> {
     println!("cargo:rustc-check-cfg=cfg(php84)");
     println!("cargo:rustc-check-cfg=cfg(php85)");
+    println!("cargo:rustc-check-cfg=cfg(php87)");
 
     let php = rapira_php_build::discover()?;
 
@@ -29,6 +30,9 @@ fn main() -> anyhow::Result<()> {
         println!("cargo:rustc-cfg=php85");
     } else {
         println!("cargo:rustc-cfg=php84");
+    }
+    if php.version >= (8, 7) {
+        println!("cargo:rustc-cfg=php87");
     }
 
     rapira_php_build::compile("rapira_sapi", C_FILES, &php, &[]);
