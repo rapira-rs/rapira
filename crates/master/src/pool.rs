@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::time::{Duration, Instant};
 
 use libc::c_int;
-use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, Scoreboard, now_millis};
+use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, Scoreboard, SharedSlot, now_millis};
 
 use crate::PoolConfig;
 use crate::pctl::KillPhase;
@@ -249,6 +249,7 @@ impl Pool {
     ) -> anyhow::Result<()> {
         let slot = w.slot;
         let lived = now.saturating_duration_since(w.spawned_at);
+        count_exit(self.board.slot(slot), verdict);
         self.board.clear(slot);
 
         if let Some(Reload {
@@ -392,6 +393,18 @@ impl Pool {
     }
 }
 
+/// Counts the exit in the slot of the worker. It runs before `clear`, while no worker owns the slot.
+fn count_exit(slot: &SharedSlot, verdict: ExitVerdict) {
+    let counter = match verdict {
+        ExitVerdict::Drain => &slot.exits_drained,
+        ExitVerdict::Recycle => &slot.exits_recycled,
+        ExitVerdict::Unhealthy => &slot.exits_unhealthy,
+        ExitVerdict::TimeoutKill => &slot.exits_timeout,
+        ExitVerdict::Crash => &slot.exits_crashed,
+    };
+    counter.fetch_add(1, Relaxed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -425,5 +438,56 @@ mod tests {
 
         p.table.slots[2].respawn_at = None;
         assert_eq!(p.next_deadline(), Some(t0 + Duration::from_millis(500)));
+    }
+
+    fn exits(slot: &SharedSlot) -> [u64; 5] {
+        [
+            slot.exits_drained.load(Relaxed),
+            slot.exits_recycled.load(Relaxed),
+            slot.exits_unhealthy.load(Relaxed),
+            slot.exits_timeout.load(Relaxed),
+            slot.exits_crashed.load(Relaxed),
+        ]
+    }
+
+    #[test]
+    fn each_exit_verdict_counts_in_its_own_field() {
+        struct Case {
+            name: &'static str,
+            verdict: ExitVerdict,
+            want: [u64; 5],
+        }
+        let cases = [
+            Case {
+                name: "drain",
+                verdict: ExitVerdict::Drain,
+                want: [1, 0, 0, 0, 0],
+            },
+            Case {
+                name: "recycle",
+                verdict: ExitVerdict::Recycle,
+                want: [0, 1, 0, 0, 0],
+            },
+            Case {
+                name: "unhealthy",
+                verdict: ExitVerdict::Unhealthy,
+                want: [0, 0, 1, 0, 0],
+            },
+            Case {
+                name: "timeout kill",
+                verdict: ExitVerdict::TimeoutKill,
+                want: [0, 0, 0, 1, 0],
+            },
+            Case {
+                name: "crash",
+                verdict: ExitVerdict::Crash,
+                want: [0, 0, 0, 0, 1],
+            },
+        ];
+        for case in cases {
+            let board = Scoreboard::create(1).unwrap();
+            count_exit(board.slot(0), case.verdict);
+            assert_eq!(exits(board.slot(0)), case.want, "{}", case.name);
+        }
     }
 }

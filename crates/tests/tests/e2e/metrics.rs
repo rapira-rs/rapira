@@ -9,7 +9,7 @@ use rapira_sapi::Mode;
 
 use crate::harness::{
     Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_get_raw, http_raw,
-    parse_status_and_body, php_version, rapira_version,
+    parse_status_and_body, php_version, rapira_version, signal,
 };
 
 const REQ: Duration = Duration::from_secs(10);
@@ -21,6 +21,10 @@ const STATES: [&str; 4] = ["starting", "idle", "active", "draining"];
 
 fn workers(state: &str) -> String {
     format!(r#"rapira_workers{{pool="http",state="{state}"}}"#)
+}
+
+fn exits(reason: &str) -> String {
+    format!(r#"rapira_worker_exits_total{{pool="http",reason="{reason}"}}"#)
 }
 
 /// One `[http]` pool of one worker over the hang fixture, with `pool` keys in `[http.pool]` and a `[metrics]` listener on a free port.
@@ -166,4 +170,35 @@ fn each_live_worker_reports_its_memory() {
         );
         assert!(*series[0].1 > 0, "{series:?}");
     }
+}
+
+/// max_requests = 2 gives a quota of exactly 3: effective_quota adds 1 + hash % max(2 / 2, 1). Five requests recycle the worker once, and the new worker counts on in the same slot.
+#[test]
+fn counts_survive_a_recycle() {
+    let (srv, metrics) = spawn("max_requests = 2");
+    for _ in 0..5 {
+        let (code, _) = http_get(srv.addr, "/", REQ).expect("GET /");
+        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    }
+    let samples = scrape_until(&srv, metrics, "5 requests and 1 recycle", |s| {
+        value(s, REQUESTS) == 5 && value(s, &exits("recycled")) == 1
+    });
+    assert_eq!(value(&samples, &exits("crashed")), 0);
+}
+
+/// A worker that a signal kills, and that the master did not signal, counts as crashed.
+#[test]
+fn a_killed_worker_counts_as_crashed() {
+    let (srv, metrics) = spawn("");
+    let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    let pid: u32 = String::from_utf8(body)
+        .expect("a UTF-8 body")
+        .strip_prefix("ok:")
+        .and_then(|pid| pid.parse().ok())
+        .expect("the fixture answers ok:<pid>");
+    signal(pid, libc::SIGKILL);
+    scrape_until(&srv, metrics, "1 crashed exit", |s| {
+        value(s, &exits("crashed")) == 1
+    });
 }
