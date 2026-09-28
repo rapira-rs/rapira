@@ -1,0 +1,24 @@
+[package]
+name = "rapira_metrics"
+version = "0.8.1"
+edition.workspace = true
+publish = false
+license = "MIT"
+description = "The Prometheus endpoint of rapira - a process without PHP that reads the worker scoreboard"
+
+[lints]
+workspace = true
+
+[dependencies]
+rapira_scoreboard = { workspace = true }
+rapira_net = { workspace = true }
+rapira_config = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+tracing = { workspace = true }
+bytes = { workspace = true }
+http = { workspace = true }
+http-body-util = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread", "net", "time"] }
+hyper = { workspace = true, features = ["http1", "server"] }
+hyper-util = { workspace = true, features = ["tokio", "server", "http1", "server-graceful"] }

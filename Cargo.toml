@@ -22,6 +22,7 @@ members = [
     "crates/config",
     "crates/tests",
     "crates/master",
+    "crates/metrics",
     "crates/php_build",
     "crates/middleware/static_files",
     "crates/sapi",
@@ -43,6 +44,7 @@ rapira_http = { path = "crates/plugins/http" }
 rapira_grpc = { path = "crates/plugins/grpc" }
 rapira_net = { path = "crates/net" }
 rapira_master = { path = "crates/master" }
+rapira_metrics = { path = "crates/metrics" }
 rapira_scoreboard = { path = "crates/scoreboard" }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
