@@ -106,10 +106,10 @@ fn pool_stats(board: &Scoreboard, region: &PoolRegion) -> PoolStats {
 mod tests {
     use super::*;
 
-    /// Slots 0 and 1 belong to the metrics pool, slots 2 to 5 to an http pool of 2 workers.
+    /// Slots 0 and 1 belong to the metrics pool, slots 2 to 5 to an http pool of 2 workers, and slots 6 to 9 to a grpc pool of 2 workers. Each pair of states has different counts in at least one pool, and each grpc exit reason has its own count, so a swap of two states or two exit reasons fails the test.
     #[test]
     fn board_stats_sums_each_pool_except_its_own() {
-        let board = Scoreboard::create(6).unwrap();
+        let board = Scoreboard::create(10).unwrap();
         let slot = |i: usize| board.slot(i);
         let place = |i: usize, state: u32, pid: u32| {
             slot(i).state.store(state, Relaxed);
@@ -137,6 +137,16 @@ mod tests {
         // http slot 3: a state value that is not known. No state count, but a live pid.
         place(5, 9, 204);
         slot(5).handled.store(1, Relaxed);
+        // grpc slots 0 to 3: one starting, two draining and one active worker.
+        place(6, SLOT_STARTING, 301);
+        slot(6).exits_drained.store(1, Relaxed);
+        slot(6).exits_recycled.store(2, Relaxed);
+        place(7, SLOT_DRAINING, 302);
+        slot(7).exits_unhealthy.store(3, Relaxed);
+        place(8, SLOT_DRAINING, 303);
+        slot(8).exits_timeout.store(4, Relaxed);
+        place(9, SLOT_ACTIVE, 304);
+        slot(9).exits_crashed.store(5, Relaxed);
         let regions = [
             PoolRegion {
                 name: "metrics",
@@ -148,39 +158,78 @@ mod tests {
                 processes: 2,
                 slots: 2..6,
             },
+            PoolRegion {
+                name: "grpc",
+                processes: 2,
+                slots: 6..10,
+            },
         ];
 
         let got = board_stats(&board, &regions, 0);
 
         assert_eq!(
             got,
-            vec![PoolStats {
-                name: "http",
-                configured: 2,
-                states: [0, 1, 1, 0],
-                requests: 23,
-                failed: 3,
-                queued: 2,
-                script_restarts: 1,
-                exits: [1, 2, 0, 0, 1],
-                workers: vec![
-                    Worker {
-                        index: 0,
-                        pid: 201,
-                        memory: None
-                    },
-                    Worker {
-                        index: 1,
-                        pid: 202,
-                        memory: None
-                    },
-                    Worker {
-                        index: 3,
-                        pid: 204,
-                        memory: None
-                    },
-                ],
-            }]
+            vec![
+                PoolStats {
+                    name: "http",
+                    configured: 2,
+                    states: [0, 1, 1, 0],
+                    requests: 23,
+                    failed: 3,
+                    queued: 2,
+                    script_restarts: 1,
+                    exits: [1, 2, 0, 0, 1],
+                    workers: vec![
+                        Worker {
+                            index: 0,
+                            pid: 201,
+                            memory: None
+                        },
+                        Worker {
+                            index: 1,
+                            pid: 202,
+                            memory: None
+                        },
+                        Worker {
+                            index: 3,
+                            pid: 204,
+                            memory: None
+                        },
+                    ],
+                },
+                PoolStats {
+                    name: "grpc",
+                    configured: 2,
+                    states: [1, 0, 1, 2],
+                    requests: 0,
+                    failed: 0,
+                    queued: 0,
+                    script_restarts: 0,
+                    exits: [1, 2, 3, 4, 5],
+                    workers: vec![
+                        Worker {
+                            index: 0,
+                            pid: 301,
+                            memory: None
+                        },
+                        Worker {
+                            index: 1,
+                            pid: 302,
+                            memory: None
+                        },
+                        Worker {
+                            index: 2,
+                            pid: 303,
+                            memory: None
+                        },
+                        Worker {
+                            index: 3,
+                            pid: 304,
+                            memory: None
+                        },
+                    ],
+                },
+            ]
         );
     }
 }
