@@ -31,7 +31,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `rapira_grpc_classes.c`: `rapira_grpc_register_classes`, the object handlers, the constructors of the internal classes, and the shells of `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters. MINIT calls `rapira_grpc_register_classes` after the base classes.
 - `rapira_grpc.c`: the other method shells: the value classes, `name()` and `getServices()` of the dispatcher, the call and the response metadata.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
-- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, and `Server::from_settings`, which loads the descriptor set.
+- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set and also builds the interceptors.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
@@ -56,6 +56,29 @@ connect-rust handles the framing, the compression, the timeout headers and the e
 ## Remote address
 
 The remote address is in the request extensions as `rapira_sapi::Addr`. PHP gets it as `Context::$remote`.
+
+## Interceptors
+
+`[grpc].interceptors` lists the interceptor names in chain order. The master builds one `connectrpc::Interceptor` for each name before the fork. Each worker registers them on its `ConnectRpcService` with `with_interceptor_arc`, the first listed outermost. Without interceptors, connect-rust only checks that its chain is empty.
+
+The chain covers every route of the listener: the PHP methods, health, reflection, and paths that match no method. connect-rust runs the `intercept_head` of each interceptor before it reads the request body. A rejection in `intercept_head` reaches the client in the format of its protocol, and PHP does not see the call. An interceptor that must change the metadata that PHP sees uses `intercept_unary`, because `intercept_head` can read the headers but not change them.
+
+`rapira_grpc_auth::Auth` is the `auth` interceptor. It reads the bearer tokens from `[grpc.auth].tokens_file` in the master. Each call needs exactly one `authorization: Bearer <token>` value with a configured token. https://www.rfc-editor.org/rfc/rfc6750#section-2.1 `grpc.health.v1.Health` needs no token, because Kubernetes gRPC probes cannot send metadata. A call without a valid token gets UNAUTHENTICATED with `www-authenticate: Bearer`: the gRPC status 16, or the HTTP status 401 for Connect. PHP still sees the `authorization` metadata of a call that passes. A changed tokens file needs a stop and a start of rapira.
+
+To add a built-in interceptor:
+
+- Put it in a new crate under `crates/interceptors`, with its `Section`, `Settings`, `resolve` and a type that implements `connectrpc::Interceptor`.
+- In the root `Cargo.toml`, add the crate to the workspace `members` and to `[workspace.dependencies]`.
+- Add the crate to the dependencies in `crates/plugins/grpc/Cargo.toml`.
+- In `src/config.rs`, add its table to `Section`, as `auth` is for `[grpc.auth]`.
+- Resolve the table in `settings`, and give the result to `resolve_interceptors` as a new argument.
+- Add a variant with its settings to `config::Interceptor`.
+- In `resolve_interceptors`, match its name, add the name to the known names of the unknown-name error, and refuse a configured table that the list does not name.
+- Build it in `Server::from_settings`.
+- In the `src/config.rs` tests, add an arm to the match in `interceptor_list_and_tables_must_agree`, and add cases for the new name.
+- Add an e2e test in `crates/tests/tests/e2e/` that starts `rapira` with the new `[grpc.<name>]` table through `Spawn::grpc_extra`, and add its `mod` line to `main.rs`.
+- Add a commented example of the table to `examples/rapira.toml`, next to `[grpc.auth]`.
+- Add its boot errors to the error list in the Config section.
 
 ## Schemas
 
@@ -153,9 +176,21 @@ The `[grpc]` table. Unknown keys fail the boot.
 - `max_timeout_secs`: the upper limit for a client timeout. Default: unset, no limit. `default_timeout_secs` must not be larger.
 - `keepalive_interval_secs`: the time without a new request, request data or a PING answer after which the listener sends an HTTP/2 keepalive PING. Default `10`. It must be at least 1.
 - `keepalive_timeout_secs`: the time the listener waits for the PING answer before it closes the connection. Default `10`. It must be at least 1.
+- `interceptors`: the interceptor names, in chain order. Default: empty. The only name is `"auth"`.
+- `[grpc.auth]`: the `auth` interceptor. `tokens_file`: the file of bearer tokens, relative to the directory of `rapira.toml`. Required. One token per line. Blank lines and lines that start with `#` are skipped.
 - `[grpc.pool]`: the worker pool. It takes the keys of `[http.pool]`, and its `mode` must be `"dispatcher"`.
 
 The drain window is not a key of this table. It is `[supervisor].process_control_timeout_secs` minus 5 seconds, or minus half of it when it is below 10 seconds. The drain therefore ends before the master sends SIGTERM.
+
+These interceptor errors fail the boot with exit code 1:
+
+- `grpc.interceptors lists "<name>" twice`
+- `grpc.interceptors entry "<name>" is unknown; known interceptors: "auth"`
+- `grpc.interceptors lists "auth" but [grpc.auth] is missing`
+- `[grpc.auth] is configured but grpc.interceptors does not list "auth"`
+- `grpc.auth.tokens_file is required`
+- `reading grpc.auth.tokens_file`: the file cannot be read.
+- `line <n> is not a valid bearer token`, and `the file has no token`. The error never shows the text of the line.
 
 ## Build
 
@@ -164,7 +199,7 @@ cargo build -p rapira_grpc
 cargo clippy -p rapira_grpc --all-targets
 ```
 
-The tests that need PHP or a socket live in `crates/tests/tests/e2e/` and run the `rapira` binary: `grpc_server.rs` and `grpc_schema.rs` drive this crate over the wire with PHP fixtures in the role of the application, `grpc_dispatcher.rs` and `grpc_values.rs` cover the PHP side, and `grpc.rs` covers the `[grpc]` pool of `rapira.toml`. `crates/tests/src/grpc.rs` holds the gRPC, gRPC-Web and Connect clients. `make grpc_fixtures` rebuilds the descriptor sets in `crates/tests/fixtures/grpc/` with a pinned `buf`.
+The tests that need PHP or a socket live in `crates/tests/tests/e2e/` and run the `rapira` binary: `grpc_server.rs` and `grpc_schema.rs` drive this crate over the wire with PHP fixtures in the role of the application, `grpc_dispatcher.rs` and `grpc_values.rs` cover the PHP side, `grpc.rs` covers the `[grpc]` pool of `rapira.toml`, and `grpc_auth.rs` covers the `auth` interceptor. `crates/tests/src/grpc.rs` holds the gRPC, gRPC-Web and Connect clients. `make grpc_fixtures` rebuilds the descriptor sets in `crates/tests/fixtures/grpc/` with a pinned `buf`.
 
 ## License
 

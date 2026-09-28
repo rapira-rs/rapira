@@ -49,12 +49,17 @@ processes = 16                # a fixed worker count; defaults to the CPU count
 # max_timeout_secs = 60        # upper limit for a client timeout; unset (the default) = no limit
 # keepalive_interval_secs = 10 # sends an HTTP/2 PING after this long without a request, request data or a PING answer
 # keepalive_timeout_secs = 10  # closes the connection when the PING has no answer within this time
+# interceptors = ["auth"]      # applied in list order; each listed interceptor needs its table
 
 # The worker pool behind the grpc listener. It takes the keys of [http.pool].
 # [grpc.pool]
 # entrypoint = "grpc.php"      # relative paths resolve against this file's directory
 # mode = "dispatcher"          # the only mode for a grpc pool
 # processes = 16               # defaults to the CPU count
+
+# The bearer-token check. Requires "auth" in grpc.interceptors. grpc.health.v1.Health needs no token.
+# [grpc.auth]
+# tokens_file = "grpc-tokens"  # relative to this file's directory; one token per line
 
 # [supervisor]
 # pidfile = "rapira.pid"      # relative to this file's directory
