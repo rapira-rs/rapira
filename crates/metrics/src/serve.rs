@@ -83,7 +83,7 @@ impl Server {
         };
         let fatal = acceptor.run(rt.handle(), &serving);
         let Serving { graceful, .. } = serving;
-        // The timeout needs the runtime context when it is created, so it is created inside block_on.
+        // `tokio::time::timeout` panics outside a runtime context, so the call runs inside `block_on`.
         let drained =
             rt.block_on(async { tokio::time::timeout(drain_grace, graceful.shutdown()).await });
         if drained.is_err() {

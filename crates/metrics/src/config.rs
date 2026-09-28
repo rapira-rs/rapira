@@ -1,5 +1,5 @@
 use anyhow::{Context, Result};
-use rapira_config::ListenAddr;
+use rapira_net::ListenAddr;
 use serde::Deserialize;
 
 /// The `[metrics]` table.

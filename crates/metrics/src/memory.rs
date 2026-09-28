@@ -1,5 +1,5 @@
 /// The memory of one worker, in bytes.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct Memory {
     pub rss: Option<u64>,
     pub pss: Option<u64>,

@@ -4,7 +4,7 @@ use crate::memory::Memory;
 use crate::stats::{EXIT_REASONS, PoolStats, STATES};
 
 /// The versions for `rapira_build_info`.
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Build {
     /// The version of the `rapira` binary.
     pub version: &'static str,
