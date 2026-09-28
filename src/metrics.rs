@@ -15,8 +15,8 @@ pub fn pool_run(
         version: env!("CARGO_PKG_VERSION"),
         php_version: rapira_sapi::linked_php_version(),
     };
-    let mut server = rapira_metrics::Server::new(settings, build);
-    server.prepare(prepare).context("metrics: prepare failed")?;
+    let server =
+        rapira_metrics::Server::new(settings, build, prepare).context("metrics: prepare failed")?;
     let pool = PoolConfig {
         name: "metrics",
         processes: 1,
@@ -32,7 +32,7 @@ pub fn pool_run(
 
 /// Returns the process exit code for the master's fork bracket. The process runs no PHP.
 pub fn metrics_body(env: WorkerEnv, server: rapira_metrics::Server, drain_grace: Duration) -> i32 {
-    // The process name tells the metrics process apart from the workers: https://man7.org/linux/man-pages/man2/PR_SET_NAME.2const.html
+    // The process name identifies the metrics process: https://man7.org/linux/man-pages/man2/PR_SET_NAME.2const.html
     #[cfg(target_os = "linux")]
     // SAFETY: prctl reads a NUL-terminated static string that fits the 16-byte limit.
     unsafe {

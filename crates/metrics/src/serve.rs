@@ -25,26 +25,16 @@ const KEEPALIVE: Duration = Duration::from_secs(60);
 
 /// The metrics endpoint. The master prepares it before the fork, and the metrics process serves it.
 pub struct Server {
-    settings: Settings,
     build: Build,
-    prepared: Option<PreparedListener>,
+    prepared: PreparedListener,
 }
 
 impl Server {
-    pub fn new(settings: Settings, build: Build) -> Self {
-        Self {
-            settings,
-            build,
-            prepared: None,
-        }
-    }
-
     /// Master side, before the fork: binds the listener.
-    pub fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
-        let prepared = ctx.bind(&self.settings.listen)?;
+    pub fn new(settings: Settings, build: Build, ctx: &mut PrepareCtx) -> Result<Server> {
+        let prepared = ctx.bind(&settings.listen)?;
         tracing::info!(target: "metrics", "prepared listener on {}", prepared.addr());
-        self.prepared = Some(prepared);
-        Ok(())
+        Ok(Self { build, prepared })
     }
 
     /// In the metrics process. Serves `GET /metrics` until `stop` turns true, then waits for the scrapes in flight within `drain_grace`. `own` is the pool of the metrics process, which the output leaves out.
@@ -56,17 +46,14 @@ impl Server {
         stop: watch::Receiver<bool>,
         drain_grace: Duration,
     ) -> Result<()> {
-        let Some(prepared) = self.prepared else {
-            return Err(anyhow!("metrics listener was not prepared"));
-        };
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
             .thread_name("rapira-metrics-io")
             .build()
             .map_err(|e| anyhow!("building the metrics runtime: {e}"))?;
-        tracing::info!(target: "metrics", "serving /metrics on {}", prepared.addr());
-        let acceptor = Acceptor::adopt(prepared, stop, rt.handle())?;
+        tracing::info!(target: "metrics", "serving /metrics on {}", self.prepared.addr());
+        let acceptor = Acceptor::adopt(self.prepared, stop, rt.handle())?;
         let mut builder = http1::Builder::new();
         builder
             .timer(TokioTimer::new())
