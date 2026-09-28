@@ -5,7 +5,7 @@ use rapira_sapi::Mode;
 use tests::wire::submit;
 use tests::{drain, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn, fixture_path, http_get, scratch_dir, slot_line};
+use crate::harness::{Server, Spawn, fixture_path, http_get, scratch_dir, slot_line, wait_workers};
 
 #[test]
 fn fibers_stress_classic() -> anyhow::Result<()> {
@@ -300,7 +300,18 @@ fn scoreboard_counts_survive_a_respawn() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
         .http_pool("max_requests = 2")
         .spawn();
-    for _ in 0..5 {
+    let first = wait_workers(&srv, Duration::from_secs(20), "one worker", |p| {
+        p.len() == 1
+    });
+    for _ in 0..3 {
+        let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+        assert_eq!(code, 200);
+    }
+    // The third request reaches the quota. The draining worker can accept one more connection and close it, so the next requests wait for the new worker.
+    wait_workers(&srv, Duration::from_secs(20), "the respawned worker", |p| {
+        p.len() == 1 && p[0] != first[0]
+    });
+    for _ in 0..2 {
         let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
         assert_eq!(code, 200);
     }

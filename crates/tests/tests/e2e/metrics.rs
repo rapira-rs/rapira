@@ -219,7 +219,15 @@ fn each_live_worker_reports_its_memory() {
 #[test]
 fn counts_survive_a_recycle() {
     let (srv, metrics) = spawn("max_requests = 2");
-    for _ in 0..5 {
+    for _ in 0..3 {
+        let (code, _) = http_get(srv.addr, "/", REQ).expect("GET /");
+        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    }
+    // The third request reaches the quota. The master counts the exit before it forks the new worker, so the next requests cannot reach the draining worker.
+    scrape_until(&srv, metrics, "the recycle", |s| {
+        value(s, &exits("recycled")) == 1
+    });
+    for _ in 0..2 {
         let (code, _) = http_get(srv.addr, "/", REQ).expect("GET /");
         assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     }
