@@ -1,7 +1,6 @@
 use std::cell::RefCell;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
 use std::thread;
 use std::thread::JoinHandle;
@@ -24,7 +23,8 @@ thread_local! {
 
 struct JobRx {
     rx: Receiver<Box<dyn Work>>,
-    pending: Arc<AtomicUsize>,
+    /// The `pending` field of this worker's scoreboard slot.
+    pending: &'static AtomicU64,
 }
 
 thread_local! {
@@ -125,9 +125,9 @@ impl Rapira {
             slot,
         } = hooks;
         slot.bind(std::process::id());
-        let pending = Arc::new(AtomicUsize::new(0));
+        let pending: &'static AtomicU64 = &slot.pending;
         let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
-        let sink = Sink::new(intake_tx, pending.clone());
+        let sink = Sink::new(intake_tx, pending);
 
         crate::context::set_script(&entrypoint);
         // SAFETY: safe, trust me, I'm a developer
@@ -270,7 +270,7 @@ pub(crate) fn pull_job_try() -> Pulled {
 pub(crate) fn pending_depth() -> usize {
     JOB_RX.with_borrow(|slot| {
         slot.as_ref()
-            .map_or(0, |job_r| job_r.pending.load(Ordering::Relaxed))
+            .map_or(0, |job_r| job_r.pending.load(Ordering::Relaxed) as usize)
     })
 }
 

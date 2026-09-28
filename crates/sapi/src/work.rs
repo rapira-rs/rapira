@@ -1,7 +1,6 @@
 use std::ffi::CStr;
 use std::marker::PhantomData;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::{Duration, Instant};
 
@@ -88,13 +87,14 @@ pub fn now_unix_f64() -> f64 {
 #[derive(Clone)]
 pub struct Sink {
     tx: SyncSender<Box<dyn Work>>,
-    pending: Arc<AtomicUsize>,
+    /// The `pending` field of this worker's scoreboard slot.
+    pending: &'static AtomicU64,
 }
 
-struct PendingGuard<'a>(Option<&'a AtomicUsize>);
+struct PendingGuard<'a>(Option<&'a AtomicU64>);
 
 impl<'a> PendingGuard<'a> {
-    fn arm(pending: &'a AtomicUsize) -> Self {
+    fn arm(pending: &'a AtomicU64) -> Self {
         pending.fetch_add(1, Ordering::Relaxed);
         Self(Some(pending))
     }
@@ -112,13 +112,13 @@ impl Drop for PendingGuard<'_> {
 }
 
 impl Sink {
-    pub(crate) fn new(tx: SyncSender<Box<dyn Work>>, pending: Arc<AtomicUsize>) -> Self {
+    pub(crate) fn new(tx: SyncSender<Box<dyn Work>>, pending: &'static AtomicU64) -> Self {
         Self { tx, pending }
     }
 
     /// pending is incremented before the send: the consumer decrements as soon as it wakes, so the reverse order could wrap the counter below zero.
     pub async fn submit(&self, mut unit: Box<dyn Work>) -> Result<(), Refused> {
-        let pending = PendingGuard::arm(&self.pending);
+        let pending = PendingGuard::arm(self.pending);
         // The deadline starts at the first full intake: the common send needs no clock read.
         let mut deadline = None;
         loop {
@@ -191,8 +191,9 @@ mod tests {
     }
 
     fn sink() -> (Sink, std::sync::mpsc::Receiver<Box<dyn Work>>) {
+        static PENDING: AtomicU64 = AtomicU64::new(0);
         let (tx, rx) = std::sync::mpsc::sync_channel(1);
-        (Sink::new(tx, Arc::new(AtomicUsize::new(0))), rx)
+        (Sink::new(tx, &PENDING), rx)
     }
 
     #[tokio::test(flavor = "current_thread")]

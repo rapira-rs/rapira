@@ -202,3 +202,23 @@ fn a_killed_worker_counts_as_crashed() {
         value(s, &exits("crashed")) == 1
     });
 }
+
+const QUEUED: &str = r#"rapira_requests_queued{pool="http"}"#;
+
+/// The held request takes the only PHP thread, so the next two requests wait in the worker queue.
+#[test]
+fn requests_behind_a_held_worker_count_as_queued() {
+    let (srv, metrics) = spawn("");
+    let addr = srv.addr;
+    // These clients never get an answer. Their threads end when the server stops at the end of the test and the connections close.
+    std::thread::spawn(move || http_get(addr, "/?hang=1", Duration::from_secs(60)));
+    scrape_until(&srv, metrics, "an active worker", |s| {
+        value(s, &workers("active")) == 1
+    });
+    for _ in 0..2 {
+        std::thread::spawn(move || http_get(addr, "/", Duration::from_secs(60)));
+    }
+    scrape_until(&srv, metrics, "2 queued requests", |s| {
+        value(s, QUEUED) == 2
+    });
+}
