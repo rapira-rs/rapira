@@ -255,11 +255,11 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
     })
 }
 
-/// The host pulls a unit to shed it after a failed boot cycle. Before this pull, the worker stored starting, or draining after the drain decision. The pull keeps the state.
-pub(crate) fn pull_job_to_shed() -> Option<Box<dyn Work>> {
-    JOB_RX.with_borrow(|slot| match slot.as_ref()?.recv(None) {
-        Pulled::Job(job) => Some(job),
-        _ => None,
+/// The host pulls a unit to shed it after a failed boot cycle, and waits at most `timeout`. Before this pull, the worker stored starting, or draining after the drain decision. The pull keeps the state.
+pub(crate) fn pull_job_to_shed(timeout: Duration) -> Pulled {
+    JOB_RX.with_borrow(|slot| match slot.as_ref() {
+        Some(job_r) => job_r.recv(Some(timeout)),
+        None => Pulled::Closed,
     })
 }
 

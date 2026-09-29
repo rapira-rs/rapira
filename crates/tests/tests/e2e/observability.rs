@@ -252,6 +252,44 @@ fn a_worker_whose_boot_fails_stays_starting() {
     );
 }
 
+/// A pool whose boot failed turns ready without a request when a later boot succeeds. The fixture fails its boot until up.flag exists next to it.
+#[test]
+fn a_pool_whose_boot_failed_turns_ready_without_a_request() {
+    let (srv, observability) = spawn(
+        "lifecycle/dependency-boot-worker.php",
+        "",
+        "[observability.probes]",
+    );
+    assert!(
+        wait_log_contains(&srv, "dependency down", REQ),
+        "\n{}",
+        diagnostics(&srv)
+    );
+    let resp = get(observability, "/readyz");
+    assert_eq!(
+        (resp.status(), resp.body_string().as_str()),
+        (503, "pool http: no ready worker\n"),
+        "\n{}",
+        diagnostics(&srv)
+    );
+    std::fs::write(srv.dir.join("http/up.flag"), "").expect("write up.flag");
+    // No request goes to the app port, so only the worker itself can run the boot again.
+    let end = Instant::now() + Duration::from_secs(15);
+    loop {
+        let resp = get(observability, "/readyz");
+        if resp.status() == 200 {
+            assert_eq!(resp.body_string(), "ok\n");
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "the pool is not ready within 15 s after the boot can succeed\n{}",
+            diagnostics(&srv)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
 /// A failed re-boot after the app served shows starting, so the request watchdog skips the worker.
 #[test]
 fn a_failed_reboot_stays_starting() {

@@ -4,7 +4,7 @@ use crate::{
     callbacks::*,
     diagnostics::error_type_to_level,
     scoreboard::sb_update,
-    start::{pull_job, pull_job_to_shed},
+    start::{Pulled, pull_job, pull_job_to_shed},
     types::Outcome,
 };
 use std::{
@@ -14,6 +14,7 @@ use std::{
     os::raw::c_int,
     path::{Path, PathBuf},
     ptr::null_mut,
+    time::Duration,
 };
 
 use crate::{
@@ -30,6 +31,8 @@ thread_local! {
 }
 
 const UNHEALTHY_AFTER: u32 = 5;
+/// After a failed boot cycle, the worker runs the boot again when no unit arrives within this time. A load balancer that reads `/readyz` sends no requests to a pool that is not ready.
+const BOOT_RETRY: Duration = Duration::from_secs(5);
 
 enum Cycle {
     Stop,
@@ -153,12 +156,13 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                     sb_update(scoreboard::Event::Unhealthy);
                 }
                 sb_update(scoreboard::Event::BootFailed);
-                match pull_job_to_shed() {
-                    None => break WorkerExit::Closed,
-                    Some(unit) => {
+                match pull_job_to_shed(BOOT_RETRY) {
+                    Pulled::Closed => break WorkerExit::Closed,
+                    Pulled::Job(unit) => {
                         unit.shed();
                         sb_update(scoreboard::Event::Shed);
                     }
+                    Pulled::Timeout | Pulled::Empty => {}
                 }
             }
         }

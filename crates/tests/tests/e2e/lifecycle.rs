@@ -264,22 +264,17 @@ fn an_unreadable_entrypoint_refuses_to_boot() {
     assert!(log.contains("is not readable"), "\n{log}");
 }
 
+/// A gen-0 pool whose boot always fails stops the master with exit code 70. No request is necessary: the worker runs the boot again on its own, and the fifth failed boot flags it unhealthy.
 #[test]
 fn master_failboot_exits_70() {
     let mut srv = spawn_with_config("lifecycle/fatal-worker.php", 1, "");
-    let addr = srv.addr;
-    let end = Instant::now() + Duration::from_secs(60);
-    let status = loop {
-        if let Some(st) = srv.try_status() {
-            break Some(st);
-        }
-        if Instant::now() >= end {
-            panic!("master never exited\n{}", diagnostics(&srv));
-        }
-        let _ = http_get(addr, "/", Duration::from_secs(2));
-        std::thread::sleep(Duration::from_millis(100));
-    };
+    let status = srv.wait_exit(Duration::from_secs(60));
     assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
+    let log = std::fs::read_to_string(srv.log_file()).expect("read server.log");
+    assert!(
+        log.contains("worker keeps failing to boot; flagged unhealthy"),
+        "5 failed boots must flag the worker unhealthy\n{log}"
+    );
 }
 
 /// A worker-mode bootstrap that never calls handle_request() must failboot the master, not hang or shed 503s forever.
