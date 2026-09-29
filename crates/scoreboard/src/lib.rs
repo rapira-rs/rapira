@@ -147,10 +147,9 @@ impl Scoreboard {
 }
 
 impl SharedSlot {
-    /// Worker-side claim. It runs exactly once per process before requests flow. The counters keep the counts of the earlier workers of this slot, so a sum over the slots of a pool only goes up. A bind always follows a zero-filled mmap or a `clear`, so `pending` is already 0.
+    /// Worker-side claim. It runs exactly once per process before requests flow. It stores only the pid. The state stays STARTING, which the master set before the fork, until the first pull of the worker. The counters keep the counts of the earlier workers of this slot, so a sum over the slots of a pool only goes up. A bind always follows a zero-filled mmap or a `clear`, so `pending` is already 0.
     pub fn bind(&'static self, pid: u32) {
         self.pid.store(pid, Relaxed);
-        self.state.store(SLOT_IDLE, Relaxed);
     }
 }
 
@@ -183,7 +182,11 @@ mod tests {
         slot.bind(4343);
         let snap = sb.snapshot_slots();
         assert_eq!(snap.len(), 1);
-        assert_eq!((snap[0].pid, snap[0].state), (4343, SLOT_IDLE));
+        assert_eq!(
+            (snap[0].pid, snap[0].state),
+            (4343, SLOT_STARTING),
+            "bind stores the pid and keeps the state that the master set"
+        );
         assert_eq!(
             (snap[0].handled, snap[0].errors, snap[0].recycles),
             (3, 1, 1),

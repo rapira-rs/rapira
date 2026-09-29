@@ -162,6 +162,31 @@ fn an_idle_connection_closes_after_the_keepalive_timeout() {
     assert!(rest.is_empty(), "{rest:?}");
 }
 
+/// A booting worker shows starting until its first pull. The fixture sleeps 3 s before its first receive().
+#[test]
+fn a_booting_worker_shows_starting_until_its_first_pull() {
+    let metrics = SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/slow-boot-worker.php"),
+    )
+    .toml(&format!("[metrics]\nlisten = \"{metrics}\""))
+    .spawn();
+    let (_, _, samples) = scrape(metrics);
+    assert_eq!(
+        (
+            value(&samples, &workers("starting")),
+            value(&samples, &workers("idle"))
+        ),
+        (1, 0),
+        "starting and idle\n{samples:#?}\n{}",
+        diagnostics(&srv)
+    );
+    scrape_until(&srv, metrics, "an idle worker", |s| {
+        value(s, &workers("idle")) == 1 && value(s, &workers("starting")) == 0
+    });
+}
+
 /// The master binds every listener in one boot, the metrics listener first. The http pool then fails on the shared address.
 #[test]
 fn a_metrics_listener_on_the_http_address_fails_the_boot() {

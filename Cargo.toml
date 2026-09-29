@@ -79,6 +79,7 @@ rapira_config = { workspace = true }
 rapira_http = { workspace = true }
 rapira_grpc = { workspace = true }
 rapira_metrics = { workspace = true }
+rapira_scoreboard = { workspace = true }
 libc = { workspace = true }
 mimalloc = "0.1"
 serde = { workspace = true }

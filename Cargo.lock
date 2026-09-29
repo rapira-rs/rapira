@@ -923,6 +923,7 @@ dependencies = [
  "rapira_metrics",
  "rapira_net",
  "rapira_sapi",
+ "rapira_scoreboard",
  "serde",
  "tokio",
  "toml",

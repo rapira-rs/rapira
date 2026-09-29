@@ -1,3 +1,4 @@
+use std::sync::atomic::Ordering::Release;
 use std::time::Duration;
 
 use anyhow::Context;
@@ -39,6 +40,10 @@ pub fn metrics_body(env: WorkerEnv, server: rapira_metrics::Server, drain_grace:
         libc::prctl(libc::PR_SET_NAME, c"rapira-metrics".as_ptr())
     };
     env.slot_view.bind(std::process::id());
+    // The metrics process never pulls PHP work, so it reports idle itself. The reload gate waits for it.
+    env.slot_view
+        .state
+        .store(rapira_scoreboard::SLOT_IDLE, Release);
     rapira_master::spawn_lifeline_watch(env.lifeline);
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
     crate::worker::spawn_signal_thread(move || {
