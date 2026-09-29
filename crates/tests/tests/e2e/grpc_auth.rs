@@ -9,11 +9,6 @@ use tests::grpc::{Conn, ECHO_PATH, HI, HI_FRAME, Wire, envelope, web_trailers};
 
 use crate::harness::{Spawn, calls, listen, scratch_dir, stop};
 
-/// Logs a `call` record for each call and answers as the request metadata asks.
-fn wire_worker() -> PathBuf {
-    fixture("grpc/wire-worker.php")
-}
-
 /// The `[grpc]` lines that enable `auth` with the tokens file `tokens`.
 fn auth(tokens: &Path) -> String {
     format!(
@@ -37,8 +32,6 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
         status: u16,
         /// The gRPC status: HTTP trailers for gRPC, the 0x80 frame for gRPC-Web. None for Connect.
         grpc_status: Option<&'static str>,
-        /// A rejected Connect call: the body contains `"code":"unauthenticated"` and the head has `www-authenticate: Bearer`.
-        connect_rejected: bool,
         reaches_php: bool,
     }
     const GRPC: &str = "application/grpc";
@@ -58,7 +51,6 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
             authorization: None,
             status: 200,
             grpc_status: Some("16"),
-            connect_rejected: false,
             reaches_php: false,
         },
         Case {
@@ -71,7 +63,6 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
             authorization: Some("Bearer gamma-token"),
             status: 200,
             grpc_status: Some("16"),
-            connect_rejected: false,
             reaches_php: false,
         },
         Case {
@@ -84,7 +75,6 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
             authorization: Some("Bearer alpha-token"),
             status: 200,
             grpc_status: Some("0"),
-            connect_rejected: false,
             reaches_php: true,
         },
         Case {
@@ -97,7 +87,6 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
             authorization: Some("bearer  beta.token~/+=="),
             status: 200,
             grpc_status: Some("0"),
-            connect_rejected: false,
             reaches_php: true,
         },
         Case {
@@ -110,7 +99,6 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
             authorization: None,
             status: 200,
             grpc_status: Some("16"),
-            connect_rejected: false,
             reaches_php: false,
         },
         Case {
@@ -123,7 +111,6 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
             authorization: Some("Bearer gamma-token"),
             status: 200,
             grpc_status: Some("16"),
-            connect_rejected: false,
             reaches_php: false,
         },
         Case {
@@ -136,7 +123,6 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
             authorization: Some("Bearer alpha-token"),
             status: 200,
             grpc_status: Some("0"),
-            connect_rejected: false,
             reaches_php: true,
         },
         Case {
@@ -149,7 +135,6 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
             authorization: None,
             status: 401,
             grpc_status: None,
-            connect_rejected: true,
             reaches_php: false,
         },
         Case {
@@ -162,7 +147,6 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
             authorization: Some("Bearer gamma-token"),
             status: 401,
             grpc_status: None,
-            connect_rejected: true,
             reaches_php: false,
         },
         Case {
@@ -175,7 +159,6 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
             authorization: Some("Bearer alpha-token"),
             status: 200,
             grpc_status: None,
-            connect_rejected: false,
             reaches_php: true,
         },
         Case {
@@ -188,7 +171,6 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
             authorization: None,
             status: 401,
             grpc_status: None,
-            connect_rejected: true,
             reaches_php: false,
         },
         Case {
@@ -201,12 +183,11 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
             authorization: Some("Bearer alpha-token"),
             status: 200,
             grpc_status: None,
-            connect_rejected: false,
             reaches_php: true,
         },
     ];
 
-    let srv = Spawn::grpc(wire_worker())
+    let srv = Spawn::grpc(fixture("grpc/wire-worker.php"))
         .grpc_extra(&auth(&fixture("grpc/tokens")))
         .json_log()
         .spawn();
@@ -225,18 +206,15 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
 
         assert_eq!(got.status, case.status, "{}: {got:?}", case.name);
         if let Some(want) = case.grpc_status {
-            let trailers = if case.content_type == Some(WEB) {
-                web_trailers(&got.body)
-            } else {
-                got.trailers.clone()
+            let web = (case.content_type == Some(WEB)).then(|| web_trailers(&got.body));
+            let status = match &web {
+                Some(trailers) => trailers.get("grpc-status").and_then(|v| v.to_str().ok()),
+                None => got.grpc_status(),
             };
-            let status = trailers
-                .get("grpc-status")
-                .or_else(|| got.headers.get("grpc-status"))
-                .and_then(|v| v.to_str().ok());
             assert_eq!(status, Some(want), "{}: {got:?}", case.name);
         }
-        if case.connect_rejected {
+        // A rejected Connect call carries the challenge and the Connect error code.
+        if case.status == 401 {
             assert_eq!(
                 got.headers
                     .get("www-authenticate")
@@ -272,7 +250,7 @@ async fn auth_rejects_a_call_before_php_on_each_protocol() {
     stop(srv).await;
 }
 
-/// Sources: `grpc/health/v1/health.proto` (SERVING is 1), `grpc/reflection/v1/reflection.proto` (`list_services` is field 7), PROTOCOL-HTTP2 (16 is UNAUTHENTICATED, 12 is UNIMPLEMENTED), and the spec (health needs no token; an unknown path without a token gets 16).
+/// Sources: `grpc/health/v1/health.proto` (SERVING is 1), `grpc/reflection/v1/reflection.proto` (`list_services` is field 7), PROTOCOL-HTTP2 (16 is UNAUTHENTICATED, 12 is UNIMPLEMENTED), and `crates/plugins/grpc/README.md` (health needs no token; an unknown path without a token gets 16).
 #[tokio::test]
 async fn auth_covers_the_plugin_routes() {
     struct Case {
@@ -329,7 +307,7 @@ async fn auth_covers_the_plugin_routes() {
         },
     ];
 
-    let srv = Spawn::grpc(wire_worker())
+    let srv = Spawn::grpc(fixture("grpc/wire-worker.php"))
         .grpc_extra(&format!(
             "reflection = true\n{}",
             auth(&fixture("grpc/tokens"))
@@ -338,13 +316,9 @@ async fn auth_covers_the_plugin_routes() {
         .spawn();
     for case in cases {
         let mut conn = Conn::open(&listen(&srv), Wire::H2).await.expect("connect");
-        let headers: Vec<(&str, &str)> = case
-            .authorization
-            .map(|a| ("authorization", a))
-            .into_iter()
-            .collect();
+        let headers = case.authorization.map(|a| ("authorization", a));
         let got = conn
-            .grpc(case.path, &headers, &envelope(case.message))
+            .grpc(case.path, headers.as_slice(), &envelope(case.message))
             .await
             .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
         assert_eq!(
@@ -384,7 +358,7 @@ fn a_bad_tokens_file_fails_the_boot() {
         },
     ];
     for case in cases {
-        let (status, log) = Spawn::grpc(wire_worker())
+        let (status, log) = Spawn::grpc(fixture("grpc/wire-worker.php"))
             .grpc_extra(&auth(&case.tokens))
             .boot_failure();
         assert_eq!(status.code(), Some(1), "{}: {log}", case.name);

@@ -168,15 +168,14 @@ impl Server {
             &settings.descriptor_set,
             settings.services.as_deref(),
         )?);
-        let interceptors = settings
-            .interceptors
-            .iter()
-            .map(|interceptor| -> Result<Arc<dyn connectrpc::Interceptor>> {
-                Ok(match interceptor {
-                    Interceptor::Auth(s) => Arc::new(rapira_grpc_auth::Auth::load(s)?),
-                })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let mut interceptors: Vec<Arc<dyn connectrpc::Interceptor>> = Vec::new();
+        for interceptor in &settings.interceptors {
+            match interceptor {
+                Interceptor::Auth(s) => {
+                    interceptors.push(Arc::new(rapira_grpc_auth::Auth::load(s)?))
+                }
+            }
+        }
         Ok(Self::init(Config {
             listen: settings.listen,
             schema,

@@ -33,7 +33,7 @@ pub(crate) struct Config {
     /// HTTP/2 PING cadence and the wait for its ACK. A peer that is gone without a FIN sends no ACK, so its connection closes within the sum and does not hold a later drain.
     pub keepalive_interval: Duration,
     pub keepalive_timeout: Duration,
-    /// `[grpc].interceptors` in list order, the first listed outermost. The master builds them before the fork.
+    /// `[grpc].interceptors` in list order, the first listed outermost.
     pub interceptors: Vec<Arc<dyn connectrpc::Interceptor>>,
 }
 

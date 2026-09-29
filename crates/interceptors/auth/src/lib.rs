@@ -10,9 +10,9 @@ use http::{HeaderMap, HeaderValue};
 /// The gRPC health service. Kubernetes gRPC probes cannot send metadata, so it needs no token.
 const HEALTH: &str = "/grpc.health.v1.Health/";
 
-/// Accepts a call that carries one of the configured bearer tokens. `grpc.health.v1.Health` needs no token.
+/// Accepts a call that carries one of the configured bearer tokens.
 pub struct Auth {
-    tokens: Vec<Box<[u8]>>,
+    tokens: Vec<String>,
 }
 
 impl Auth {
@@ -36,7 +36,7 @@ impl Auth {
         // Every token is compared, so the time does not show which token matched.
         self.tokens
             .iter()
-            .fold(false, |found, t| found | same(t, token))
+            .fold(false, |found, t| found | same(t.as_bytes(), token))
     }
 }
 
@@ -82,7 +82,7 @@ fn same(a: &[u8], b: &[u8]) -> bool {
 }
 
 /// One token per line. Blank lines and `#` lines are skipped. An error names the line, never its text.
-fn parse(text: &str) -> anyhow::Result<Vec<Box<[u8]>>> {
+fn parse(text: &str) -> anyhow::Result<Vec<String>> {
     let mut tokens = Vec::new();
     for (i, line) in text.lines().enumerate() {
         let line = line.trim();
@@ -92,7 +92,7 @@ fn parse(text: &str) -> anyhow::Result<Vec<Box<[u8]>>> {
         if !is_b64token(line.as_bytes()) {
             bail!("line {} is not a valid bearer token", i + 1);
         }
-        tokens.push(line.as_bytes().into());
+        tokens.push(line.to_owned());
     }
     if tokens.is_empty() {
         bail!("the file has no token");
@@ -102,12 +102,9 @@ fn parse(text: &str) -> anyhow::Result<Vec<Box<[u8]>>> {
 
 #[cfg(test)]
 mod tests {
-    use http::HeaderValue;
-    use http::header::AUTHORIZATION;
-
     use super::*;
 
-    /// Expected values: the `b64token` grammar of RFC 6750 §2.1, and the file format of the spec (one token per line, trimmed, blank lines and `#` lines skipped, at least one token).
+    /// Expected values: the `b64token` grammar of RFC 6750 §2.1, and the tokens file format (one token per line, trimmed, blank lines and `#` lines skipped, at least one token).
     #[test]
     fn tokens_file_parses() {
         struct Case {
@@ -180,24 +177,14 @@ mod tests {
         for case in cases {
             let got = parse(case.text);
             match (got, case.expected) {
-                (Ok(tokens), Ok(want)) => {
-                    let want: Vec<Box<[u8]>> = want.iter().map(|t| t.as_bytes().into()).collect();
-                    assert_eq!(tokens, want, "{}", case.name);
-                }
-                (Err(e), Err(want)) => {
-                    assert_eq!(e.to_string(), want, "{}", case.name);
-                    assert!(
-                        !e.to_string().contains("not a token"),
-                        "{}: the error shows the line",
-                        case.name
-                    );
-                }
+                (Ok(tokens), Ok(want)) => assert_eq!(tokens, want, "{}", case.name),
+                (Err(e), Err(want)) => assert_eq!(e.to_string(), want, "{}", case.name),
                 (got, want) => panic!("{}: got {got:?}, want {want:?}", case.name),
             }
         }
     }
 
-    /// Expected values: RFC 6750 §2.1 (`credentials = "Bearer" 1*SP b64token`) and RFC 9110 §11.1 (the scheme is case-insensitive). The spec accepts exactly one `authorization` value.
+    /// Expected values: RFC 6750 §2.1 (`credentials = "Bearer" 1*SP b64token`) and RFC 9110 §11.1 (the scheme is case-insensitive). The interceptor accepts exactly one `authorization` value.
     #[test]
     fn authorization_is_checked() {
         struct Case {
@@ -298,7 +285,7 @@ mod tests {
             },
         ];
         let auth = Auth {
-            tokens: vec![b"alpha".as_slice().into(), b"beta==".as_slice().into()],
+            tokens: vec!["alpha".into(), "beta==".into()],
         };
         for case in cases {
             let mut headers = HeaderMap::new();
