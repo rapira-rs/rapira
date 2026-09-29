@@ -19,7 +19,7 @@ pub struct SharedSlot {
     pub recycles: AtomicU64,
     /// [`now_millis`] when the worker last went ACTIVE. The request watchdog measures the request age from it.
     pub last_activity_ms: AtomicU64,
-    /// Units that the IO runtime handed to the worker queue and that the PHP thread has not pulled yet.
+    /// Units that the IO runtime handed to the worker queue, or that wait for room in a full queue, and that the PHP thread has not pulled yet.
     pub pending: AtomicU64,
     /// Worker exits per verdict. The master counts them.
     pub exits_drained: AtomicU64,
