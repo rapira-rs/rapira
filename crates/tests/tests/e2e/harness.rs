@@ -543,7 +543,7 @@ impl Spawn {
         self
     }
 
-    /// Keys inside `[grpc]`, for example `reflection = true`.
+    /// Keys inside `[grpc]`, for example `reflection = true`. The text may open `[grpc.*]` tables after its keys.
     pub fn grpc_extra(mut self, keys: &str) -> Spawn {
         self.grpc_extra += keys;
         self.grpc_extra.push('\n');

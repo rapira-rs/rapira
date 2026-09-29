@@ -945,6 +945,7 @@ dependencies = [
  "connectrpc-reflection",
  "http",
  "rapira_config",
+ "rapira_grpc_auth",
  "rapira_net",
  "rapira_php_build",
  "rapira_sapi",
@@ -953,6 +954,17 @@ dependencies = [
  "toml",
  "tower",
  "tracing",
+]
+
+[[package]]
+name = "rapira_grpc_auth"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "connectrpc",
+ "http",
+ "rapira_config",
+ "serde",
 ]
 
 [[package]]

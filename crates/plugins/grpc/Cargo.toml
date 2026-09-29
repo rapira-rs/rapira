@@ -13,6 +13,7 @@ workspace = true
 rapira_sapi = { workspace = true }
 rapira_net = { workspace = true }
 rapira_config = { workspace = true }
+rapira_grpc_auth = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
