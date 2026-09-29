@@ -238,7 +238,7 @@ impl Pool {
         }
     }
 
-    /// Failboot only for a gen-0 worker in a pool that never served: a reload replacement dying unhealthy must not take down the running pool.
+    /// Failboot only for a gen-0 worker in a pool that never served and has no serving worker: a reload replacement dying unhealthy must not take down the running pool, and a worker that never boots must not take down a pool that booted.
     pub(crate) fn on_child_exit(
         &mut self,
         w: WorkerProc,
@@ -274,7 +274,10 @@ impl Pool {
                 self.table.slots[slot].schedule_immediate(now);
             }
             ExitVerdict::Unhealthy => {
-                if w.generation == 0 && self.total_successful() == 0 {
+                if w.generation == 0
+                    && self.total_successful() == 0
+                    && !(0..self.table.slots.len()).any(|i| self.slot_is_serving(i))
+                {
                     anyhow::bail!(
                         "{} pool: worker {} exited unhealthy before the pool served any request",
                         self.cfg.name,

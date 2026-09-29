@@ -256,6 +256,42 @@ fn master_failboot_exits_70() {
     );
 }
 
+/// A gen-0 pool with a serving worker keeps the master up when another worker never boots. The fixture fails its boot while the other worker holds boot.lock. No request arrives.
+#[test]
+fn a_worker_that_never_boots_next_to_a_serving_worker_keeps_the_master_up() {
+    let observability = std::net::SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let mut srv = spawn_with_config(
+        "lifecycle/lock-boot-worker.php",
+        2,
+        &format!(
+            "mode = \"dispatcher\"\n[observability]\nlisten = \"{observability}\"\n[observability.probes]\n"
+        ),
+    );
+    assert!(
+        wait_log_contains(
+            &srv,
+            "worker keeps failing to boot; flagged unhealthy",
+            Duration::from_secs(40)
+        ),
+        "\n{}",
+        diagnostics(&srv)
+    );
+    let status = srv.wait_exit(Duration::from_secs(5));
+    assert!(
+        status.is_none(),
+        "the master exited: {status:?}\n{}",
+        diagnostics(&srv)
+    );
+    let (code, body) =
+        http_get(observability, "/readyz", Duration::from_secs(10)).expect("GET /readyz");
+    assert_eq!(
+        (code, body.as_slice()),
+        (200, b"ok\n".as_slice()),
+        "\n{}",
+        diagnostics(&srv)
+    );
+}
+
 /// A worker-mode bootstrap that never calls handle_request() must failboot the master, not hang or shed 503s forever.
 #[test]
 fn worker_bootstrap_that_never_serves_failboots() {
