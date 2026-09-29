@@ -45,21 +45,12 @@ pub(crate) struct PoolStats {
     pub workers: Vec<Worker>,
 }
 
-/// The stats of every pool except `own`, the pool of the observability process.
-pub(crate) fn board_stats(
-    board: &Scoreboard,
-    regions: &[PoolRegion],
-    own: usize,
-) -> Vec<PoolStats> {
-    regions
-        .iter()
-        .enumerate()
-        .filter(|&(i, _)| i != own)
-        .map(|(_, region)| pool_stats(board, region))
-        .collect()
+/// The stats of each pool in `pools`.
+pub(crate) fn board_stats(board: &Scoreboard, pools: &[PoolRegion]) -> Vec<PoolStats> {
+    pools.iter().map(|pool| pool_stats(board, pool)).collect()
 }
 
-/// Counters and the queue sum over all slots of the pool: a slot keeps the counts of every worker that it held, and `clear` empties the queue of a dead worker. A state value that is not known is not counted.
+/// Counters and the queue sum over all slots of the pool: a slot keeps the counts of every worker that it held, and `clear` empties the queue of a dead worker.
 fn pool_stats(board: &Scoreboard, region: &PoolRegion) -> PoolStats {
     let mut stats = PoolStats {
         name: region.name,
@@ -109,69 +100,58 @@ fn pool_stats(board: &Scoreboard, region: &PoolRegion) -> PoolStats {
 mod tests {
     use super::*;
 
-    /// Slots 0 and 1 belong to the observability pool, slots 2 to 5 to an http pool of 2 workers, and slots 6 to 9 to a grpc pool of 2 workers. Each pair of states has different counts in at least one pool, and each grpc exit reason has its own count, so a swap of two states or two exit reasons fails the test.
+    /// Slots 0 to 3 belong to an http pool of 2 workers, and slots 4 to 7 to a grpc pool of 2 workers. Each pair of states has different counts in at least one pool, and each grpc exit reason has its own count, so a swap of two states or two exit reasons fails the test.
     #[test]
-    fn board_stats_sums_each_pool_except_its_own() {
-        let board = Scoreboard::create(10).unwrap();
+    fn board_stats_sums_each_pool() {
+        let board = Scoreboard::create(8).unwrap();
         let slot = |i: usize| board.slot(i);
         let place = |i: usize, state: u32, pid: u32| {
             slot(i).state.store(state, Relaxed);
             slot(i).pid.store(pid, Relaxed);
         };
-        // The observability pool: left out of the output.
-        place(0, SLOT_IDLE, 100);
-        slot(0).handled.store(99, Relaxed);
         // http slot 0: an active worker.
-        place(2, SLOT_ACTIVE, 201);
-        slot(2).handled.store(10, Relaxed);
-        slot(2).errors.store(1, Relaxed);
-        slot(2).pending.store(2, Relaxed);
-        slot(2).recycles.store(1, Relaxed);
-        slot(2).exits_crashed.store(1, Relaxed);
-        slot(2).failed_on_full_queue.store(4, Relaxed);
+        place(0, SLOT_ACTIVE, 201);
+        slot(0).handled.store(10, Relaxed);
+        slot(0).errors.store(1, Relaxed);
+        slot(0).pending.store(2, Relaxed);
+        slot(0).recycles.store(1, Relaxed);
+        slot(0).exits_crashed.store(1, Relaxed);
+        slot(0).failed_on_full_queue.store(4, Relaxed);
         // http slot 1: an idle worker.
-        place(3, SLOT_IDLE, 202);
-        slot(3).handled.store(5, Relaxed);
-        slot(3).exits_recycled.store(2, Relaxed);
+        place(1, SLOT_IDLE, 202);
+        slot(1).handled.store(5, Relaxed);
+        slot(1).exits_recycled.store(2, Relaxed);
         // http slot 2: free. Its counts stay in the totals.
-        place(4, SLOT_FREE, 0);
-        slot(4).handled.store(7, Relaxed);
-        slot(4).errors.store(2, Relaxed);
-        slot(4).exits_drained.store(1, Relaxed);
-        slot(4).failed_on_full_queue.store(5, Relaxed);
-        // http slot 3: a state value that is not known. No state count, but a live pid.
-        place(5, 9, 204);
-        slot(5).handled.store(1, Relaxed);
+        place(2, SLOT_FREE, 0);
+        slot(2).handled.store(7, Relaxed);
+        slot(2).errors.store(2, Relaxed);
+        slot(2).exits_drained.store(1, Relaxed);
+        slot(2).failed_on_full_queue.store(5, Relaxed);
         // grpc slots 0 to 3: one starting, two draining and one active worker.
-        place(6, SLOT_STARTING, 301);
-        slot(6).exits_drained.store(1, Relaxed);
-        slot(6).exits_recycled.store(2, Relaxed);
-        place(7, SLOT_DRAINING, 302);
-        slot(7).exits_unhealthy.store(3, Relaxed);
-        place(8, SLOT_DRAINING, 303);
-        slot(8).exits_timeout.store(4, Relaxed);
-        place(9, SLOT_ACTIVE, 304);
-        slot(9).exits_crashed.store(5, Relaxed);
-        slot(9).failed_on_full_queue.store(6, Relaxed);
-        let regions = [
-            PoolRegion {
-                name: "observability",
-                processes: 1,
-                slots: 0..2,
-            },
+        place(4, SLOT_STARTING, 301);
+        slot(4).exits_drained.store(1, Relaxed);
+        slot(4).exits_recycled.store(2, Relaxed);
+        place(5, SLOT_DRAINING, 302);
+        slot(5).exits_unhealthy.store(3, Relaxed);
+        place(6, SLOT_DRAINING, 303);
+        slot(6).exits_timeout.store(4, Relaxed);
+        place(7, SLOT_ACTIVE, 304);
+        slot(7).exits_crashed.store(5, Relaxed);
+        slot(7).failed_on_full_queue.store(6, Relaxed);
+        let pools = [
             PoolRegion {
                 name: "http",
                 processes: 2,
-                slots: 2..6,
+                slots: 0..4,
             },
             PoolRegion {
                 name: "grpc",
                 processes: 2,
-                slots: 6..10,
+                slots: 4..8,
             },
         ];
 
-        let got = board_stats(&board, &regions, 0);
+        let got = board_stats(&board, &pools);
 
         assert_eq!(
             got,
@@ -180,7 +160,7 @@ mod tests {
                     name: "http",
                     configured: 2,
                     states: [0, 1, 1, 0],
-                    requests: 23,
+                    requests: 22,
                     failed: 3,
                     failed_on_full_queue: 9,
                     queued: 2,
@@ -195,11 +175,6 @@ mod tests {
                         Worker {
                             index: 1,
                             pid: 202,
-                            memory: None
-                        },
-                        Worker {
-                            index: 3,
-                            pid: 204,
                             memory: None
                         },
                     ],

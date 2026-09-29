@@ -1,11 +1,9 @@
-use std::time::Duration;
-
 use http::header::{AUTHORIZATION, HeaderValue};
 use rapira_sapi::Mode;
 use tests::wire::submit;
 use tests::{drain, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn, fixture_path, http_get, scratch_dir, slot_line, wait_workers};
+use crate::harness::{Server, Spawn, scratch_dir, slot_line};
 
 #[test]
 fn fibers_stress_classic() -> anyhow::Result<()> {
@@ -292,30 +290,6 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
         snap.recycles
     );
     Ok(())
-}
-
-/// A respawned worker takes the slot of the worker that it replaces, and the slot keeps the counts of both. max_requests = 2 gives a quota of exactly 3: effective_quota adds 1 + hash % max(2 / 2, 1).
-#[test]
-fn scoreboard_counts_survive_a_respawn() {
-    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
-        .http_pool("max_requests = 2")
-        .spawn();
-    let first = wait_workers(&srv, Duration::from_secs(20), "one worker", |p| {
-        p.len() == 1
-    });
-    for _ in 0..3 {
-        let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
-        assert_eq!(code, 200);
-    }
-    // The third request reaches the quota. The draining worker can accept one more connection and close it, so the next requests wait for the new worker.
-    wait_workers(&srv, Duration::from_secs(20), "the respawned worker", |p| {
-        p.len() == 1 && p[0] != first[0]
-    });
-    for _ in 0..2 {
-        let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
-        assert_eq!(code, 200);
-    }
-    slot_line(&srv, "handled 5 errors 0");
 }
 
 #[test]

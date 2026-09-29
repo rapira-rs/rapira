@@ -67,8 +67,12 @@ impl Server {
         let serving = Serving {
             scrape: Arc::new(Scrape {
                 board,
-                regions,
-                own,
+                pools: regions
+                    .iter()
+                    .enumerate()
+                    .filter(|&(i, _)| i != own)
+                    .map(|(_, region)| region.clone())
+                    .collect(),
                 build: self.build,
                 metrics: self.metrics,
                 probes: self.probes,
@@ -91,11 +95,11 @@ impl Server {
     }
 }
 
-/// What a request reads: the board, the pool layout, the build and the routes that the config turns on.
+/// What a request reads: the board, the pools it reports, the build and the routes that the config turns on.
 struct Scrape {
     board: Scoreboard,
-    regions: &'static [PoolRegion],
-    own: usize,
+    /// Every pool except the pool of the observability process.
+    pools: Vec<PoolRegion>,
     build: Build,
     metrics: bool,
     probes: bool,
@@ -104,7 +108,7 @@ struct Scrape {
 impl Scrape {
     /// One pass over the board, then one `/proc` read for each live worker.
     fn text(&self) -> String {
-        let mut pools = stats::board_stats(&self.board, self.regions, self.own);
+        let mut pools = stats::board_stats(&self.board, &self.pools);
         for worker in pools.iter_mut().flat_map(|p| p.workers.iter_mut()) {
             worker.memory = memory::read(worker.pid);
         }
@@ -163,7 +167,7 @@ fn respond(scrape: &Scrape, req: &Request<Incoming>) -> Response<Full<Bytes>> {
             reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
         }
         (&Method::GET, "/readyz") if scrape.probes => {
-            let unready = probes::unready(&scrape.board, scrape.regions, scrape.own);
+            let unready = probes::unready(&scrape.board, &scrape.pools);
             if unready.is_empty() {
                 reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
             } else {

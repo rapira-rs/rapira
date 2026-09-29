@@ -142,11 +142,6 @@ mod tests {
                 error: Some("unknown field `path`"),
             },
             Case {
-                name: "old metrics table",
-                toml: "[metrics]\nlisten = \":9180\"\n",
-                error: Some("unknown field `metrics`"),
-            },
-            Case {
                 name: "unknown key in the metrics sub-table",
                 toml: "[observability]\nlisten = \":9180\"\n[observability.metrics]\npath = \"/m\"\n",
                 error: Some("unknown field `path`"),

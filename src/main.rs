@@ -147,7 +147,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     }
 
     let mut prepare: PrepareCtx = PrepareCtx::new();
-    // `WorkerEnv::pool` indexes both lists, so they keep one order. The observability pool goes first, so the slot cap error of `MasterConfig::scoreboard_slots` always names a PHP pool.
+    // `WorkerEnv::pool` indexes both lists, so they keep one order. The observability pool goes first, so the slot cap error of the master always names a PHP pool.
     let mut runs: Vec<(PoolRun, PoolConfig)> = Vec::new();
     if let Some(observability) = settings.observability {
         runs.push(observability::pool_run(observability, &mut prepare)?);

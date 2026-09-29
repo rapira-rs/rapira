@@ -49,36 +49,28 @@ pub struct MasterConfig {
 }
 
 impl MasterConfig {
-    /// Two slots per worker, pools contiguous in order. Names the pool that pushes the total past the cap.
-    pub fn scoreboard_slots(&self) -> anyhow::Result<usize> {
-        let mut slots: usize = 0;
-        for p in &self.pools {
-            slots = slots.saturating_add(p.slots());
-            anyhow::ensure!(
-                slots <= SB_MAX_SLOTS,
-                "{}.pool.processes ({}) raises the worker total to {}, above the supported maximum ({})",
-                p.name,
-                p.processes,
-                slots / 2,
-                SB_MAX_SLOTS / 2
-            );
-        }
-        Ok(slots)
-    }
-
-    /// Two slots per worker, pools contiguous in `pools` order.
-    fn regions(&self) -> Vec<PoolRegion> {
+    /// Two slots per worker, pools contiguous in `pools` order. Names the pool that pushes the total past the cap.
+    fn regions(&self) -> anyhow::Result<Vec<PoolRegion>> {
         let mut base: usize = 0;
         self.pools
             .iter()
             .map(|p| {
-                let slots = base..base + p.slots();
-                base = slots.end;
-                PoolRegion {
+                let end = base.saturating_add(p.slots());
+                anyhow::ensure!(
+                    end <= SB_MAX_SLOTS,
+                    "{}.pool.processes ({}) raises the worker total to {}, above the supported maximum ({})",
+                    p.name,
+                    p.processes,
+                    end / 2,
+                    SB_MAX_SLOTS / 2
+                );
+                let slots = base..end;
+                base = end;
+                Ok(PoolRegion {
                     name: p.name,
                     processes: p.processes,
                     slots,
-                }
+                })
             })
             .collect()
     }
@@ -107,9 +99,10 @@ pub enum StopReason {
 
 /// Returns in the parent on a clean or forced stop; in a forked child it never returns: the worker closure runs and the child `_exit`s.
 pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::Result<StopReason> {
-    let scoreboard: Scoreboard = Scoreboard::create(cfg.scoreboard_slots()?)?;
+    let regions = cfg.regions()?;
+    let scoreboard: Scoreboard = Scoreboard::create(regions.last().map_or(0, |r| r.slots.end))?;
     // Built once per boot and never freed, as the board: every forked child reads the same regions.
-    let regions: &'static [PoolRegion] = Box::leak(cfg.regions().into_boxed_slice());
+    let regions: &'static [PoolRegion] = Box::leak(regions.into_boxed_slice());
     let self_pipe: signals::SelfPipe = signals::install_master_signals()?;
     let lifeline: lifeline::Lifeline = lifeline::Lifeline::create()?;
     let _pidfile: Option<pidfile::PidFile> = match &cfg.pidfile {
@@ -149,25 +142,15 @@ mod tests {
     }
 
     #[test]
-    fn scoreboard_slots_sums_two_per_worker_over_pools() {
-        assert_eq!(
-            cfg(vec![pool("http", 3), pool("grpc", 2)])
-                .scoreboard_slots()
-                .unwrap(),
-            10
-        );
-        assert_eq!(
-            cfg(vec![pool("http", SB_MAX_SLOTS / 2)])
-                .scoreboard_slots()
-                .unwrap(),
-            SB_MAX_SLOTS
-        );
+    fn regions_fill_the_board_up_to_the_cap() {
+        let regions = cfg(vec![pool("http", SB_MAX_SLOTS / 2)]).regions().unwrap();
+        assert_eq!(regions[0].slots, 0..SB_MAX_SLOTS);
     }
 
     #[test]
-    fn scoreboard_slots_names_the_pool_that_crosses_the_cap() {
+    fn regions_name_the_pool_that_crosses_the_cap() {
         let e = cfg(vec![pool("http", SB_MAX_SLOTS / 2), pool("grpc", 1)])
-            .scoreboard_slots()
+            .regions()
             .unwrap_err()
             .to_string();
         assert!(e.contains("grpc.pool.processes (1)"), "{e}");
@@ -184,12 +167,18 @@ mod tests {
 
     #[test]
     fn regions_follow_the_pool_order_with_two_slots_per_worker() {
-        let regions = cfg(vec![pool("metrics", 1), pool("http", 3), pool("grpc", 2)]).regions();
+        let regions = cfg(vec![
+            pool("observability", 1),
+            pool("http", 3),
+            pool("grpc", 2),
+        ])
+        .regions()
+        .unwrap();
         assert_eq!(
             regions,
             [
                 PoolRegion {
-                    name: "metrics",
+                    name: "observability",
                     processes: 1,
                     slots: 0..2
                 },

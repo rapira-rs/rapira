@@ -283,10 +283,10 @@ pub(crate) fn pull_job_try() -> Pulled {
     })
 }
 
-pub(crate) fn pending_depth() -> usize {
+pub(crate) fn pending_depth() -> u64 {
     JOB_RX.with_borrow(|slot| {
         slot.as_ref()
-            .map_or(0, |job_r| job_r.pending.load(Ordering::Relaxed) as usize)
+            .map_or(0, |job_r| job_r.pending.load(Ordering::Relaxed))
     })
 }
 

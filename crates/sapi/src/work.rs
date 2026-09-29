@@ -95,18 +95,18 @@ pub struct Sink {
 }
 
 /// Keeps one unit in `pending` during the hand-off. A drop before `disarm` subtracts the unit from `pending`. If the unit found the queue full, the drop also adds 1 to `failed_on_full_queue`.
-struct PendingGuard<'a> {
-    slot: Option<&'a SharedSlot>,
-    /// The unit found the queue full.
-    waited: bool,
+struct PendingGuard {
+    slot: Option<&'static SharedSlot>,
+    /// The time to shed the unit. It is set when the unit first finds the queue full, so the common send needs no clock read.
+    deadline: Option<Instant>,
 }
 
-impl<'a> PendingGuard<'a> {
-    fn arm(slot: &'a SharedSlot) -> Self {
+impl PendingGuard {
+    fn arm(slot: &'static SharedSlot) -> Self {
         slot.pending.fetch_add(1, Ordering::Relaxed);
         Self {
             slot: Some(slot),
-            waited: false,
+            deadline: None,
         }
     }
     fn disarm(mut self) {
@@ -114,11 +114,11 @@ impl<'a> PendingGuard<'a> {
     }
 }
 
-impl Drop for PendingGuard<'_> {
+impl Drop for PendingGuard {
     fn drop(&mut self) {
         if let Some(slot) = self.slot.take() {
             slot.pending.fetch_sub(1, Ordering::Relaxed);
-            if self.waited {
+            if self.deadline.is_some() {
                 slot.failed_on_full_queue.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -133,8 +133,6 @@ impl Sink {
     /// pending is incremented before the send: the consumer decrements as soon as it wakes, so the reverse order could wrap the counter below zero.
     pub async fn submit(&self, mut unit: Box<dyn Work>) -> Result<(), Refused> {
         let mut pending = PendingGuard::arm(self.slot);
-        // The deadline starts at the first full intake: the common send needs no clock read.
-        let mut deadline = None;
         loop {
             match self.tx.try_send(unit) {
                 Ok(()) => {
@@ -142,8 +140,9 @@ impl Sink {
                     return Ok(());
                 }
                 Err(TrySendError::Full(u)) => {
-                    pending.waited = true;
-                    let deadline = *deadline.get_or_insert_with(|| Instant::now() + INTAKE_WAIT);
+                    let deadline = *pending
+                        .deadline
+                        .get_or_insert_with(|| Instant::now() + INTAKE_WAIT);
                     if Instant::now() > deadline {
                         tracing::warn!(
                             target: "rapira",

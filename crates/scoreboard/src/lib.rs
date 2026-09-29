@@ -40,7 +40,7 @@ pub struct Scoreboard {
 }
 
 /// The part of the board that one pool owns.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct PoolRegion {
     /// The config table of the pool ("http").
     pub name: &'static str,
@@ -73,7 +73,7 @@ pub fn now_millis() -> u64 {
 
 impl Scoreboard {
     /// Master-side, pre-fork. The mapping must exist before a fork can inherit it.
-    /// Callers pass a bounded count: the master derives it from `MasterConfig::scoreboard_slots`.
+    /// Callers pass a bounded count: the master derives it from its pool regions, which stop at `SB_MAX_SLOTS`.
     pub fn create(nslots: usize) -> anyhow::Result<Scoreboard> {
         let bytes = nslots * size_of::<SharedSlot>();
         // SAFETY:
