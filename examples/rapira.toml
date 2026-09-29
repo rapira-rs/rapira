@@ -59,6 +59,7 @@ processes = 16                # a fixed worker count; defaults to the CPU count
 # The Prometheus endpoint. A process without PHP serves GET /metrics from the worker scoreboard.
 # [metrics]
 # listen = "127.0.0.1:9180"    # required; host:port, ":port" (all interfaces), or "unix:/path"
+# keepalive_timeout_secs = 60 # optional; closes a keep-alive connection idle past the limit
 
 # [supervisor]
 # pidfile = "rapira.pid"      # relative to this file's directory

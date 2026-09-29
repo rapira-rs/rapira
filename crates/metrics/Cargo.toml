@@ -12,6 +12,7 @@ workspace = true
 [dependencies]
 rapira_scoreboard = { workspace = true }
 rapira_net = { workspace = true }
+rapira_config = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }

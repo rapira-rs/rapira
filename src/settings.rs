@@ -122,6 +122,11 @@ mod tests {
                 error: None,
             },
             Case {
+                name: "metrics keep-alive key",
+                toml: "[metrics]\nlisten = \":9180\"\nkeepalive_timeout_secs = 5\n",
+                error: None,
+            },
+            Case {
                 name: "metrics table without listen",
                 toml: "[metrics]\n",
                 error: Some("missing field `listen`"),

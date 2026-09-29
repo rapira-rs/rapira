@@ -8,7 +8,7 @@ use rapira_net::ListenAddr;
 use rapira_sapi::Mode;
 
 use crate::harness::{
-    Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_get_raw, http_raw,
+    Conn, Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_get_raw, http_raw,
     parse_status_and_body, php_version, rapira_version, signal, wait_workers,
 };
 
@@ -134,6 +134,32 @@ fn only_get_metrics_is_served() {
         let (status, _) = http_raw(metrics, case.request.as_bytes(), REQ).expect(case.name);
         assert_eq!(status, 404, "{}\n{}", case.name, diagnostics(&srv));
     }
+}
+
+/// An idle keep-alive connection closes after `keepalive_timeout_secs`. With 1 s the close comes within the 5 s read; the 60 s default misses it.
+#[test]
+fn an_idle_connection_closes_after_the_keepalive_timeout() {
+    let metrics = SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let _srv = Spawn::http(Mode::Dispatcher, fixture_path(HANG))
+        .toml(&format!(
+            "[metrics]\nlisten = \"{metrics}\"\nkeepalive_timeout_secs = 1"
+        ))
+        .spawn();
+    let mut conn = Conn::open(metrics, REQ).expect("connect");
+    conn.send(b"GET /metrics HTTP/1.1\r\nHost: e2e\r\n\r\n")
+        .expect("send");
+    let (status, fields) = conn.read_head(REQ).expect("head");
+    assert_eq!(status, 200);
+    let len: usize = fields
+        .iter()
+        .find(|(k, _)| k == "content-length")
+        .map(|(_, v)| v.parse().expect("a content-length number"))
+        .expect("a content-length field");
+    conn.read_n(len, REQ).expect("the body");
+    let rest = conn
+        .read_remaining(Duration::from_secs(5))
+        .expect("the server closes the idle connection");
+    assert!(rest.is_empty(), "{rest:?}");
 }
 
 /// The master binds every listener in one boot, the metrics listener first. The http pool then fails on the shared address.

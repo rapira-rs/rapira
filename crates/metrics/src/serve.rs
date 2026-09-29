@@ -20,13 +20,11 @@ use crate::config::Settings;
 use crate::text::{self, Build};
 use crate::{memory, stats};
 
-/// Idle keep-alive connections close after this time, the default of `[http].keepalive_timeout_secs`.
-const KEEPALIVE: Duration = Duration::from_secs(60);
-
 /// The metrics endpoint. The master prepares it before the fork, and the metrics process serves it.
 pub struct Server {
     build: Build,
     prepared: PreparedListener,
+    keepalive_timeout: Duration,
 }
 
 impl Server {
@@ -34,7 +32,11 @@ impl Server {
     pub fn new(settings: Settings, build: Build, ctx: &mut PrepareCtx) -> Result<Server> {
         let prepared = ctx.bind(&settings.listen)?;
         tracing::info!(target: "metrics", "prepared listener on {}", prepared.addr());
-        Ok(Self { build, prepared })
+        Ok(Self {
+            build,
+            prepared,
+            keepalive_timeout: settings.keepalive_timeout,
+        })
     }
 
     /// In the metrics process. Serves `GET /metrics` until `stop` turns true, then waits for the scrapes in flight within `drain_grace`. `own` is the pool of the metrics process, which the output leaves out.
@@ -57,7 +59,7 @@ impl Server {
         let mut builder = http1::Builder::new();
         builder
             .timer(TokioTimer::new())
-            .header_read_timeout(KEEPALIVE);
+            .header_read_timeout(self.keepalive_timeout);
         let serving = Serving {
             scrape: Arc::new(Scrape {
                 board,

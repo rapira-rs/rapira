@@ -1001,6 +1001,7 @@ dependencies = [
  "http-body-util",
  "hyper",
  "hyper-util",
+ "rapira_config",
  "rapira_net",
  "rapira_scoreboard",
  "serde",
