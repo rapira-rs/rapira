@@ -1,0 +1,4 @@
+# Bearer tokens for the auth interceptor tests.
+alpha-token
+
+beta.token~/+==

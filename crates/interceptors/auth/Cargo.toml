@@ -1,0 +1,17 @@
+[package]
+name = "rapira_grpc_auth"
+version = "0.8.1"
+edition.workspace = true
+publish = false
+license = "MIT"
+description = "Bearer-token auth interceptor for the rapira grpc plugin"
+
+[lints]
+workspace = true
+
+[dependencies]
+rapira_config = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+http = { workspace = true }
+connectrpc = { workspace = true }
