@@ -1,7 +1,9 @@
 use std::cell::Cell;
 use std::sync::atomic::Ordering::{Relaxed, Release};
 
-use rapira_scoreboard::{SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SharedSlot, now_millis};
+use rapira_scoreboard::{
+    SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SLOT_STARTING, SharedSlot, now_millis,
+};
 
 thread_local! {
     pub static SB: Cell<Option<&'static SharedSlot>> = const { Cell::new(None) };
@@ -16,6 +18,8 @@ pub enum Event {
     Idle,
     Active,
     Draining,
+    /// A boot cycle ended without a pull of the app. The slot shows STARTING until the app pulls.
+    BootFailed,
 }
 
 pub fn sb_set(slot: &'static SharedSlot) {
@@ -57,5 +61,6 @@ pub fn sb_update(event: Event) {
             s.state.store(SLOT_ACTIVE, Release);
         }
         Event::Draining => DRAINING.set(true),
+        Event::BootFailed => s.state.store(SLOT_STARTING, Release),
     }
 }

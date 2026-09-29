@@ -152,6 +152,7 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                     error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
                     sb_update(scoreboard::Event::Unhealthy);
                 }
+                sb_update(scoreboard::Event::BootFailed);
                 match pull_job_to_shed() {
                     None => break WorkerExit::Closed,
                     Some(unit) => {

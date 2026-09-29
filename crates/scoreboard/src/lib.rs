@@ -9,7 +9,7 @@ pub const SLOT_IDLE: u32 = 2;
 pub const SLOT_ACTIVE: u32 = 3;
 pub const SLOT_DRAINING: u32 = 4; // worker-initiated exit pending
 
-/// Each field has one writer at a time. The worker writes `pid` at bind, the IDLE, ACTIVE and DRAINING states, the request counters, `pending` and `failed_on_full_queue`. The master writes the STARTING and FREE states, and it writes `pid`, `pending` and the exit counters only while no worker owns the slot: after the reap and before the next bind.
+/// Each field has one writer at a time. The worker writes `pid` at bind, the IDLE, ACTIVE and DRAINING states, the STARTING state after a failed boot cycle, the request counters, `pending` and `failed_on_full_queue`. The master writes the STARTING and FREE states, and it writes `pid`, `pending` and the exit counters only while no worker owns the slot: after the reap and before the next bind.
 #[repr(C, align(64))]
 pub struct SharedSlot {
     pub state: AtomicU32,

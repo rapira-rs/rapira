@@ -255,7 +255,7 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
     })
 }
 
-/// The host pulls a unit to shed it after a failed cycle. The app made no pull, so the slot keeps its state: a worker whose boot fails stays starting.
+/// The host pulls a unit to shed it after a failed boot cycle. The worker stored starting before this pull, and the pull keeps the state.
 pub(crate) fn pull_job_to_shed() -> Option<Box<dyn Work>> {
     JOB_RX.with_borrow(|slot| match slot.as_ref()?.recv(None) {
         Pulled::Job(job) => Some(job),

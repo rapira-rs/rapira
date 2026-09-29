@@ -216,6 +216,44 @@ fn a_worker_whose_boot_fails_stays_starting() {
     );
 }
 
+/// A failed re-boot after the app served shows starting, so the request watchdog skips the worker.
+#[test]
+fn a_failed_reboot_stays_starting() {
+    let metrics = SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/reboot-fails-worker.php"),
+    )
+    .http_pool("request_terminate_timeout_secs = 1")
+    .toml(&format!("[metrics]\nlisten = \"{metrics}\""))
+    .spawn();
+    let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
+    assert_eq!(
+        (code, body),
+        (200, b"ok".to_vec()),
+        "\n{}",
+        diagnostics(&srv)
+    );
+    assert!(
+        wait_log_contains(&srv, "reboot failed", Duration::from_secs(10)),
+        "\n{}",
+        diagnostics(&srv)
+    );
+    // Longer than the 1 s limit plus the 1 s tick of the watchdog.
+    std::thread::sleep(Duration::from_millis(2500));
+    let (_, _, samples) = scrape(metrics);
+    assert_eq!(
+        (
+            value(&samples, &workers("starting")),
+            value(&samples, &workers("active")),
+            value(&samples, &exits("timeout"))
+        ),
+        (1, 0, 0),
+        "starting, active and timeout exits\n{samples:#?}\n{}",
+        diagnostics(&srv)
+    );
+}
+
 /// The master binds every listener in one boot, the metrics listener first. The http pool then fails on the shared address.
 #[test]
 fn a_metrics_listener_on_the_http_address_fails_the_boot() {
