@@ -1,5 +1,5 @@
 <?php
-// Fails its boot while another worker holds boot.lock next to it: a per-worker resource that only one worker gets.
+// The boot fails while another worker holds boot.lock in this directory. Only one worker at a time can hold the lock.
 
 use Rapira\Exception\ClosedException;
 

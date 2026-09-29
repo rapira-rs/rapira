@@ -243,10 +243,10 @@ fn an_unreadable_entrypoint_refuses_to_boot() {
     assert!(log.contains("is not readable"), "\n{log}");
 }
 
-/// A gen-0 pool whose boot always fails stops the master with exit code 70. No request is necessary: the worker runs the boot again on its own, and the fifth failed boot flags it unhealthy.
+/// A gen-0 pool whose boot always fails stops the master with exit code 70. No request is necessary: each worker runs the boot again on its own, and the fifth failed boot flags it unhealthy. Two workers: a worker that fails its boot does not count as serving.
 #[test]
 fn master_failboot_exits_70() {
-    let mut srv = spawn_with_config("lifecycle/fatal-worker.php", 1, "");
+    let mut srv = spawn_with_config("lifecycle/fatal-worker.php", 2, "");
     let status = srv.wait_exit(Duration::from_secs(60));
     assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
     let log = std::fs::read_to_string(srv.log_file()).expect("read server.log");
