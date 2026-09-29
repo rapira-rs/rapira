@@ -4,7 +4,7 @@ version = "0.8.1"
 edition.workspace = true
 publish = false
 license = "MIT"
-description = "The Prometheus endpoint of rapira - a process without PHP that reads the worker scoreboard"
+description = "The observability process of rapira - a process without PHP that serves the Prometheus metrics and the livez and readyz probes"
 
 [lints]
 workspace = true

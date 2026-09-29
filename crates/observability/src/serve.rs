@@ -18,7 +18,7 @@ use tokio::sync::watch;
 
 use crate::config::Settings;
 use crate::text::{self, Build};
-use crate::{memory, stats};
+use crate::{memory, probes, stats};
 
 /// The observability endpoint. The master prepares it before the fork, and the observability process serves it.
 pub struct Server {
@@ -26,6 +26,7 @@ pub struct Server {
     prepared: PreparedListener,
     keepalive_timeout: Duration,
     metrics: bool,
+    probes: bool,
 }
 
 impl Server {
@@ -38,10 +39,11 @@ impl Server {
             prepared,
             keepalive_timeout: settings.keepalive_timeout,
             metrics: settings.metrics,
+            probes: settings.probes,
         })
     }
 
-    /// In the observability process. Serves `GET /metrics` until `stop` turns true, then waits for the requests in flight within `drain_grace`. `own` is the pool of the observability process, which the output leaves out.
+    /// In the observability process. Serves the routes of the configured sub-tables until `stop` turns true, then waits for the requests in flight within `drain_grace`. `own` is the pool of the observability process, which the metrics and `/readyz` leave out.
     pub fn serve(
         self,
         board: Scoreboard,
@@ -69,6 +71,7 @@ impl Server {
                 own,
                 build: self.build,
                 metrics: self.metrics,
+                probes: self.probes,
             }),
             graceful: GracefulShutdown::new(),
             builder,
@@ -88,13 +91,14 @@ impl Server {
     }
 }
 
-/// What one scrape reads.
+/// What a request reads: the board, the pool layout, the build and the routes that the config turns on.
 struct Scrape {
     board: Scoreboard,
     regions: &'static [PoolRegion],
     own: usize,
     build: Build,
     metrics: bool,
+    probes: bool,
 }
 
 impl Scrape {
@@ -145,15 +149,47 @@ impl Serve for Serving {
     }
 }
 
-/// `GET /metrics` answers the text format when `[observability.metrics]` is configured. Every other request gets 404.
+/// The content type of the probe answers.
+const PROBE_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
+
+/// `GET /metrics` answers the text format when `[observability.metrics]` is configured, and `GET /livez` and `GET /readyz` answer when `[observability.probes]` is configured. Every other request gets 404.
 fn respond(scrape: &Scrape, req: &Request<Incoming>) -> Response<Full<Bytes>> {
-    if scrape.metrics && req.method() == Method::GET && req.uri().path() == "/metrics" {
-        let mut ok = Response::new(Full::new(Bytes::from(scrape.text())));
-        ok.headers_mut()
-            .insert(CONTENT_TYPE, HeaderValue::from_static(text::CONTENT_TYPE));
-        return ok;
+    match (req.method(), req.uri().path()) {
+        (&Method::GET, "/metrics") if scrape.metrics => {
+            reply(StatusCode::OK, text::CONTENT_TYPE, scrape.text())
+        }
+        // The lifeline stops this process when the master dies, so an answer shows that the master lives.
+        (&Method::GET, "/livez") if scrape.probes => {
+            reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
+        }
+        (&Method::GET, "/readyz") if scrape.probes => {
+            let unready = probes::unready(&scrape.board, scrape.regions, scrape.own);
+            if unready.is_empty() {
+                reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
+            } else {
+                let body: String = unready
+                    .iter()
+                    .map(|name| format!("pool {name}: no ready worker\n"))
+                    .collect();
+                reply(StatusCode::SERVICE_UNAVAILABLE, PROBE_CONTENT_TYPE, body)
+            }
+        }
+        _ => {
+            let mut not_found = Response::new(Full::new(Bytes::new()));
+            *not_found.status_mut() = StatusCode::NOT_FOUND;
+            not_found
+        }
     }
-    let mut not_found = Response::new(Full::new(Bytes::new()));
-    *not_found.status_mut() = StatusCode::NOT_FOUND;
-    not_found
+}
+
+fn reply(
+    status: StatusCode,
+    content_type: &'static str,
+    body: impl Into<Bytes>,
+) -> Response<Full<Bytes>> {
+    let mut res = Response::new(Full::new(body.into()));
+    *res.status_mut() = status;
+    res.headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
+    res
 }

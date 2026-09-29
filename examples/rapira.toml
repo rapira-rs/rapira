@@ -56,11 +56,12 @@ processes = 16                # a fixed worker count; defaults to the CPU count
 # mode = "dispatcher"          # the only mode for a grpc pool
 # processes = 16               # defaults to the CPU count
 
-# The observability process: a process without PHP that serves GET /metrics from the worker scoreboard.
+# The observability process: a process without PHP that serves GET /metrics and the livez and readyz probes from the worker scoreboard.
 # [observability]
 # listen = "127.0.0.1:9180"    # required; host:port, ":port" (all interfaces), or "unix:/path"
 # keepalive_timeout_secs = 60 # optional; closes a keep-alive connection idle past the limit
 # [observability.metrics]    # GET /metrics
+# [observability.probes]     # GET /livez, GET /readyz
 
 # [supervisor]
 # pidfile = "rapira.pid"      # relative to this file's directory

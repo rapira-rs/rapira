@@ -1,7 +1,8 @@
-//! The Prometheus endpoint: a process without PHP that the master forks and supervises as a pool of one. It reads the worker scoreboard at each scrape.
+//! The observability process: a process without PHP that the master forks and supervises as a pool of one. It serves the Prometheus metrics and the livez and readyz probes. `/metrics` and `/readyz` read the worker scoreboard at each request.
 
 pub mod config;
 mod memory;
+mod probes;
 mod serve;
 mod stats;
 mod text;

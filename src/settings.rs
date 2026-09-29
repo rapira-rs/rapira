@@ -122,6 +122,11 @@ mod tests {
                 error: None,
             },
             Case {
+                name: "probes table",
+                toml: "[http.pool]\nentrypoint = \"a.php\"\n[observability]\nlisten = \"127.0.0.1:9180\"\n[observability.probes]\n",
+                error: None,
+            },
+            Case {
                 name: "observability keep-alive key",
                 toml: "[observability]\nlisten = \":9180\"\nkeepalive_timeout_secs = 5\n[observability.metrics]\n",
                 error: None,
@@ -144,6 +149,11 @@ mod tests {
             Case {
                 name: "unknown key in the metrics sub-table",
                 toml: "[observability]\nlisten = \":9180\"\n[observability.metrics]\npath = \"/m\"\n",
+                error: Some("unknown field `path`"),
+            },
+            Case {
+                name: "unknown key in the probes sub-table",
+                toml: "[observability]\nlisten = \":9180\"\n[observability.probes]\npath = \"/p\"\n",
                 error: Some("unknown field `path`"),
             },
             Case {

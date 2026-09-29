@@ -1,4 +1,4 @@
-//! The `[observability]` endpoint: the process without PHP that serves `GET /metrics` from the worker scoreboard.
+//! The `[observability]` endpoint: the process without PHP that serves `GET /metrics`, `GET /livez` and `GET /readyz`.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -40,13 +40,19 @@ fn spawn(pool: &str) -> (Server, SocketAddr) {
     (srv, observability)
 }
 
-/// One `GET /metrics`: the status, the head and the samples.
-fn scrape(addr: SocketAddr) -> (u16, String, BTreeMap<String, u64>) {
-    let raw = http_get_raw(addr, "/metrics", &[], REQ).expect("GET /metrics");
+/// One `GET`: the status, the head and the body.
+fn get(addr: SocketAddr, path: &str) -> (u16, String, String) {
+    let raw = http_get_raw(addr, path, &[], REQ).unwrap_or_else(|e| panic!("GET {path}: {e}"));
     let (status, body) = parse_status_and_body(&raw).expect("an HTTP response");
     let head = String::from_utf8_lossy(&raw[..raw.len() - body.len()]).into_owned();
-    let text = std::str::from_utf8(body).expect("a UTF-8 body");
-    (status, head, tests::metrics::samples(text))
+    let body = String::from_utf8(body.to_vec()).expect("a UTF-8 body");
+    (status, head, body)
+}
+
+/// One `GET /metrics`: the status, the head and the samples.
+fn scrape(addr: SocketAddr) -> (u16, String, BTreeMap<String, u64>) {
+    let (status, head, body) = get(addr, "/metrics");
+    (status, head, tests::metrics::samples(&body))
 }
 
 /// The value of `series`. A missing series fails the test.
@@ -137,6 +143,112 @@ fn only_get_metrics_is_served() {
     for case in &cases {
         let (status, _) = http_raw(observability, case.request.as_bytes(), REQ).expect(case.name);
         assert_eq!(status, 404, "{}\n{}", case.name, diagnostics(&srv));
+    }
+}
+
+#[test]
+fn livez_answers_ok() {
+    let observability = SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path(HANG))
+        .toml(&format!(
+            "[observability]\nlisten = \"{observability}\"\n[observability.probes]\n"
+        ))
+        .spawn();
+    let (status, head, body) = get(observability, "/livez");
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "ok\n"),
+        "\n{}",
+        diagnostics(&srv)
+    );
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("\r\ncontent-type: text/plain; charset=utf-8\r\n"),
+        "{head}"
+    );
+}
+
+/// The slot of a booting worker stays starting until its first pull, so its pool is not ready. The fixture sleeps 3 s before its first receive().
+#[test]
+fn readyz_waits_for_the_first_pull() {
+    let observability = SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/slow-boot-worker.php"),
+    )
+    .toml(&format!(
+        "[observability]\nlisten = \"{observability}\"\n[observability.metrics]\n[observability.probes]\n"
+    ))
+    .spawn();
+    let (status, head, body) = get(observability, "/readyz");
+    assert_eq!(
+        (status, body.as_str()),
+        (503, "pool http: no ready worker\n"),
+        "\n{}",
+        diagnostics(&srv)
+    );
+    assert!(
+        head.to_ascii_lowercase()
+            .contains("\r\ncontent-type: text/plain; charset=utf-8\r\n"),
+        "{head}"
+    );
+    let end = Instant::now() + Duration::from_secs(20);
+    loop {
+        let (status, _, body) = get(observability, "/readyz");
+        if (status, body.as_str()) == (200, "ok\n") {
+            break;
+        }
+        assert!(
+            Instant::now() < end,
+            "no ready pool within 20 s: {status} {body:?}\n{}",
+            diagnostics(&srv)
+        );
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+/// Each sub-table turns on its own routes. A route of a missing sub-table answers 404.
+#[test]
+fn each_endpoint_group_needs_its_table() {
+    struct Case {
+        name: &'static str,
+        table: &'static str,
+        /// A route of the configured sub-table.
+        served: &'static str,
+        /// A route of the missing sub-table.
+        missing: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "probes only",
+            table: "[observability.probes]",
+            served: "/livez",
+            missing: "/metrics",
+        },
+        Case {
+            name: "metrics only",
+            table: "[observability.metrics]",
+            served: "/metrics",
+            missing: "/livez",
+        },
+    ];
+    for case in &cases {
+        let observability = SocketAddr::from(([127, 0, 0, 1], free_port()));
+        let srv = Spawn::http(Mode::Dispatcher, fixture_path(HANG))
+            .toml(&format!(
+                "[observability]\nlisten = \"{observability}\"\n{}\n",
+                case.table
+            ))
+            .spawn();
+        let (served, _, _) = get(observability, case.served);
+        let (missing, _, _) = get(observability, case.missing);
+        assert_eq!(
+            (served, missing),
+            (200, 404),
+            "{}\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
     }
 }
 
