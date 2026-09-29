@@ -1,6 +1,6 @@
 use std::ffi::CStr;
 use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::atomic::Ordering;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::Duration;
 
@@ -94,22 +94,33 @@ pub struct Sink {
     slot: &'static SharedSlot,
 }
 
-struct PendingGuard<'a>(Option<&'a AtomicU64>);
+/// Keeps one unit in `pending` during the hand-off. A drop before `disarm` subtracts the unit from `pending`. If the unit found the queue full, the drop also adds 1 to `failed_on_full_queue`.
+struct PendingGuard<'a> {
+    slot: Option<&'a SharedSlot>,
+    /// The unit found the queue full.
+    waited: bool,
+}
 
 impl<'a> PendingGuard<'a> {
-    fn arm(pending: &'a AtomicU64) -> Self {
-        pending.fetch_add(1, Ordering::Relaxed);
-        Self(Some(pending))
+    fn arm(slot: &'a SharedSlot) -> Self {
+        slot.pending.fetch_add(1, Ordering::Relaxed);
+        Self {
+            slot: Some(slot),
+            waited: false,
+        }
     }
     fn disarm(mut self) {
-        self.0 = None;
+        self.slot = None;
     }
 }
 
 impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
-        if let Some(pending) = self.0.take() {
-            pending.fetch_sub(1, Ordering::Relaxed);
+        if let Some(slot) = self.slot.take() {
+            slot.pending.fetch_sub(1, Ordering::Relaxed);
+            if self.waited {
+                slot.failed_on_full_queue.fetch_add(1, Ordering::Relaxed);
+            }
         }
     }
 }
@@ -121,7 +132,7 @@ impl Sink {
 
     /// pending is incremented before the send: the consumer decrements as soon as it wakes, so the reverse order could wrap the counter below zero.
     pub async fn submit(&self, mut unit: Box<dyn Work>) -> Result<(), Refused> {
-        let pending = PendingGuard::arm(&self.slot.pending);
+        let mut pending = PendingGuard::arm(self.slot);
         // The deadline starts at the first full intake: the common send needs no clock read.
         let mut deadline = None;
         loop {
@@ -131,6 +142,7 @@ impl Sink {
                     return Ok(());
                 }
                 Err(TrySendError::Full(u)) => {
+                    pending.waited = true;
                     let deadline = *deadline.get_or_insert_with(|| Instant::now() + INTAKE_WAIT);
                     if Instant::now() > deadline {
                         tracing::warn!(
@@ -207,28 +219,102 @@ mod tests {
     #[tokio::test(flavor = "current_thread")]
     async fn intake_reports_stopped_after_the_receiver_is_gone() {
         let (tx, rx) = sync_channel(1);
-        let (sink, _) = sink(tx);
+        let (sink, slot) = sink(tx);
         let intake = Intake::<Probe>::new(sink);
         drop(rx);
         assert_eq!(intake.submit(Probe).await.unwrap_err(), Refused::Stopped);
-    }
-
-    /// The test fills the queue of one before the sink takes the sender, so `pending` does not count that unit. The receiver stays open, so the queue stays full. The paused clock passes `INTAKE_WAIT` at once.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn a_full_intake_sheds_and_counts_a_failed_unit() {
-        let (tx, _rx) = sync_channel::<Box<dyn Work>>(1);
-        tx.send(Box::new(Probe)).unwrap();
-        let (sink, slot) = sink(tx);
-        let intake = Intake::<Probe>::new(sink);
-        assert_eq!(intake.submit(Probe).await.unwrap_err(), Refused::Saturated);
         assert_eq!(
             (
-                slot.handled.load(Ordering::Relaxed),
-                slot.errors.load(Ordering::Relaxed),
+                slot.failed_on_full_queue.load(Ordering::Relaxed),
                 slot.pending.load(Ordering::Relaxed),
             ),
-            (1, 1, 0),
-            "handled, errors, pending"
+            (0, 0),
+            "the unit never found the queue full: failed_on_full_queue, pending"
         );
+    }
+
+    /// Each case fills a queue of one before the sink takes the sender, so `pending` does not count that unit and the submit finds the queue full. The paused clock moves to the next timer at once, so the waits take no real time.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_full_intake_counts_each_unit_that_never_enters() {
+        enum During {
+            Nothing,
+            ClientLeaves,
+            WorkerStops,
+            RoomFrees,
+        }
+        struct Case {
+            name: &'static str,
+            /// What happens 1 s into the wait.
+            during: During,
+            /// None: the client left, so the submit gives no result.
+            result: Option<Result<(), Refused>>,
+            /// handled, errors, failed_on_full_queue, pending.
+            want: (u64, u64, u64, u64),
+        }
+        const ACTION_DELAY: Duration = Duration::from_secs(1);
+        let cases = [
+            Case {
+                name: "shed after the wait",
+                during: During::Nothing,
+                result: Some(Err(Refused::Saturated)),
+                want: (1, 1, 1, 0),
+            },
+            Case {
+                name: "the client leaves during the wait",
+                during: During::ClientLeaves,
+                result: None,
+                want: (0, 0, 1, 0),
+            },
+            Case {
+                name: "the worker stops during the wait",
+                during: During::WorkerStops,
+                result: Some(Err(Refused::Stopped)),
+                want: (0, 0, 1, 0),
+            },
+            Case {
+                name: "room frees during the wait",
+                during: During::RoomFrees,
+                result: Some(Ok(())),
+                // The unit is in the queue. Only the pull of the PHP thread subtracts it from `pending`.
+                want: (0, 0, 0, 1),
+            },
+        ];
+        for case in cases {
+            let (tx, rx) = sync_channel::<Box<dyn Work>>(1);
+            tx.send(Box::new(Probe)).unwrap();
+            let (sink, slot) = sink(tx);
+            let intake = Intake::<Probe>::new(sink);
+            let submit = intake.submit(Probe);
+            let result = match case.during {
+                During::Nothing => Some(submit.await),
+                During::ClientLeaves => tokio::time::timeout(ACTION_DELAY, submit).await.ok(),
+                During::WorkerStops => {
+                    let (result, ()) = tokio::join!(submit, async move {
+                        tokio::time::sleep(ACTION_DELAY).await;
+                        drop(rx);
+                    });
+                    Some(result)
+                }
+                During::RoomFrees => {
+                    let (result, _) = tokio::join!(submit, async {
+                        tokio::time::sleep(ACTION_DELAY).await;
+                        rx.try_recv().unwrap()
+                    });
+                    Some(result)
+                }
+            };
+            assert_eq!(result, case.result, "{}", case.name);
+            assert_eq!(
+                (
+                    slot.handled.load(Ordering::Relaxed),
+                    slot.errors.load(Ordering::Relaxed),
+                    slot.failed_on_full_queue.load(Ordering::Relaxed),
+                    slot.pending.load(Ordering::Relaxed),
+                ),
+                case.want,
+                "{}: handled, errors, failed_on_full_queue, pending",
+                case.name
+            );
+        }
     }
 }

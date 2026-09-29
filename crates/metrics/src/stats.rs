@@ -37,6 +37,7 @@ pub(crate) struct PoolStats {
     pub states: [u64; 4],
     pub requests: u64,
     pub failed: u64,
+    pub failed_on_full_queue: u64,
     pub queued: u64,
     pub script_restarts: u64,
     /// Exit counts in `EXIT_REASONS` order.
@@ -66,6 +67,7 @@ fn pool_stats(board: &Scoreboard, region: &PoolRegion) -> PoolStats {
         states: [0; 4],
         requests: 0,
         failed: 0,
+        failed_on_full_queue: 0,
         queued: 0,
         script_restarts: 0,
         exits: [0; 5],
@@ -86,6 +88,7 @@ fn pool_stats(board: &Scoreboard, region: &PoolRegion) -> PoolStats {
         }
         stats.requests += s.handled.load(Relaxed);
         stats.failed += s.errors.load(Relaxed);
+        stats.failed_on_full_queue += s.failed_on_full_queue.load(Relaxed);
         stats.queued += s.pending.load(Relaxed);
         stats.script_restarts += s.recycles.load(Relaxed);
         let exits = [
@@ -125,6 +128,7 @@ mod tests {
         slot(2).pending.store(2, Relaxed);
         slot(2).recycles.store(1, Relaxed);
         slot(2).exits_crashed.store(1, Relaxed);
+        slot(2).failed_on_full_queue.store(4, Relaxed);
         // http slot 1: an idle worker.
         place(3, SLOT_IDLE, 202);
         slot(3).handled.store(5, Relaxed);
@@ -134,6 +138,7 @@ mod tests {
         slot(4).handled.store(7, Relaxed);
         slot(4).errors.store(2, Relaxed);
         slot(4).exits_drained.store(1, Relaxed);
+        slot(4).failed_on_full_queue.store(5, Relaxed);
         // http slot 3: a state value that is not known. No state count, but a live pid.
         place(5, 9, 204);
         slot(5).handled.store(1, Relaxed);
@@ -147,6 +152,7 @@ mod tests {
         slot(8).exits_timeout.store(4, Relaxed);
         place(9, SLOT_ACTIVE, 304);
         slot(9).exits_crashed.store(5, Relaxed);
+        slot(9).failed_on_full_queue.store(6, Relaxed);
         let regions = [
             PoolRegion {
                 name: "metrics",
@@ -176,6 +182,7 @@ mod tests {
                     states: [0, 1, 1, 0],
                     requests: 23,
                     failed: 3,
+                    failed_on_full_queue: 9,
                     queued: 2,
                     script_restarts: 1,
                     exits: [1, 2, 0, 0, 1],
@@ -203,6 +210,7 @@ mod tests {
                     states: [1, 0, 1, 2],
                     requests: 0,
                     failed: 0,
+                    failed_on_full_queue: 6,
                     queued: 0,
                     script_restarts: 0,
                     exits: [1, 2, 3, 4, 5],

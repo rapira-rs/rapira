@@ -42,7 +42,7 @@ pub(crate) fn render(pools: &[PoolStats], build: &Build) -> String {
         }
     }
 
-    let per_pool: [PoolFamily; 5] = [
+    let per_pool: [PoolFamily; 6] = [
         (
             "rapira_workers_configured",
             "gauge",
@@ -60,6 +60,12 @@ pub(crate) fn render(pools: &[PoolStats], build: &Build) -> String {
             "counter",
             "Units of work that the host could not complete.",
             |p| p.failed,
+        ),
+        (
+            "rapira_requests_failed_on_full_queue_total",
+            "counter",
+            "Units of work that found the worker queue full and never entered it.",
+            |p| p.failed_on_full_queue,
         ),
         (
             "rapira_requests_queued",
@@ -182,6 +188,9 @@ rapira_requests_total{pool="http"} 23
 # HELP rapira_requests_failed_total Units of work that the host could not complete.
 # TYPE rapira_requests_failed_total counter
 rapira_requests_failed_total{pool="http"} 3
+# HELP rapira_requests_failed_on_full_queue_total Units of work that found the worker queue full and never entered it.
+# TYPE rapira_requests_failed_on_full_queue_total counter
+rapira_requests_failed_on_full_queue_total{pool="http"} 4
 # HELP rapira_requests_queued Units of work that wait for the PHP thread.
 # TYPE rapira_requests_queued gauge
 rapira_requests_queued{pool="http"} 2
@@ -228,6 +237,10 @@ rapira_requests_total{pool="grpc"} 0
 # TYPE rapira_requests_failed_total counter
 rapira_requests_failed_total{pool="http"} 0
 rapira_requests_failed_total{pool="grpc"} 0
+# HELP rapira_requests_failed_on_full_queue_total Units of work that found the worker queue full and never entered it.
+# TYPE rapira_requests_failed_on_full_queue_total counter
+rapira_requests_failed_on_full_queue_total{pool="http"} 0
+rapira_requests_failed_on_full_queue_total{pool="grpc"} 0
 # HELP rapira_requests_queued Units of work that wait for the PHP thread.
 # TYPE rapira_requests_queued gauge
 rapira_requests_queued{pool="http"} 0
@@ -264,6 +277,7 @@ rapira_build_info{version="0.8.1",php_version="8.5.10"} 1
             states: [0; 4],
             requests: 0,
             failed: 0,
+            failed_on_full_queue: 0,
             queued: 0,
             script_restarts: 0,
             exits: [0; 5],
@@ -287,6 +301,7 @@ rapira_build_info{version="0.8.1",php_version="8.5.10"} 1
                     states: [0, 1, 1, 0],
                     requests: 23,
                     failed: 3,
+                    failed_on_full_queue: 4,
                     queued: 2,
                     script_restarts: 1,
                     exits: [1, 2, 0, 0, 1],
