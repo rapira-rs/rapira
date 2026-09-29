@@ -65,7 +65,7 @@ impl Server {
             .timer(TokioTimer::new())
             .header_read_timeout(self.keepalive_timeout);
         let serving = Serving {
-            scrape: Arc::new(Scrape {
+            routes: Arc::new(Routes {
                 board,
                 pools: regions
                     .iter()
@@ -96,7 +96,7 @@ impl Server {
 }
 
 /// What a request reads: the board, the pools it reports, the build and the routes that the config turns on.
-struct Scrape {
+struct Routes {
     board: Scoreboard,
     /// Every pool except the pool of the observability process.
     pools: Vec<PoolRegion>,
@@ -105,9 +105,9 @@ struct Scrape {
     probes: bool,
 }
 
-impl Scrape {
+impl Routes {
     /// One pass over the board, then one `/proc` read for each live worker.
-    fn text(&self) -> String {
+    fn metrics_text(&self) -> String {
         let mut pools = stats::board_stats(&self.board, &self.pools);
         for worker in pools.iter_mut().flat_map(|p| p.workers.iter_mut()) {
             worker.memory = memory::read(worker.pid);
@@ -117,7 +117,7 @@ impl Scrape {
 }
 
 struct Serving {
-    scrape: Arc<Scrape>,
+    routes: Arc<Routes>,
     graceful: GracefulShutdown,
     builder: http1::Builder,
 }
@@ -127,10 +127,10 @@ impl Serving {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let scrape = Arc::clone(&self.scrape);
+        let routes = Arc::clone(&self.routes);
         let service = hyper::service::service_fn(move |req| {
-            let scrape = Arc::clone(&scrape);
-            async move { Ok::<_, Infallible>(respond(&scrape, &req)) }
+            let routes = Arc::clone(&routes);
+            async move { Ok::<_, Infallible>(respond(&routes, &req)) }
         });
         let conn = self
             .graceful
@@ -157,17 +157,17 @@ impl Serve for Serving {
 const PROBE_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
 /// `GET /metrics` answers the text format when `[observability.metrics]` is configured, and `GET /livez` and `GET /readyz` answer when `[observability.probes]` is configured. Every other request gets 404.
-fn respond(scrape: &Scrape, req: &Request<Incoming>) -> Response<Full<Bytes>> {
+fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<Full<Bytes>> {
     match (req.method(), req.uri().path()) {
-        (&Method::GET, "/metrics") if scrape.metrics => {
-            reply(StatusCode::OK, text::CONTENT_TYPE, scrape.text())
+        (&Method::GET, "/metrics") if routes.metrics => {
+            reply(StatusCode::OK, text::CONTENT_TYPE, routes.metrics_text())
         }
         // The lifeline stops this process when the master dies, so an answer shows that the master lives.
-        (&Method::GET, "/livez") if scrape.probes => {
+        (&Method::GET, "/livez") if routes.probes => {
             reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
         }
-        (&Method::GET, "/readyz") if scrape.probes => {
-            let unready = probes::unready(&scrape.board, &scrape.pools);
+        (&Method::GET, "/readyz") if routes.probes => {
+            let unready = probes::unready(&routes.board, &routes.pools);
             if unready.is_empty() {
                 reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
             } else {
