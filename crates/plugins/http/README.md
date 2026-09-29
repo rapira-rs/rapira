@@ -67,6 +67,13 @@ To add a built-in middleware:
 - In `resolve_middleware`, match its name, add the name to the known names of the unknown-name error, and refuse a configured table that the list does not name.
 - Add its boot check to `resolve`, as `check_static_root` is for `static`.
 - Build its layer in `Server::from_settings`.
+- In the `src/config.rs` tests, add a `Middleware` arm to the match in `static_middleware_resolves`, or the tests do not compile.
+- Add cases for the new name to the tables of `middleware_list_and_tables_must_agree` and of a resolve test.
+- Add an e2e test in `crates/tests/tests/e2e/` that starts `rapira` with the new `[http.<name>]` table through `Spawn::http_extra`, and add its `mod` line to `main.rs`.
+- Add a commented example of the table to `examples/rapira.toml`, next to `[http.static]`.
+- Add its boot errors to the error list in the Config section.
+
+`rapira_http` depends on each middleware crate, so a crate under `crates/middleware` cannot use `Peer`. A middleware that needs `Peer` must be in `rapira_http`, or `Peer` must first move to a shared crate.
 
 `rapira_static_files::StaticFiles` is the `static` middleware. It serves files from `[http.static].root`. A miss goes to the next layer, and to PHP when `static` is the last layer. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
 
