@@ -9,7 +9,7 @@ use rapira_sapi::Mode;
 
 use crate::harness::{
     Conn, Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_get_raw, http_raw,
-    parse_status_and_body, php_version, rapira_version, signal, wait_workers,
+    parse_status_and_body, php_version, rapira_version, signal, wait_log_contains, wait_workers,
 };
 
 const REQ: Duration = Duration::from_secs(10);
@@ -185,6 +185,35 @@ fn a_booting_worker_shows_starting_until_its_first_pull() {
     scrape_until(&srv, metrics, "an idle worker", |s| {
         value(s, &workers("idle")) == 1 && value(s, &workers("starting")) == 0
     });
+}
+
+/// A worker whose boot fails stays starting: the host's shed pull does not count as the app's first pull.
+#[test]
+fn a_worker_whose_boot_fails_stays_starting() {
+    let metrics = SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/never-loop-worker.php"),
+    )
+    .toml(&format!("[metrics]\nlisten = \"{metrics}\""))
+    .spawn();
+    assert!(
+        wait_log_contains(&srv, "booted", Duration::from_secs(10)),
+        "\n{}",
+        diagnostics(&srv)
+    );
+    // After the log call, the cycle fails and the host waits in the shed pull.
+    std::thread::sleep(Duration::from_millis(500));
+    let (_, _, samples) = scrape(metrics);
+    assert_eq!(
+        (
+            value(&samples, &workers("starting")),
+            value(&samples, &workers("idle"))
+        ),
+        (1, 0),
+        "starting and idle\n{samples:#?}\n{}",
+        diagnostics(&srv)
+    );
 }
 
 /// The master binds every listener in one boot, the metrics listener first. The http pool then fails on the shared address.

@@ -1,7 +1,10 @@
 use tracing::error;
 
 use crate::{
-    callbacks::*, diagnostics::error_type_to_level, scoreboard::sb_update, start::pull_job,
+    callbacks::*,
+    diagnostics::error_type_to_level,
+    scoreboard::sb_update,
+    start::{pull_job, pull_job_to_shed},
     types::Outcome,
 };
 use std::{
@@ -149,7 +152,7 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                     error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
                     sb_update(scoreboard::Event::Unhealthy);
                 }
-                match pull_job() {
+                match pull_job_to_shed() {
                     None => break WorkerExit::Closed,
                     Some(unit) => {
                         unit.shed();

@@ -27,6 +27,24 @@ struct JobRx {
     pending: &'static AtomicU64,
 }
 
+impl JobRx {
+    /// Waits for one unit, with no time limit when `timeout` is None. A pulled unit leaves `pending`.
+    fn recv(&self, timeout: Option<Duration>) -> Pulled {
+        let got = match timeout {
+            None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(t) => self.rx.recv_timeout(t),
+        };
+        match got {
+            Ok(job) => {
+                self.pending.fetch_sub(1, Ordering::Relaxed);
+                Pulled::Job(job)
+            }
+            Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
+            Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
+        }
+    }
+}
+
 thread_local! {
     /// The parts that MINIT registers after the base classes. MINIT runs on the thread that calls `boot_master`.
     static PARTS: RefCell<Vec<PhpPart>> = const { RefCell::new(Vec::new()) };
@@ -231,19 +249,17 @@ pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
             return Pulled::Closed;
         };
         sb_update(Event::Idle);
-        let got = match timeout {
-            None => job_r.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            Some(t) => job_r.rx.recv_timeout(t),
-        };
+        let pulled = job_r.recv(timeout);
         sb_update(Event::Active);
-        match got {
-            Ok(job) => {
-                job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(job)
-            }
-            Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
-            Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
-        }
+        pulled
+    })
+}
+
+/// The host pulls a unit to shed it after a failed cycle. The app made no pull, so the slot keeps its state: a worker whose boot fails stays starting.
+pub(crate) fn pull_job_to_shed() -> Option<Box<dyn Work>> {
+    JOB_RX.with_borrow(|slot| match slot.as_ref()?.recv(None) {
+        Pulled::Job(job) => Some(job),
+        _ => None,
     })
 }
 
