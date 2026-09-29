@@ -80,7 +80,7 @@ fn failboot_grpc_worker_sheds_with_unavailable() -> anyhow::Result<()> {
 }
 
 // UNHEALTHY_AFTER (5) consecutive boot failures must flag the worker unhealthy, each failed boot 503ing its queued job.
-// The boot runs failed cycle 1, and each shed job starts the next cycle. So cycle 5 follows job 4 and flags the worker. The flag stops the worker, and the master failboots because the gen-0 pool never served.
+// The boot runs failed cycle 1. The 4 requests arrive before the 5 s boot retry, so each shed job starts the next cycle, and cycle 5 follows job 4 and flags the worker. The flag stops the worker, and the master failboots because the gen-0 pool never served.
 #[test]
 fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
     let mut srv = Spawn::http(
