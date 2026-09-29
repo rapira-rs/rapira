@@ -10,7 +10,7 @@ use tracing::info;
 
 mod logging;
 
-mod metrics;
+mod observability;
 
 mod settings;
 
@@ -46,9 +46,9 @@ enum PoolRun {
         plugin: Option<Box<dyn Plugin>>,
         args: worker::PoolArgs,
     },
-    /// The metrics pool. The server is taken exactly once, in the forked child.
-    Metrics {
-        server: Option<rapira_metrics::Server>,
+    /// The observability pool. The server is taken exactly once, in the forked child.
+    Observability {
+        server: Option<rapira_observability::Server>,
     },
 }
 
@@ -147,10 +147,10 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     }
 
     let mut prepare: PrepareCtx = PrepareCtx::new();
-    // `WorkerEnv::pool` indexes both lists, so they keep one order. The metrics pool goes first, so the slot cap error of `MasterConfig::scoreboard_slots` always names a PHP pool.
+    // `WorkerEnv::pool` indexes both lists, so they keep one order. The observability pool goes first, so the slot cap error of `MasterConfig::scoreboard_slots` always names a PHP pool.
     let mut runs: Vec<(PoolRun, PoolConfig)> = Vec::new();
-    if let Some(metrics) = settings.metrics {
-        runs.push(metrics::pool_run(metrics, &mut prepare)?);
+    if let Some(observability) = settings.observability {
+        runs.push(observability::pool_run(observability, &mut prepare)?);
     }
     for (plugin, pool) in plugins {
         runs.push(pool_run(plugin, &pool, &mut prepare, &settings.supervisor)?);
@@ -177,11 +177,11 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
                         plugin.take().expect("fresh child owns the plugin copy");
                     worker::worker_body(env, plugin, args.clone())
                 }
-                PoolRun::Metrics { server } => {
+                PoolRun::Observability { server } => {
                     let server = server
                         .take()
-                        .expect("fresh child owns the metrics server copy");
-                    metrics::metrics_body(env, server, drain_grace)
+                        .expect("fresh child owns the observability server copy");
+                    observability::observability_body(env, server, drain_grace)
                 }
             }
         });

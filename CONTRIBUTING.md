@@ -51,20 +51,20 @@ C sources (`*.c`, `*.h` under `crates/`) follow `.clang-format`.
 
 ## Repository layout
 
-| Crate                 | Directory                        | Role                                                                                                                                         |
-| --------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rapira_core`         | `src/`                           | the `rapira` binary: CLI, the `rapira.toml` file shape, the plugin list, boot, fork and the worker and metrics process entries               |
-| `rapira_php_build`    | `crates/php_build`               | build helper: `php-config` discovery and the C compile of the method shells, for `rapira_sapi` and every plugin with a PHP surface           |
-| `rapira_net`          | `crates/net`                     | listeners: `ListenAddr`, `PrepareCtx` and `PreparedListener` bind in the master before the fork, `Acceptor` adopts and accepts in the worker |
-| `rapira_sapi`         | `crates/sapi`                    | the embed SAPI: boot, the PHP thread, the intake, the base PHP contract, the classic and worker modes, the `Plugin` and `Work` traits        |
-| `rapira_config`       | `crates/config`                  | the shared config shapes: `[supervisor]`, `[log]`, the pool table, `listen`, the duration and path helpers                                   |
-| `rapira_master`       | `crates/master`                  | the pre-fork supervisor: forking, reaping, respawn, signals, reload                                                                          |
-| `rapira_scoreboard`   | `crates/scoreboard`              | shared per-worker counters                                                                                                                   |
-| `rapira_metrics`      | `crates/metrics`                 | the `[metrics]` table and the metrics process: the Prometheus text from the scoreboard, served without PHP                                   |
-| `rapira_http`         | `crates/plugins/http`            | the http plugin: HTTP/1.1, the `Rapira\Http` classes, the `[http]` table ([README](crates/plugins/http/README.md))                           |
-| `rapira_grpc`         | `crates/plugins/grpc`            | the grpc plugin: gRPC, gRPC-Web and Connect, the `Rapira\Grpc` classes, the `[grpc]` table ([README](crates/plugins/grpc/README.md))         |
-| `rapira_static_files` | `crates/middleware/static_files` | the `static` http middleware, a tower layer; each built-in http middleware is one crate under `crates/middleware`                            |
-| `tests`               | `crates/tests`                   | the e2e suite, its harness and its fixtures                                                                                                  |
+| Crate                  | Directory                        | Role                                                                                                                                         |
+| ---------------------- | -------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------- |
+| `rapira_core`          | `src/`                           | the `rapira` binary: CLI, the `rapira.toml` file shape, the plugin list, boot, fork and the worker and observability process entries         |
+| `rapira_php_build`     | `crates/php_build`               | build helper: `php-config` discovery and the C compile of the method shells, for `rapira_sapi` and every plugin with a PHP surface           |
+| `rapira_net`           | `crates/net`                     | listeners: `ListenAddr`, `PrepareCtx` and `PreparedListener` bind in the master before the fork, `Acceptor` adopts and accepts in the worker |
+| `rapira_sapi`          | `crates/sapi`                    | the embed SAPI: boot, the PHP thread, the intake, the base PHP contract, the classic and worker modes, the `Plugin` and `Work` traits        |
+| `rapira_config`        | `crates/config`                  | the shared config shapes: `[supervisor]`, `[log]`, the pool table, `listen`, the duration and path helpers                                   |
+| `rapira_master`        | `crates/master`                  | the pre-fork supervisor: forking, reaping, respawn, signals, reload                                                                          |
+| `rapira_scoreboard`    | `crates/scoreboard`              | shared per-worker counters                                                                                                                   |
+| `rapira_observability` | `crates/observability`           | the `[observability]` table and the observability process: the Prometheus text from the scoreboard, served without PHP                       |
+| `rapira_http`          | `crates/plugins/http`            | the http plugin: HTTP/1.1, the `Rapira\Http` classes, the `[http]` table ([README](crates/plugins/http/README.md))                           |
+| `rapira_grpc`          | `crates/plugins/grpc`            | the grpc plugin: gRPC, gRPC-Web and Connect, the `Rapira\Grpc` classes, the `[grpc]` table ([README](crates/plugins/grpc/README.md))         |
+| `rapira_static_files`  | `crates/middleware/static_files` | the `static` http middleware, a tower layer; each built-in http middleware is one crate under `crates/middleware`                            |
+| `tests`                | `crates/tests`                   | the e2e suite, its harness and its fixtures                                                                                                  |
 
 ## Plugins
 

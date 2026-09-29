@@ -7,24 +7,24 @@ use rapira_net::PrepareCtx;
 
 use crate::PoolRun;
 
-/// The metrics pool: one process without PHP and without a request timeout. The listener is bound here, before the fork.
+/// The observability pool: one process without PHP and without a request timeout. The listener is bound here, before the fork.
 pub fn pool_run(
-    settings: rapira_metrics::config::Settings,
+    settings: rapira_observability::config::Settings,
     prepare: &mut PrepareCtx,
 ) -> anyhow::Result<(PoolRun, PoolConfig)> {
-    let build = rapira_metrics::Build {
+    let build = rapira_observability::Build {
         version: env!("CARGO_PKG_VERSION"),
         php_version: rapira_sapi::linked_php_version(),
     };
-    let server =
-        rapira_metrics::Server::new(settings, build, prepare).context("metrics: prepare failed")?;
+    let server = rapira_observability::Server::new(settings, build, prepare)
+        .context("observability: prepare failed")?;
     let pool = PoolConfig {
-        name: "metrics",
+        name: "observability",
         processes: 1,
         request_terminate_timeout: Duration::ZERO,
     };
     Ok((
-        PoolRun::Metrics {
+        PoolRun::Observability {
             server: Some(server),
         },
         pool,
@@ -32,15 +32,19 @@ pub fn pool_run(
 }
 
 /// Returns the process exit code for the master's fork bracket. The process runs no PHP.
-pub fn metrics_body(env: WorkerEnv, server: rapira_metrics::Server, drain_grace: Duration) -> i32 {
-    // The process name identifies the metrics process: https://man7.org/linux/man-pages/man2/PR_SET_NAME.2const.html
+pub fn observability_body(
+    env: WorkerEnv,
+    server: rapira_observability::Server,
+    drain_grace: Duration,
+) -> i32 {
+    // The process name identifies the observability process: https://man7.org/linux/man-pages/man2/PR_SET_NAME.2const.html
     #[cfg(target_os = "linux")]
     // SAFETY: prctl reads a NUL-terminated static string that fits the 16-byte limit.
     unsafe {
-        libc::prctl(libc::PR_SET_NAME, c"rapira-metrics".as_ptr())
+        libc::prctl(libc::PR_SET_NAME, c"rapira-obs".as_ptr())
     };
     env.slot_view.bind(std::process::id());
-    // The metrics process never pulls PHP work, so it reports idle itself. The reload gate waits for it.
+    // The observability process never pulls PHP work, so it reports idle itself. The reload gate waits for it.
     env.slot_view
         .state
         .store(rapira_scoreboard::SLOT_IDLE, Release);
@@ -52,7 +56,7 @@ pub fn metrics_body(env: WorkerEnv, server: rapira_metrics::Server, drain_grace:
     match server.serve(env.board, env.regions, env.pool, stop_rx, drain_grace) {
         Ok(()) => 0,
         Err(e) => {
-            tracing::error!(target: "metrics", "{e:#}");
+            tracing::error!(target: "observability", "{e:#}");
             1
         }
     }

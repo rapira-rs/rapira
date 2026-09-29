@@ -12,7 +12,7 @@ use std::path::Path;
 struct FileConfig {
     http: Option<rapira_http::config::Section>,
     grpc: Option<rapira_grpc::config::Section>,
-    metrics: Option<rapira_metrics::config::Section>,
+    observability: Option<rapira_observability::config::Section>,
     #[serde(default)]
     supervisor: SupervisorSection,
     #[serde(default)]
@@ -23,7 +23,7 @@ struct FileConfig {
 pub struct Settings {
     pub http: Option<rapira_http::config::Settings>,
     pub grpc: Option<rapira_grpc::config::Settings>,
-    pub metrics: Option<rapira_metrics::config::Settings>,
+    pub observability: Option<rapira_observability::config::Settings>,
     pub supervisor: SupervisorSettings,
     pub log: LogSettings,
 }
@@ -51,9 +51,9 @@ fn settings(file: FileConfig, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
         .grpc
         .map(|section| rapira_grpc::config::resolve(section, ctx))
         .transpose()?;
-    let metrics = file
-        .metrics
-        .map(rapira_metrics::config::resolve)
+    let observability = file
+        .observability
+        .map(rapira_observability::config::resolve)
         .transpose()?;
     let supervisor = resolve_supervisor(file.supervisor, ctx)?;
     let log = resolve_log(file.log)?;
@@ -61,7 +61,7 @@ fn settings(file: FileConfig, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
     Ok(Settings {
         http,
         grpc,
-        metrics,
+        observability,
         supervisor,
         log,
     })
@@ -117,23 +117,33 @@ mod tests {
                 error: None,
             },
             Case {
-                name: "metrics table",
-                toml: "[http.pool]\nentrypoint = \"a.php\"\n[metrics]\nlisten = \"127.0.0.1:9180\"\n",
+                name: "observability table",
+                toml: "[http.pool]\nentrypoint = \"a.php\"\n[observability]\nlisten = \"127.0.0.1:9180\"\n[observability.metrics]\n",
                 error: None,
             },
             Case {
-                name: "metrics keep-alive key",
-                toml: "[metrics]\nlisten = \":9180\"\nkeepalive_timeout_secs = 5\n",
+                name: "observability keep-alive key",
+                toml: "[observability]\nlisten = \":9180\"\nkeepalive_timeout_secs = 5\n[observability.metrics]\n",
                 error: None,
             },
             Case {
-                name: "metrics table without listen",
-                toml: "[metrics]\n",
+                name: "observability table without listen",
+                toml: "[observability]\n",
                 error: Some("missing field `listen`"),
             },
             Case {
-                name: "unknown metrics key",
-                toml: "[metrics]\nlisten = \":9180\"\npath = \"/m\"\n",
+                name: "unknown key in the observability table",
+                toml: "[observability]\nlisten = \":9180\"\npath = \"/m\"\n[observability.metrics]\n",
+                error: Some("unknown field `path`"),
+            },
+            Case {
+                name: "old metrics table",
+                toml: "[metrics]\nlisten = \":9180\"\n",
+                error: Some("unknown field `metrics`"),
+            },
+            Case {
+                name: "unknown key in the metrics sub-table",
+                toml: "[observability]\nlisten = \":9180\"\n[observability.metrics]\npath = \"/m\"\n",
                 error: Some("unknown field `path`"),
             },
             Case {
@@ -189,8 +199,8 @@ mod tests {
                 toml: "[log]\nlevel = \"info\"\n",
             },
             Case {
-                name: "metrics table only",
-                toml: "[metrics]\nlisten = \"127.0.0.1:9180\"\n",
+                name: "observability table only",
+                toml: "[observability]\nlisten = \"127.0.0.1:9180\"\n[observability.metrics]\n",
             },
         ];
         for case in cases {

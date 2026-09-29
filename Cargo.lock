@@ -920,8 +920,8 @@ dependencies = [
  "rapira_grpc",
  "rapira_http",
  "rapira_master",
- "rapira_metrics",
  "rapira_net",
+ "rapira_observability",
  "rapira_sapi",
  "rapira_scoreboard",
  "serde",
@@ -993,7 +993,19 @@ dependencies = [
 ]
 
 [[package]]
-name = "rapira_metrics"
+name = "rapira_net"
+version = "0.8.1"
+dependencies = [
+ "anyhow",
+ "libc",
+ "rapira_config",
+ "socket2",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
+name = "rapira_observability"
 version = "0.8.1"
 dependencies = [
  "anyhow",
@@ -1006,18 +1018,6 @@ dependencies = [
  "rapira_net",
  "rapira_scoreboard",
  "serde",
- "tokio",
- "tracing",
-]
-
-[[package]]
-name = "rapira_net"
-version = "0.8.1"
-dependencies = [
- "anyhow",
- "libc",
- "rapira_config",
- "socket2",
  "tokio",
  "tracing",
 ]

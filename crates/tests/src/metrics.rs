@@ -1,4 +1,4 @@
-//! A reader for the Prometheus text format of the `[metrics]` endpoint.
+//! A reader for the Prometheus text format of the `[observability.metrics]` endpoint.
 
 use std::collections::BTreeMap;
 

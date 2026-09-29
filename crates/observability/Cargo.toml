@@ -1,5 +1,5 @@
 [package]
-name = "rapira_metrics"
+name = "rapira_observability"
 version = "0.8.1"
 edition.workspace = true
 publish = false

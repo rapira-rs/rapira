@@ -20,26 +20,28 @@ use crate::config::Settings;
 use crate::text::{self, Build};
 use crate::{memory, stats};
 
-/// The metrics endpoint. The master prepares it before the fork, and the metrics process serves it.
+/// The observability endpoint. The master prepares it before the fork, and the observability process serves it.
 pub struct Server {
     build: Build,
     prepared: PreparedListener,
     keepalive_timeout: Duration,
+    metrics: bool,
 }
 
 impl Server {
     /// Master side, before the fork: binds the listener.
     pub fn new(settings: Settings, build: Build, ctx: &mut PrepareCtx) -> Result<Server> {
         let prepared = ctx.bind(&settings.listen)?;
-        tracing::info!(target: "metrics", "prepared listener on {}", prepared.addr());
+        tracing::info!(target: "observability", "prepared listener on {}", prepared.addr());
         Ok(Self {
             build,
             prepared,
             keepalive_timeout: settings.keepalive_timeout,
+            metrics: settings.metrics,
         })
     }
 
-    /// In the metrics process. Serves `GET /metrics` until `stop` turns true, then waits for the scrapes in flight within `drain_grace`. `own` is the pool of the metrics process, which the output leaves out.
+    /// In the observability process. Serves `GET /metrics` until `stop` turns true, then waits for the requests in flight within `drain_grace`. `own` is the pool of the observability process, which the output leaves out.
     pub fn serve(
         self,
         board: Scoreboard,
@@ -51,10 +53,10 @@ impl Server {
         let rt = tokio::runtime::Builder::new_multi_thread()
             .worker_threads(1)
             .enable_all()
-            .thread_name("rapira-metrics-io")
+            .thread_name("rapira-obs-io")
             .build()
-            .map_err(|e| anyhow!("building the metrics runtime: {e}"))?;
-        tracing::info!(target: "metrics", "serving /metrics on {}", self.prepared.addr());
+            .map_err(|e| anyhow!("building the observability runtime: {e}"))?;
+        tracing::info!(target: "observability", "serving on {}", self.prepared.addr());
         let acceptor = Acceptor::adopt(self.prepared, stop, rt.handle())?;
         let mut builder = http1::Builder::new();
         builder
@@ -66,6 +68,7 @@ impl Server {
                 regions,
                 own,
                 build: self.build,
+                metrics: self.metrics,
             }),
             graceful: GracefulShutdown::new(),
             builder,
@@ -76,7 +79,7 @@ impl Server {
         let drained =
             rt.block_on(async { tokio::time::timeout(drain_grace, graceful.shutdown()).await });
         if drained.is_err() {
-            tracing::warn!(target: "metrics", "scrapes still in flight after {drain_grace:?}");
+            tracing::warn!(target: "observability", "requests still in flight after {drain_grace:?}");
         }
         match fatal {
             Some(e) => Err(e),
@@ -91,6 +94,7 @@ struct Scrape {
     regions: &'static [PoolRegion],
     own: usize,
     build: Build,
+    metrics: bool,
 }
 
 impl Scrape {
@@ -125,7 +129,7 @@ impl Serving {
             .watch(self.builder.serve_connection(TokioIo::new(stream), service));
         tokio::spawn(async move {
             if let Err(e) = conn.await {
-                tracing::debug!(target: "metrics", "connection ended with error: {e}");
+                tracing::debug!(target: "observability", "connection ended with error: {e}");
             }
         });
     }
@@ -141,15 +145,15 @@ impl Serve for Serving {
     }
 }
 
-/// `GET /metrics` answers the text format. Every other method or path gets 404.
+/// `GET /metrics` answers the text format when `[observability.metrics]` is configured. Every other request gets 404.
 fn respond(scrape: &Scrape, req: &Request<Incoming>) -> Response<Full<Bytes>> {
-    if req.method() != Method::GET || req.uri().path() != "/metrics" {
-        let mut not_found = Response::new(Full::new(Bytes::new()));
-        *not_found.status_mut() = StatusCode::NOT_FOUND;
-        return not_found;
+    if scrape.metrics && req.method() == Method::GET && req.uri().path() == "/metrics" {
+        let mut ok = Response::new(Full::new(Bytes::from(scrape.text())));
+        ok.headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static(text::CONTENT_TYPE));
+        return ok;
     }
-    let mut ok = Response::new(Full::new(Bytes::from(scrape.text())));
-    ok.headers_mut()
-        .insert(CONTENT_TYPE, HeaderValue::from_static(text::CONTENT_TYPE));
-    ok
+    let mut not_found = Response::new(Full::new(Bytes::new()));
+    *not_found.status_mut() = StatusCode::NOT_FOUND;
+    not_found
 }

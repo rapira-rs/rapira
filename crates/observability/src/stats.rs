@@ -45,7 +45,7 @@ pub(crate) struct PoolStats {
     pub workers: Vec<Worker>,
 }
 
-/// The stats of every pool except `own`, the pool of the metrics process.
+/// The stats of every pool except `own`, the pool of the observability process.
 pub(crate) fn board_stats(
     board: &Scoreboard,
     regions: &[PoolRegion],
@@ -109,7 +109,7 @@ fn pool_stats(board: &Scoreboard, region: &PoolRegion) -> PoolStats {
 mod tests {
     use super::*;
 
-    /// Slots 0 and 1 belong to the metrics pool, slots 2 to 5 to an http pool of 2 workers, and slots 6 to 9 to a grpc pool of 2 workers. Each pair of states has different counts in at least one pool, and each grpc exit reason has its own count, so a swap of two states or two exit reasons fails the test.
+    /// Slots 0 and 1 belong to the observability pool, slots 2 to 5 to an http pool of 2 workers, and slots 6 to 9 to a grpc pool of 2 workers. Each pair of states has different counts in at least one pool, and each grpc exit reason has its own count, so a swap of two states or two exit reasons fails the test.
     #[test]
     fn board_stats_sums_each_pool_except_its_own() {
         let board = Scoreboard::create(10).unwrap();
@@ -118,7 +118,7 @@ mod tests {
             slot(i).state.store(state, Relaxed);
             slot(i).pid.store(pid, Relaxed);
         };
-        // The metrics pool: left out of the output.
+        // The observability pool: left out of the output.
         place(0, SLOT_IDLE, 100);
         slot(0).handled.store(99, Relaxed);
         // http slot 0: an active worker.
@@ -155,7 +155,7 @@ mod tests {
         slot(9).failed_on_full_queue.store(6, Relaxed);
         let regions = [
             PoolRegion {
-                name: "metrics",
+                name: "observability",
                 processes: 1,
                 slots: 0..2,
             },
