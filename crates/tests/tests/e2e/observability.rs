@@ -230,7 +230,7 @@ fn a_booting_worker_is_starting_and_not_ready_until_its_first_pull() {
     assert_eq!((resp.status(), resp.body_string().as_str()), (200, "ok\n"));
 }
 
-/// A worker whose boot fails stays starting: the host's shed pull does not count as the app's first pull.
+/// A worker whose boot fails stays starting: the host's shed pull does not count as the app's first pull. The 503 shows that the host shed the request in its shed pull. The slot stays starting through the re-boot and the next shed pull.
 #[test]
 fn a_worker_whose_boot_fails_stays_starting() {
     let (srv, observability) = spawn(
@@ -238,13 +238,8 @@ fn a_worker_whose_boot_fails_stays_starting() {
         "",
         "[observability.metrics]",
     );
-    assert!(
-        wait_log_contains(&srv, "booted", Duration::from_secs(10)),
-        "\n{}",
-        diagnostics(&srv)
-    );
-    // After the log call, the cycle fails and the host waits in the shed pull.
-    std::thread::sleep(Duration::from_millis(500));
+    let (code, _) = http_get(srv.addr, "/", REQ).expect("GET /");
+    assert_eq!(code, 503, "\n{}", diagnostics(&srv));
     let samples = scrape(observability);
     assert_eq!(
         (
