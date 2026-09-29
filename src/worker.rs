@@ -34,8 +34,7 @@ fn effective_quota(max_requests: u64) -> u64 {
     max_requests.saturating_add(1 + (h.finish() % grace))
 }
 
-/// Everything a pool's worker needs besides the fork-time env; cloned into each child.
-#[derive(Clone)]
+/// Everything a pool's worker needs besides the fork-time env.
 pub struct PoolArgs {
     pub mode: Mode,
     pub entrypoint: PathBuf,

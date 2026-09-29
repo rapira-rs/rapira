@@ -9,6 +9,8 @@ use rapira_sapi::Mode;
 use tests::wire::submit;
 use tests::{Resp, drain_resp_deadline, req};
 
+#[cfg(target_os = "linux")]
+use crate::harness::wait_child_exit;
 use crate::harness::{
     Conn, Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_raw, php_version,
     rapira_version, signal, wait_log_contains, wait_workers,
@@ -464,4 +466,68 @@ fn requests_behind_a_held_worker_count_as_queued() {
     scrape_until(&srv, observability, "2 queued requests", |s| {
         value(s, QUEUED) == 2
     });
+}
+
+/// The master dies while its worker holds a request, and the orphaned worker drains for up to 55 s. A new server on the same observability address boots and answers in that time. The test process is a child subreaper while the master dies, so the orphaned processes become its children. https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html
+#[cfg(target_os = "linux")]
+#[test]
+fn a_new_server_takes_the_observability_address_while_an_orphan_drains() {
+    let (mut first, observability) = spawn(
+        HANG,
+        "",
+        "[observability.metrics]\n[supervisor]\nprocess_control_timeout_secs = 60",
+    );
+    let pids = wait_workers(
+        &first,
+        Duration::from_secs(20),
+        "the worker and the observability process",
+        |p| p.len() == 2,
+    );
+    let (code, body) = http_get(first.addr, "/", REQ).expect("GET /");
+    assert_eq!(code, 200, "\n{}", diagnostics(&first));
+    let worker: u32 = String::from_utf8(body)
+        .expect("a UTF-8 body")
+        .strip_prefix("ok:")
+        .and_then(|pid| pid.parse().ok())
+        .expect("the fixture answers ok:<pid>");
+    let obs: u32 = *pids
+        .iter()
+        .find(|&&pid| pid != worker)
+        .expect("the observability process");
+    let addr = first.addr;
+    // The client never gets an answer. Its thread ends when the test kills the orphan.
+    std::thread::spawn(move || http_get(addr, "/?hang=1", Duration::from_secs(120)));
+    scrape_until(&first, observability, "an active worker", |s| {
+        value(s, &workers("active")) == 1
+    });
+
+    // SAFETY: prctl with integer arguments only.
+    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
+    signal(first.pid(), libc::SIGKILL);
+    let status = first.wait_exit(Duration::from_secs(10));
+    // SAFETY: prctl with integer arguments only.
+    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0) };
+    assert!(status.is_some(), "master survived SIGKILL");
+    // The first observability process closes its own listener when it exits.
+    wait_child_exit(obs, Duration::from_secs(10), &first);
+
+    let second = Spawn::http(Mode::Dispatcher, fixture_path(HANG))
+        .toml(&format!(
+            "[observability]\nlisten = \"{observability}\"\n[observability.probes]\n"
+        ))
+        .spawn();
+    let resp = get(observability, "/livez");
+    assert_eq!(
+        (resp.status(), resp.body_string().as_str()),
+        (200, "ok\n"),
+        "\n{}",
+        diagnostics(&second)
+    );
+    let mut status: libc::c_int = 0;
+    // SAFETY: non-blocking waitpid on a child of this process; status is a live out-param.
+    let rc = unsafe { libc::waitpid(worker as libc::pid_t, &mut status, libc::WNOHANG) };
+    assert_eq!(rc, 0, "the orphaned worker {worker} stopped draining");
+
+    signal(worker, libc::SIGKILL);
+    wait_child_exit(worker, Duration::from_secs(10), &first);
 }

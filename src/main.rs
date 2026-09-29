@@ -41,14 +41,14 @@ struct ServeArgs {
 
 /// One pool's fork-time payload. The master hands out `WorkerEnv::pool` as the index into the list.
 enum PoolRun {
-    /// A PHP pool. The plugin is taken exactly once, in the forked child.
+    /// A PHP pool.
     Php {
-        plugin: Option<Box<dyn Plugin>>,
+        plugin: Box<dyn Plugin>,
         args: worker::PoolArgs,
     },
-    /// The observability pool. The server is taken exactly once, in the forked child.
+    /// The observability pool.
     Observability {
-        server: Option<rapira_observability::Server>,
+        server: rapira_observability::Server,
     },
 }
 
@@ -114,7 +114,7 @@ fn pool_run(
         .with_context(|| format!("plugin {name}: prepare failed"))?;
     Ok((
         PoolRun::Php {
-            plugin: Some(plugin),
+            plugin,
             args: worker::PoolArgs {
                 mode: pool.mode,
                 entrypoint: pool.entrypoint.clone(),
@@ -171,16 +171,12 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     let stop: Result<rapira_master::StopReason, anyhow::Error> =
         rapira_master::run(cfg, move |env: rapira_master::WorkerEnv| {
-            match &mut pools[env.pool] {
-                PoolRun::Php { plugin, args } => {
-                    let plugin: Box<dyn Plugin> =
-                        plugin.take().expect("fresh child owns the plugin copy");
-                    worker::worker_body(env, plugin, args.clone())
-                }
+            // The child keeps its own pool's entry and drops the others, so an orphaned child holds no other pool's listener.
+            let run: PoolRun = pools.swap_remove(env.pool);
+            pools.clear();
+            match run {
+                PoolRun::Php { plugin, args } => worker::worker_body(env, plugin, args),
                 PoolRun::Observability { server } => {
-                    let server = server
-                        .take()
-                        .expect("fresh child owns the observability server copy");
                     observability::observability_body(env, server, drain_grace)
                 }
             }

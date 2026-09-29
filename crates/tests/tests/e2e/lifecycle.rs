@@ -122,27 +122,6 @@ fn sigterm_master_stops() {
 #[cfg(target_os = "linux")]
 const WORKER_EXIT_DRAINED: i32 = 0;
 
-/// Reaps `pid`, a child of this process, and returns its exit code; `None` if it was killed by a signal.
-#[cfg(target_os = "linux")]
-fn wait_child_exit(pid: u32, timeout: Duration, srv: &Server) -> Option<i32> {
-    let end = Instant::now() + timeout;
-    loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: non-blocking waitpid on a child of this process; status is a live out-param.
-        let rc = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
-        if rc == pid as libc::pid_t {
-            return libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status));
-        }
-        assert_eq!(rc, 0, "waitpid({pid}): {}", std::io::Error::last_os_error());
-        assert!(
-            Instant::now() < end,
-            "worker {pid} survived the master\n{}",
-            diagnostics(srv)
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 /// The test process is a child subreaper while the master dies, so the orphaned workers become its children and their exit codes are visible. https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html
 #[cfg(target_os = "linux")]
 #[test]

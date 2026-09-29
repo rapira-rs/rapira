@@ -23,12 +23,7 @@ pub fn pool_run(
         processes: 1,
         request_terminate_timeout: Duration::ZERO,
     };
-    Ok((
-        PoolRun::Observability {
-            server: Some(server),
-        },
-        pool,
-    ))
+    Ok((PoolRun::Observability { server }, pool))
 }
 
 /// Returns the process exit code for the master's fork bracket. The process runs no PHP.
