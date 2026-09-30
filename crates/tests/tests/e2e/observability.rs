@@ -9,17 +9,18 @@ use rapira_sapi::Mode;
 use tests::wire::submit;
 use tests::{Resp, drain_resp_deadline, req};
 
-#[cfg(target_os = "linux")]
-use crate::harness::wait_child_exit;
 use crate::harness::{
-    Conn, Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_raw, php_version,
-    rapira_version, signal, wait_log_contains, wait_workers,
+    Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_raw, php_version,
+    rapira_version, serving_pid, signal, wait_log_contains, wait_workers,
 };
+#[cfg(target_os = "linux")]
+use crate::harness::{kill_master_as_subreaper, wait_child_exit};
 
 const REQ: Duration = Duration::from_secs(10);
 /// Dispatcher mode. `/` answers `ok:<pid>`, and `/?hang=1` holds the PHP thread forever.
 const HANG: &str = "lifecycle/hang-worker.php";
 const PROBE_TYPE: &str = "text/plain; charset=utf-8";
+const METRICS_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 const REQUESTS: &str = r#"rapira_requests_total{pool="http"}"#;
 const CONFIGURED: &str = r#"rapira_workers_configured{pool="http"}"#;
 const QUEUED: &str = r#"rapira_requests_queued{pool="http"}"#;
@@ -56,6 +57,7 @@ fn get(addr: SocketAddr, path: &str) -> Resp {
 fn scrape(addr: SocketAddr) -> BTreeMap<String, u64> {
     let resp = get(addr, "/metrics");
     assert_eq!(resp.status(), 200, "{}", resp.body_string());
+    assert_eq!(resp.header("content-type").as_deref(), Some(METRICS_TYPE));
     tests::metrics::samples(&resp.body_string())
 }
 
@@ -99,13 +101,6 @@ fn a_scrape_reports_the_pool() {
     let samples = scrape_until(&srv, observability, "3 requests", |s| {
         value(s, REQUESTS) == 3
     });
-
-    let resp = get(observability, "/metrics");
-    assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.header("content-type").as_deref(),
-        Some("text/plain; version=0.0.4; charset=utf-8")
-    );
     assert_eq!(value(&samples, CONFIGURED), 1);
     let total: u64 = STATES
         .iter()
@@ -181,21 +176,13 @@ fn an_idle_connection_closes_after_the_keepalive_timeout() {
         "",
         "keepalive_timeout_secs = 1\n[observability.metrics]",
     );
-    let mut conn = Conn::open(observability, REQ).expect("connect");
-    conn.send(b"GET /metrics HTTP/1.1\r\nHost: e2e\r\n\r\n")
-        .expect("send");
-    let (status, fields) = conn.read_head(REQ).expect("head");
+    let (status, _) = http_raw(
+        observability,
+        b"GET /metrics HTTP/1.1\r\nHost: e2e\r\n\r\n",
+        Duration::from_secs(5),
+    )
+    .expect("the server closes the idle connection");
     assert_eq!(status, 200);
-    let len: usize = fields
-        .iter()
-        .find(|(k, _)| k == "content-length")
-        .map(|(_, v)| v.parse().expect("a content-length number"))
-        .expect("a content-length field");
-    conn.read_n(len, REQ).expect("the body");
-    let rest = conn
-        .read_remaining(Duration::from_secs(5))
-        .expect("the server closes the idle connection");
-    assert!(rest.is_empty(), "{rest:?}");
 }
 
 /// A booting worker shows starting until its first pull, and its pool is not ready. The fixture sleeps 3 s before its first receive().
@@ -302,8 +289,8 @@ fn a_failed_reboot_stays_starting() {
     );
     let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
     assert_eq!(
-        (code, body),
-        (200, b"ok".to_vec()),
+        (code, body.as_slice()),
+        (200, b"ok".as_slice()),
         "\n{}",
         diagnostics(&srv)
     );
@@ -387,9 +374,10 @@ fn each_live_worker_reports_its_memory() {
         s.contains_key(r#"rapira_worker_pss_bytes{pool="http",worker="0"}"#)
     });
     for case in &cases {
+        let prefix = format!("{}{{", case.family);
         let series: Vec<(&String, &u64)> = samples
             .iter()
-            .filter(|(k, _)| k.starts_with(&format!("{}{{", case.family)))
+            .filter(|(k, _)| k.starts_with(&prefix))
             .collect();
         assert_eq!(
             series.len(),
@@ -433,14 +421,7 @@ fn counts_survive_a_recycle() {
 #[test]
 fn a_killed_worker_counts_as_crashed() {
     let (srv, observability) = spawn(HANG, "", "[observability.metrics]");
-    let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    let pid: u32 = String::from_utf8(body)
-        .expect("a UTF-8 body")
-        .strip_prefix("ok:")
-        .and_then(|pid| pid.parse().ok())
-        .expect("the fixture answers ok:<pid>");
-    signal(pid, libc::SIGKILL);
+    signal(serving_pid(&srv), libc::SIGKILL);
     scrape_until(&srv, observability, "1 crashed exit", |s| {
         value(s, &exits("crashed")) == 1
     });
@@ -483,13 +464,7 @@ fn a_new_server_takes_the_observability_address_while_an_orphan_drains() {
         "the worker and the observability process",
         |p| p.len() == 2,
     );
-    let (code, body) = http_get(first.addr, "/", REQ).expect("GET /");
-    assert_eq!(code, 200, "\n{}", diagnostics(&first));
-    let worker: u32 = String::from_utf8(body)
-        .expect("a UTF-8 body")
-        .strip_prefix("ok:")
-        .and_then(|pid| pid.parse().ok())
-        .expect("the fixture answers ok:<pid>");
+    let worker = serving_pid(&first);
     let obs: u32 = *pids
         .iter()
         .find(|&&pid| pid != worker)
@@ -501,13 +476,7 @@ fn a_new_server_takes_the_observability_address_while_an_orphan_drains() {
         value(s, &workers("active")) == 1
     });
 
-    // SAFETY: prctl with integer arguments only.
-    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
-    signal(first.pid(), libc::SIGKILL);
-    let status = first.wait_exit(Duration::from_secs(10));
-    // SAFETY: prctl with integer arguments only.
-    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0) };
-    assert!(status.is_some(), "master survived SIGKILL");
+    kill_master_as_subreaper(&mut first);
     // The first observability process closes its own listener when it exits.
     wait_child_exit(obs, Duration::from_secs(10), &first);
 

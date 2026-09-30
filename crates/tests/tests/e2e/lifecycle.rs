@@ -131,13 +131,7 @@ fn killed_master_leaves_workers_to_drain() {
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 
-    // SAFETY: prctl with integer arguments only.
-    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
-    signal(srv.pid(), libc::SIGKILL);
-    let status = srv.wait_exit(Duration::from_secs(10));
-    // SAFETY: prctl with integer arguments only.
-    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0) };
-    assert!(status.is_some(), "master survived SIGKILL");
+    kill_master_as_subreaper(&mut srv);
 
     for pid in pids {
         assert_eq!(

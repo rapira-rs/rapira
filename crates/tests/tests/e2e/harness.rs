@@ -130,13 +130,8 @@ pub fn rapira_version() -> String {
 
 /// major.minor.patch of the PHP that `php-config` names. The build links the libphp of that PHP.
 pub fn php_version() -> String {
-    let bin = std::env::var("PHP_CONFIG").unwrap_or_else(|_| "php-config".into());
-    let out = Command::new(bin)
-        .arg("--version")
-        .output()
-        .expect("run php-config --version");
-    let text = String::from_utf8_lossy(&out.stdout);
-    text.trim()
+    php_config("--version")
+        .expect("run php-config --version")
         .split(|c: char| !(c.is_ascii_digit() || c == '.'))
         .next()
         .unwrap_or_default()
@@ -797,6 +792,16 @@ pub fn http_raw(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Resu
     parse_status_and_body(&raw).map(|(status, body)| (status, body.to_vec()))
 }
 
+/// The pid of the worker that serves one `GET /`. The fixture answers `ok:<pid>`.
+pub fn serving_pid(srv: &Server) -> u32 {
+    let (code, body) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    assert_eq!(code, 200, "\n{}", diagnostics(srv));
+    let body = String::from_utf8_lossy(&body);
+    body.strip_prefix("ok:")
+        .and_then(|pid| pid.parse().ok())
+        .unwrap_or_else(|| panic!("unexpected body {body:?}"))
+}
+
 /// Sibling of [`http_get`] with a body; `content_type` is bytes because a multipart boundary is opaque octets and obs-text is legal in a field value.
 pub fn http_post(
     addr: SocketAddr,
@@ -920,6 +925,18 @@ pub fn wait_child_exit(pid: u32, timeout: Duration, srv: &Server) -> Option<i32>
         );
         std::thread::sleep(Duration::from_millis(50));
     }
+}
+
+/// Kills the master with SIGKILL while the test process is a child subreaper, so the orphaned workers become children of the test process. https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html
+#[cfg(target_os = "linux")]
+pub fn kill_master_as_subreaper(srv: &mut Server) {
+    // SAFETY: prctl with integer arguments only.
+    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
+    signal(srv.pid(), libc::SIGKILL);
+    let status = srv.wait_exit(Duration::from_secs(10));
+    // SAFETY: prctl with integer arguments only.
+    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0) };
+    assert!(status.is_some(), "master survived SIGKILL");
 }
 
 /// Per-thread outcome counters: `refused` means the listener closed, `failed` means a non-200 response, a hang, or a corrupt reply; connection drops only record `last_err` (the balancer retries those).
@@ -1099,13 +1116,18 @@ pub fn fixture_path(name: &str) -> PathBuf {
         .join(name)
 }
 
-/// `extension_dir` of the linked PHP, from the same `php-config` the build script uses (crates/sapi/build.rs).
-fn php_extension_dir() -> Option<PathBuf> {
+/// Trimmed stdout of the `php-config` that the build script uses (crates/sapi/build.rs), or None when it fails.
+fn php_config(arg: &str) -> Option<String> {
     let bin = std::env::var("PHP_CONFIG").unwrap_or_else(|_| "php-config".into());
-    let out = Command::new(bin).arg("--extension-dir").output().ok()?;
+    let out = Command::new(bin).arg(arg).output().ok()?;
     out.status
         .success()
-        .then(|| PathBuf::from(String::from_utf8_lossy(&out.stdout).trim()))
+        .then(|| String::from_utf8_lossy(&out.stdout).trim().to_owned())
+}
+
+/// `extension_dir` of the linked PHP.
+fn php_extension_dir() -> Option<PathBuf> {
+    php_config("--extension-dir").map(PathBuf::from)
 }
 
 /// The shared object for `name`, or None when this PHP build lacks it; RAPIRA_REQUIRE_EXTS turns a demanded skip into a panic.

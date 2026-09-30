@@ -142,12 +142,6 @@ mod tests {
     }
 
     #[test]
-    fn regions_fill_the_board_up_to_the_cap() {
-        let regions = cfg(vec![pool("http", SB_MAX_SLOTS / 2)]).regions().unwrap();
-        assert_eq!(regions[0].slots, 0..SB_MAX_SLOTS);
-    }
-
-    #[test]
     fn regions_name_the_pool_that_crosses_the_cap() {
         let e = cfg(vec![pool("http", SB_MAX_SLOTS / 2), pool("grpc", 1)])
             .regions()
@@ -166,33 +160,47 @@ mod tests {
     }
 
     #[test]
-    fn regions_follow_the_pool_order_with_two_slots_per_worker() {
-        let regions = cfg(vec![
-            pool("observability", 1),
-            pool("http", 3),
-            pool("grpc", 2),
-        ])
-        .regions()
-        .unwrap();
-        assert_eq!(
-            regions,
-            [
-                PoolRegion {
-                    name: "observability",
-                    processes: 1,
-                    slots: 0..2
-                },
-                PoolRegion {
+    fn regions_place_the_pools_on_the_board() {
+        struct Case {
+            name: &'static str,
+            pools: Vec<PoolConfig>,
+            want: Vec<PoolRegion>,
+        }
+        let cases = [
+            Case {
+                name: "pool order with two slots per worker",
+                pools: vec![pool("observability", 1), pool("http", 3), pool("grpc", 2)],
+                want: vec![
+                    PoolRegion {
+                        name: "observability",
+                        processes: 1,
+                        slots: 0..2,
+                    },
+                    PoolRegion {
+                        name: "http",
+                        processes: 3,
+                        slots: 2..8,
+                    },
+                    PoolRegion {
+                        name: "grpc",
+                        processes: 2,
+                        slots: 8..12,
+                    },
+                ],
+            },
+            Case {
+                name: "one pool fills the board up to the cap",
+                pools: vec![pool("http", SB_MAX_SLOTS / 2)],
+                want: vec![PoolRegion {
                     name: "http",
-                    processes: 3,
-                    slots: 2..8
-                },
-                PoolRegion {
-                    name: "grpc",
-                    processes: 2,
-                    slots: 8..12
-                },
-            ]
-        );
+                    processes: SB_MAX_SLOTS / 2,
+                    slots: 0..SB_MAX_SLOTS,
+                }],
+            },
+        ];
+        for case in cases {
+            let regions = cfg(case.pools).regions().unwrap();
+            assert_eq!(regions, case.want, "{}", case.name);
+        }
     }
 }
