@@ -81,10 +81,7 @@ impl Server {
         if drained.is_err() {
             tracing::warn!(target: "observability", "requests still in flight after {drain_grace:?}");
         }
-        match fatal {
-            Some(e) => Err(e),
-            None => Ok(()),
-        }
+        fatal.map_or(Ok(()), Err)
     }
 }
 
