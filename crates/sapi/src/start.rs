@@ -142,7 +142,6 @@ impl Rapira {
             on_unhealthy,
             slot,
         } = hooks;
-        slot.bind(std::process::id());
         let pending: &'static AtomicU64 = &slot.pending;
         let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
         let sink = Sink::new(intake_tx, slot);
@@ -244,8 +243,8 @@ pub(crate) enum Pulled {
 
 /// Idle covers only the park: control returns to PHP as Active on every arm, or the master watchdog skips a worker spinning after a no-unit return.
 pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
-    JOB_RX.with_borrow_mut(|slot| {
-        let Some(job_r) = slot.as_mut() else {
+    JOB_RX.with_borrow(|slot| {
+        let Some(job_r) = slot.as_ref() else {
             return Pulled::Closed;
         };
         sb_update(Event::Idle);

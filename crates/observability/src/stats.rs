@@ -24,12 +24,12 @@ pub(crate) struct Worker {
     /// The slot index in the pool.
     pub index: usize,
     pub pid: u32,
-    /// Filled after the board read. None: not read yet, or the read failed.
-    pub memory: Option<Memory>,
+    /// Filled after the board read. Both values are None until the read, or when the read fails.
+    pub memory: Memory,
 }
 
 /// The values of one pool at one scrape.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub(crate) struct PoolStats {
     pub name: &'static str,
     pub configured: usize,
@@ -55,14 +55,7 @@ fn pool_stats(board: &Scoreboard, region: &PoolRegion) -> PoolStats {
     let mut stats = PoolStats {
         name: region.name,
         configured: region.processes,
-        states: [0; 4],
-        requests: 0,
-        failed: 0,
-        failed_on_full_queue: 0,
-        queued: 0,
-        script_restarts: 0,
-        exits: [0; 5],
-        workers: Vec::new(),
+        ..Default::default()
     };
     for (index, s) in board.slots()[region.slots.clone()].iter().enumerate() {
         let state = s.state.load(Relaxed);
@@ -74,7 +67,7 @@ fn pool_stats(board: &Scoreboard, region: &PoolRegion) -> PoolStats {
             stats.workers.push(Worker {
                 index,
                 pid,
-                memory: None,
+                memory: Memory::default(),
             });
         }
         stats.requests += s.handled.load(Relaxed);
@@ -170,12 +163,12 @@ mod tests {
                         Worker {
                             index: 0,
                             pid: 201,
-                            memory: None
+                            memory: Memory::default()
                         },
                         Worker {
                             index: 1,
                             pid: 202,
-                            memory: None
+                            memory: Memory::default()
                         },
                     ],
                 },
@@ -193,22 +186,22 @@ mod tests {
                         Worker {
                             index: 0,
                             pid: 301,
-                            memory: None
+                            memory: Memory::default()
                         },
                         Worker {
                             index: 1,
                             pid: 302,
-                            memory: None
+                            memory: Memory::default()
                         },
                         Worker {
                             index: 2,
                             pid: 303,
-                            memory: None
+                            memory: Memory::default()
                         },
                         Worker {
                             index: 3,
                             pid: 304,
-                            memory: None
+                            memory: Memory::default()
                         },
                     ],
                 },

@@ -1,6 +1,4 @@
-use std::sync::atomic::Ordering::Relaxed;
-
-use rapira_scoreboard::{PoolRegion, SLOT_ACTIVE, SLOT_IDLE, Scoreboard};
+use rapira_scoreboard::{PoolRegion, Scoreboard, SharedSlot};
 
 /// The pools in `pools` without a worker that can serve: no slot of the pool is idle or active.
 pub(crate) fn unready(board: &Scoreboard, pools: &[PoolRegion]) -> Vec<&'static str> {
@@ -9,7 +7,7 @@ pub(crate) fn unready(board: &Scoreboard, pools: &[PoolRegion]) -> Vec<&'static 
         .filter(|pool| {
             !board.slots()[pool.slots.clone()]
                 .iter()
-                .any(|s| matches!(s.state.load(Relaxed), SLOT_IDLE | SLOT_ACTIVE))
+                .any(SharedSlot::serving)
         })
         .map(|pool| pool.name)
         .collect()
@@ -17,7 +15,9 @@ pub(crate) fn unready(board: &Scoreboard, pools: &[PoolRegion]) -> Vec<&'static 
 
 #[cfg(test)]
 mod tests {
-    use rapira_scoreboard::{SLOT_DRAINING, SLOT_FREE, SLOT_STARTING};
+    use std::sync::atomic::Ordering::Relaxed;
+
+    use rapira_scoreboard::{SLOT_ACTIVE, SLOT_DRAINING, SLOT_FREE, SLOT_IDLE, SLOT_STARTING};
 
     use super::*;
 

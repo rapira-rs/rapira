@@ -83,12 +83,6 @@ impl Pool {
         self.board.slot(i).state.load(Relaxed) == SLOT_FREE
     }
 
-    /// Serving is IDLE or ACTIVE: under load a replacement may never be observed IDLE between requests.
-    fn slot_is_serving(&self, i: usize) -> bool {
-        let state = self.board.slot(i).state.load(Relaxed);
-        state == SLOT_IDLE || state == SLOT_ACTIVE
-    }
-
     fn find_spawn_slot(&self) -> Option<usize> {
         (0..self.table.slots.len())
             .find(|&i| self.slot_is_free(i) && self.table.slots[i].respawn_at.is_none())
@@ -103,13 +97,16 @@ impl Pool {
         self.board.set_starting(slot);
         let generation = self.table.generation;
         match spawner.spawn(self.index, self.board.slot(slot)) {
-            Ok(pid) => self.table.procs.push(WorkerProc {
-                pid,
-                slot,
-                generation,
-                spawned_at: now,
-                timeout_kill: false,
-            }),
+            Ok(pid) => {
+                self.board.slot(slot).pid.store(pid as u32, Relaxed);
+                self.table.procs.push(WorkerProc {
+                    pid,
+                    slot,
+                    generation,
+                    spawned_at: now,
+                    timeout_kill: false,
+                });
+            }
             Err(e) => {
                 tracing::error!(
                     target: "master",
@@ -208,7 +205,7 @@ impl Pool {
         };
         match reload.phase {
             ReloadPhase::Await { slot, until } => {
-                if self.slot_is_serving(slot) {
+                if self.board.slot(slot).serving() {
                     self.reload_quit_next(now);
                 } else if now >= until {
                     tracing::warn!(
@@ -276,7 +273,7 @@ impl Pool {
             ExitVerdict::Unhealthy => {
                 if w.generation == 0
                     && self.total_successful() == 0
-                    && !(0..self.table.slots.len()).any(|i| self.slot_is_serving(i))
+                    && !self.board.slots().iter().any(SharedSlot::serving)
                 {
                     anyhow::bail!(
                         "{} pool: worker {} exited unhealthy before the pool served any request",

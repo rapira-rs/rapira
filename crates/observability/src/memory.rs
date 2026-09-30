@@ -1,21 +1,21 @@
 /// The memory of one worker, in bytes.
-#[derive(Debug, PartialEq)]
+#[derive(Debug, Default, PartialEq)]
 pub(crate) struct Memory {
     pub rss: Option<u64>,
     pub pss: Option<u64>,
 }
 
-/// Reads `/proc/<pid>/smaps_rollup`: https://docs.kernel.org/filesystems/proc.html#process-specific-subdirectories. None when the process is gone or the file cannot be read.
+/// Reads `/proc/<pid>/smaps_rollup`: https://docs.kernel.org/filesystems/proc.html#process-specific-subdirectories. Both values are None when the process is gone or the file cannot be read.
 #[cfg(target_os = "linux")]
-pub(crate) fn read(pid: u32) -> Option<Memory> {
-    let text = std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup")).ok()?;
-    Some(parse(&text))
+pub(crate) fn read(pid: u32) -> Memory {
+    std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
+        .map_or_else(|_| Memory::default(), |text| parse(&text))
 }
 
 /// Only Linux has `/proc/<pid>/smaps_rollup`.
 #[cfg(not(target_os = "linux"))]
-pub(crate) fn read(_pid: u32) -> Option<Memory> {
-    None
+pub(crate) fn read(_pid: u32) -> Memory {
+    Memory::default()
 }
 
 /// The `Rss:` and `Pss:` lines. The kernel writes the values in kB.

@@ -38,7 +38,6 @@ pub fn observability_body(
     unsafe {
         libc::prctl(libc::PR_SET_NAME, c"rapira-obs".as_ptr())
     };
-    env.slot_view.bind(std::process::id());
     // The observability process never pulls PHP work, so it reports idle itself. The reload gate waits for it.
     env.slot_view
         .state
@@ -48,7 +47,8 @@ pub fn observability_body(
     crate::worker::spawn_signal_thread(move || {
         stop_tx.send_replace(true);
     });
-    match server.serve(env.board, env.regions, env.pool, stop_rx, drain_grace) {
+    // main.rs puts the observability pool first, so the other pools follow it.
+    match server.serve(env.board, &env.regions[1..], stop_rx, drain_grace) {
         Ok(()) => 0,
         Err(e) => {
             tracing::error!(target: "observability", "{e:#}");

@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -43,12 +42,11 @@ impl Server {
         })
     }
 
-    /// In the observability process. Serves the routes of the configured sub-tables until `stop` turns true, then waits for the requests in flight within `drain_grace`. `own` is the pool of the observability process, which the metrics and `/readyz` leave out.
+    /// In the observability process. Serves the routes of the configured sub-tables until `stop` turns true, then waits for the requests in flight within `drain_grace`. `pools` are the pools that the metrics and `/readyz` report.
     pub fn serve(
         self,
         board: Scoreboard,
-        regions: &'static [PoolRegion],
-        own: usize,
+        pools: &'static [PoolRegion],
         stop: watch::Receiver<bool>,
         drain_grace: Duration,
     ) -> Result<()> {
@@ -65,18 +63,13 @@ impl Server {
             .timer(TokioTimer::new())
             .header_read_timeout(self.keepalive_timeout);
         let serving = Serving {
-            routes: Arc::new(Routes {
+            routes: Box::leak(Box::new(Routes {
                 board,
-                pools: regions
-                    .iter()
-                    .enumerate()
-                    .filter(|&(i, _)| i != own)
-                    .map(|(_, region)| region.clone())
-                    .collect(),
+                pools,
                 build: self.build,
                 metrics: self.metrics,
                 probes: self.probes,
-            }),
+            })),
             graceful: GracefulShutdown::new(),
             builder,
         };
@@ -99,7 +92,7 @@ impl Server {
 struct Routes {
     board: Scoreboard,
     /// Every pool except the pool of the observability process.
-    pools: Vec<PoolRegion>,
+    pools: &'static [PoolRegion],
     build: Build,
     metrics: bool,
     probes: bool,
@@ -108,7 +101,7 @@ struct Routes {
 impl Routes {
     /// One pass over the board, then one `/proc` read for each live worker.
     fn metrics_text(&self) -> String {
-        let mut pools = stats::board_stats(&self.board, &self.pools);
+        let mut pools = stats::board_stats(&self.board, self.pools);
         for worker in pools.iter_mut().flat_map(|p| p.workers.iter_mut()) {
             worker.memory = memory::read(worker.pid);
         }
@@ -117,7 +110,7 @@ impl Routes {
 }
 
 struct Serving {
-    routes: Arc<Routes>,
+    routes: &'static Routes,
     graceful: GracefulShutdown,
     builder: http1::Builder,
 }
@@ -127,10 +120,9 @@ impl Serving {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let routes = Arc::clone(&self.routes);
+        let routes = self.routes;
         let service = hyper::service::service_fn(move |req| {
-            let routes = Arc::clone(&routes);
-            async move { Ok::<_, Infallible>(respond(&routes, &req)) }
+            std::future::ready(Ok::<_, Infallible>(respond(routes, &req)))
         });
         let conn = self
             .graceful
@@ -167,7 +159,7 @@ fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<Full<Bytes>> {
             reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
         }
         (&Method::GET, "/readyz") if routes.probes => {
-            let unready = probes::unready(&routes.board, &routes.pools);
+            let unready = probes::unready(&routes.board, routes.pools);
             if unready.is_empty() {
                 reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
             } else {

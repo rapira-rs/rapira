@@ -9,7 +9,7 @@ pub const SLOT_IDLE: u32 = 2;
 pub const SLOT_ACTIVE: u32 = 3;
 pub const SLOT_DRAINING: u32 = 4; // worker-initiated exit pending
 
-/// Each field has one writer at a time. The worker writes `pid` at bind, the IDLE, ACTIVE and DRAINING states, the STARTING state after a failed boot cycle, the request counters, `pending` and `failed_on_full_queue`. The master writes the STARTING and FREE states, and it writes `pid`, `pending` and the exit counters only while no worker owns the slot: after the reap and before the next bind.
+/// Each field has one writer at a time. The worker writes the IDLE, ACTIVE and DRAINING states, the STARTING state after a failed boot cycle, the request counters, `pending` and `failed_on_full_queue`. The master writes the STARTING and FREE states, and `pid` at spawn and at clear. It writes `pending` and the exit counters only while no worker owns the slot: after the reap and before the next spawn.
 #[repr(C, align(64))]
 pub struct SharedSlot {
     pub state: AtomicU32,
@@ -40,7 +40,7 @@ pub struct Scoreboard {
 }
 
 /// The part of the board that one pool owns.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, PartialEq)]
 pub struct PoolRegion {
     /// The config table of the pool ("http").
     pub name: &'static str,
@@ -116,7 +116,7 @@ impl Scoreboard {
         self.slots
     }
 
-    /// Master-side at fork time. It reserves the slot, so the next spawn cannot take it before the worker binds it.
+    /// Master-side at fork time. It reserves the slot, so the next spawn cannot take it.
     pub fn set_starting(&self, i: usize) {
         self.slot(i).state.store(SLOT_STARTING, Relaxed);
     }
@@ -147,9 +147,9 @@ impl Scoreboard {
 }
 
 impl SharedSlot {
-    /// Worker-side claim. It runs exactly once per process before requests flow. It stores only the pid. The state stays STARTING, which the master set before the fork, until the first pull of the worker. The counters keep the counts of the earlier workers of this slot, so a sum over the slots of a pool only goes up. A bind always follows a zero-filled mmap or a `clear`, so `pending` is already 0.
-    pub fn bind(&'static self, pid: u32) {
-        self.pid.store(pid, Relaxed);
+    /// Serving is IDLE or ACTIVE: under load a replacement may never be observed IDLE between requests.
+    pub fn serving(&self) -> bool {
+        matches!(self.state.load(Relaxed), SLOT_IDLE | SLOT_ACTIVE)
     }
 }
 
@@ -162,7 +162,7 @@ mod tests {
         let sb = Scoreboard::create(1).unwrap();
         let slot = sb.slot(0);
         sb.set_starting(0);
-        slot.bind(4242);
+        slot.pid.store(4242, Relaxed);
         slot.handled.fetch_add(3, Relaxed);
         slot.errors.fetch_add(1, Relaxed);
         slot.recycles.fetch_add(1, Relaxed);
@@ -179,13 +179,13 @@ mod tests {
         assert!(sb.snapshot_slots().is_empty());
 
         sb.set_starting(0);
-        slot.bind(4343);
+        slot.pid.store(4343, Relaxed);
         let snap = sb.snapshot_slots();
         assert_eq!(snap.len(), 1);
         assert_eq!(
             (snap[0].pid, snap[0].state),
             (4343, SLOT_STARTING),
-            "bind stores the pid and keeps the state that the master set"
+            "the snapshot shows the pid and the state that the master set"
         );
         assert_eq!(
             (snap[0].handled, snap[0].errors, snap[0].recycles),

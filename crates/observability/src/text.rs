@@ -120,7 +120,7 @@ pub(crate) fn render(pools: &[PoolStats], build: &Build) -> String {
         family(&mut out, name, "gauge", help);
         for p in pools {
             for w in &p.workers {
-                if let Some(bytes) = w.memory.as_ref().and_then(value) {
+                if let Some(bytes) = value(&w.memory) {
                     let worker = w.index.to_string();
                     sample(
                         &mut out,
@@ -270,21 +270,6 @@ rapira_worker_exits_total{pool="grpc",reason="crashed"} 0
 rapira_build_info{version="0.8.1",php_version="8.5.10"} 1
 "#;
 
-    fn empty_pool(name: &'static str) -> PoolStats {
-        PoolStats {
-            name,
-            configured: 1,
-            states: [0; 4],
-            requests: 0,
-            failed: 0,
-            failed_on_full_queue: 0,
-            queued: 0,
-            script_restarts: 0,
-            exits: [0; 5],
-            workers: Vec::new(),
-        }
-    }
-
     #[test]
     fn render_writes_every_family_as_one_group() {
         struct Case {
@@ -309,15 +294,15 @@ rapira_build_info{version="0.8.1",php_version="8.5.10"} 1
                         Worker {
                             index: 0,
                             pid: 201,
-                            memory: Some(Memory {
+                            memory: Memory {
                                 rss: Some(4096),
                                 pss: Some(2048),
-                            }),
+                            },
                         },
                         Worker {
                             index: 1,
                             pid: 202,
-                            memory: None,
+                            memory: Memory::default(),
                         },
                     ],
                 }],
@@ -325,7 +310,18 @@ rapira_build_info{version="0.8.1",php_version="8.5.10"} 1
             },
             Case {
                 name: "two pools without workers",
-                pools: vec![empty_pool("http"), empty_pool("grpc")],
+                pools: vec![
+                    PoolStats {
+                        name: "http",
+                        configured: 1,
+                        ..Default::default()
+                    },
+                    PoolStats {
+                        name: "grpc",
+                        configured: 1,
+                        ..Default::default()
+                    },
+                ],
                 want: TWO_POOLS,
             },
         ];

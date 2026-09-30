@@ -102,7 +102,7 @@ pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::R
     let regions = cfg.regions()?;
     let scoreboard: Scoreboard = Scoreboard::create(regions.last().map_or(0, |r| r.slots.end))?;
     // Built once per boot and never freed, as the board: every forked child reads the same regions.
-    let regions: &'static [PoolRegion] = Box::leak(regions.into_boxed_slice());
+    let regions: &'static [PoolRegion] = regions.leak();
     let self_pipe: signals::SelfPipe = signals::install_master_signals()?;
     let lifeline: lifeline::Lifeline = lifeline::Lifeline::create()?;
     let _pidfile: Option<pidfile::PidFile> = match &cfg.pidfile {
