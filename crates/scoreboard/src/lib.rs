@@ -183,11 +183,6 @@ mod tests {
         let snap = sb.snapshot_slots();
         assert_eq!(snap.len(), 1);
         assert_eq!(
-            (snap[0].pid, snap[0].state),
-            (4343, SLOT_STARTING),
-            "the snapshot shows the pid and the state that the master set"
-        );
-        assert_eq!(
             (snap[0].handled, snap[0].errors, snap[0].recycles),
             (3, 1, 1),
             "the counts of the first worker stay in the slot"

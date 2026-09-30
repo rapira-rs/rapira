@@ -57,7 +57,12 @@ fn get(addr: SocketAddr, path: &str) -> Resp {
 fn scrape(addr: SocketAddr) -> BTreeMap<String, u64> {
     let resp = get(addr, "/metrics");
     assert_eq!(resp.status(), 200, "{}", resp.body_string());
-    assert_eq!(resp.header("content-type").as_deref(), Some(METRICS_TYPE));
+    assert_eq!(
+        resp.header("content-type").as_deref(),
+        Some(METRICS_TYPE),
+        "{}",
+        resp.body_string()
+    );
     tests::metrics::samples(&resp.body_string())
 }
 
@@ -331,7 +336,7 @@ fn an_observability_listener_on_the_http_address_fails_the_boot() {
     );
 }
 
-/// A USR2 reload replaces the observability process too. It never pulls PHP work, so it stores idle itself after the bind: otherwise the reload gate of its pool waits the whole control timeout, 30 s by default.
+/// A USR2 reload replaces the observability process too. It never pulls PHP work, so it stores idle itself: otherwise the reload gate of its pool waits the whole control timeout, 30 s by default.
 #[test]
 fn a_reload_replaces_the_observability_process() {
     let (srv, observability) = spawn(HANG, "", "[observability.metrics]");
