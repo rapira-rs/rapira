@@ -8,7 +8,7 @@ use crate::stats::{EXIT_REASONS, PoolStats, STATES};
 pub struct Build {
     /// The version of the `rapira` binary.
     pub version: &'static str,
-    /// major.minor.patch of the linked libphp.
+    /// PHP_VERSION of the linked libphp.
     pub php_version: String,
 }
 

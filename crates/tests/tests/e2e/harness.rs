@@ -128,14 +128,9 @@ pub fn rapira_version() -> String {
         .to_owned()
 }
 
-/// major.minor.patch of the PHP that `php-config` names. The build links the libphp of that PHP.
+/// PHP_VERSION of the PHP that `php-config` names. The build links the libphp of that PHP.
 pub fn php_version() -> String {
-    php_config("--version")
-        .expect("run php-config --version")
-        .split(|c: char| !(c.is_ascii_digit() || c == '.'))
-        .next()
-        .unwrap_or_default()
-        .to_owned()
+    php_config("--version").expect("run php-config --version")
 }
 
 /// `extra_toml` is appended inside `[http.pool]`, bare keys first; a `[log]` or `[supervisor]` header may follow, and it must not open `[http]` or `[http.*]`.

@@ -1,4 +1,5 @@
 use std::cell::RefCell;
+use std::ffi::CStr;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
@@ -66,34 +67,26 @@ pub struct Rapira {
     worker: Option<JoinHandle<()>>,
 }
 
-/// Split a `PHP_VERSION_ID` (major * 10000 + minor * 100 + patch) into major and minor: https://www.php.net/manual/en/function.phpversion.php
-fn php_series(id: u32) -> (u32, u32) {
-    (id / 10_000, (id / 100) % 100)
-}
-
 /// Zend structs are bound by bindgen at build time, so a libphp from another PHP minor is an ABI mismatch (`sapi_startup` handed a differently shaped struct), not a load error.
 fn check_linked_php() -> anyhow::Result<()> {
     // SAFETY: php_version_id() returns a compile-time constant and touches no engine state, so this is valid pre-startup.
     let linked = unsafe { php_version_id() };
-    let (want, got) = (php_series(PHP_VERSION_ID), php_series(linked));
+    // A PHP_VERSION_ID is major * 10000 + minor * 100 + patch, so `/ 100` drops the patch: https://www.php.net/manual/en/function.phpversion.php
     anyhow::ensure!(
-        want == got,
-        "linked libphp is PHP {}.{}, but this rapira was built against PHP {}.{}. \
+        linked / 100 == PHP_VERSION_ID / 100,
+        "linked libphp is PHP {} (PHP_VERSION_ID {linked}), but this rapira was built against PHP_VERSION_ID {PHP_VERSION_ID}. \
          Use a libphp from the same PHP minor as the build.",
-        got.0,
-        got.1,
-        want.0,
-        want.1
+        linked_php_version()
     );
     Ok(())
 }
 
-/// The linked libphp as major.minor.patch.
+/// The PHP_VERSION string of the linked libphp.
 pub fn linked_php_version() -> String {
-    // SAFETY: php_version_id() returns a compile-time constant and touches no engine state, so this is valid pre-startup.
-    let id = unsafe { php_version_id() };
-    let (major, minor) = php_series(id);
-    format!("{major}.{minor}.{}", id % 100)
+    // SAFETY: php_version() returns a static NUL-terminated string and touches no engine state, so this is valid pre-startup.
+    unsafe { CStr::from_ptr(php_version()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// MINIT once in the master. Base classes first, then each part in order.
@@ -287,17 +280,4 @@ pub(crate) fn pending_depth() -> u64 {
         slot.as_ref()
             .map_or(0, |job_r| job_r.pending.load(Ordering::Relaxed))
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::php_series;
-
-    #[test]
-    fn php_series_drops_the_patch() {
-        assert_eq!(php_series(80_508), (8, 5));
-        assert_eq!(php_series(80_426), (8, 4));
-        assert_eq!(php_series(80_500), php_series(80_599));
-        assert_ne!(php_series(80_400), php_series(80_500));
-    }
 }
