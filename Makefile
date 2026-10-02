@@ -8,9 +8,7 @@ PHP_BIN ?= $(shell $(PHP_CONFIG) --prefix)/bin/php
 BUF_VERSION ?= v1.73.0
 BUF ?= go run github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
 
-FUZZ_TIME ?= 300
-
-.PHONY: test test_nts test_e2e coverage fuzz stubs grpc_fixtures php php-macos
+.PHONY: test test_nts test_e2e coverage stubs grpc_fixtures php php-macos
 
 stubs:
 	@test -f "$(GEN_STUB)" || { echo "gen_stub.php not found at $(GEN_STUB); set GEN_STUB=/path/to/gen_stub.php"; exit 1; }
@@ -40,10 +38,6 @@ test_e2e:
 	@$(LOCATE_PHP); \
 	CARGO_TARGET_DIR=target/nts $(PHP_ENV) cargo build -p rapira_core --bin rapira && \
 	CARGO_TARGET_DIR=target/nts $(PHP_ENV) cargo test -p tests --test e2e --features e2e -- --test-threads=1
-
-fuzz:
-	@$(LOCATE_PHP); \
-	$(PHP_ENV) cargo +nightly fuzz run multipart -- -dict=fuzz/multipart.dict -max_total_time=$(FUZZ_TIME)
 
 PHP_SRC ?= ../../third-party/php-src
 PHP_PREFIX ?= $(HOME)/.local/share/php-nts

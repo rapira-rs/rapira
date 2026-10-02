@@ -34,12 +34,11 @@ make test   # runs test_nts, then test_e2e - sequentially on purpose
 ```
 
 - `make test_nts` - the unit tests of every crate (`cargo test --workspace`; the e2e suite is feature-gated off here).
-- `make test_e2e` - the end-to-end suite (`crates/tests`, `--features e2e`): each test spawns the `rapira` binary, which forks workers and binds ports, and drives it over HTTP, gRPC and signals. Single-threaded on purpose; never run it concurrently with `test_nts`. On Linux, the HTTP fuzz test needs Docker. To run the long fuzz test, add `--ignored generated_requests_cross_the_http_listener_long` to the arguments of the `cargo test` command.
+- `make test_e2e` - the end-to-end suite (`crates/tests`, `--features e2e`): each test spawns the `rapira` binary, which forks workers and binds ports, and drives it over HTTP, gRPC and signals. Single-threaded on purpose; never run it concurrently with `test_nts`. On Linux, the HTTP fuzz test needs Docker. The `Fuzz` workflow (`.github/workflows/fuzz.yml`) runs the long HTTP fuzz test twice a week. To run it locally, add `--ignored generated_requests_cross_the_http_listener_long` to the arguments of the e2e `cargo test` command.
 - `make coverage` - writes the line coverage of the unit and e2e suites to `lcov.info`. It needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
-- `make fuzz` - runs the libFuzzer target of the multipart parser for `FUZZ_TIME` seconds (default 300). It needs a nightly Rust toolchain and `cargo install cargo-fuzz`.
 - `make stubs` - maintainers only: regenerates each `*_arginfo.h` header under `crates/` from the `*.stub.php` stub next to it with PHP's `gen_stub.php`. Never edit the generated headers by hand.
 
-Test placement: unit tests live inside their crate and use no fixture: no file on disk, no socket, no child process, no environment variable and no PHP. Every test that needs a fixture spawns the `rapira` binary and lives under `crates/tests/tests/e2e/` behind the `e2e` feature. The shared harness (the wire clients and the log readers) is in `crates/tests/src/`, and the fixtures are in `crates/tests/fixtures/` and `crates/tests/tests/e2e/fixtures/`. The fuzz targets live in `fuzz/`, a cargo-fuzz crate outside the workspace that calls only the public API.
+Test placement: unit tests live inside their crate and use no fixture: no file on disk, no socket, no child process, no environment variable and no PHP. Every test that needs a fixture spawns the `rapira` binary and lives under `crates/tests/tests/e2e/` behind the `e2e` feature. The shared harness (the wire clients and the log readers) is in `crates/tests/src/`, and the fixtures are in `crates/tests/fixtures/` and `crates/tests/tests/e2e/fixtures/`.
 
 ## Lint and format
 

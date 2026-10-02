@@ -122,6 +122,3 @@ jobs:
 
             - run: cargo test --workspace
             - run: cargo build -p rapira_core --bin rapira && cargo test -p tests --test e2e --features e2e -- --test-threads=1
-            - name: HTTP fuzz test, long run
-              if: github.event_name == 'schedule' && matrix.os == 'ubuntu-latest'
-              run: cargo test -p tests --test e2e --features e2e -- --ignored generated_requests_cross_the_http_listener_long --test-threads=1
