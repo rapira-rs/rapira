@@ -1,5 +1,6 @@
 name: Fuzz
 on:
+    pull_request:
     schedule:
         - cron: "17 3 * * 1,4"
     workflow_dispatch:
@@ -9,37 +10,29 @@ permissions:
 
 jobs:
     fuzz:
-        # Schemathesis runs in Docker with the host network, so the job runs directly on the runner host.
         runs-on: ubuntu-latest
         timeout-minutes: 30
-        env:
-            RUST_BACKTRACE: "1"
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with: { persist-credentials: false }
 
-            - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+            - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+            # The rapira image of .github/fuzz/compose.yaml. The GitHub Actions cache keeps its layers between runs.
+            - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
               with:
-                  php-version: "8.5"
-                  coverage: none
+                  context: .
+                  target: payload
+                  load: true
+                  tags: rapira-fuzz
+                  cache-from: type=gha,scope=fuzz
+                  cache-to: type=gha,mode=max,scope=fuzz
+
+            # A pull request runs a short session with a fixed seed. A scheduled or manual run uses the run id as a new seed.
+            - name: Fuzz session
               env:
-                  phpts: nts
-
-            - name: Build deps for bindgen/cc
-              run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
-
-            - name: Expose the PHP embed lib
+                  SEED: ${{ github.event_name == 'pull_request' && '1' || github.run_id }}
+                  EXAMPLES: ${{ github.event_name == 'pull_request' && '500' || '2000' }}
               run: |
-                  LIBPHP=/usr/lib/libphp8.5.so
-                  test -e "$LIBPHP" || { echo "missing $LIBPHP"; exit 1; }
-                  mkdir -p "$RUNNER_TEMP/phplib"
-                  ln -sf "$LIBPHP" "$RUNNER_TEMP/phplib/libphp.so"
-                  echo "LD_LIBRARY_PATH=$RUNNER_TEMP/phplib:/usr/lib" >> "$GITHUB_ENV"
-                  echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
-
-            - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
-              with:
-                  cache-on-failure: true
-
-            - run: cargo build -p rapira_core --bin rapira && cargo test -p tests --test e2e --features e2e -- --ignored generated_requests_cross_the_http_listener_long --test-threads=1
+                  echo "SEED=$SEED EXAMPLES=$EXAMPLES"
+                  docker compose -f .github/fuzz/compose.yaml up --no-build --exit-code-from fuzz

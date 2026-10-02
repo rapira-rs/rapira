@@ -1,8 +1,19 @@
-"""Schemathesis hooks for crates/tests/tests/e2e/http_fuzz.rs.
+"""Schemathesis hooks for the HTTP target.
 
-The check `rapira_echo` compares the echo of crates/tests/fixtures/dispatcher/echo-json-worker.php with the request
-that Schemathesis sent (`response.request`, a requests.PreparedRequest). The expected values come from the PHP
-contract (https://github.com/rapira-rs/contract, src/Http) and from RFC 9110 and RFC 9112.
+The check `rapira_echo` compares the echo of echo.php with the request that Schemathesis sent (`response.request`, a
+requests.PreparedRequest): the method, target, authority, URI, protocol, header fields, the raw body, and each
+multipart field and file in document order. The expected values come from the PHP contract
+(https://github.com/rapira-rs/contract, src/Http) and from RFC 9110 and RFC 9112.
+
+Known exclusions:
+- A backslash in a part name or filename: rapira reads it as a quoted-pair,
+  https://github.com/rapira-rs/rapira/issues/165
+- A control byte in a part name or filename: rapira answers 400, https://github.com/rapira-rs/rapira/issues/181
+- The case of a header field name: rapira lowercases it on HTTP/1.1, https://github.com/rapira-rs/rapira/issues/180
+
+A negative case breaks the spec on purpose. The check accepts a 400 for a multipart body with an empty part name, a
+control byte or a backslash in a part name or filename, or a body outside the urllib3 shape. It accepts a 413 for more
+files than the default max_files.
 
 urllib3 encodes a multipart body: one part per item, `Content-Disposition: form-data; name="N"[; filename="F"]`, an
 optional `Content-Type`, then the data. In the parameter values it percent-encodes only LF, CR and `"`.
@@ -108,9 +119,9 @@ def rapira_echo(ctx, response, case):
     # for more files than MAX_FILES.
     malformed = any(p[0] == b"" for p in parts or []) or any(CTL_RE.search(x) for x in names)
     if response.status_code == 400 and (unchecked or malformed):
-        return None
+        return
     if response.status_code == 413 and sum(p[1] is not None for p in parts or []) > MAX_FILES:
-        return None
+        return
     assert response.status_code == 200, f"expected 200, got {response.status_code}: {short(response.content)}"
 
     echo = json.loads(response.content)
@@ -142,11 +153,11 @@ def rapira_echo(ctx, response, case):
     if not multipart:
         assert echo["kind"] == "raw", f"body kind {echo['kind']}, want raw"
         assert d(echo["body"]) == body, f"raw body differs: sent {short(body)}, echo {short(d(echo['body']))}"
-        return None
+        return
 
     assert echo["kind"] == "multipart", f"body kind {echo['kind']}, want multipart"
     if unchecked:
-        return None
+        return
     # Multipart: fields are the parts without a filename parameter, files the parts with one, each in document order
     fields = [p for p in parts if p[1] is None]
     files = [p for p in parts if p[1] is not None]
@@ -171,4 +182,3 @@ def rapira_echo(ctx, response, case):
         assert d(e["content"]) == data, f"file {i} content differs ({len(data)} bytes sent)"
         want, got = field_set(headers), echo_field_set(e["headers"])
         assert got == want, f"file {i} headers: sent {short(want)}, echo {short(got)}"
-    return None

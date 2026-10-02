@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: rapira echo
   version: "1"
-  description: The echo worker (crates/tests/fixtures/dispatcher/echo-json-worker.php) returns the Request as JSON, every byte string in base64. The check rapira_echo in hooks.py compares the echo with the sent request.
+  description: The echo app (echo.php) returns the Request as JSON, every byte string in base64. The check rapira_echo in hooks.py compares the echo with the sent request.
 # The part counts of a positive case stay below the default upload limits (max_files 20, max_parts 1024): maxProperties and maxItems bound them. Generated values are short, far below max_field_size_kb (256) and max_file_size_mb (2).
 components:
   responses:

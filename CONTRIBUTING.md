@@ -8,7 +8,6 @@ This repository contains the server: the SAPI crate (`crates/sapi`), the plugins
 - A C compiler (the build compiles `crates/sapi/*.c` and the C method shells of each plugin against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
 - PHP 8.4 or 8.5, **NTS**, built with the embed SAPI (`--enable-embed=shared`). ZTS builds are rejected at compile time.
-- Docker on Linux, for the HTTP fuzz e2e test
 
 ```sh
 sudo apt install php8.4-dev libphp8.4-embed   # Debian/Ubuntu (deb.sury.org / ppa:ondrej)
@@ -34,7 +33,8 @@ make test   # runs test_nts, then test_e2e - sequentially on purpose
 ```
 
 - `make test_nts` - the unit tests of every crate (`cargo test --workspace`; the e2e suite is feature-gated off here).
-- `make test_e2e` - the end-to-end suite (`crates/tests`, `--features e2e`): each test spawns the `rapira` binary, which forks workers and binds ports, and drives it over HTTP, gRPC and signals. Single-threaded on purpose; never run it concurrently with `test_nts`. On Linux, the HTTP fuzz test needs Docker. The `Fuzz` workflow (`.github/workflows/fuzz.yml`) runs the long HTTP fuzz test twice a week. To run it locally, add `--ignored generated_requests_cross_the_http_listener_long` to the arguments of the e2e `cargo test` command.
+- `make test_e2e` - the end-to-end suite (`crates/tests`, `--features e2e`): each test spawns the `rapira` binary, which forks workers and binds ports, and drives it over HTTP, gRPC and signals. Single-threaded on purpose; never run it concurrently with `test_nts`.
+- `docker compose -f .github/fuzz/compose.yaml up --build --exit-code-from fuzz` - a fuzz session: Schemathesis sends generated requests to a rapira container built from the `Dockerfile`, and the command exits with a non-zero status on a failed check or a crashed worker. It needs Docker. Set `SEED` and `EXAMPLES` (default 1 and 500) to replay a session. The `Fuzz` workflow runs this session on each pull request, and a long session with a new seed twice a week. The files are in `.github/fuzz/`.
 - `make coverage` - writes the line coverage of the unit and e2e suites to `lcov.info`. It needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
 - `make stubs` - maintainers only: regenerates each `*_arginfo.h` header under `crates/` from the `*.stub.php` stub next to it with PHP's `gen_stub.php`. Never edit the generated headers by hand.
 

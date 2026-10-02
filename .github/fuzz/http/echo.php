@@ -1,6 +1,6 @@
 <?php
 
-// Echoes the Request as JSON for the HTTP fuzz test. Every byte string is base64, so the check compares bytes, not text.
+// Echoes the Request as JSON for the HTTP fuzz target. Every byte string is base64, so the check compares bytes, not text.
 
 $b64 = static fn(string $s): string => base64_encode($s);
 

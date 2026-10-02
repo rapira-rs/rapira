@@ -1,0 +1,15 @@
+# The rapira service of a fuzz session. compose.yaml mounts this directory at /fuzz.
+
+[http]
+listen = ":8080"
+
+[http.pool]
+mode = "dispatcher"
+entrypoint = "http/echo.php"
+processes = 1
+
+[observability]
+listen = ":9180"
+
+[observability.metrics]
+[observability.probes]
