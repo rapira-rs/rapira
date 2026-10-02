@@ -1,3 +1,4 @@
+use core::fmt::NumBuffer;
 use std::{
     ffi::{CStr, CString, c_char, c_void},
     net::SocketAddr,
@@ -8,7 +9,7 @@ use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::{MAX_BUFFERED_BODY, guard};
 use rapira_sapi::exchange::{
-    AddrOwned, add_list, build_address, header_key, path_bytes, push_dec, push_ipv4,
+    AddrOwned, add_list, build_address, header_key, path_bytes, push_ipv4,
 };
 use rapira_sapi::plugin::PhpPart;
 use rapira_sapi::scoreboard::{Event, sb_update};
@@ -173,13 +174,13 @@ impl RequestView {
                 Addr::Inet(SocketAddr::V4(sa)) => {
                     push_ipv4(&mut uri_abs, *sa.ip());
                     uri_abs.push(':');
-                    push_dec(&mut uri_abs, sa.port());
+                    uri_abs.push_str(sa.port().format_into(&mut NumBuffer::new()));
                 }
                 Addr::Inet(sa) => uri_abs.push_str(&sa.to_string()),
                 Addr::Unix(_) => {
                     uri_abs.push_str(&req.server_name);
                     uri_abs.push(':');
-                    push_dec(&mut uri_abs, req.server_port);
+                    uri_abs.push_str(req.server_port.format_into(&mut NumBuffer::new()));
                 }
             },
         }

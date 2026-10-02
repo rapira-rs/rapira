@@ -1,3 +1,4 @@
+use core::fmt::NumBuffer;
 pub(crate) use std::{
     cell::Cell,
     ffi::{c_char, c_int},
@@ -117,28 +118,13 @@ pub fn path_bytes(p: &Path) -> Vec<u8> {
     p.as_os_str().as_bytes().to_vec()
 }
 
-/// Appends `n` in decimal.
-pub fn push_dec(out: &mut String, mut n: u16) {
-    let mut buf = [0u8; 5];
-    let mut at = buf.len();
-    loop {
-        at -= 1;
-        buf[at] = b'0' + (n % 10) as u8;
-        n /= 10;
-        if n == 0 {
-            break;
-        }
-    }
-    out.push_str(std::str::from_utf8(&buf[at..]).expect("ascii digits"));
-}
-
 /// Appends the dotted form of `ip`, the same bytes as its `Display`.
 pub fn push_ipv4(out: &mut String, ip: Ipv4Addr) {
     for (i, octet) in ip.octets().into_iter().enumerate() {
         if i > 0 {
             out.push('.');
         }
-        push_dec(out, u16::from(octet));
+        out.push_str(octet.format_into(&mut NumBuffer::new()));
     }
 }
 

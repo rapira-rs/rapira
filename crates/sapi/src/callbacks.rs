@@ -6,6 +6,7 @@ use ::http::header::{
     AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, FROM, HeaderMap, HeaderName, HeaderValue,
     PROXY_AUTHORIZATION, REFERER,
 };
+use core::fmt::NumBuffer;
 use core::slice;
 use std::ffi::CStr;
 use std::io::Read;
@@ -147,9 +148,10 @@ fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
 /// Owned buffers stay in ManuallyDrop because `put` can bail out over this frame.
 fn cgi_header_vars(headers: &HeaderMap, content_length: i64, mut put: impl FnMut(&CStr, &[u8])) {
     if content_length >= 0 {
-        let len = ManuallyDrop::new(content_length.to_string());
-        put(c"CONTENT_LENGTH", len.as_bytes());
-        drop(ManuallyDrop::into_inner(len));
+        put(
+            c"CONTENT_LENGTH",
+            content_length.format_into(&mut NumBuffer::new()).as_bytes(),
+        );
     }
     let mut name = ManuallyDrop::new(Vec::new());
     let mut joined = ManuallyDrop::new(Vec::new());
