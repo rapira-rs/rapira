@@ -25,7 +25,8 @@ grpc_fixtures:
 	@cd crates/tests && \
 	$(BUF) build fixtures/grpc --as-file-descriptor-set -o fixtures/grpc/echo.binpb && \
 	$(BUF) build fixtures/grpc --as-file-descriptor-set --exclude-imports -o fixtures/grpc/echo-no-imports.binpb && \
-	$(BUF) build fixtures/grpc_options --as-file-descriptor-set --path fixtures/grpc_options/ping.proto --exclude-imports -o fixtures/grpc_options/ping-no-imports.binpb
+	$(BUF) build fixtures/grpc_options --as-file-descriptor-set --path fixtures/grpc_options/ping.proto --exclude-imports -o fixtures/grpc_options/ping-no-imports.binpb && \
+	$(BUF) build fixtures/grpc_fuzz --as-file-descriptor-set -o fixtures/grpc_fuzz/sample.binpb
 
 test:
 	@$(MAKE) test_nts
