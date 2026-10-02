@@ -1,0 +1,236 @@
+openapi: 3.1.0
+info:
+  title: rapira echo
+  version: "1"
+  description: The echo worker (crates/tests/fixtures/dispatcher/echo-json-worker.php) returns the Request as JSON, every byte string in base64. The check rapira_echo in hooks.py compares the echo with the sent request.
+# The part counts of a positive case stay below the default upload limits (max_files 20, max_parts 1024): maxProperties and maxItems bound them. Generated values are short, far below max_field_size_kb (256) and max_file_size_mb (2).
+components:
+  responses:
+    echo:
+      description: The echoed request.
+      content:
+        application/json:
+          schema:
+            type: object
+            required: [method, uri, target, protocol, headers, kind]
+    rejected:
+      description: rapira refused the request before dispatch.
+  parameters:
+    id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: string
+        minLength: 1
+    trace:
+      name: X-Trace
+      in: header
+      schema:
+        type: string
+    count:
+      name: X-Count
+      in: header
+      schema:
+        type: integer
+paths:
+  /upload/{id}:
+    post:
+      operationId: uploadMixed
+      parameters:
+        - $ref: "#/components/parameters/id"
+        - $ref: "#/components/parameters/trace"
+        - name: mode
+          in: query
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              required: [title, upload]
+              # The part names, and so the file names: Schemathesis makes a filename from the part name.
+              # Not empty: the contract types FormField::$name and UploadedFile::$name as non-empty-string.
+              # No backslash: rapira reads it as a quoted-pair, https://github.com/rapira-rs/rapira/issues/165
+              # No control byte other than HTAB: rapira answers 400, https://github.com/rapira-rs/rapira/issues/181
+              propertyNames: &partName
+                minLength: 1
+                pattern: '^[^\x00-\x08\x0a-\x1f\x7f\\]+$'
+              # With upload and 4 attachments, at most 5 additional properties of at most 2 parts each: 15 files.
+              maxProperties: 8
+              properties:
+                title:
+                  type: string
+                note:
+                  type: string
+                count:
+                  type: integer
+                ratio:
+                  type: number
+                flag:
+                  type: boolean
+                tags:
+                  type: array
+                  maxItems: 4
+                  items:
+                    type: string
+                upload:
+                  type: string
+                  format: binary
+                attachments:
+                  type: array
+                  maxItems: 4
+                  items:
+                    type: string
+                    format: binary
+                meta:
+                  type: object
+              # Any value. An array becomes one file part per item.
+              additionalProperties:
+                maxItems: 2
+            encoding:
+              upload:
+                contentType: application/octet-stream
+      responses:
+        "200":
+          $ref: "#/components/responses/echo"
+        "400":
+          $ref: "#/components/responses/rejected"
+        "413":
+          $ref: "#/components/responses/rejected"
+  /parts:
+    post:
+      operationId: freeParts
+      description: Only free-form parts. A string value is a field part. An array value is one file part per item, and its filename is the part name.
+      requestBody:
+        required: true
+        content:
+          multipart/form-data:
+            schema:
+              type: object
+              propertyNames: *partName
+              # At most 4 arrays of at most 4 items: 16 files.
+              maxProperties: 4
+              additionalProperties:
+                anyOf:
+                  - type: string
+                  - type: array
+                    maxItems: 4
+                    items:
+                      type: string
+                  - type: array
+                    maxItems: 4
+                    items:
+                      type: string
+                      format: binary
+      responses:
+        "200":
+          $ref: "#/components/responses/echo"
+        "400":
+          $ref: "#/components/responses/rejected"
+        "413":
+          $ref: "#/components/responses/rejected"
+  /form:
+    post:
+      operationId: urlencodedForm
+      parameters:
+        - $ref: "#/components/parameters/count"
+      requestBody:
+        required: true
+        content:
+          application/x-www-form-urlencoded:
+            schema:
+              type: object
+              properties:
+                name:
+                  type: string
+                n:
+                  type: integer
+                list:
+                  type: array
+                  items:
+                    type: string
+              additionalProperties:
+                type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/echo"
+        "400":
+          $ref: "#/components/responses/rejected"
+  /raw/{id}:
+    put:
+      operationId: rawBody
+      parameters:
+        - $ref: "#/components/parameters/id"
+        - $ref: "#/components/parameters/trace"
+      requestBody:
+        required: true
+        content:
+          application/octet-stream:
+            schema:
+              type: string
+              format: binary
+          text/plain:
+            schema:
+              type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/echo"
+        "400":
+          $ref: "#/components/responses/rejected"
+  /items/{id}:
+    get:
+      operationId: queryAndHeaders
+      parameters:
+        - $ref: "#/components/parameters/id"
+        - $ref: "#/components/parameters/trace"
+        - $ref: "#/components/parameters/count"
+        - name: X-Flag
+          in: header
+          schema:
+            type: boolean
+        - name: q
+          in: query
+          schema:
+            type: string
+        - name: n
+          in: query
+          schema:
+            type: integer
+        - name: f
+          in: query
+          schema:
+            type: number
+        - name: b
+          in: query
+          schema:
+            type: boolean
+        - name: tags
+          in: query
+          style: form
+          explode: true
+          schema:
+            type: array
+            items:
+              type: string
+        - name: csv
+          in: query
+          style: form
+          explode: false
+          schema:
+            type: array
+            items:
+              type: integer
+        - name: filter
+          in: query
+          style: deepObject
+          explode: true
+          schema:
+            type: object
+            additionalProperties:
+              type: string
+      responses:
+        "200":
+          $ref: "#/components/responses/echo"

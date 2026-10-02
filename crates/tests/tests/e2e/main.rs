@@ -18,6 +18,9 @@ mod grpc_schema;
 mod grpc_server;
 mod grpc_values;
 mod harness;
+// Schemathesis runs in Docker, and the macOS runners have no Docker.
+#[cfg(target_os = "linux")]
+mod http_fuzz;
 mod http_values;
 mod imap_tests;
 mod ini;

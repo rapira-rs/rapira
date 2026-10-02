@@ -8,6 +8,7 @@ This repository contains the server: the SAPI crate (`crates/sapi`), the plugins
 - A C compiler (the build compiles `crates/sapi/*.c` and the C method shells of each plugin against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
 - PHP 8.4 or 8.5, **NTS**, built with the embed SAPI (`--enable-embed=shared`). ZTS builds are rejected at compile time.
+- Docker on Linux, for the HTTP fuzz e2e test
 
 ```sh
 sudo apt install php8.4-dev libphp8.4-embed   # Debian/Ubuntu (deb.sury.org / ppa:ondrej)
@@ -33,7 +34,7 @@ make test   # runs test_nts, then test_e2e - sequentially on purpose
 ```
 
 - `make test_nts` - the unit tests of every crate (`cargo test --workspace`; the e2e suite is feature-gated off here).
-- `make test_e2e` - the end-to-end suite (`crates/tests`, `--features e2e`): each test spawns the `rapira` binary, which forks workers and binds ports, and drives it over HTTP, gRPC and signals. Single-threaded on purpose; never run it concurrently with `test_nts`.
+- `make test_e2e` - the end-to-end suite (`crates/tests`, `--features e2e`): each test spawns the `rapira` binary, which forks workers and binds ports, and drives it over HTTP, gRPC and signals. Single-threaded on purpose; never run it concurrently with `test_nts`. On Linux, the HTTP fuzz test needs Docker. To run the long fuzz test, add `--ignored generated_requests_cross_the_http_listener_long` to the arguments of the `cargo test` command.
 - `make coverage` - writes the line coverage of the unit and e2e suites to `lcov.info`. It needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
 - `make fuzz` - runs the libFuzzer target of the multipart parser for `FUZZ_TIME` seconds (default 300). It needs a nightly Rust toolchain and `cargo install cargo-fuzz`.
 - `make stubs` - maintainers only: regenerates each `*_arginfo.h` header under `crates/` from the `*.stub.php` stub next to it with PHP's `gen_stub.php`. Never edit the generated headers by hand.
