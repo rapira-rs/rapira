@@ -39,18 +39,7 @@ mod round_robin {
     use std::collections::{HashMap, HashSet};
     use std::time::Duration;
 
-    use crate::harness::{Server, diagnostics, http_get, spawn_with_config, wait_workers};
-
-    const REQ: Duration = Duration::from_secs(10);
-
-    fn serving_pid(srv: &Server) -> u32 {
-        let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
-        assert_eq!(code, 200, "\n{}", diagnostics(srv));
-        let body = String::from_utf8_lossy(&body);
-        body.strip_prefix("ok:")
-            .and_then(|pid| pid.parse().ok())
-            .unwrap_or_else(|| panic!("unexpected body {body:?}"))
-    }
+    use crate::harness::{diagnostics, serving_pid, spawn_with_config, wait_workers};
 
     /// One request at a time leaves every other worker blocked in accept when the next
     /// connection arrives. The kernel wakes one of them, and that worker re-registers behind

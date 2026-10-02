@@ -22,6 +22,7 @@ members = [
     "crates/config",
     "crates/tests",
     "crates/master",
+    "crates/observability",
     "crates/php_build",
     "crates/middleware/static_files",
     "crates/interceptors/auth",
@@ -45,6 +46,7 @@ rapira_http = { path = "crates/plugins/http" }
 rapira_grpc = { path = "crates/plugins/grpc" }
 rapira_net = { path = "crates/net" }
 rapira_master = { path = "crates/master" }
+rapira_observability = { path = "crates/observability" }
 rapira_scoreboard = { path = "crates/scoreboard" }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
@@ -78,9 +80,12 @@ rapira_sapi = { workspace = true }
 rapira_config = { workspace = true }
 rapira_http = { workspace = true }
 rapira_grpc = { workspace = true }
+rapira_observability = { workspace = true }
+rapira_scoreboard = { workspace = true }
 libc = { workspace = true }
 mimalloc = "0.1"
 serde = { workspace = true }
+tokio = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono", "json"] }

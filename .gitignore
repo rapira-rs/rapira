@@ -12,3 +12,5 @@ lcov.info
 
 .claude/settings.local.json
 .claude/CLAUDE.local.md
+
+.superpowers/

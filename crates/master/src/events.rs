@@ -2,7 +2,6 @@ use std::os::fd::RawFd;
 use std::time::{Duration, Instant};
 
 use libc::c_int;
-use rapira_scoreboard::Scoreboard;
 
 use crate::pctl::{Pctl, SignalAction};
 use crate::pool::Pool;
@@ -40,24 +39,22 @@ pub(crate) struct Master<'w> {
 }
 
 impl<'w> Master<'w> {
-    /// Lays the pools out over the board: two slots per worker, contiguous, in `cfg.pools` order.
-    pub(crate) fn new(
-        cfg: MasterConfig,
-        scoreboard: Scoreboard,
-        spawner: Forker<'w>,
-    ) -> Master<'w> {
+    /// Gives each pool the slots of its region.
+    pub(crate) fn new(cfg: MasterConfig, spawner: Forker<'w>) -> Master<'w> {
         let now = Instant::now();
         let control_timeout = cfg.process_control_timeout;
-        let mut base: usize = 0;
         let pools: Vec<Pool> = cfg
             .pools
             .into_iter()
+            .zip(spawner.regions)
             .enumerate()
-            .map(|(i, p)| {
-                let len = p.slots();
-                let board = scoreboard.slice(base..base + len);
-                base += len;
-                Pool::new(i, p, board, control_timeout)
+            .map(|(i, (p, region))| {
+                Pool::new(
+                    i,
+                    p,
+                    spawner.board.slice(region.slots.clone()),
+                    control_timeout,
+                )
             })
             .collect();
         Master {

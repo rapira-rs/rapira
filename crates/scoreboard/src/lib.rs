@@ -9,7 +9,7 @@ pub const SLOT_IDLE: u32 = 2;
 pub const SLOT_ACTIVE: u32 = 3;
 pub const SLOT_DRAINING: u32 = 4; // worker-initiated exit pending
 
-/// Single-writer slot: only its worker mutates it, the master writes just the STARTING/FREE transitions.
+/// Each field has one writer at a time. The worker writes the IDLE, ACTIVE and DRAINING states, the STARTING state after a failed boot cycle, the request counters, `pending` and `failed_on_full_queue`. The master writes the STARTING and FREE states, and `pid` at spawn and at clear. It writes `pending` and the exit counters only while no worker owns the slot: after the reap and before the next spawn.
 #[repr(C, align(64))]
 pub struct SharedSlot {
     pub state: AtomicU32,
@@ -19,14 +19,35 @@ pub struct SharedSlot {
     pub recycles: AtomicU64,
     /// [`now_millis`] when the worker last went ACTIVE. The request watchdog measures the request age from it.
     pub last_activity_ms: AtomicU64,
+    /// Units that the IO runtime handed to the worker queue, or that wait for room in a full queue, and that the PHP thread has not pulled yet.
+    pub pending: AtomicU64,
+    /// Worker exits per verdict. The master counts them.
+    pub exits_drained: AtomicU64,
+    pub exits_recycled: AtomicU64,
+    pub exits_unhealthy: AtomicU64,
+    pub exits_timeout: AtomicU64,
+    pub exits_crashed: AtomicU64,
+    /// Units that found the worker queue full and never entered it. An IO thread of the worker counts them.
+    pub failed_on_full_queue: AtomicU64,
 }
 
-const _: () = assert!(size_of::<SharedSlot>() == 64 && align_of::<SharedSlot>() == 64);
+const _: () = assert!(size_of::<SharedSlot>() == 128 && align_of::<SharedSlot>() == 64);
 
 /// Copy view over the mapping. The mmap happens once, pre-fork, so the addresses are identical in every forked child.
 #[derive(Clone, Copy)]
 pub struct Scoreboard {
     slots: &'static [SharedSlot],
+}
+
+/// The part of the board that one pool owns.
+#[derive(Debug, PartialEq)]
+pub struct PoolRegion {
+    /// The config table of the pool ("http").
+    pub name: &'static str,
+    /// The worker count of the pool.
+    pub processes: usize,
+    /// The indices of the pool's slots on the whole board.
+    pub slots: Range<usize>,
 }
 
 #[derive(Debug, Default, Clone)]
@@ -52,7 +73,7 @@ pub fn now_millis() -> u64 {
 
 impl Scoreboard {
     /// Master-side, pre-fork. The mapping must exist before a fork can inherit it.
-    /// Callers pass a bounded count: the master derives it from `MasterConfig::scoreboard_slots`.
+    /// Callers pass a bounded count: the master derives it from its pool regions, which stop at `SB_MAX_SLOTS`.
     pub fn create(nslots: usize) -> anyhow::Result<Scoreboard> {
         let bytes = nslots * size_of::<SharedSlot>();
         // SAFETY:
@@ -95,15 +116,16 @@ impl Scoreboard {
         self.slots
     }
 
-    /// Master-side at fork time. It reserves the slot, so the next spawn cannot take it before the worker binds it.
+    /// Master-side at fork time. It reserves the slot, so the next spawn cannot take it.
     pub fn set_starting(&self, i: usize) {
         self.slot(i).state.store(SLOT_STARTING, Relaxed);
     }
 
-    /// Master-side, after the slot's worker is reaped. The slot can then go to a new fork.
+    /// Master-side, after the slot's worker is reaped. The queue of the dead worker is gone, so `pending` goes to 0. The slot can then go to a new fork.
     pub fn clear(&self, i: usize) {
         let s = self.slot(i);
         s.pid.store(0, Relaxed);
+        s.pending.store(0, Relaxed);
         s.state.store(SLOT_FREE, Relaxed);
     }
 
@@ -125,13 +147,9 @@ impl Scoreboard {
 }
 
 impl SharedSlot {
-    /// Worker-side claim and reset. It runs exactly once per process before requests flow.
-    pub fn bind(&'static self, pid: u32) {
-        self.handled.store(0, Relaxed);
-        self.errors.store(0, Relaxed);
-        self.recycles.store(0, Relaxed);
-        self.pid.store(pid, Relaxed);
-        self.state.store(SLOT_IDLE, Relaxed);
+    /// Serving is IDLE or ACTIVE: under load a replacement may never be observed IDLE between requests.
+    pub fn serving(&self) -> bool {
+        matches!(self.state.load(Relaxed), SLOT_IDLE | SLOT_ACTIVE)
     }
 }
 
@@ -140,28 +158,35 @@ mod tests {
     use super::*;
 
     #[test]
-    fn create_bind_snapshot_roundtrip() {
-        let sb = Scoreboard::create(3).unwrap();
-        assert_eq!(sb.nslots(), 3);
-        assert_eq!(sb.slot(0).state.load(Relaxed), SLOT_FREE);
-
-        sb.set_starting(0);
-        assert_eq!(sb.slot(0).state.load(Relaxed), SLOT_STARTING);
-        assert_eq!(sb.slot(1).state.load(Relaxed), SLOT_FREE);
-
+    fn a_rebound_slot_keeps_its_counts_and_clear_empties_its_queue() {
+        let sb = Scoreboard::create(1).unwrap();
         let slot = sb.slot(0);
-        slot.bind(4242);
-        slot.handled.fetch_add(2, Relaxed);
+        sb.set_starting(0);
+        slot.pid.store(4242, Relaxed);
+        slot.handled.fetch_add(3, Relaxed);
         slot.errors.fetch_add(1, Relaxed);
-
-        let snap = sb.snapshot_slots();
-        assert_eq!(snap.len(), 1);
-        assert_eq!((snap[0].pid, snap[0].handled, snap[0].errors), (4242, 2, 1));
-        assert_eq!(snap[0].state, SLOT_IDLE);
+        slot.recycles.fetch_add(1, Relaxed);
+        slot.pending.fetch_add(2, Relaxed);
 
         sb.clear(0);
-        assert_eq!(sb.slot(0).state.load(Relaxed), SLOT_FREE);
+        assert_eq!(slot.state.load(Relaxed), SLOT_FREE);
+        assert_eq!(slot.pid.load(Relaxed), 0);
+        assert_eq!(
+            slot.pending.load(Relaxed),
+            0,
+            "the queue died with the worker"
+        );
         assert!(sb.snapshot_slots().is_empty());
+
+        sb.set_starting(0);
+        slot.pid.store(4343, Relaxed);
+        let snap = sb.snapshot_slots();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(
+            (snap[0].handled, snap[0].errors, snap[0].recycles),
+            (3, 1, 1),
+            "the counts of the first worker stay in the slot"
+        );
     }
 
     #[test]

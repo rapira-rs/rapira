@@ -5,9 +5,12 @@ use rapira_master::PoolConfig;
 use rapira_net::PrepareCtx;
 use rapira_sapi::plugin::{Mode, Plugin};
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::info;
 
 mod logging;
+
+mod observability;
 
 mod settings;
 
@@ -37,10 +40,16 @@ struct ServeArgs {
 }
 
 /// One pool's fork-time payload. The master hands out `WorkerEnv::pool` as the index into the list.
-struct PoolRun {
-    /// Taken exactly once, in the forked child.
-    plugin: Option<Box<dyn Plugin>>,
-    args: worker::PoolArgs,
+enum PoolRun {
+    /// A PHP pool.
+    Php {
+        plugin: Box<dyn Plugin>,
+        args: worker::PoolArgs,
+    },
+    /// The observability pool.
+    Observability {
+        server: rapira_observability::Server,
+    },
 }
 
 /// Signals are blocked first: USR1/USR2/HUP terminate by default until the master installs its handlers.
@@ -104,8 +113,8 @@ fn pool_run(
         .prepare(prepare)
         .with_context(|| format!("plugin {name}: prepare failed"))?;
     Ok((
-        PoolRun {
-            plugin: Some(plugin),
+        PoolRun::Php {
+            plugin,
             args: worker::PoolArgs {
                 mode: pool.mode,
                 entrypoint: pool.entrypoint.clone(),
@@ -138,19 +147,22 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     }
 
     let mut prepare: PrepareCtx = PrepareCtx::new();
-    // `WorkerEnv::pool` indexes both lists, so they keep one order.
-    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = plugins
-        .into_iter()
-        .map(|(plugin, pool)| pool_run(plugin, &pool, &mut prepare, &settings.supervisor))
-        .collect::<anyhow::Result<Vec<_>>>()?
-        .into_iter()
-        .unzip();
+    // `WorkerEnv::pool` indexes both lists, so they keep one order. The observability pool goes first, so the slot cap error of the master always names a PHP pool.
+    let mut runs: Vec<(PoolRun, PoolConfig)> = Vec::new();
+    if let Some(observability) = settings.observability {
+        runs.push(observability::pool_run(observability, &mut prepare)?);
+    }
+    for (plugin, pool) in plugins {
+        runs.push(pool_run(plugin, &pool, &mut prepare, &settings.supervisor)?);
+    }
+    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = runs.into_iter().unzip();
 
     // MINIT once, after every pool bound its listeners. Every linked plugin registers its classes, whatever pools are configured.
     let module: rapira_sapi::PhpModule =
         rapira_sapi::boot_master(&[rapira_http::PHP_PART, rapira_grpc::PHP_PART])?;
 
     // forks ------------------------------------------------------------------
+    let drain_grace: Duration = settings.supervisor.drain_grace();
     let cfg: rapira_master::MasterConfig = rapira_master::MasterConfig {
         pools: pool_cfgs,
         process_control_timeout: settings.supervisor.process_control_timeout,
@@ -159,12 +171,15 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     let stop: Result<rapira_master::StopReason, anyhow::Error> =
         rapira_master::run(cfg, move |env: rapira_master::WorkerEnv| {
-            let pool: &mut PoolRun = &mut pools[env.pool];
-            let plugin: Box<dyn Plugin> = pool
-                .plugin
-                .take()
-                .expect("fresh child owns the plugin copy");
-            worker::worker_body(env, plugin, pool.args.clone())
+            // The child keeps its own pool's entry and drops the others, so an orphaned child holds no other pool's listener.
+            let run: PoolRun = pools.swap_remove(env.pool);
+            pools.clear();
+            match run {
+                PoolRun::Php { plugin, args } => worker::worker_body(env, plugin, args),
+                PoolRun::Observability { server } => {
+                    observability::observability_body(env, server, drain_grace)
+                }
+            }
         });
 
     match stop {

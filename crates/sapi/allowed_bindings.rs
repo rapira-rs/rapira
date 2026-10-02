@@ -7,8 +7,8 @@ bind! {
     php_execute_script, zend_error, zend_stream_init_filename, zend_destroy_file_handle,
     rapira_mode, RAPIRA_MODE_CLASSIC, RAPIRA_MODE_WORKER,
     RAPIRA_MODE_DISPATCHER,
-    // the two halves of the linked-libphp version check
-    PHP_VERSION_ID, php_version_id,
+    // the two halves of the linked-libphp version check, and the linked version string
+    PHP_VERSION_ID, php_version_id, php_version,
     // the embedded-object layout; rapira_sapi.h is the source of truth
     rapira_dispatcher_info_obj,
     // MINIT-written class-entry globals the Rust builder reads (static mut)

@@ -122,27 +122,6 @@ fn sigterm_master_stops() {
 #[cfg(target_os = "linux")]
 const WORKER_EXIT_DRAINED: i32 = 0;
 
-/// Reaps `pid`, a child of this process, and returns its exit code; `None` if it was killed by a signal.
-#[cfg(target_os = "linux")]
-fn wait_child_exit(pid: u32, timeout: Duration, srv: &Server) -> Option<i32> {
-    let end = Instant::now() + timeout;
-    loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: non-blocking waitpid on a child of this process; status is a live out-param.
-        let rc = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
-        if rc == pid as libc::pid_t {
-            return libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status));
-        }
-        assert_eq!(rc, 0, "waitpid({pid}): {}", std::io::Error::last_os_error());
-        assert!(
-            Instant::now() < end,
-            "worker {pid} survived the master\n{}",
-            diagnostics(srv)
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
 /// The test process is a child subreaper while the master dies, so the orphaned workers become its children and their exit codes are visible. https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html
 #[cfg(target_os = "linux")]
 #[test]
@@ -152,13 +131,7 @@ fn killed_master_leaves_workers_to_drain() {
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 
-    // SAFETY: prctl with integer arguments only.
-    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
-    signal(srv.pid(), libc::SIGKILL);
-    let status = srv.wait_exit(Duration::from_secs(10));
-    // SAFETY: prctl with integer arguments only.
-    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0) };
-    assert!(status.is_some(), "master survived SIGKILL");
+    kill_master_as_subreaper(&mut srv);
 
     for pid in pids {
         assert_eq!(
@@ -264,22 +237,53 @@ fn an_unreadable_entrypoint_refuses_to_boot() {
     assert!(log.contains("is not readable"), "\n{log}");
 }
 
+/// A gen-0 pool whose boot always fails stops the master with exit code 70. No request is necessary: each worker runs the boot again on its own, and the fifth failed boot flags it unhealthy. Two workers: a worker that fails its boot does not count as serving.
 #[test]
 fn master_failboot_exits_70() {
-    let mut srv = spawn_with_config("lifecycle/fatal-worker.php", 1, "");
-    let addr = srv.addr;
-    let end = Instant::now() + Duration::from_secs(60);
-    let status = loop {
-        if let Some(st) = srv.try_status() {
-            break Some(st);
-        }
-        if Instant::now() >= end {
-            panic!("master never exited\n{}", diagnostics(&srv));
-        }
-        let _ = http_get(addr, "/", Duration::from_secs(2));
-        std::thread::sleep(Duration::from_millis(100));
-    };
+    let mut srv = spawn_with_config("lifecycle/fatal-worker.php", 2, "");
+    let status = srv.wait_exit(Duration::from_secs(60));
     assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
+    let log = std::fs::read_to_string(srv.log_file()).expect("read server.log");
+    assert!(
+        log.contains("worker keeps failing to boot; flagged unhealthy"),
+        "5 failed boots must flag the worker unhealthy\n{log}"
+    );
+}
+
+/// A gen-0 pool with a serving worker keeps the master up when another worker never boots. The fixture fails its boot while the other worker holds boot.lock. No request arrives.
+#[test]
+fn a_worker_that_never_boots_next_to_a_serving_worker_keeps_the_master_up() {
+    let observability = std::net::SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let mut srv = spawn_with_config(
+        "lifecycle/lock-boot-worker.php",
+        2,
+        &format!(
+            "mode = \"dispatcher\"\n[observability]\nlisten = \"{observability}\"\n[observability.probes]\n"
+        ),
+    );
+    assert!(
+        wait_log_contains(
+            &srv,
+            "worker keeps failing to boot; flagged unhealthy",
+            Duration::from_secs(40)
+        ),
+        "\n{}",
+        diagnostics(&srv)
+    );
+    let status = srv.wait_exit(Duration::from_secs(5));
+    assert!(
+        status.is_none(),
+        "the master exited: {status:?}\n{}",
+        diagnostics(&srv)
+    );
+    let (code, body) =
+        http_get(observability, "/readyz", Duration::from_secs(10)).expect("GET /readyz");
+    assert_eq!(
+        (code, body.as_slice()),
+        (200, b"ok\n".as_slice()),
+        "\n{}",
+        diagnostics(&srv)
+    );
 }
 
 /// A worker-mode bootstrap that never calls handle_request() must failboot the master, not hang or shed 503s forever.

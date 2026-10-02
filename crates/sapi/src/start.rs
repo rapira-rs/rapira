@@ -1,7 +1,7 @@
 use std::cell::RefCell;
+use std::ffi::CStr;
 use std::path::PathBuf;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
 use std::thread;
 use std::thread::JoinHandle;
@@ -24,7 +24,26 @@ thread_local! {
 
 struct JobRx {
     rx: Receiver<Box<dyn Work>>,
-    pending: Arc<AtomicUsize>,
+    /// The `pending` field of this worker's scoreboard slot.
+    pending: &'static AtomicU64,
+}
+
+impl JobRx {
+    /// Waits for one unit, with no time limit when `timeout` is None. A pulled unit leaves `pending`.
+    fn recv(&self, timeout: Option<Duration>) -> Pulled {
+        let got = match timeout {
+            None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+            Some(t) => self.rx.recv_timeout(t),
+        };
+        match got {
+            Ok(job) => {
+                self.pending.fetch_sub(1, Ordering::Relaxed);
+                Pulled::Job(job)
+            }
+            Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
+            Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
+        }
+    }
 }
 
 thread_local! {
@@ -48,26 +67,26 @@ pub struct Rapira {
     worker: Option<JoinHandle<()>>,
 }
 
-/// Split a `PHP_VERSION_ID` (major * 10000 + minor * 100 + patch) into major and minor: https://www.php.net/manual/en/function.phpversion.php
-fn php_series(id: u32) -> (u32, u32) {
-    (id / 10_000, (id / 100) % 100)
-}
-
 /// Zend structs are bound by bindgen at build time, so a libphp from another PHP minor is an ABI mismatch (`sapi_startup` handed a differently shaped struct), not a load error.
 fn check_linked_php() -> anyhow::Result<()> {
     // SAFETY: php_version_id() returns a compile-time constant and touches no engine state, so this is valid pre-startup.
     let linked = unsafe { php_version_id() };
-    let (want, got) = (php_series(PHP_VERSION_ID), php_series(linked));
+    // A PHP_VERSION_ID is major * 10000 + minor * 100 + patch, so `/ 100` drops the patch: https://www.php.net/manual/en/function.phpversion.php
     anyhow::ensure!(
-        want == got,
-        "linked libphp is PHP {}.{}, but this rapira was built against PHP {}.{}. \
+        linked / 100 == PHP_VERSION_ID / 100,
+        "linked libphp is PHP {} (PHP_VERSION_ID {linked}), but this rapira was built against PHP_VERSION_ID {PHP_VERSION_ID}. \
          Use a libphp from the same PHP minor as the build.",
-        got.0,
-        got.1,
-        want.0,
-        want.1
+        linked_php_version()
     );
     Ok(())
+}
+
+/// The PHP_VERSION string of the linked libphp.
+pub fn linked_php_version() -> String {
+    // SAFETY: php_version() returns a static NUL-terminated string and touches no engine state, so this is valid pre-startup.
+    unsafe { CStr::from_ptr(php_version()) }
+        .to_string_lossy()
+        .into_owned()
 }
 
 /// MINIT once in the master. Base classes first, then each part in order.
@@ -116,10 +135,9 @@ impl Rapira {
             on_unhealthy,
             slot,
         } = hooks;
-        slot.bind(std::process::id());
-        let pending = Arc::new(AtomicUsize::new(0));
+        let pending: &'static AtomicU64 = &slot.pending;
         let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
-        let sink = Sink::new(intake_tx, pending.clone());
+        let sink = Sink::new(intake_tx, slot);
 
         crate::context::set_script(&entrypoint);
         // SAFETY: safe, trust me, I'm a developer
@@ -218,24 +236,22 @@ pub(crate) enum Pulled {
 
 /// Idle covers only the park: control returns to PHP as Active on every arm, or the master watchdog skips a worker spinning after a no-unit return.
 pub(crate) fn pull_job_wait(timeout: Option<Duration>) -> Pulled {
-    JOB_RX.with_borrow_mut(|slot| {
-        let Some(job_r) = slot.as_mut() else {
+    JOB_RX.with_borrow(|slot| {
+        let Some(job_r) = slot.as_ref() else {
             return Pulled::Closed;
         };
         sb_update(Event::Idle);
-        let got = match timeout {
-            None => job_r.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            Some(t) => job_r.rx.recv_timeout(t),
-        };
+        let pulled = job_r.recv(timeout);
         sb_update(Event::Active);
-        match got {
-            Ok(job) => {
-                job_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Job(job)
-            }
-            Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
-            Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
-        }
+        pulled
+    })
+}
+
+/// The host pulls a unit to shed it after a failed boot cycle, and waits at most `timeout`. Before this pull, the worker stored starting, or draining after the drain decision. The pull keeps the state.
+pub(crate) fn pull_job_to_shed(timeout: Duration) -> Pulled {
+    JOB_RX.with_borrow(|slot| match slot.as_ref() {
+        Some(job_r) => job_r.recv(Some(timeout)),
+        None => Pulled::Closed,
     })
 }
 
@@ -259,22 +275,9 @@ pub(crate) fn pull_job_try() -> Pulled {
     })
 }
 
-pub(crate) fn pending_depth() -> usize {
+pub(crate) fn pending_depth() -> u64 {
     JOB_RX.with_borrow(|slot| {
         slot.as_ref()
             .map_or(0, |job_r| job_r.pending.load(Ordering::Relaxed))
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use super::php_series;
-
-    #[test]
-    fn php_series_drops_the_patch() {
-        assert_eq!(php_series(80_508), (8, 5));
-        assert_eq!(php_series(80_426), (8, 4));
-        assert_eq!(php_series(80_500), php_series(80_599));
-        assert_ne!(php_series(80_400), php_series(80_500));
-    }
 }

@@ -12,6 +12,7 @@ use std::path::Path;
 struct FileConfig {
     http: Option<rapira_http::config::Section>,
     grpc: Option<rapira_grpc::config::Section>,
+    observability: Option<rapira_observability::config::Section>,
     #[serde(default)]
     supervisor: SupervisorSection,
     #[serde(default)]
@@ -22,6 +23,7 @@ struct FileConfig {
 pub struct Settings {
     pub http: Option<rapira_http::config::Settings>,
     pub grpc: Option<rapira_grpc::config::Settings>,
+    pub observability: Option<rapira_observability::config::Settings>,
     pub supervisor: SupervisorSettings,
     pub log: LogSettings,
 }
@@ -49,12 +51,17 @@ fn settings(file: FileConfig, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
         .grpc
         .map(|section| rapira_grpc::config::resolve(section, ctx))
         .transpose()?;
+    let observability = file
+        .observability
+        .map(rapira_observability::config::resolve)
+        .transpose()?;
     let supervisor = resolve_supervisor(file.supervisor, ctx)?;
     let log = resolve_log(file.log)?;
 
     Ok(Settings {
         http,
         grpc,
+        observability,
         supervisor,
         log,
     })
@@ -110,6 +117,41 @@ mod tests {
                 error: None,
             },
             Case {
+                name: "observability table",
+                toml: "[http.pool]\nentrypoint = \"a.php\"\n[observability]\nlisten = \"127.0.0.1:9180\"\n[observability.metrics]\n",
+                error: None,
+            },
+            Case {
+                name: "probes table",
+                toml: "[http.pool]\nentrypoint = \"a.php\"\n[observability]\nlisten = \"127.0.0.1:9180\"\n[observability.probes]\n",
+                error: None,
+            },
+            Case {
+                name: "observability keep-alive key",
+                toml: "[observability]\nlisten = \":9180\"\nkeepalive_timeout_secs = 5\n[observability.metrics]\n",
+                error: None,
+            },
+            Case {
+                name: "observability table without listen",
+                toml: "[observability]\n",
+                error: Some("missing field `listen`"),
+            },
+            Case {
+                name: "unknown key in the observability table",
+                toml: "[observability]\nlisten = \":9180\"\npath = \"/m\"\n[observability.metrics]\n",
+                error: Some("unknown field `path`"),
+            },
+            Case {
+                name: "unknown key in the metrics sub-table",
+                toml: "[observability]\nlisten = \":9180\"\n[observability.metrics]\npath = \"/m\"\n",
+                error: Some("unknown field `path`"),
+            },
+            Case {
+                name: "unknown key in the probes sub-table",
+                toml: "[observability]\nlisten = \":9180\"\n[observability.probes]\npath = \"/p\"\n",
+                error: Some("unknown field `path`"),
+            },
+            Case {
                 name: "shipped example",
                 toml: include_str!("../examples/rapira.toml"),
                 error: None,
@@ -152,8 +194,28 @@ mod tests {
 
     #[test]
     fn a_file_without_a_plugin_table_is_refused() {
-        let file: FileConfig = toml::from_str("[log]\nlevel = \"info\"\n").unwrap();
-        let err = settings(file, &ctx()).unwrap_err().to_string();
-        assert_eq!(err, "no plugin configured: add an [http] or a [grpc] table");
+        struct Case {
+            name: &'static str,
+            toml: &'static str,
+        }
+        let cases = [
+            Case {
+                name: "log table only",
+                toml: "[log]\nlevel = \"info\"\n",
+            },
+            Case {
+                name: "observability table only",
+                toml: "[observability]\nlisten = \"127.0.0.1:9180\"\n[observability.metrics]\n",
+            },
+        ];
+        for case in cases {
+            let file: FileConfig = toml::from_str(case.toml).unwrap();
+            let err = settings(file, &ctx()).unwrap_err().to_string();
+            assert_eq!(
+                err, "no plugin configured: add an [http] or a [grpc] table",
+                "{}",
+                case.name
+            );
+        }
     }
 }

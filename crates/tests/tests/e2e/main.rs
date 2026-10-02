@@ -24,6 +24,7 @@ mod lifecycle;
 mod listeners;
 mod logging;
 mod mode;
+mod observability;
 mod observer_teardown_tests;
 mod observer_tests;
 mod php_ext_tests;

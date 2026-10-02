@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::time::{Duration, Instant};
 
 use libc::c_int;
-use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, Scoreboard, now_millis};
+use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, Scoreboard, SharedSlot, now_millis};
 
 use crate::PoolConfig;
 use crate::pctl::KillPhase;
@@ -36,8 +36,6 @@ pub(crate) struct Pool {
     pub board: Scoreboard,
     pub table: ProcTable,
     pub control_timeout: Duration,
-    /// Latched history: scoreboard counters cannot carry it, a replacement `bind()` zeroes a slot's served count.
-    pub ever_served: bool,
     /// This pool's overlap-reload chain; `None` once finished or never started.
     pub reload: Option<Reload>,
 }
@@ -56,7 +54,6 @@ impl Pool {
             board,
             table,
             control_timeout,
-            ever_served: false,
             reload: None,
         }
     }
@@ -82,21 +79,8 @@ impl Pool {
             .sum()
     }
 
-    /// Must run before a replacement bind resets the slot counters.
-    fn latch_served(&mut self) {
-        if !self.ever_served && self.total_successful() > 0 {
-            self.ever_served = true;
-        }
-    }
-
     fn slot_is_free(&self, i: usize) -> bool {
         self.board.slot(i).state.load(Relaxed) == SLOT_FREE
-    }
-
-    /// Serving is IDLE or ACTIVE: under load a replacement may never be observed IDLE between requests.
-    fn slot_is_serving(&self, i: usize) -> bool {
-        let state = self.board.slot(i).state.load(Relaxed);
-        state == SLOT_IDLE || state == SLOT_ACTIVE
     }
 
     fn find_spawn_slot(&self) -> Option<usize> {
@@ -113,13 +97,16 @@ impl Pool {
         self.board.set_starting(slot);
         let generation = self.table.generation;
         match spawner.spawn(self.index, self.board.slot(slot)) {
-            Ok(pid) => self.table.procs.push(WorkerProc {
-                pid,
-                slot,
-                generation,
-                spawned_at: now,
-                timeout_kill: false,
-            }),
+            Ok(pid) => {
+                self.board.slot(slot).pid.store(pid as u32, Relaxed);
+                self.table.procs.push(WorkerProc {
+                    pid,
+                    slot,
+                    generation,
+                    spawned_at: now,
+                    timeout_kill: false,
+                });
+            }
             Err(e) => {
                 tracing::error!(
                     target: "master",
@@ -218,7 +205,7 @@ impl Pool {
         };
         match reload.phase {
             ReloadPhase::Await { slot, until } => {
-                if self.slot_is_serving(slot) {
+                if self.board.slot(slot).serving() {
                     self.reload_quit_next(now);
                 } else if now >= until {
                     tracing::warn!(
@@ -248,7 +235,7 @@ impl Pool {
         }
     }
 
-    /// Failboot only for a gen-0 worker in a pool that never served: a reload replacement dying unhealthy must not take down the running pool.
+    /// Failboot only for a gen-0 worker in a pool that never served and has no serving worker: a reload replacement dying unhealthy must not take down the running pool, and a worker that never boots must not take down a pool that booted.
     pub(crate) fn on_child_exit(
         &mut self,
         w: WorkerProc,
@@ -259,7 +246,7 @@ impl Pool {
     ) -> anyhow::Result<()> {
         let slot = w.slot;
         let lived = now.saturating_duration_since(w.spawned_at);
-        self.latch_served();
+        count_exit(self.board.slot(slot), verdict);
         self.board.clear(slot);
 
         if let Some(Reload {
@@ -284,7 +271,10 @@ impl Pool {
                 self.table.slots[slot].schedule_immediate(now);
             }
             ExitVerdict::Unhealthy => {
-                if w.generation == 0 && !self.ever_served {
+                if w.generation == 0
+                    && self.total_successful() == 0
+                    && !self.board.slots().iter().any(SharedSlot::serving)
+                {
                     anyhow::bail!(
                         "{} pool: worker {} exited unhealthy before the pool served any request",
                         self.cfg.name,
@@ -333,7 +323,7 @@ impl Pool {
         }
     }
 
-    /// Nothing runs while the master stops; the stop escalation bounds every worker. The refill pauses while this pool drains a reload chain: it would race the chain for the slot it just freed. The served latch and the request watchdog keep running during the reload.
+    /// Nothing runs while the master stops; the stop escalation bounds every worker. The refill pauses while this pool drains a reload chain: it would race the chain for the slot it just freed. The request watchdog keeps running during the reload.
     pub(crate) fn maintenance_tick(
         &mut self,
         now: Instant,
@@ -343,7 +333,6 @@ impl Pool {
         if stopping {
             return;
         }
-        self.latch_served();
         self.watchdog_tick();
         if self.reload.is_some() {
             return;
@@ -404,6 +393,18 @@ impl Pool {
     }
 }
 
+/// Counts the exit in the slot of the worker. It runs before `clear`, while no worker owns the slot.
+fn count_exit(slot: &SharedSlot, verdict: ExitVerdict) {
+    let counter = match verdict {
+        ExitVerdict::Drain => &slot.exits_drained,
+        ExitVerdict::Recycle => &slot.exits_recycled,
+        ExitVerdict::Unhealthy => &slot.exits_unhealthy,
+        ExitVerdict::TimeoutKill => &slot.exits_timeout,
+        ExitVerdict::Crash => &slot.exits_crashed,
+    };
+    counter.fetch_add(1, Relaxed);
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -437,5 +438,56 @@ mod tests {
 
         p.table.slots[2].respawn_at = None;
         assert_eq!(p.next_deadline(), Some(t0 + Duration::from_millis(500)));
+    }
+
+    fn exits(slot: &SharedSlot) -> [u64; 5] {
+        [
+            slot.exits_drained.load(Relaxed),
+            slot.exits_recycled.load(Relaxed),
+            slot.exits_unhealthy.load(Relaxed),
+            slot.exits_timeout.load(Relaxed),
+            slot.exits_crashed.load(Relaxed),
+        ]
+    }
+
+    #[test]
+    fn each_exit_verdict_counts_in_its_own_field() {
+        struct Case {
+            name: &'static str,
+            verdict: ExitVerdict,
+            want: [u64; 5],
+        }
+        let cases = [
+            Case {
+                name: "drain",
+                verdict: ExitVerdict::Drain,
+                want: [1, 0, 0, 0, 0],
+            },
+            Case {
+                name: "recycle",
+                verdict: ExitVerdict::Recycle,
+                want: [0, 1, 0, 0, 0],
+            },
+            Case {
+                name: "unhealthy",
+                verdict: ExitVerdict::Unhealthy,
+                want: [0, 0, 1, 0, 0],
+            },
+            Case {
+                name: "timeout kill",
+                verdict: ExitVerdict::TimeoutKill,
+                want: [0, 0, 0, 1, 0],
+            },
+            Case {
+                name: "crash",
+                verdict: ExitVerdict::Crash,
+                want: [0, 0, 0, 0, 1],
+            },
+        ];
+        for case in cases {
+            let board = Scoreboard::create(1).unwrap();
+            count_exit(board.slot(0), case.verdict);
+            assert_eq!(exits(board.slot(0)), case.want, "{}", case.name);
+        }
     }
 }
