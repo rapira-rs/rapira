@@ -150,6 +150,7 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                 failures = 0;
             }
             Cycle::Failed => {
+                // we should probably adopt here circuit breaker algorithm
                 failures += 1;
                 if failures == UNHEALTHY_AFTER {
                     error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
