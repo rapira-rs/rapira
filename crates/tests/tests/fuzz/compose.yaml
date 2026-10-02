@@ -1,11 +1,11 @@
-# A fuzz session: docker compose -f .github/fuzz/compose.yaml up --build --exit-code-from fuzz
+# A fuzz session: docker compose -f crates/tests/tests/fuzz/compose.yaml up --build --exit-code-from fuzz
 # SEED (default 1) and EXAMPLES (default 500) select the session. The same values replay it.
 services:
   rapira:
     image: rapira-fuzz
     # The payload stage holds the release build of rapira in /out and the PHP runtime that it links.
     build:
-      context: ../..
+      context: ../../../..
       target: payload
     command: [/out/usr/local/bin/rapira, serve, /fuzz/rapira.toml]
     volumes:
