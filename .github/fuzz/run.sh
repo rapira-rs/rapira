@@ -13,6 +13,7 @@ fuzz() {
 }
 
 fuzz http http://rapira:8080 not_a_server_error,status_code_conformance,content_type_conformance,response_schema_conformance,rapira_echo
+fuzz grpc http://rapira:9090 not_a_server_error,status_code_conformance,content_type_conformance,connect_echo
 
 # The counters of each worker exit and each entrypoint restart. A value other than 0 is a crash.
 wget -qO- http://rapira:9180/metrics | awk '

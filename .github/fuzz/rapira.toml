@@ -8,6 +8,14 @@ mode = "dispatcher"
 entrypoint = "http/echo.php"
 processes = 1
 
+[grpc]
+listen = ":9090"
+descriptor_set = "grpc/sample.binpb"
+
+[grpc.pool]
+entrypoint = "grpc/echo.php"
+processes = 1
+
 [observability]
 listen = ":9180"
 

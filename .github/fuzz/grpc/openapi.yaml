@@ -1,0 +1,163 @@
+openapi: 3.1.0
+info:
+  title: rapira Connect echo
+  version: "1"
+  description: The Connect unary JSON endpoint of rapira.test.fuzz.v1.FuzzService/Echo in sample.proto, https://connectrpc.com/docs/protocol/. The echo app (echo.php) replies with the request message. The check connect_echo in hooks.py compares the reply with the request under the proto3 JSON mapping.
+# The schemas describe the JSON that the proto3 JSON mapping accepts for each field, https://protobuf.dev/programming-guides/json/. They also allow some forms that a parser accepts but a printer does not write: a 64-bit integer as a number and an enum as a number.
+paths:
+  /rapira.test.fuzz.v1.FuzzService/Echo:
+    post:
+      operationId: echo
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/Sample"
+      responses:
+        "200":
+          description: The request message.
+          content:
+            application/json:
+              schema:
+                type: object
+        "400":
+          description: A Connect error.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [code]
+        "415":
+          description: The request has no JSON content type.
+components:
+  schemas:
+    int32:
+      type: integer
+      minimum: -2147483648
+      maximum: 2147483647
+    uint32:
+      type: integer
+      minimum: 0
+      maximum: 4294967295
+    # The string form has at most 18 digits, so it is in range.
+    int64:
+      anyOf:
+        - type: integer
+          minimum: -9223372036854775808
+          maximum: 9223372036854775807
+        - type: string
+          pattern: "^(0|-?[1-9][0-9]{0,17})$"
+    # The string form has at most 19 digits, so it is in range.
+    uint64:
+      anyOf:
+        - type: integer
+          minimum: 0
+          maximum: 18446744073709551615
+        - type: string
+          pattern: "^(0|[1-9][0-9]{0,18})$"
+    # The bounds keep a value below FLT_MAX, which rapira rejects: https://github.com/rapira-rs/rapira/issues/177
+    float:
+      anyOf:
+        - type: number
+          minimum: -3.4e38
+          maximum: 3.4e38
+        - enum: ["NaN", "Infinity", "-Infinity"]
+    double:
+      anyOf:
+        - type: number
+        - enum: ["NaN", "Infinity", "-Infinity"]
+    # Standard base64 with padding and zero pad bits: the form that a printer writes.
+    bytes:
+      type: string
+      pattern: "^([A-Za-z0-9+/]{4})*([A-Za-z0-9+/][AQgw]==|[A-Za-z0-9+/]{2}[AEIMQUYcgkosw048]=)?$"
+    Kind:
+      anyOf:
+        - enum: [KIND_UNSPECIFIED, KIND_ONE, KIND_TWO, KIND_NEGATIVE]
+        - $ref: "#/components/schemas/int32"
+    Inner:
+      type: object
+      additionalProperties: false
+      properties:
+        id:
+          $ref: "#/components/schemas/int32"
+        label:
+          type: string
+    Sample:
+      type: object
+      additionalProperties: false
+      properties:
+        int32Value:
+          $ref: "#/components/schemas/int32"
+        int64Value:
+          $ref: "#/components/schemas/int64"
+        uint32Value:
+          $ref: "#/components/schemas/uint32"
+        uint64Value:
+          $ref: "#/components/schemas/uint64"
+        sint32Value:
+          $ref: "#/components/schemas/int32"
+        sint64Value:
+          $ref: "#/components/schemas/int64"
+        fixed32Value:
+          $ref: "#/components/schemas/uint32"
+        fixed64Value:
+          $ref: "#/components/schemas/uint64"
+        sfixed32Value:
+          $ref: "#/components/schemas/int32"
+        sfixed64Value:
+          $ref: "#/components/schemas/int64"
+        floatValue:
+          $ref: "#/components/schemas/float"
+        doubleValue:
+          $ref: "#/components/schemas/double"
+        boolValue:
+          type: boolean
+        stringValue:
+          type: string
+        bytesValue:
+          $ref: "#/components/schemas/bytes"
+        kind:
+          $ref: "#/components/schemas/Kind"
+        inner:
+          $ref: "#/components/schemas/Inner"
+        repeatedInt32:
+          type: array
+          items:
+            $ref: "#/components/schemas/int32"
+        repeatedString:
+          type: array
+          items:
+            type: string
+        repeatedKind:
+          type: array
+          items:
+            $ref: "#/components/schemas/Kind"
+        repeatedInner:
+          type: array
+          items:
+            $ref: "#/components/schemas/Inner"
+        stringToInt64:
+          type: object
+          additionalProperties:
+            $ref: "#/components/schemas/int64"
+        # A map key is the decimal form of an int32 with at most 9 digits.
+        int32ToString:
+          type: object
+          propertyNames:
+            pattern: "^(0|-?[1-9][0-9]{0,8})$"
+          additionalProperties:
+            type: string
+        choiceText:
+          type: string
+        choiceInner:
+          $ref: "#/components/schemas/Inner"
+        choiceNumber:
+          $ref: "#/components/schemas/int64"
+        optionalInt32:
+          $ref: "#/components/schemas/int32"
+      # The oneof choice takes at most one member.
+      anyOf:
+        - properties: {choiceInner: false, choiceNumber: false}
+        - properties: {choiceText: false, choiceNumber: false}
+        - properties: {choiceText: false, choiceInner: false}

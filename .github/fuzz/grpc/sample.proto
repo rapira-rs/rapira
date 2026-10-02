@@ -1,5 +1,5 @@
-// `make grpc_fixtures`, from crates/tests: go run github.com/bufbuild/buf/cmd/buf@v1.73.0 build fixtures/grpc_fuzz --as-file-descriptor-set -o fixtures/grpc_fuzz/sample.binpb
-// One field of each kind for the gRPC fuzz test, with no well-known types.
+// From .github/fuzz/grpc: go run github.com/bufbuild/buf/cmd/buf@v1.73.0 build . --as-file-descriptor-set -o sample.binpb
+// One field of each kind for the Connect JSON fuzz target, with no well-known types.
 syntax = "proto3";
 
 package rapira.test.fuzz.v1;

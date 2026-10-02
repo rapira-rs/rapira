@@ -13,7 +13,6 @@ mod general_tests;
 mod grpc;
 mod grpc_auth;
 mod grpc_dispatcher;
-mod grpc_fuzz;
 mod grpc_schema;
 mod grpc_server;
 mod grpc_values;
