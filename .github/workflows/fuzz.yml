@@ -25,7 +25,10 @@ jobs:
                   target: payload
                   load: true
                   tags: rapira-fuzz
-                  cache-from: type=gha,scope=fuzz
+                  # docker.yml keeps the same stages from main in the scope 8.5-amd64.
+                  cache-from: |
+                      type=gha,scope=fuzz
+                      type=gha,scope=8.5-amd64
                   cache-to: type=gha,mode=max,scope=fuzz
 
             # A pull request runs a short session with a fixed seed. A scheduled or manual run uses the run id as a new seed.
@@ -33,6 +36,4 @@ jobs:
               env:
                   SEED: ${{ github.event_name == 'pull_request' && '1' || github.run_id }}
                   EXAMPLES: ${{ github.event_name == 'pull_request' && '500' || '2000' }}
-              run: |
-                  echo "SEED=$SEED EXAMPLES=$EXAMPLES"
-                  docker compose -f crates/tests/tests/fuzz/compose.yaml up --no-build --exit-code-from fuzz
+              run: docker compose -f crates/tests/tests/fuzz/compose.yaml up --no-build --exit-code-from fuzz

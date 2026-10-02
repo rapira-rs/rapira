@@ -23,6 +23,7 @@ services:
         condition: service_healthy
     entrypoint: [sh, /fuzz/run.sh]
     environment:
+      SCHEMATHESIS_HOOKS: /fuzz/hooks.py
       SEED: ${SEED:-1}
       EXAMPLES: ${EXAMPLES:-500}
       # The image runs a free-threaded CPython. With the GIL off, its Schemathesis process segfaulted in about 1 of 300 sessions.

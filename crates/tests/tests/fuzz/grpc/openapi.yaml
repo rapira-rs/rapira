@@ -2,7 +2,7 @@ openapi: 3.1.0
 info:
   title: rapira Connect echo
   version: "1"
-  description: The Connect unary JSON endpoint of rapira.test.fuzz.v1.FuzzService/Echo in sample.proto, https://connectrpc.com/docs/protocol/. The echo app (echo.php) replies with the request message. The check connect_echo in hooks.py compares the reply with the request under the proto3 JSON mapping.
+  description: The Connect unary JSON endpoint of rapira.test.fuzz.v1.FuzzService/Echo in sample.proto, https://connectrpc.com/docs/protocol/. The echo app (echo.php) replies with the request message. The check connect_echo in ../hooks.py compares the reply with the request under the proto3 JSON mapping.
 # The schemas describe the JSON that the proto3 JSON mapping accepts for each field, https://protobuf.dev/programming-guides/json/. They also allow some forms that a parser accepts but a printer does not write: a 64-bit integer as a number and an enum as a number.
 paths:
   /rapira.test.fuzz.v1.FuzzService/Echo:
@@ -18,18 +18,11 @@ paths:
         "200":
           description: The request message.
           content:
-            application/json:
-              schema:
-                type: object
+            application/json: {}
         "400":
           description: A Connect error.
           content:
-            application/json:
-              schema:
-                type: object
-                required: [code]
-        "415":
-          description: The request has no JSON content type.
+            application/json: {}
 components:
   schemas:
     int32:

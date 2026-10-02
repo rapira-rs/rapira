@@ -4,7 +4,6 @@
 listen = ":8080"
 
 [http.pool]
-mode = "dispatcher"
 entrypoint = "http/echo.php"
 processes = 1
 
