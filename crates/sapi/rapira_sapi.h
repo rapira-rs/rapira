@@ -116,11 +116,17 @@ void rapira_sapi_get_info(INTERNAL_FUNCTION_PARAMETERS);
 void rapira_sapi_pending_count(INTERNAL_FUNCTION_PARAMETERS);
 void rapira_sapi_active_count(INTERNAL_FUNCTION_PARAMETERS);
 
-static zend_always_inline void rapira_throw_or_backstop(const char *what) {
-    if (!EG(exception)) {
-        zend_throw_error(NULL, "%s failed", what);
-    }
-}
+// Returns from the internal function when `call` reports false. Rust throws
+// before it reports false; the backstop covers a missing throw.
+#define RAPIRA_RETURN_THROWS_UNLESS(call, what)                                \
+    do {                                                                       \
+        if (!(call)) {                                                         \
+            if (!EG(exception)) {                                              \
+                zend_throw_error(NULL, "%s failed", what);                     \
+            }                                                                  \
+            RETURN_THROWS();                                                   \
+        }                                                                      \
+    } while (0)
 
 // https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
 static zend_always_inline rapira_dispatcher_info_obj *

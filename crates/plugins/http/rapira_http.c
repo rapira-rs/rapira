@@ -28,10 +28,9 @@ ZEND_METHOD(Rapira_Http_FormField, __construct) {
     Z_PARAM_ARRAY(headers)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_form_field(Z_OBJ_P(ZEND_THIS), name, value, headers)) {
-        rapira_throw_or_backstop("FormField construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_form_field(Z_OBJ_P(ZEND_THIS), name, value, headers),
+        "FormField construction");
 }
 
 ZEND_METHOD(Rapira_Http_UploadedFile, __construct) {
@@ -47,12 +46,11 @@ ZEND_METHOD(Rapira_Http_UploadedFile, __construct) {
     Z_PARAM_LONG(size)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_uploaded_file(Z_OBJ_P(ZEND_THIS), name,
-                                      client_filename, client_media_type,
-                                      headers, tmp_path, (int64_t)size)) {
-        rapira_throw_or_backstop("UploadedFile construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_uploaded_file(Z_OBJ_P(ZEND_THIS), name, client_filename,
+                                     client_media_type, headers, tmp_path,
+                                     (int64_t)size),
+        "UploadedFile construction");
 }
 
 ZEND_METHOD(Rapira_Http_Multipart, __construct) {
@@ -62,10 +60,9 @@ ZEND_METHOD(Rapira_Http_Multipart, __construct) {
     Z_PARAM_ARRAY(files)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_multipart(Z_OBJ_P(ZEND_THIS), fields, files)) {
-        rapira_throw_or_backstop("Multipart construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_multipart(Z_OBJ_P(ZEND_THIS), fields, files),
+        "Multipart construction");
 }
 
 ZEND_METHOD(Rapira_Http_Request, __construct) {
@@ -95,10 +92,9 @@ ZEND_METHOD(Rapira_Http_Request, __construct) {
         ZVAL_STR(&body, body_str);
     }
 
-    if (!rapira_rs_ctor_request(Z_OBJ_P(ZEND_THIS), method, uri, target,
-                                authority, protocol, headers, &body, remote,
-                                server, tls, received_at)) {
-        rapira_throw_or_backstop("Request construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_request(Z_OBJ_P(ZEND_THIS), method, uri, target,
+                               authority, protocol, headers, &body, remote,
+                               server, tls, received_at),
+        "Request construction");
 }

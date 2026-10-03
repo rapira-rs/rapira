@@ -44,10 +44,8 @@ ZEND_FUNCTION(Rapira_get_mode) {
 
 ZEND_FUNCTION(Rapira_get_dispatcher) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (!rapira_rs_get_dispatcher(return_value)) {
-        rapira_throw_or_backstop("get_dispatcher");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_get_dispatcher(return_value),
+                                "get_dispatcher");
 }
 
 // a nested handle_request() would rebind SG(server_context) over the live job
@@ -110,26 +108,20 @@ void rapira_sapi_receive(INTERNAL_FUNCTION_PARAMETERS) {
     Z_PARAM_LONG(timeout)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_receive((int64_t)timeout, return_value)) {
-        rapira_throw_or_backstop("receive");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_receive((int64_t)timeout, return_value), "receive");
 }
 
 void rapira_sapi_try_receive(INTERNAL_FUNCTION_PARAMETERS) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (!rapira_rs_try_receive(return_value)) {
-        rapira_throw_or_backstop("tryReceive");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_try_receive(return_value),
+                                "tryReceive");
 }
 
 void rapira_sapi_get_info(INTERNAL_FUNCTION_PARAMETERS) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (!rapira_rs_dispatcher_info(return_value)) {
-        rapira_throw_or_backstop("getInfo");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_dispatcher_info(return_value),
+                                "getInfo");
 }
 
 void rapira_sapi_pending_count(INTERNAL_FUNCTION_PARAMETERS) {

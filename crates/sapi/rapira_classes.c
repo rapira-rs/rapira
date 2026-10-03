@@ -60,10 +60,9 @@ ZEND_METHOD(Rapira_InetAddress, __construct) {
     Z_PARAM_LONG(port)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_inet_address(Z_OBJ_P(ZEND_THIS), ip, (int64_t)port)) {
-        rapira_throw_or_backstop("InetAddress construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_inet_address(Z_OBJ_P(ZEND_THIS), ip, (int64_t)port),
+        "InetAddress construction");
 }
 
 ZEND_METHOD(Rapira_UnixAddress, __construct) {
@@ -72,10 +71,9 @@ ZEND_METHOD(Rapira_UnixAddress, __construct) {
     Z_PARAM_STR_OR_NULL(path)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_unix_address(Z_OBJ_P(ZEND_THIS), path)) {
-        rapira_throw_or_backstop("UnixAddress construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_unix_address(Z_OBJ_P(ZEND_THIS), path),
+        "UnixAddress construction");
 }
 
 ZEND_METHOD(Rapira_Tls, __construct) {
@@ -91,11 +89,10 @@ ZEND_METHOD(Rapira_Tls, __construct) {
     Z_PARAM_STR_OR_NULL(fingerprint)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_tls(Z_OBJ_P(ZEND_THIS), version, cipher, negotiated,
-                            server_name, serial, org, fingerprint)) {
-        rapira_throw_or_backstop("Tls construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_tls(Z_OBJ_P(ZEND_THIS), version, cipher, negotiated,
+                           server_name, serial, org, fingerprint),
+        "Tls construction");
 }
 
 void rapira_register_classes(void) {
