@@ -1,5 +1,4 @@
 use std::convert::Infallible;
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -27,7 +26,7 @@ struct Serving {
 }
 
 impl Serving {
-    fn start(intake: Sink, uploads: Option<Arc<multipart::Limits>>, config: Config) -> Self {
+    fn start(intake: Sink, config: Config) -> Self {
         match &config.listen {
             ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
             unix => tracing::info!(target: "http", "listening on {unix}"),
@@ -35,7 +34,6 @@ impl Serving {
         let shared = Arc::new(Shared {
             cfg: config,
             intake,
-            uploads,
             inflight: Arc::new(AtomicUsize::new(0)),
         });
         let mut builder = http1::Builder::new();
@@ -134,24 +132,17 @@ impl Serve for Serving {
 /// Runs the accept loop on the calling thread until the stop flag, then drains the connections.
 pub(crate) fn serve(
     intake: Sink,
-    config: Config,
+    mut config: Config,
     prepared: PreparedListener,
     worker: Worker,
 ) -> Result<()> {
     let acceptor = Acceptor::adopt(prepared, worker.stop.clone(), &worker.handle)?;
     // Each worker spools in its own dir under the configured one.
-    let uploads: Option<Arc<multipart::Limits>> = config
-        .uploads
-        .as_ref()
-        .map(|limits| {
-            anyhow::Ok(Arc::new(multipart::Limits {
-                dir: multipart::create_worker_spool_dir(&limits.dir)?,
-                ..limits.clone()
-            }))
-        })
-        .transpose()?;
-    let spool_dir: Option<PathBuf> = uploads.as_ref().map(|limits| limits.dir.clone());
-    let serving = Serving::start(intake, uploads, config);
+    if let Some(limits) = &mut config.uploads {
+        limits.dir = multipart::create_worker_spool_dir(&limits.dir)?;
+    }
+    let spool_dir = config.uploads.as_ref().map(|limits| limits.dir.clone());
+    let serving = Serving::start(intake, config);
     let fatal = acceptor.run(&worker.handle, &serving);
     let drained = worker
         .handle

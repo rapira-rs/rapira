@@ -21,8 +21,6 @@ use crate::{Config, Exchange, bridge, multipart, request};
 pub(crate) struct Shared {
     pub cfg: Config,
     pub intake: Sink,
-    /// The multipart limits; None outside dispatcher mode.
-    pub uploads: Option<Arc<multipart::Limits>>,
     pub inflight: Arc<AtomicUsize>,
 }
 
@@ -463,7 +461,7 @@ async fn submit(
     shared: &Shared,
     request: Request,
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
-    let request = parse_multipart(request, shared.uploads.as_ref()).await?;
+    let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
     let (exchange, reply) = Exchange::new(request, shared.cfg.superglobals);
     shared.intake.submit(Box::new(exchange)).await?;
     Ok(reply)
@@ -472,7 +470,7 @@ async fn submit(
 /// Parses a multipart body before submit, so a rejected body never reaches the pending and active counters. `limits` is None outside dispatcher mode.
 async fn parse_multipart(
     mut req: Request,
-    limits: Option<&Arc<multipart::Limits>>,
+    limits: Option<&multipart::Limits>,
 ) -> Result<Request, Rejection> {
     let Some(limits) = limits else {
         return Ok(req);
@@ -501,7 +499,7 @@ async fn parse_multipart(
     }
     let boundary = multipart::boundary(content_type)?;
     let bytes = std::mem::take(raw.get_mut());
-    let limits = Arc::clone(limits);
+    let limits = limits.clone();
     let parsed = tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
         .await
         .map_err(|e| Rejection {

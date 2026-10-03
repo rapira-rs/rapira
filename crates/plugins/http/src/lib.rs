@@ -34,7 +34,7 @@ pub struct Config {
     pub keepalive_timeout: Duration,
     /// `[http].middleware` in config order, the first listed outermost.
     pub middleware: Vec<middleware::Layer>,
-    /// Multipart limits of a dispatcher pool; None in the other modes, which feed php-src's own rfc1867 through read_post. Each worker spools in its own dir under `dir`, which `serve` creates.
+    /// Multipart limits of a dispatcher pool; None in the other modes, which feed php-src's own rfc1867 through read_post. `serve` replaces `dir` with the worker's own spool dir under it.
     pub uploads: Option<multipart::Limits>,
     /// sendFile() containment root.
     pub sendfile_root: PathBuf,
