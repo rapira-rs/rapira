@@ -311,13 +311,22 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
     Ok((name, filename))
 }
 
-/// Nothing fallible may sit between keep() and the SpooledFile wrap, or the kept file has no owner to unlink it.
-fn spool(bytes: &[u8], dir: &std::path::Path) -> std::io::Result<SpooledFile> {
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    tmp.write_all(bytes)?;
-    let (file, path) = tmp.keep().map_err(|e| e.error)?;
-    drop(file);
-    Ok(SpooledFile { path })
+/// Spool file names are unique per process; the fuzz targets share one dir across processes, so the pid stays in the name.
+static SPOOL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The SpooledFile wraps the path before the write, so a failed write unlinks the file on drop.
+fn spool(bytes: &[u8], dir: &Path) -> std::io::Result<SpooledFile> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let n = SPOOL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!("{}-{n}", std::process::id()));
+    let mut file = std::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    let spooled = SpooledFile { path };
+    file.write_all(bytes)?;
+    Ok(spooled)
 }
 
 /// A filename parameter, even an empty one, makes the part a file part.

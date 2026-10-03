@@ -26,10 +26,9 @@ hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio", "server", "http1", "server-graceful"] }
 tower = { workspace = true }
 http-body = "1"
-# multipart parsing over the buffered body + file-part spooling
+# multipart parsing over the buffered body
 memchr = "2"
 httparse = "1"
-tempfile = "3"
 
 [build-dependencies]
 rapira_php_build = { workspace = true }
