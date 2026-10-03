@@ -68,7 +68,7 @@ pub fn echo_descriptor_set() -> PathBuf {
 /// A response stream collected to its `End` (or to the producer dying).
 #[derive(Debug, Default)]
 pub struct Resp {
-    pub head: Option<rapira_sapi::ResponseHead>,
+    pub head: Option<rapira_sapi::types::ResponseHead>,
     pub content_length: Option<u64>,
     pub body: Vec<u8>,
     pub trailers: HeaderMap,
@@ -198,7 +198,7 @@ pub async fn drain_async(rx: mpsc::Receiver<Frame>) -> (u16, String) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapira_sapi::ResponseHead;
+    use rapira_sapi::types::ResponseHead;
 
     /// A reply that yields `events` and then closes.
     fn reply(events: Vec<Frame>) -> mpsc::Receiver<Frame> {

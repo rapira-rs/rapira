@@ -1,7 +1,7 @@
 use std::{ops::Deref, path::Path};
 
 use http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE};
-use rapira_sapi::{Mode, Request};
+use rapira_sapi::{Request, plugin::Mode};
 use tests::wire::submit;
 use tests::{Resp, drain, drain_resp, fixture, req, server_log};
 

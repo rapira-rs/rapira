@@ -2,7 +2,7 @@ use crate::harness::{
     Conn, Server, Spawn, diagnostics, http_get, http_get_raw, http_post, http_raw_bytes,
     parse_status_and_body, scratch_dir, spawn_boot_failure, spawn_with_http_extra,
 };
-use rapira_sapi::Mode;
+use rapira_sapi::plugin::Mode;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 use tests::fixture;

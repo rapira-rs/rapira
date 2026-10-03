@@ -8,7 +8,7 @@ use std::path::Path;
 use std::time::{Duration, Instant};
 
 use rapira_net::ListenAddr;
-use rapira_sapi::Mode;
+use rapira_sapi::plugin::Mode;
 
 use crate::harness::{
     BOOT, Server, Spawn, diagnostics, fixture_path, free_port, http_get, parse_status_and_body,

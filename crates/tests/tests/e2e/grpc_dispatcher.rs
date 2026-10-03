@@ -2,7 +2,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use http::{HeaderMap, Method};
 use rapira_net::ListenAddr;
-use rapira_sapi::Mode;
+use rapira_sapi::plugin::Mode;
 use serde_json::{Value, json};
 use tests::grpc::{
     Conn, ECHO_PATH, ERROR_INFO, Fields, Response, Wire, envelope, fields, status_bytes,

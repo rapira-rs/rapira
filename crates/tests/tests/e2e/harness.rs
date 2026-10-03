@@ -11,7 +11,7 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use rapira_net::ListenAddr;
-use rapira_sapi::{Addr, Mode};
+use rapira_sapi::{Addr, plugin::Mode};
 use serde_json::Value;
 use tests::server_log;
 

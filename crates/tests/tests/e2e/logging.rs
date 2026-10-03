@@ -1,5 +1,5 @@
 use crate::harness::*;
-use rapira_sapi::Mode;
+use rapira_sapi::plugin::Mode;
 use std::time::{Duration, Instant};
 
 /// `[log] format = "json"` shapes every record while `RUST_LOG` still owns the filter.

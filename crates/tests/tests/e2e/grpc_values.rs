@@ -1,4 +1,4 @@
-use rapira_sapi::Mode;
+use rapira_sapi::plugin::Mode;
 use tests::{fixture, server_log};
 
 use crate::harness::{BOOT, Spawn, diagnostics, wait_log_contains};

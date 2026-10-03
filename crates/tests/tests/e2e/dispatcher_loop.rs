@@ -7,7 +7,7 @@ use std::time::Duration;
 use anyhow::Context;
 use http::HeaderValue;
 use rapira_sapi::types::Body;
-use rapira_sapi::{Frame, Mode};
+use rapira_sapi::{Frame, plugin::Mode};
 use tests::wire::submit;
 use tests::{drain, drain_resp, fixture, req, server_log};
 

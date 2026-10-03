@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use rapira_sapi::Mode;
+use rapira_sapi::plugin::Mode;
 use tests::grpc::{Conn, ECHO_PATH, HI_FRAME, Wire, status_details};
 use tests::wire::submit;
 use tests::{drain_resp_deadline, fixture, req};

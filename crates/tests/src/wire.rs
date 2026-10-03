@@ -12,7 +12,7 @@ use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use rapira_sapi::types::Body;
-use rapira_sapi::{Frame, Request, ResponseHead};
+use rapira_sapi::{Frame, Request, types::ResponseHead};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 

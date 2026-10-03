@@ -5,7 +5,7 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use rapira_net::ListenAddr;
-use rapira_sapi::Mode;
+use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
 use tests::{Resp, drain_resp_deadline, req};
 
