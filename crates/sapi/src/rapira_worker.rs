@@ -21,7 +21,7 @@ use crate::{
     callbacks::guard,
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
     executor::run_script,
-    php_request_startup, rapira_eg, rapira_pg, rapira_run_handler,
+    php_request_startup, rapira_run_handler,
     types::Context,
     zend_fcall_info, zend_fcall_info_cache, *,
 };
@@ -79,20 +79,20 @@ fn boot_request_startup() -> bool {
     let arg0 = CString::new(crate::context::script().filename.as_bytes()).unwrap_or_default();
     let mut argv = [arg0.as_ptr().cast_mut()];
     unsafe {
-        let sg = rapira_sg();
+        let sg = &raw mut sapi_globals;
         (*sg).request_info.argc = 1;
         (*sg).request_info.argv = argv.as_mut_ptr();
         // PHP 8.4 adds argv only with register_argc_argv on, so its CLI and embed SAPIs force it on; PHP 8.5 adds argv when argc is set.
         // https://github.com/php/php-src/blob/php-8.4.26/sapi/embed/php_embed.c#L26-L32
         #[cfg(php84)]
-        let register_argc_argv = std::mem::replace(&mut (*rapira_pg()).register_argc_argv, true);
+        let register_argc_argv = (&raw mut core_globals.register_argc_argv).replace(true);
         let started = php_request_startup() == SUCCESS;
         if started {
             zend_is_auto_global_str(c"_SERVER".as_ptr(), c"_SERVER".count_bytes());
         }
         #[cfg(php84)]
         {
-            (*rapira_pg()).register_argc_argv = register_argc_argv;
+            core_globals.register_argc_argv = register_argc_argv;
         }
         (*sg).request_info.argc = 0;
         (*sg).request_info.argv = null_mut();
@@ -283,11 +283,11 @@ pub extern "C" fn rapira_rs_finish_response() {
 /// clear_last_error() keeps last_error_type/lineno set (main/main.c:1307-1316) so the message pointer is the only "slot filled" signal, and php_error_cb applies EG(error_reporting) only after filling it (main/main.c:1394-1411).
 fn log_and_clear_last_error() {
     unsafe {
-        let pg = rapira_pg();
+        let pg = &raw const core_globals;
         let msg = (*pg).last_error_message;
         if !msg.is_null() {
             let (level, label) =
-                error_type_to_level((*pg).last_error_type, (*rapira_eg()).error_reporting);
+                error_type_to_level((*pg).last_error_type, executor_globals.error_reporting);
             crate::diagnostics::event_at!(
                 "php",
                 level,

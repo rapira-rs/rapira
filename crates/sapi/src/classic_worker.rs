@@ -33,9 +33,9 @@ fn classic_executor(ctx: &mut Context) -> (Event, bool) {
         crate::context::apply_proto_num(ctx);
 
         let failed = !run_script(std::path::Path::new(&crate::context::script().filename));
-        let pg = rapira_pg();
+        let pg = &raw const core_globals;
         let exec_err: bool = failed
-            && ((*rapira_cg()).unclean_shutdown
+            && (compiler_globals.unclean_shutdown
                 || (!(*pg).last_error_message.is_null()
                     && (*pg).last_error_type & E_FATAL_ERRORS as i32 != 0));
         ctx.tearing_down = true;

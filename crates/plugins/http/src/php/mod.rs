@@ -18,12 +18,12 @@ use rapira_sapi::types::{
 };
 use rapira_sapi::work::{DispatcherClasses, Held, release};
 use rapira_sapi::{
-    HashPosition, HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex,
-    rapira_array_init, rapira_ce_already_finalized_error, rapira_ce_tls,
-    rapira_ce_work_discarded_exception, rapira_eg, zend, zend_class_entry,
-    zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
-    zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_set_timeout,
-    zend_string, zend_unset_timeout, zval, zval_add_ref, zval_ptr_dtor,
+    HashPosition, HashTable, IS_ARRAY, IS_STRING, add_next_index_object, executor_globals,
+    object_init_ex, rapira_array_init, rapira_ce_already_finalized_error, rapira_ce_tls,
+    rapira_ce_work_discarded_exception, zend, zend_class_entry, zend_hash_get_current_data_ex,
+    zend_hash_get_current_key_ex, zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex,
+    zend_object, zend_set_timeout, zend_string, zend_unset_timeout, zval, zval_add_ref,
+    zval_ptr_dtor,
 };
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 

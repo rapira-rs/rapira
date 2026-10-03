@@ -2,10 +2,10 @@ use std::ffi::{CStr, c_char};
 
 use crate::{
     IS_DOUBLE, IS_LONG, IS_NULL, IS_PROP_REINITABLE, IS_PROP_UNINIT, IS_REFERENCE, IS_UNDEF,
-    rapira_eg, rapira_zval_stringl, zend_class_entry, zend_object, zend_property_info, zend_string,
-    zend_throw_error, zend_throw_exception, zend_update_property, zend_update_property_double,
-    zend_update_property_long, zend_update_property_null, zend_update_property_stringl,
-    zend_value_error, zval,
+    executor_globals, rapira_zval_stringl, zend_class_entry, zend_object, zend_property_info,
+    zend_string, zend_throw_error, zend_throw_exception, zend_update_property,
+    zend_update_property_double, zend_update_property_long, zend_update_property_null,
+    zend_update_property_stringl, zend_value_error, zval,
 };
 
 pub fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
@@ -208,7 +208,7 @@ pub unsafe fn slot_double(obj: *mut zend_object, offset: u32, d: f64) {
 /// # Safety
 /// Engine booted on this thread.
 pub unsafe fn exception_pending() -> bool {
-    unsafe { !(*rapira_eg()).exception.is_null() }
+    unsafe { !executor_globals.exception.is_null() }
 }
 
 /// instanceof_function is inline; this is its two-halves replication.

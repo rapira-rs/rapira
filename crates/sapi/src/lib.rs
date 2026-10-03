@@ -35,10 +35,6 @@ pub const HASH_KEY_IS_STRING: i64 = 1;
 
 // The Outcome-typed shims return a C `int`; call sites decode it via `Outcome::from_c` (unexpected values fall back to `Bailout`).
 unsafe extern "C" {
-    pub fn rapira_sg() -> *mut sapi_globals_struct;
-    pub fn rapira_eg() -> *mut zend_executor_globals;
-    pub fn rapira_cg() -> *mut zend_compiler_globals;
-    pub fn rapira_pg() -> *mut php_core_globals;
     pub fn rapira_finish_output() -> c_int;
     pub fn rapira_init_call_stack();
     pub fn rapira_clear_last_error();

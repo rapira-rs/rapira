@@ -189,7 +189,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
             };
 
             if ctx.stream == StreamState::NotSent {
-                let status = unsafe { SapiHeaders(&mut (*rapira_sg()).sapi_headers).status() };
+                let status = unsafe { SapiHeaders(&raw mut sapi_globals.sapi_headers).status() };
                 ctx.commit_head(status, HeaderMap::new());
             }
 
@@ -340,7 +340,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             .unwrap_or(b"");
         put_bytes(c"AUTH_TYPE", auth_type);
 
-        let auth_user = unsafe { (*rapira_sg()).request_info.auth_user };
+        let auth_user = unsafe { sapi_globals.request_info.auth_user };
         if !auth_user.is_null() {
             let user: &CStr = unsafe { CStr::from_ptr(auth_user as *const c_char) };
             put_bytes(c"REMOTE_USER", user.to_bytes());
