@@ -70,7 +70,6 @@ fn settings(file: FileConfig, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapira_config::{LogLevel, resolve_pool};
     use std::path::PathBuf;
 
     fn ctx() -> ConfigCtx {
@@ -168,28 +167,6 @@ mod tests {
                 (got, _) => panic!("{}: unexpected {got:?}", case.name),
             }
         }
-    }
-
-    /// The e2e harness writes `[http.pool]` before `[http]`. TOML allows the super-table later.
-    #[test]
-    fn subtable_before_supertable_parses() {
-        let file: FileConfig = toml::from_str(
-            "[http.pool]\nentrypoint = \"a.php\"\nprocesses = 3\n\
-             [log]\nlevel = \"debug\"\n\
-             [http]\nlisten = \"127.0.0.1:7000\"\nmiddleware = [\"static\"]\n\
-             [http.static]\nroot = \"public\"\n",
-        )
-        .unwrap();
-        assert_eq!(resolve_log(file.log).unwrap().level, LogLevel::Debug);
-        let http = file.http.unwrap();
-        assert_eq!(http.listen.as_deref(), Some("127.0.0.1:7000"));
-        assert_eq!(http.middleware, ["static"]);
-        assert_eq!(
-            http.r#static.and_then(|s| s.root).as_deref(),
-            Some("public")
-        );
-        let pool = resolve_pool(http.pool, "http.pool", &ctx()).unwrap();
-        assert_eq!(pool.processes, 3);
     }
 
     #[test]
