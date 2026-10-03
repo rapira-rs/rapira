@@ -13,7 +13,7 @@ use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Sink;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::watch::{Sender, channel};
+use tokio::sync::watch::channel;
 
 use crate::bridge::ConnectionState;
 use crate::handler::{Conn, Shared, respond};
@@ -60,7 +60,22 @@ impl Serving {
             self.shared.cfg.write_timeout,
             closed_tx.clone(),
         );
-        spawn_connection(&self.builder, &self.graceful, io, handler, closed_tx);
+        let chain = handler.chain();
+        // `BoxCloneService` polls and calls through `&mut`, so each request takes its own clone.
+        let service = hyper::service::service_fn(move |req| {
+            let handler = Arc::clone(&handler);
+            let chain = chain.clone();
+            async move { Ok::<_, Infallible>(respond(handler, chain, req).await) }
+        });
+        let watched = self
+            .graceful
+            .watch(self.builder.serve_connection(io, service));
+        tokio::spawn(async move {
+            if let Err(e) = watched.await {
+                tracing::debug!(target: "http", "connection ended with error: {e}");
+            }
+            closed_tx.send_modify(|s| s.closed = true);
+        });
     }
 
     /// Waits out the connections in flight. The acceptor is already gone.
@@ -114,41 +129,6 @@ impl Serve for Serving {
         let remote = Addr::Unix(peer.map(Into::into));
         self.spawn_conn(stream, remote, listen_addr(&self.shared.cfg.listen));
     }
-}
-
-/// Serves one connection under `graceful` on its own task and marks `closed_tx` closed when it ends.
-pub(crate) fn spawn_connection<I>(
-    builder: &http1::Builder,
-    graceful: &GracefulShutdown,
-    io: I,
-    handler: Arc<Conn>,
-    closed_tx: Sender<ConnectionState>,
-) where
-    I: hyper::rt::Read + hyper::rt::Write + Unpin + Send + 'static,
-{
-    let chain = handler.chain();
-    // `BoxCloneService` polls and calls through `&mut`, so each request takes its own clone.
-    let service = hyper::service::service_fn(move |req| {
-        let handler = Arc::clone(&handler);
-        let chain = chain.clone();
-        async move { Ok::<_, Infallible>(respond(handler, chain, req).await) }
-    });
-    spawn_watched(
-        graceful.watch(builder.serve_connection(io, service)),
-        closed_tx,
-    );
-}
-
-fn spawn_watched(
-    watched: impl Future<Output = hyper::Result<()>> + Send + 'static,
-    closed_tx: Sender<ConnectionState>,
-) {
-    tokio::spawn(async move {
-        if let Err(e) = watched.await {
-            tracing::debug!(target: "http", "connection ended with error: {e}");
-        }
-        closed_tx.send_modify(|s| s.closed = true);
-    });
 }
 
 /// Runs the accept loop on the calling thread until the stop flag, then drains the connections.
