@@ -114,9 +114,9 @@ fn run_cycle(script: &Path) -> Cycle {
         return Cycle::Restart;
     }
 
-    if crate::exchange::closed_seen() {
+    if crate::exchange::CLOSED_SEEN.get() {
         Cycle::Stop
-    } else if recycle || crate::exchange::received_any() {
+    } else if recycle || crate::exchange::RECEIVED.get() {
         Cycle::Recycle
     } else {
         Cycle::Failed
@@ -245,14 +245,14 @@ fn next_job() -> Option<Context> {
                         sb_update(scoreboard::Event::Handled(true));
                         continue;
                     }
-                    crate::exchange::note_received();
+                    crate::exchange::RECEIVED.set(true);
                     let Some(ctx) = unit.into_cgi() else {
                         unreachable!("a unit with no CGI form goes to dispatcher-mode workers only");
                     };
                     return Some(ctx);
                 }
                 None => {
-                    crate::exchange::note_closed();
+                    crate::exchange::CLOSED_SEEN.set(true);
                     return None;
                 }
             }
