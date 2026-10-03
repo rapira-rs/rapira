@@ -57,9 +57,7 @@ fn main() -> anyhow::Result<()> {
     let inputs: &[&str] = &[
         "rapira_sapi.h",
         "allowed_bindings.rs",
-        "rapira.stub.php",
         "rapira_arginfo.h",
-        "rapira_exception.stub.php",
         "rapira_exception_arginfo.h",
     ];
     rapira_php_build::rerun_if_changed(inputs);

@@ -11,10 +11,6 @@ fn main() -> anyhow::Result<()> {
         &php,
         &[&sapi_include],
     );
-    rapira_php_build::rerun_if_changed(&[
-        "rapira_http.h",
-        "rapira_http.stub.php",
-        "rapira_http_arginfo.h",
-    ]);
+    rapira_php_build::rerun_if_changed(&["rapira_http.h", "rapira_http_arginfo.h"]);
     Ok(())
 }

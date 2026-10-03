@@ -7,10 +7,6 @@ fn main() -> anyhow::Result<()> {
         &php,
         &[&sapi_include],
     );
-    rapira_php_build::rerun_if_changed(&[
-        "rapira_grpc.h",
-        "rapira_grpc.stub.php",
-        "rapira_grpc_arginfo.h",
-    ]);
+    rapira_php_build::rerun_if_changed(&["rapira_grpc.h", "rapira_grpc_arginfo.h"]);
     Ok(())
 }
