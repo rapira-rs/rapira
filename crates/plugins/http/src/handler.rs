@@ -180,15 +180,11 @@ fn framed_length(method: &http::Method, response: &http::Response<RespBody>) -> 
         .or_else(|| response.body().size_hint().exact())
 }
 
-async fn handle<B>(
+async fn handle(
     handler: Arc<Conn>,
     chain: Option<Service>,
-    req: http::Request<B>,
-) -> http::Response<RespBody>
-where
-    B: Body<Data = bytes::Bytes> + Unpin + Send + 'static,
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
+    req: http::Request<Incoming>,
+) -> http::Response<RespBody> {
     let reqs_counter: Arc<InflightReqCount> =
         Arc::new(InflightReqCount::init(&handler.shared.inflight));
     let received_at: f64 = rapira_sapi::work::now_unix_f64();
