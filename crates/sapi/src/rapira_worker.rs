@@ -173,7 +173,7 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
 }
 
 /// # Safety
-/// Called from the C handle_request shell on the resident worker thread inside its active request, with valid `fci`/`fcc`; the unconditional unbind covers the caught-panic path, where SG(server_context) would otherwise point at a freed job.
+/// Called from the C handle_request shell on the resident worker thread inside its active request, with valid `fci`/`fcc`; the unbind here is the only one; it also covers the caught-panic path, where SG(server_context) would otherwise point at a freed job.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_handle_request(
     fci: *mut zend_fcall_info,
@@ -220,7 +220,6 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     let truncated: bool = finalize_response(&mut ctx, errored);
 
     log_and_clear_last_error();
-    unbind_server_context();
     sb_update(scoreboard::Event::Handled(errored));
     if recycle {
         set_worker_recycle();

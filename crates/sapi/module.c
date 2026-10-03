@@ -362,12 +362,8 @@ int rapira_request_teardown(void) {
         zend_clear_exception();
     }
 
-    SG(request_info).request_method = NULL;
-    SG(request_info).query_string = NULL;
-    SG(request_info).request_uri = NULL;
-    SG(request_info).path_translated = NULL;
-    SG(request_info).content_type = NULL;
-    SG(request_info).cookie_data = NULL;
+    // sapi_deactivate_module frees both without clearing them (main/SAPI.c);
+    // the cycle-end sapi_deactivate would free them again
     SG(request_info).current_user = NULL;
     SG(request_info).content_type_dup = NULL;
 
