@@ -1,5 +1,5 @@
 use std::net::SocketAddr;
-use std::os::fd::{IntoRawFd, OwnedFd, RawFd};
+use std::os::fd::OwnedFd;
 use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
@@ -14,19 +14,13 @@ const LISTEN_BACKLOG: i32 = 65535;
 /// Exactly one closer per process: the master holds its copy for its whole life so respawned workers keep inheriting it, a worker hands its copy to the adopter.
 #[derive(Debug)]
 pub struct PreparedListener {
-    fd: OwnedFd,
-    addr: ListenAddr,
+    pub(crate) fd: OwnedFd,
+    pub(crate) addr: ListenAddr,
 }
 
 impl PreparedListener {
     pub fn addr(&self) -> &ListenAddr {
         &self.addr
-    }
-}
-
-impl IntoRawFd for PreparedListener {
-    fn into_raw_fd(self) -> RawFd {
-        self.fd.into_raw_fd()
     }
 }
 

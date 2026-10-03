@@ -41,7 +41,6 @@ impl Acceptor {
         stop: watch::Receiver<bool>,
         rt: &Handle,
     ) -> std::io::Result<Self> {
-        use std::os::fd::{FromRawFd, IntoRawFd};
         // The blocked acceptor waits on an eventfd, so a task on rt passes the flag on to it.
         #[cfg(target_os = "linux")]
         let stop = {
@@ -53,22 +52,20 @@ impl Acceptor {
             });
             wake
         };
-        let addr = prepared.addr().clone();
+        let PreparedListener { fd, addr } = prepared;
         let tcp: bool = matches!(addr, ListenAddr::Tcp(_));
         // On other OSes from_std registers the tokio listener with the reactor of rt.
         let _guard = rt.enter();
-        // SAFETY: into_raw_fd transfers sole ownership of a listening socket.
         // bind set O_NONBLOCK: both acceptors need an accept that does not block.
         let socket = if tcp {
-            let std = unsafe { std::net::TcpListener::from_raw_fd(prepared.into_raw_fd()) };
+            let std = std::net::TcpListener::from(fd);
             #[cfg(target_os = "linux")]
             let listener = TcpListener::from_std(std, stop)?;
             #[cfg(not(target_os = "linux"))]
             let listener = TcpListener::from_std(std)?;
             Socket::Tcp(listener)
         } else {
-            let std =
-                unsafe { std::os::unix::net::UnixListener::from_raw_fd(prepared.into_raw_fd()) };
+            let std = std::os::unix::net::UnixListener::from(fd);
             #[cfg(target_os = "linux")]
             let listener = UnixListener::from_std(std, stop)?;
             #[cfg(not(target_os = "linux"))]
