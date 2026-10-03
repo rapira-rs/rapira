@@ -28,7 +28,6 @@ base64 = { workspace = true }
 tower = { workspace = true }
 
 [build-dependencies]
-anyhow = { workspace = true }
 rapira_php_build = { workspace = true }
 
 [dev-dependencies]

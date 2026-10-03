@@ -32,7 +32,6 @@ httparse = "1"
 tempfile = "3"
 
 [build-dependencies]
-anyhow = { workspace = true }
 rapira_php_build = { workspace = true }
 
 [dev-dependencies]

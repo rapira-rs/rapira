@@ -18,7 +18,6 @@ bytes = { workspace = true }
 http = { workspace = true }
 
 [build-dependencies]
-anyhow = { workspace = true }
 bindgen = "0"
 rapira_php_build = { workspace = true }
 
