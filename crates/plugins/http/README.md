@@ -116,7 +116,7 @@ The `[http]` table. Unknown keys fail the boot.
 - `keepalive_timeout_secs`: closes an idle keepalive connection, and limits each head read and body-frame read. Default 60.
 - `unsafe_field_names`: `"drop"` (default) or `"reject"` for header names that alias a CGI variable. In dispatcher mode no `$_SERVER` mapping exists, so `"drop"` keeps the names and `"reject"` still answers 400.
 - `middleware`: the middleware names in chain order, the first listed outermost. Default: none.
-- `[http.uploads]`: the multipart limits of dispatcher mode: `dir` (default: the system temp dir), `max_file_size_mb` (2), `max_field_size_kb` (256), `max_files` (20), `max_parts` (1024), `max_part_headers` (32). This table under another mode fails the boot.
+- `[http.uploads]`: the multipart limits of dispatcher mode: `dir` (default: the system temp dir), `max_file_size_mb` (2), `max_field_size_kb` (256), `max_files` (20), `max_parts` (1024). This table under another mode fails the boot.
 - `[http.sendfile]`: `root`, the directory that must contain each `sendFile()` path. Default: the entrypoint directory.
 - `[http.static]`: the settings of the `static` middleware: `root` (required, an existing directory) and `forbid` (the file-name suffixes it never serves, default `[".php"]`).
 - `[http.pool]`: the worker pool: `entrypoint` (required), `mode`, `processes`, `max_requests`, `request_terminate_timeout_secs`. `examples/rapira.toml` shows each key.

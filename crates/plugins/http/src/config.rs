@@ -51,7 +51,6 @@ pub struct UploadsSection {
     pub max_field_size_kb: Option<NonZero<usize>>,
     pub max_files: Option<NonZero<usize>>,
     pub max_parts: Option<NonZero<usize>>,
-    pub max_part_headers: Option<NonZero<usize>>,
 }
 
 #[derive(Debug)]
@@ -220,7 +219,6 @@ fn resolve_uploads(section: UploadsSection, config_dir: &Path) -> Result<Limits>
         anyhow!("http.uploads.max_field_size_kb {max_field_size_kb} is too large")
     })?;
     let max_parts = section.max_parts.map_or(1024, NonZero::get);
-    let max_part_headers = section.max_part_headers.map_or(32, NonZero::get);
     let max_files = section.max_files.map_or(20, NonZero::get);
     Ok(Limits {
         dir,
@@ -228,7 +226,6 @@ fn resolve_uploads(section: UploadsSection, config_dir: &Path) -> Result<Limits>
         max_field_size,
         max_files,
         max_parts,
-        max_part_headers,
     })
 }
 
@@ -570,7 +567,6 @@ mod tests {
             max_field_size: 256 * 1024,
             max_files: 20,
             max_parts: 1024,
-            max_part_headers: 32,
         }
     }
 
@@ -582,14 +578,13 @@ mod tests {
                 name: "every knob",
                 toml: "[pool]\nentrypoint = \"a.php\"\n[uploads]\ndir = \"spool\"\n\
                        max_file_size_mb = 3\nmax_field_size_kb = 7\nmax_files = 4\n\
-                       max_parts = 9\nmax_part_headers = 5\n",
+                       max_parts = 9\n",
                 want: Some(Limits {
                     dir: PathBuf::from("/w/spool"),
                     max_file_size: 3 * 1024 * 1024,
                     max_field_size: 7 * 1024,
                     max_files: 4,
                     max_parts: 9,
-                    max_part_headers: 5,
                 }),
             },
             UploadsCase {
