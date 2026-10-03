@@ -1,9 +1,10 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
 use std::time::Duration;
 
+use rapira_config::PoolSettings;
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
-use rapira_sapi::plugin::{Mode, Plugin, Stopper, run_plugin};
+use rapira_sapi::plugin::{Plugin, Stopper, run_plugin};
 use rapira_sapi::{Rapira, WorkerHooks};
 
 /// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset, so the plugin outcome sets the exit code.
@@ -34,24 +35,20 @@ fn effective_quota(max_requests: u64) -> u64 {
     max_requests.saturating_add(1 + (h.finish() % grace))
 }
 
-/// Everything a pool's worker needs besides the fork-time env.
-pub struct PoolArgs {
-    pub mode: Mode,
-    pub entrypoint: PathBuf,
-    pub max_requests: u64,
-    pub grace: Duration,
-    pub drain_grace: Duration,
-}
-
 /// Returns the process exit code for the master's fork bracket; never runs PHP module teardown, MSHUTDOWN stays with the master.
-pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i32 {
-    let PoolArgs {
+pub fn worker_body(
+    env: WorkerEnv,
+    plugin: Box<dyn Plugin>,
+    pool: PoolSettings,
+    grace: Duration,
+    drain_grace: Duration,
+) -> i32 {
+    let PoolSettings {
         mode,
         entrypoint,
         max_requests,
-        grace,
-        drain_grace,
-    } = args;
+        ..
+    } = pool;
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { rapira_sapi::rapira_child_init() };
     // The worker enters the entrypoint directory once and owns it from here; PHP keeps it over every script run.
@@ -86,7 +83,12 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
 
     let name: &str = plugin.name();
     let outcome: anyhow::Result<()> =
-        serve_plugin(plugin, rapira.sink(), stopper, grace, drain_grace);
+        run_plugin(plugin, rapira.sink(), stopper.clone(), grace, drain_grace).and_then(
+            |running| {
+                spawn_signal_thread(move || stopper.stop());
+                running.join()
+            },
+        );
     if let Err(e) = &outcome {
         tracing::error!(target: "rapira", "plugin {name}: {e:#}");
     }
@@ -97,19 +99,6 @@ pub fn worker_body(env: WorkerEnv, plugin: Box<dyn Plugin>, args: PoolArgs) -> i
         -1 => 0,
         code => code,
     }
-}
-
-/// Runs the plugin until it stops and joins it.
-fn serve_plugin(
-    plugin: Box<dyn Plugin>,
-    sink: rapira_sapi::work::Sink,
-    stopper: Stopper,
-    grace: Duration,
-    drain_grace: Duration,
-) -> anyhow::Result<()> {
-    let running = run_plugin(plugin, sink, stopper.clone(), grace, drain_grace)?;
-    spawn_signal_thread(move || stopper.stop());
-    running.join()
 }
 
 /// Requires the fork bracket to have masked exactly {QUIT, INT} in the child: the first signal runs `stop`, a second force-exits 131.

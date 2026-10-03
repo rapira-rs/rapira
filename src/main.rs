@@ -1,5 +1,5 @@
 use anyhow::Context;
-use rapira_config::{PoolSettings, SupervisorSettings};
+use rapira_config::PoolSettings;
 use rapira_master::PoolConfig;
 use rapira_sapi::plugin::{Mode, Plugin};
 use std::ffi::OsString;
@@ -25,7 +25,7 @@ enum PoolRun {
     /// A PHP pool.
     Php {
         plugin: Box<dyn Plugin>,
-        args: worker::PoolArgs,
+        pool: PoolSettings,
     },
     /// The observability pool.
     Observability {
@@ -79,20 +79,10 @@ fn check_mode(name: &str, served: &[Mode], mode: Mode) -> anyhow::Result<()> {
     )
 }
 
-/// The supervision config the master needs for one pool.
-fn pool_config(name: &'static str, pool: &PoolSettings) -> PoolConfig {
-    PoolConfig {
-        name,
-        processes: pool.processes,
-        request_terminate_timeout: pool.request_terminate_timeout,
-    }
-}
-
 /// Checks the pool mode, binds the pool's listeners and packs what the master forks with.
 fn pool_run(
     mut plugin: Box<dyn Plugin>,
-    pool: &PoolSettings,
-    supervisor: &SupervisorSettings,
+    pool: PoolSettings,
 ) -> anyhow::Result<(PoolRun, PoolConfig)> {
     let name: &'static str = plugin.name();
     check_mode(name, plugin.modes(), pool.mode)?;
@@ -100,19 +90,12 @@ fn pool_run(
     plugin
         .prepare()
         .with_context(|| format!("plugin {name}: prepare failed"))?;
-    Ok((
-        PoolRun::Php {
-            plugin,
-            args: worker::PoolArgs {
-                mode: pool.mode,
-                entrypoint: pool.entrypoint.clone(),
-                max_requests: pool.max_requests,
-                grace: supervisor.process_control_timeout,
-                drain_grace: supervisor.drain_grace(),
-            },
-        },
-        pool_config(name, pool),
-    ))
+    let cfg = PoolConfig {
+        name,
+        processes: pool.processes,
+        request_terminate_timeout: pool.request_terminate_timeout,
+    };
+    Ok((PoolRun::Php { plugin, pool }, cfg))
 }
 
 fn serve(config: &Path) -> anyhow::Result<()> {
@@ -121,26 +104,20 @@ fn serve(config: &Path) -> anyhow::Result<()> {
     logging::init(&settings.log);
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
-    // One plugin per configured table, with its pool.
-    let mut plugins: Vec<(Box<dyn Plugin>, PoolSettings)> = Vec::new();
-    if let Some(http) = settings.http {
-        let pool: PoolSettings = http.pool.clone();
-        let plugin = rapira_http::Server::from_settings(http);
-        plugins.push((Box::new(plugin), pool));
-    }
-    if let Some(grpc) = settings.grpc {
-        let pool: PoolSettings = grpc.pool.clone();
-        let plugin = rapira_grpc::Server::from_settings(grpc)?;
-        plugins.push((Box::new(plugin), pool));
-    }
-
     // `WorkerEnv::pool` indexes both lists, so they keep one order. The observability pool goes first, so the slot cap error of the master always names a PHP pool.
     let mut runs: Vec<(PoolRun, PoolConfig)> = Vec::new();
     if let Some(observability) = settings.observability {
         runs.push(observability::pool_run(observability)?);
     }
-    for (plugin, pool) in plugins {
-        runs.push(pool_run(plugin, &pool, &settings.supervisor)?);
+    if let Some(http) = settings.http {
+        let pool: PoolSettings = http.pool.clone();
+        let plugin = rapira_http::Server::from_settings(http);
+        runs.push(pool_run(Box::new(plugin), pool)?);
+    }
+    if let Some(grpc) = settings.grpc {
+        let pool: PoolSettings = grpc.pool.clone();
+        let plugin = rapira_grpc::Server::from_settings(grpc)?;
+        runs.push(pool_run(Box::new(plugin), pool)?);
     }
     let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = runs.into_iter().unzip();
 
@@ -149,6 +126,7 @@ fn serve(config: &Path) -> anyhow::Result<()> {
         rapira_sapi::boot_master(&[rapira_http::PHP_PART, rapira_grpc::PHP_PART])?;
 
     // forks ------------------------------------------------------------------
+    let grace: Duration = settings.supervisor.process_control_timeout;
     let drain_grace: Duration = settings.supervisor.drain_grace();
     let cfg: rapira_master::MasterConfig = rapira_master::MasterConfig {
         pools: pool_cfgs,
@@ -162,7 +140,9 @@ fn serve(config: &Path) -> anyhow::Result<()> {
             let run: PoolRun = pools.swap_remove(env.pool);
             pools.clear();
             match run {
-                PoolRun::Php { plugin, args } => worker::worker_body(env, plugin, args),
+                PoolRun::Php { plugin, pool } => {
+                    worker::worker_body(env, plugin, pool, grace, drain_grace)
+                }
                 PoolRun::Observability { server } => {
                     observability::observability_body(env, server, drain_grace)
                 }
