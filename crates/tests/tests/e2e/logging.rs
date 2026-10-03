@@ -185,7 +185,7 @@ fn log_filter_source_and_target_prefix() {
     }
 }
 
-/// A JSON record nests the event fields under `fields`, names the target and the level, stamps UTC milliseconds and carries no span keys.
+/// A JSON record nests the event fields under `fields`, names the target and the level, stamps UTC microseconds and carries no span keys.
 #[test]
 fn json_record_shape() {
     let mut srv = Spawn::http(Mode::Dispatcher, fixture_path(MARKS))
@@ -206,9 +206,9 @@ fn json_record_shape() {
     assert_eq!(v["fields"]["context"], r#"{"answer":42}"#, "{v}");
     assert_eq!(v["target"], "app", "{v}");
     assert_eq!(v["level"], "INFO", "{v}");
-    // ChronoUtc %.3f: RFC 3339 UTC with exactly milliseconds.
+    // SystemTime timer: RFC 3339 UTC with exactly microseconds.
     let ts = v["timestamp"].as_str().expect("timestamp");
-    assert_eq!(ts.len(), "2026-01-01T00:00:00.000Z".len(), "{ts}");
+    assert_eq!(ts.len(), "2026-01-01T00:00:00.000000Z".len(), "{ts}");
     assert_eq!(&ts[19..20], ".", "{ts}");
     assert!(ts.ends_with('Z'), "{ts}");
     assert!(v.get("span").is_none() && v.get("spans").is_none(), "{v}");

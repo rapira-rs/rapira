@@ -1,6 +1,5 @@
 use rapira_config::{LogFormat, LogSettings};
 use std::io::{self, IsTerminal};
-use tracing_subscriber::fmt::time::ChronoUtc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -46,7 +45,6 @@ where
             .json()
             .with_current_span(false)
             .with_span_list(false)
-            .with_timer(ChronoUtc::new("%Y-%m-%dT%H:%M:%S%.3fZ".into()))
             .with_writer(io::stderr)
             .boxed(),
         LogFormat::Plain => tracing_subscriber::fmt::layer()
