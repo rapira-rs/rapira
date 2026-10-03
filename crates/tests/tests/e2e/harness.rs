@@ -325,20 +325,9 @@ fn render_config(
 
 pub use tests::grpc::ECHO_SERVICE;
 
-/// Copies `grpc/echo-worker.php` and its descriptor set into `dir` as `grpc-worker.php` and `echo.binpb`.
-fn stage_grpc(dir: &Path) {
-    std::fs::copy(
-        fixture_path("grpc/echo-worker.php"),
-        dir.join("grpc-worker.php"),
-    )
-    .expect("copy the grpc fixture");
-    std::fs::copy(tests::echo_descriptor_set(), dir.join("echo.binpb")).expect("copy echo.binpb");
-}
-
 /// A `[grpc]` pool over `entrypoint`. `listen`, `descriptor_set` and `extra` (keys inside `[grpc]`) go into the file verbatim; `services` becomes a TOML string array, and None leaves the key out.
 fn render_grpc(
     listen: &str,
-    processes: usize,
     entrypoint: &str,
     descriptor_set: &str,
     services: Option<&[String]>,
@@ -350,61 +339,8 @@ fn render_grpc(
     });
     format!(
         "[grpc]\nlisten = \"{listen}\"\ndescriptor_set = \"{descriptor_set}\"\n{services}{extra}\n\
-         [grpc.pool]\nprocesses = {processes}\nentrypoint = \"{entrypoint}\"\n"
+         [grpc.pool]\nprocesses = 1\nentrypoint = \"{entrypoint}\"\n"
     )
-}
-
-/// A master with only a `[grpc]` pool over the echo fixture; `addr` is the gRPC listener.
-pub fn spawn_grpc(processes: usize) -> Server {
-    let dir = scratch_dir();
-    stage_grpc(&dir);
-    let render = |port| {
-        render_grpc(
-            &tcp(port),
-            processes,
-            "grpc-worker.php",
-            "echo.binpb",
-            None,
-            "",
-        )
-    };
-    let mut srv = spawn_ready(dir, &render, None, Some("info"), None, &[]);
-    srv.grpc = Some(ListenAddr::Tcp(srv.addr));
-    srv
-}
-
-/// A master with an `[http]` pool over `http_fixture` and a `[grpc]` pool over the echo fixture, one process each.
-/// Returns the master, whose `addr` is the gRPC listener, and the HTTP listener.
-pub fn spawn_grpc_with_http(http_fixture: &str) -> (Server, SocketAddr) {
-    let (dir, entrypoint) = stage_fixture(http_fixture);
-    stage_grpc(&dir);
-    let http_port = std::cell::Cell::new(0);
-    let render = |port| {
-        http_port.set(free_port());
-        render_config(&tcp(http_port.get()), 1, &entrypoint, "", "")
-            + &render_grpc(&tcp(port), 1, "grpc-worker.php", "echo.binpb", None, "")
-    };
-    let mut srv = spawn_ready(dir, &render, None, Some("info"), None, &[]);
-    srv.grpc = Some(ListenAddr::Tcp(srv.addr));
-    (srv, SocketAddr::from(([127, 0, 0, 1], http_port.get())))
-}
-
-/// Boots a `[grpc]`-only config that must fail: returns the status with the whole log.
-pub fn spawn_grpc_boot_failure(descriptor_set: &str, service: &str) -> (ExitStatus, String) {
-    let dir = scratch_dir();
-    stage_grpc(&dir);
-    let services = [service.to_owned()];
-    let render = |port| {
-        render_grpc(
-            &tcp(port),
-            1,
-            "grpc-worker.php",
-            descriptor_set,
-            Some(&services),
-            "",
-        )
-    };
-    exit_of(dir, &render, Some("info"), None, &[])
 }
 
 /// A master to spawn with one worker process per pool: [`Spawn::http`] or [`Spawn::grpc`] starts the config, and each setter adds to it.
@@ -658,7 +594,6 @@ impl Spawn {
                 };
                 config += &render_grpc(
                     &listen,
-                    1,
                     entrypoint,
                     descriptor_set,
                     self.services.as_deref(),
