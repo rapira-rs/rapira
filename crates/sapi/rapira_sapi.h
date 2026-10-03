@@ -90,9 +90,11 @@ extern zend_class_entry *rapira_ce_unix_address;
 // rapira_register_classes fills both before the plugin parts register.
 // A plugin's Dispatcher class: std handlers without clone.
 extern zend_object_handlers rapira_dispatcher_handlers;
-// A plugin's DispatcherInfo class: the rapira_dispatcher_info_obj layout, with rapira_dispatcher_info_create.
+// A plugin's DispatcherInfo class: the rapira_dispatcher_info_obj layout.
 extern zend_object_handlers rapira_info_handlers;
-zend_object *rapira_dispatcher_info_create(zend_class_entry *ce);
+// create_object for every class with a C prefix; the handler offset gives the
+// prefix size.
+zend_object *rapira_object_create(zend_class_entry *ce);
 
 // called from PHP_MINIT_FUNCTION
 void rapira_register_classes(void);

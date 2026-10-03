@@ -20,17 +20,6 @@ zend_class_entry *rapira_ce_internal_grpc_response_metadata;
 static zend_object_handlers rapira_grpc_call_handlers;
 static zend_object_handlers rapira_grpc_metadata_handlers;
 
-static zend_object *rapira_grpc_call_create(zend_class_entry *ce) {
-    rapira_grpc_call_obj *obj = zend_object_alloc(sizeof(*obj), ce);
-    obj->state = NULL;
-    ZVAL_UNDEF(&obj->message);
-    ZVAL_UNDEF(&obj->context);
-    ZVAL_UNDEF(&obj->metadata);
-    zend_object_std_init(&obj->std, ce);
-    object_properties_init(&obj->std, ce);
-    return &obj->std;
-}
-
 // state is a Rust Box; free_obj hands it back to Rust to drop. receive()
 // allocates the object before the pull, so state is NULL when no call came.
 static void rapira_grpc_call_free(zend_object *std) {
@@ -49,14 +38,6 @@ static void rapira_grpc_call_free(zend_object *std) {
     zval_ptr_dtor(&obj->metadata);
 
     zend_object_std_dtor(std);
-}
-
-static zend_object *rapira_grpc_metadata_create(zend_class_entry *ce) {
-    rapira_grpc_metadata_obj *obj = zend_object_alloc(sizeof(*obj), ce);
-    obj->state = NULL;
-    zend_object_std_init(&obj->std, ce);
-    object_properties_init(&obj->std, ce);
-    return &obj->std;
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, __construct) {
@@ -152,7 +133,7 @@ void rapira_grpc_register_classes(void) {
         &rapira_dispatcher_handlers;
 
     rapira_ce_internal_grpc_dispatcher_info->create_object =
-        rapira_dispatcher_info_create;
+        rapira_object_create;
     rapira_ce_internal_grpc_dispatcher_info->default_object_handlers =
         &rapira_info_handlers;
 
@@ -161,7 +142,7 @@ void rapira_grpc_register_classes(void) {
     rapira_grpc_call_handlers.clone_obj = NULL;
     rapira_grpc_call_handlers.offset = offsetof(rapira_grpc_call_obj, std);
     rapira_grpc_call_handlers.free_obj = rapira_grpc_call_free;
-    rapira_ce_internal_grpc_unary_call->create_object = rapira_grpc_call_create;
+    rapira_ce_internal_grpc_unary_call->create_object = rapira_object_create;
     rapira_ce_internal_grpc_unary_call->default_object_handlers =
         &rapira_grpc_call_handlers;
 
@@ -172,7 +153,7 @@ void rapira_grpc_register_classes(void) {
     rapira_grpc_metadata_handlers.offset =
         offsetof(rapira_grpc_metadata_obj, std);
     rapira_ce_internal_grpc_response_metadata->create_object =
-        rapira_grpc_metadata_create;
+        rapira_object_create;
     rapira_ce_internal_grpc_response_metadata->default_object_handlers =
         &rapira_grpc_metadata_handlers;
 }

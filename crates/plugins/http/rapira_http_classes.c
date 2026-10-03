@@ -16,15 +16,6 @@ zend_class_entry *rapira_ce_http_file_not_sendable_exception;
 // own copy: std_object_handlers is shared engine state
 static zend_object_handlers rapira_exchange_handlers;
 
-static zend_object *rapira_exchange_create(zend_class_entry *ce) {
-    rapira_exchange_obj *obj = zend_object_alloc(sizeof(*obj), ce);
-    obj->job = NULL;
-    ZVAL_UNDEF(&obj->request);
-    zend_object_std_init(&obj->std, ce);
-    object_properties_init(&obj->std, ce);
-    return &obj->std;
-}
-
 // job is a Rust Box; free_obj hands it back to Rust to drop
 static void rapira_exchange_free(zend_object *std) {
     rapira_exchange_obj *obj = rapira_exchange_from(std);
@@ -118,12 +109,12 @@ void rapira_http_register_classes(void) {
     rapira_exchange_handlers.clone_obj = NULL;
     rapira_exchange_handlers.offset = offsetof(rapira_exchange_obj, std);
     rapira_exchange_handlers.free_obj = rapira_exchange_free;
-    rapira_ce_internal_http_exchange->create_object = rapira_exchange_create;
+    rapira_ce_internal_http_exchange->create_object = rapira_object_create;
     rapira_ce_internal_http_exchange->default_object_handlers =
         &rapira_exchange_handlers;
 
     rapira_ce_internal_http_dispatcher_info->create_object =
-        rapira_dispatcher_info_create;
+        rapira_object_create;
     rapira_ce_internal_http_dispatcher_info->default_object_handlers =
         &rapira_info_handlers;
 }

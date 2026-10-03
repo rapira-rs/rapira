@@ -36,13 +36,16 @@ const zend_function_entry *rapira_php_functions(void) { return ext_functions; }
 zend_object_handlers rapira_dispatcher_handlers;
 zend_object_handlers rapira_info_handlers;
 
-zend_object *rapira_dispatcher_info_create(zend_class_entry *ce) {
-    rapira_dispatcher_info_obj *obj = zend_object_alloc(sizeof(*obj), ce);
-    obj->pending = 0;
-    obj->active = 0;
-    zend_object_std_init(&obj->std, ce);
-    object_properties_init(&obj->std, ce);
-    return &obj->std;
+// create_object for a class whose default_object_handlers set .offset: the C
+// prefix sits before std, and zend_object_alloc zeroes it
+// (Zend/zend_objects_API.h), so NULL and IS_UNDEF fields need no assignment.
+zend_object *rapira_object_create(zend_class_entry *ce) {
+    size_t offset = ce->default_object_handlers->offset;
+    char *obj = zend_object_alloc(offset + sizeof(zend_object), ce);
+    zend_object *std = (zend_object *)(obj + offset);
+    zend_object_std_init(std, ce);
+    object_properties_init(std, ce);
+    return std;
 }
 
 ZEND_METHOD(Rapira_InetAddress, __construct) {
