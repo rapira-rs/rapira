@@ -81,19 +81,11 @@ fn over(reason: impl Into<String>) -> Rejection {
     }
 }
 
-fn trim_ows(mut b: &[u8]) -> &[u8] {
-    while let [b' ' | b'\t', rest @ ..] = b {
-        b = rest;
-    }
-    while let [rest @ .., b' ' | b'\t'] = b {
-        b = rest;
-    }
-    b
-}
-
 pub fn is_multipart(content_type: &[u8]) -> bool {
     let media = content_type.split(|&b| b == b';').next().unwrap_or(b"");
-    trim_ows(media).eq_ignore_ascii_case(b"multipart/form-data")
+    media
+        .trim_ascii()
+        .eq_ignore_ascii_case(b"multipart/form-data")
 }
 
 /// Case-insensitive, quoted form unquoted, unquoted form terminated by `,` (php-src rfc1867.c:707-751), capped at the RFC 2046 §5.1.1 70 characters.
@@ -102,10 +94,10 @@ pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
         let Some(eq) = memchr::memchr(b'=', seg) else {
             continue;
         };
-        if !trim_ows(&seg[..eq]).eq_ignore_ascii_case(b"boundary") {
+        if !seg[..eq].trim_ascii().eq_ignore_ascii_case(b"boundary") {
             continue;
         }
-        let val = trim_ows(&seg[eq + 1..]);
+        let val = seg[eq + 1..].trim_ascii();
         let val = if let [b'"', inner @ ..] = val {
             match memchr::memchr(b'"', inner) {
                 Some(end) => &inner[..end],
@@ -113,7 +105,7 @@ pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
             }
         } else {
             match memchr::memchr(b',', val) {
-                Some(end) => trim_ows(&val[..end]),
+                Some(end) => val[..end].trim_ascii(),
                 None => val,
             }
         };
@@ -258,7 +250,7 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
         let Some(eq) = memchr::memchr(b'=', &v[i..]).map(|o| o + i) else {
             break;
         };
-        let key = trim_ows(&v[i..eq]);
+        let key = v[i..eq].trim_ascii();
         let mut j = eq + 1;
         while matches!(v.get(j), Some(b' ' | b'\t')) {
             j += 1;
@@ -287,7 +279,7 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
             let end = memchr::memchr(b';', &v[j..])
                 .map(|o| o + j)
                 .unwrap_or(v.len());
-            (trim_ows(&v[j..end]).to_vec(), end)
+            (v[j..end].trim_ascii().to_vec(), end)
         };
         let slot = if key.eq_ignore_ascii_case(b"name") {
             Some(&mut name)
@@ -373,7 +365,7 @@ fn parse_part(
         ));
     };
     let client_media_type = media_type
-        .map(trim_ows)
+        .map(<[u8]>::trim_ascii)
         .filter(|v| !v.is_empty())
         .map(<[u8]>::to_vec);
 
