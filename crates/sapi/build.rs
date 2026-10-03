@@ -1,6 +1,3 @@
-#[macro_use]
-mod macros;
-
 use std::env;
 use std::path::PathBuf;
 
@@ -14,7 +11,7 @@ const C_FILES: &[&str] = &[
 ];
 
 // bindgen panics on php-src master's `preserve_none` opcode handlers, so `_zend_op` stays opaque: https://clang.llvm.org/docs/AttributeReference.html#preserve-none
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-check-cfg=cfg(php84)");
     println!("cargo:rustc-check-cfg=cfg(php85)");
     println!("cargo:rustc-check-cfg=cfg(php87)");
@@ -47,10 +44,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     for binding in ALLOWED_BINDINGS {
-        bindings = bindings
-            .allowlist_function(binding)
-            .allowlist_type(binding)
-            .allowlist_var(binding);
+        bindings = bindings.allowlist_item(binding);
     }
 
     bindings
@@ -63,9 +57,7 @@ fn main() -> anyhow::Result<()> {
     let inputs: &[&str] = &[
         "rapira_sapi.h",
         "allowed_bindings.rs",
-        "rapira.stub.php",
         "rapira_arginfo.h",
-        "rapira_exception.stub.php",
         "rapira_exception_arginfo.h",
     ];
     rapira_php_build::rerun_if_changed(inputs);

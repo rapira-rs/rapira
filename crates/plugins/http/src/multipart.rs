@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use memchr::memmem;
 use rapira_sapi::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
 
+use crate::check::Rejection;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Limits {
     pub dir: PathBuf,
@@ -13,8 +15,10 @@ pub struct Limits {
     pub max_field_size: usize,
     pub max_files: usize,
     pub max_parts: usize,
-    pub max_part_headers: usize,
 }
+
+/// Header fields allowed in one part; the httparse buffer size.
+pub const MAX_PART_HEADERS: usize = 32;
 
 /// The spool dir of this worker process under `base`. The master sweeps the dirs whose process is gone.
 fn worker_spool_dir(base: &Path) -> PathBuf {
@@ -65,61 +69,37 @@ pub(crate) fn sweep_spool_dirs(base: &Path) {
     }
 }
 
-#[derive(Debug)]
-pub enum ParseError {
-    /// The body is malformed (400) or over a limit (413).
-    Rejected {
-        status: http::StatusCode,
-        reason: String,
-    },
-    Io(std::io::Error),
-}
-
-impl From<std::io::Error> for ParseError {
-    fn from(e: std::io::Error) -> Self {
-        ParseError::Io(e)
-    }
-}
-
-fn bad(reason: impl Into<String>) -> ParseError {
-    ParseError::Rejected {
+fn bad(reason: impl Into<String>) -> Rejection {
+    Rejection {
         status: http::StatusCode::BAD_REQUEST,
         reason: reason.into(),
     }
 }
 
-fn over(reason: impl Into<String>) -> ParseError {
-    ParseError::Rejected {
+fn over(reason: impl Into<String>) -> Rejection {
+    Rejection {
         status: http::StatusCode::PAYLOAD_TOO_LARGE,
         reason: reason.into(),
     }
 }
 
-fn trim_ows(mut b: &[u8]) -> &[u8] {
-    while let [b' ' | b'\t', rest @ ..] = b {
-        b = rest;
-    }
-    while let [rest @ .., b' ' | b'\t'] = b {
-        b = rest;
-    }
-    b
-}
-
 pub fn is_multipart(content_type: &[u8]) -> bool {
     let media = content_type.split(|&b| b == b';').next().unwrap_or(b"");
-    trim_ows(media).eq_ignore_ascii_case(b"multipart/form-data")
+    media
+        .trim_ascii()
+        .eq_ignore_ascii_case(b"multipart/form-data")
 }
 
 /// Case-insensitive, quoted form unquoted, unquoted form terminated by `,` (php-src rfc1867.c:707-751), capped at the RFC 2046 §5.1.1 70 characters.
-pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, ParseError> {
+pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
     for seg in content_type.split(|&b| b == b';').skip(1) {
         let Some(eq) = memchr::memchr(b'=', seg) else {
             continue;
         };
-        if !trim_ows(&seg[..eq]).eq_ignore_ascii_case(b"boundary") {
+        if !seg[..eq].trim_ascii().eq_ignore_ascii_case(b"boundary") {
             continue;
         }
-        let val = trim_ows(&seg[eq + 1..]);
+        let val = seg[eq + 1..].trim_ascii();
         let val = if let [b'"', inner @ ..] = val {
             match memchr::memchr(b'"', inner) {
                 Some(end) => &inner[..end],
@@ -127,7 +107,7 @@ pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, ParseError> {
             }
         } else {
             match memchr::memchr(b',', val) {
-                Some(end) => trim_ows(&val[..end]),
+                Some(end) => val[..end].trim_ascii(),
                 None => val,
             }
         };
@@ -202,7 +182,7 @@ fn next_delimiter(
 
 /// Parses a non-empty body; the empty-body case lands on the contract's string arm (`$body === ''`) instead.
 /// https://www.rfc-editor.org/rfc/rfc7578
-pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartBody, ParseError> {
+pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartBody, Rejection> {
     let delim: Vec<u8> = [b"--".as_slice(), boundary].concat();
     let finder = memmem::Finder::new(&delim);
 
@@ -239,32 +219,11 @@ pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartB
     }
 }
 
-/// Header section ends at the first empty line, CRLF or bare LF; returns (head including the terminator, body).
-fn split_head(part: &[u8]) -> Result<(&[u8], &[u8]), ParseError> {
-    if let Some(rest) = part.strip_prefix(b"\r\n") {
-        return Ok((&part[..2], rest));
-    }
-    if let Some(rest) = part.strip_prefix(b"\n") {
-        return Ok((&part[..1], rest));
-    }
-    let mut i = 0;
-    while let Some(nl) = memchr::memchr(b'\n', &part[i..]).map(|o| o + i) {
-        match part.get(nl + 1) {
-            Some(b'\n') => return Ok((&part[..nl + 2], &part[nl + 2..])),
-            Some(b'\r') if part.get(nl + 2) == Some(&b'\n') => {
-                return Ok((&part[..nl + 3], &part[nl + 3..]));
-            }
-            _ => i = nl + 1,
-        }
-    }
-    Err(bad("part without a header/body separator"))
-}
-
 /// (name, filename) from a content-disposition value.
 type Disposition = (Option<Vec<u8>>, Option<Vec<u8>>);
 
 /// The disposition type token is not enforced: php-src rfc1867.c reads the parameters regardless.
-fn disposition_params(v: &[u8]) -> Result<Disposition, ParseError> {
+fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
     let mut name: Option<Vec<u8>> = None;
     let mut filename: Option<Vec<u8>> = None;
     let mut i = memchr::memchr(b';', v).map(|i| i + 1).unwrap_or(v.len());
@@ -272,7 +231,7 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, ParseError> {
         let Some(eq) = memchr::memchr(b'=', &v[i..]).map(|o| o + i) else {
             break;
         };
-        let key = trim_ows(&v[i..eq]);
+        let key = v[i..eq].trim_ascii();
         let mut j = eq + 1;
         while matches!(v.get(j), Some(b' ' | b'\t')) {
             j += 1;
@@ -301,7 +260,7 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, ParseError> {
             let end = memchr::memchr(b';', &v[j..])
                 .map(|o| o + j)
                 .unwrap_or(v.len());
-            (trim_ows(&v[j..end]).to_vec(), end)
+            (v[j..end].trim_ascii().to_vec(), end)
         };
         let slot = if key.eq_ignore_ascii_case(b"name") {
             Some(&mut name)
@@ -325,13 +284,22 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, ParseError> {
     Ok((name, filename))
 }
 
-/// Nothing fallible may sit between keep() and the SpooledFile wrap, or the kept file has no owner to unlink it.
-fn spool(bytes: &[u8], dir: &std::path::Path) -> Result<SpooledFile, ParseError> {
-    let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
-    tmp.write_all(bytes)?;
-    let (file, path) = tmp.keep().map_err(|e| ParseError::Io(e.error))?;
-    drop(file);
-    Ok(SpooledFile { path })
+/// Spool file names are unique per process; the fuzz targets share one dir across processes, so the pid stays in the name.
+static SPOOL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The SpooledFile wraps the path before the write, so a failed write unlinks the file on drop.
+fn spool(bytes: &[u8], dir: &Path) -> std::io::Result<SpooledFile> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let n = SPOOL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let path = dir.join(format!("{}-{n}", std::process::id()));
+    let mut file = std::fs::File::options()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .open(&path)?;
+    let spooled = SpooledFile { path };
+    file.write_all(bytes)?;
+    Ok(spooled)
 }
 
 /// A filename parameter, even an empty one, makes the part a file part.
@@ -340,15 +308,16 @@ fn parse_part(
     limits: &Limits,
     fields: &mut Vec<FormField>,
     files: &mut Vec<UploadedFile>,
-) -> Result<(), ParseError> {
-    let (head, body) = split_head(part)?;
-
-    let mut hbuf = vec![httparse::EMPTY_HEADER; limits.max_part_headers];
-    let parsed = match httparse::parse_headers(head, &mut hbuf) {
-        Ok(httparse::Status::Complete((_, headers))) => headers,
-        Ok(httparse::Status::Partial) => return Err(bad("truncated part header section")),
+) -> Result<(), Rejection> {
+    let mut hbuf = [httparse::EMPTY_HEADER; MAX_PART_HEADERS];
+    let (body, parsed) = match httparse::parse_headers(part, &mut hbuf) {
+        // the header section ends at the first empty line, CRLF or bare LF; len includes that line
+        Ok(httparse::Status::Complete((len, headers))) => (&part[len..], headers),
+        Ok(httparse::Status::Partial) => return Err(bad("part without a header/body separator")),
         Err(httparse::Error::TooManyHeaders) => {
-            return Err(over("part headers over max_part_headers"));
+            return Err(over(format!(
+                "part with more than {MAX_PART_HEADERS} header fields"
+            )));
         }
         // httparse enforces RFC 9110 token field names, stricter than rfc1867.c
         Err(_) => return Err(bad("unparseable part header section")),
@@ -378,7 +347,7 @@ fn parse_part(
         ));
     };
     let client_media_type = media_type
-        .map(trim_ows)
+        .map(<[u8]>::trim_ascii)
         .filter(|v| !v.is_empty())
         .map(<[u8]>::to_vec);
 
@@ -390,7 +359,10 @@ fn parse_part(
             if body.len() as u64 > limits.max_file_size {
                 return Err(over("file part over max_file_size"));
             }
-            let file = spool(body, &limits.dir)?;
+            let file = spool(body, &limits.dir).map_err(|e| Rejection {
+                status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                reason: format!("upload spool failed: {e}"),
+            })?;
             files.push(UploadedFile {
                 name,
                 client_filename,
@@ -425,7 +397,6 @@ mod tests {
             max_field_size: 256 * 1024,
             max_files: 20,
             max_parts: 1024,
-            max_part_headers: 32,
         }
     }
 
@@ -436,8 +407,7 @@ mod tests {
     /// The status of the rejection.
     fn rejected(body: &[u8], l: &Limits) -> u16 {
         match parse(body, b"B", l) {
-            Err(ParseError::Rejected { status, .. }) => status.as_u16(),
-            Err(ParseError::Io(e)) => panic!("io error: {e}"),
+            Err(Rejection { status, .. }) => status.as_u16(),
             Ok(_) => panic!("expected a rejection"),
         }
     }
@@ -504,11 +474,11 @@ mod tests {
         }
         assert!(matches!(
             boundary(b"multipart/form-data"),
-            Err(ParseError::Rejected { status, .. }) if status == 400
+            Err(Rejection { status, .. }) if status == 400
         ));
         assert!(matches!(
             boundary(b"multipart/form-data; boundary="),
-            Err(ParseError::Rejected { status, .. }) if status == 400
+            Err(Rejection { status, .. }) if status == 400
         ));
     }
 

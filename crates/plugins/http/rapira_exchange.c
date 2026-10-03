@@ -1,7 +1,5 @@
 #include "rapira_http.h"
 
-#include "zend_API.h"
-
 // rust glue; the verbs throw from Rust and report false with the throw pending
 extern bool rapira_rs_exchange_build_request(rapira_exchange_obj *ex,
                                              zval *return_value);
@@ -35,10 +33,9 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeHead) {
     ZEND_PARSE_PARAMETERS_END();
 
     void *job = exchange_job(ZEND_THIS);
-    if (!rapira_rs_exchange_write_head(job, (int64_t)status, headers)) {
-        rapira_throw_or_backstop("writeHead");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_exchange_write_head(job, (int64_t)status, headers),
+        "writeHead");
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, writeBody) {
@@ -51,11 +48,10 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeBody) {
     ZEND_PARSE_PARAMETERS_END();
 
     void *job = exchange_job(ZEND_THIS);
-    if (!rapira_rs_exchange_write_body(job, ZSTR_VAL(content),
-                                       ZSTR_LEN(content), eos)) {
-        rapira_throw_or_backstop("writeBody");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_exchange_write_body(job, ZSTR_VAL(content), ZSTR_LEN(content),
+                                      eos),
+        "writeBody");
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, isFinalized) {
@@ -85,12 +81,11 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, sendFile) {
     ZEND_PARSE_PARAMETERS_END();
 
     void *job = exchange_job(ZEND_THIS);
-    if (!rapira_rs_exchange_send_file(job, ZSTR_VAL(path), ZSTR_LEN(path),
-                                      (int64_t)offset, (int64_t)length,
-                                      length_is_null, eos)) {
-        rapira_throw_or_backstop("sendFile");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_exchange_send_file(job, ZSTR_VAL(path), ZSTR_LEN(path),
+                                     (int64_t)offset, (int64_t)length,
+                                     length_is_null, eos),
+        "sendFile");
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, writeTrailers) {
@@ -100,27 +95,20 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeTrailers) {
     ZEND_PARSE_PARAMETERS_END();
 
     void *job = exchange_job(ZEND_THIS);
-    if (!rapira_rs_exchange_write_trailers(job, trailers)) {
-        rapira_throw_or_backstop("writeTrailers");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_exchange_write_trailers(job, trailers), "writeTrailers");
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
     ZEND_PARSE_PARAMETERS_NONE();
     void *job = exchange_job(ZEND_THIS);
-    if (!rapira_rs_exchange_flush(job)) {
-        rapira_throw_or_backstop("flush");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_exchange_flush(job), "flush");
 }
 
 // the request graph builder lives in Rust (src/php/); this shell owns the macro layer
 ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest) {
     ZEND_PARSE_PARAMETERS_NONE();
     rapira_exchange_obj *ex = rapira_exchange_from(Z_OBJ_P(ZEND_THIS));
-    if (!rapira_rs_exchange_build_request(ex, return_value)) {
-        rapira_throw_or_backstop("getRequest");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_exchange_build_request(ex, return_value), "getRequest");
 }

@@ -12,14 +12,12 @@ workspace = true
 anyhow = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "time", "sync"] }
-rapira_net = { workspace = true }
 rapira_config = { workspace = true }
 rapira_scoreboard = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 
 [build-dependencies]
-anyhow = { workspace = true }
 bindgen = "0"
 rapira_php_build = { workspace = true }
 

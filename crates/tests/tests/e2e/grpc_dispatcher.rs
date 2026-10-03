@@ -2,7 +2,7 @@ use std::time::{Duration, UNIX_EPOCH};
 
 use http::{HeaderMap, Method};
 use rapira_net::ListenAddr;
-use rapira_sapi::Mode;
+use rapira_sapi::plugin::Mode;
 use serde_json::{Value, json};
 use tests::grpc::{
     Conn, ECHO_PATH, ERROR_INFO, Fields, Response, Wire, envelope, fields, status_bytes,
@@ -377,7 +377,7 @@ async fn call_context_reports_the_request_facts() -> anyhow::Result<()> {
     let on_tcp = unary_worker();
     let on_unix = booted(
         Spawn::grpc(fixture("grpc/unary-worker.php"))
-            .grpc_unix(&dir.join("grpc.sock"))
+            .grpc_listen(ListenAddr::Unix(dir.join("grpc.sock")))
             .json_log()
             .spawn(),
     );

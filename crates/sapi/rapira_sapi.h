@@ -2,19 +2,12 @@
 #define RAPIRA_SAPI_H
 
 // clang-format off
-#include <TSRM/TSRM.h>
-#include <Zend/zend.h>
-#include <Zend/zend_API.h>
-#include <Zend/zend_compile.h>
-#include <Zend/zend_globals.h>
 #include <Zend/zend_exceptions.h>
 #include <Zend/zend_enum.h>
 #include <Zend/zend_interfaces.h>
 #include <main/php.h>
 #include <ext/standard/basic_functions.h>
-#include <main/SAPI.h>
 #include <main/php_main.h>
-#include <main/php_output.h>
 #include <main/php_variables.h>
 // clang-format on
 
@@ -30,8 +23,6 @@
 #include <Zend/zend_observer.h>
 #include <ext/spl/spl_exceptions.h>
 #include <ext/standard/head.h>
-#include <main/php_memory_streams.h>
-#include <main/php_streams.h>
 
 // injected by rapira_php_build::compile
 #ifndef RAPIRA_VERSION
@@ -61,12 +52,16 @@ enum {
 };
 extern int rapira_mode;
 
-// HandleAction in rapira_worker.rs - keep in sync
+// Return values of rapira_rs_handle_request (rapira_worker.rs);
+// rapira_dispatcher.c reads them.
 enum {
     RAPIRA_HANDLE_STOP = 0,
     RAPIRA_HANDLE_CONTINUE = 1,
     RAPIRA_HANDLE_RECYCLE = 2,
 };
+
+// Return values of the request shims in module.c.
+enum { RAPIRA_OK = 0, RAPIRA_BAILOUT = 1, RAPIRA_THROW = 3 };
 
 // rust glue
 extern void rapira_rs_dispatcher_release(void);
@@ -78,7 +73,7 @@ typedef struct {
     zend_object std;
 } rapira_dispatcher_info_obj;
 
-// Class entries of the base stubs; rapira_register_classes assigns them in MINIT, before the plugin parts register and before any object of these classes can exist.
+// Class entries of the base stubs; rapira_register_classes assigns them in MINIT, before the plugin classes register and before any object of these classes can exist.
 // Rust binds the entries it reads as static muts (allowed_bindings.rs); the others are C-only.
 extern zend_class_entry *rapira_ce_throwable;
 extern zend_class_entry *rapira_ce_work;
@@ -96,18 +91,17 @@ extern zend_class_entry *rapira_ce_tls;
 extern zend_class_entry *rapira_ce_inet_address;
 extern zend_class_entry *rapira_ce_unix_address;
 
-// rapira_register_classes fills both before the plugin parts register.
+// rapira_register_classes fills both before the plugin classes register.
 // A plugin's Dispatcher class: std handlers without clone.
 extern zend_object_handlers rapira_dispatcher_handlers;
-// A plugin's DispatcherInfo class: the rapira_dispatcher_info_obj layout, with rapira_dispatcher_info_create.
+// A plugin's DispatcherInfo class: the rapira_dispatcher_info_obj layout.
 extern zend_object_handlers rapira_info_handlers;
-zend_object *rapira_dispatcher_info_create(zend_class_entry *ce);
+// create_object for every class with a C prefix; the handler offset gives the
+// prefix size.
+zend_object *rapira_object_create(zend_class_entry *ce);
 
 // called from PHP_MINIT_FUNCTION
 void rapira_register_classes(void);
-
-// ext_functions[] - needs const initialization
-const zend_function_entry *rapira_php_functions(void);
 
 // The Dispatcher and DispatcherInfo method bodies; a plugin's method shells call them.
 void rapira_sapi_receive(INTERNAL_FUNCTION_PARAMETERS);
@@ -116,11 +110,17 @@ void rapira_sapi_get_info(INTERNAL_FUNCTION_PARAMETERS);
 void rapira_sapi_pending_count(INTERNAL_FUNCTION_PARAMETERS);
 void rapira_sapi_active_count(INTERNAL_FUNCTION_PARAMETERS);
 
-static zend_always_inline void rapira_throw_or_backstop(const char *what) {
-    if (!EG(exception)) {
-        zend_throw_error(NULL, "%s failed", what);
-    }
-}
+// Returns from the internal function when `call` reports false. Rust throws
+// before it reports false; the backstop covers a missing throw.
+#define RAPIRA_RETURN_THROWS_UNLESS(call, what)                                \
+    do {                                                                       \
+        if (!(call)) {                                                         \
+            if (!EG(exception)) {                                              \
+                zend_throw_error(NULL, "%s failed", what);                     \
+            }                                                                  \
+            RETURN_THROWS();                                                   \
+        }                                                                      \
+    } while (0)
 
 // https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
 static zend_always_inline rapira_dispatcher_info_obj *

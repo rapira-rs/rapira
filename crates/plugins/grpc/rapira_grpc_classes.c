@@ -1,13 +1,5 @@
 #include "rapira_grpc.h"
-#include "ext/spl/spl_exceptions.h"
 #include "rapira_grpc_arginfo.h"
-#include "zend_API.h"
-#include "zend_exceptions.h"
-#include "zend_object_handlers.h"
-#include "zend_objects.h"
-#include "zend_objects_API.h"
-#include "zend_property_hooks.h"
-#include "zend_types.h"
 
 zend_class_entry *rapira_ce_grpc_status_code;
 zend_class_entry *rapira_ce_grpc_method_kind;
@@ -27,17 +19,6 @@ zend_class_entry *rapira_ce_internal_grpc_response_metadata;
 // own copies: std_object_handlers is shared engine state
 static zend_object_handlers rapira_grpc_call_handlers;
 static zend_object_handlers rapira_grpc_metadata_handlers;
-
-static zend_object *rapira_grpc_call_create(zend_class_entry *ce) {
-    rapira_grpc_call_obj *obj = zend_object_alloc(sizeof(*obj), ce);
-    obj->state = NULL;
-    ZVAL_UNDEF(&obj->message);
-    ZVAL_UNDEF(&obj->context);
-    ZVAL_UNDEF(&obj->metadata);
-    zend_object_std_init(&obj->std, ce);
-    object_properties_init(&obj->std, ce);
-    return &obj->std;
-}
 
 // state is a Rust Box; free_obj hands it back to Rust to drop. receive()
 // allocates the object before the pull, so state is NULL when no call came.
@@ -59,24 +40,12 @@ static void rapira_grpc_call_free(zend_object *std) {
     zend_object_std_dtor(std);
 }
 
-static zend_object *rapira_grpc_metadata_create(zend_class_entry *ce) {
-    rapira_grpc_metadata_obj *obj = zend_object_alloc(sizeof(*obj), ce);
-    obj->state = NULL;
-    zend_object_std_init(&obj->std, ce);
-    object_properties_init(&obj->std, ce);
-    return &obj->std;
-}
-
 ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, __construct) {
-    (void)execute_data;
-    (void)return_value;
     zend_throw_error(NULL,
                      "host-created; obtain it from \\Rapira\\get_dispatcher()");
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_DispatcherInfo, __construct) {
-    (void)execute_data;
-    (void)return_value;
     zend_throw_error(NULL, "host-created");
 }
 
@@ -160,27 +129,25 @@ void rapira_grpc_register_classes(void) {
         &rapira_dispatcher_handlers;
 
     rapira_ce_internal_grpc_dispatcher_info->create_object =
-        rapira_dispatcher_info_create;
+        rapira_object_create;
     rapira_ce_internal_grpc_dispatcher_info->default_object_handlers =
         &rapira_info_handlers;
 
-    memcpy(&rapira_grpc_call_handlers, &std_object_handlers,
-           sizeof(rapira_grpc_call_handlers));
+    rapira_grpc_call_handlers = std_object_handlers;
     rapira_grpc_call_handlers.clone_obj = NULL;
     rapira_grpc_call_handlers.offset = offsetof(rapira_grpc_call_obj, std);
     rapira_grpc_call_handlers.free_obj = rapira_grpc_call_free;
-    rapira_ce_internal_grpc_unary_call->create_object = rapira_grpc_call_create;
+    rapira_ce_internal_grpc_unary_call->create_object = rapira_object_create;
     rapira_ce_internal_grpc_unary_call->default_object_handlers =
         &rapira_grpc_call_handlers;
 
     // the standard free_obj: the metadata object owns nothing
-    memcpy(&rapira_grpc_metadata_handlers, &std_object_handlers,
-           sizeof(rapira_grpc_metadata_handlers));
+    rapira_grpc_metadata_handlers = std_object_handlers;
     rapira_grpc_metadata_handlers.clone_obj = NULL;
     rapira_grpc_metadata_handlers.offset =
         offsetof(rapira_grpc_metadata_obj, std);
     rapira_ce_internal_grpc_response_metadata->create_object =
-        rapira_grpc_metadata_create;
+        rapira_object_create;
     rapira_ce_internal_grpc_response_metadata->default_object_handlers =
         &rapira_grpc_metadata_handlers;
 }

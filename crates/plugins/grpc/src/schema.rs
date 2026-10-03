@@ -125,18 +125,11 @@ impl Schema {
                     .flat_map(|f| f.dependency.iter().map(String::as_str))
                     .collect();
                 let selected: Vec<_> = pool
-                    .files()
+                    .services()
                     .iter()
-                    .filter(|f| !imported.contains(f.name.as_deref().unwrap_or_default()))
-                    .flat_map(|f| {
-                        f.service.iter().filter_map(|s| {
-                            let name = s.name.as_deref().unwrap_or_default();
-                            match f.package.as_deref() {
-                                Some(package) if !package.is_empty() => {
-                                    pool.service_by_name(&format!("{package}.{name}"))
-                                }
-                                _ => pool.service_by_name(name),
-                            }
+                    .filter(|s| {
+                        pool.file_containing_symbol(s.full_name()).is_some_and(|f| {
+                            !imported.contains(f.name.as_deref().unwrap_or_default())
                         })
                     })
                     .filter(|s| {

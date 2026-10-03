@@ -1,13 +1,13 @@
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use libc::c_int;
 
 use crate::WorkerEnv;
-use crate::lifeline::Lifeline;
+use crate::pool::Pool;
 use crate::signals::{MASTER_SIGNALS, SelfPipe, sigset};
 use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY};
-use rapira_scoreboard::{PoolRegion, Scoreboard, SharedSlot};
+use rapira_scoreboard::{PoolRegion, SharedSlot};
 
 pub(crate) const QUICK_CRASH: Duration = Duration::from_secs(10);
 pub(crate) const RESPAWN_BASE: Duration = Duration::from_millis(100);
@@ -41,10 +41,6 @@ impl SlotState {
     pub fn schedule_immediate(&mut self, now: Instant) {
         self.crash_streak = 0;
         self.respawn_at = Some(now);
-    }
-
-    pub fn cancel_respawn(&mut self) {
-        self.respawn_at = None;
     }
 }
 
@@ -81,48 +77,24 @@ pub(crate) fn classify(status: c_int, timeout_kill: bool) -> ExitVerdict {
     }
 }
 
-pub(crate) struct ProcTable {
-    pub procs: Vec<WorkerProc>,
-    pub slots: Vec<SlotState>,
-    pub generation: u32,
-}
-
-impl ProcTable {
-    pub fn new(nslots: usize) -> ProcTable {
-        ProcTable {
-            procs: Vec::new(),
-            slots: vec![SlotState::default(); nslots],
-            generation: 0,
-        }
-    }
-
-    pub fn running(&self) -> usize {
-        self.procs.len()
-    }
-
-    fn remove(&mut self, pid: libc::pid_t) -> Option<WorkerProc> {
-        let i = self.procs.iter().position(|p| p.pid == pid)?;
-        Some(self.procs.swap_remove(i))
-    }
-}
-
-/// Routes one dead pid to the pool that owns it. `waitpid(-1)` returns a bare pid, so the tables resolve the owning pool.
+/// Routes one dead pid to the pool that owns it. `waitpid(-1)` returns a bare pid, so the pools resolve the owner.
 pub(crate) fn bury(
-    tables: &mut [&mut ProcTable],
+    pools: &mut [Pool],
     pid: libc::pid_t,
     status: c_int,
 ) -> Option<(usize, WorkerProc, ExitVerdict)> {
-    for (pool, table) in tables.iter_mut().enumerate() {
-        if let Some(w) = table.remove(pid) {
-            let verdict = classify(status, w.timeout_kill);
-            return Some((pool, w, verdict));
-        }
+    for (i, pool) in pools.iter_mut().enumerate() {
+        let Some(at) = pool.procs.iter().position(|p| p.pid == pid) else {
+            continue;
+        };
+        let w = pool.procs.swap_remove(at);
+        return Some((i, w, classify(status, w.timeout_kill)));
     }
     None
 }
 
 /// Drains `waitpid` fully so every child ready at this point is buried in one pass.
-pub(crate) fn reap_all(tables: &mut [&mut ProcTable]) -> Vec<(usize, WorkerProc, ExitVerdict)> {
+pub(crate) fn reap_all(pools: &mut [Pool]) -> Vec<(usize, WorkerProc, ExitVerdict)> {
     let mut buried = Vec::new();
     loop {
         let mut status: c_int = 0;
@@ -131,7 +103,7 @@ pub(crate) fn reap_all(tables: &mut [&mut ProcTable]) -> Vec<(usize, WorkerProc,
         if pid <= 0 {
             break;
         }
-        match bury(tables, pid, status) {
+        match bury(pools, pid, status) {
             Some(entry) => buried.push(entry),
             None => tracing::warn!(target: "master", "reaped unknown child {pid}"),
         }
@@ -147,26 +119,24 @@ pub(crate) fn kill(pid: libc::pid_t, sig: c_int) {
 /// Fork source for every pool. The boxed worker closure keeps `Pool` and `Master` free of the closure's type.
 pub(crate) struct Forker<'w> {
     pub self_pipe: SelfPipe,
-    pub lifeline: Lifeline,
+    /// `lifeline_wr` is never written: its close at master exit is what signals master death to every worker's read end. Both ends are CLOEXEC; fork still inherits them.
+    pub lifeline_rd: std::io::PipeReader,
+    pub lifeline_wr: std::io::PipeWriter,
     /// The whole board, for every `WorkerEnv`.
-    pub board: Scoreboard,
+    pub board: &'static [SharedSlot],
     /// The slot range of each pool, in pool order, for every `WorkerEnv`.
     pub regions: &'static [PoolRegion],
     pub worker: Box<dyn FnMut(WorkerEnv) -> i32 + 'w>,
 }
 
 impl Forker<'_> {
-    pub(crate) fn signal_fd(&self) -> RawFd {
-        self.self_pipe.rd.as_raw_fd()
-    }
-
     /// Fork bracket: the child leaves {QUIT, INT} blocked for the worker's sigwait watcher and `_exit`s under `catch_unwind`, so no master Drop (pidfile unlink, PHP shutdown) can ever run in a child.
     pub(crate) fn spawn(
         &mut self,
         pool: usize,
         slot_view: &'static SharedSlot,
     ) -> std::io::Result<libc::pid_t> {
-        let lifeline_rd: std::os::fd::OwnedFd = self.lifeline.rd.try_clone()?;
+        let lifeline_rd: std::os::fd::OwnedFd = self.lifeline_rd.try_clone()?.into();
 
         let block: libc::sigset_t = sigset(&MASTER_SIGNALS);
         // SAFETY: zeroed sigset_t is fully overwritten by sigprocmask's out-param.
@@ -181,7 +151,7 @@ impl Forker<'_> {
                 unsafe {
                     libc::close(self.self_pipe.rd.as_raw_fd());
                     libc::close(self.self_pipe.wr.as_raw_fd());
-                    libc::close(self.lifeline.wr.as_raw_fd());
+                    libc::close(self.lifeline_wr.as_raw_fd());
 
                     let mut dfl: libc::sigaction = std::mem::zeroed();
                     dfl.sa_sigaction = libc::SIG_DFL;
@@ -280,39 +250,6 @@ mod tests {
         assert_eq!(classify(signaled(libc::SIGKILL), false), ExitVerdict::Crash);
         assert_eq!(classify(signaled(libc::SIGTERM), false), ExitVerdict::Crash);
         assert_eq!(classify(signaled(libc::SIGSEGV), true), ExitVerdict::Crash);
-    }
-
-    #[test]
-    fn bury_routes_a_pid_to_the_table_that_owns_it() {
-        let mut http = ProcTable::new(2);
-        let mut grpc = ProcTable::new(2);
-        let at = Instant::now();
-        http.procs.push(WorkerProc {
-            pid: 2_000_000_001,
-            slot: 0,
-            generation: 0,
-            spawned_at: at,
-            timeout_kill: false,
-        });
-        grpc.procs.push(WorkerProc {
-            pid: 2_000_000_002,
-            slot: 1,
-            generation: 3,
-            spawned_at: at,
-            timeout_kill: false,
-        });
-
-        let (pool, w, verdict) = {
-            let mut tables: Vec<&mut ProcTable> = vec![&mut http, &mut grpc];
-            assert!(bury(&mut tables, 2_000_000_009, exited(0)).is_none());
-            bury(&mut tables, 2_000_000_002, exited(89)).expect("the second table owns the pid")
-        };
-
-        assert_eq!(pool, 1);
-        assert_eq!((w.slot, w.generation), (1, 3));
-        assert_eq!(verdict, ExitVerdict::Unhealthy);
-        assert_eq!(http.procs.len(), 1, "the other table is untouched");
-        assert_eq!(grpc.procs.len(), 0);
     }
 
     #[test]

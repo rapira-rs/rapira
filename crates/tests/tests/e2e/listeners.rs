@@ -5,10 +5,11 @@ use std::net::{SocketAddr, TcpStream};
 use std::os::unix::fs::PermissionsExt;
 use std::os::unix::net::UnixStream;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use rapira_net::ListenAddr;
-use rapira_sapi::Mode;
+use rapira_sapi::plugin::Mode;
+use tests::poll;
 
 use crate::harness::{
     BOOT, Server, Spawn, diagnostics, fixture_path, free_port, http_get, parse_status_and_body,
@@ -70,7 +71,10 @@ fn php_child_processes_inherit_no_socket() {
 fn unix_socket_file_mode_live_refusal_and_stale_reclaim() {
     let dir = scratch_dir();
     let sock = dir.join("http.sock");
-    let spawn = || Spawn::http(Mode::Dispatcher, fixture_path(ECHO)).http_unix(&sock);
+    let spawn = || {
+        Spawn::http(Mode::Dispatcher, fixture_path(ECHO))
+            .http_listen(ListenAddr::Unix(sock.clone()))
+    };
 
     let mut live = spawn().spawn();
     assert_eq!(mode(&sock), 0o666);
@@ -203,23 +207,17 @@ fn signals_during_the_boot_do_not_stop_the_master() {
 /// The address of the `[http]` listener, from its `prepared listener on` record in the log of `srv`.
 fn logged_http_addr(srv: &Server) -> SocketAddr {
     const RECORD: &str = "http: prepared listener on ";
-    let end = Instant::now() + BOOT;
-    loop {
+    poll(BOOT, || {
         let log = std::fs::read_to_string(srv.log_file()).unwrap_or_default();
-        if let Some(line) = log.lines().find(|line| line.contains(RECORD)) {
-            let (_, addr) = line.split_once(RECORD).expect("the record");
-            return addr
-                .trim()
+        let line = log.lines().find(|line| line.contains(RECORD))?;
+        let (_, addr) = line.split_once(RECORD).expect("the record");
+        Some(
+            addr.trim()
                 .parse()
-                .unwrap_or_else(|e| panic!("address {addr:?}: {e}\n{log}"));
-        }
-        assert!(
-            Instant::now() < end,
-            "no {RECORD:?} record\n{}",
-            diagnostics(srv)
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+                .unwrap_or_else(|e| panic!("address {addr:?}: {e}\n{log}")),
+        )
+    })
+    .unwrap_or_else(|| panic!("no {RECORD:?} record\n{}", diagnostics(srv)))
 }
 
 /// The permission bits of `path`.

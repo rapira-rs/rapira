@@ -32,9 +32,6 @@ jobs:
             # https://github.com/googleapis/release-please-action/blob/v5.0.0/src/index.ts
             - id: rp
               uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-              with:
-                  config-file: release-please-config.json
-                  manifest-file: .release-please-manifest.json
 
     # The tag and the draft release come from the default GITHUB_TOKEN, which fires
     # no other workflows. The builds chain here through workflow_call.

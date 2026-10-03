@@ -56,7 +56,7 @@ C sources (`*.c`, `*.h` under `crates/`) follow `.clang-format`.
 | ---------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
 | `rapira_core`          | `src/`                           | the `rapira` binary: CLI, the `rapira.toml` file shape, the plugin list, boot, fork and the worker and observability process entries                  |
 | `rapira_php_build`     | `crates/php_build`               | build helper: `php-config` discovery and the C compile of the method shells, for `rapira_sapi` and every plugin with a PHP surface                    |
-| `rapira_net`           | `crates/net`                     | listeners: `ListenAddr`, `PrepareCtx` and `PreparedListener` bind in the master before the fork, `Acceptor` adopts and accepts in the worker          |
+| `rapira_net`           | `crates/net`                     | listeners: `ListenAddr`, `bind` and `PreparedListener` bind in the master before the fork, `Acceptor` adopts and accepts in the worker                |
 | `rapira_sapi`          | `crates/sapi`                    | the embed SAPI: boot, the PHP thread, the intake, the base PHP contract, the classic and worker modes, the `Plugin` and `Work` traits                 |
 | `rapira_config`        | `crates/config`                  | the shared config shapes: `[supervisor]`, `[log]`, the pool table, `listen`, the duration and path helpers                                            |
 | `rapira_master`        | `crates/master`                  | the pre-fork supervisor: forking, reaping, respawn, signals, reload                                                                                   |
@@ -83,7 +83,7 @@ To add a plugin:
 - In the root `Cargo.toml`, add the crate to the workspace `members`, to `[workspace.dependencies]` and to the `[dependencies]` of `rapira_core`.
 - In `src/settings.rs`, add its table to `FileConfig` and its settings to `Settings`.
 - In `settings` in `src/settings.rs`, call its `resolve`, and add its table to the check that refuses a file with no plugin table.
-- In `serve` in `src/main.rs`, build the plugin with its pool, and add its `PhpPart` to the `boot_master` call.
+- In `serve` in `src/main.rs`, build the plugin with its pool, and add its register function to the `boot_master` call.
 
 ## Pull requests
 

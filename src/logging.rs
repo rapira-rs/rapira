@@ -1,6 +1,5 @@
 use rapira_config::{LogFormat, LogSettings};
 use std::io::{self, IsTerminal};
-use tracing_subscriber::fmt::time::ChronoUtc;
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -8,18 +7,11 @@ use tracing_subscriber::{EnvFilter, Layer};
 
 pub fn init(log: &LogSettings) {
     let filter = build_filter(std::env::var("RUST_LOG").ok().as_deref(), log);
-    let ansi = ansi_enabled(
-        io::stderr().is_terminal(),
-        std::env::var_os("NO_COLOR").as_deref(),
-    );
+    let tty: bool = io::stderr().is_terminal();
     tracing_subscriber::registry()
         .with(filter)
-        .with(make_layer(log.format, ansi))
+        .with(make_layer(log.format, tty))
         .init();
-}
-
-fn ansi_enabled(stderr_is_tty: bool, no_color: Option<&std::ffi::OsStr>) -> bool {
-    stderr_is_tty && no_color.is_none_or(|v| v.is_empty())
 }
 
 fn build_filter(rust_log: Option<&str>, log: &LogSettings) -> EnvFilter {
@@ -37,7 +29,7 @@ fn build_filter(rust_log: Option<&str>, log: &LogSettings) -> EnvFilter {
     }
 }
 
-fn make_layer<S>(format: LogFormat, ansi: bool) -> Box<dyn Layer<S> + Send + Sync>
+fn make_layer<S>(format: LogFormat, tty: bool) -> Box<dyn Layer<S> + Send + Sync>
 where
     S: tracing::Subscriber + for<'a> LookupSpan<'a>,
 {
@@ -46,13 +38,17 @@ where
             .json()
             .with_current_span(false)
             .with_span_list(false)
-            .with_timer(ChronoUtc::new("%Y-%m-%dT%H:%M:%S%.3fZ".into()))
             .with_writer(io::stderr)
             .boxed(),
-        LogFormat::Plain => tracing_subscriber::fmt::layer()
-            .with_ansi(ansi)
-            .with_writer(io::stderr)
-            .boxed(),
+        LogFormat::Plain => {
+            // The default ANSI setting reads NO_COLOR, and with_ansi overrides it. https://docs.rs/tracing-subscriber/0.3.18/tracing_subscriber/fmt/struct.Layer.html#method.with_ansi
+            let layer = tracing_subscriber::fmt::layer().with_writer(io::stderr);
+            if tty {
+                layer.boxed()
+            } else {
+                layer.with_ansi(false).boxed()
+            }
+        }
     }
 }
 
@@ -85,17 +81,5 @@ mod tests {
             let filter = build_filter(None, &settings(level, &[]));
             assert_eq!(filter.to_string(), level.as_str());
         }
-    }
-
-    #[test]
-    fn no_color_counts_as_set_only_when_non_empty() {
-        use std::ffi::OsStr;
-        assert!(ansi_enabled(true, None));
-        assert!(
-            ansi_enabled(true, Some(OsStr::new(""))),
-            "empty NO_COLOR counts as unset"
-        );
-        assert!(!ansi_enabled(true, Some(OsStr::new("1"))));
-        assert!(!ansi_enabled(false, None), "never color a non-tty");
     }
 }

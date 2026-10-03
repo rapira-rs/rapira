@@ -1,8 +1,5 @@
-#include "ext/spl/spl_array.h"
 #include "rapira_grpc.h"
-#include "zend_API.h"
-#include "zend_enum.h"
-#include "zend_types.h"
+#include "ext/spl/spl_array.h"
 
 // rust glue (src/php/values.rs): false means a PHP exception is pending
 extern bool rapira_rs_ctor_grpc_error_detail(zend_object *obj,
@@ -72,11 +69,9 @@ ZEND_METHOD(Rapira_Grpc_ErrorDetail, __construct) {
     Z_PARAM_STR(value)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_grpc_error_detail(Z_OBJ_P(ZEND_THIS), type_url,
-                                          value)) {
-        rapira_throw_or_backstop("ErrorDetail construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_grpc_error_detail(Z_OBJ_P(ZEND_THIS), type_url, value),
+        "ErrorDetail construction");
 }
 
 // Status and GrpcException take the same (StatusCode, message, details) triple.
@@ -99,10 +94,8 @@ static void grpc_status_ctor(INTERNAL_FUNCTION_PARAMETERS,
         ZVAL_EMPTY_ARRAY(&empty);
         details = &empty;
     }
-    if (!ctor(Z_OBJ_P(ZEND_THIS), code, message, details)) {
-        rapira_throw_or_backstop(what);
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        ctor(Z_OBJ_P(ZEND_THIS), code, message, details), what);
 }
 
 ZEND_METHOD(Rapira_Grpc_Status, __construct) {
@@ -122,10 +115,9 @@ ZEND_METHOD(Rapira_Grpc_Metadata, __construct) {
         ZVAL_EMPTY_ARRAY(&empty);
         entries = &empty;
     }
-    if (!rapira_rs_ctor_grpc_metadata(Z_OBJ_P(ZEND_THIS), entries)) {
-        rapira_throw_or_backstop("Metadata construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_grpc_metadata(Z_OBJ_P(ZEND_THIS), entries),
+        "Metadata construction");
 }
 
 ZEND_METHOD(Rapira_Grpc_Metadata, values) {
@@ -135,11 +127,10 @@ ZEND_METHOD(Rapira_Grpc_Metadata, values) {
     ZEND_PARSE_PARAMETERS_END();
 
     zval *entries = rapira_grpc_metadata_entries(Z_OBJ_P(ZEND_THIS));
-    if (!rapira_rs_grpc_metadata_values(Z_ARRVAL_P(entries), ZSTR_VAL(name),
-                                        ZSTR_LEN(name), return_value)) {
-        rapira_throw_or_backstop("Metadata::values");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_grpc_metadata_values(Z_ARRVAL_P(entries), ZSTR_VAL(name),
+                                       ZSTR_LEN(name), return_value),
+        "Metadata::values");
 }
 
 ZEND_METHOD(Rapira_Grpc_Metadata, count) {
@@ -167,11 +158,10 @@ ZEND_METHOD(Rapira_Grpc_MethodInfo, __construct) {
     Z_PARAM_OBJECT_OF_CLASS(kind, rapira_ce_grpc_method_kind)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_grpc_method_info(Z_OBJ_P(ZEND_THIS), name, input_type,
-                                         output_type, kind)) {
-        rapira_throw_or_backstop("MethodInfo construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_grpc_method_info(Z_OBJ_P(ZEND_THIS), name, input_type,
+                                        output_type, kind),
+        "MethodInfo construction");
 }
 
 ZEND_METHOD(Rapira_Grpc_ServiceInfo, __construct) {
@@ -182,10 +172,9 @@ ZEND_METHOD(Rapira_Grpc_ServiceInfo, __construct) {
     Z_PARAM_ARRAY(methods)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_grpc_service_info(Z_OBJ_P(ZEND_THIS), name, methods)) {
-        rapira_throw_or_backstop("ServiceInfo construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_grpc_service_info(Z_OBJ_P(ZEND_THIS), name, methods),
+        "ServiceInfo construction");
 }
 
 ZEND_METHOD(Rapira_Grpc_Call_Context, __construct) {
@@ -203,12 +192,11 @@ ZEND_METHOD(Rapira_Grpc_Call_Context, __construct) {
     Z_PARAM_DOUBLE(received_at)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_grpc_context(Z_OBJ_P(ZEND_THIS), method, metadata,
-                                     !deadline_null ? &deadline : NULL, remote,
-                                     tls, protocol, received_at)) {
-        rapira_throw_or_backstop("Context construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_grpc_context(Z_OBJ_P(ZEND_THIS), method, metadata,
+                                    !deadline_null ? &deadline : NULL, remote,
+                                    tls, protocol, received_at),
+        "Context construction");
 }
 
 ZEND_METHOD(Rapira_Grpc_Exception_GrpcException, __construct) {
@@ -225,10 +213,8 @@ ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, name) {
 
 ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, getServices) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (!rapira_rs_grpc_services(return_value)) {
-        rapira_throw_or_backstop("getServices");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_grpc_services(return_value),
+                                "getServices");
 }
 
 // receive() sets state before PHP code can reach the object
@@ -263,20 +249,18 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getMessage) {
 
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getContext) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (!rapira_rs_grpc_context(rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS)),
-                                return_value)) {
-        rapira_throw_or_backstop("getContext");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_grpc_context(rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS)),
+                               return_value),
+        "getContext");
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getResponseMetadata) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (!rapira_rs_grpc_response_metadata(
-            rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS)), return_value)) {
-        rapira_throw_or_backstop("getResponseMetadata");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_grpc_response_metadata(
+            rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS)), return_value),
+        "getResponseMetadata");
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, respond) {
@@ -285,11 +269,10 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, respond) {
     Z_PARAM_STR(message)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_grpc_respond(grpc_call_state(ZEND_THIS), ZSTR_VAL(message),
-                                ZSTR_LEN(message))) {
-        rapira_throw_or_backstop("respond");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_grpc_respond(grpc_call_state(ZEND_THIS), ZSTR_VAL(message),
+                               ZSTR_LEN(message)),
+        "respond");
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, fail) {
@@ -298,10 +281,9 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, fail) {
     Z_PARAM_OBJECT_OF_CLASS(status, rapira_ce_grpc_status)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_grpc_fail(grpc_call_state(ZEND_THIS), Z_OBJ_P(status))) {
-        rapira_throw_or_backstop("fail");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_grpc_fail(grpc_call_state(ZEND_THIS), Z_OBJ_P(status)),
+        "fail");
 }
 
 // state is NULL after the call object is gone; Rust then throws
@@ -315,11 +297,10 @@ static void grpc_add(INTERNAL_FUNCTION_PARAMETERS, bool trailer, bool binary,
     ZEND_PARSE_PARAMETERS_END();
 
     void *state = rapira_grpc_metadata_from(Z_OBJ_P(ZEND_THIS))->state;
-    if (!rapira_rs_grpc_add(state, trailer, binary, ZSTR_VAL(name),
-                            ZSTR_LEN(name), ZSTR_VAL(value), ZSTR_LEN(value))) {
-        rapira_throw_or_backstop(what);
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_grpc_add(state, trailer, binary, ZSTR_VAL(name),
+                           ZSTR_LEN(name), ZSTR_VAL(value), ZSTR_LEN(value)),
+        what);
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addHeader) {
@@ -343,10 +324,8 @@ static void grpc_snapshot(INTERNAL_FUNCTION_PARAMETERS, bool trailer,
                           const char *what) {
     ZEND_PARSE_PARAMETERS_NONE();
     void *state = rapira_grpc_metadata_from(Z_OBJ_P(ZEND_THIS))->state;
-    if (!rapira_rs_grpc_snapshot(state, trailer, return_value)) {
-        rapira_throw_or_backstop(what);
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_grpc_snapshot(state, trailer, return_value), what);
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, headers) {

@@ -2,7 +2,7 @@ use crate::harness::{
     Conn, Server, Spawn, diagnostics, http_get, http_get_raw, http_post, http_raw_bytes,
     parse_status_and_body, scratch_dir, spawn_boot_failure, spawn_with_http_extra,
 };
-use rapira_sapi::Mode;
+use rapira_sapi::plugin::Mode;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 use tests::fixture;
@@ -630,92 +630,76 @@ fn cached_entries_answer_until_they_go_stale() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// A 000 directory passes a stat of its own path and a 0400 directory lists but cannot resolve child paths, so the boot probe must resolve inside the root.
 #[test]
-fn a_missing_static_root_refuses_to_boot() {
-    let (status, log) = spawn_boot_failure(
-        "shared/echo-worker.php",
-        "middleware = [\"static\"]\n[http.static]\nroot = \"/nonexistent-rapira-static-root\"\n",
-    );
-    assert_eq!(status.code(), Some(1), "{log}");
-    assert!(
-        log.contains("http.static.root") && log.contains("is not accessible"),
-        "{log}"
-    );
-}
-
-/// A 000 directory passes a stat of its own path; the boot probe must resolve inside it.
-#[test]
-fn an_unreadable_static_root_refuses_to_boot() {
+fn a_bad_static_root_refuses_to_boot() {
     use std::os::unix::fs::PermissionsExt;
-    let dir = scratch_dir();
-    let root = dir.join("root");
-    std::fs::create_dir(&root).expect("create root");
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o000)).expect("chmod root");
-    // Root bypasses permission checks; the case cannot occur for that user.
-    if std::fs::read_dir(&root).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return;
+    enum Root {
+        Missing,
+        Dir(u32),
+        File,
     }
-    let (status, log) = spawn_boot_failure(
-        "shared/echo-worker.php",
-        &format!(
-            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
-            root.display()
-        ),
-    );
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("restore root");
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(status.code(), Some(1), "{log}");
-    assert!(
-        log.contains("http.static.root") && log.contains("is not accessible"),
-        "{log}"
-    );
-}
-
-/// A 0400 root lists but cannot resolve child paths; boot must require search permission.
-#[test]
-fn a_static_root_without_search_permission_refuses_to_boot() {
-    use std::os::unix::fs::PermissionsExt;
-    let dir = scratch_dir();
-    let root = dir.join("root");
-    std::fs::create_dir(&root).expect("create root");
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o400)).expect("chmod root");
-    // Root bypasses permission checks; the case cannot occur for that user.
-    if std::fs::metadata(root.join(".")).is_ok() {
-        let _ = std::fs::remove_dir_all(&dir);
-        return;
+    struct Case {
+        name: &'static str,
+        root: Root,
+        log: &'static str,
     }
-    let (status, log) = spawn_boot_failure(
-        "shared/echo-worker.php",
-        &format!(
-            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
-            root.display()
-        ),
-    );
-    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755)).expect("restore root");
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(status.code(), Some(1), "{log}");
-    assert!(
-        log.contains("http.static.root") && log.contains("is not accessible"),
-        "{log}"
-    );
-}
-
-#[test]
-fn a_static_root_that_is_not_a_directory_refuses_to_boot() {
-    let dir = scratch_dir();
-    let file = dir.join("root");
-    std::fs::write(&file, "x").expect("write file root");
-    let (status, log) = spawn_boot_failure(
-        "shared/echo-worker.php",
-        &format!(
-            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
-            file.display()
-        ),
-    );
-    let _ = std::fs::remove_dir_all(&dir);
-    assert_eq!(status.code(), Some(1), "{log}");
-    assert!(log.contains("is not a directory"), "{log}");
+    let cases = [
+        Case {
+            name: "missing",
+            root: Root::Missing,
+            log: "is not accessible",
+        },
+        Case {
+            name: "unreadable (000)",
+            root: Root::Dir(0o000),
+            log: "is not accessible",
+        },
+        Case {
+            name: "no search permission (0400)",
+            root: Root::Dir(0o400),
+            log: "is not accessible",
+        },
+        Case {
+            name: "not a directory",
+            root: Root::File,
+            log: "is not a directory",
+        },
+    ];
+    for case in cases {
+        let dir = scratch_dir();
+        let root = dir.join("root");
+        match case.root {
+            Root::Missing => {}
+            Root::Dir(mode) => {
+                std::fs::create_dir(&root).expect("create root");
+                std::fs::set_permissions(&root, std::fs::Permissions::from_mode(mode))
+                    .expect("chmod root");
+            }
+            Root::File => std::fs::write(&root, "x").expect("write file root"),
+        }
+        // Root bypasses permission checks; the permission rows cannot occur for that user.
+        if std::fs::metadata(root.join(".")).is_ok() {
+            let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755));
+            let _ = std::fs::remove_dir_all(&dir);
+            continue;
+        }
+        let (status, log) = spawn_boot_failure(
+            "shared/echo-worker.php",
+            &format!(
+                "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
+                root.display()
+            ),
+        );
+        let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(status.code(), Some(1), "{}: {log}", case.name);
+        assert!(
+            log.contains("http.static.root") && log.contains(case.log),
+            "{}: {log}",
+            case.name
+        );
+    }
 }
 
 /// A dispatcher pool over the echo loop behind the static middleware on `root`. The echo

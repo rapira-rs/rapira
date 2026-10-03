@@ -1,21 +1,6 @@
 use crate::harness::*;
-use std::time::{Duration, Instant};
-
-#[test]
-fn http_round_trip() {
-    let srv = spawn_with_config("shared/echo-worker.php", 1, "");
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-    for _ in 0..2 {
-        let (code, body) =
-            http_get(srv.addr, "/?from=e2e", Duration::from_secs(10)).expect("GET /?from=e2e");
-        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-        assert!(
-            body.starts_with(b"ok:"),
-            "body should start with ok:, got {:?}",
-            String::from_utf8_lossy(&body)
-        );
-    }
-}
+use std::time::Duration;
+use tests::poll;
 
 #[test]
 fn retained_spl_tempfile_survives_next_request() {
@@ -78,22 +63,18 @@ fn killed_worker_respawns() {
 
 // After the master exits its workers reparent away and `worker_pids` cannot see them, so poll the captured pids directly.
 fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
-    let end = Instant::now() + timeout;
-    loop {
+    poll(timeout, || {
         // SAFETY: kill(pid, 0) only probes existence; ESRCH means gone.
-        let gone = pids
-            .iter()
-            .all(|&p| unsafe { libc::kill(p as libc::pid_t, 0) } == -1);
-        if gone {
-            return;
-        }
-        assert!(
-            Instant::now() < end,
+        pids.iter()
+            .all(|&p| unsafe { libc::kill(p as libc::pid_t, 0) } == -1)
+            .then_some(())
+    })
+    .unwrap_or_else(|| {
+        panic!(
             "workers survived the master: {pids:?}\n{}",
             diagnostics(srv)
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+        )
+    });
 }
 
 #[test]
@@ -291,18 +272,14 @@ fn a_worker_that_never_boots_next_to_a_serving_worker_keeps_the_master_up() {
 fn worker_bootstrap_that_never_serves_failboots() {
     let mut srv = spawn_with_config("lifecycle/never-loop-worker.php", 1, "mode = \"worker\"\n");
     let addr = srv.addr;
-    let end = Instant::now() + Duration::from_secs(60);
-    let status = loop {
-        if let Some(st) = srv.try_status() {
-            break Some(st);
-        }
-        if Instant::now() >= end {
-            panic!("master never exited\n{}", diagnostics(&srv));
-        }
-        let _ = http_get(addr, "/", Duration::from_secs(2));
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
+    let status = poll(Duration::from_secs(60), || {
+        srv.try_status().or_else(|| {
+            let _ = http_get(addr, "/", Duration::from_secs(2));
+            None
+        })
+    })
+    .unwrap_or_else(|| panic!("master never exited\n{}", diagnostics(&srv)));
+    assert_exit_code(Some(status), MASTER_EXIT_FAILBOOT, &srv);
 }
 
 /// A client that walks away mid-handler must not take the worker down: the abort recycles the cycle and the next request is served.
@@ -366,45 +343,6 @@ fn abandoned_exchange_is_discarded_by_next_receive() {
     assert!(
         wait_log_contains(&srv, "discarded an unfinalized unit", BOOT),
         "the discard must be logged\n{}",
-        diagnostics(&srv)
-    );
-}
-
-/// A field php-src lets through but the plugin cannot represent must cost only that field, not the response.
-#[test]
-fn unrepresentable_header_still_serves_the_response() {
-    let srv = spawn_with_config("lifecycle/bad-header-worker.php", 1, "mode = \"worker\"\n");
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-    let (code, body) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
-    assert_eq!(code, 201, "\n{}", diagnostics(&srv));
-    assert_eq!(body, b"body", "\n{}", diagnostics(&srv));
-}
-
-/// The multipart boundary must reach php-src byte for byte: decoded lossily, rfc1867 searches for a boundary the body never contains and the upload silently vanishes.
-#[test]
-fn non_utf8_multipart_boundary_uploads() {
-    let srv = spawn_with_config("lifecycle/upload-worker.php", 1, "mode = \"worker\"\n");
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-    let boundary: &[u8] = b"RAP\xff\xfeIRA";
-    let mut body = Vec::new();
-    body.extend_from_slice(b"--");
-    body.extend_from_slice(boundary);
-    body.extend_from_slice(b"\r\nContent-Disposition: form-data; name=\"file\"; filename=\"foo.txt\"\r\nContent-Type: text/plain\r\n\r\nbar\r\n--");
-    body.extend_from_slice(boundary);
-    body.extend_from_slice(b"--\r\n");
-    let mut ctype = b"multipart/form-data; boundary=".to_vec();
-    ctype.extend_from_slice(boundary);
-
-    let (code, out) =
-        http_post(srv.addr, "/", &ctype, &body, Duration::from_secs(10)).expect("POST /");
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    let out = String::from_utf8_lossy(&out);
-    let tmp = out.strip_prefix("foo.txt|0|bar|").unwrap_or_else(|| {
-        panic!("upload must parse (got {out:?})\n{}", diagnostics(&srv));
-    });
-    assert!(
-        !std::path::Path::new(tmp).exists(),
-        "upload temp file {tmp} must be cleaned up\n{}",
         diagnostics(&srv)
     );
 }

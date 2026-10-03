@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::task::{Context, Poll};
 use std::time::Duration;
 
-use bytes::Bytes;
+use hyper::body::Bytes;
 use rapira_sapi::Frame;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
@@ -73,7 +73,7 @@ impl ReplyBody {
     fn terminal_error(
         &mut self,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<http_body::Frame<Bytes>, BoxError>>> {
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, BoxError>>> {
         self.reply = None;
         self.file = None;
         self.err_armed = true;
@@ -82,14 +82,14 @@ impl ReplyBody {
     }
 }
 
-impl http_body::Body for ReplyBody {
+impl hyper::body::Body for ReplyBody {
     type Data = Bytes;
     type Error = BoxError;
 
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<http_body::Frame<Bytes>, BoxError>>> {
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, BoxError>>> {
         let this = self.get_mut();
         loop {
             if this.err_armed {
@@ -134,7 +134,7 @@ impl http_body::Body for ReplyBody {
                 } else {
                     this.file = None;
                 }
-                return Poll::Ready(Some(Ok(http_body::Frame::data(buf.into()))));
+                return Poll::Ready(Some(Ok(hyper::body::Frame::data(buf.into()))));
             }
             let ev: Option<Frame> = if let Some(ev) = this.staged.take() {
                 Some(ev)
@@ -155,7 +155,7 @@ impl http_body::Body for ReplyBody {
                 }
                 Some(Frame::Chunk(b)) => {
                     this.sent += b.len() as u64;
-                    return Poll::Ready(Some(Ok(http_body::Frame::data(b))));
+                    return Poll::Ready(Some(Ok(hyper::body::Frame::data(b))));
                 }
                 Some(Frame::File { file, offset, len }) => {
                     let want = std::cmp::min(64 * 1024, len) as usize;
@@ -442,7 +442,7 @@ mod tests {
     /// The terminal error must let hyper flush first: one Pending pass with a wake, then the error.
     #[test]
     fn error_is_gated_behind_one_flush_pass() {
-        use http_body::Body as _;
+        use hyper::body::Body as _;
         use std::task::{Wake, Waker};
         struct Flag(AtomicBool);
         impl Wake for Flag {

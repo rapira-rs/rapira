@@ -73,9 +73,7 @@ codegen-units = 1
 
 [dependencies]
 anyhow = { workspace = true }
-clap = { version = "4", features = ["derive"] }
 rapira_master = { workspace = true }
-rapira_net = { workspace = true }
 rapira_sapi = { workspace = true }
 rapira_config = { workspace = true }
 rapira_http = { workspace = true }
@@ -88,4 +86,4 @@ serde = { workspace = true }
 tokio = { workspace = true }
 toml = { workspace = true }
 tracing = { workspace = true }
-tracing-subscriber = { version = "0.3", features = ["env-filter", "chrono", "json"] }
+tracing-subscriber = { version = "0.3.18", default-features = false, features = ["fmt", "ansi", "env-filter", "json"] }

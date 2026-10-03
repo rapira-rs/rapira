@@ -9,14 +9,6 @@ use crate::work::{DispatcherClasses, Sink};
 
 pub use rapira_config::Mode;
 
-/// One plugin's PHP surface.
-#[derive(Clone, Copy)]
-pub struct PhpPart {
-    /// Registers the plugin's classes. Runs in MINIT after the base classes.
-    pub register: unsafe extern "C" fn(),
-    pub dispatcher: DispatcherClasses,
-}
-
 /// What the worker hands to [`Plugin::serve`].
 pub struct Worker {
     pub handle: tokio::runtime::Handle,
@@ -32,10 +24,10 @@ pub trait Plugin: Send + 'static {
     fn name(&self) -> &'static str;
     /// The pool modes this plugin serves. The root refuses another mode at boot.
     fn modes(&self) -> &'static [Mode];
-    /// The plugin's PHP surface.
-    fn php(&self) -> PhpPart;
+    /// The dispatcher surface receive() serves in dispatcher mode.
+    fn dispatcher(&self) -> DispatcherClasses;
     /// Master side, before the fork, no runtime.
-    fn prepare(&mut self, ctx: &mut rapira_net::PrepareCtx) -> anyhow::Result<()>;
+    fn prepare(&mut self) -> anyhow::Result<()>;
     /// Worker side, on the plugin thread. Returns after the stop signal and the drain.
     fn serve(self: Box<Self>, worker: Worker) -> anyhow::Result<()>;
 }
@@ -43,16 +35,21 @@ pub trait Plugin: Send + 'static {
 /// The plugin thread that [`run_plugin`] started.
 pub struct Running {
     name: &'static str,
-    thread: Option<JoinHandle<anyhow::Result<()>>>,
+    thread: JoinHandle<anyhow::Result<()>>,
     stopper: Stopper,
     grace: Duration,
 }
 
 impl Running {
     /// Joins the plugin thread. An error from serve, a panic, or a join past `grace` after stop is an Err.
-    pub fn join(mut self) -> anyhow::Result<()> {
-        let thread = self.thread.take().expect("join consumes Running");
-        let events = &self.stopper.events;
+    pub fn join(self) -> anyhow::Result<()> {
+        let Running {
+            name,
+            thread,
+            stopper,
+            grace,
+        } = self;
+        let events = &stopper.events;
         let mut state = events.lock();
         while !state.ended {
             state = match state.stopped_at {
@@ -61,12 +58,8 @@ impl Running {
                     .wait(state)
                     .unwrap_or_else(PoisonError::into_inner),
                 Some(at) => {
-                    let Some(left) = self.grace.checked_sub(at.elapsed()) else {
-                        return Err(anyhow!(
-                            "{} did not stop within {:?}",
-                            self.name,
-                            self.grace
-                        ));
+                    let Some(left) = grace.checked_sub(at.elapsed()) else {
+                        return Err(anyhow!("{name} did not stop within {grace:?}"));
                     };
                     events
                         .changed
@@ -83,17 +76,8 @@ impl Running {
                 .copied()
                 .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
                 .unwrap_or("unknown panic");
-            anyhow!("{} panicked: {msg}", self.name)
+            anyhow!("{name} panicked: {msg}")
         })?
-    }
-}
-
-impl Drop for Running {
-    /// An unjoined plugin thread gets the stop flag and ends on its own.
-    fn drop(&mut self) {
-        if self.thread.is_some() {
-            self.stopper.stop();
-        }
     }
 }
 
@@ -179,7 +163,7 @@ pub fn run_plugin(
         .map_err(|e| anyhow!("spawning the {name} thread: {e}"))?;
     Ok(Running {
         name,
-        thread: Some(thread),
+        thread,
         stopper,
         grace,
     })

@@ -66,7 +66,7 @@ impl<L: AsRawFd> Listener<L> {
     }
 
     /// Blocks until this worker owns a connection. `None` means the wake descriptor fired.
-    fn accept_blocking_with<S, A>(
+    pub(crate) fn accept_blocking<S, A>(
         &self,
         mut accept: impl FnMut(&L) -> io::Result<(S, A)>,
     ) -> io::Result<Option<(S, A)>> {
@@ -140,34 +140,5 @@ impl<L: AsRawFd> Listener<L> {
                 return Err(error);
             }
         }
-    }
-}
-
-impl TcpListener {
-    pub(crate) fn accept_blocking(
-        &self,
-    ) -> io::Result<Option<(std::net::TcpStream, std::net::SocketAddr)>> {
-        self.accept_blocking_with(|listener| {
-            let (stream, peer) = listener.accept()?;
-            stream.set_nonblocking(true)?;
-            Ok((stream, peer))
-        })
-    }
-}
-
-impl UnixListener {
-    pub(crate) fn accept_blocking(
-        &self,
-    ) -> io::Result<
-        Option<(
-            std::os::unix::net::UnixStream,
-            std::os::unix::net::SocketAddr,
-        )>,
-    > {
-        self.accept_blocking_with(|listener| {
-            let (stream, peer) = listener.accept()?;
-            stream.set_nonblocking(true)?;
-            Ok((stream, peer))
-        })
     }
 }

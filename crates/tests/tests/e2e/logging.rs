@@ -1,6 +1,7 @@
 use crate::harness::*;
-use rapira_sapi::Mode;
-use std::time::{Duration, Instant};
+use rapira_sapi::plugin::Mode;
+use std::time::Duration;
+use tests::poll;
 
 /// `[log] format = "json"` shapes every record while `RUST_LOG` still owns the filter.
 #[test]
@@ -9,8 +10,7 @@ fn json_format_shapes_the_log() {
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
+    poll(Duration::from_secs(2), || {
         let text = std::fs::read_to_string(srv.dir.join("server.log")).unwrap_or_default();
         let banner = text.lines().any(|l| {
             serde_json::from_str::<serde_json::Value>(l).is_ok_and(|v| {
@@ -29,16 +29,9 @@ fn json_format_shapes_the_log() {
                 diagnostics(&srv)
             );
         }
-        if banner {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no JSON banner line in server.log\n{}",
-            diagnostics(&srv)
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+        banner.then_some(())
+    })
+    .unwrap_or_else(|| panic!("no JSON banner line in server.log\n{}", diagnostics(&srv)));
 }
 
 /// Default `[log]` on a redirected (non-tty) stderr emits no ANSI escapes.
@@ -48,26 +41,17 @@ fn plain_format_is_uncolored_when_redirected() {
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 
-    let deadline = Instant::now() + Duration::from_secs(2);
-    loop {
+    poll(Duration::from_secs(2), || {
         let text = std::fs::read_to_string(srv.dir.join("server.log")).unwrap_or_default();
         assert!(
             !text.contains('\u{1b}'),
             "ANSI escape in a redirected log:\n{text}"
         );
-        if text
-            .lines()
+        text.lines()
             .any(|l| l.contains("INFO") && l.contains("rapira_core v"))
-        {
-            return;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no plain banner line in server.log\n{}",
-            diagnostics(&srv)
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+            .then_some(())
+    })
+    .unwrap_or_else(|| panic!("no plain banner line in server.log\n{}", diagnostics(&srv)));
 }
 
 /// `[log.targets] php = "warn"` surfaces PHP diagnostics that `level = "error"` alone hides.
@@ -185,7 +169,7 @@ fn log_filter_source_and_target_prefix() {
     }
 }
 
-/// A JSON record nests the event fields under `fields`, names the target and the level, stamps UTC milliseconds and carries no span keys.
+/// A JSON record nests the event fields under `fields`, names the target and the level, stamps UTC microseconds and carries no span keys.
 #[test]
 fn json_record_shape() {
     let mut srv = Spawn::http(Mode::Dispatcher, fixture_path(MARKS))
@@ -206,9 +190,9 @@ fn json_record_shape() {
     assert_eq!(v["fields"]["context"], r#"{"answer":42}"#, "{v}");
     assert_eq!(v["target"], "app", "{v}");
     assert_eq!(v["level"], "INFO", "{v}");
-    // ChronoUtc %.3f: RFC 3339 UTC with exactly milliseconds.
+    // SystemTime timer: RFC 3339 UTC with exactly microseconds.
     let ts = v["timestamp"].as_str().expect("timestamp");
-    assert_eq!(ts.len(), "2026-01-01T00:00:00.000Z".len(), "{ts}");
+    assert_eq!(ts.len(), "2026-01-01T00:00:00.000000Z".len(), "{ts}");
     assert_eq!(&ts[19..20], ".", "{ts}");
     assert!(ts.ends_with('Z'), "{ts}");
     assert!(v.get("span").is_none() && v.get("spans").is_none(), "{v}");

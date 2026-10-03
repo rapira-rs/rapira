@@ -18,13 +18,9 @@ jobs:
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-master-debug
             RUST_BACKTRACE: "1"
-        defaults:
-            run:
-                working-directory: core
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
-                  path: core
                   persist-credentials: false
 
             - name: Install build deps (Linux)
@@ -54,7 +50,7 @@ jobs:
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-master-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-${{ hashFiles('core/.github/php-configure-flags.txt', 'core/.github/workflows/master.yml') }}
+                  key: php-master-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/master.yml') }}
 
             - name: Build NTS+debug PHP (embed SAPI) from php-src master
               if: steps.php.outputs.cache-hit != 'true'
@@ -83,7 +79,7 @@ jobs:
                     --enable-zend-test \
                     --enable-debug \
                     --enable-igbinary --enable-redis --enable-redis-igbinary \
-                    $(tr '\n' ' ' < "$GITHUB_WORKSPACE/core/.github/php-configure-flags.txt") $EXTRA
+                    $(tr '\n' ' ' < "$GITHUB_WORKSPACE/.github/php-configure-flags.txt") $EXTRA
                   make -j"$(getconf _NPROCESSORS_ONLN)"
                   make install
 
@@ -92,7 +88,7 @@ jobs:
               uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-master-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-${{ hashFiles('core/.github/php-configure-flags.txt', 'core/.github/workflows/master.yml') }}
+                  key: php-master-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/master.yml') }}
 
             - name: Expose PHP to build + tests
               run: |
@@ -117,7 +113,6 @@ jobs:
             - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
             - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
               with:
-                  workspaces: core
                   cache-on-failure: true
 
             - run: cargo test --workspace

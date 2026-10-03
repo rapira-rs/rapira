@@ -1,6 +1,6 @@
 use std::cell::RefCell;
-use std::ffi::CStr;
-use std::path::PathBuf;
+use std::ffi::{CStr, CString};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
 use std::thread;
@@ -8,13 +8,13 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::{error, info, trace};
 
-use crate::quota::{self, WorkerHooks};
+use crate::quota;
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
 use crate::work::{DispatcherClasses, Sink, Work};
 use crate::{
     classic_worker::classic_worker,
-    plugin::{Mode, PhpPart},
+    plugin::{Mode, Stopper},
     *,
 };
 
@@ -47,8 +47,8 @@ impl JobRx {
 }
 
 thread_local! {
-    /// The parts that MINIT registers after the base classes. MINIT runs on the thread that calls `boot_master`.
-    static PARTS: RefCell<Vec<PhpPart>> = const { RefCell::new(Vec::new()) };
+    /// The register functions that MINIT calls after the base classes. MINIT runs on the thread that calls `boot_master`.
+    static REGISTER_FNS: RefCell<Vec<unsafe extern "C" fn()>> = const { RefCell::new(Vec::new()) };
 }
 
 pub struct PhpModule {}
@@ -63,7 +63,6 @@ impl Drop for PhpModule {
 }
 
 pub struct Rapira {
-    sink: Option<Sink>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -89,10 +88,10 @@ pub fn linked_php_version() -> String {
         .into_owned()
 }
 
-/// MINIT once in the master. Base classes first, then each part in order.
-pub fn boot_master(parts: &[PhpPart]) -> anyhow::Result<PhpModule> {
+/// MINIT once in the master. Base classes first, then each register function in order.
+pub fn boot_master(register: &[unsafe extern "C" fn()]) -> anyhow::Result<PhpModule> {
     check_linked_php()?;
-    PARTS.set(parts.to_vec());
+    REGISTER_FNS.set(register.to_vec());
     let mut module: _sapi_module_struct = module::build_sapi_module();
     let started: bool = unsafe {
         // The Rust runtime sets SIGPIPE to SIG_IGN before main, so a write to a closed peer returns EPIPE: https://doc.rust-lang.org/beta/unstable-book/compiler-flags/on-broken-pipe.html
@@ -113,28 +112,26 @@ pub fn boot_master(parts: &[PhpPart]) -> anyhow::Result<PhpModule> {
 /// MINIT calls it after the base classes (module.c).
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_register_plugin_classes() {
-    PARTS.with_borrow(|parts| {
-        for part in parts {
-            // SAFETY: MINIT runs on the booting thread, and the base classes the part extends are registered.
-            unsafe { (part.register)() };
+    REGISTER_FNS.with_borrow(|register| {
+        for f in register {
+            // SAFETY: MINIT runs on the booting thread, and the base classes the plugin classes extend are registered.
+            unsafe { f() };
         }
     });
 }
 
 impl Rapira {
-    /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `classes`: the dispatcher surface receive() serves in dispatcher mode.
+    /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `max_requests`: 0 = unlimited; jitter already applied by the caller.
+    /// `slot`: the scoreboard slot this worker reports into. `stopper` stops the plugin when the quota ends or PHP turns unhealthy. `classes`: the dispatcher surface receive() serves in dispatcher mode.
+    /// The returned Sink is the intake of this worker. The PHP thread sees the intake closed once every clone of the Sink is dropped.
     pub fn start_worker(
         mode: Mode,
         entrypoint: PathBuf,
-        hooks: WorkerHooks,
+        max_requests: u64,
+        slot: &'static rapira_scoreboard::SharedSlot,
+        stopper: Stopper,
         classes: DispatcherClasses,
-    ) -> Self {
-        let WorkerHooks {
-            max_requests,
-            on_quota,
-            on_unhealthy,
-            slot,
-        } = hooks;
+    ) -> (Self, Sink) {
         let pending: &'static AtomicU64 = &slot.pending;
         let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
         let sink = Sink::new(intake_tx, slot);
@@ -152,7 +149,7 @@ impl Rapira {
         trace!(target: "rapira", "spawning worker thread");
         let worker: JoinHandle<()> = thread::spawn(move || {
             sb_set(slot);
-            quota::install(max_requests, on_quota, on_unhealthy);
+            quota::install(max_requests, stopper);
             worker_main(
                 mode,
                 entrypoint,
@@ -164,22 +161,18 @@ impl Rapira {
             )
         });
 
-        Self {
-            sink: Some(sink),
-            worker: Some(worker),
-        }
-    }
-
-    /// The intake of this worker. The PHP thread sees the intake closed once `Rapira` and every clone are dropped.
-    pub fn sink(&self) -> Sink {
-        self.sink.clone().expect("the sink lives until Drop")
+        (
+            Self {
+                worker: Some(worker),
+            },
+            sink,
+        )
     }
 }
 
 impl Drop for Rapira {
     fn drop(&mut self) {
         info!(target: "rapira", "shutting down, dropping");
-        self.sink = None;
         let Some(worker) = self.worker.take() else {
             return;
         };
@@ -217,6 +210,21 @@ fn worker_main(mode: Mode, entrypoint: PathBuf, rx: JobRx, classes: DispatcherCl
         if matches!(exit, WorkerExit::Closed) {
             break;
         }
+    }
+}
+
+/// # Safety
+/// Requires an active request. `php_execute_script` catches a bailout itself.
+pub(crate) unsafe fn run_script(script: &Path) -> bool {
+    unsafe {
+        let c_script: CString =
+            CString::new(script.to_string_lossy().as_bytes()).unwrap_or_default();
+        let mut fh: zend_file_handle = std::mem::zeroed();
+        zend_stream_init_filename(&mut fh, c_script.as_ptr());
+        fh.primary_script = true;
+        let ok: bool = php_execute_script(&mut fh);
+        zend_destroy_file_handle(&mut fh);
+        ok
     }
 }
 

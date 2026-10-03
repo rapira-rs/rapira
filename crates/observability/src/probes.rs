@@ -1,14 +1,10 @@
-use rapira_scoreboard::{PoolRegion, Scoreboard, SharedSlot};
+use rapira_scoreboard::{PoolRegion, SharedSlot};
 
 /// The pools in `pools` without a worker that can serve: no slot of the pool is idle or active.
-pub(crate) fn unready(board: &Scoreboard, pools: &[PoolRegion]) -> Vec<&'static str> {
+pub(crate) fn unready(board: &[SharedSlot], pools: &[PoolRegion]) -> Vec<&'static str> {
     pools
         .iter()
-        .filter(|pool| {
-            !board.slots()[pool.slots.clone()]
-                .iter()
-                .any(SharedSlot::serving)
-        })
+        .filter(|pool| !board[pool.slots.clone()].iter().any(SharedSlot::serving))
         .map(|pool| pool.name)
         .collect()
 }
@@ -74,12 +70,12 @@ mod tests {
             },
         ];
         for case in cases {
-            let board = Scoreboard::create(8).unwrap();
+            let board = rapira_scoreboard::create(8).unwrap();
             for &(i, state, handled) in case.slots {
-                board.slot(i).state.store(state, Relaxed);
-                board.slot(i).handled.store(handled, Relaxed);
+                board[i].state.store(state, Relaxed);
+                board[i].handled.store(handled, Relaxed);
             }
-            assert_eq!(unready(&board, &case.pools), case.want, "{}", case.name);
+            assert_eq!(unready(board, &case.pools), case.want, "{}", case.name);
         }
     }
 }

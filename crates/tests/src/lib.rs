@@ -1,6 +1,7 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
-use rapira_sapi::{Addr, Frame, Request};
+use rapira_sapi::Frame;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 pub mod grpc;
@@ -38,25 +39,26 @@ pub fn assert_skip_allowed(fixture: &str) {
     }
 }
 
-/// Build a minimal `GET` request for `uri`.
-pub fn req(uri: &str) -> Request {
-    Request {
-        https: false,
-        method: "GET".into(),
-        uri: uri.into(),
-        target: None,
-        authority: None,
-        protocol: "HTTP/1.1".into(),
-        remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-        server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-        server_name: "localhost".into(),
-        server_port: 8080,
-        headers: HeaderMap::new(),
-        content_type: None,
-        content_length: 0,
-        body: rapira_sapi::types::Body::Raw(std::io::Cursor::new(Vec::new())),
-        received_at: 0.0,
-        tls: None,
+/// A GET request for `uri` with `Host: localhost`; the body is the raw bytes.
+pub fn req(uri: &str) -> http::Request<Vec<u8>> {
+    http::Request::builder()
+        .uri(uri)
+        .header(http::header::HOST, "localhost")
+        .body(Vec::new())
+        .expect("a valid test request")
+}
+
+/// Calls `check` every 50 ms until it returns Some or `within` has passed; None = the deadline passed.
+pub fn poll<T>(within: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
+    let end = Instant::now() + within;
+    loop {
+        if let Some(v) = check() {
+            return Some(v);
+        }
+        if Instant::now() >= end {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
     }
 }
 
@@ -68,7 +70,7 @@ pub fn echo_descriptor_set() -> PathBuf {
 /// A response stream collected to its `End` (or to the producer dying).
 #[derive(Debug, Default)]
 pub struct Resp {
-    pub head: Option<rapira_sapi::ResponseHead>,
+    pub head: Option<rapira_sapi::types::ResponseHead>,
     pub content_length: Option<u64>,
     pub body: Vec<u8>,
     pub trailers: HeaderMap,
@@ -119,20 +121,6 @@ impl Resp {
         }
         false
     }
-}
-
-/// Drains `reply` to its `End`; a missing head, a missing `End` or a truncated `End` is an error.
-pub async fn collect(reply: mpsc::Receiver<Frame>) -> anyhow::Result<Resp> {
-    let r = drain_resp_async(reply).await;
-    if r.head.is_none() && !r.ended {
-        anyhow::bail!("php worker died mid-response (channel closed without a response)");
-    }
-    anyhow::ensure!(
-        r.ended && !r.truncated,
-        "php crashed mid-response; body truncated"
-    );
-    anyhow::ensure!(r.head.is_some(), "php produced no response head");
-    Ok(r)
 }
 
 /// Poll for a first frame until `deadline`: None = nothing arrived in time, a producer that died with no frames yields `Resp::default()`.
@@ -193,72 +181,4 @@ pub async fn drain_resp_async(mut rx: mpsc::Receiver<Frame>) -> Resp {
 pub async fn drain_async(rx: mpsc::Receiver<Frame>) -> (u16, String) {
     let r = drain_resp_async(rx).await;
     (r.status(), r.body_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rapira_sapi::ResponseHead;
-
-    /// A reply that yields `events` and then closes.
-    fn reply(events: Vec<Frame>) -> mpsc::Receiver<Frame> {
-        let (tx, rx) = mpsc::channel(events.len().max(1));
-        for ev in events {
-            tx.try_send(ev).unwrap();
-        }
-        rx
-    }
-
-    fn head() -> Frame {
-        Frame::Head {
-            head: ResponseHead {
-                status: 200,
-                headers: fields(&[("x-a", "1")]),
-            },
-            content_length: None,
-            bodiless: false,
-        }
-    }
-
-    fn end(truncated: bool) -> Frame {
-        Frame::End {
-            trailers: HeaderMap::new(),
-            truncated,
-        }
-    }
-
-    /// Each failed stream maps to its error: no events, no `End`, a truncated `End`, no head.
-    #[tokio::test]
-    async fn collect_maps_stream_outcomes() {
-        let died = collect(reply(Vec::new())).await.unwrap_err();
-        assert!(died.to_string().contains("died mid-response"), "{died:#}");
-
-        let cut = collect(reply(vec![head()])).await.unwrap_err();
-        assert!(cut.to_string().contains("truncated"), "{cut:#}");
-
-        let cut = collect(reply(vec![head(), end(true)])).await.unwrap_err();
-        assert!(cut.to_string().contains("truncated"), "{cut:#}");
-
-        let headless = collect(reply(vec![end(false)])).await.unwrap_err();
-        assert!(
-            headless.to_string().contains("no response head"),
-            "{headless:#}"
-        );
-    }
-
-    /// Chunks concatenate in order.
-    #[tokio::test]
-    async fn collect_concatenates_the_stream() {
-        let r = collect(reply(vec![
-            head(),
-            Frame::Chunk(b"one,"[..].into()),
-            Frame::Chunk(b"two"[..].into()),
-            end(false),
-        ]))
-        .await
-        .unwrap();
-        assert_eq!(r.status(), 200);
-        assert_eq!(r.head.unwrap().headers, fields(&[("x-a", "1")]));
-        assert_eq!(r.body, b"one,two");
-    }
 }

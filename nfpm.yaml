@@ -4,12 +4,9 @@
 # rpm x86_64/aarch64 automatically.
 name: "rapira-php${PHP_MINOR}"
 arch: "${NFPM_ARCH}"
-platform: "linux"
 version: "${VERSION}"
-version_schema: "semver"
 release: "1"
 section: "net"
-priority: "optional"
 maintainer: "Valery Piashchynski <piashchynski.valery@gmail.com>"
 vendor: "rapira"
 homepage: "https://github.com/rapira-rs/rapira"

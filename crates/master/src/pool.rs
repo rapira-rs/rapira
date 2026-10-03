@@ -2,11 +2,11 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::time::{Duration, Instant};
 
 use libc::c_int;
-use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, Scoreboard, SharedSlot, now_millis};
+use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, SharedSlot, now_millis};
 
 use crate::PoolConfig;
 use crate::pctl::KillPhase;
-use crate::process::{ExitVerdict, Forker, ProcTable, WorkerProc, kill};
+use crate::process::{ExitVerdict, Forker, SlotState, WorkerProc, kill};
 
 /// Re-check cadence for the overlap reload gate; the total wait is bounded by `process_control_timeout`.
 const RELOAD_GATE_POLL: Duration = Duration::from_millis(50);
@@ -33,8 +33,11 @@ pub(crate) struct Pool {
     pub index: usize,
     pub cfg: PoolConfig,
     /// Sub-view of the shared board; every slot index in this struct is local to it.
-    pub board: Scoreboard,
-    pub table: ProcTable,
+    pub board: &'static [SharedSlot],
+    pub procs: Vec<WorkerProc>,
+    /// Respawn state per slot, local indices as in `board`.
+    pub slot_states: Vec<SlotState>,
+    pub generation: u32,
     pub control_timeout: Duration,
     /// This pool's overlap-reload chain; `None` once finished or never started.
     pub reload: Option<Reload>,
@@ -44,32 +47,24 @@ impl Pool {
     pub(crate) fn new(
         index: usize,
         cfg: PoolConfig,
-        board: Scoreboard,
+        board: &'static [SharedSlot],
         control_timeout: Duration,
     ) -> Pool {
-        let table = ProcTable::new(board.nslots());
         Pool {
             index,
             cfg,
+            procs: Vec::new(),
+            slot_states: vec![SlotState::default(); board.len()],
+            generation: 0,
             board,
-            table,
             control_timeout,
             reload: None,
         }
     }
 
-    fn count_state(&self, state: u32) -> usize {
-        self.board
-            .slots()
-            .iter()
-            .filter(|s| s.state.load(Relaxed) == state)
-            .count()
-    }
-
     /// Requests completed without error: Acquire pairs with the worker's Release on `handled` (stored after `errors`) so a shed 503 never counts as a success.
     fn total_successful(&self) -> u64 {
         self.board
-            .slots()
             .iter()
             .map(|s| {
                 let handled = s.handled.load(Acquire);
@@ -79,27 +74,25 @@ impl Pool {
             .sum()
     }
 
-    fn slot_is_free(&self, i: usize) -> bool {
-        self.board.slot(i).state.load(Relaxed) == SLOT_FREE
-    }
-
     fn find_spawn_slot(&self) -> Option<usize> {
-        (0..self.table.slots.len())
-            .find(|&i| self.slot_is_free(i) && self.table.slots[i].respawn_at.is_none())
+        (0..self.slot_states.len()).find(|&i| {
+            self.board[i].state.load(Relaxed) == SLOT_FREE
+                && self.slot_states[i].respawn_at.is_none()
+        })
     }
 
     fn has_old_gen(&self) -> bool {
-        let cur = self.table.generation;
-        self.table.procs.iter().any(|p| p.generation < cur)
+        let cur = self.generation;
+        self.procs.iter().any(|p| p.generation < cur)
     }
 
     fn spawn_into(&mut self, slot: usize, now: Instant, spawner: &mut Forker<'_>) {
-        self.board.set_starting(slot);
-        let generation = self.table.generation;
-        match spawner.spawn(self.index, self.board.slot(slot)) {
+        self.board[slot].set_starting();
+        let generation = self.generation;
+        match spawner.spawn(self.index, &self.board[slot]) {
             Ok(pid) => {
-                self.board.slot(slot).pid.store(pid as u32, Relaxed);
-                self.table.procs.push(WorkerProc {
+                self.board[slot].pid.store(pid as u32, Relaxed);
+                self.procs.push(WorkerProc {
                     pid,
                     slot,
                     generation,
@@ -113,14 +106,10 @@ impl Pool {
                     "{} pool: spawn failed for slot {slot}: {e}",
                     self.cfg.name
                 );
-                self.board.clear(slot);
-                self.table.slots[slot].schedule_backoff(Duration::ZERO, now);
+                self.board[slot].clear();
+                self.slot_states[slot].schedule_backoff(Duration::ZERO, now);
             }
         }
-    }
-
-    pub(crate) fn fork_initial(&mut self, now: Instant, spawner: &mut Forker<'_>) {
-        self.spawn_up_to(self.cfg.processes, now, spawner);
     }
 
     fn spawn_up_to(&mut self, n: usize, now: Instant, spawner: &mut Forker<'_>) {
@@ -134,21 +123,21 @@ impl Pool {
 
     pub(crate) fn begin_stop(&mut self) {
         self.signal_all(libc::SIGQUIT);
-        for s in &mut self.table.slots {
-            s.cancel_respawn();
+        for s in &mut self.slot_states {
+            s.respawn_at = None;
         }
         self.reload = None;
     }
 
     pub(crate) fn signal_all(&self, sig: c_int) {
-        for p in &self.table.procs {
+        for p in &self.procs {
             kill(p.pid, sig);
         }
     }
 
     /// Overlap reload: spawn one current-gen worker as headroom and gate on it serving before any old worker is drained, so capacity never dips.
     pub(crate) fn begin_reload(&mut self, now: Instant, spawner: &mut Forker<'_>) {
-        self.table.generation += 1;
+        self.generation += 1;
         let slot = if self.has_old_gen() {
             self.find_spawn_slot()
         } else {
@@ -175,9 +164,8 @@ impl Pool {
     }
 
     fn reload_quit_next(&mut self, now: Instant) {
-        let cur = self.table.generation;
+        let cur = self.generation;
         let target = self
-            .table
             .procs
             .iter()
             .filter(|p| p.generation < cur)
@@ -205,7 +193,7 @@ impl Pool {
         };
         match reload.phase {
             ReloadPhase::Await { slot, until } => {
-                if self.board.slot(slot).serving() {
+                if self.board[slot].serving() {
                     self.reload_quit_next(now);
                 } else if now >= until {
                     tracing::warn!(
@@ -246,8 +234,8 @@ impl Pool {
     ) -> anyhow::Result<()> {
         let slot = w.slot;
         let lived = now.saturating_duration_since(w.spawned_at);
-        count_exit(self.board.slot(slot), verdict);
-        self.board.clear(slot);
+        count_exit(&self.board[slot], verdict);
+        self.board[slot].clear();
 
         if let Some(Reload {
             phase: ReloadPhase::Drain { draining, .. },
@@ -268,12 +256,12 @@ impl Pool {
 
         match verdict {
             ExitVerdict::Recycle | ExitVerdict::Drain | ExitVerdict::TimeoutKill => {
-                self.table.slots[slot].schedule_immediate(now);
+                self.slot_states[slot].schedule_immediate(now);
             }
             ExitVerdict::Unhealthy => {
                 if w.generation == 0
                     && self.total_successful() == 0
-                    && !self.board.slots().iter().any(SharedSlot::serving)
+                    && !self.board.iter().any(SharedSlot::serving)
                 {
                     anyhow::bail!(
                         "{} pool: worker {} exited unhealthy before the pool served any request",
@@ -281,10 +269,10 @@ impl Pool {
                         w.pid
                     );
                 }
-                self.table.slots[slot].schedule_backoff(lived, now);
+                self.slot_states[slot].schedule_backoff(lived, now);
             }
             ExitVerdict::Crash => {
-                self.table.slots[slot].schedule_backoff(lived, now);
+                self.slot_states[slot].schedule_backoff(lived, now);
             }
         }
         Ok(())
@@ -297,8 +285,8 @@ impl Pool {
             return;
         }
         let now_ms = now_millis();
-        for p in self.table.procs.iter_mut() {
-            let s = self.board.slot(p.slot);
+        for p in self.procs.iter_mut() {
+            let s = &self.board[p.slot];
             if s.state.load(Acquire) != SLOT_ACTIVE {
                 continue;
             }
@@ -340,10 +328,10 @@ impl Pool {
         self.refill(now, spawner);
     }
 
-    fn refill(&mut self, now: Instant, spawner: &mut Forker<'_>) {
-        let running = self.table.running();
-        let pending = (0..self.table.slots.len())
-            .filter(|&i| self.table.slots[i].respawn_at.is_some())
+    pub(crate) fn refill(&mut self, now: Instant, spawner: &mut Forker<'_>) {
+        let running = self.procs.len();
+        let pending = (0..self.slot_states.len())
+            .filter(|&i| self.slot_states[i].respawn_at.is_some())
             .count();
         let committed = running + pending;
         self.spawn_up_to(self.cfg.processes.saturating_sub(committed), now, spawner);
@@ -355,19 +343,18 @@ impl Pool {
         {
             self.on_reload_deadline(now);
         }
-        for slot in 0..self.table.slots.len() {
-            if let Some(t) = self.table.slots[slot].respawn_at
+        for slot in 0..self.slot_states.len() {
+            if let Some(t) = self.slot_states[slot].respawn_at
                 && now >= t
             {
-                self.table.slots[slot].cancel_respawn();
+                self.slot_states[slot].respawn_at = None;
                 self.spawn_into(slot, now, spawner);
             }
         }
     }
 
     pub(crate) fn next_deadline(&self) -> Option<Instant> {
-        self.table
-            .slots
+        self.slot_states
             .iter()
             .filter_map(|s| s.respawn_at)
             .chain(self.reload.map(|r| r.deadline))
@@ -375,19 +362,34 @@ impl Pool {
     }
 
     pub(crate) fn log_status(&self) {
+        let idle = self
+            .board
+            .iter()
+            .filter(|s| s.state.load(Relaxed) == SLOT_IDLE)
+            .count();
         tracing::info!(
             target: "master",
             "status: {} pool: {} running, {} idle, generation {}",
             self.cfg.name,
-            self.table.running(),
-            self.count_state(SLOT_IDLE),
-            self.table.generation
+            self.procs.len(),
+            idle,
+            self.generation
         );
-        for s in self.board.snapshot_slots() {
+        for (i, s) in self.board.iter().enumerate() {
+            let state = s.state.load(Relaxed);
+            let pid = s.pid.load(Relaxed);
+            if state == SLOT_FREE && pid == 0 {
+                continue;
+            }
             tracing::info!(
                 target: "master",
                 "  slot {} pid {} state {} handled {} errors {} recycles {}",
-                s.id, s.pid, s.state, s.handled, s.errors, s.recycles
+                i,
+                pid,
+                state,
+                s.handled.load(Relaxed),
+                s.errors.load(Relaxed),
+                s.recycles.load(Relaxed)
             );
         }
     }
@@ -408,9 +410,10 @@ fn count_exit(slot: &SharedSlot, verdict: ExitVerdict) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::process::bury;
 
     fn test_pool(processes: usize) -> Pool {
-        let board = Scoreboard::create(processes * 2).unwrap();
+        let board = rapira_scoreboard::create(processes * 2).unwrap();
         let cfg = PoolConfig {
             name: "http",
             processes,
@@ -425,8 +428,8 @@ mod tests {
         let t0 = Instant::now();
         assert_eq!(p.next_deadline(), None);
 
-        p.table.slots[1].respawn_at = Some(t0 + Duration::from_millis(700));
-        p.table.slots[2].respawn_at = Some(t0 + Duration::from_millis(400));
+        p.slot_states[1].respawn_at = Some(t0 + Duration::from_millis(700));
+        p.slot_states[2].respawn_at = Some(t0 + Duration::from_millis(400));
         p.reload = Some(Reload {
             phase: ReloadPhase::Await {
                 slot: 0,
@@ -436,8 +439,39 @@ mod tests {
         });
         assert_eq!(p.next_deadline(), Some(t0 + Duration::from_millis(400)));
 
-        p.table.slots[2].respawn_at = None;
+        p.slot_states[2].respawn_at = None;
         assert_eq!(p.next_deadline(), Some(t0 + Duration::from_millis(500)));
+    }
+
+    #[test]
+    fn bury_routes_a_pid_to_the_pool_that_owns_it() {
+        let mut pools = [test_pool(1), test_pool(1)];
+        let at = Instant::now();
+        pools[0].procs.push(WorkerProc {
+            pid: 2_000_000_001,
+            slot: 0,
+            generation: 0,
+            spawned_at: at,
+            timeout_kill: false,
+        });
+        pools[1].procs.push(WorkerProc {
+            pid: 2_000_000_002,
+            slot: 1,
+            generation: 3,
+            spawned_at: at,
+            timeout_kill: false,
+        });
+
+        assert!(bury(&mut pools, 2_000_000_009, 0).is_none());
+        // Raw wait status: exit code 89 in bits 8..16.
+        let (pool, w, verdict) =
+            bury(&mut pools, 2_000_000_002, 89 << 8).expect("the second pool owns the pid");
+
+        assert_eq!(pool, 1);
+        assert_eq!((w.slot, w.generation), (1, 3));
+        assert_eq!(verdict, ExitVerdict::Unhealthy);
+        assert_eq!(pools[0].procs.len(), 1, "the other pool is untouched");
+        assert!(pools[1].procs.is_empty());
     }
 
     fn exits(slot: &SharedSlot) -> [u64; 5] {
@@ -485,9 +519,9 @@ mod tests {
             },
         ];
         for case in cases {
-            let board = Scoreboard::create(1).unwrap();
-            count_exit(board.slot(0), case.verdict);
-            assert_eq!(exits(board.slot(0)), case.want, "{}", case.name);
+            let board = rapira_scoreboard::create(1).unwrap();
+            count_exit(&board[0], case.verdict);
+            assert_eq!(exits(&board[0]), case.want, "{}", case.name);
         }
     }
 }

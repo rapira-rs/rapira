@@ -1,7 +1,7 @@
 use std::sync::atomic::Ordering::Relaxed;
 
 use rapira_scoreboard::{
-    PoolRegion, SLOT_ACTIVE, SLOT_DRAINING, SLOT_FREE, SLOT_IDLE, SLOT_STARTING, Scoreboard,
+    PoolRegion, SLOT_ACTIVE, SLOT_DRAINING, SLOT_FREE, SLOT_IDLE, SLOT_STARTING, SharedSlot,
 };
 
 use crate::memory::Memory;
@@ -46,18 +46,18 @@ pub(crate) struct PoolStats {
 }
 
 /// The stats of each pool in `pools`.
-pub(crate) fn board_stats(board: &Scoreboard, pools: &[PoolRegion]) -> Vec<PoolStats> {
+pub(crate) fn board_stats(board: &[SharedSlot], pools: &[PoolRegion]) -> Vec<PoolStats> {
     pools.iter().map(|pool| pool_stats(board, pool)).collect()
 }
 
 /// Counters and the queue sum over all slots of the pool: a slot keeps the counts of every worker that it held, and `clear` empties the queue of a dead worker.
-fn pool_stats(board: &Scoreboard, region: &PoolRegion) -> PoolStats {
+fn pool_stats(board: &[SharedSlot], region: &PoolRegion) -> PoolStats {
     let mut stats = PoolStats {
         name: region.name,
         configured: region.processes,
         ..Default::default()
     };
-    for (index, s) in board.slots()[region.slots.clone()].iter().enumerate() {
+    for (index, s) in board[region.slots.clone()].iter().enumerate() {
         let state = s.state.load(Relaxed);
         if let Some(i) = STATES.iter().position(|&(known, _)| known == state) {
             stats.states[i] += 1;
@@ -96,8 +96,8 @@ mod tests {
     /// Slots 0 to 3 belong to an http pool of 2 workers, and slots 4 to 7 to a grpc pool of 2 workers. Each pair of states has different counts in at least one pool, and each grpc exit reason has its own count, so a swap of two states or two exit reasons fails the test.
     #[test]
     fn board_stats_sums_each_pool() {
-        let board = Scoreboard::create(8).unwrap();
-        let slot = |i: usize| board.slot(i);
+        let board = rapira_scoreboard::create(8).unwrap();
+        let slot = |i: usize| &board[i];
         let place = |i: usize, state: u32, pid: u32| {
             slot(i).state.store(state, Relaxed);
             slot(i).pid.store(pid, Relaxed);
@@ -144,7 +144,7 @@ mod tests {
             },
         ];
 
-        let got = board_stats(&board, &pools);
+        let got = board_stats(board, &pools);
 
         assert_eq!(
             got,

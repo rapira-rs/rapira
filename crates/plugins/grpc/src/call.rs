@@ -1,4 +1,4 @@
-use http::HeaderMap;
+use connectrpc::http::HeaderMap;
 use rapira_sapi::types::Addr;
 use rapira_sapi::work::{Held, Work, now_unix_f64};
 use rapira_sapi::zend_object;
@@ -11,28 +11,20 @@ use crate::php::{GrpcState, grpc_call_from};
 pub(crate) struct UnaryCall {
     /// `package.Service/Method`, without a leading slash.
     pub method: String,
-    pub protocol: RpcProtocol,
+    pub protocol: Option<connectrpc::Protocol>,
     /// The request headers as received. `getContext()` drops the transport names and decodes `-bin` values when it builds `Context::$metadata`.
-    pub metadata: http::HeaderMap,
+    pub metadata: HeaderMap,
     /// Unix seconds.
     pub deadline: Option<f64>,
     pub remote: Addr,
     pub message: bytes::Bytes,
 }
 
-/// The protocol that the client of an RPC used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RpcProtocol {
-    Grpc,
-    GrpcWeb,
-    Connect,
-}
-
 /// The outcome of a unary RPC. The metadata is in wire form: `-bin` values are unpadded base64.
 #[derive(Debug, PartialEq)]
 pub(crate) struct UnaryReply {
-    pub headers: http::HeaderMap,
-    pub trailers: http::HeaderMap,
+    pub headers: HeaderMap,
+    pub trailers: HeaderMap,
     /// The output message, or the status the call failed with.
     pub outcome: std::result::Result<bytes::Bytes, RpcStatus>,
 }
@@ -67,11 +59,6 @@ impl Call {
         };
         (call, rx)
     }
-
-    /// Commits the outcome, as a finalize from PHP does.
-    pub(crate) fn respond(self, reply: UnaryReply) {
-        let _ = self.reply.send(reply);
-    }
 }
 
 impl Work for Call {
@@ -91,7 +78,7 @@ impl Work for Call {
     }
 
     fn shed(self: Box<Self>) {
-        self.respond(UnaryReply {
+        let _ = self.reply.send(UnaryReply {
             headers: HeaderMap::new(),
             trailers: HeaderMap::new(),
             outcome: Err(RpcStatus {

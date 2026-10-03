@@ -2,7 +2,7 @@
 
 use std::time::{Duration, Instant};
 
-use rapira_sapi::Mode;
+use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
 use tests::{drain, drain_resp_deadline, fixture, req, server_log};
 

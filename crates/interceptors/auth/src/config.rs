@@ -1,7 +1,7 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::bail;
-use rapira_config::ConfigCtx;
+use rapira_config::opt_path;
 use serde::Deserialize;
 
 /// The `[grpc.auth]` table.
@@ -17,11 +17,9 @@ pub struct Settings {
     pub tokens_file: PathBuf,
 }
 
-pub fn resolve(section: Section, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
-    match section.tokens_file.filter(|f| !f.is_empty()) {
-        Some(f) => Ok(Settings {
-            tokens_file: ctx.resolve_path(&f)?,
-        }),
-        None => bail!("grpc.auth.tokens_file is required"),
-    }
+pub fn resolve(section: Section, dir: &Path) -> anyhow::Result<Settings> {
+    let Some(tokens_file) = opt_path(dir, section.tokens_file.as_deref())? else {
+        bail!("grpc.auth.tokens_file is required");
+    };
+    Ok(Settings { tokens_file })
 }

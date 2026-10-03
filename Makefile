@@ -8,7 +8,7 @@ PHP_BIN ?= $(shell $(PHP_CONFIG) --prefix)/bin/php
 BUF_VERSION ?= v1.73.0
 BUF ?= go run github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
 
-.PHONY: test test_nts test_e2e coverage stubs grpc_fixtures php php-macos
+.PHONY: test test_nts test_e2e coverage stubs grpc_fixtures php
 
 stubs:
 	@test -f "$(GEN_STUB)" || { echo "gen_stub.php not found at $(GEN_STUB); set GEN_STUB=/path/to/gen_stub.php"; exit 1; }
@@ -45,25 +45,19 @@ php:
 	@test -d "$(PHP_SRC)" || { echo "php-src not found at $(PHP_SRC); set PHP_SRC=/path/to/php-src"; exit 1; }
 	-@$(MAKE) -C "$(PHP_SRC)" distclean >/dev/null 2>&1
 	@FLAGS="$$(tr '\n' ' ' < .github/php-configure-flags.txt)"; \
+	if [ "$$(uname)" = Darwin ]; then \
+		export PKG_CONFIG_PATH="$$(brew --prefix openssl@3)/lib/pkgconfig:$$(brew --prefix curl)/lib/pkgconfig:$$(brew --prefix oniguruma)/lib/pkgconfig:$$(brew --prefix libxml2)/lib/pkgconfig:$$(brew --prefix sqlite)/lib/pkgconfig:$$(brew --prefix libffi)/lib/pkgconfig:$$(brew --prefix icu4c)/lib/pkgconfig:$$(brew --prefix libpq)/lib/pkgconfig$${PKG_CONFIG_PATH:+:$$PKG_CONFIG_PATH}"; \
+		FLAGS="$$FLAGS --with-iconv=$$(xcrun --show-sdk-path)/usr --with-gettext=$$(brew --prefix gettext)"; \
+	fi; \
 	cd "$(PHP_SRC)" && \
 	./buildconf --force && \
 	./configure --prefix="$(PHP_PREFIX)" $$FLAGS
 	@$(MAKE) -C "$(PHP_SRC)" -j"$$(getconf _NPROCESSORS_ONLN)"
 	@$(MAKE) -C "$(PHP_SRC)" install
 
-php-macos:
-	@test -d "$(PHP_SRC)" || { echo "php-src not found at $(PHP_SRC); set PHP_SRC=/path/to/php-src"; exit 1; }
-	-@$(MAKE) -C "$(PHP_SRC)" distclean >/dev/null 2>&1
-	@FLAGS="$$(tr '\n' ' ' < .github/php-configure-flags.txt)"; \
-	export PKG_CONFIG_PATH="$$(brew --prefix openssl@3)/lib/pkgconfig:$$(brew --prefix curl)/lib/pkgconfig:$$(brew --prefix oniguruma)/lib/pkgconfig:$$(brew --prefix libxml2)/lib/pkgconfig:$$(brew --prefix sqlite)/lib/pkgconfig:$$(brew --prefix libffi)/lib/pkgconfig:$$(brew --prefix icu4c)/lib/pkgconfig:$$(brew --prefix libpq)/lib/pkgconfig$${PKG_CONFIG_PATH:+:$$PKG_CONFIG_PATH}"; \
-	cd "$(PHP_SRC)" && \
-	./buildconf --force && \
-	./configure --prefix="$(PHP_PREFIX)" $$FLAGS \
-		--with-iconv="$$(xcrun --show-sdk-path)/usr" \
-		--with-gettext="$$(brew --prefix gettext)"
-	@$(MAKE) -C "$(PHP_SRC)" -j"$$(getconf _NPROCESSORS_ONLN)"
-	@$(MAKE) -C "$(PHP_SRC)" install
-
+# Workers leave through _exit, which skips the profile write at exit. Continuous mode (%c) keeps the
+# counters in a mapped file that forked workers share. On Linux it needs counter relocation:
+# https://clang.llvm.org/docs/SourceBasedCodeCoverage.html#running-the-instrumented-program
 coverage:
 	@$(LOCATE_PHP); \
 	export CARGO_TARGET_DIR=target/coverage $(PHP_ENV) && \

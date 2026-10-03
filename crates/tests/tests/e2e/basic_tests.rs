@@ -1,5 +1,6 @@
-use http::header::{AUTHORIZATION, HeaderValue};
-use rapira_sapi::Mode;
+use http::Method;
+use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
+use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
 use tests::{drain, fixture, req, server_log};
 
@@ -92,7 +93,7 @@ fn worker_basic_auth() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/auth-worker.php")).spawn();
 
     let mut with_auth = req("/");
-    with_auth.headers.append(
+    with_auth.headers_mut().append(
         AUTHORIZATION,
         HeaderValue::from_static("Basic dXNlcjpwYXNz"),
     );
@@ -122,10 +123,12 @@ fn server_variables() -> anyhow::Result<()> {
         .spawn();
 
     let mut request = req("/server-variables.php?foo=a&bar=b");
-    request.method = "POST".into();
-    request.content_type = Some("text/plain".into());
-    request.body = rapira_sapi::types::Body::Raw(std::io::Cursor::new(b"foo".to_vec()));
-    request.headers.append(
+    *request.method_mut() = Method::POST;
+    request
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    *request.body_mut() = b"foo".to_vec();
+    request.headers_mut().append(
         AUTHORIZATION,
         HeaderValue::from_static("Basic dmFsZXJ5OnBhc3N3b3Jk"),
     );
