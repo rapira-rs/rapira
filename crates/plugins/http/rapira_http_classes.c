@@ -100,8 +100,7 @@ void rapira_http_register_classes(void) {
     rapira_ce_internal_http_dispatcher->default_object_handlers =
         &rapira_dispatcher_handlers;
 
-    memcpy(&rapira_exchange_handlers, &std_object_handlers,
-           sizeof(rapira_exchange_handlers));
+    rapira_exchange_handlers = std_object_handlers;
     rapira_exchange_handlers.clone_obj = NULL;
     rapira_exchange_handlers.offset = offsetof(rapira_exchange_obj, std);
     rapira_exchange_handlers.free_obj = rapira_exchange_free;

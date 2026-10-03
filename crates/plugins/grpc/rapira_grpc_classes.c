@@ -133,8 +133,7 @@ void rapira_grpc_register_classes(void) {
     rapira_ce_internal_grpc_dispatcher_info->default_object_handlers =
         &rapira_info_handlers;
 
-    memcpy(&rapira_grpc_call_handlers, &std_object_handlers,
-           sizeof(rapira_grpc_call_handlers));
+    rapira_grpc_call_handlers = std_object_handlers;
     rapira_grpc_call_handlers.clone_obj = NULL;
     rapira_grpc_call_handlers.offset = offsetof(rapira_grpc_call_obj, std);
     rapira_grpc_call_handlers.free_obj = rapira_grpc_call_free;
@@ -143,8 +142,7 @@ void rapira_grpc_register_classes(void) {
         &rapira_grpc_call_handlers;
 
     // the standard free_obj: the metadata object owns nothing
-    memcpy(&rapira_grpc_metadata_handlers, &std_object_handlers,
-           sizeof(rapira_grpc_metadata_handlers));
+    rapira_grpc_metadata_handlers = std_object_handlers;
     rapira_grpc_metadata_handlers.clone_obj = NULL;
     rapira_grpc_metadata_handlers.offset =
         offsetof(rapira_grpc_metadata_obj, std);
