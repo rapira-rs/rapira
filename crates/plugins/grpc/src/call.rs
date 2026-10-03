@@ -1,4 +1,4 @@
-use http::HeaderMap;
+use connectrpc::http::HeaderMap;
 use rapira_sapi::types::Addr;
 use rapira_sapi::work::{Held, Work, now_unix_f64};
 use rapira_sapi::zend_object;
@@ -13,7 +13,7 @@ pub(crate) struct UnaryCall {
     pub method: String,
     pub protocol: Option<connectrpc::Protocol>,
     /// The request headers as received. `getContext()` drops the transport names and decodes `-bin` values when it builds `Context::$metadata`.
-    pub metadata: http::HeaderMap,
+    pub metadata: HeaderMap,
     /// Unix seconds.
     pub deadline: Option<f64>,
     pub remote: Addr,
@@ -23,8 +23,8 @@ pub(crate) struct UnaryCall {
 /// The outcome of a unary RPC. The metadata is in wire form: `-bin` values are unpadded base64.
 #[derive(Debug, PartialEq)]
 pub(crate) struct UnaryReply {
-    pub headers: http::HeaderMap,
-    pub trailers: http::HeaderMap,
+    pub headers: HeaderMap,
+    pub trailers: HeaderMap,
     /// The output message, or the status the call failed with.
     pub outcome: std::result::Result<bytes::Bytes, RpcStatus>,
 }

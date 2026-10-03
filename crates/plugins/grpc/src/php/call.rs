@@ -6,7 +6,7 @@ use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD_NO_PAD};
 use bytes::Bytes;
 use connectrpc::Protocol;
-use http::header::{HeaderMap, HeaderName, HeaderValue};
+use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};

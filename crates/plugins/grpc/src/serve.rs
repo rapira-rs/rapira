@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use connectrpc::server::serve_connection;
 use connectrpc::{
     Chain, CompressionRegistry, ConnectRpcBody, ConnectRpcService, ConnectionConfig,
-    ConnectionInfo, DeadlinePolicy, GzipProvider, Router,
+    ConnectionInfo, DeadlinePolicy, GzipProvider, Router, http,
 };
 use connectrpc_health::StaticChecker;
 use rapira_net::{Acceptor, Serve};

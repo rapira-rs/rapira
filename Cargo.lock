@@ -948,7 +948,6 @@ dependencies = [
  "connectrpc",
  "connectrpc-health",
  "connectrpc-reflection",
- "http",
  "rapira_config",
  "rapira_grpc_auth",
  "rapira_net",
@@ -967,7 +966,6 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "connectrpc",
- "http",
  "rapira_config",
  "serde",
 ]

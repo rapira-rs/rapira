@@ -13,5 +13,4 @@ workspace = true
 rapira_config = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
-http = { workspace = true }
 connectrpc = { workspace = true }
