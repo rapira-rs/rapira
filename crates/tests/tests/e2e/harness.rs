@@ -853,22 +853,12 @@ pub fn kill_master_as_subreaper(srv: &mut Server) {
 }
 
 /// Per-thread outcome counters: `refused` means the listener closed, `failed` means a non-200 response, a hang, or a corrupt reply; connection drops only record `last_err` (the balancer retries those).
+#[derive(Default)]
 pub struct Tally {
     pub ok: u64,
     pub refused: u64,
     pub failed: u64,
     pub last_err: Option<String>,
-}
-
-impl Tally {
-    fn new() -> Tally {
-        Tally {
-            ok: 0,
-            refused: 0,
-            failed: 0,
-            last_err: None,
-        }
-    }
 }
 
 /// A pool of threads hammering the server until [`Storm::halt`].
@@ -884,7 +874,7 @@ pub fn storm(addr: SocketAddr, threads: usize) -> Storm {
         .map(|_| {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                let mut tally = Tally::new();
+                let mut tally = Tally::default();
                 while !stop.load(Ordering::Relaxed) {
                     match http_get(addr, "/", Duration::from_secs(10)) {
                         Ok((200, _)) => tally.ok += 1,
@@ -927,7 +917,7 @@ pub fn storm(addr: SocketAddr, threads: usize) -> Storm {
 impl Storm {
     pub fn halt(self) -> Tally {
         self.stop.store(true, Ordering::Relaxed);
-        let mut total = Tally::new();
+        let mut total = Tally::default();
         for h in self.threads {
             if let Ok(t) = h.join() {
                 total.ok += t.ok;
