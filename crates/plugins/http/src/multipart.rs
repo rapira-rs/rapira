@@ -219,27 +219,6 @@ pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartB
     }
 }
 
-/// Header section ends at the first empty line, CRLF or bare LF; returns (head including the terminator, body).
-fn split_head(part: &[u8]) -> Result<(&[u8], &[u8]), Rejection> {
-    if let Some(rest) = part.strip_prefix(b"\r\n") {
-        return Ok((&part[..2], rest));
-    }
-    if let Some(rest) = part.strip_prefix(b"\n") {
-        return Ok((&part[..1], rest));
-    }
-    let mut i = 0;
-    while let Some(nl) = memchr::memchr(b'\n', &part[i..]).map(|o| o + i) {
-        match part.get(nl + 1) {
-            Some(b'\n') => return Ok((&part[..nl + 2], &part[nl + 2..])),
-            Some(b'\r') if part.get(nl + 2) == Some(&b'\n') => {
-                return Ok((&part[..nl + 3], &part[nl + 3..]));
-            }
-            _ => i = nl + 1,
-        }
-    }
-    Err(bad("part without a header/body separator"))
-}
-
 /// (name, filename) from a content-disposition value.
 type Disposition = (Option<Vec<u8>>, Option<Vec<u8>>);
 
@@ -330,12 +309,11 @@ fn parse_part(
     fields: &mut Vec<FormField>,
     files: &mut Vec<UploadedFile>,
 ) -> Result<(), Rejection> {
-    let (head, body) = split_head(part)?;
-
     let mut hbuf = [httparse::EMPTY_HEADER; MAX_PART_HEADERS];
-    let parsed = match httparse::parse_headers(head, &mut hbuf) {
-        Ok(httparse::Status::Complete((_, headers))) => headers,
-        Ok(httparse::Status::Partial) => return Err(bad("truncated part header section")),
+    let (body, parsed) = match httparse::parse_headers(part, &mut hbuf) {
+        // the header section ends at the first empty line, CRLF or bare LF; len includes that line
+        Ok(httparse::Status::Complete((len, headers))) => (&part[len..], headers),
+        Ok(httparse::Status::Partial) => return Err(bad("part without a header/body separator")),
         Err(httparse::Error::TooManyHeaders) => {
             return Err(over(format!(
                 "part with more than {MAX_PART_HEADERS} header fields"
