@@ -172,17 +172,19 @@ fn is_skipped_accept(e: &std::io::Error) -> bool {
 #[cfg(target_os = "linux")]
 fn accept_blocking(socket: &Socket, serve: &impl Serve) -> std::io::Result<bool> {
     match socket {
-        Socket::Tcp(l) => match l.accept_blocking()? {
+        Socket::Tcp(l) => match l.accept_blocking(std::net::TcpListener::accept)? {
             None => return Ok(false),
             Some((stream, peer)) => {
+                stream.set_nonblocking(true)?;
                 let stream = tokio::net::TcpStream::from_std(stream)?;
                 let _ = stream.set_nodelay(true);
                 serve.spawn_tcp(stream, peer);
             }
         },
-        Socket::Unix(l) => match l.accept_blocking()? {
+        Socket::Unix(l) => match l.accept_blocking(std::os::unix::net::UnixListener::accept)? {
             None => return Ok(false),
             Some((stream, peer)) => {
+                stream.set_nonblocking(true)?;
                 serve.spawn_unix(
                     tokio::net::UnixStream::from_std(stream)?,
                     peer.as_pathname(),
