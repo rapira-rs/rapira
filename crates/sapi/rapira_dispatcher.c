@@ -21,21 +21,15 @@ ZEND_FUNCTION(Rapira_get_version) {
 ZEND_FUNCTION(Rapira_get_mode) {
     ZEND_PARSE_PARAMETERS_NONE();
 
-    const char *name;
-    switch (rapira_mode) {
-    case RAPIRA_MODE_WORKER:
-        name = "Worker";
-        break;
-    case RAPIRA_MODE_DISPATCHER:
-        name = "Dispatcher";
-        break;
-    default:
-        name = "Classic";
-        break;
-    }
+    static const char *const names[] = {
+        [RAPIRA_MODE_CLASSIC] = "Classic",
+        [RAPIRA_MODE_WORKER] = "Worker",
+        [RAPIRA_MODE_DISPATCHER] = "Dispatcher",
+    };
 
     // the case object belongs to the per-request class constant; the copy takes a reference
-    RETURN_OBJ_COPY(zend_enum_get_case_cstr(rapira_ce_mode, name));
+    RETURN_OBJ_COPY(
+        zend_enum_get_case_cstr(rapira_ce_mode, names[rapira_mode]));
 }
 
 ZEND_FUNCTION(Rapira_get_dispatcher) {
