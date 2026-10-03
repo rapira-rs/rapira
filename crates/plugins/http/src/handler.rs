@@ -38,18 +38,6 @@ impl From<Refused> for Rejection {
     }
 }
 
-impl From<multipart::ParseError> for Rejection {
-    fn from(e: multipart::ParseError) -> Self {
-        match e {
-            multipart::ParseError::Rejected { status, reason } => Self { status, reason },
-            multipart::ParseError::Io(e) => Self {
-                status: http::StatusCode::INTERNAL_SERVER_ERROR,
-                reason: format!("upload spool failed: {e}"),
-            },
-        }
-    }
-}
-
 pub(crate) struct InflightReqCount {
     counter: Arc<AtomicUsize>,
     /// Connection flush count when the last response byte was handed to hyper.

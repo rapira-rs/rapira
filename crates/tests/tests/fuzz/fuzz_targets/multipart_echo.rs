@@ -6,7 +6,8 @@ use std::sync::LazyLock;
 
 use arbitrary::{Arbitrary, Unstructured};
 use rapira_fuzz::MAX_LEN;
-use rapira_http::multipart::{Limits, ParseError, boundary, is_multipart, parse};
+use rapira_http::check::Rejection;
+use rapira_http::multipart::{Limits, boundary, is_multipart, parse};
 
 #[derive(Arbitrary)]
 struct EchoPart<'a> {
@@ -169,8 +170,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     let ctx = body.escape_ascii();
     let got = match parse(&body, &bnd, &LIMITS) {
         Ok(got) => got,
-        Err(ParseError::Rejected { status, reason }) => panic!("{status} {reason}: {ctx}"),
-        Err(ParseError::Io(e)) => panic!("io error {e}: {ctx}"),
+        Err(Rejection { status, reason }) => panic!("{status} {reason}: {ctx}"),
     };
     let mut fields = got.fields.iter();
     let mut files = got.files.iter();

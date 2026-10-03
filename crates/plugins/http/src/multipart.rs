@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use memchr::memmem;
 use rapira_sapi::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
 
+use crate::check::Rejection;
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct Limits {
     pub dir: PathBuf,
@@ -65,31 +67,15 @@ pub(crate) fn sweep_spool_dirs(base: &Path) {
     }
 }
 
-#[derive(Debug)]
-pub enum ParseError {
-    /// The body is malformed (400) or over a limit (413).
-    Rejected {
-        status: http::StatusCode,
-        reason: String,
-    },
-    Io(std::io::Error),
-}
-
-impl From<std::io::Error> for ParseError {
-    fn from(e: std::io::Error) -> Self {
-        ParseError::Io(e)
-    }
-}
-
-fn bad(reason: impl Into<String>) -> ParseError {
-    ParseError::Rejected {
+fn bad(reason: impl Into<String>) -> Rejection {
+    Rejection {
         status: http::StatusCode::BAD_REQUEST,
         reason: reason.into(),
     }
 }
 
-fn over(reason: impl Into<String>) -> ParseError {
-    ParseError::Rejected {
+fn over(reason: impl Into<String>) -> Rejection {
+    Rejection {
         status: http::StatusCode::PAYLOAD_TOO_LARGE,
         reason: reason.into(),
     }
@@ -111,7 +97,7 @@ pub fn is_multipart(content_type: &[u8]) -> bool {
 }
 
 /// Case-insensitive, quoted form unquoted, unquoted form terminated by `,` (php-src rfc1867.c:707-751), capped at the RFC 2046 §5.1.1 70 characters.
-pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, ParseError> {
+pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
     for seg in content_type.split(|&b| b == b';').skip(1) {
         let Some(eq) = memchr::memchr(b'=', seg) else {
             continue;
@@ -202,7 +188,7 @@ fn next_delimiter(
 
 /// Parses a non-empty body; the empty-body case lands on the contract's string arm (`$body === ''`) instead.
 /// https://www.rfc-editor.org/rfc/rfc7578
-pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartBody, ParseError> {
+pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartBody, Rejection> {
     let delim: Vec<u8> = [b"--".as_slice(), boundary].concat();
     let finder = memmem::Finder::new(&delim);
 
@@ -240,7 +226,7 @@ pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartB
 }
 
 /// Header section ends at the first empty line, CRLF or bare LF; returns (head including the terminator, body).
-fn split_head(part: &[u8]) -> Result<(&[u8], &[u8]), ParseError> {
+fn split_head(part: &[u8]) -> Result<(&[u8], &[u8]), Rejection> {
     if let Some(rest) = part.strip_prefix(b"\r\n") {
         return Ok((&part[..2], rest));
     }
@@ -264,7 +250,7 @@ fn split_head(part: &[u8]) -> Result<(&[u8], &[u8]), ParseError> {
 type Disposition = (Option<Vec<u8>>, Option<Vec<u8>>);
 
 /// The disposition type token is not enforced: php-src rfc1867.c reads the parameters regardless.
-fn disposition_params(v: &[u8]) -> Result<Disposition, ParseError> {
+fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
     let mut name: Option<Vec<u8>> = None;
     let mut filename: Option<Vec<u8>> = None;
     let mut i = memchr::memchr(b';', v).map(|i| i + 1).unwrap_or(v.len());
@@ -326,10 +312,10 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, ParseError> {
 }
 
 /// Nothing fallible may sit between keep() and the SpooledFile wrap, or the kept file has no owner to unlink it.
-fn spool(bytes: &[u8], dir: &std::path::Path) -> Result<SpooledFile, ParseError> {
+fn spool(bytes: &[u8], dir: &std::path::Path) -> std::io::Result<SpooledFile> {
     let mut tmp = tempfile::NamedTempFile::new_in(dir)?;
     tmp.write_all(bytes)?;
-    let (file, path) = tmp.keep().map_err(|e| ParseError::Io(e.error))?;
+    let (file, path) = tmp.keep().map_err(|e| e.error)?;
     drop(file);
     Ok(SpooledFile { path })
 }
@@ -340,7 +326,7 @@ fn parse_part(
     limits: &Limits,
     fields: &mut Vec<FormField>,
     files: &mut Vec<UploadedFile>,
-) -> Result<(), ParseError> {
+) -> Result<(), Rejection> {
     let (head, body) = split_head(part)?;
 
     let mut hbuf = vec![httparse::EMPTY_HEADER; limits.max_part_headers];
@@ -390,7 +376,10 @@ fn parse_part(
             if body.len() as u64 > limits.max_file_size {
                 return Err(over("file part over max_file_size"));
             }
-            let file = spool(body, &limits.dir)?;
+            let file = spool(body, &limits.dir).map_err(|e| Rejection {
+                status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                reason: format!("upload spool failed: {e}"),
+            })?;
             files.push(UploadedFile {
                 name,
                 client_filename,
@@ -436,8 +425,7 @@ mod tests {
     /// The status of the rejection.
     fn rejected(body: &[u8], l: &Limits) -> u16 {
         match parse(body, b"B", l) {
-            Err(ParseError::Rejected { status, .. }) => status.as_u16(),
-            Err(ParseError::Io(e)) => panic!("io error: {e}"),
+            Err(Rejection { status, .. }) => status.as_u16(),
             Ok(_) => panic!("expected a rejection"),
         }
     }
@@ -504,11 +492,11 @@ mod tests {
         }
         assert!(matches!(
             boundary(b"multipart/form-data"),
-            Err(ParseError::Rejected { status, .. }) if status == 400
+            Err(Rejection { status, .. }) if status == 400
         ));
         assert!(matches!(
             boundary(b"multipart/form-data; boundary="),
-            Err(ParseError::Rejected { status, .. }) if status == 400
+            Err(Rejection { status, .. }) if status == 400
         ));
     }
 
