@@ -7,7 +7,7 @@ use http_body_util::BodyExt;
 use crate::middleware::{Body, BoxError, Response};
 
 pub(crate) fn empty_body() -> Body {
-    http_body_util::Empty::<bytes::Bytes>::new()
+    http_body_util::Empty::<hyper::body::Bytes>::new()
         .map_err(BoxError::from)
         .boxed_unsync()
 }

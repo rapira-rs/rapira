@@ -18,14 +18,12 @@ anyhow = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
-bytes = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros"] }
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio", "server", "http1", "server-graceful"] }
 tower = { workspace = true }
-http-body = "1"
 # multipart parsing over the buffered body
 memchr = "2"
 httparse = "1"

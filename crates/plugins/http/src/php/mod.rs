@@ -5,8 +5,8 @@ use std::{
     time::Instant,
 };
 
-use bytes::Bytes;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
+use hyper::body::Bytes;
 use rapira_sapi::callbacks::{MAX_BUFFERED_BODY, guard};
 use rapira_sapi::exchange::{
     AddrOwned, add_list, build_address, header_key, path_bytes, push_ipv4,

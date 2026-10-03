@@ -6,9 +6,8 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use http::header::CONTENT_TYPE;
-use http_body::Body;
 use http_body_util::BodyExt;
-use hyper::body::Incoming;
+use hyper::body::{Body, Bytes, Incoming, SizeHint};
 use rapira_sapi::work::{Refused, Sink};
 use rapira_sapi::{Addr, Frame, Request};
 use tower::{Service as _, ServiceExt as _};
@@ -93,13 +92,13 @@ fn refused(status: http::StatusCode, req_count: Arc<InflightReqCount>) -> http::
 }
 
 impl Body for RespBody {
-    type Data = bytes::Bytes;
+    type Data = Bytes;
     type Error = BoxError;
 
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<http_body::Frame<bytes::Bytes>, BoxError>>> {
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, BoxError>>> {
         let this = self.get_mut();
         let poll = match &mut this.kind {
             BodyKind::Reply(b) => Pin::new(b).poll_frame(cx),
@@ -126,10 +125,10 @@ impl Body for RespBody {
         }
     }
 
-    fn size_hint(&self) -> http_body::SizeHint {
+    fn size_hint(&self) -> SizeHint {
         match &self.kind {
             BodyKind::Reply(b) => b.size_hint(),
-            BodyKind::Empty => http_body::SizeHint::with_exact(0),
+            BodyKind::Empty => SizeHint::with_exact(0),
             BodyKind::Boxed(b) => b.size_hint(),
         }
     }
@@ -324,7 +323,7 @@ async fn serve_php<B>(
     peer: Peer,
 ) -> http::Response<RespBody>
 where
-    B: Body<Data = bytes::Bytes> + Unpin,
+    B: Body<Data = Bytes> + Unpin,
     B::Error: std::fmt::Display,
 {
     let cfg = &shared.cfg;

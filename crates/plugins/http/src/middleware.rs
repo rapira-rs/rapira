@@ -4,7 +4,7 @@ use rapira_sapi::Addr;
 
 pub type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// https://docs.rs/http-body-util/latest/http_body_util/combinators/struct.UnsyncBoxBody.html
-pub type Body = http_body_util::combinators::UnsyncBoxBody<bytes::Bytes, BoxError>;
+pub type Body = http_body_util::combinators::UnsyncBoxBody<hyper::body::Bytes, BoxError>;
 pub type Request = http::Request<Body>;
 pub type Response = http::Response<Body>;
 pub type Service = tower::util::BoxCloneService<Request, Response, Infallible>;

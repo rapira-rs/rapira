@@ -773,9 +773,7 @@ name = "rapira_http"
 version = "0.8.1"
 dependencies = [
  "anyhow",
- "bytes",
  "http",
- "http-body",
  "http-body-util",
  "httparse",
  "hyper",
@@ -1057,7 +1055,6 @@ version = "0.8.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
- "bytes",
  "http",
  "http-body-util",
  "hyper",
