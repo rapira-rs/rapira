@@ -27,14 +27,12 @@ impl KillPhase {
 }
 
 /// Master-wide control state. Each pool owns its reload chain.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum PctlState {
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum Pctl {
+    #[default]
     Normal,
     /// `deadline` is when the next escalation fires.
-    Stopping {
-        phase: KillPhase,
-        deadline: Instant,
-    },
+    Stopping { phase: KillPhase, deadline: Instant },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -46,42 +44,29 @@ pub(crate) enum SignalAction {
     Ignore,
 }
 
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct Pctl {
-    pub state: PctlState,
-}
-
-impl Default for Pctl {
-    fn default() -> Self {
-        Pctl {
-            state: PctlState::Normal,
-        }
-    }
-}
-
 impl Pctl {
     pub fn is_stopping(&self) -> bool {
-        matches!(self.state, PctlState::Stopping { .. })
+        matches!(self, Pctl::Stopping { .. })
     }
 
     /// `stop_deadline` arms the first escalation when this signal starts a stop.
     /// Override precedence: normal < stopping; only TERM/INT overrides stopping (forced), while a retried QUIT stays graceful.
     pub fn on_signal(&mut self, signo: c_int, stop_deadline: Instant) -> SignalAction {
         match signo {
-            libc::SIGTERM | libc::SIGINT | libc::SIGQUIT => match self.state {
-                PctlState::Stopping { .. } if signo == libc::SIGQUIT => SignalAction::Ignore,
-                PctlState::Stopping { .. } => SignalAction::Forced,
-                _ => {
-                    self.state = PctlState::Stopping {
+            libc::SIGTERM | libc::SIGINT | libc::SIGQUIT => match *self {
+                Pctl::Stopping { .. } if signo == libc::SIGQUIT => SignalAction::Ignore,
+                Pctl::Stopping { .. } => SignalAction::Forced,
+                Pctl::Normal => {
+                    *self = Pctl::Stopping {
                         phase: KillPhase::Quit,
                         deadline: stop_deadline,
                     };
                     SignalAction::Stop
                 }
             },
-            libc::SIGUSR2 | libc::SIGHUP => match self.state {
-                PctlState::Normal => SignalAction::Reload,
-                PctlState::Stopping { .. } => SignalAction::Ignore,
+            libc::SIGUSR2 | libc::SIGHUP => match *self {
+                Pctl::Normal => SignalAction::Reload,
+                Pctl::Stopping { .. } => SignalAction::Ignore,
             },
             libc::SIGUSR1 => SignalAction::Status,
             _ => SignalAction::Ignore,
@@ -89,15 +74,15 @@ impl Pctl {
     }
 
     pub fn stop_deadline(&self) -> Option<Instant> {
-        match self.state {
-            PctlState::Normal => None,
-            PctlState::Stopping { deadline, .. } => Some(deadline),
+        match self {
+            Pctl::Normal => None,
+            Pctl::Stopping { deadline, .. } => Some(*deadline),
         }
     }
 
     /// Runs only at the stop deadline: re-arms it one second out and returns the next signal for every worker of every pool. A reload escalates per pool, against the one worker that drains.
     pub fn escalate(&mut self, now: Instant) -> c_int {
-        let PctlState::Stopping { phase, deadline } = &mut self.state else {
+        let Pctl::Stopping { phase, deadline } = self else {
             unreachable!("stop escalation outside a stop");
         };
         *deadline = now + Duration::from_secs(1);
@@ -116,8 +101,8 @@ mod tests {
             let mut p = Pctl::default();
             assert_eq!(p.on_signal(signo, t0), SignalAction::Stop);
             assert_eq!(
-                p.state,
-                PctlState::Stopping {
+                p,
+                Pctl::Stopping {
                     phase: KillPhase::Quit,
                     deadline: t0
                 }
@@ -150,7 +135,7 @@ mod tests {
         for signo in [libc::SIGUSR2, libc::SIGHUP] {
             let mut p = Pctl::default();
             assert_eq!(p.on_signal(signo, t0), SignalAction::Reload);
-            assert_eq!(p.state, PctlState::Normal);
+            assert_eq!(p, Pctl::Normal);
         }
     }
 
@@ -168,7 +153,7 @@ mod tests {
         let t0 = Instant::now();
         let mut p = Pctl::default();
         assert_eq!(p.on_signal(libc::SIGUSR1, t0), SignalAction::Status);
-        assert_eq!(p.state, PctlState::Normal);
+        assert_eq!(p, Pctl::Normal);
         p.on_signal(libc::SIGTERM, t0);
         assert_eq!(p.on_signal(libc::SIGUSR1, t0), SignalAction::Status);
         assert!(p.is_stopping());
