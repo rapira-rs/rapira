@@ -16,20 +16,13 @@ pub fn spool_dir() -> PathBuf {
 
 /// One `name:value` field per line. A line that the http crate rejects as a field is left out.
 pub fn header_map(data: &[u8]) -> HeaderMap {
-    let mut map = HeaderMap::new();
-    for line in data.split(|&b| b == b'\n') {
-        let Some(colon) = line.iter().position(|&b| b == b':') else {
-            continue;
-        };
-        let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(&line[..colon]),
-            HeaderValue::from_bytes(&line[colon + 1..]),
-        ) else {
-            continue;
-        };
-        map.append(name, value);
-    }
-    map
+    data.split(|&b| b == b'\n')
+        .filter_map(|line| {
+            let colon = line.iter().position(|&b| b == b':')?;
+            let name = HeaderName::from_bytes(&line[..colon]).ok()?;
+            Some((name, HeaderValue::from_bytes(&line[colon + 1..]).ok()?))
+        })
+        .collect()
 }
 
 /// The `HTTP_*` variable name changes `-` to `_`: https://www.rfc-editor.org/rfc/rfc3875#section-4.1.18

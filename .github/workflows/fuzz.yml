@@ -9,8 +9,7 @@ permissions:
     contents: read
 
 env:
-    # -max_len also bounds the Connect JSON memory of #167: https://github.com/rapira-rs/rapira/issues/167
-    FLAGS: -max_len=4096 -timeout=10 -rss_limit_mb=2048
+    FLAGS: -max_len=4096 -timeout=10 -create_missing_dirs=1
 
 defaults:
     run:
@@ -43,11 +42,8 @@ jobs:
             - &libphp
               name: Expose the PHP embed lib
               run: |
-                  LIBPHP=/usr/lib/libphp8.5.so
-                  test -e "$LIBPHP" || { echo "missing $LIBPHP"; exit 1; }
                   mkdir -p "$RUNNER_TEMP/phplib"
-                  ln -sf "$LIBPHP" "$RUNNER_TEMP/phplib/libphp.so"
-                  echo "LD_LIBRARY_PATH=$RUNNER_TEMP/phplib:/usr/lib" >> "$GITHUB_ENV"
+                  ln -sf /usr/lib/libphp8.5.so "$RUNNER_TEMP/phplib/libphp.so"
                   echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
 
             - &toolchain
@@ -60,7 +56,6 @@ jobs:
 
             - run: |
                   for t in $(cargo fuzz list --fuzz-dir .); do
-                      mkdir -p "corpus/$t"
                       cargo fuzz run --fuzz-dir . -s none "$t" "corpus/$t" "seeds/$t" -- \
                           $FLAGS -dict="dict/$t.dict" -seed=1 -max_total_time=60
                   done
@@ -95,7 +90,6 @@ jobs:
             - env:
                   SEED: ${{ github.run_id }}
               run: |
-                  mkdir -p "corpus/$TARGET"
                   cargo fuzz run --fuzz-dir . -s none "$TARGET" "corpus/$TARGET" "seeds/$TARGET" -- \
                       $FLAGS -dict="dict/$TARGET.dict" -seed="$SEED" -fork=4 -max_total_time=1800
 

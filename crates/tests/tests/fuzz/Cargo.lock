@@ -727,7 +727,6 @@ version = "0.0.0"
 dependencies = [
  "arbitrary",
  "base64 0.23.1",
- "buffa",
  "buffa-descriptor",
  "http",
  "httparse",

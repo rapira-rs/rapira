@@ -5,10 +5,10 @@
 use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
+use buffa_descriptor::DynamicMessage;
 use buffa_descriptor::reflect::{ReflectMessageMut, Value};
-use buffa_descriptor::{DescriptorPool, DynamicMessage, MessageIndex};
 use rapira_fuzz::MAX_LEN;
-use rapira_grpc::schema::Schema;
+use rapira_grpc::schema::{Method, Schema};
 
 const SAMPLE_BINPB: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/grpc/sample.binpb");
 const ECHO: &str = "rapira.test.fuzz.v1.FuzzService/Echo";
@@ -16,34 +16,12 @@ const ECHO: &str = "rapira.test.fuzz.v1.FuzzService/Echo";
 const FLOAT: u32 = 11;
 const DOUBLE: u32 = 12;
 
-/// rapira's schema, and a second pool from the same file that decodes the messages for the compare.
-struct Connect {
-    schema: Schema,
-    pool: Arc<DescriptorPool>,
-    sample: MessageIndex,
-}
+static SCHEMA: LazyLock<Schema> =
+    LazyLock::new(|| Schema::load(Path::new(SAMPLE_BINPB), None).expect("loading sample.binpb"));
 
-static CONNECT: LazyLock<Connect> = LazyLock::new(|| {
-    let path = Path::new(SAMPLE_BINPB);
-    let schema = Schema::load(path, None).expect("loading sample.binpb");
-    let bytes = std::fs::read(path).expect("reading sample.binpb");
-    let pool = Arc::new(DescriptorPool::decode(&bytes).expect("decoding sample.binpb"));
-    let sample = pool
-        .message_index("rapira.test.fuzz.v1.Sample")
-        .expect("the Sample message");
-    Connect {
-        schema,
-        pool,
-        sample,
-    }
-});
-
-impl Connect {
-    fn decode(&self, bytes: &[u8]) -> DynamicMessage {
-        let opts = buffa::DecodeOptions::new().with_element_memory_limit(usize::MAX);
-        DynamicMessage::decode_with_options(Arc::clone(&self.pool), self.sample, bytes, &opts)
-            .expect("decoding a transcoded message")
-    }
+fn decode(s: &Schema, m: &Method, bytes: &[u8]) -> DynamicMessage {
+    DynamicMessage::decode(Arc::clone(s.pool()), m.input, bytes)
+        .expect("decoding a transcoded message")
 }
 
 /// The distance in units in the last place. Both zeros are 0 and two NaNs have no distance.
@@ -84,18 +62,17 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     if data.len() > MAX_LEN {
         return;
     }
-    let c = &*CONNECT;
-    let m = c.schema.method(ECHO).expect("the Echo route");
-    // #190: a valid float-form enum or int64 is rejected, so a rejected input is not compared, https://github.com/rapira-rs/rapira/issues/190
-    let Ok(p1) = c.schema.json_to_proto(m, data) else {
+    let c = &*SCHEMA;
+    let m = c.method(ECHO).expect("the Echo route");
+    // A rejected input has no round trip to compare.
+    let Ok(p1) = c.json_to_proto(m, data) else {
         return;
     };
     let j1 = c
-        .schema
         .proto_to_json(m, &p1)
         .unwrap_or_else(|e| panic!("proto_to_json of an accepted message: {e}"));
-    let mut m1 = c.decode(&p1);
-    let p2 = match c.schema.json_to_proto(m, &j1) {
+    let mut m1 = decode(c, m, &p1);
+    let p2 = match c.json_to_proto(m, &j1) {
         Ok(p2) => p2,
         // #177: FLT_MAX does not round trip, https://github.com/rapira-rs/rapira/issues/177
         Err(_) if near_f32_max(&m1) => return,
@@ -104,14 +81,14 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             String::from_utf8_lossy(&j1)
         ),
     };
-    let mut m2 = c.decode(&p2);
+    let mut m2 = decode(c, m, &p2);
     // #177: the JSON parse can move a float or a double by up to 2 ULP, https://github.com/rapira-rs/rapira/issues/177
     for (number, single) in [(FLOAT, true), (DOUBLE, false)] {
         let (a, b) = (float(&m1, number), float(&m2, number));
         assert!(ulps(a, b, single) <= 2, "field {number}: {a} -> {b}");
         let field = c
-            .pool
-            .message(c.sample)
+            .pool()
+            .message(m.input)
             .field(number)
             .expect("a float field");
         m1.clear(field);

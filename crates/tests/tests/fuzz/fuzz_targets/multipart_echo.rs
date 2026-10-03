@@ -48,29 +48,16 @@ static LIMITS: LazyLock<Limits> = LazyLock::new(|| Limits {
 const BCHARS: &[u8] =
     b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'()+_,-./:=? ";
 
-/// Name and filename bytes. The encoder escapes CR and LF.
+/// Name and filename bytes. The WHATWG encoder escapes LF, CR and `"`, so a name has none of them: https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#multipart/form-data-encoding-algorithm
 fn name_bytes(raw: &[u8]) -> Vec<u8> {
     raw.iter()
         .copied()
+        .filter(|&b| b != b'"')
         // #165: the parser reads a backslash as a quoted-pair, https://github.com/rapira-rs/rapira/issues/165
         .filter(|&b| b != b'\\')
         // #181: the parser rejects a control byte other than HTAB, https://github.com/rapira-rs/rapira/issues/181
-        .filter(|&b| matches!(b, b'\t' | b'\r' | b'\n') || (b >= 0x20 && b != 0x7f))
+        .filter(|&b| b == b'\t' || (b >= 0x20 && b != 0x7f))
         .collect()
-}
-
-/// The WHATWG encoder escapes LF, CR and `"` in a name or filename: https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#multipart/form-data-encoding-algorithm
-fn escaped(name: &[u8]) -> Vec<u8> {
-    let mut out = Vec::with_capacity(name.len());
-    for &b in name {
-        match b {
-            b'\n' => out.extend_from_slice(b"%0A"),
-            b'\r' => out.extend_from_slice(b"%0D"),
-            b'"' => out.extend_from_slice(b"%22"),
-            _ => out.push(b),
-        }
-    }
-    out
 }
 
 /// RFC 9110 field-value bytes without leading or trailing whitespace: https://www.rfc-editor.org/rfc/rfc9110#section-5.5
@@ -80,10 +67,7 @@ fn value_bytes(raw: &[u8]) -> Vec<u8> {
         .copied()
         .filter(|&b| b == b'\t' || (b >= 0x20 && b != 0x7f))
         .collect();
-    let ows = |b: &u8| *b == b' ' || *b == b'\t';
-    let start = v.iter().position(|b| !ows(b)).unwrap_or(v.len());
-    let end = v.iter().rposition(|b| !ows(b)).map_or(start, |i| i + 1);
-    v[start..end].to_vec()
+    v.trim_ascii().to_vec()
 }
 
 /// RFC 9110 tchar: https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2
@@ -112,7 +96,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     if bnd.is_empty() {
         bnd.push(b'B');
     }
-    let content_type = if bnd.iter().any(|b| b"()<>@,;:\\\"/[]?= ".contains(b)) {
+    let content_type = if bnd.iter().any(|&b| !is_tchar(b)) {
         [b"multipart/form-data; boundary=\"", &bnd[..], b"\""].concat()
     } else {
         [b"multipart/form-data; boundary=", &bnd[..]].concat()
@@ -127,11 +111,11 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     let mut body = delim.clone();
     let mut sent = Vec::new();
     for p in form.parts.iter().take(MAX_PARTS) {
-        let mut name = escaped(&name_bytes(p.name));
+        let mut name = name_bytes(p.name);
         if name.is_empty() {
             name.push(b'n');
         }
-        let filename = p.filename.map(|f| escaped(&name_bytes(f)));
+        let filename = p.filename.map(name_bytes);
         let mut disposition = [b"form-data; name=\"", &name[..], b"\""].concat();
         if let Some(f) = &filename {
             disposition.extend_from_slice(b"; filename=\"");

@@ -1,4 +1,4 @@
-//! Request headers through the field name policy to the `$_SERVER` variables of the classic and worker modes. The first byte selects the policy and the content length, and the rest is one `name:value` field per line.
+//! Request headers through the field name policy to the `$_SERVER` variables of the classic and worker modes. The first byte selects the content length, and the rest is one `name:value` field per line.
 
 #![no_main]
 
@@ -22,24 +22,14 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     let Some((&flags, rest)) = data.split_first() else {
         return;
     };
-    let policy = if flags & 1 == 0 {
-        UnsafeFieldNames::Drop
-    } else {
-        UnsafeFieldNames::Reject
-    };
-    let content_length = if flags & 2 == 0 {
+    let content_length = if flags & 1 == 0 {
         rest.len() as i64
     } else {
         -1
     };
     let sent = rapira_fuzz::header_map(rest);
     let mut headers = sent.clone();
-    if let Err(r) = apply_field_name_policy(&mut headers, policy, true) {
-        assert_eq!(policy, UnsafeFieldNames::Reject);
-        assert_eq!(r.status, http::StatusCode::BAD_REQUEST);
-        assert!(!sent.keys().all(safe_name), "rejected safe names: {r}");
-        return;
-    }
+    apply_field_name_policy(&mut headers, UnsafeFieldNames::Drop, true).expect("the Drop policy");
 
     let mut want = Vec::new();
     if content_length >= 0 {

@@ -48,7 +48,7 @@ pub(crate) fn services() -> &'static [ServiceInfo] {
 
 /// A unary method that rapira routes to PHP.
 pub struct Method {
-    pub(crate) input: MessageIndex,
+    pub input: MessageIndex,
     pub(crate) output: MessageIndex,
     /// The method has `idempotency_level = NO_SIDE_EFFECTS`, so Connect GET can call it.
     pub(crate) idempotent: bool,
@@ -175,7 +175,7 @@ impl Schema {
         &self.services
     }
 
-    pub(crate) fn pool(&self) -> &Arc<DescriptorPool> {
+    pub fn pool(&self) -> &Arc<DescriptorPool> {
         &self.pool
     }
 

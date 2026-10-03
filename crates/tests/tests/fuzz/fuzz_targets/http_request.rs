@@ -3,7 +3,6 @@
 
 #![no_main]
 
-use std::net::Ipv6Addr;
 use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::Duration;
@@ -42,25 +41,6 @@ fn length(v: &HeaderValue) -> Option<u64> {
     s.bytes()
         .all(|b| b.is_ascii_digit())
         .then(|| s.parse().ok())?
-}
-
-/// RFC 9110 Host = uri-host [ ":" port ], https://www.rfc-editor.org/rfc/rfc9110#section-7.2
-/// An http URI has a non-empty host, RFC 9110 section 4.2.1. The http crate rejects a percent-encoded reg-name, so this leaves it out.
-fn is_host(a: &[u8]) -> bool {
-    let (host, port) = match a.iter().rposition(|&b| b == b':') {
-        Some(i) if !a[i..].contains(&b']') => (&a[..i], &a[i + 1..]),
-        _ => (a, &[][..]),
-    };
-    let ip_literal = host
-        .strip_prefix(b"[")
-        .and_then(|h| h.strip_suffix(b"]"))
-        .and_then(|h| std::str::from_utf8(h).ok())
-        .is_some_and(|h| h.parse::<Ipv6Addr>().is_ok());
-    let reg_name = !host.is_empty()
-        && host
-            .iter()
-            .all(|b| b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=".contains(b));
-    port.iter().all(u8::is_ascii_digit) && (ip_literal || reg_name)
 }
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
@@ -167,15 +147,18 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         None => hosts.first().copied().filter(|h| !h.is_empty()),
     };
     assert_eq!(authority.as_deref(), want_authority, "authority");
-    // #193: an absolute-form target rewrites the Host field of Request::$headers, https://github.com/rapira-rs/rapira/issues/193
+    // The fields as received, without the names that the policy drops.
     let keep_all = policy == UnsafeFieldNames::Drop && !superglobals;
-    for name in sent.keys() {
-        assert_eq!(
-            parts.headers.contains_key(name),
-            keep_all || safe_name(name),
-            "field {name}"
-        );
+    let mut want_fields: HeaderMap = sent
+        .iter()
+        .filter(|(n, _)| keep_all || safe_name(n))
+        .map(|(n, v)| (n.clone(), v.clone()))
+        .collect();
+    // #193: an absolute-form target rewrites the Host field of Request::$headers, https://github.com/rapira-rs/rapira/issues/193
+    if let (Some(_), Some(a)) = (uri.authority(), want_authority) {
+        want_fields.insert(HOST, HeaderValue::from_bytes(a).unwrap());
     }
+    assert_eq!(parts.headers, want_fields, "fields");
 
     let peer = Peer {
         remote: Addr::Inet(([127, 0, 0, 1], 40000).into()),
@@ -212,8 +195,8 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // Request::$uri: the listener scheme, the authority or else the listener address, and the path. OPTIONS * gives the root.
     let view = RequestView::new(&built);
     let a = authority.as_deref().unwrap_or(SERVER.as_bytes());
-    // #169: a Host value that is not uri-host [ ":" port ] goes into $uri as it is, https://github.com/rapira-rs/rapira/issues/169
-    if is_host(a) {
+    // #169: rapira puts any Host value into $uri, so $uri is checked only for an authority that http::Uri accepts, https://github.com/rapira-rs/rapira/issues/169
+    if http::uri::Authority::try_from(a).is_ok() {
         let u = Uri::try_from(view.uri_abs.as_str())
             .unwrap_or_else(|e| panic!("$uri {}: {e}", view.uri_abs));
         assert_eq!(
