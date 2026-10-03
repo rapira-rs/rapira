@@ -4,7 +4,6 @@ use std::time::{Duration, Instant};
 use libc::c_int;
 
 use crate::WorkerEnv;
-use crate::lifeline::Lifeline;
 use crate::signals::{MASTER_SIGNALS, SelfPipe, sigset};
 use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY};
 use rapira_scoreboard::{PoolRegion, SharedSlot};
@@ -147,7 +146,9 @@ pub(crate) fn kill(pid: libc::pid_t, sig: c_int) {
 /// Fork source for every pool. The boxed worker closure keeps `Pool` and `Master` free of the closure's type.
 pub(crate) struct Forker<'w> {
     pub self_pipe: SelfPipe,
-    pub lifeline: Lifeline,
+    /// `lifeline_wr` is never written: its close at master exit is what signals master death to every worker's read end. Both ends are CLOEXEC; fork still inherits them.
+    pub lifeline_rd: std::io::PipeReader,
+    pub lifeline_wr: std::io::PipeWriter,
     /// The whole board, for every `WorkerEnv`.
     pub board: &'static [SharedSlot],
     /// The slot range of each pool, in pool order, for every `WorkerEnv`.
@@ -162,7 +163,7 @@ impl Forker<'_> {
         pool: usize,
         slot_view: &'static SharedSlot,
     ) -> std::io::Result<libc::pid_t> {
-        let lifeline_rd: std::os::fd::OwnedFd = self.lifeline.rd.try_clone()?;
+        let lifeline_rd: std::os::fd::OwnedFd = self.lifeline_rd.try_clone()?.into();
 
         let block: libc::sigset_t = sigset(&MASTER_SIGNALS);
         // SAFETY: zeroed sigset_t is fully overwritten by sigprocmask's out-param.
@@ -177,7 +178,7 @@ impl Forker<'_> {
                 unsafe {
                     libc::close(self.self_pipe.rd.as_raw_fd());
                     libc::close(self.self_pipe.wr.as_raw_fd());
-                    libc::close(self.lifeline.wr.as_raw_fd());
+                    libc::close(self.lifeline_wr.as_raw_fd());
 
                     let mut dfl: libc::sigaction = std::mem::zeroed();
                     dfl.sa_sigaction = libc::SIG_DFL;

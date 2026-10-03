@@ -106,7 +106,7 @@ pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::R
     // Built once per boot and never freed, as the board: every forked child reads the same regions.
     let regions: &'static [PoolRegion] = regions.leak();
     let self_pipe: signals::SelfPipe = signals::install_master_signals()?;
-    let lifeline: lifeline::Lifeline = lifeline::Lifeline::create()?;
+    let (lifeline_rd, lifeline_wr) = std::io::pipe().context("lifeline pipe")?;
     let _pidfile: Option<pidfile::PidFile> = match &cfg.pidfile {
         Some(p) => Some(pidfile::PidFile::write(p)?),
         None => None,
@@ -114,7 +114,8 @@ pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::R
 
     let forker = process::Forker {
         self_pipe,
-        lifeline,
+        lifeline_rd,
+        lifeline_wr,
         board,
         regions,
         worker: Box::new(worker),
