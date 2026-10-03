@@ -282,19 +282,22 @@ impl Server {
             );
         }
 
-        Self::init(Config {
-            listen: settings.listen,
-            server_name: settings.server_name,
-            server_port: settings.server_port,
-            max_body_size: settings.max_body_size,
-            write_timeout: settings.write_timeout,
-            unsafe_field_names: settings.unsafe_field_names,
-            superglobals: settings.pool.mode != Mode::Dispatcher,
-            keepalive_timeout: settings.keepalive_timeout,
-            middleware,
-            uploads: settings.uploads,
-            sendfile_root: settings.sendfile_root,
-        })
+        Self {
+            config: Config {
+                listen: settings.listen,
+                server_name: settings.server_name,
+                server_port: settings.server_port,
+                max_body_size: settings.max_body_size,
+                write_timeout: settings.write_timeout,
+                unsafe_field_names: settings.unsafe_field_names,
+                superglobals: settings.pool.mode != Mode::Dispatcher,
+                keepalive_timeout: settings.keepalive_timeout,
+                middleware,
+                uploads: settings.uploads,
+                sendfile_root: settings.sendfile_root,
+            },
+            prepared: None,
+        }
     }
 }
 

@@ -54,15 +54,6 @@ pub struct Server {
     prepared: Option<PreparedListener>,
 }
 
-impl Server {
-    pub(crate) fn init(config: Config) -> Self {
-        Self {
-            config,
-            prepared: None,
-        }
-    }
-}
-
 impl Plugin for Server {
     fn name(&self) -> &'static str {
         "http"
