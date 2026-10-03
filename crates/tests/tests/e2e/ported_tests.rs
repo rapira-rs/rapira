@@ -1,17 +1,26 @@
 use std::{ops::Deref, path::Path};
 
-use http::header::{AUTHORIZATION, COOKIE, HeaderValue, SET_COOKIE};
-use rapira_sapi::{Request, plugin::Mode};
+use http::Method;
+use http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderValue, SET_COOKIE};
+use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
 use tests::{Resp, drain, drain_resp, fixture, req, server_log};
 
 use crate::harness::Spawn;
 
-fn post(fixture_name: &str, query: &str, content_type: Option<&str>, body: Vec<u8>) -> Request {
-    let mut r: Request = req(&format!("/{fixture_name}?{query}"));
-    r.method = "POST".into();
-    r.content_type = content_type.map(|s| s.as_bytes().to_vec());
-    r.body = rapira_sapi::types::Body::Raw(std::io::Cursor::new(body));
+fn post(
+    fixture_name: &str,
+    query: &str,
+    content_type: Option<&str>,
+    body: Vec<u8>,
+) -> http::Request<Vec<u8>> {
+    let mut r = req(&format!("/{fixture_name}?{query}"));
+    *r.method_mut() = Method::POST;
+    if let Some(ct) = content_type {
+        r.headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_str(ct).unwrap());
+    }
+    *r.body_mut() = body;
     r
 }
 
@@ -187,7 +196,7 @@ fn cookies_refresh_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("ported_tests/cookies-worker.php")).spawn();
     for i in 0..3 {
         let mut request = req("/cookies-worker.php");
-        request.headers.append(
+        request.headers_mut().append(
             COOKIE,
             HeaderValue::try_from(format!("foo=bar; i={i}")).unwrap(),
         );
@@ -206,7 +215,7 @@ fn cookies_refresh_worker() -> anyhow::Result<()> {
 fn malformed_cookies_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("ported_tests/cookies.php")).spawn();
     let mut request = req("/cookies.php");
-    request.headers.append(
+    request.headers_mut().append(
         COOKIE,
         HeaderValue::from_static(
             "foo =bar; ===;;==;  .dot.=val  ; PHPSESSID=1234; dup=first; dup=second",
@@ -259,7 +268,7 @@ fn session_roundtrip(mode: Mode, fixture_name: &str) -> anyhow::Result<()> {
         .expect("session cookie must be issued");
 
     let mut request = req(&format!("/{fixture_name}"));
-    request.headers.append(
+    request.headers_mut().append(
         COOKIE,
         HeaderValue::try_from(format!("PHPSESSID={sid}")).unwrap(),
     );
@@ -889,7 +898,7 @@ fn multi_cookie_headers_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("ported_tests/multi-cookie.php")).spawn();
     let mut request = req("/multi-cookie.php");
     request
-        .headers
+        .headers_mut()
         .append(COOKIE, HeaderValue::from_static("a=1; b=2"));
     let (status, body) = drain(submit(srv.addr, request)?);
     assert_eq!((status, body.as_str()), (200, "1,2,a=1; b=2"));
@@ -911,7 +920,7 @@ fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
         (AUTHORIZATION, "Bearer two"),
     ] {
         request
-            .headers
+            .headers_mut()
             .append(name, HeaderValue::from_static(value));
     }
     let (status, body) = drain(submit(srv.addr, request)?);
@@ -968,7 +977,9 @@ fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     );
     let mut ctype = b"multipart/form-data; boundary=".to_vec();
     ctype.extend_from_slice(boundary);
-    request.content_type = Some(ctype);
+    request
+        .headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_bytes(&ctype).unwrap());
     let (status, body) = drain(submit(srv.addr, request)?);
     srv.stop();
     assert_upload_and_cleanup(status, &body);

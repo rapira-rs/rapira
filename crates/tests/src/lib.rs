@@ -1,5 +1,5 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
-use rapira_sapi::{Addr, Frame, Request};
+use rapira_sapi::Frame;
 use std::path::{Path, PathBuf};
 use tokio::sync::mpsc;
 
@@ -38,26 +38,13 @@ pub fn assert_skip_allowed(fixture: &str) {
     }
 }
 
-/// Build a minimal `GET` request for `uri`.
-pub fn req(uri: &str) -> Request {
-    Request {
-        https: false,
-        method: "GET".into(),
-        uri: uri.into(),
-        target: None,
-        authority: None,
-        protocol: "HTTP/1.1".into(),
-        remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-        server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-        server_name: "localhost".into(),
-        server_port: 8080,
-        headers: HeaderMap::new(),
-        content_type: None,
-        content_length: 0,
-        body: rapira_sapi::types::Body::Raw(std::io::Cursor::new(Vec::new())),
-        received_at: 0.0,
-        tls: None,
-    }
+/// A GET request for `uri` with `Host: localhost`; the body is the raw bytes.
+pub fn req(uri: &str) -> http::Request<Vec<u8>> {
+    http::Request::builder()
+        .uri(uri)
+        .header(http::header::HOST, "localhost")
+        .body(Vec::new())
+        .expect("a valid test request")
 }
 
 /// The FileDescriptorSet of `fixtures/grpc/echo.proto`.

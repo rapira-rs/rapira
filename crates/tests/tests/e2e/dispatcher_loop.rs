@@ -1,12 +1,12 @@
-use std::io::{Cursor, Read, Write};
+use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::Context;
-use http::HeaderValue;
-use rapira_sapi::types::Body;
+use http::header::{CONTENT_TYPE, HOST};
+use http::{HeaderValue, Method, Version};
 use rapira_sapi::{Frame, plugin::Mode};
 use tests::wire::submit;
 use tests::{drain, drain_resp, fixture, req, server_log};
@@ -50,7 +50,7 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     );
 
     let mut rq2 = req("/second");
-    rq2.body = Body::Raw(Cursor::new(b"two".to_vec()));
+    *rq2.body_mut() = b"two".to_vec();
     let resp = drain_resp(submit(srv.addr, rq2)?);
     assert_eq!(resp.header("x-rapira-target").as_deref(), Some("/second"));
     assert_eq!(resp.body_string(), "method=GET body=two");
@@ -327,16 +327,19 @@ fn abandoned_mid_stream_exchange_truncates() -> anyhow::Result<()> {
 const BOUNDARY: &str = "rapira-test-boundary";
 
 /// A POST of a multipart/form-data body; each part is its header lines and its content.
-fn multipart(uri: &str, parts: &[(&str, &str)]) -> rapira_sapi::Request {
+fn multipart(uri: &str, parts: &[(&str, &str)]) -> http::Request<Vec<u8>> {
     let mut body = String::new();
     for (headers, content) in parts {
         body += &format!("--{BOUNDARY}\r\n{headers}\r\n\r\n{content}\r\n");
     }
     body += &format!("--{BOUNDARY}--\r\n");
     let mut rq = req(uri);
-    rq.method = "POST".into();
-    rq.content_type = Some(format!("multipart/form-data; boundary={BOUNDARY}").into_bytes());
-    rq.body = Body::Raw(Cursor::new(body.into_bytes()));
+    *rq.method_mut() = Method::POST;
+    rq.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(&format!("multipart/form-data; boundary={BOUNDARY}")).unwrap(),
+    );
+    *rq.body_mut() = body.into_bytes();
     rq
 }
 
@@ -412,7 +415,7 @@ fn head_and_204_drop_the_body() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php")).spawn();
 
     let mut head_rq = req("/");
-    head_rq.method = "HEAD".into();
+    *head_rq.method_mut() = Method::HEAD;
     let (status, _) = drain(submit(srv.addr, head_rq)?);
     assert_eq!(status, 200, "HEAD keeps the GET head");
 
@@ -496,7 +499,8 @@ fn plugin_stamped_fields_pass_through() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php")).spawn();
 
     let mut rq = req("/p");
-    rq.protocol = "HTTP/1.0".into();
+    *rq.version_mut() = Version::HTTP_10;
+    rq.headers_mut().remove(HOST);
     let (status, body) = drain(submit(srv.addr, rq)?);
     assert_eq!(status, 200);
     let uri = format!("uri=http://{}/p", srv.addr);
@@ -543,8 +547,9 @@ fn uri_synthesis_covers_asterisk_form() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php")).spawn();
 
     let mut rq = req("*");
-    rq.method = "OPTIONS".into();
-    rq.authority = Some(srv.addr.to_string().into_bytes());
+    *rq.method_mut() = Method::OPTIONS;
+    rq.headers_mut()
+        .insert(HOST, HeaderValue::from_str(&srv.addr.to_string())?);
     let (status, body) = drain(submit(srv.addr, rq)?);
     assert_eq!(status, 200);
     let uri = format!("uri=http://{}/", srv.addr);
@@ -854,12 +859,12 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
     let mut accepted = 0;
     for case in cases {
         let mut rq = req("/");
-        rq.method = case.method.into();
+        *rq.method_mut() = case.method.parse::<Method>()?;
         for line in case.content_type {
-            rq.headers
-                .append(http::header::CONTENT_TYPE, HeaderValue::from_static(line));
+            rq.headers_mut()
+                .append(CONTENT_TYPE, HeaderValue::from_static(line));
         }
-        rq.body = Body::Raw(Cursor::new(case.body.clone()));
+        *rq.body_mut() = case.body.clone();
         let (status, body) = drain(submit(srv.addr, rq)?);
         assert_eq!(
             status,
@@ -1055,9 +1060,9 @@ fn sendfile_payload(srv: &Server) -> PathBuf {
     path
 }
 
-fn with_path_header(query: &str, path: &Path) -> rapira_sapi::Request {
+fn with_path_header(query: &str, path: &Path) -> http::Request<Vec<u8>> {
     let mut rq = req(query);
-    rq.headers.append(
+    rq.headers_mut().append(
         "x-path",
         HeaderValue::try_from(path.to_string_lossy().into_owned()).unwrap(),
     );
