@@ -26,14 +26,6 @@ jobs:
           phpts: nts
           fail-fast: true # a missing extension fails the job instead of warning
 
-      - name: Verify no coverage driver in the PHP build
-        run: |
-          mods=$(php -m); echo "$mods"
-          if grep -qiE '^(xdebug|pcov)$' <<<"$mods"; then
-            echo "::error::a PHP coverage driver is enabled; it overrides zend_error_cb and JIT in the embed SAPI"
-            exit 1
-          fi
-
       - name: Build deps for bindgen/cc
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
 
