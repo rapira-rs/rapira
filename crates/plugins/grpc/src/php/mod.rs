@@ -1,10 +1,8 @@
-use std::ffi::{CStr, c_void};
+use std::ffi::c_void;
 
 use rapira_sapi::plugin::PhpPart;
 use rapira_sapi::work::DispatcherClasses;
 use rapira_sapi::{zend_class_entry, zend_object, zval};
-
-use crate::MethodInfo;
 
 pub mod call;
 mod values;
@@ -57,51 +55,3 @@ pub static PHP_PART: PhpPart = PhpPart {
     register: rapira_grpc_register_classes,
     dispatcher: DISPATCHER_CLASSES,
 };
-
-/// `Rapira\Grpc\MethodKind`: client streaming streams the request, server streaming streams the response.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum MethodKind {
-    Unary,
-    ServerStreaming,
-    ClientStreaming,
-    BidiStreaming,
-}
-
-impl MethodKind {
-    pub(crate) fn of(m: &MethodInfo) -> Self {
-        match (m.client_streaming, m.server_streaming) {
-            (false, false) => Self::Unary,
-            (false, true) => Self::ServerStreaming,
-            (true, false) => Self::ClientStreaming,
-            (true, true) => Self::BidiStreaming,
-        }
-    }
-
-    /// From the backing value of a case.
-    pub(crate) fn from_value(value: &[u8]) -> Option<Self> {
-        Some(match value {
-            b"unary" => Self::Unary,
-            b"server-streaming" => Self::ServerStreaming,
-            b"client-streaming" => Self::ClientStreaming,
-            b"bidi-streaming" => Self::BidiStreaming,
-            _ => return None,
-        })
-    }
-
-    pub(crate) fn case(self) -> &'static CStr {
-        match self {
-            Self::Unary => c"Unary",
-            Self::ServerStreaming => c"ServerStreaming",
-            Self::ClientStreaming => c"ClientStreaming",
-            Self::BidiStreaming => c"BidiStreaming",
-        }
-    }
-
-    pub(crate) fn streams_request(self) -> bool {
-        matches!(self, Self::ClientStreaming | Self::BidiStreaming)
-    }
-
-    pub(crate) fn streams_response(self) -> bool {
-        matches!(self, Self::ServerStreaming | Self::BidiStreaming)
-    }
-}

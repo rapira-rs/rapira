@@ -11,7 +11,7 @@ use rapira_sapi::{
     zend_type_error, zend_value_error, zval, zval_add_ref, zval_ptr_dtor,
 };
 
-use super::{MethodKind, rapira_ce_grpc_exception, rapira_ce_grpc_status};
+use super::{rapira_ce_grpc_exception, rapira_ce_grpc_status};
 
 /// # Safety
 /// `obj` is under construction; strings/zvals are ZPP-owned for the call, and all ctors below share this contract.
@@ -189,13 +189,12 @@ pub unsafe extern "C" fn rapira_rs_grpc_kind_streams(
 ) -> bool {
     guard(false, || {
         let kind = unsafe { std::slice::from_raw_parts(value.cast::<u8>(), len) };
-        MethodKind::from_value(kind).is_some_and(|k| {
-            if request {
-                k.streams_request()
-            } else {
-                k.streams_response()
-            }
-        })
+        match kind {
+            b"bidi-streaming" => true,
+            b"client-streaming" => request,
+            b"server-streaming" => !request,
+            _ => false,
+        }
     })
 }
 

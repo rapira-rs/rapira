@@ -20,7 +20,7 @@ use rapira_sapi::{
 use tokio::sync::oneshot;
 
 use super::{
-    CallObj, MetadataObj, MethodKind, rapira_ce_grpc_context, rapira_ce_grpc_error_detail,
+    CallObj, MetadataObj, rapira_ce_grpc_context, rapira_ce_grpc_error_detail,
     rapira_ce_grpc_metadata, rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind,
     rapira_ce_grpc_protocol, rapira_ce_grpc_service_info, rapira_ce_grpc_status,
     rapira_ce_internal_grpc_response_metadata,
@@ -37,12 +37,14 @@ unsafe fn method_info(dst: *mut zval, m: &MethodInfo) {
         zend::prop_stringl(ce, obj, c"name", m.name.as_bytes());
         zend::prop_stringl(ce, obj, c"inputType", m.input_type.as_bytes());
         zend::prop_stringl(ce, obj, c"outputType", m.output_type.as_bytes());
+        let case = match (m.client_streaming, m.server_streaming) {
+            (false, false) => c"Unary",
+            (false, true) => c"ServerStreaming",
+            (true, false) => c"ClientStreaming",
+            (true, true) => c"BidiStreaming",
+        };
         let mut kind: zval = std::mem::zeroed();
-        rapira_zval_enum_case(
-            &mut kind,
-            rapira_ce_grpc_method_kind,
-            MethodKind::of(m).case().as_ptr(),
-        );
+        rapira_zval_enum_case(&mut kind, rapira_ce_grpc_method_kind, case.as_ptr());
         zend::prop_zval(ce, obj, c"kind", &mut kind);
         zval_ptr_dtor(&mut kind);
     }
