@@ -1,13 +1,5 @@
 #include "rapira_grpc.h"
-#include "ext/spl/spl_exceptions.h"
 #include "rapira_grpc_arginfo.h"
-#include "zend_API.h"
-#include "zend_exceptions.h"
-#include "zend_object_handlers.h"
-#include "zend_objects.h"
-#include "zend_objects_API.h"
-#include "zend_property_hooks.h"
-#include "zend_types.h"
 
 zend_class_entry *rapira_ce_grpc_status_code;
 zend_class_entry *rapira_ce_grpc_method_kind;

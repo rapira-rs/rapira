@@ -1,8 +1,4 @@
 #include "rapira_sapi.h"
-#include "zend.h"
-#include "zend_API.h"
-#include "zend_enum.h"
-#include "zend_exceptions.h"
 
 // rust glue; the verbs throw from Rust and report false with the throw pending
 extern void rapira_rs_log_call(zend_string *message, zend_object *level,

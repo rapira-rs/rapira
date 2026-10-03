@@ -1,13 +1,5 @@
 #include "rapira_http.h"
-#include "ext/spl/spl_exceptions.h"
 #include "rapira_http_arginfo.h"
-#include "zend_API.h"
-#include "zend_exceptions.h"
-#include "zend_object_handlers.h"
-#include "zend_objects.h"
-#include "zend_objects_API.h"
-#include "zend_property_hooks.h"
-#include "zend_types.h"
 
 zend_class_entry *rapira_ce_http_multipart;
 zend_class_entry *rapira_ce_internal_http_dispatcher;

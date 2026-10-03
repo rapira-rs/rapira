@@ -1,6 +1,4 @@
 #include "rapira_http.h"
-#include "zend_API.h"
-#include "zend_types.h"
 
 // rust glue (src/php/values.rs): these return false with a PHP exception already pending
 extern bool rapira_rs_ctor_form_field(zend_object *obj, zend_string *name,

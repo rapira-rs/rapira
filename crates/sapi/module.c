@@ -1,6 +1,4 @@
-#include "php.h"
 #include "rapira_sapi.h"
-#include "zend_types.h"
 
 extern void rapira_rs_finish_response(void);
 

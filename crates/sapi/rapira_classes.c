@@ -1,14 +1,7 @@
 #include "rapira_sapi.h"
-#include "ext/spl/spl_exceptions.h"
+
 #include "rapira_arginfo.h"
 #include "rapira_exception_arginfo.h"
-#include "zend_API.h"
-#include "zend_exceptions.h"
-#include "zend_object_handlers.h"
-#include "zend_objects.h"
-#include "zend_objects_API.h"
-#include "zend_property_hooks.h"
-#include "zend_types.h"
 
 // rust glue (src/values.rs): these return false with a PHP exception already pending
 extern bool rapira_rs_ctor_inet_address(zend_object *obj, zend_string *ip,
