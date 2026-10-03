@@ -117,6 +117,8 @@ void rapira_receive_untimed(void) {
 // zend_set_timeout re-assigns EG(timeout_seconds) itself (zend_execute_API.c).
 // receive() calls this without rapira_receive_untimed() when a job is queued:
 // the capture is then still due, and zend_set_timeout(0) keeps a running timer.
+// Callers: receive() for each pulled unit, and rapira_request_init for each
+// worker job.
 void rapira_receive_timed(void) {
     if (rapira_job_timeout < 0) {
         rapira_job_timeout = EG(timeout_seconds);
@@ -137,11 +139,9 @@ static void rapira_request_init(void) {
     // init_compiler clears this per cycle (zend_compile.c:461), not per job
     CG(unclean_shutdown) = false;
 
-    // reset_signals=0: the cycle's php_request_startup installed the SIGPROF handler
-    if (rapira_job_timeout < 0) {
-        rapira_job_timeout = EG(timeout_seconds);
-    }
-    zend_set_timeout(rapira_job_timeout, false);
+    // arms the job budget as receive() does; reset_signals=0 there: the cycle's
+    // php_request_startup installed the SIGPROF handler
+    rapira_receive_timed();
 
     if (PG(expose_php)) {
         sapi_add_header(SAPI_PHP_VERSION_HEADER,
