@@ -6,7 +6,7 @@ use libc::c_int;
 
 use crate::pctl::{Pctl, SignalAction};
 use crate::pool::Pool;
-use crate::process::{ExitVerdict, Forker, WorkerProc, reap_all};
+use crate::process::{Forker, reap_all};
 use crate::signals::errno_get;
 use crate::{MasterConfig, StopReason};
 
@@ -54,18 +54,24 @@ impl<'w> Master<'w> {
         match self.pctl.on_signal(signo, now + self.control_timeout) {
             SignalAction::Stop => self.begin_stop(),
             SignalAction::Forced => {
-                self.force_stop();
+                for p in &self.pools {
+                    p.signal_all(libc::SIGTERM);
+                }
                 Some(StopReason::Forced)
             }
             SignalAction::Reload => {
                 // A pool that still drains its chain swallows the signal.
                 if self.pools.iter().all(|p| p.reload.is_none()) {
-                    self.begin_reload(now);
+                    for p in &mut self.pools {
+                        p.begin_reload(now, &mut self.spawner);
+                    }
                 }
                 None
             }
             SignalAction::Status => {
-                self.log_status();
+                for p in &self.pools {
+                    p.log_status();
+                }
                 None
             }
             SignalAction::Ignore => None,
@@ -82,52 +88,25 @@ impl<'w> Master<'w> {
         None
     }
 
-    fn force_stop(&self) {
-        for p in &self.pools {
-            p.signal_all(libc::SIGTERM);
-        }
-    }
-
-    fn escalate_stop(&mut self, now: Instant) {
-        let sig = self.pctl.escalate(now);
-        for p in &self.pools {
-            p.signal_all(sig);
-        }
-    }
-
     fn drained(&self) -> bool {
         self.pools.iter().all(|p| p.procs.is_empty())
     }
 
-    fn begin_reload(&mut self, now: Instant) {
-        for p in &mut self.pools {
-            p.begin_reload(now, &mut self.spawner);
-        }
-    }
-
-    fn route_exit(
-        &mut self,
-        pool: usize,
-        w: WorkerProc,
-        verdict: ExitVerdict,
-        now: Instant,
-    ) -> anyhow::Result<()> {
-        let stopping = self.pctl.is_stopping();
-        self.pools[pool].on_child_exit(w, verdict, now, stopping, &mut self.spawner)?;
-        Ok(())
-    }
-
     fn reap(&mut self, now: Instant) -> anyhow::Result<()> {
         let buried = reap_all(&mut self.pools);
+        let stopping = self.pctl.is_stopping();
         for (pool, w, verdict) in buried {
-            self.route_exit(pool, w, verdict, now)?;
+            self.pools[pool].on_child_exit(w, verdict, now, stopping, &mut self.spawner)?;
         }
         Ok(())
     }
 
     fn fire_due_deadlines(&mut self, now: Instant) {
         if self.pctl.stop_deadline().is_some_and(|t| now >= t) {
-            self.escalate_stop(now);
+            let sig = self.pctl.escalate(now);
+            for p in &self.pools {
+                p.signal_all(sig);
+            }
         }
         for p in &mut self.pools {
             p.fire_due(now, &mut self.spawner);
@@ -152,12 +131,6 @@ impl<'w> Master<'w> {
             next = next.min(d);
         }
         next
-    }
-
-    fn log_status(&self) {
-        for p in &self.pools {
-            p.log_status();
-        }
     }
 
     pub(crate) fn run_loop(&mut self) -> anyhow::Result<StopReason> {
