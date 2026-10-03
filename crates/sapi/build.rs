@@ -1,6 +1,3 @@
-#[macro_use]
-mod macros;
-
 use std::env;
 use std::path::PathBuf;
 
@@ -47,10 +44,7 @@ fn main() -> anyhow::Result<()> {
     }
 
     for binding in ALLOWED_BINDINGS {
-        bindings = bindings
-            .allowlist_function(binding)
-            .allowlist_type(binding)
-            .allowlist_var(binding);
+        bindings = bindings.allowlist_item(binding);
     }
 
     bindings
