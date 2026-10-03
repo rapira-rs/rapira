@@ -29,7 +29,7 @@ extern zend_class_entry *rapira_ce_grpc_protocol;
 extern zend_class_entry *rapira_ce_grpc_status;
 extern zend_class_entry *rapira_ce_grpc_metadata;
 
-// the register function of the grpc plugin part
+// the register function of the grpc plugin
 void rapira_grpc_register_classes(void);
 
 static zend_always_inline rapira_grpc_call_obj *

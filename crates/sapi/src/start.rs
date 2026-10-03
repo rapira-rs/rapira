@@ -12,11 +12,7 @@ use crate::quota::{self, WorkerHooks};
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
 use crate::work::{DispatcherClasses, Sink, Work};
-use crate::{
-    classic_worker::classic_worker,
-    plugin::{Mode, PhpPart},
-    *,
-};
+use crate::{classic_worker::classic_worker, plugin::Mode, *};
 
 thread_local! {
     static JOB_RX: RefCell<Option<JobRx>> = const { RefCell::new(None) };
@@ -47,8 +43,8 @@ impl JobRx {
 }
 
 thread_local! {
-    /// The parts that MINIT registers after the base classes. MINIT runs on the thread that calls `boot_master`.
-    static PARTS: RefCell<Vec<PhpPart>> = const { RefCell::new(Vec::new()) };
+    /// The register functions that MINIT calls after the base classes. MINIT runs on the thread that calls `boot_master`.
+    static REGISTER_FNS: RefCell<Vec<unsafe extern "C" fn()>> = const { RefCell::new(Vec::new()) };
 }
 
 pub struct PhpModule {}
@@ -89,10 +85,10 @@ pub fn linked_php_version() -> String {
         .into_owned()
 }
 
-/// MINIT once in the master. Base classes first, then each part in order.
-pub fn boot_master(parts: &[PhpPart]) -> anyhow::Result<PhpModule> {
+/// MINIT once in the master. Base classes first, then each register function in order.
+pub fn boot_master(register: &[unsafe extern "C" fn()]) -> anyhow::Result<PhpModule> {
     check_linked_php()?;
-    PARTS.set(parts.to_vec());
+    REGISTER_FNS.set(register.to_vec());
     let mut module: _sapi_module_struct = module::build_sapi_module();
     let started: bool = unsafe {
         // The Rust runtime sets SIGPIPE to SIG_IGN before main, so a write to a closed peer returns EPIPE: https://doc.rust-lang.org/beta/unstable-book/compiler-flags/on-broken-pipe.html
@@ -113,10 +109,10 @@ pub fn boot_master(parts: &[PhpPart]) -> anyhow::Result<PhpModule> {
 /// MINIT calls it after the base classes (module.c).
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_register_plugin_classes() {
-    PARTS.with_borrow(|parts| {
-        for part in parts {
-            // SAFETY: MINIT runs on the booting thread, and the base classes the part extends are registered.
-            unsafe { (part.register)() };
+    REGISTER_FNS.with_borrow(|register| {
+        for f in register {
+            // SAFETY: MINIT runs on the booting thread, and the base classes the plugin classes extend are registered.
+            unsafe { f() };
         }
     });
 }

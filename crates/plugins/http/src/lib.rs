@@ -3,7 +3,8 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use rapira_net::{ListenAddr, PreparedListener};
-use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
+use rapira_sapi::plugin::{Mode, Plugin, Worker};
+use rapira_sapi::work::DispatcherClasses;
 
 use exchange::Exchange;
 
@@ -19,7 +20,7 @@ pub mod request;
 mod response;
 mod serve;
 
-pub use php::PHP_PART;
+pub use php::rapira_http_register_classes;
 
 #[derive(Clone)]
 pub struct Config {
@@ -71,8 +72,8 @@ impl Plugin for Server {
         &[Mode::Classic, Mode::Worker, Mode::Dispatcher]
     }
 
-    fn php(&self) -> PhpPart {
-        PHP_PART
+    fn dispatcher(&self) -> DispatcherClasses {
+        php::DISPATCHER_CLASSES
     }
 
     fn prepare(&mut self) -> Result<()> {

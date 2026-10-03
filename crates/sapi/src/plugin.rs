@@ -9,14 +9,6 @@ use crate::work::{DispatcherClasses, Sink};
 
 pub use rapira_config::Mode;
 
-/// One plugin's PHP surface.
-#[derive(Clone, Copy)]
-pub struct PhpPart {
-    /// Registers the plugin's classes. Runs in MINIT after the base classes.
-    pub register: unsafe extern "C" fn(),
-    pub dispatcher: DispatcherClasses,
-}
-
 /// What the worker hands to [`Plugin::serve`].
 pub struct Worker {
     pub handle: tokio::runtime::Handle,
@@ -32,8 +24,8 @@ pub trait Plugin: Send + 'static {
     fn name(&self) -> &'static str;
     /// The pool modes this plugin serves. The root refuses another mode at boot.
     fn modes(&self) -> &'static [Mode];
-    /// The plugin's PHP surface.
-    fn php(&self) -> PhpPart;
+    /// The dispatcher surface receive() serves in dispatcher mode.
+    fn dispatcher(&self) -> DispatcherClasses;
     /// Master side, before the fork, no runtime.
     fn prepare(&mut self) -> anyhow::Result<()>;
     /// Worker side, on the plugin thread. Returns after the stop signal and the drain.

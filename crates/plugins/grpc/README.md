@@ -8,7 +8,8 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 
 - `name()` returns `grpc`: the TOML table and the dispatcher name that PHP sees.
 - `modes()` accepts dispatcher mode only.
-- `php()` returns `PHP_PART`, the `PhpPart` of the plugin: `register`, the function that MINIT calls after the base classes to register the `Rapira\Grpc` classes, and `dispatcher`, the dispatcher classes.
+- `dispatcher()` returns `DISPATCHER_CLASSES`, the dispatcher classes.
+- The crate exports `rapira_grpc_register_classes`. MINIT calls it after the base classes to register the `Rapira\Grpc` classes.
 - `prepare()` runs in the master before the fork, with no runtime. It sets the service list that `getServices()` returns, binds the listener with `rapira_net::bind`, and builds the routes that the plugin answers without PHP: health, and reflection when it is on.
 - `serve()` runs in the worker on the plugin thread `rapira-grpc`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the sink to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
 
@@ -36,7 +37,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
 - `src/call.rs`: the `Call` unit and its `Work` impl, and the `UnaryCall`, `UnaryReply` and `RpcStatus` types.
-- `src/php/`: the Rust behind the PHP methods: the class entries, `PHP_PART` and `DISPATCHER_CLASSES` (`mod.rs`), the call and its metadata (`call.rs`), and the value class constructors (`values.rs`).
+- `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES` and the declaration of `rapira_grpc_register_classes` (`mod.rs`), the call and its metadata (`call.rs`), and the value class constructors (`values.rs`).
 
 ## Protocols
 

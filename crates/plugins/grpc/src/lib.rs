@@ -6,7 +6,8 @@ use connectrpc::Router;
 use connectrpc_health::StaticChecker;
 use connectrpc_reflection::Reflector;
 use rapira_net::{ListenAddr, PreparedListener};
-use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
+use rapira_sapi::plugin::{Mode, Plugin, Worker};
+use rapira_sapi::work::DispatcherClasses;
 
 mod call;
 pub mod config;
@@ -16,7 +17,7 @@ pub mod schema;
 mod serve;
 
 use call::{Call, RpcStatus, UnaryCall, UnaryReply};
-pub use php::PHP_PART;
+pub use php::rapira_grpc_register_classes;
 use schema::{MethodInfo, Schema, set_services};
 
 #[derive(Clone)]
@@ -57,8 +58,8 @@ impl Plugin for Server {
         &[Mode::Dispatcher]
     }
 
-    fn php(&self) -> PhpPart {
-        PHP_PART
+    fn dispatcher(&self) -> DispatcherClasses {
+        php::DISPATCHER_CLASSES
     }
 
     fn prepare(&mut self) -> Result<()> {

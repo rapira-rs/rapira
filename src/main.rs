@@ -122,8 +122,10 @@ fn serve(config: &Path) -> anyhow::Result<()> {
     let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = runs.into_iter().unzip();
 
     // MINIT once, after every pool bound its listeners. Every linked plugin registers its classes, whatever pools are configured.
-    let module: rapira_sapi::PhpModule =
-        rapira_sapi::boot_master(&[rapira_http::PHP_PART, rapira_grpc::PHP_PART])?;
+    let module: rapira_sapi::PhpModule = rapira_sapi::boot_master(&[
+        rapira_http::rapira_http_register_classes,
+        rapira_grpc::rapira_grpc_register_classes,
+    ])?;
 
     // forks ------------------------------------------------------------------
     let grace: Duration = settings.supervisor.process_control_timeout;

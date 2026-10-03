@@ -77,7 +77,7 @@ pub fn worker_body(
         slot: env.slot_view,
     };
 
-    let rapira = Rapira::start_worker(mode, entrypoint, hooks, plugin.php().dispatcher);
+    let rapira = Rapira::start_worker(mode, entrypoint, hooks, plugin.dispatcher());
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 

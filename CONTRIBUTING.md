@@ -83,7 +83,7 @@ To add a plugin:
 - In the root `Cargo.toml`, add the crate to the workspace `members`, to `[workspace.dependencies]` and to the `[dependencies]` of `rapira_core`.
 - In `src/settings.rs`, add its table to `FileConfig` and its settings to `Settings`.
 - In `settings` in `src/settings.rs`, call its `resolve`, and add its table to the check that refuses a file with no plugin table.
-- In `serve` in `src/main.rs`, build the plugin with its pool, and add its `PhpPart` to the `boot_master` call.
+- In `serve` in `src/main.rs`, build the plugin with its pool, and add its register function to the `boot_master` call.
 
 ## Pull requests
 

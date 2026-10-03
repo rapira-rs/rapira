@@ -18,7 +18,7 @@ typedef struct {
 // (src/php/mod.rs).
 extern zend_class_entry *rapira_ce_http_multipart;
 
-// the register function of the http plugin part
+// the register function of the http plugin
 void rapira_http_register_classes(void);
 
 static zend_always_inline rapira_exchange_obj *

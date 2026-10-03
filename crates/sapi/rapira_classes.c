@@ -131,7 +131,7 @@ void rapira_register_classes(void) {
     rapira_info_handlers.offset = offsetof(rapira_dispatcher_info_obj, std);
 }
 
-// start.rs: runs the register function of each plugin part, in the boot order
+// start.rs: runs each plugin register function, in the boot order
 extern void rapira_rs_register_plugin_classes(void);
 
 // the plugin classes extend the base classes, so the base classes register first

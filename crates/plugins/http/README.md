@@ -8,7 +8,8 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 
 - `name()` returns `http`: the TOML table and the dispatcher name that PHP sees.
 - `modes()` accepts the classic, worker and dispatcher modes.
-- `php()` returns `PHP_PART`, the `PhpPart` of the plugin: `register`, the function that MINIT calls after the base classes to register the `Rapira\Http` classes, and `dispatcher`, the dispatcher classes of dispatcher mode.
+- `dispatcher()` returns `DISPATCHER_CLASSES`, the dispatcher classes of dispatcher mode.
+- The crate exports `rapira_http_register_classes`. MINIT calls it after the base classes to register the `Rapira\Http` classes.
 - `prepare()` runs in the master before the fork, with no runtime. It removes the spool dirs of dead workers and binds the listener with `rapira_net::bind`.
 - `serve()` runs in the worker on the plugin thread `rapira-http`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the sink to the PHP thread, the stop flag, the drain bound `drain_grace`, the entrypoint and the pool mode. After the stop, the plugin drains within `worker.drain_grace` and returns.
 
@@ -44,7 +45,7 @@ The client gets 503 when the intake of the worker stays full for 30 seconds, and
 - `src/bridge.rs`: the reply body that streams the PHP frames and the `sendFile` slices, and the write timeout.
 - `src/exchange.rs`: the `Exchange` unit and its `Work` impl.
 - `src/multipart.rs`: the multipart parser and the spool dirs of dispatcher mode.
-- `src/php/`: the Rust behind the PHP methods: the class entries, `PHP_PART` and `DISPATCHER_CLASSES` (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), the value class constructors (`values.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
+- `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES` and the declaration of `rapira_http_register_classes` (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), the value class constructors (`values.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
 
 ## Middleware
 

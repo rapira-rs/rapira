@@ -73,7 +73,7 @@ typedef struct {
     zend_object std;
 } rapira_dispatcher_info_obj;
 
-// Class entries of the base stubs; rapira_register_classes assigns them in MINIT, before the plugin parts register and before any object of these classes can exist.
+// Class entries of the base stubs; rapira_register_classes assigns them in MINIT, before the plugin classes register and before any object of these classes can exist.
 // Rust binds the entries it reads as static muts (allowed_bindings.rs); the others are C-only.
 extern zend_class_entry *rapira_ce_throwable;
 extern zend_class_entry *rapira_ce_work;
@@ -91,7 +91,7 @@ extern zend_class_entry *rapira_ce_tls;
 extern zend_class_entry *rapira_ce_inet_address;
 extern zend_class_entry *rapira_ce_unix_address;
 
-// rapira_register_classes fills both before the plugin parts register.
+// rapira_register_classes fills both before the plugin classes register.
 // A plugin's Dispatcher class: std handlers without clone.
 extern zend_object_handlers rapira_dispatcher_handlers;
 // A plugin's DispatcherInfo class: the rapira_dispatcher_info_obj layout.

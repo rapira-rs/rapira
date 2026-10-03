@@ -1,6 +1,5 @@
 use std::ffi::c_void;
 
-use rapira_sapi::plugin::PhpPart;
 use rapira_sapi::work::DispatcherClasses;
 use rapira_sapi::{zend_class_entry, zend_object, zval};
 
@@ -24,7 +23,7 @@ unsafe extern "C" {
     pub static mut rapira_ce_internal_grpc_dispatcher_info: *mut zend_class_entry;
     pub static mut rapira_ce_internal_grpc_unary_call: *mut zend_class_entry;
     pub static mut rapira_ce_internal_grpc_response_metadata: *mut zend_class_entry;
-    fn rapira_grpc_register_classes();
+    pub fn rapira_grpc_register_classes();
 }
 
 /// Mirrors `rapira_grpc_call_obj` in rapira_grpc.h. The C fields sit before `std`.
@@ -49,9 +48,4 @@ pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {
     info: || unsafe { rapira_ce_internal_grpc_dispatcher_info },
     unit: || unsafe { rapira_ce_internal_grpc_unary_call },
     busy: c"receive() while a Rapira\\Grpc\\UnaryCall is unfinalized; finalize it first",
-};
-
-pub static PHP_PART: PhpPart = PhpPart {
-    register: rapira_grpc_register_classes,
-    dispatcher: DISPATCHER_CLASSES,
 };
