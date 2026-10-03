@@ -176,16 +176,19 @@ impl Server {
                 }
             }
         }
-        Ok(Self::init(Config {
-            listen: settings.listen,
-            schema,
-            reflection: settings.reflection,
-            default_timeout: settings.default_timeout,
-            max_timeout: settings.max_timeout,
-            keepalive_interval: settings.keepalive_interval,
-            keepalive_timeout: settings.keepalive_timeout,
-            interceptors,
-        }))
+        Ok(Self {
+            config: Config {
+                listen: settings.listen,
+                schema,
+                reflection: settings.reflection,
+                default_timeout: settings.default_timeout,
+                max_timeout: settings.max_timeout,
+                keepalive_interval: settings.keepalive_interval,
+                keepalive_timeout: settings.keepalive_timeout,
+                interceptors,
+            },
+            prepared: None,
+        })
     }
 }
 

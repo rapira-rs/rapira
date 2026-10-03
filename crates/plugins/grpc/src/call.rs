@@ -67,11 +67,6 @@ impl Call {
         };
         (call, rx)
     }
-
-    /// Commits the outcome, as a finalize from PHP does.
-    pub(crate) fn respond(self, reply: UnaryReply) {
-        let _ = self.reply.send(reply);
-    }
 }
 
 impl Work for Call {
@@ -91,7 +86,7 @@ impl Work for Call {
     }
 
     fn shed(self: Box<Self>) {
-        self.respond(UnaryReply {
+        let _ = self.reply.send(UnaryReply {
             headers: HeaderMap::new(),
             trailers: HeaderMap::new(),
             outcome: Err(RpcStatus {

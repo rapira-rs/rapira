@@ -49,15 +49,6 @@ pub(crate) struct Prepared {
     pub(crate) health: Arc<StaticChecker>,
 }
 
-impl Server {
-    pub(crate) fn init(config: Config) -> Self {
-        Self {
-            config,
-            prepared: None,
-        }
-    }
-}
-
 impl Plugin for Server {
     fn name(&self) -> &'static str {
         "grpc"
