@@ -71,7 +71,10 @@ fn php_child_processes_inherit_no_socket() {
 fn unix_socket_file_mode_live_refusal_and_stale_reclaim() {
     let dir = scratch_dir();
     let sock = dir.join("http.sock");
-    let spawn = || Spawn::http(Mode::Dispatcher, fixture_path(ECHO)).http_unix(&sock);
+    let spawn = || {
+        Spawn::http(Mode::Dispatcher, fixture_path(ECHO))
+            .http_listen(ListenAddr::Unix(sock.clone()))
+    };
 
     let mut live = spawn().spawn();
     assert_eq!(mode(&sock), 0o666);

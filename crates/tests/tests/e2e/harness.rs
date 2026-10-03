@@ -408,20 +408,10 @@ impl Spawn {
         self
     }
 
-    /// The `[http]` pool listens on the unix socket `sock`.
-    pub fn http_unix(self, sock: &Path) -> Spawn {
-        self.http_listen(ListenAddr::Unix(sock.to_owned()))
-    }
-
     /// The `[http]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
     pub fn http_listen(mut self, listen: ListenAddr) -> Spawn {
         self.http_listen = Some(listen);
         self
-    }
-
-    /// The `[grpc]` pool listens on the unix socket `sock`.
-    pub fn grpc_unix(self, sock: &Path) -> Spawn {
-        self.grpc_listen(ListenAddr::Unix(sock.to_owned()))
     }
 
     /// The `[grpc]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.

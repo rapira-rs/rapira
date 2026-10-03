@@ -7,6 +7,7 @@ use std::time::Duration;
 use anyhow::Context;
 use http::header::{CONTENT_TYPE, HOST};
 use http::{HeaderValue, Method, Version};
+use rapira_net::ListenAddr;
 use rapira_sapi::{Frame, plugin::Mode};
 use tests::wire::submit;
 use tests::{drain, drain_resp, fixture, poll, req, server_log};
@@ -515,7 +516,7 @@ fn plugin_stamped_fields_pass_through() -> anyhow::Result<()> {
 fn unix_address_arms_reach_php() -> anyhow::Result<()> {
     let sock = std::env::temp_dir().join(format!("rapira-e2e-{}.sock", std::process::id()));
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php"))
-        .http_unix(&sock)
+        .http_listen(ListenAddr::Unix(sock.clone()))
         .http_extra("server_port = 8080")
         .spawn();
 

@@ -377,7 +377,7 @@ async fn call_context_reports_the_request_facts() -> anyhow::Result<()> {
     let on_tcp = unary_worker();
     let on_unix = booted(
         Spawn::grpc(fixture("grpc/unary-worker.php"))
-            .grpc_unix(&dir.join("grpc.sock"))
+            .grpc_listen(ListenAddr::Unix(dir.join("grpc.sock")))
             .json_log()
             .spawn(),
     );
