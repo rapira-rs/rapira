@@ -2,19 +2,12 @@
 #define RAPIRA_SAPI_H
 
 // clang-format off
-#include <TSRM/TSRM.h>
-#include <Zend/zend.h>
-#include <Zend/zend_API.h>
-#include <Zend/zend_compile.h>
-#include <Zend/zend_globals.h>
 #include <Zend/zend_exceptions.h>
 #include <Zend/zend_enum.h>
 #include <Zend/zend_interfaces.h>
 #include <main/php.h>
 #include <ext/standard/basic_functions.h>
-#include <main/SAPI.h>
 #include <main/php_main.h>
-#include <main/php_output.h>
 #include <main/php_variables.h>
 // clang-format on
 
@@ -30,8 +23,6 @@
 #include <Zend/zend_observer.h>
 #include <ext/spl/spl_exceptions.h>
 #include <ext/standard/head.h>
-#include <main/php_memory_streams.h>
-#include <main/php_streams.h>
 
 // injected by rapira_php_build::compile
 #ifndef RAPIRA_VERSION
