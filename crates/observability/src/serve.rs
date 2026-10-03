@@ -2,12 +2,10 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
-use http::header::CONTENT_TYPE;
-use http::{HeaderValue, Method, Request, Response, StatusCode};
-use http_body_util::Full;
 use hyper::body::Incoming;
+use hyper::header::{CONTENT_TYPE, HeaderValue};
 use hyper::server::conn::http1;
+use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use rapira_net::{Acceptor, PreparedListener, Serve};
@@ -146,7 +144,7 @@ impl Serve for Serving {
 const PROBE_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
 /// `GET /metrics` answers the text format when `[observability.metrics]` is configured, and `GET /livez` and `GET /readyz` answer when `[observability.probes]` is configured. Every other request gets 404.
-fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<Full<Bytes>> {
+fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<String> {
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/metrics") if routes.metrics => {
             reply(StatusCode::OK, text::CONTENT_TYPE, routes.metrics_text())
@@ -168,7 +166,7 @@ fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<Full<Bytes>> {
             }
         }
         _ => {
-            let mut not_found = Response::new(Full::new(Bytes::new()));
+            let mut not_found = Response::new(String::new());
             *not_found.status_mut() = StatusCode::NOT_FOUND;
             not_found
         }
@@ -178,9 +176,9 @@ fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<Full<Bytes>> {
 fn reply(
     status: StatusCode,
     content_type: &'static str,
-    body: impl Into<Bytes>,
-) -> Response<Full<Bytes>> {
-    let mut res = Response::new(Full::new(body.into()));
+    body: impl Into<String>,
+) -> Response<String> {
+    let mut res = Response::new(body.into());
     *res.status_mut() = status;
     res.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));

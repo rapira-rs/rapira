@@ -844,9 +844,6 @@ name = "rapira_observability"
 version = "0.8.1"
 dependencies = [
  "anyhow",
- "bytes",
- "http",
- "http-body-util",
  "hyper",
  "hyper-util",
  "rapira_config",
