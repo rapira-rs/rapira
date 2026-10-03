@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::time::{Instant, SystemTime, UNIX_EPOCH};
+use std::time::Instant;
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
@@ -10,7 +10,7 @@ use connectrpc::{
     MethodDescriptor, Payload, Protocol, RequestContext,
 };
 use rapira_sapi::Addr;
-use rapira_sapi::work::Intake;
+use rapira_sapi::work::{Intake, now_unix_f64};
 
 use crate::schema::Schema;
 use crate::{Call, RpcProtocol, RpcStatus, UnaryCall};
@@ -114,7 +114,7 @@ async fn unary(
         metadata: std::mem::take(ctx.headers_mut()),
         deadline: ctx
             .deadline()
-            .map(|d| unix_deadline(d, Instant::now(), SystemTime::now())),
+            .map(|d| now_unix_f64() + d.saturating_duration_since(Instant::now()).as_secs_f64()),
         remote: ctx
             .extensions_mut()
             .remove::<Addr>()
@@ -173,47 +173,4 @@ fn status_error(status: RpcStatus, protocol: Option<Protocol>) -> ConnectError {
         })
         .collect();
     err
-}
-
-/// The wall-clock time of `deadline`, in Unix seconds.
-fn unix_deadline(deadline: Instant, now: Instant, wall: SystemTime) -> f64 {
-    let wall = wall.duration_since(UNIX_EPOCH).unwrap_or_default();
-    (wall + deadline.saturating_duration_since(now)).as_secs_f64()
-}
-
-#[cfg(test)]
-mod tests {
-    use std::time::Duration;
-
-    use super::*;
-
-    #[test]
-    fn unix_deadline_converts_monotonic_to_wall() {
-        struct Case {
-            name: &'static str,
-            deadline: Duration,
-            now: Duration,
-            expected: f64,
-        }
-        let cases = [
-            Case {
-                name: "1.5 s ahead",
-                deadline: Duration::from_millis(1500),
-                now: Duration::ZERO,
-                expected: 101.5,
-            },
-            Case {
-                name: "already passed",
-                deadline: Duration::ZERO,
-                now: Duration::from_secs(1),
-                expected: 100.0,
-            },
-        ];
-        let base = Instant::now();
-        let wall = UNIX_EPOCH + Duration::from_secs(100);
-        for case in cases {
-            let got = unix_deadline(base + case.deadline, base + case.now, wall);
-            assert!((got - case.expected).abs() < 1e-9, "{}: {got}", case.name);
-        }
-    }
 }
