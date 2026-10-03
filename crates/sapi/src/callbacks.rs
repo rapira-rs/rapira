@@ -146,7 +146,11 @@ fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
 /// php_register_known_variable is last-write-wins, so the call order is the precedence rule: CONTENT_LENGTH, then HTTP_*.
 /// Each name registers once, with its repeats joined.
 /// Owned buffers stay in ManuallyDrop because `put` can bail out over this frame.
-fn cgi_header_vars(headers: &HeaderMap, content_length: i64, mut put: impl FnMut(&CStr, &[u8])) {
+pub fn cgi_header_vars(
+    headers: &HeaderMap,
+    content_length: i64,
+    mut put: impl FnMut(&CStr, &[u8]),
+) {
     if content_length >= 0 {
         put(
             c"CONTENT_LENGTH",

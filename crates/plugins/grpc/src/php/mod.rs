@@ -6,7 +6,7 @@ use rapira_sapi::{zend_class_entry, zend_object, zval};
 
 use crate::MethodInfo;
 
-mod call;
+pub mod call;
 mod values;
 
 pub(crate) use call::{GrpcState, grpc_call_from};

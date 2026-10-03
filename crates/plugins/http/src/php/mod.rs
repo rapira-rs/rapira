@@ -150,14 +150,14 @@ fn protocol_php(protocol: &str) -> &str {
 }
 
 /// Owned values of the `Request` object. The builder keeps them in the state because a Zend OOM bailout longjmps through its frame, so that frame holds no values with Drop glue.
-struct RequestView {
-    uri_abs: String,
+pub struct RequestView {
+    pub uri_abs: String,
     remote: AddrOwned,
     server: AddrOwned,
 }
 
 impl RequestView {
-    fn new(req: &Request) -> Self {
+    pub fn new(req: &Request) -> Self {
         let scheme = if req.https { "https://" } else { "http://" };
         let path = if req.uri.starts_with('/') {
             req.uri.as_str()

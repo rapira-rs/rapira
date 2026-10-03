@@ -117,7 +117,7 @@ pub(crate) fn is_binary(name: &[u8]) -> bool {
 /// `Context::$metadata`: the application keys, with `-bin` values decoded. A text value that is not printable or an undecodable `-bin` value is dropped, and a key with no values left is absent.
 /// A `-bin` value is split on "," first: "Implementations must split Binary-Headers on "," before decoding the Base64-encoded values." https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
 /// The optional whitespace around "," follows the HTTP list rule. https://www.rfc-editor.org/rfc/rfc9110#section-5.6.1
-fn context_metadata(headers: &HeaderMap) -> Fields {
+pub fn context_metadata(headers: &HeaderMap) -> Fields {
     let mut out = Fields::new();
     for name in headers.keys() {
         if reserved(name.as_str()) {

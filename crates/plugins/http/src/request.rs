@@ -5,7 +5,7 @@ use crate::Config;
 use crate::middleware::Peer;
 
 /// Moves the header map out of `parts`. The body stays raw: the handler parses multipart.
-pub(crate) fn build(
+pub fn build(
     parts: &mut http::request::Parts,
     authority: Option<Vec<u8>>,
     body: Vec<u8>,
