@@ -12,7 +12,7 @@ use std::{
 
 pub(crate) use crate::work::{DispatcherClasses, Held, release};
 pub(crate) use crate::{
-    RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
+    IS_NULL, RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
     callbacks::guard,
     object_init_ex, rapira_array_init, rapira_ce_closed_exception, rapira_ce_inet_address,
     rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
@@ -127,7 +127,7 @@ pub unsafe fn add_list<'v>(
         let mut list: zval = std::mem::zeroed();
         rapira_array_init(&mut list, values.size_hint().0 as u32);
         for v in values {
-            zend::list_push_stringl(&mut list, v);
+            crate::add_next_index_stringl(&mut list, zend::ptr_or_empty(v), v.len());
         }
         add_assoc_zval_ex(dst, key, key_len, &mut list);
     }

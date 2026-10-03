@@ -23,14 +23,6 @@ pub unsafe fn is_undef(zv: *const zval) -> bool {
 }
 
 /// # Safety
-/// `list` a live packed array; ownership of the string bytes stays with the caller.
-pub(crate) unsafe fn list_push_stringl(list: *mut zval, bytes: &[u8]) {
-    unsafe {
-        crate::add_next_index_stringl(list, ptr_or_empty(bytes), bytes.len());
-    }
-}
-
-/// # Safety
 /// `ce` a registered class; `obj` alive; the property declared on `ce`.
 pub unsafe fn prop_stringl(
     ce: *mut zend_class_entry,
@@ -228,14 +220,6 @@ pub unsafe fn zstr_bytes<'a>(s: *const zend_string) -> &'a [u8] {
 /// `zv` readable.
 pub unsafe fn zval_type(zv: *const zval) -> u32 {
     unsafe { u32::from((*zv).u1.v.type_) }
-}
-
-/// # Safety
-/// `zv` writable.
-pub(crate) unsafe fn zval_null(zv: *mut zval) {
-    unsafe {
-        (*zv).u1.type_info = IS_NULL;
-    }
 }
 
 /// # Safety

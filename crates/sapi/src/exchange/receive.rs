@@ -70,7 +70,7 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                 }
                 Pulled::Empty if matches!(mode, RecvMode::Try) => {
                     zval_ptr_dtor(&mut obj);
-                    zend::zval_null(return_value);
+                    (*return_value).u1.type_info = IS_NULL;
                     return true;
                 }
                 Pulled::Timeout | Pulled::Empty => {
