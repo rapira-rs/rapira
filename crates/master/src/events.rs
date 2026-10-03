@@ -49,12 +49,7 @@ impl<'w> Master<'w> {
             .zip(spawner.regions)
             .enumerate()
             .map(|(i, (p, region))| {
-                Pool::new(
-                    i,
-                    p,
-                    spawner.board.slice(region.slots.clone()),
-                    control_timeout,
-                )
+                Pool::new(i, p, &spawner.board[region.slots.clone()], control_timeout)
             })
             .collect();
         Master {

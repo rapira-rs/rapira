@@ -65,8 +65,6 @@ fn draining_or(state: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use rapira_scoreboard::Scoreboard;
-
     use super::*;
 
     /// A failed boot cycle shows starting, and draining after the worker decided to exit.
@@ -89,7 +87,7 @@ mod tests {
                 want: SLOT_DRAINING,
             },
         ];
-        let slot = Scoreboard::create(1).unwrap().slot(0);
+        let slot = &rapira_scoreboard::create(1).unwrap()[0];
         sb_set(slot);
         for case in cases {
             DRAINING.set(case.draining);

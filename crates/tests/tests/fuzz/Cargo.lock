@@ -837,7 +837,6 @@ dependencies = [
 name = "rapira_scoreboard"
 version = "0.8.1"
 dependencies = [
- "anyhow",
  "libc",
 ]
 

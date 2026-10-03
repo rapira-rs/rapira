@@ -7,7 +7,7 @@ use crate::WorkerEnv;
 use crate::lifeline::Lifeline;
 use crate::signals::{MASTER_SIGNALS, SelfPipe, sigset};
 use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY};
-use rapira_scoreboard::{PoolRegion, Scoreboard, SharedSlot};
+use rapira_scoreboard::{PoolRegion, SharedSlot};
 
 pub(crate) const QUICK_CRASH: Duration = Duration::from_secs(10);
 pub(crate) const RESPAWN_BASE: Duration = Duration::from_millis(100);
@@ -149,7 +149,7 @@ pub(crate) struct Forker<'w> {
     pub self_pipe: SelfPipe,
     pub lifeline: Lifeline,
     /// The whole board, for every `WorkerEnv`.
-    pub board: Scoreboard,
+    pub board: &'static [SharedSlot],
     /// The slot range of each pool, in pool order, for every `WorkerEnv`.
     pub regions: &'static [PoolRegion],
     pub worker: Box<dyn FnMut(WorkerEnv) -> i32 + 'w>,

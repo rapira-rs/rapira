@@ -7,5 +7,4 @@ edition.workspace = true
 workspace = true
 
 [dependencies]
-anyhow = { workspace = true }
 libc = { workspace = true }

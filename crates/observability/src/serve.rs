@@ -11,7 +11,7 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use rapira_net::{Acceptor, PreparedListener, Serve};
-use rapira_scoreboard::{PoolRegion, Scoreboard};
+use rapira_scoreboard::{PoolRegion, SharedSlot};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 
@@ -45,7 +45,7 @@ impl Server {
     /// In the observability process. Serves the routes of the configured sub-tables until `stop` turns true, then waits for the requests in flight within `drain_grace`. `pools` are the pools that the metrics and `/readyz` report.
     pub fn serve(
         self,
-        board: Scoreboard,
+        board: &'static [SharedSlot],
         pools: &'static [PoolRegion],
         stop: watch::Receiver<bool>,
         drain_grace: Duration,
@@ -87,7 +87,7 @@ impl Server {
 
 /// What a request reads: the board, the pools it reports, the build and the routes that the config turns on.
 struct Routes {
-    board: Scoreboard,
+    board: &'static [SharedSlot],
     /// Every pool except the pool of the observability process.
     pools: &'static [PoolRegion],
     build: Build,
@@ -98,7 +98,7 @@ struct Routes {
 impl Routes {
     /// One pass over the board, then one `/proc` read for each live worker.
     fn metrics_text(&self) -> String {
-        let mut pools = stats::board_stats(&self.board, self.pools);
+        let mut pools = stats::board_stats(self.board, self.pools);
         for worker in pools.iter_mut().flat_map(|p| p.workers.iter_mut()) {
             worker.memory = memory::read(worker.pid);
         }
@@ -156,7 +156,7 @@ fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<Full<Bytes>> {
             reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
         }
         (&Method::GET, "/readyz") if routes.probes => {
-            let unready = probes::unready(&routes.board, routes.pools);
+            let unready = probes::unready(routes.board, routes.pools);
             if unready.is_empty() {
                 reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
             } else {

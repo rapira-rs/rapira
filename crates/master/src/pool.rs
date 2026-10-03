@@ -2,7 +2,7 @@ use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::time::{Duration, Instant};
 
 use libc::c_int;
-use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, Scoreboard, SharedSlot, now_millis};
+use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, SharedSlot, now_millis};
 
 use crate::PoolConfig;
 use crate::pctl::KillPhase;
@@ -33,7 +33,7 @@ pub(crate) struct Pool {
     pub index: usize,
     pub cfg: PoolConfig,
     /// Sub-view of the shared board; every slot index in this struct is local to it.
-    pub board: Scoreboard,
+    pub board: &'static [SharedSlot],
     pub table: ProcTable,
     pub control_timeout: Duration,
     /// This pool's overlap-reload chain; `None` once finished or never started.
@@ -44,10 +44,10 @@ impl Pool {
     pub(crate) fn new(
         index: usize,
         cfg: PoolConfig,
-        board: Scoreboard,
+        board: &'static [SharedSlot],
         control_timeout: Duration,
     ) -> Pool {
-        let table = ProcTable::new(board.nslots());
+        let table = ProcTable::new(board.len());
         Pool {
             index,
             cfg,
@@ -60,7 +60,6 @@ impl Pool {
 
     fn count_state(&self, state: u32) -> usize {
         self.board
-            .slots()
             .iter()
             .filter(|s| s.state.load(Relaxed) == state)
             .count()
@@ -69,7 +68,6 @@ impl Pool {
     /// Requests completed without error: Acquire pairs with the worker's Release on `handled` (stored after `errors`) so a shed 503 never counts as a success.
     fn total_successful(&self) -> u64 {
         self.board
-            .slots()
             .iter()
             .map(|s| {
                 let handled = s.handled.load(Acquire);
@@ -80,7 +78,7 @@ impl Pool {
     }
 
     fn slot_is_free(&self, i: usize) -> bool {
-        self.board.slot(i).state.load(Relaxed) == SLOT_FREE
+        self.board[i].state.load(Relaxed) == SLOT_FREE
     }
 
     fn find_spawn_slot(&self) -> Option<usize> {
@@ -94,11 +92,11 @@ impl Pool {
     }
 
     fn spawn_into(&mut self, slot: usize, now: Instant, spawner: &mut Forker<'_>) {
-        self.board.set_starting(slot);
+        self.board[slot].set_starting();
         let generation = self.table.generation;
-        match spawner.spawn(self.index, self.board.slot(slot)) {
+        match spawner.spawn(self.index, &self.board[slot]) {
             Ok(pid) => {
-                self.board.slot(slot).pid.store(pid as u32, Relaxed);
+                self.board[slot].pid.store(pid as u32, Relaxed);
                 self.table.procs.push(WorkerProc {
                     pid,
                     slot,
@@ -113,7 +111,7 @@ impl Pool {
                     "{} pool: spawn failed for slot {slot}: {e}",
                     self.cfg.name
                 );
-                self.board.clear(slot);
+                self.board[slot].clear();
                 self.table.slots[slot].schedule_backoff(Duration::ZERO, now);
             }
         }
@@ -205,7 +203,7 @@ impl Pool {
         };
         match reload.phase {
             ReloadPhase::Await { slot, until } => {
-                if self.board.slot(slot).serving() {
+                if self.board[slot].serving() {
                     self.reload_quit_next(now);
                 } else if now >= until {
                     tracing::warn!(
@@ -246,8 +244,8 @@ impl Pool {
     ) -> anyhow::Result<()> {
         let slot = w.slot;
         let lived = now.saturating_duration_since(w.spawned_at);
-        count_exit(self.board.slot(slot), verdict);
-        self.board.clear(slot);
+        count_exit(&self.board[slot], verdict);
+        self.board[slot].clear();
 
         if let Some(Reload {
             phase: ReloadPhase::Drain { draining, .. },
@@ -273,7 +271,7 @@ impl Pool {
             ExitVerdict::Unhealthy => {
                 if w.generation == 0
                     && self.total_successful() == 0
-                    && !self.board.slots().iter().any(SharedSlot::serving)
+                    && !self.board.iter().any(SharedSlot::serving)
                 {
                     anyhow::bail!(
                         "{} pool: worker {} exited unhealthy before the pool served any request",
@@ -298,7 +296,7 @@ impl Pool {
         }
         let now_ms = now_millis();
         for p in self.table.procs.iter_mut() {
-            let s = self.board.slot(p.slot);
+            let s = &self.board[p.slot];
             if s.state.load(Acquire) != SLOT_ACTIVE {
                 continue;
             }
@@ -383,11 +381,21 @@ impl Pool {
             self.count_state(SLOT_IDLE),
             self.table.generation
         );
-        for s in self.board.snapshot_slots() {
+        for (i, s) in self.board.iter().enumerate() {
+            let state = s.state.load(Relaxed);
+            let pid = s.pid.load(Relaxed);
+            if state == SLOT_FREE && pid == 0 {
+                continue;
+            }
             tracing::info!(
                 target: "master",
                 "  slot {} pid {} state {} handled {} errors {} recycles {}",
-                s.id, s.pid, s.state, s.handled, s.errors, s.recycles
+                i,
+                pid,
+                state,
+                s.handled.load(Relaxed),
+                s.errors.load(Relaxed),
+                s.recycles.load(Relaxed)
             );
         }
     }
@@ -410,7 +418,7 @@ mod tests {
     use super::*;
 
     fn test_pool(processes: usize) -> Pool {
-        let board = Scoreboard::create(processes * 2).unwrap();
+        let board = rapira_scoreboard::create(processes * 2).unwrap();
         let cfg = PoolConfig {
             name: "http",
             processes,
@@ -485,9 +493,9 @@ mod tests {
             },
         ];
         for case in cases {
-            let board = Scoreboard::create(1).unwrap();
-            count_exit(board.slot(0), case.verdict);
-            assert_eq!(exits(board.slot(0)), case.want, "{}", case.name);
+            let board = rapira_scoreboard::create(1).unwrap();
+            count_exit(&board[0], case.verdict);
+            assert_eq!(exits(&board[0]), case.want, "{}", case.name);
         }
     }
 }

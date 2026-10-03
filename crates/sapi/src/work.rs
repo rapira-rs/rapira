@@ -191,8 +191,6 @@ impl<U: Work> Intake<U> {
 mod tests {
     use std::sync::mpsc::sync_channel;
 
-    use rapira_scoreboard::Scoreboard;
-
     use super::*;
 
     struct Probe;
@@ -211,7 +209,7 @@ mod tests {
 
     /// A sink on slot 0 of a board in memory.
     fn sink(tx: SyncSender<Box<dyn Work>>) -> (Sink, &'static SharedSlot) {
-        let slot = Scoreboard::create(1).unwrap().slot(0);
+        let slot = &rapira_scoreboard::create(1).unwrap()[0];
         (Sink::new(tx, slot), slot)
     }
 
