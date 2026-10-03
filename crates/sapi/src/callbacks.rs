@@ -166,55 +166,53 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
     len: usize,
     aborted: *mut bool,
 ) -> usize {
-    let mut completed = false;
-    let written = guard(0, || {
-        let n = (|| {
-            let ctx = unsafe {
-                let Some(c) = ctx() else {
-                    let data = slice::from_raw_parts(buf.cast::<u8>(), len);
-                    tracing::info!(target: "php", "{}", String::from_utf8_lossy(data));
-                    return len;
-                };
-                c
+    guard(None, || {
+        let ctx = unsafe {
+            let Some(c) = ctx() else {
+                let data = slice::from_raw_parts(buf.cast::<u8>(), len);
+                tracing::info!(target: "php", "{}", String::from_utf8_lossy(data));
+                return Some(len);
             };
+            c
+        };
 
-            if ctx.stream == StreamState::NotSent {
-                let status = unsafe { head_status(&*(&raw const sapi_globals.sapi_headers)) };
-                ctx.commit_head(status, HeaderMap::new());
+        if ctx.stream == StreamState::NotSent {
+            let status = unsafe {
+                let headers = &raw const sapi_globals.sapi_headers;
+                head_status(&*headers)
+            };
+            ctx.commit_head(status, HeaderMap::new());
+        }
+
+        if let Some(tx) = &ctx.sender {
+            if tx.is_closed() {
+                ctx.finish(false);
+                unsafe { *aborted = true };
+                return Some(0);
             }
-
-            if let Some(tx) = &ctx.sender {
-                if tx.is_closed() {
-                    ctx.finish(false);
-                    unsafe { *aborted = true };
-                    return 0;
-                }
-                if ctx.body.len() + len > MAX_BUFFERED_BODY {
-                    tracing::error!(
-                        target: "rapira",
-                        "response body exceeds the host buffer cap ({} + {len} > {MAX_BUFFERED_BODY} bytes); aborting the request",
-                        ctx.body.len()
-                    );
-                    ctx.finish(true);
-                    unsafe { *aborted = true };
-                    return 0;
-                }
-                let buf = unsafe { slice::from_raw_parts(buf.cast::<u8>(), len) };
-                ctx.body.extend_from_slice(buf);
-                if !ctx.tearing_down {
-                    ctx.stream = StreamState::BodyStreamed;
-                }
+            if ctx.body.len() + len > MAX_BUFFERED_BODY {
+                tracing::error!(
+                    target: "rapira",
+                    "response body exceeds the host buffer cap ({} + {len} > {MAX_BUFFERED_BODY} bytes); aborting the request",
+                    ctx.body.len()
+                );
+                ctx.finish(true);
+                unsafe { *aborted = true };
+                return Some(0);
             }
+            let buf = unsafe { slice::from_raw_parts(buf.cast::<u8>(), len) };
+            ctx.body.extend_from_slice(buf);
+            if !ctx.tearing_down {
+                ctx.stream = StreamState::BodyStreamed;
+            }
+        }
 
-            len
-        })();
-        completed = true;
-        n
-    });
-    if !completed {
+        Some(len)
+    })
+    .unwrap_or_else(|| {
         unsafe { *aborted = true };
-    }
-    written
+        0
+    })
 }
 
 /// # Safety
