@@ -253,10 +253,6 @@ impl Context {
         }
     }
 
-    pub fn is_truncated(&self, errored: bool) -> bool {
-        errored && self.stream == StreamState::BodyStreamed
-    }
-
     pub fn commit_head(&mut self, mut status: u16, mut headers: HeaderMap) {
         for value in headers.get_all(&STATUS) {
             match status_field_code(value.as_bytes()) {

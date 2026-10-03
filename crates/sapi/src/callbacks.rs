@@ -374,7 +374,7 @@ pub fn send_error_head(c: &mut Context, status: u16) {
 }
 
 pub(crate) fn finalize_response(c: &mut Context, errored: bool) -> bool {
-    let truncated = c.is_truncated(errored);
+    let truncated = errored && c.stream == StreamState::BodyStreamed;
     if errored {
         send_error_head(c, 500);
     }
