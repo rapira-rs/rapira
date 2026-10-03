@@ -1,6 +1,6 @@
 use std::cell::RefCell;
-use std::ffi::CStr;
-use std::path::PathBuf;
+use std::ffi::{CStr, CString};
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
 use std::thread;
@@ -217,6 +217,21 @@ fn worker_main(mode: Mode, entrypoint: PathBuf, rx: JobRx, classes: DispatcherCl
         if matches!(exit, WorkerExit::Closed) {
             break;
         }
+    }
+}
+
+/// # Safety
+/// Requires an active request. `php_execute_script` catches a bailout itself.
+pub(crate) unsafe fn run_script(script: &Path) -> bool {
+    unsafe {
+        let c_script: CString =
+            CString::new(script.to_string_lossy().as_bytes()).unwrap_or_default();
+        let mut fh: zend_file_handle = std::mem::zeroed();
+        zend_stream_init_filename(&mut fh, c_script.as_ptr());
+        fh.primary_script = true;
+        let ok: bool = php_execute_script(&mut fh);
+        zend_destroy_file_handle(&mut fh);
+        ok
     }
 }
 

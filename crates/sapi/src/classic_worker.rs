@@ -1,9 +1,8 @@
 use crate::{
     callbacks::{finalize_response, send_error_head},
     context::{bind_server_context, populate_request_context, unbind_server_context},
-    executor::run_script,
     scoreboard::{Event, sb_update},
-    start::pull_job,
+    start::{pull_job, run_script},
     types::Context,
     *,
 };

@@ -4,7 +4,7 @@ use crate::{
     callbacks::*,
     diagnostics::error_type_to_level,
     scoreboard::sb_update,
-    start::{Pulled, pull_job, pull_job_to_shed},
+    start::{Pulled, pull_job, pull_job_to_shed, run_script},
 };
 use std::{
     cell::Cell,
@@ -18,7 +18,6 @@ use std::{
 use crate::{
     callbacks::guard,
     context::{bind_server_context, ctx, populate_request_context, unbind_server_context},
-    executor::run_script,
     php_request_startup, rapira_run_handler,
     types::Context,
     zend_fcall_info, zend_fcall_info_cache, *,
