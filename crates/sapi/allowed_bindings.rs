@@ -7,7 +7,8 @@
     "sapi_startup", "sapi_shutdown", "php_module_startup", "php_module_shutdown", "php_request_startup",
     "php_execute_script", "zend_error", "zend_stream_init_filename", "zend_destroy_file_handle",
     "rapira_mode", "RAPIRA_MODE_CLASSIC", "RAPIRA_MODE_WORKER",
-    "RAPIRA_MODE_DISPATCHER",
+    "RAPIRA_MODE_DISPATCHER", "RAPIRA_OK", "RAPIRA_BAILOUT", "RAPIRA_THROW",
+    "RAPIRA_HANDLE_STOP", "RAPIRA_HANDLE_CONTINUE", "RAPIRA_HANDLE_RECYCLE",
     // the two halves of the linked-libphp version check, and the linked version string
     "PHP_VERSION_ID", "php_version_id", "php_version",
     // the embedded-object layout; rapira_sapi.h is the source of truth

@@ -52,12 +52,16 @@ enum {
 };
 extern int rapira_mode;
 
-// HandleAction in rapira_worker.rs - keep in sync
+// Return values of rapira_rs_handle_request (rapira_worker.rs);
+// rapira_dispatcher.c reads them.
 enum {
     RAPIRA_HANDLE_STOP = 0,
     RAPIRA_HANDLE_CONTINUE = 1,
     RAPIRA_HANDLE_RECYCLE = 2,
 };
+
+// Return values of the request shims in module.c.
+enum { RAPIRA_OK = 0, RAPIRA_BAILOUT = 1, RAPIRA_THROW = 3 };
 
 // rust glue
 extern void rapira_rs_dispatcher_release(void);

@@ -13,18 +13,11 @@ size_t rapira_ub_write(const char *str, size_t len) {
     return written;
 }
 
-// Keep in sync with Outcome in types.rs (#[repr(C)]).
-enum {
-    OK = 0,
-    BAILOUT = 1,
-    THROW = 3,
-};
-
 // On bailout: flag it and close the observer frames the longjmp abandoned.
 #define RAPIRA_GUARD(stmt, flag, base)                                         \
     zend_try { stmt; }                                                         \
     zend_catch {                                                               \
-        (flag) = BAILOUT;                                                      \
+        (flag) = RAPIRA_BAILOUT;                                               \
         rapira_observer_end_to(base);                                          \
     }                                                                          \
     zend_end_try()
@@ -41,10 +34,10 @@ int rapira_finish_output(void) {
         php_output_end_all();
         php_header(); // no-op if SG(headers_sent) is true
     }
-    zend_catch { return BAILOUT; }
+    zend_catch { return RAPIRA_BAILOUT; }
     zend_end_try();
 
-    return OK;
+    return RAPIRA_OK;
 }
 
 PHP_FUNCTION(rapira_finish_request) {
@@ -56,7 +49,7 @@ PHP_FUNCTION(rapira_finish_request) {
                   "mode; finalize the unit that receive() returned");
         RETURN_THROWS();
     }
-    if (rapira_finish_output() != OK) {
+    if (rapira_finish_output() != RAPIRA_OK) {
         // re-raise: rapira_run_handler (worker mode) or php_execute_script (classic mode) catches it
         zend_bailout();
     }
@@ -244,7 +237,7 @@ static void rapira_reset_super_global(void) {
 }
 // exit()/die() in 8.4+ are not bailouts: they land in EG(exception).
 int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
-    int outcome = OK;
+    int outcome = RAPIRA_OK;
     zval retval;
     ZVAL_UNDEF(&retval);
     // fci does not outlive this frame
@@ -271,7 +264,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
                 // the zend_try contains a bailout from the userland handler
                 zend_try_exception_handler();
                 if (EG(exception)) {
-                    outcome = THROW;
+                    outcome = RAPIRA_THROW;
                     // Throwable path is E_DONT_BAIL and releases the object
                     zend_exception_error(EG(exception), E_ERROR);
                 }
@@ -279,7 +272,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
         }
     }
     zend_catch {
-        outcome = BAILOUT;
+        outcome = RAPIRA_BAILOUT;
         rapira_observer_end_to(observed_base);
     }
     zend_end_try();
@@ -296,15 +289,16 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
 
     gc_protect(false); // _zend_bailout can leave it engaged
 
-    if (outcome != BAILOUT && !unclean_at_entry && CG(unclean_shutdown)) {
-        outcome = BAILOUT;
+    if (outcome != RAPIRA_BAILOUT && !unclean_at_entry &&
+        CG(unclean_shutdown)) {
+        outcome = RAPIRA_BAILOUT;
         rapira_observer_end_to(observed_base);
     }
     return outcome;
 }
 
 int rapira_request_activate(void) {
-    int outcome = OK;
+    int outcome = RAPIRA_OK;
     zend_try {
         php_output_activate();
         sapi_activate();
@@ -313,10 +307,10 @@ int rapira_request_activate(void) {
         rapira_reset_super_global();
         rapira_activate_auto_globals();
     }
-    zend_catch { outcome = BAILOUT; }
+    zend_catch { outcome = RAPIRA_BAILOUT; }
     zend_end_try();
 
-    if (outcome == BAILOUT) {
+    if (outcome == RAPIRA_BAILOUT) {
         gc_protect(false);
     }
 
@@ -340,7 +334,7 @@ static void rapira_release_header_callback(void) {
 
 // per-request sapi teardown (main/main.c:1985,2002,2031)
 int rapira_request_teardown(void) {
-    int bailed = OK;
+    int bailed = RAPIRA_OK;
     // the VM stack is popped when handle_request returns, so close frames here
     zend_execute_data *observed_base = EG(current_observed_frame);
 
@@ -463,7 +457,7 @@ static void rapira_restore_boot_shutdown_functions(void) {
 
 // retry is safe: end_all NULLs EG(current_observed_frame) (zend_observer.c:322)
 int rapira_request_shutdown(void) {
-    volatile int bailed = OK;
+    volatile int bailed = RAPIRA_OK;
     // put the budget back armed: a stale 0 disables max_execution_time next
     // cycle, and the boot shutdown functions run under the timer until
     // php_request_shutdown disarms it (main/main.c:1993)
@@ -482,7 +476,7 @@ int rapira_request_shutdown(void) {
         php_request_shutdown(NULL);
     }
     zend_catch {
-        bailed = BAILOUT;
+        bailed = RAPIRA_BAILOUT;
         zend_try { php_request_shutdown(NULL); }
         zend_end_try();
     }

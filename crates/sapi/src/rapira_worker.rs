@@ -5,7 +5,6 @@ use crate::{
     diagnostics::error_type_to_level,
     scoreboard::sb_update,
     start::{Pulled, pull_job, pull_job_to_shed},
-    types::Outcome,
 };
 use std::{
     borrow::Cow,
@@ -44,14 +43,6 @@ enum Cycle {
 pub enum WorkerExit {
     Closed,
     Restart,
-}
-
-// rapira_sapi.h's RAPIRA_HANDLE_* values mirror this - keep in sync.
-#[repr(i32)]
-enum HandleAction {
-    Stop = 0,
-    Continue = 1,
-    Recycle = 2,
 }
 
 struct WorkerChan {
@@ -118,7 +109,7 @@ fn run_cycle(script: &Path) -> Cycle {
     });
 
     log_and_clear_last_error();
-    if Outcome::from_c(unsafe { rapira_request_shutdown() }) == Outcome::Bailout {
+    if unsafe { rapira_request_shutdown() } == RAPIRA_BAILOUT as c_int {
         error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
         return Cycle::Restart;
     }
@@ -179,18 +170,18 @@ pub extern "C" fn rapira_rs_handle_request(
     fci: *mut zend_fcall_info,
     fcc: *mut zend_fcall_info_cache,
 ) -> c_int {
-    let action = guard(HandleAction::Recycle, || handle_request_impl(fci, fcc));
+    let action = guard(RAPIRA_HANDLE_RECYCLE, || handle_request_impl(fci, fcc));
     unbind_server_context();
     action as c_int
 }
 
 /// Flushes before rapira_request_teardown: the real head (status, cookies, php_error_cb's 500) lives in SG(sapi_headers), which teardown destroys.
-fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> HandleAction {
+fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> u32 {
     let Some(mut ctx) = next_job() else {
         return if worker_recycle() {
-            HandleAction::Recycle
+            RAPIRA_HANDLE_RECYCLE
         } else {
-            HandleAction::Stop
+            RAPIRA_HANDLE_STOP
         };
     };
 
@@ -200,23 +191,24 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
         rapira_release_temporary_streams();
     }
 
-    let mut outcome = Outcome::from_c(unsafe { rapira_request_activate() });
-    if outcome != Outcome::Bailout {
+    let mut outcome = unsafe { rapira_request_activate() };
+    if outcome != RAPIRA_BAILOUT as c_int {
         unsafe {
             crate::context::apply_proto_num(&ctx);
-            outcome = Outcome::from_c(rapira_run_handler(fci, fcc));
+            outcome = rapira_run_handler(fci, fcc);
         }
     }
 
     ctx.tearing_down = true;
-    let flushed = match outcome {
-        Outcome::Bailout | Outcome::Throw => Outcome::from_c(unsafe { rapira_finish_output() }),
-        _ => Outcome::Ok,
+    let flushed = if outcome == RAPIRA_OK as c_int {
+        RAPIRA_OK as c_int
+    } else {
+        unsafe { rapira_finish_output() }
     };
-    let teardown: Outcome = Outcome::from_c(unsafe { rapira_request_teardown() });
+    let teardown = unsafe { rapira_request_teardown() };
 
-    let recycle: bool = [outcome, flushed, teardown].contains(&Outcome::Bailout);
-    let errored: bool = recycle || outcome == Outcome::Throw;
+    let recycle: bool = [outcome, flushed, teardown].contains(&(RAPIRA_BAILOUT as c_int));
+    let errored: bool = recycle || outcome == RAPIRA_THROW as c_int;
     let truncated: bool = finalize_response(&mut ctx, errored);
 
     log_and_clear_last_error();
@@ -226,9 +218,9 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     }
     ctx.finish(truncated);
     if recycle {
-        HandleAction::Recycle
+        RAPIRA_HANDLE_RECYCLE
     } else {
-        HandleAction::Continue
+        RAPIRA_HANDLE_CONTINUE
     }
 }
 
@@ -237,8 +229,7 @@ fn next_job() -> Option<Context> {
     WORKER.with_borrow_mut(|w| {
         let wc = w.as_mut()?;
         if std::mem::take(&mut wc.first_call) {
-            let outcome = Outcome::from_c(unsafe { rapira_request_teardown() });
-            if outcome == Outcome::Bailout {
+            if unsafe { rapira_request_teardown() } == RAPIRA_BAILOUT as c_int {
                 error!(target: "rapira", "rapira_request_teardown() bailed on first call; recycling");
                 wc.recycle = true;
                 return None;
