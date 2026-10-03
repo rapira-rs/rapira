@@ -42,14 +42,10 @@ pub(crate) fn error_type_to_level(err_type: c_int, mask: c_int) -> (tracing::Lev
 /// Syslog priorities LOG_EMERG(0)..LOG_DEBUG(7); php-src reports deprecations at LOG_INFO (main/main.c:1443-1446).
 pub(crate) fn syslog_to_level(syslog_lev: c_int) -> tracing::Level {
     match syslog_lev {
-        0 => tracing::Level::ERROR,
-        1 => tracing::Level::ERROR,
-        2 => tracing::Level::ERROR,
-        3 => tracing::Level::ERROR,
+        0..=3 => tracing::Level::ERROR,
         4 => tracing::Level::WARN,
         5 => tracing::Level::INFO,
-        6 => tracing::Level::DEBUG,
-        7 => tracing::Level::DEBUG,
+        6 | 7 => tracing::Level::DEBUG,
         _ => tracing::Level::INFO,
     }
 }
