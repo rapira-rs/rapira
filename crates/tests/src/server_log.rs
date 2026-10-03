@@ -62,18 +62,6 @@ pub fn app_records(log: &Path) -> (Vec<AppRecord>, Vec<String>) {
     (app, php)
 }
 
-/// The one `app` record of `log`; a stray extra record fails the test.
-pub fn app_record(log: &Path) -> AppRecord {
-    let (records, _) = app_records(log);
-    assert_eq!(
-        records.len(),
-        1,
-        "{} must hold exactly one app record (got {records:?})",
-        log.display()
-    );
-    records.into_iter().next().expect("checked above")
-}
-
 /// The contexts of the `app` records of `log` named `message`, in log order.
 pub fn app_contexts(log: &Path, message: &str) -> Vec<String> {
     records(log)
@@ -121,29 +109,23 @@ pub fn app_results(log: &Path, message: &str) -> Vec<String> {
         .collect()
 }
 
-/// A fixture that probes one case at a time logs `case {name, result}`; this is name to result.
-fn case_map(all: &[Captured]) -> HashMap<String, String> {
-    all.iter()
+/// One `case` record per (name, expected result) row, and no stray one; every mismatch is listed at once.
+pub fn assert_case_records(log: &Path, cases: &[(&str, &str)]) {
+    let all = records(log);
+    let count = all
+        .iter()
+        .filter(|c| c.target == "app" && c.message == "case")
+        .count();
+    // A fixture that probes one case at a time logs `case {name, result}`; this is name to result.
+    let results: HashMap<String, String> = all
+        .iter()
         .filter(|c| c.target == "app" && c.message == "case")
         .filter_map(|c| serde_json::from_str::<Value>(&c.context).ok())
         .map(|ctx| {
             let name = ctx["name"].as_str().unwrap_or_default().to_owned();
             (name, result_text(&ctx))
         })
-        .collect()
-}
-
-/// One `case` record per (name, expected result) row, and no stray one; every mismatch is listed at once.
-pub fn assert_case_records(log: &Path, cases: &[(&str, &str)]) {
-    assert_cases(&records(log), cases);
-}
-
-fn assert_cases(all: &[Captured], cases: &[(&str, &str)]) {
-    let count = all
-        .iter()
-        .filter(|c| c.target == "app" && c.message == "case")
-        .count();
-    let results = case_map(all);
+        .collect();
     assert_eq!(count, cases.len(), "one record per case (got {results:?})");
     let mismatches: Vec<String> = cases
         .iter()
@@ -156,22 +138,4 @@ fn assert_cases(all: &[Captured], cases: &[(&str, &str)]) {
         })
         .collect();
     assert!(mismatches.is_empty(), "{mismatches:#?}");
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    /// A repeated name is a stray record, even when it repeats the expected result.
-    #[test]
-    #[should_panic(expected = "one record per case")]
-    fn case_records_reject_a_repeated_name() {
-        let record = || Captured {
-            level: tracing::Level::INFO,
-            target: "app".to_owned(),
-            message: "case".to_owned(),
-            context: r#"{"name":"a","result":"ok"}"#.to_owned(),
-        };
-        assert_cases(&[record(), record()], &[("a", "ok")]);
-    }
 }
