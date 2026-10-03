@@ -30,8 +30,6 @@ zend_class_entry *rapira_ce_inet_address;
 zend_class_entry *rapira_ce_unix_address;
 zend_class_entry *rapira_ce_tls;
 
-const zend_function_entry *rapira_php_functions(void) { return ext_functions; }
-
 // own copies: std_object_handlers is shared engine state
 zend_object_handlers rapira_dispatcher_handlers;
 zend_object_handlers rapira_info_handlers;
@@ -134,3 +132,36 @@ void rapira_register_classes(void) {
     rapira_info_handlers.clone_obj = NULL;
     rapira_info_handlers.offset = offsetof(rapira_dispatcher_info_obj, std);
 }
+
+// start.rs: runs the register function of each plugin part, in the boot order
+extern void rapira_rs_register_plugin_classes(void);
+
+// the plugin classes extend the base classes, so the base classes register first
+PHP_MINIT_FUNCTION(rapira) {
+    (void)type;
+    (void)module_number;
+    rapira_register_classes();
+    rapira_rs_register_plugin_classes();
+    return SUCCESS;
+}
+
+PHP_RSHUTDOWN_FUNCTION(rapira) {
+    (void)type;
+    (void)module_number;
+    rapira_rs_dispatcher_release();
+    return SUCCESS;
+}
+
+// clang-format off
+zend_module_entry rapira_module_entry = {
+    STANDARD_MODULE_HEADER,
+    "rapira",
+    ext_functions,
+    PHP_MINIT(rapira),
+    NULL,
+    NULL,
+    PHP_RSHUTDOWN(rapira),
+    NULL,
+    RAPIRA_VERSION,
+    STANDARD_MODULE_PROPERTIES};
+// clang-format on

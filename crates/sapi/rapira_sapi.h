@@ -99,9 +99,6 @@ zend_object *rapira_object_create(zend_class_entry *ce);
 // called from PHP_MINIT_FUNCTION
 void rapira_register_classes(void);
 
-// ext_functions[] - needs const initialization
-const zend_function_entry *rapira_php_functions(void);
-
 // The Dispatcher and DispatcherInfo method bodies; a plugin's method shells call them.
 void rapira_sapi_receive(INTERNAL_FUNCTION_PARAMETERS);
 void rapira_sapi_try_receive(INTERNAL_FUNCTION_PARAMETERS);

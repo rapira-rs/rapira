@@ -64,37 +64,6 @@ PHP_FUNCTION(rapira_finish_request) {
     RETURN_TRUE;
 }
 
-// start.rs: runs the register function of each plugin part, in the boot order
-extern void rapira_rs_register_plugin_classes(void);
-
-// the plugin classes extend the base classes, so the base classes register first
-PHP_MINIT_FUNCTION(rapira) {
-    (void)type;
-    (void)module_number;
-    rapira_register_classes();
-    rapira_rs_register_plugin_classes();
-    return SUCCESS;
-}
-
-PHP_RSHUTDOWN_FUNCTION(rapira) {
-    (void)type;
-    (void)module_number;
-    rapira_rs_dispatcher_release();
-    return SUCCESS;
-}
-
-zend_module_entry rapira_module_entry = {
-    STANDARD_MODULE_HEADER,
-    "rapira",
-    NULL, // functions: installed by rapira_process_init
-    PHP_MINIT(rapira),
-    NULL,
-    NULL,
-    PHP_RSHUTDOWN(rapira),
-    NULL,
-    RAPIRA_VERSION,
-    STANDARD_MODULE_PROPERTIES};
-
 // ext/filter frees its cached raw input only in RSHUTDOWN (filter.c:190-196).
 // PECL imap frees its error and alert stacks only in RSHUTDOWN; without the reload a resident worker leaks and request N reads request N-1's errors.
 static const char *RELOAD_MODULES[] = {"filter", "imap", NULL};
@@ -432,11 +401,7 @@ void rapira_clear_last_error(void) {
 }
 
 // once per process, before sapi_startup
-void rapira_process_init(void) {
-    // ext_functions[] is file-static, so wire it up before php_module_startup
-    rapira_module_entry.functions = rapira_php_functions();
-    zend_signal_startup();
-}
+void rapira_process_init(void) { zend_signal_startup(); }
 
 // re-key the MM heap after fork; 8.5 asserts getpid() == heap->pid at shutdown.
 // php_execute_script keeps the current directory over a script run (main/main.c, SAPI_OPTION_NO_CHDIR)
