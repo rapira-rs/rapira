@@ -1,4 +1,5 @@
-use std::os::fd::RawFd;
+use std::io::Read as _;
+use std::os::fd::AsRawFd as _;
 use std::time::{Duration, Instant};
 
 use libc::c_int;
@@ -6,7 +7,7 @@ use libc::c_int;
 use crate::pctl::{Pctl, SignalAction};
 use crate::pool::Pool;
 use crate::process::{ExitVerdict, Forker, ProcTable, WorkerProc, reap_all};
-use crate::signals::{SIG_CHLD, errno_get};
+use crate::signals::errno_get;
 use crate::{MasterConfig, StopReason};
 
 /// Milliseconds until `next`, rounded up so a sub-millisecond remainder never busy-spins `poll` with a 0 timeout.
@@ -14,19 +15,6 @@ fn poll_timeout_ms(next: Instant, now: Instant) -> c_int {
     let d = next.saturating_duration_since(now);
     let ms = d.as_nanos().div_ceil(1_000_000);
     ms.min(i32::MAX as u128) as c_int
-}
-
-fn drain_pipe(fd: RawFd, buf: &mut [u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    loop {
-        // SAFETY: read into a live buffer from a valid nonblocking fd.
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-        if n <= 0 {
-            break;
-        }
-        out.extend_from_slice(&buf[..n as usize]);
-    }
-    out
 }
 
 /// The global half: signals, the stop escalation, and routing to the pools. Every per-pool decision lives in [`Pool`].
@@ -62,8 +50,8 @@ impl<'w> Master<'w> {
     }
 
     /// `Some(reason)` means the loop must return now: forced stop, or a stop with nothing left to drain.
-    fn handle_signal(&mut self, byte: u8, now: Instant) -> Option<StopReason> {
-        match self.pctl.on_signal(byte, now + self.control_timeout) {
+    fn handle_signal(&mut self, signo: c_int, now: Instant) -> Option<StopReason> {
+        match self.pctl.on_signal(signo, now + self.control_timeout) {
             SignalAction::Stop => self.begin_stop(),
             SignalAction::Forced => {
                 self.force_stop();
@@ -183,7 +171,7 @@ impl<'w> Master<'w> {
         }
         loop {
             let mut pfd = libc::pollfd {
-                fd: self.spawner.signal_fd(),
+                fd: self.spawner.self_pipe.rd.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             };
@@ -202,11 +190,13 @@ impl<'w> Master<'w> {
             let mut got_chld: bool = false;
             if n > 0 && (pfd.revents & libc::POLLIN) != 0 {
                 let mut buf = [0u8; 64];
-                for b in drain_pipe(self.spawner.signal_fd(), &mut buf) {
-                    if b == SIG_CHLD {
-                        got_chld = true;
-                    } else if let Some(reason) = self.handle_signal(b, now) {
-                        return Ok(reason);
+                while let Ok(len @ 1..) = (&self.spawner.self_pipe.rd).read(&mut buf) {
+                    for &b in &buf[..len] {
+                        if b == libc::SIGCHLD as u8 {
+                            got_chld = true;
+                        } else if let Some(reason) = self.handle_signal(c_int::from(b), now) {
+                            return Ok(reason);
+                        }
                     }
                 }
             }

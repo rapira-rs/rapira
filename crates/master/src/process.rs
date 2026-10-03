@@ -1,4 +1,4 @@
-use std::os::fd::{AsRawFd, RawFd};
+use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
 
 use libc::c_int;
@@ -156,10 +156,6 @@ pub(crate) struct Forker<'w> {
 }
 
 impl Forker<'_> {
-    pub(crate) fn signal_fd(&self) -> RawFd {
-        self.self_pipe.rd.as_raw_fd()
-    }
-
     /// Fork bracket: the child leaves {QUIT, INT} blocked for the worker's sigwait watcher and `_exit`s under `catch_unwind`, so no master Drop (pidfile unlink, PHP shutdown) can ever run in a child.
     pub(crate) fn spawn(
         &mut self,
