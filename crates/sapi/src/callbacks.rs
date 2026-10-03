@@ -260,9 +260,21 @@ pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
 const SERVER_VARS_MAX: u32 = 28;
 
 pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut zval) {
+    // Every name is valid for php_register_known_variable: the fixed names as written, HTTP_* through cgi_header_name.
+    let put_bytes = |name: &CStr, val: &[u8]| unsafe {
+        rapira_register_known_stringl(
+            name.as_ptr(),
+            name.to_bytes().len(),
+            val.as_ptr() as *const c_char,
+            val.len(),
+            track_vars_array,
+        );
+    };
     // No bound request: the boot run of the entrypoint in worker and dispatcher mode.
     if unsafe { ctx() }.is_none() {
-        guard((), || unsafe { register_boot_variables(track_vars_array) });
+        guard((), || unsafe {
+            register_boot_variables(track_vars_array, put_bytes)
+        });
         return;
     }
     with_ctx((), |ctx| {
@@ -270,16 +282,6 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         // One allocation for the whole array: the names below, one HTTP_* name per field, and the entries php_register_server_variables adds after this callback.
         let size = SERVER_VARS_MAX + ctx.req.headers.keys_len() as u32;
         unsafe { zend_hash_extend((*track_vars_array).value.arr, size, false) };
-        // Every name is valid for php_register_known_variable: the fixed names as written, HTTP_* through cgi_header_name.
-        let put_bytes = |name: &CStr, val: &[u8]| unsafe {
-            rapira_register_known_stringl(
-                name.as_ptr(),
-                name.to_bytes().len(),
-                val.as_ptr() as *const c_char,
-                val.len(),
-                track_vars_array,
-            );
-        };
         let put = |name: &CStr, val: &str| put_bytes(name, val.as_bytes());
         let script = crate::context::script();
         put(c"PHP_SELF", &script.script_name);
@@ -341,21 +343,12 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
 
 /// The variables of `php entrypoint.php`, in its order: the process environment, then the entrypoint path, which wins over an environment variable of the same name.
 /// https://github.com/php/php-src/blob/php-8.5.11/sapi/cli/php_cli.c#L316-L347
-unsafe fn register_boot_variables(track_vars_array: *mut zval) {
+unsafe fn register_boot_variables(track_vars_array: *mut zval, put: impl Fn(&CStr, &[u8])) {
     unsafe {
         if let Some(import) = php_import_environment_variables {
             import(track_vars_array);
         }
     }
-    let put = |name: &CStr, val: &[u8]| unsafe {
-        rapira_register_known_stringl(
-            name.as_ptr(),
-            name.to_bytes().len(),
-            val.as_ptr() as *const c_char,
-            val.len(),
-            track_vars_array,
-        );
-    };
     let path = crate::context::script().filename.as_bytes();
     put(c"PHP_SELF", path);
     put(c"SCRIPT_NAME", path);
