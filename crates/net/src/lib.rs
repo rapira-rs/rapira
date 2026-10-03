@@ -10,7 +10,7 @@ use tokio::sync::watch;
 mod accept_linux;
 
 pub mod listen;
-pub use listen::{ListenAddr, PrepareCtx, PreparedListener};
+pub use listen::{ListenAddr, PreparedListener, bind};
 
 #[cfg(target_os = "linux")]
 use accept_linux::{TcpListener, UnixListener};
@@ -58,7 +58,7 @@ impl Acceptor {
         // On other OSes from_std registers the tokio listener with the reactor of rt.
         let _guard = rt.enter();
         // SAFETY: into_raw_fd transfers sole ownership of a listening socket.
-        // prepare set O_NONBLOCK: both acceptors need an accept that does not block.
+        // bind set O_NONBLOCK: both acceptors need an accept that does not block.
         let socket = if tcp {
             let std = unsafe { std::net::TcpListener::from_raw_fd(prepared.into_raw_fd()) };
             #[cfg(target_os = "linux")]

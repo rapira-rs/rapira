@@ -2,7 +2,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
+use rapira_net::{ListenAddr, PreparedListener};
 use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
 use rapira_sapi::work::Intake;
 
@@ -76,11 +76,11 @@ impl Plugin for Server {
         PHP_PART
     }
 
-    fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
+    fn prepare(&mut self) -> Result<()> {
         if let Some(uploads) = &self.config.uploads {
             multipart::sweep_spool_dirs(&uploads.dir);
         }
-        let prepared = ctx.bind(&self.config.listen)?;
+        let prepared = rapira_net::bind(&self.config.listen)?;
         tracing::info!(target: "http", "prepared listener on {}", prepared.addr());
         self.prepared = Some(prepared);
         Ok(())

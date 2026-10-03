@@ -2,7 +2,6 @@ use anyhow::Context;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use rapira_config::{PoolSettings, SupervisorSettings};
 use rapira_master::PoolConfig;
-use rapira_net::PrepareCtx;
 use rapira_sapi::plugin::{Mode, Plugin};
 use std::path::PathBuf;
 use std::time::Duration;
@@ -103,14 +102,13 @@ fn pool_config(name: &'static str, pool: &PoolSettings) -> PoolConfig {
 fn pool_run(
     mut plugin: Box<dyn Plugin>,
     pool: &PoolSettings,
-    prepare: &mut PrepareCtx,
     supervisor: &SupervisorSettings,
 ) -> anyhow::Result<(PoolRun, PoolConfig)> {
     let name: &'static str = plugin.name();
     check_mode(name, plugin.modes(), pool.mode)?;
     // An address that an earlier pool bound fails here: that pool keeps its listener open.
     plugin
-        .prepare(prepare)
+        .prepare()
         .with_context(|| format!("plugin {name}: prepare failed"))?;
     Ok((
         PoolRun::Php {
@@ -146,14 +144,13 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         plugins.push((Box::new(plugin), pool));
     }
 
-    let mut prepare: PrepareCtx = PrepareCtx::new();
     // `WorkerEnv::pool` indexes both lists, so they keep one order. The observability pool goes first, so the slot cap error of the master always names a PHP pool.
     let mut runs: Vec<(PoolRun, PoolConfig)> = Vec::new();
     if let Some(observability) = settings.observability {
-        runs.push(observability::pool_run(observability, &mut prepare)?);
+        runs.push(observability::pool_run(observability)?);
     }
     for (plugin, pool) in plugins {
-        runs.push(pool_run(plugin, &pool, &mut prepare, &settings.supervisor)?);
+        runs.push(pool_run(plugin, &pool, &settings.supervisor)?);
     }
     let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = runs.into_iter().unzip();
 

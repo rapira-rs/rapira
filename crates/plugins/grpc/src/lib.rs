@@ -5,7 +5,7 @@ use anyhow::{Result, anyhow};
 use connectrpc::Router;
 use connectrpc_health::StaticChecker;
 use connectrpc_reflection::Reflector;
-use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
+use rapira_net::{ListenAddr, PreparedListener};
 use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
 use rapira_sapi::work::Intake;
 
@@ -71,9 +71,9 @@ impl Plugin for Server {
         PHP_PART
     }
 
-    fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
+    fn prepare(&mut self) -> Result<()> {
         set_services(self.config.schema.services().to_vec())?;
-        let listener = ctx.bind(&self.config.listen)?;
+        let listener = rapira_net::bind(&self.config.listen)?;
         tracing::info!(target: "grpc", "prepared listener on {}", listener.addr());
 
         let names: Vec<String> = self

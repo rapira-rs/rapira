@@ -35,7 +35,7 @@ pub trait Plugin: Send + 'static {
     /// The plugin's PHP surface.
     fn php(&self) -> PhpPart;
     /// Master side, before the fork, no runtime.
-    fn prepare(&mut self, ctx: &mut rapira_net::PrepareCtx) -> anyhow::Result<()>;
+    fn prepare(&mut self) -> anyhow::Result<()>;
     /// Worker side, on the plugin thread. Returns after the stop signal and the drain.
     fn serve(self: Box<Self>, worker: Worker) -> anyhow::Result<()>;
 }

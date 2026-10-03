@@ -827,7 +827,6 @@ dependencies = [
  "bytes",
  "http",
  "rapira_config",
- "rapira_net",
  "rapira_php_build",
  "rapira_scoreboard",
  "tokio",

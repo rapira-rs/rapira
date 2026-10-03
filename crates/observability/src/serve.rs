@@ -10,7 +10,7 @@ use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
-use rapira_net::{Acceptor, PrepareCtx, PreparedListener, Serve};
+use rapira_net::{Acceptor, PreparedListener, Serve};
 use rapira_scoreboard::{PoolRegion, Scoreboard};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
@@ -30,8 +30,8 @@ pub struct Server {
 
 impl Server {
     /// Master side, before the fork: binds the listener.
-    pub fn new(settings: Settings, build: Build, ctx: &mut PrepareCtx) -> Result<Server> {
-        let prepared = ctx.bind(&settings.listen)?;
+    pub fn new(settings: Settings, build: Build) -> Result<Server> {
+        let prepared = rapira_net::bind(&settings.listen)?;
         tracing::info!(target: "observability", "prepared listener on {}", prepared.addr());
         Ok(Self {
             build,
