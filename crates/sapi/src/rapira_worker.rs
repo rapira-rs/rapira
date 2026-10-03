@@ -8,7 +8,7 @@ use crate::{
 };
 use std::{
     borrow::Cow,
-    cell::RefCell,
+    cell::Cell,
     ffi::CString,
     os::raw::c_int,
     path::{Path, PathBuf},
@@ -26,7 +26,9 @@ use crate::{
 };
 
 thread_local! {
-    static WORKER: RefCell<Option<WorkerChan>> = const { RefCell::new(None) };
+    /// The next handle_request() call tears down the boot request first.
+    static FIRST_CALL: Cell<bool> = const { Cell::new(true) };
+    static RECYCLE: Cell<bool> = const { Cell::new(false) };
 }
 
 const UNHEALTHY_AFTER: u32 = 5;
@@ -43,23 +45,6 @@ enum Cycle {
 pub enum WorkerExit {
     Closed,
     Restart,
-}
-
-struct WorkerChan {
-    first_call: bool,
-    recycle: bool,
-}
-
-fn worker_recycle() -> bool {
-    WORKER.with_borrow(|w| w.as_ref().is_some_and(|wc| wc.recycle))
-}
-
-fn set_worker_recycle() {
-    WORKER.with_borrow_mut(|w| {
-        if let Some(wc) = w.as_mut() {
-            wc.recycle = true;
-        }
-    });
 }
 
 /// Starts the boot request with the argv of `php entrypoint.php` and builds $_SERVER before the script runs, as the CLI does.
@@ -101,12 +86,8 @@ fn run_cycle(script: &Path) -> Cycle {
         error!(target: "rapira", "php_request_startup() failed");
     }
 
-    let recycle = WORKER.with_borrow_mut(|w| {
-        w.as_mut().is_some_and(|wc| {
-            wc.first_call = true;
-            std::mem::take(&mut wc.recycle)
-        })
-    });
+    FIRST_CALL.set(true);
+    let recycle = RECYCLE.take();
 
     log_and_clear_last_error();
     if unsafe { rapira_request_shutdown() } == RAPIRA_BAILOUT as c_int {
@@ -124,13 +105,6 @@ fn run_cycle(script: &Path) -> Cycle {
 }
 
 pub fn rapira_worker(script: PathBuf) -> WorkerExit {
-    WORKER.with_borrow_mut(|w| {
-        *w = Some(WorkerChan {
-            first_call: true,
-            recycle: false,
-        })
-    });
-
     let mut failures: u32 = 0;
     let exit = loop {
         match run_cycle(&script) {
@@ -178,7 +152,7 @@ pub extern "C" fn rapira_rs_handle_request(
 /// Flushes before rapira_request_teardown: the real head (status, cookies, php_error_cb's 500) lives in SG(sapi_headers), which teardown destroys.
 fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> u32 {
     let Some(mut ctx) = next_job() else {
-        return if worker_recycle() {
+        return if RECYCLE.get() {
             RAPIRA_HANDLE_RECYCLE
         } else {
             RAPIRA_HANDLE_STOP
@@ -214,7 +188,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     log_and_clear_last_error();
     sb_update(scoreboard::Event::Handled(errored));
     if recycle {
-        set_worker_recycle();
+        RECYCLE.set(true);
     }
     ctx.finish(truncated);
     if recycle {
@@ -226,38 +200,35 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 
 /// The first call tears down the bootstrap request php_request_startup() left behind, before any job is served.
 fn next_job() -> Option<Context> {
-    WORKER.with_borrow_mut(|w| {
-        let wc = w.as_mut()?;
-        if std::mem::take(&mut wc.first_call) {
-            if unsafe { rapira_request_teardown() } == RAPIRA_BAILOUT as c_int {
-                error!(target: "rapira", "rapira_request_teardown() bailed on first call; recycling");
-                wc.recycle = true;
+    if FIRST_CALL.take() {
+        if unsafe { rapira_request_teardown() } == RAPIRA_BAILOUT as c_int {
+            error!(target: "rapira", "rapira_request_teardown() bailed on first call; recycling");
+            RECYCLE.set(true);
+            return None;
+        }
+        // hide boot registrations from the per-job shutdown pass; they run at cycle end
+        unsafe { rapira_stash_boot_shutdown_functions() };
+    }
+    log_and_clear_last_error();
+    loop {
+        match pull_job() {
+            Some(unit) => {
+                if unit.cancelled() {
+                    sb_update(scoreboard::Event::Handled(true));
+                    continue;
+                }
+                crate::exchange::RECEIVED.set(true);
+                let Some(ctx) = unit.into_cgi() else {
+                    unreachable!("a unit with no CGI form goes to dispatcher-mode workers only");
+                };
+                return Some(ctx);
+            }
+            None => {
+                crate::exchange::CLOSED_SEEN.set(true);
                 return None;
             }
-            // hide boot registrations from the per-job shutdown pass; they run at cycle end
-            unsafe { rapira_stash_boot_shutdown_functions() };
         }
-        log_and_clear_last_error();
-        loop {
-            match pull_job() {
-                Some(unit) => {
-                    if unit.cancelled() {
-                        sb_update(scoreboard::Event::Handled(true));
-                        continue;
-                    }
-                    crate::exchange::RECEIVED.set(true);
-                    let Some(ctx) = unit.into_cgi() else {
-                        unreachable!("a unit with no CGI form goes to dispatcher-mode workers only");
-                    };
-                    return Some(ctx);
-                }
-                None => {
-                    crate::exchange::CLOSED_SEEN.set(true);
-                    return None;
-                }
-            }
-        }
-    })
+    }
 }
 
 /// # Safety
