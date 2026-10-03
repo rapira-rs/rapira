@@ -13,18 +13,10 @@ typedef struct {
     zend_object std;
 } rapira_exchange_obj;
 
-// Class entries of the http stub; rapira_http_register_classes assigns them in MINIT, after the base classes.
+// Class entries that rapira_http.c reads; rapira_http_register_classes assigns
+// them in MINIT, after the base classes. Rust declares its own externs
+// (src/php/mod.rs).
 extern zend_class_entry *rapira_ce_http_multipart;
-extern zend_class_entry *rapira_ce_internal_http_dispatcher;
-extern zend_class_entry *rapira_ce_internal_http_exchange;
-extern zend_class_entry *rapira_ce_internal_http_dispatcher_info;
-extern zend_class_entry *rapira_ce_http_head_already_written_error;
-extern zend_class_entry *rapira_ce_http_head_not_written_error;
-extern zend_class_entry *rapira_ce_http_content_length_exceeded_error;
-extern zend_class_entry *rapira_ce_http_file_not_sendable_exception;
-extern zend_class_entry *rapira_ce_http_form_field;
-extern zend_class_entry *rapira_ce_http_uploaded_file;
-extern zend_class_entry *rapira_ce_http_request;
 
 // the register function of the http plugin part
 void rapira_http_register_classes(void);
