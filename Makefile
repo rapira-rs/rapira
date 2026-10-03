@@ -64,6 +64,9 @@ php-macos:
 	@$(MAKE) -C "$(PHP_SRC)" -j"$$(getconf _NPROCESSORS_ONLN)"
 	@$(MAKE) -C "$(PHP_SRC)" install
 
+# Workers leave through _exit, which skips the profile write at exit. Continuous mode (%c) keeps the
+# counters in a mapped file that forked workers share. On Linux it needs counter relocation:
+# https://clang.llvm.org/docs/SourceBasedCodeCoverage.html#running-the-instrumented-program
 coverage:
 	@$(LOCATE_PHP); \
 	export CARGO_TARGET_DIR=target/coverage $(PHP_ENV) && \

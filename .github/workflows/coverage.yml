@@ -9,8 +9,6 @@ jobs:
   coverage:
     runs-on: ubuntu-latest
     env:
-      # setup-php's version and the versioned libphp path below must agree
-      PHP_VERSION: "8.5"
       RUST_BACKTRACE: "1"
     permissions:
       contents: read
@@ -21,7 +19,7 @@ jobs:
 
       - uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # 2.37.2
         with:
-          php-version: ${{ env.PHP_VERSION }}
+          php-version: "8.5"
           coverage: none
           extensions: bcmath, ctype, curl, dom, fileinfo, filter, iconv, igbinary, imap, intl, mbstring, opcache, openssl, pdo_pgsql, pdo_sqlite, pgsql, phar, posix, redis, session, simplexml, sqlite3, tokenizer, xml, xmlreader, xmlwriter, zlib
         env:
@@ -39,15 +37,6 @@ jobs:
       - name: Build deps for bindgen/cc
         run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
 
-      - name: Expose the PHP embed lib
-        run: |
-          LIBPHP=/usr/lib/libphp${PHP_VERSION}.so
-          test -e "$LIBPHP" || { echo "missing $LIBPHP"; exit 1; }
-          mkdir -p "$RUNNER_TEMP/phplib"
-          ln -sf "$LIBPHP" "$RUNNER_TEMP/phplib/libphp.so"
-          echo "LD_LIBRARY_PATH=$RUNNER_TEMP/phplib:/usr/lib" >> "$GITHUB_ENV"
-          echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
-
       - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
         with: { components: llvm-tools-preview }
       - uses: taiki-e/install-action@ab4220e067fa624f7930084426dbfb7440a52829 # cargo-llvm-cov
@@ -59,18 +48,7 @@ jobs:
         # a skip in a gated suite on Linux means a broken install, not a pass
         env:
           RAPIRA_REQUIRE_EXTS: imap,openssl
-        # workers leave through _exit, which skips the profile write at exit; continuous mode (%c) keeps the
-        # counters in a mapped file that forked workers share, and on Linux it needs counter relocation:
-        # https://clang.llvm.org/docs/SourceBasedCodeCoverage.html#running-the-instrumented-program
-        run: |
-          export RUSTFLAGS="$RUSTFLAGS -Cllvm-args=-runtime-counter-relocation"
-          eval "$(cargo llvm-cov show-env --export-prefix)"
-          export LLVM_PROFILE_FILE="$CARGO_LLVM_COV_TARGET_DIR/rapira-%p%c.profraw"
-          cargo llvm-cov clean --workspace
-          cargo test --workspace
-          cargo build -p rapira_core --bin rapira
-          cargo test -p tests --test e2e --features e2e -- --test-threads=1
-          cargo llvm-cov report --workspace --lcov --output-path lcov.info --ignore-filename-regex '(crates/tests/|bindings\.rs$|/src/main\.rs$)'
+        run: make coverage
 
       - name: Upload to Codecov
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
