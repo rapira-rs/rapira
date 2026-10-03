@@ -1,0 +1,8 @@
+x-request-id:abc
+authorization:Bearer t
+trace-bin:YWJj
+trace-bin:YQ==, YWI
+grpc-timeout:1S
+content-type:application/grpc
+te:trailers
+host:a

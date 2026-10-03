@@ -1,0 +1,6 @@
+GET / HTTP/1.1
+Host: a
+X_Forwarded_For: 1.2.3.4
+X.Real.Ip: 5
+X-Ok: 6
+
