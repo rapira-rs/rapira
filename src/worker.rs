@@ -77,18 +77,16 @@ pub fn worker_body(
         slot: env.slot_view,
     };
 
-    let rapira = Rapira::start_worker(mode, entrypoint, hooks, plugin.dispatcher());
+    let (rapira, sink) = Rapira::start_worker(mode, entrypoint, hooks, plugin.dispatcher());
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
     let name: &str = plugin.name();
-    let outcome: anyhow::Result<()> =
-        run_plugin(plugin, rapira.sink(), stopper.clone(), grace, drain_grace).and_then(
-            |running| {
-                spawn_signal_thread(move || stopper.stop());
-                running.join()
-            },
-        );
+    let outcome: anyhow::Result<()> = run_plugin(plugin, sink, stopper.clone(), grace, drain_grace)
+        .and_then(|running| {
+            spawn_signal_thread(move || stopper.stop());
+            running.join()
+        });
     if let Err(e) = &outcome {
         tracing::error!(target: "rapira", "plugin {name}: {e:#}");
     }

@@ -59,7 +59,6 @@ impl Drop for PhpModule {
 }
 
 pub struct Rapira {
-    sink: Option<Sink>,
     worker: Option<JoinHandle<()>>,
 }
 
@@ -119,12 +118,13 @@ pub extern "C" fn rapira_rs_register_plugin_classes() {
 
 impl Rapira {
     /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `classes`: the dispatcher surface receive() serves in dispatcher mode.
+    /// The returned Sink is the intake of this worker. The PHP thread sees the intake closed once every clone of the Sink is dropped.
     pub fn start_worker(
         mode: Mode,
         entrypoint: PathBuf,
         hooks: WorkerHooks,
         classes: DispatcherClasses,
-    ) -> Self {
+    ) -> (Self, Sink) {
         let WorkerHooks {
             max_requests,
             on_quota,
@@ -160,22 +160,18 @@ impl Rapira {
             )
         });
 
-        Self {
-            sink: Some(sink),
-            worker: Some(worker),
-        }
-    }
-
-    /// The intake of this worker. The PHP thread sees the intake closed once `Rapira` and every clone are dropped.
-    pub fn sink(&self) -> Sink {
-        self.sink.clone().expect("the sink lives until Drop")
+        (
+            Self {
+                worker: Some(worker),
+            },
+            sink,
+        )
     }
 }
 
 impl Drop for Rapira {
     fn drop(&mut self) {
         info!(target: "rapira", "shutting down, dropping");
-        self.sink = None;
         let Some(worker) = self.worker.take() else {
             return;
         };
