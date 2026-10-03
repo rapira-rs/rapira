@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use rapira_net::ListenAddr;
 use rapira_sapi::{Addr, plugin::Mode};
 use serde_json::Value;
-use tests::server_log;
+use tests::{poll, server_log};
 
 /// Connect budget for a freshly spawned master (CI macOS worst case).
 pub const BOOT: Duration = Duration::from_secs(30);
@@ -55,18 +55,7 @@ impl Server {
     }
 
     pub fn wait_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
-        let end = Instant::now() + timeout;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(st)) => return Some(st),
-                Ok(None) => {}
-                Err(_) => return None,
-            }
-            if Instant::now() >= end {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        poll(timeout, || self.child.try_wait().transpose()).and_then(Result::ok)
     }
 
     pub fn try_status(&mut self) -> Option<ExitStatus> {
@@ -878,20 +867,16 @@ pub fn wait_workers(
     pred: impl Fn(&[u32]) -> bool,
 ) -> Vec<u32> {
     let master = srv.child.id();
-    let end = Instant::now() + deadline;
-    loop {
+    poll(deadline, || {
         let pids = worker_pids(master);
-        if pred(&pids) {
-            return pids;
-        }
-        if Instant::now() >= end {
-            panic!(
-                "timed out after {deadline:?} waiting for {what}\n{}",
-                diagnostics(srv)
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+        pred(&pids).then_some(pids)
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "timed out after {deadline:?} waiting for {what}\n{}",
+            diagnostics(srv)
+        )
+    })
 }
 
 pub fn signal(pid: u32, sig: i32) {
@@ -1366,19 +1351,12 @@ impl Conn {
 /// Poll `server.log` for `needle`, bounded.
 pub fn wait_log_contains(srv: &Server, needle: &str, deadline: Duration) -> bool {
     let path = srv.dir.join("server.log");
-    let end = std::time::Instant::now() + deadline;
-    loop {
-        if std::fs::read_to_string(&path)
-            .map(|s| s.contains(needle))
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        if std::time::Instant::now() >= end {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    poll(deadline, || {
+        std::fs::read_to_string(&path)
+            .is_ok_and(|s| s.contains(needle))
+            .then_some(())
+    })
+    .is_some()
 }
 
 /// Sends SIGUSR1 until the master logs a scoreboard line of slot 0 that contains `fragment`, for at most 10 s; returns that line.

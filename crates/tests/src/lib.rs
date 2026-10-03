@@ -1,6 +1,7 @@
 use http::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::Frame;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
 
 pub mod grpc;
@@ -45,6 +46,20 @@ pub fn req(uri: &str) -> http::Request<Vec<u8>> {
         .header(http::header::HOST, "localhost")
         .body(Vec::new())
         .expect("a valid test request")
+}
+
+/// Calls `check` every 50 ms until it returns Some or `within` has passed; None = the deadline passed.
+pub fn poll<T>(within: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
+    let end = Instant::now() + within;
+    loop {
+        if let Some(v) = check() {
+            return Some(v);
+        }
+        if Instant::now() >= end {
+            return None;
+        }
+        std::thread::sleep(Duration::from_millis(50));
+    }
 }
 
 /// The FileDescriptorSet of `fixtures/grpc/echo.proto`.

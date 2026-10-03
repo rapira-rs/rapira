@@ -9,7 +9,7 @@ use http::header::{CONTENT_TYPE, HOST};
 use http::{HeaderValue, Method, Version};
 use rapira_sapi::{Frame, plugin::Mode};
 use tests::wire::submit;
-use tests::{drain, drain_resp, fixture, req, server_log};
+use tests::{drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::{
     Server, Spawn, parse_status_and_body, scratch_dir, slot_line, wait_log_contains,
@@ -1239,11 +1239,7 @@ fn sendfile_of_a_shrunken_file_ends_short() -> anyhow::Result<()> {
         path.display()
     )?;
     // The test reads nothing before the cut, so the socket buffers stop the plugin read far below CUT.
-    let deadline = std::time::Instant::now() + READ;
-    while !marker.exists() {
-        assert!(std::time::Instant::now() < deadline, "the file was not cut");
-        std::thread::sleep(Duration::from_millis(10));
-    }
+    poll(READ, || marker.exists().then_some(())).expect("the file was not cut");
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw)?;
 

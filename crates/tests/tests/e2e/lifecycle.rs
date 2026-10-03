@@ -1,5 +1,6 @@
 use crate::harness::*;
-use std::time::{Duration, Instant};
+use std::time::Duration;
+use tests::poll;
 
 #[test]
 fn http_round_trip() {
@@ -78,22 +79,18 @@ fn killed_worker_respawns() {
 
 // After the master exits its workers reparent away and `worker_pids` cannot see them, so poll the captured pids directly.
 fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
-    let end = Instant::now() + timeout;
-    loop {
+    poll(timeout, || {
         // SAFETY: kill(pid, 0) only probes existence; ESRCH means gone.
-        let gone = pids
-            .iter()
-            .all(|&p| unsafe { libc::kill(p as libc::pid_t, 0) } == -1);
-        if gone {
-            return;
-        }
-        assert!(
-            Instant::now() < end,
+        pids.iter()
+            .all(|&p| unsafe { libc::kill(p as libc::pid_t, 0) } == -1)
+            .then_some(())
+    })
+    .unwrap_or_else(|| {
+        panic!(
             "workers survived the master: {pids:?}\n{}",
             diagnostics(srv)
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
+        )
+    });
 }
 
 #[test]
@@ -291,18 +288,14 @@ fn a_worker_that_never_boots_next_to_a_serving_worker_keeps_the_master_up() {
 fn worker_bootstrap_that_never_serves_failboots() {
     let mut srv = spawn_with_config("lifecycle/never-loop-worker.php", 1, "mode = \"worker\"\n");
     let addr = srv.addr;
-    let end = Instant::now() + Duration::from_secs(60);
-    let status = loop {
-        if let Some(st) = srv.try_status() {
-            break Some(st);
-        }
-        if Instant::now() >= end {
-            panic!("master never exited\n{}", diagnostics(&srv));
-        }
-        let _ = http_get(addr, "/", Duration::from_secs(2));
-        std::thread::sleep(Duration::from_millis(100));
-    };
-    assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
+    let status = poll(Duration::from_secs(60), || {
+        srv.try_status().or_else(|| {
+            let _ = http_get(addr, "/", Duration::from_secs(2));
+            None
+        })
+    })
+    .unwrap_or_else(|| panic!("master never exited\n{}", diagnostics(&srv)));
+    assert_exit_code(Some(status), MASTER_EXIT_FAILBOOT, &srv);
 }
 
 /// A client that walks away mid-handler must not take the worker down: the abort recycles the cycle and the next request is served.

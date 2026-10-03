@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use serde_json::Value;
 
@@ -85,18 +85,10 @@ pub fn app_contexts(log: &Path, message: &str) -> Vec<String> {
 
 /// Polls `log` until an `app` record with `message` appears, for at most 10 s; returns its context.
 pub fn wait_app_record(log: &Path, message: &str) -> String {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(context) = app_contexts(log, message).into_iter().next() {
-            return context;
-        }
-        assert!(
-            Instant::now() < deadline,
-            "no {message:?} app record within 10s in {}",
-            log.display()
-        );
-        std::thread::sleep(Duration::from_millis(20));
-    }
+    crate::poll(Duration::from_secs(10), || {
+        app_contexts(log, message).into_iter().next()
+    })
+    .unwrap_or_else(|| panic!("no {message:?} app record within 10s in {}", log.display()))
 }
 
 /// The context of the one `dispatcher` app record of `log`. Stop the server first, so the worker has run to its end.
