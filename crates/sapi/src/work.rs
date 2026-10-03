@@ -1,5 +1,4 @@
 use std::ffi::CStr;
-use std::marker::PhantomData;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::Duration;
@@ -161,32 +160,6 @@ impl Sink {
     }
 }
 
-/// The typed handle a plugin's transport submits to.
-pub struct Intake<U: Work> {
-    sink: Sink,
-    unit: PhantomData<fn(U)>,
-}
-
-impl<U: Work> Clone for Intake<U> {
-    fn clone(&self) -> Self {
-        Self::new(self.sink.clone())
-    }
-}
-
-impl<U: Work> Intake<U> {
-    /// The worker behind `sink` must have started with the `DispatcherClasses` of the plugin that owns `U`.
-    pub fn new(sink: Sink) -> Self {
-        Self {
-            sink,
-            unit: PhantomData,
-        }
-    }
-
-    pub async fn submit(&self, unit: U) -> Result<(), Refused> {
-        self.sink.submit(Box::new(unit)).await
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::mpsc::sync_channel;
@@ -217,9 +190,11 @@ mod tests {
     async fn intake_reports_stopped_after_the_receiver_is_gone() {
         let (tx, rx) = sync_channel(1);
         let (sink, slot) = sink(tx);
-        let intake = Intake::<Probe>::new(sink);
         drop(rx);
-        assert_eq!(intake.submit(Probe).await.unwrap_err(), Refused::Stopped);
+        assert_eq!(
+            sink.submit(Box::new(Probe)).await.unwrap_err(),
+            Refused::Stopped
+        );
         assert_eq!(
             (
                 slot.failed_on_full_queue.load(Ordering::Relaxed),
@@ -280,8 +255,7 @@ mod tests {
             let (tx, rx) = sync_channel::<Box<dyn Work>>(1);
             tx.send(Box::new(Probe)).unwrap();
             let (sink, slot) = sink(tx);
-            let intake = Intake::<Probe>::new(sink);
-            let submit = intake.submit(Probe);
+            let submit = sink.submit(Box::new(Probe));
             let result = match case.during {
                 During::Nothing => Some(submit.await),
                 During::ClientLeaves => tokio::time::timeout(ACTION_DELAY, submit).await.ok(),

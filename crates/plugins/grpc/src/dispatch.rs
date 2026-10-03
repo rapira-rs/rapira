@@ -10,7 +10,7 @@ use connectrpc::{
     MethodDescriptor, Payload, Protocol, RequestContext,
 };
 use rapira_sapi::Addr;
-use rapira_sapi::work::{Intake, now_unix_f64};
+use rapira_sapi::work::{Sink, now_unix_f64};
 
 use crate::schema::Schema;
 use crate::{Call, RpcStatus, UnaryCall};
@@ -18,7 +18,7 @@ use crate::{Call, RpcStatus, UnaryCall};
 /// Routes the unary methods of the configured services to PHP.
 pub(crate) struct PhpDispatcher {
     pub(crate) schema: Arc<Schema>,
-    pub(crate) intake: Intake<Call>,
+    pub(crate) intake: Sink,
 }
 
 impl Dispatcher for PhpDispatcher {
@@ -79,7 +79,7 @@ fn streaming() -> ConnectError {
 
 async fn unary(
     schema: &Schema,
-    intake: &Intake<Call>,
+    intake: &Sink,
     path: String,
     mut ctx: RequestContext,
     request: Payload,
@@ -119,7 +119,7 @@ async fn unary(
     };
     let (call, reply) = Call::new(call);
     // A refusal before dispatch: PHP never saw the call.
-    if let Err(e) = intake.submit(call).await {
+    if let Err(e) = intake.submit(Box::new(call)).await {
         return Err(ConnectError::unavailable(e.to_string()));
     }
     // A closed channel means that PHP lost the call. Dropping this future closes the call for PHP.

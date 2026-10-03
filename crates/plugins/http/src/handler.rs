@@ -9,7 +9,7 @@ use http::header::CONTENT_TYPE;
 use http_body::Body;
 use http_body_util::BodyExt;
 use hyper::body::Incoming;
-use rapira_sapi::work::{Intake, Refused};
+use rapira_sapi::work::{Refused, Sink};
 use rapira_sapi::{Addr, Frame, Request};
 use tower::{Service as _, ServiceExt as _};
 
@@ -20,7 +20,7 @@ use crate::{Config, Exchange, bridge, multipart, request};
 
 pub(crate) struct Shared {
     pub cfg: Config,
-    pub intake: Intake<Exchange>,
+    pub intake: Sink,
     /// The multipart limits; None outside dispatcher mode.
     pub uploads: Option<Arc<multipart::Limits>>,
     pub inflight: Arc<AtomicUsize>,
@@ -477,7 +477,7 @@ async fn submit(
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
     let request = parse_multipart(request, shared.uploads.as_ref()).await?;
     let (exchange, reply) = Exchange::new(request, shared.cfg.superglobals);
-    shared.intake.submit(exchange).await?;
+    shared.intake.submit(Box::new(exchange)).await?;
     Ok(reply)
 }
 

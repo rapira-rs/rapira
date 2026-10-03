@@ -11,13 +11,13 @@ use hyper_util::server::graceful::GracefulShutdown;
 use rapira_net::{Acceptor, ListenAddr, PreparedListener, Serve};
 use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
-use rapira_sapi::work::Intake;
+use rapira_sapi::work::Sink;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch::{Sender, channel};
 
 use crate::bridge::ConnectionState;
 use crate::handler::{Conn, Shared, respond};
-use crate::{Config, Exchange, multipart};
+use crate::{Config, multipart};
 
 /// Everything the accept loop hands to a connection, and the drain that follows it.
 struct Serving {
@@ -27,11 +27,7 @@ struct Serving {
 }
 
 impl Serving {
-    fn start(
-        intake: Intake<Exchange>,
-        uploads: Option<Arc<multipart::Limits>>,
-        config: Config,
-    ) -> Self {
+    fn start(intake: Sink, uploads: Option<Arc<multipart::Limits>>, config: Config) -> Self {
         match &config.listen {
             ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
             unix => tracing::info!(target: "http", "listening on {unix}"),
@@ -157,7 +153,7 @@ fn spawn_watched(
 
 /// Runs the accept loop on the calling thread until the stop flag, then drains the connections.
 pub(crate) fn serve(
-    intake: Intake<Exchange>,
+    intake: Sink,
     config: Config,
     prepared: PreparedListener,
     worker: Worker,

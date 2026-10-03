@@ -7,7 +7,6 @@ use connectrpc_health::StaticChecker;
 use connectrpc_reflection::Reflector;
 use rapira_net::{ListenAddr, PreparedListener};
 use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
-use rapira_sapi::work::Intake;
 
 mod call;
 pub mod config;
@@ -94,7 +93,6 @@ impl Plugin for Server {
         let Some(prepared) = prepared else {
             return Err(anyhow!("grpc listener was not prepared"));
         };
-        let intake = Intake::new(worker.sink.clone());
-        serve::serve(intake, config, prepared, worker)
+        serve::serve(worker.sink.clone(), config, prepared, worker)
     }
 }

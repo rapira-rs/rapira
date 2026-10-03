@@ -4,7 +4,6 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use rapira_net::{ListenAddr, PreparedListener};
 use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
-use rapira_sapi::work::Intake;
 
 use exchange::Exchange;
 
@@ -92,7 +91,6 @@ impl Plugin for Server {
             return Err(anyhow!("http listener was not prepared"));
         };
         php::set_sendfile_root(config.sendfile_root.clone());
-        let intake = Intake::new(worker.sink.clone());
-        serve::serve(intake, config, prepared, worker)
+        serve::serve(worker.sink.clone(), config, prepared, worker)
     }
 }
