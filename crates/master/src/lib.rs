@@ -35,13 +35,6 @@ pub struct PoolConfig {
     pub request_terminate_timeout: Duration,
 }
 
-impl PoolConfig {
-    /// Two slots per worker so a reload replacement fits next to the worker it replaces.
-    pub fn slots(&self) -> usize {
-        self.processes * 2
-    }
-}
-
 pub struct MasterConfig {
     pub pools: Vec<PoolConfig>,
     /// Stop/reload QUIT to TERM escalation grace.
@@ -50,13 +43,13 @@ pub struct MasterConfig {
 }
 
 impl MasterConfig {
-    /// Two slots per worker, pools contiguous in `pools` order. Names the pool that pushes the total past the cap.
+    /// Two slots per worker, so a reload replacement fits next to the worker it replaces; pools contiguous in `pools` order. Names the pool that pushes the total past the cap.
     fn regions(&self) -> anyhow::Result<Vec<PoolRegion>> {
         let mut base: usize = 0;
         self.pools
             .iter()
             .map(|p| {
-                let end = base.saturating_add(p.slots());
+                let end = base.saturating_add(p.processes * 2);
                 anyhow::ensure!(
                     end <= SB_MAX_SLOTS,
                     "{}.pool.processes ({}) raises the worker total to {}, above the supported maximum ({})",

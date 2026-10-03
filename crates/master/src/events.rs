@@ -6,7 +6,7 @@ use libc::c_int;
 
 use crate::pctl::{Pctl, SignalAction};
 use crate::pool::Pool;
-use crate::process::{ExitVerdict, Forker, ProcTable, WorkerProc, reap_all};
+use crate::process::{ExitVerdict, Forker, WorkerProc, reap_all};
 use crate::signals::errno_get;
 use crate::{MasterConfig, StopReason};
 
@@ -96,7 +96,7 @@ impl<'w> Master<'w> {
     }
 
     fn drained(&self) -> bool {
-        self.pools.iter().all(|p| p.table.procs.is_empty())
+        self.pools.iter().all(|p| p.procs.is_empty())
     }
 
     fn begin_reload(&mut self, now: Instant) {
@@ -118,11 +118,7 @@ impl<'w> Master<'w> {
     }
 
     fn reap(&mut self, now: Instant) -> anyhow::Result<()> {
-        let buried = {
-            let mut tables: Vec<&mut ProcTable> =
-                self.pools.iter_mut().map(|p| &mut p.table).collect();
-            reap_all(&mut tables)
-        };
+        let buried = reap_all(&mut self.pools);
         for (pool, w, verdict) in buried {
             self.route_exit(pool, w, verdict, now)?;
         }
@@ -167,7 +163,7 @@ impl<'w> Master<'w> {
     pub(crate) fn run_loop(&mut self) -> anyhow::Result<StopReason> {
         let start = Instant::now();
         for p in &mut self.pools {
-            p.fork_initial(start, &mut self.spawner);
+            p.refill(start, &mut self.spawner);
         }
         loop {
             let mut pfd = libc::pollfd {
