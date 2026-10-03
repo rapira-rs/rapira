@@ -2,6 +2,7 @@ use anyhow::bail;
 use serde::Deserialize;
 use std::fmt;
 use std::fs::File;
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -42,7 +43,7 @@ impl fmt::Display for Mode {
 #[serde(deny_unknown_fields)]
 pub struct PoolSection {
     entrypoint: Option<String>,
-    processes: Option<usize>,
+    processes: Option<NonZero<usize>>,
     mode: Option<Mode>,
     max_requests: Option<u64>,
     request_terminate_timeout_secs: Option<u64>,
@@ -56,10 +57,9 @@ fn default_processes() -> usize {
 
 /// `table` is the qualified table of the calling plugin, such as `http.pool`. Every message carries it.
 pub fn resolve_pool(section: PoolSection, table: &str, dir: &Path) -> anyhow::Result<PoolSettings> {
-    let processes = section.processes.unwrap_or_else(default_processes);
-    if processes == 0 {
-        bail!("{table}.processes must be at least 1");
-    }
+    let processes = section
+        .processes
+        .map_or_else(default_processes, NonZero::get);
 
     let mode = section.mode.unwrap_or(Mode::Dispatcher);
 
@@ -218,7 +218,7 @@ mod tests {
             ErrCase {
                 name: "zero processes",
                 toml: "entrypoint = \"a.php\"\nprocesses = 0\n",
-                error: "http.pool.processes must be at least 1",
+                error: "expected a nonzero usize",
             },
             ErrCase {
                 name: "request timeout above the cap",

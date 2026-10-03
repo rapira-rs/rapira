@@ -1,5 +1,6 @@
 use std::fs::{OpenOptions, remove_file};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -20,7 +21,7 @@ pub struct Section {
     pub listen: Option<String>,
     pub server_name: Option<String>,
     pub server_port: Option<u16>,
-    pub max_body_size_mb: Option<usize>,
+    pub max_body_size_mb: Option<NonZero<usize>>,
     pub write_timeout_secs: Option<u64>,
     pub keepalive_timeout_secs: Option<u64>,
     pub unsafe_field_names: Option<UnsafeFieldNames>,
@@ -46,11 +47,11 @@ pub struct SendfileSection {
 #[serde(deny_unknown_fields)]
 pub struct UploadsSection {
     pub dir: Option<String>,
-    pub max_file_size_mb: Option<u64>,
-    pub max_field_size_kb: Option<usize>,
-    pub max_files: Option<usize>,
-    pub max_parts: Option<usize>,
-    pub max_part_headers: Option<usize>,
+    pub max_file_size_mb: Option<NonZero<u64>>,
+    pub max_field_size_kb: Option<NonZero<usize>>,
+    pub max_files: Option<NonZero<usize>>,
+    pub max_parts: Option<NonZero<usize>>,
+    pub max_part_headers: Option<NonZero<usize>>,
 }
 
 #[derive(Debug)]
@@ -110,10 +111,7 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         },
     };
 
-    let max_body_size_mb = section.max_body_size_mb.unwrap_or(8);
-    if max_body_size_mb == 0 {
-        bail!("http.max_body_size_mb must be at least 1");
-    }
+    let max_body_size_mb = section.max_body_size_mb.map_or(8, NonZero::get);
     let max_body_size = max_body_size_mb
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow!("http.max_body_size_mb {max_body_size_mb} is too large"))?;
@@ -213,32 +211,17 @@ fn resolve_middleware(
 
 fn resolve_uploads(section: UploadsSection, config_dir: &Path) -> Result<Limits> {
     let dir = opt_path(config_dir, section.dir.as_deref())?.unwrap_or_else(std::env::temp_dir);
-    let max_file_size_mb = section.max_file_size_mb.unwrap_or(2);
-    if max_file_size_mb == 0 {
-        bail!("http.uploads.max_file_size_mb must be at least 1");
-    }
+    let max_file_size_mb = section.max_file_size_mb.map_or(2, NonZero::get);
     let max_file_size = max_file_size_mb
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow!("http.uploads.max_file_size_mb {max_file_size_mb} is too large"))?;
-    let max_field_size_kb = section.max_field_size_kb.unwrap_or(256);
-    if max_field_size_kb == 0 {
-        bail!("http.uploads.max_field_size_kb must be at least 1");
-    }
+    let max_field_size_kb = section.max_field_size_kb.map_or(256, NonZero::get);
     let max_field_size = max_field_size_kb.checked_mul(1024).ok_or_else(|| {
         anyhow!("http.uploads.max_field_size_kb {max_field_size_kb} is too large")
     })?;
-    let max_parts = section.max_parts.unwrap_or(1024);
-    if max_parts == 0 {
-        bail!("http.uploads.max_parts must be at least 1");
-    }
-    let max_part_headers = section.max_part_headers.unwrap_or(32);
-    if max_part_headers == 0 {
-        bail!("http.uploads.max_part_headers must be at least 1");
-    }
-    let max_files = section.max_files.unwrap_or(20);
-    if max_files == 0 {
-        bail!("http.uploads.max_files must be at least 1");
-    }
+    let max_parts = section.max_parts.map_or(1024, NonZero::get);
+    let max_part_headers = section.max_part_headers.map_or(32, NonZero::get);
+    let max_files = section.max_files.map_or(20, NonZero::get);
     Ok(Limits {
         dir,
         max_file_size,
@@ -397,7 +380,7 @@ mod tests {
             Case {
                 name: "zero max_files would 413 every file part",
                 toml: "[pool]\nentrypoint = \"a.php\"\n[uploads]\nmax_files = 0\n",
-                error: "http.uploads.max_files must be at least 1",
+                error: "expected a nonzero usize",
             },
             Case {
                 name: "uploads under classic mode",
