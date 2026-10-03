@@ -41,15 +41,11 @@ static void rapira_grpc_call_free(zend_object *std) {
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, __construct) {
-    (void)execute_data;
-    (void)return_value;
     zend_throw_error(NULL,
                      "host-created; obtain it from \\Rapira\\get_dispatcher()");
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_DispatcherInfo, __construct) {
-    (void)execute_data;
-    (void)return_value;
     zend_throw_error(NULL, "host-created");
 }
 

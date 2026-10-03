@@ -138,16 +138,12 @@ extern void rapira_rs_register_plugin_classes(void);
 
 // the plugin classes extend the base classes, so the base classes register first
 PHP_MINIT_FUNCTION(rapira) {
-    (void)type;
-    (void)module_number;
     rapira_register_classes();
     rapira_rs_register_plugin_classes();
     return SUCCESS;
 }
 
 PHP_RSHUTDOWN_FUNCTION(rapira) {
-    (void)type;
-    (void)module_number;
     rapira_rs_dispatcher_release();
     return SUCCESS;
 }

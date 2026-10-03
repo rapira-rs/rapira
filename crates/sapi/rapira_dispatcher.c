@@ -76,7 +76,6 @@ ZEND_FUNCTION(Rapira_handle_request) {
 }
 
 ZEND_FUNCTION(Rapira_log) {
-    (void)return_value;
     zend_string *message = NULL;
     zval *level = NULL;
     HashTable *context = NULL;

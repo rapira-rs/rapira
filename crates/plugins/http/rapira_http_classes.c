@@ -36,15 +36,11 @@ ZEND_METHOD(Rapira_Internal_Http_Dispatcher, name) {
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Dispatcher, __construct) {
-    (void)execute_data;
-    (void)return_value;
     zend_throw_error(NULL,
                      "host-created; obtain it from \\Rapira\\get_dispatcher()");
 }
 
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, __construct) {
-    (void)execute_data;
-    (void)return_value;
     zend_throw_error(NULL, "host-created");
 }
 
