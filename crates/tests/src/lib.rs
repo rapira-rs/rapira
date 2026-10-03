@@ -121,20 +121,6 @@ impl Resp {
     }
 }
 
-/// Drains `reply` to its `End`; a missing head, a missing `End` or a truncated `End` is an error.
-pub async fn collect(reply: mpsc::Receiver<Frame>) -> anyhow::Result<Resp> {
-    let r = drain_resp_async(reply).await;
-    if r.head.is_none() && !r.ended {
-        anyhow::bail!("php worker died mid-response (channel closed without a response)");
-    }
-    anyhow::ensure!(
-        r.ended && !r.truncated,
-        "php crashed mid-response; body truncated"
-    );
-    anyhow::ensure!(r.head.is_some(), "php produced no response head");
-    Ok(r)
-}
-
 /// Poll for a first frame until `deadline`: None = nothing arrived in time, a producer that died with no frames yields `Resp::default()`.
 pub fn drain_resp_deadline(
     rx: &mut mpsc::Receiver<Frame>,
@@ -193,72 +179,4 @@ pub async fn drain_resp_async(mut rx: mpsc::Receiver<Frame>) -> Resp {
 pub async fn drain_async(rx: mpsc::Receiver<Frame>) -> (u16, String) {
     let r = drain_resp_async(rx).await;
     (r.status(), r.body_string())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use rapira_sapi::types::ResponseHead;
-
-    /// A reply that yields `events` and then closes.
-    fn reply(events: Vec<Frame>) -> mpsc::Receiver<Frame> {
-        let (tx, rx) = mpsc::channel(events.len().max(1));
-        for ev in events {
-            tx.try_send(ev).unwrap();
-        }
-        rx
-    }
-
-    fn head() -> Frame {
-        Frame::Head {
-            head: ResponseHead {
-                status: 200,
-                headers: fields(&[("x-a", "1")]),
-            },
-            content_length: None,
-            bodiless: false,
-        }
-    }
-
-    fn end(truncated: bool) -> Frame {
-        Frame::End {
-            trailers: HeaderMap::new(),
-            truncated,
-        }
-    }
-
-    /// Each failed stream maps to its error: no events, no `End`, a truncated `End`, no head.
-    #[tokio::test]
-    async fn collect_maps_stream_outcomes() {
-        let died = collect(reply(Vec::new())).await.unwrap_err();
-        assert!(died.to_string().contains("died mid-response"), "{died:#}");
-
-        let cut = collect(reply(vec![head()])).await.unwrap_err();
-        assert!(cut.to_string().contains("truncated"), "{cut:#}");
-
-        let cut = collect(reply(vec![head(), end(true)])).await.unwrap_err();
-        assert!(cut.to_string().contains("truncated"), "{cut:#}");
-
-        let headless = collect(reply(vec![end(false)])).await.unwrap_err();
-        assert!(
-            headless.to_string().contains("no response head"),
-            "{headless:#}"
-        );
-    }
-
-    /// Chunks concatenate in order.
-    #[tokio::test]
-    async fn collect_concatenates_the_stream() {
-        let r = collect(reply(vec![
-            head(),
-            Frame::Chunk(b"one,"[..].into()),
-            Frame::Chunk(b"two"[..].into()),
-            end(false),
-        ]))
-        .await
-        .unwrap();
-        assert_eq!(r.status(), 200);
-        assert_eq!(r.head.unwrap().headers, fields(&[("x-a", "1")]));
-        assert_eq!(r.body, b"one,two");
-    }
 }

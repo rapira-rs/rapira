@@ -3,16 +3,22 @@ use std::net::SocketAddr;
 use http::header::SET_COOKIE;
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit_async;
-use tests::{Resp, collect, fixture, req};
+use tests::{Resp, drain_resp_async, fixture, req};
 
 use crate::harness::Spawn;
 
-/// One request on its own connection, collected to its end; a truncated body is an error.
+/// One request on its own connection, drained to its end.
 async fn exchange(addr: SocketAddr, uri: &str) -> anyhow::Result<Resp> {
-    collect(submit_async(addr, req(uri)).await?).await
+    Ok(drain_resp_async(submit_async(addr, req(uri)).await?).await)
 }
 
 fn check(res: &Resp, want: &str) -> anyhow::Result<()> {
+    anyhow::ensure!(
+        res.ended && !res.truncated,
+        "the reply must end whole (ended={}, truncated={})",
+        res.ended,
+        res.truncated
+    );
     anyhow::ensure!(res.status() == 200, "expected 200, got {}", res.status());
     anyhow::ensure!(
         res.body == want.as_bytes(),
@@ -38,6 +44,12 @@ async fn classic_mode_serves_exchanges() -> anyhow::Result<()> {
 async fn error_path(mode: Mode, script: &str) -> anyhow::Result<()> {
     let srv = Spawn::http(mode, fixture(script)).spawn();
     let resp = exchange(srv.addr, "/").await?;
+    anyhow::ensure!(
+        resp.ended && !resp.truncated,
+        "the reply must end whole (ended={}, truncated={})",
+        resp.ended,
+        resp.truncated
+    );
     anyhow::ensure!(resp.status() == 404, "expected 404, got {}", resp.status());
     anyhow::ensure!(
         resp.header(SET_COOKIE.as_str()).is_some(),
@@ -60,17 +72,13 @@ async fn buffered_error_response_arrives_whole_classic() -> anyhow::Result<()> {
 #[tokio::test]
 async fn truncated_response_ends_as_truncated_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/output-then-throw-worker.php")).spawn();
-    let err = match exchange(srv.addr, "/").await {
-        Ok(resp) => anyhow::bail!(
-            "the reply must end as truncated, got {} with body {:?}",
-            resp.status(),
-            resp.body_string()
-        ),
-        Err(e) => e,
-    };
+    let resp = exchange(srv.addr, "/").await?;
     anyhow::ensure!(
-        err.to_string().contains("truncated"),
-        "expected the truncated-response error, got: {err:#}"
+        resp.truncated,
+        "the reply must end as truncated, got {} with body {:?} (ended={})",
+        resp.status(),
+        resp.body_string(),
+        resp.ended
     );
     Ok(())
 }
