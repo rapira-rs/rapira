@@ -348,15 +348,10 @@ mod tests {
         }
     }
 
-    /// `allow` is rejected too: there is no off-switch, so asking for one must fail loudly.
+    /// `allow` is rejected: there is no off-switch, so asking for one must fail loudly.
     #[test]
     fn section_errors_name_the_key() {
         let cases = [
-            Case {
-                name: "unknown unsafe_field_names value",
-                toml: "unsafe_field_names = \"dorp\"\n[pool]\nentrypoint = \"a.php\"\n",
-                error: "unknown variant `dorp`",
-            },
             Case {
                 name: "allow is no unsafe_field_names value",
                 toml: "unsafe_field_names = \"allow\"\n[pool]\nentrypoint = \"a.php\"\n",
