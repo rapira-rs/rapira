@@ -5,7 +5,7 @@ use crate::UnsafeFieldNames;
 
 /// A refusal before dispatch: PHP never saw the request.
 #[derive(Debug)]
-pub(crate) struct Rejection {
+pub struct Rejection {
     pub status: http::StatusCode,
     pub reason: String,
 }
@@ -46,7 +46,7 @@ pub(crate) fn authority(
     }
 }
 
-pub(crate) fn apply_field_name_policy(
+pub fn apply_field_name_policy(
     headers: &mut HeaderMap,
     policy: UnsafeFieldNames,
     superglobals: bool,
@@ -93,7 +93,7 @@ pub(crate) fn apply_field_name_policy(
 }
 
 /// Admission checks in dispatch order; Ok carries the resolved authority for the PHP request.
-pub(crate) fn check_request(
+pub fn check_request(
     parts: &mut http::request::Parts,
     unsafe_field_names: UnsafeFieldNames,
     superglobals: bool,

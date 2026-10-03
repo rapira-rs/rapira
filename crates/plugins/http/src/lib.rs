@@ -9,21 +9,21 @@ use rapira_sapi::work::Intake;
 use exchange::Exchange;
 
 mod bridge;
-mod check;
+pub mod check;
 pub mod config;
 mod exchange;
 mod handler;
 pub mod middleware;
 pub mod multipart;
-mod php;
-mod request;
+pub mod php;
+pub mod request;
 mod response;
 mod serve;
 
 pub use php::PHP_PART;
 
 #[derive(Clone)]
-pub(crate) struct Config {
+pub struct Config {
     pub listen: ListenAddr,
     pub server_name: String,
     pub server_port: u16,

@@ -1,7 +1,9 @@
 version: 2
 updates:
   - package-ecosystem: cargo
-    directory: /
+    directories:
+      - /
+      - /crates/tests/tests/fuzz
     schedule:
       interval: weekly
     commit-message:

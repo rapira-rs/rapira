@@ -7,7 +7,7 @@ use buffa_descriptor::generated::descriptor::method_options::IdempotencyLevel;
 use buffa_descriptor::{DescriptorPool, DynamicMessage, MessageIndex, ServiceDescriptor};
 
 /// The services of a FileDescriptorSet that rapira serves.
-pub(crate) struct Schema {
+pub struct Schema {
     pool: Arc<DescriptorPool>,
     /// Keyed `package.Service/Method`, the request path without its leading slash.
     methods: HashMap<String, Method>,
@@ -47,8 +47,8 @@ pub(crate) fn services() -> &'static [ServiceInfo] {
 }
 
 /// A unary method that rapira routes to PHP.
-pub(crate) struct Method {
-    pub(crate) input: MessageIndex,
+pub struct Method {
+    pub input: MessageIndex,
     pub(crate) output: MessageIndex,
     /// The method has `idempotency_level = NO_SIDE_EFFECTS`, so Connect GET can call it.
     pub(crate) idempotent: bool,
@@ -63,7 +63,7 @@ const PLUGIN_SERVICES: [&str; 3] = [
 
 impl Schema {
     /// Loads the set at `path` and keeps the unary methods of `services` as routes. `None` serves the services of the files that no other file of the set imports.
-    pub(crate) fn load(path: &Path, services: Option<&[String]>) -> anyhow::Result<Schema> {
+    pub fn load(path: &Path, services: Option<&[String]>) -> anyhow::Result<Schema> {
         let bytes = std::fs::read(path)
             .map_err(|e| anyhow!("reading grpc.descriptor_set {}: {e}", path.display()))?;
         // The operator supplies the set, so the element memory limit for untrusted input does not apply.
@@ -175,24 +175,24 @@ impl Schema {
         &self.services
     }
 
-    pub(crate) fn pool(&self) -> &Arc<DescriptorPool> {
+    pub fn pool(&self) -> &Arc<DescriptorPool> {
         &self.pool
     }
 
     /// The route for `path` (`package.Service/Method`). Streaming and unlisted methods have none.
-    pub(crate) fn method(&self, path: &str) -> Option<&Method> {
+    pub fn method(&self, path: &str) -> Option<&Method> {
         self.methods.get(path)
     }
 
     /// Unknown fields are dropped. An unknown enum value name fails the decode.
-    pub(crate) fn json_to_proto(&self, m: &Method, json: &[u8]) -> anyhow::Result<Vec<u8>> {
+    pub fn json_to_proto(&self, m: &Method, json: &[u8]) -> anyhow::Result<Vec<u8>> {
         let json = std::str::from_utf8(json)?;
         let msg =
             DynamicMessage::from_json_ignoring_unknown(Arc::clone(&self.pool), m.input, json)?;
         Ok(msg.encode_to_vec())
     }
 
-    pub(crate) fn proto_to_json(&self, m: &Method, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
+    pub fn proto_to_json(&self, m: &Method, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
         // The application produces the reply, so the element memory limit for untrusted input does not apply. `to_json` decodes an `Any` payload again under the default limit.
         let opts = buffa::DecodeOptions::new().with_element_memory_limit(usize::MAX);
         let msg =

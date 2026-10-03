@@ -41,6 +41,14 @@ These rules apply to all text, such as comments and docs.
 
 `make test` (test_nts then test_e2e), `make test_nts`, `make test_e2e`, `make coverage`, `make stubs`. All derived from `php-config`, no hardcoded distro paths.
 
+## Fuzz targets
+
+- The libFuzzer targets in `crates/tests/tests/fuzz/` call the parsers of client bytes in process. Each target has an oracle beyond "no panic", seeds in `seeds/<target>/` and a dictionary in `dict/<target>.dict`.
+- When you add or change a feature, a plugin, a header or anything else that a client or PHP can see, update the fuzz targets in the same change. Extend the target that reaches the changed code, or add a target for new code that reads client bytes. Add a new target to the `long` matrix in `.github/workflows/fuzz.yml`. Add seeds and dictionary entries for the new inputs.
+- A target calls existing functions only. Make an existing item `pub` (or its module `pub mod`) when a target needs it. Do not add a function, a method or a type for a target.
+- An oracle tolerates a known defect only with a one-line comment that links its issue. Remove the tolerance in the change that fixes the issue.
+- Run each changed target for at least 60 s with its seeds and its dictionary (the command is in `CONTRIBUTING.md`). Break the changed code on purpose and check that the target fails before you commit.
+
 ## Dependencies
 
 Prefer `libc` directly over wrappers.

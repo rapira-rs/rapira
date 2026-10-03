@@ -1,0 +1,96 @@
+name: Fuzz
+on:
+    pull_request:
+    schedule:
+        - cron: "17 3 * * 1,4"
+    workflow_dispatch:
+
+permissions:
+    contents: read
+
+env:
+    FLAGS: -max_len=4096 -timeout=10 -create_missing_dirs=1
+
+defaults:
+    run:
+        working-directory: crates/tests/tests/fuzz
+
+jobs:
+    # A short run with a fixed seed: each target replays its seeds and fuzzes for 60 s.
+    pull-request:
+        if: github.event_name == 'pull_request'
+        runs-on: ubuntu-latest
+        timeout-minutes: 20
+        steps:
+            - &checkout
+              uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with: { persist-credentials: false }
+
+            - &php
+              uses: shivammathur/setup-php@f3e473d116dcccaddc5834248c87452386958240 # v2
+              with:
+                  php-version: "8.5"
+                  coverage: none
+              env:
+                  phpts: nts
+
+            - &deps
+              name: Build deps for bindgen/cc
+              run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
+
+            # The fuzz targets do not call PHP, but rapira_sapi links libphp.
+            - &libphp
+              name: Expose the PHP embed lib
+              run: |
+                  mkdir -p "$RUNNER_TEMP/phplib"
+                  ln -sf /usr/lib/libphp8.5.so "$RUNNER_TEMP/phplib/libphp.so"
+                  echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
+
+            - &toolchain
+              uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+
+            - &cargo-fuzz
+              run: cargo install --locked cargo-fuzz@0.13.2
+
+            - run: cargo fuzz build --fuzz-dir . -s none
+
+            - run: |
+                  for t in $(cargo fuzz list --fuzz-dir .); do
+                      cargo fuzz run --fuzz-dir . -s none "$t" "corpus/$t" "seeds/$t" -- \
+                          $FLAGS -dict="dict/$t.dict" -seed=1 -max_total_time=60
+                  done
+
+            - &artifacts
+              if: failure()
+              uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+              with:
+                  name: fuzz-artifacts-${{ env.TARGET || 'pull-request' }}
+                  path: crates/tests/tests/fuzz/artifacts
+                  if-no-files-found: ignore
+
+    # A long run of each target with a new seed. Each run starts from the committed seeds.
+    long:
+        if: github.event_name != 'pull_request'
+        runs-on: ubuntu-latest
+        timeout-minutes: 60
+        strategy:
+            fail-fast: false
+            matrix:
+                target: [multipart_raw, multipart_echo, connect_json, http_request, grpc_metadata, cgi_headers]
+        env:
+            TARGET: ${{ matrix.target }}
+        steps:
+            - *checkout
+            - *php
+            - *deps
+            - *libphp
+            - *toolchain
+            - *cargo-fuzz
+
+            - env:
+                  SEED: ${{ github.run_id }}
+              run: |
+                  cargo fuzz run --fuzz-dir . -s none "$TARGET" "corpus/$TARGET" "seeds/$TARGET" -- \
+                      $FLAGS -dict="dict/$TARGET.dict" -seed="$SEED" -fork=4 -max_total_time=1800
+
+            - *artifacts

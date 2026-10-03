@@ -1,0 +1,1 @@
+{"inner":{"id":7,"label":"x"},"repeatedInt32":[0,1,-1],"repeatedString":["","a"],"repeatedKind":["KIND_ONE",2],"repeatedInner":[{},{"id":1}]}

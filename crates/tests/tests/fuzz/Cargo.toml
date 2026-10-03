@@ -1,0 +1,65 @@
+[package]
+name = "rapira_fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+# cargo-fuzz builds this crate on its own, outside the rapira workspace.
+[workspace]
+
+[dependencies]
+arbitrary = { version = "1", features = ["derive"] }
+base64 = "0.23"
+buffa-descriptor = { version = "0.9.2", features = ["reflect", "json"] }
+http = "1"
+httparse = "1"
+libfuzzer-sys = "0.4"
+rapira_grpc = { path = "../../../plugins/grpc" }
+rapira_http = { path = "../../../plugins/http" }
+rapira_net = { path = "../../../net" }
+rapira_sapi = { path = "../../../sapi" }
+
+[[bin]]
+name = "multipart_raw"
+path = "fuzz_targets/multipart_raw.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "multipart_echo"
+path = "fuzz_targets/multipart_echo.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "connect_json"
+path = "fuzz_targets/connect_json.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "http_request"
+path = "fuzz_targets/http_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "grpc_metadata"
+path = "fuzz_targets/grpc_metadata.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "cgi_headers"
+path = "fuzz_targets/cgi_headers.rs"
+test = false
+doc = false
+bench = false

@@ -12,8 +12,8 @@ use rapira_sapi::work::Intake;
 mod call;
 pub mod config;
 mod dispatch;
-mod php;
-mod schema;
+pub mod php;
+pub mod schema;
 mod serve;
 
 use call::{Call, RpcProtocol, RpcStatus, UnaryCall, UnaryReply};
