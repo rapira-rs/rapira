@@ -21,8 +21,6 @@ pub const BOOT: Duration = Duration::from_secs(30);
 /// Master could not bring up a serviceable gen-0 pool.
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
 pub const MASTER_EXIT_OK: i32 = 0;
-/// Master forced stop (a second signal arrived while draining).
-pub const MASTER_EXIT_FORCED: i32 = 130;
 
 /// Must outlast supervisor.process_control_timeout (30s): after it the master escalates a stuck worker QUIT/TERM/KILL and still exits 0.
 pub const STOP_BUDGET: Duration = Duration::from_secs(45);
@@ -947,26 +945,11 @@ impl Storm {
 pub fn assert_exit_code(status: Option<ExitStatus>, expected: i32, srv: &Server) {
     match status.and_then(|s| s.code()) {
         Some(code) if code == expected => {}
-        Some(code) => panic!(
-            "expected exit {expected} [{}], got {code} [{}]\n{}",
-            code_name(expected),
-            code_name(code),
-            diagnostics(srv)
-        ),
+        Some(code) => panic!("expected exit {expected}, got {code}\n{}", diagnostics(srv)),
         None => panic!(
-            "expected exit {expected} [{}], but the master was killed by a signal or is still running\n{}",
-            code_name(expected),
+            "expected exit {expected}, but the master was killed by a signal or is still running\n{}",
             diagnostics(srv)
         ),
-    }
-}
-
-fn code_name(code: i32) -> String {
-    match code {
-        MASTER_EXIT_OK => "DRAINED/OK".into(),
-        MASTER_EXIT_FAILBOOT => "MASTER_FAILBOOT".into(),
-        MASTER_EXIT_FORCED => "MASTER_FORCED".into(),
-        other => format!("code {other}"),
     }
 }
 
