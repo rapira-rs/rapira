@@ -7,7 +7,6 @@ use crate::{
     start::{Pulled, pull_job, pull_job_to_shed},
 };
 use std::{
-    borrow::Cow,
     cell::Cell,
     ffi::CString,
     os::raw::c_int,
@@ -254,16 +253,11 @@ fn log_and_clear_last_error() {
                 "php",
                 level,
                 "{label}: {} in {}:{}",
-                zstr_lossy(&*msg),
-                zstr_lossy(&*(*pg).last_error_file),
+                String::from_utf8_lossy(zend::zstr_bytes(msg)),
+                String::from_utf8_lossy(zend::zstr_bytes((*pg).last_error_file)),
                 (*pg).last_error_lineno
             );
         }
         rapira_clear_last_error();
     }
-}
-
-fn zstr_lossy(s: &zend_string) -> Cow<'_, str> {
-    let bytes = unsafe { std::slice::from_raw_parts(s.val.as_ptr().cast::<u8>(), s.len) };
-    String::from_utf8_lossy(bytes)
 }
