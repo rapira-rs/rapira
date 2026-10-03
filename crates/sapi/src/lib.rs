@@ -20,7 +20,6 @@ pub mod zend;
 use std::ffi::c_int;
 
 pub use bindings::*;
-pub use quota::WorkerHooks;
 pub use start::{PhpModule, Rapira, boot_master, linked_php_version};
 pub use types::{Addr, Frame, Request};
 

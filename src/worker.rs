@@ -1,27 +1,12 @@
 use std::path::Path;
-use std::sync::atomic::{AtomicI32, Ordering::SeqCst};
+use std::sync::atomic::Ordering::SeqCst;
 use std::time::Duration;
 
 use rapira_config::PoolSettings;
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
+use rapira_sapi::Rapira;
 use rapira_sapi::plugin::{Plugin, Stopper, run_plugin};
-use rapira_sapi::{Rapira, WorkerHooks};
-
-/// First writer wins, except unhealthy upgrades a pending recycle; -1 = unset, so the plugin outcome sets the exit code.
-static WORKER_EXIT: AtomicI32 = AtomicI32::new(-1);
-
-fn request_worker_exit(code: i32, stopper: &Stopper) {
-    let decided = WORKER_EXIT
-        .compare_exchange(-1, code, SeqCst, SeqCst)
-        .is_ok()
-        || (code == WORKER_EXIT_UNHEALTHY
-            && WORKER_EXIT
-                .compare_exchange(WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, SeqCst, SeqCst)
-                .is_ok());
-    if decided {
-        stopper.stop();
-    }
-}
+use rapira_sapi::quota::{STOP_QUOTA, STOP_REASON, STOP_UNHEALTHY};
 
 /// Jitter avoids lockstep recycling. The hash mixes in the pid because every child inherits the same seed from the pre-fork master.
 fn effective_quota(max_requests: u64) -> u64 {
@@ -64,20 +49,14 @@ pub fn worker_body(
         return WORKER_EXIT_UNHEALTHY;
     }
     let stopper = Stopper::default();
-    let hooks: WorkerHooks = WorkerHooks {
-        max_requests: effective_quota(max_requests),
-        on_quota: Box::new({
-            let stopper = stopper.clone();
-            move || request_worker_exit(WORKER_EXIT_RECYCLE, &stopper)
-        }),
-        on_unhealthy: Box::new({
-            let stopper = stopper.clone();
-            move || request_worker_exit(WORKER_EXIT_UNHEALTHY, &stopper)
-        }),
-        slot: env.slot_view,
-    };
-
-    let (rapira, sink) = Rapira::start_worker(mode, entrypoint, hooks, plugin.dispatcher());
+    let (rapira, sink) = Rapira::start_worker(
+        mode,
+        entrypoint,
+        effective_quota(max_requests),
+        env.slot_view,
+        stopper.clone(),
+        plugin.dispatcher(),
+    );
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
@@ -92,10 +71,11 @@ pub fn worker_body(
     }
     drop(rapira);
 
-    match WORKER_EXIT.load(SeqCst) {
-        -1 if outcome.is_err() => 1,
-        -1 => 0,
-        code => code,
+    match STOP_REASON.load(SeqCst) {
+        STOP_QUOTA => WORKER_EXIT_RECYCLE,
+        STOP_UNHEALTHY => WORKER_EXIT_UNHEALTHY,
+        _ if outcome.is_err() => 1,
+        _ => 0,
     }
 }
 

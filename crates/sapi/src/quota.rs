@@ -1,24 +1,22 @@
 use std::cell::RefCell;
+use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
 
 use tracing::info;
 
+use crate::plugin::Stopper;
 use crate::scoreboard::{Event, sb_update};
 
-pub struct WorkerHooks {
-    /// 0 = unlimited; jitter already applied by the caller.
-    pub max_requests: u64,
-    pub on_quota: Box<dyn FnOnce() + Send>,
-    pub on_unhealthy: Box<dyn FnOnce() + Send>,
-    /// The scoreboard slot this worker reports into.
-    pub slot: &'static rapira_scoreboard::SharedSlot,
-}
+pub const STOP_QUOTA: u8 = 1;
+pub const STOP_UNHEALTHY: u8 = 2;
+
+/// Why the worker stops: 0 = no stop requested. The higher reason wins, so unhealthy replaces a pending quota stop.
+pub static STOP_REASON: AtomicU8 = AtomicU8::new(0);
 
 #[derive(Default)]
 struct QuotaState {
     served: u64,
     max: u64,
-    on_quota: Option<Box<dyn FnOnce() + Send>>,
-    on_unhealthy: Option<Box<dyn FnOnce() + Send>>,
+    stopper: Stopper,
 }
 
 thread_local! {
@@ -26,19 +24,21 @@ thread_local! {
 }
 
 /// Install on the PHP worker thread before the first job.
-pub(crate) fn install(
-    max_requests: u64,
-    on_quota: Box<dyn FnOnce() + Send>,
-    on_unhealthy: Box<dyn FnOnce() + Send>,
-) {
+pub(crate) fn install(max_requests: u64, stopper: Stopper) {
     Q.with_borrow_mut(|q| {
         *q = QuotaState {
             served: 0,
             max: max_requests,
-            on_quota: Some(on_quota),
-            on_unhealthy: Some(on_unhealthy),
+            stopper,
         };
     });
+}
+
+fn stop(reason: u8, stopper: &Stopper) {
+    if STOP_REASON.fetch_max(reason, SeqCst) < reason {
+        sb_update(Event::Draining);
+        stopper.stop();
+    }
 }
 
 pub(crate) fn tick() {
@@ -47,21 +47,13 @@ pub(crate) fn tick() {
             return;
         }
         q.served += 1;
-        if q.served == q.max
-            && let Some(f) = q.on_quota.take()
-        {
+        if q.served == q.max {
             info!(target: "rapira", "worker served {} requests; recycling", q.served);
-            sb_update(Event::Draining);
-            f();
+            stop(STOP_QUOTA, &q.stopper);
         }
     });
 }
 
 pub(crate) fn fire_unhealthy() {
-    Q.with_borrow_mut(|q| {
-        if let Some(f) = q.on_unhealthy.take() {
-            sb_update(Event::Draining);
-            f();
-        }
-    });
+    Q.with_borrow(|q| stop(STOP_UNHEALTHY, &q.stopper));
 }

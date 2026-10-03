@@ -8,11 +8,15 @@ use std::thread::JoinHandle;
 use std::time::Duration;
 use tracing::{error, info, trace};
 
-use crate::quota::{self, WorkerHooks};
+use crate::quota;
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
 use crate::work::{DispatcherClasses, Sink, Work};
-use crate::{classic_worker::classic_worker, plugin::Mode, *};
+use crate::{
+    classic_worker::classic_worker,
+    plugin::{Mode, Stopper},
+    *,
+};
 
 thread_local! {
     static JOB_RX: RefCell<Option<JobRx>> = const { RefCell::new(None) };
@@ -117,20 +121,17 @@ pub extern "C" fn rapira_rs_register_plugin_classes() {
 }
 
 impl Rapira {
-    /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `classes`: the dispatcher surface receive() serves in dispatcher mode.
+    /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `max_requests`: 0 = unlimited; jitter already applied by the caller.
+    /// `slot`: the scoreboard slot this worker reports into. `stopper` stops the plugin when the quota ends or PHP turns unhealthy. `classes`: the dispatcher surface receive() serves in dispatcher mode.
     /// The returned Sink is the intake of this worker. The PHP thread sees the intake closed once every clone of the Sink is dropped.
     pub fn start_worker(
         mode: Mode,
         entrypoint: PathBuf,
-        hooks: WorkerHooks,
+        max_requests: u64,
+        slot: &'static rapira_scoreboard::SharedSlot,
+        stopper: Stopper,
         classes: DispatcherClasses,
     ) -> (Self, Sink) {
-        let WorkerHooks {
-            max_requests,
-            on_quota,
-            on_unhealthy,
-            slot,
-        } = hooks;
         let pending: &'static AtomicU64 = &slot.pending;
         let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
         let sink = Sink::new(intake_tx, slot);
@@ -148,7 +149,7 @@ impl Rapira {
         trace!(target: "rapira", "spawning worker thread");
         let worker: JoinHandle<()> = thread::spawn(move || {
             sb_set(slot);
-            quota::install(max_requests, on_quota, on_unhealthy);
+            quota::install(max_requests, stopper);
             worker_main(
                 mode,
                 entrypoint,
