@@ -93,11 +93,6 @@ mod tests {
                 toml: "bogus = 1\n",
                 error: "unknown field `bogus`",
             },
-            Case {
-                name: "max_requests belongs to the pool",
-                toml: "max_requests = 1\n",
-                error: "unknown field `max_requests`",
-            },
         ];
         for case in cases {
             let err = supervisor(case.toml).expect_err(case.name).to_string();

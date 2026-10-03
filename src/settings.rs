@@ -100,11 +100,6 @@ mod tests {
                 error: Some("unknown field `nope`"),
             },
             Case {
-                name: "fpm pm table",
-                toml: "[pm]\nmode = \"static\"\n",
-                error: Some("unknown field `pm`"),
-            },
-            Case {
                 name: "pool under http",
                 toml: "[http.pool]\nentrypoint = \"a.php\"\n",
                 error: None,

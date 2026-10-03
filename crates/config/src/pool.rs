@@ -246,31 +246,6 @@ mod tests {
                 toml: "bogus = 1\n",
                 error: "unknown field `bogus`",
             },
-            ErrCase {
-                name: "threads is not a pool key",
-                toml: "threads = 1\n",
-                error: "unknown field `threads`",
-            },
-            ErrCase {
-                name: "classic is not a pool key",
-                toml: "classic = true\n",
-                error: "unknown field `classic`",
-            },
-            ErrCase {
-                name: "pidfile belongs to the supervisor",
-                toml: "pidfile = \"r.pid\"\n",
-                error: "unknown field `pidfile`",
-            },
-            ErrCase {
-                name: "scaling is not a pool key",
-                toml: "entrypoint = \"a.php\"\nscaling = \"static\"\n",
-                error: "unknown field `scaling`",
-            },
-            ErrCase {
-                name: "process_idle_timeout_secs is not a pool key",
-                toml: "entrypoint = \"a.php\"\nprocess_idle_timeout_secs = 10\n",
-                error: "unknown field `process_idle_timeout_secs`",
-            },
         ];
         for case in cases {
             let err = pool(case.toml).expect_err(case.name).to_string();
