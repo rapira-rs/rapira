@@ -13,7 +13,7 @@ use rapira_sapi::Addr;
 use rapira_sapi::work::{Intake, now_unix_f64};
 
 use crate::schema::Schema;
-use crate::{Call, RpcProtocol, RpcStatus, UnaryCall};
+use crate::{Call, RpcStatus, UnaryCall};
 
 /// Routes the unary methods of the configured services to PHP.
 pub(crate) struct PhpDispatcher {
@@ -106,11 +106,7 @@ async fn unary(
     let protocol = ctx.protocol();
     let call = UnaryCall {
         method: path.clone(),
-        protocol: match protocol {
-            Some(Protocol::Grpc) => RpcProtocol::Grpc,
-            Some(Protocol::GrpcWeb) => RpcProtocol::GrpcWeb,
-            _ => RpcProtocol::Connect,
-        },
+        protocol,
         metadata: std::mem::take(ctx.headers_mut()),
         deadline: ctx
             .deadline()

@@ -5,6 +5,7 @@ use base64::alphabet;
 use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD_NO_PAD};
 use bytes::Bytes;
+use connectrpc::Protocol;
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key};
@@ -25,7 +26,7 @@ use super::{
     rapira_ce_grpc_protocol, rapira_ce_grpc_service_info, rapira_ce_grpc_status,
     rapira_ce_internal_grpc_response_metadata,
 };
-use crate::{Call, MethodInfo, RpcProtocol, RpcStatus, UnaryCall, UnaryReply};
+use crate::{Call, MethodInfo, RpcStatus, UnaryCall, UnaryReply};
 
 /// # Safety
 /// `dst` writable; engine active on this thread.
@@ -373,11 +374,11 @@ unsafe fn build_metadata(dst: *mut zval, fields: &[Field]) {
     }
 }
 
-fn protocol_case(protocol: RpcProtocol) -> &'static CStr {
+fn protocol_case(protocol: Option<Protocol>) -> &'static CStr {
     match protocol {
-        RpcProtocol::Grpc => c"Grpc",
-        RpcProtocol::GrpcWeb => c"GrpcWeb",
-        RpcProtocol::Connect => c"Connect",
+        Some(Protocol::Grpc) => c"Grpc",
+        Some(Protocol::GrpcWeb) => c"GrpcWeb",
+        _ => c"Connect",
     }
 }
 
@@ -662,7 +663,7 @@ mod tests {
     fn state() -> (GrpcState, oneshot::Receiver<UnaryReply>) {
         let req = UnaryCall {
             method: "rapira.test.v1.EchoService/Echo".into(),
-            protocol: RpcProtocol::Grpc,
+            protocol: Some(Protocol::Grpc),
             metadata: HeaderMap::new(),
             deadline: None,
             remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),

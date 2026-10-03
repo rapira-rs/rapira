@@ -16,7 +16,7 @@ pub mod php;
 pub mod schema;
 mod serve;
 
-use call::{Call, RpcProtocol, RpcStatus, UnaryCall, UnaryReply};
+use call::{Call, RpcStatus, UnaryCall, UnaryReply};
 pub use php::PHP_PART;
 use schema::{MethodInfo, Schema, set_services};
 

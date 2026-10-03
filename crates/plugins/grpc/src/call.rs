@@ -11,21 +11,13 @@ use crate::php::{GrpcState, grpc_call_from};
 pub(crate) struct UnaryCall {
     /// `package.Service/Method`, without a leading slash.
     pub method: String,
-    pub protocol: RpcProtocol,
+    pub protocol: Option<connectrpc::Protocol>,
     /// The request headers as received. `getContext()` drops the transport names and decodes `-bin` values when it builds `Context::$metadata`.
     pub metadata: http::HeaderMap,
     /// Unix seconds.
     pub deadline: Option<f64>,
     pub remote: Addr,
     pub message: bytes::Bytes,
-}
-
-/// The protocol that the client of an RPC used.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum RpcProtocol {
-    Grpc,
-    GrpcWeb,
-    Connect,
 }
 
 /// The outcome of a unary RPC. The metadata is in wire form: `-bin` values are unpadded base64.
