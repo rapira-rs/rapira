@@ -1,11 +1,13 @@
 use std::ffi::{CStr, c_char};
 
 use crate::{
-    IS_DOUBLE, IS_LONG, IS_NULL, IS_PROP_REINITABLE, IS_PROP_UNINIT, IS_REFERENCE, IS_UNDEF,
-    executor_globals, rapira_zval_stringl, zend_class_entry, zend_object, zend_property_info,
-    zend_string, zend_throw_error, zend_throw_exception, zend_update_property,
-    zend_update_property_double, zend_update_property_long, zend_update_property_null,
-    zend_update_property_stringl, zend_value_error, zval,
+    HashPosition, HashTable, IS_DOUBLE, IS_LONG, IS_NULL, IS_PROP_REINITABLE, IS_PROP_UNINIT,
+    IS_REFERENCE, IS_UNDEF, executor_globals, rapira_zval_stringl, zend_class_entry,
+    zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
+    zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object,
+    zend_property_info, zend_read_property, zend_string, zend_throw_error, zend_throw_exception,
+    zend_ulong, zend_update_property, zend_update_property_double, zend_update_property_long,
+    zend_update_property_null, zend_update_property_stringl, zend_value_error, zval,
 };
 
 pub fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
@@ -230,6 +232,73 @@ pub unsafe fn deref(zv: *mut zval) -> *mut zval {
             &raw mut (*(*zv).value.ref_).val
         } else {
             zv
+        }
+    }
+}
+
+/// The engine writes a `__get` or hook result into `rv` and returns a pointer into it, so `rv` must outlive the returned pointer. Never NULL: an unset property gives `EG(uninitialized_zval)`.
+/// # Safety
+/// `ce` a registered class; `obj` alive; engine active.
+pub unsafe fn read_prop(
+    ce: *mut zend_class_entry,
+    obj: *mut zend_object,
+    name: &CStr,
+    rv: &mut zval,
+) -> *mut zval {
+    unsafe {
+        deref(zend_read_property(
+            ce,
+            obj,
+            name.as_ptr(),
+            name.count_bytes(),
+            true,
+            rv,
+        ))
+    }
+}
+
+// HASH_KEY_IS_STRING is a #define on 8.4 and an enum constant on 8.5, so it is hardcoded and compared through i64::from in `Entries::next`.
+const HASH_KEY_IS_STRING: i64 = 1;
+
+pub enum Key {
+    Str(*mut zend_string),
+    Index(zend_ulong),
+}
+
+/// A walk over the entries of a HashTable, with each value dereferenced. It has no Drop glue, so a Zend bailout can longjmp through a frame that holds it. The position moves before the caller gets the entry, so the caller must not change the walked table.
+pub struct Entries {
+    ht: *mut HashTable,
+    pos: HashPosition,
+}
+
+/// # Safety
+/// `ht` a live array that outlives the walk.
+pub unsafe fn entries(ht: *mut HashTable) -> Entries {
+    let mut pos: HashPosition = 0;
+    unsafe { zend_hash_internal_pointer_reset_ex(ht, &mut pos) };
+    Entries { ht, pos }
+}
+
+impl Iterator for Entries {
+    type Item = (Key, *mut zval);
+
+    /// `&raw mut self.pos`: the pos parameter is *mut on PHP 8.4 and *const on 8.5.
+    fn next(&mut self) -> Option<Self::Item> {
+        unsafe {
+            let entry = zend_hash_get_current_data_ex(self.ht, &raw mut self.pos);
+            if entry.is_null() {
+                return None;
+            }
+            let mut skey: *mut zend_string = std::ptr::null_mut();
+            let mut nkey: zend_ulong = 0;
+            let kt = zend_hash_get_current_key_ex(self.ht, &mut skey, &mut nkey, &self.pos);
+            zend_hash_move_forward_ex(self.ht, &mut self.pos);
+            let key = if i64::from(kt) == HASH_KEY_IS_STRING {
+                Key::Str(skey)
+            } else {
+                Key::Index(nkey)
+            };
+            Some((key, deref(entry)))
         }
     }
 }

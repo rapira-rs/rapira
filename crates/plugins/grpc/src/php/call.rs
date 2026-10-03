@@ -12,11 +12,10 @@ use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};
 use rapira_sapi::work::{Held, release};
 use rapira_sapi::{
-    HashPosition, HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex,
-    rapira_array_init, rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception,
-    rapira_zval_enum_case, zend, zend_argument_type_error, zend_class_entry,
-    zend_hash_get_current_data_ex, zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex,
-    zend_object, zend_read_property, zend_zval_value_name, zval, zval_add_ref, zval_ptr_dtor,
+    HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
+    rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_zval_enum_case,
+    zend, zend_argument_type_error, zend_object, zend_zval_value_name, zval, zval_add_ref,
+    zval_ptr_dtor,
 };
 use tokio::sync::oneshot;
 
@@ -427,43 +426,19 @@ unsafe fn build_context(dst: *mut zval, st: &mut GrpcState) {
 /// `obj` a live ErrorDetail; the borrow must not outlive it.
 unsafe fn detail_prop<'a>(obj: *mut zend_object, name: &CStr) -> Option<&'a [u8]> {
     unsafe {
-        let zv = read_prop(rapira_ce_grpc_error_detail, obj, name);
+        let mut rv: zval = std::mem::zeroed();
+        let zv = zend::read_prop(rapira_ce_grpc_error_detail, obj, name, &mut rv);
         (zend::zval_type(zv) == IS_STRING).then(|| zend::zstr_bytes((*zv).value.str_))
     }
 }
 
-/// A declared property of `obj`, read through the engine.
-/// # Safety
-/// `obj` an instance of `ce`; engine active.
-unsafe fn read_prop(ce: *mut zend_class_entry, obj: *mut zend_object, name: &CStr) -> *mut zval {
-    unsafe {
-        let mut rv: zval = std::mem::zeroed();
-        zend::deref(zend_read_property(
-            ce,
-            obj,
-            name.as_ptr(),
-            name.count_bytes(),
-            true,
-            &mut rv,
-        ))
-    }
-}
-
 /// `Status::$details` as owned pairs, or the first item that is not an ErrorDetail.
-/// `&raw mut pos`: the pos parameter is *mut on PHP 8.4 and *const on 8.5.
 /// # Safety
 /// `details` a live array.
 unsafe fn read_details(details: *mut HashTable) -> Result<Vec<(String, Bytes)>, *mut zval> {
     unsafe {
         let mut out = Vec::new();
-        let mut pos: HashPosition = 0;
-        zend_hash_internal_pointer_reset_ex(details, &mut pos);
-        loop {
-            let item = zend_hash_get_current_data_ex(details, &raw mut pos);
-            if item.is_null() {
-                return Ok(out);
-            }
-            let item = zend::deref(item);
+        for (_, item) in zend::entries(details) {
             let pair = if zend::zval_type(item) == IS_OBJECT
                 && zend::instanceof((*(*item).value.obj).ce, rapira_ce_grpc_error_detail)
             {
@@ -479,8 +454,8 @@ unsafe fn read_details(details: *mut HashTable) -> Result<Vec<(String, Bytes)>, 
                 String::from_utf8_lossy(url).into_owned(),
                 Bytes::copy_from_slice(value),
             ));
-            zend_hash_move_forward_ex(details, &mut pos);
         }
+        Ok(out)
     }
 }
 
@@ -577,10 +552,19 @@ pub unsafe extern "C" fn rapira_rs_grpc_respond(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_fail(state: *mut c_void, status: *mut zend_object) -> bool {
     guard(false, || unsafe {
-        let code = read_prop(rapira_ce_grpc_status, status, c"code");
-        let code = read_prop((*(*code).value.obj).ce, (*code).value.obj, c"value");
-        let message = read_prop(rapira_ce_grpc_status, status, c"message");
-        let details = read_prop(rapira_ce_grpc_status, status, c"details");
+        let mut code_rv: zval = std::mem::zeroed();
+        let mut value_rv: zval = std::mem::zeroed();
+        let mut message_rv: zval = std::mem::zeroed();
+        let mut details_rv: zval = std::mem::zeroed();
+        let code = zend::read_prop(rapira_ce_grpc_status, status, c"code", &mut code_rv);
+        let code = zend::read_prop(
+            (*(*code).value.obj).ce,
+            (*code).value.obj,
+            c"value",
+            &mut value_rv,
+        );
+        let message = zend::read_prop(rapira_ce_grpc_status, status, c"message", &mut message_rv);
+        let details = zend::read_prop(rapira_ce_grpc_status, status, c"details", &mut details_rv);
         let details = match read_details((*details).value.arr) {
             Ok(details) => details,
             Err(item) => {

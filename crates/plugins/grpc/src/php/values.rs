@@ -1,13 +1,10 @@
 use std::ffi::{c_char, c_double, c_int};
-use std::ptr::null_mut;
 
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::values::address_arg;
 use rapira_sapi::{
-    HASH_KEY_IS_STRING, HashPosition, HashTable, IS_ARRAY, IS_STRING, object_init_ex,
-    rapira_array_init, rapira_array_is_list, rapira_symtable_str_find, zend,
-    zend_get_exception_base, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
-    zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object, zend_string,
+    HashTable, IS_ARRAY, IS_STRING, object_init_ex, rapira_array_init, rapira_array_is_list,
+    rapira_symtable_str_find, zend, zend_get_exception_base, zend_object, zend_string,
     zend_type_error, zend_value_error, zval, zval_add_ref, zval_ptr_dtor,
 };
 
@@ -79,41 +76,25 @@ unsafe fn not_a_list(key: &[u8]) {
 /// `ht` a live array; entries stay ZPP-owned.
 unsafe fn metadata_valid(ht: *mut HashTable) -> bool {
     unsafe {
-        let mut pos: HashPosition = 0;
-        zend_hash_internal_pointer_reset_ex(ht, &mut pos);
-        loop {
-            let entry = zend_hash_get_current_data_ex(ht, &raw mut pos);
-            if entry.is_null() {
-                return true;
-            }
-            let mut str_key: *mut zend_string = null_mut();
-            let mut num_key = 0;
-            let kt = zend_hash_get_current_key_ex(ht, &mut str_key, &mut num_key, &pos);
+        for (key, list) in zend::entries(ht) {
             let num_text;
-            let key = if i64::from(kt) == HASH_KEY_IS_STRING {
-                zend::zstr_bytes(str_key)
-            } else {
-                num_text = (num_key as i64).to_string();
-                num_text.as_bytes()
+            let key = match key {
+                zend::Key::Str(s) => zend::zstr_bytes(s),
+                zend::Key::Index(n) => {
+                    num_text = (n as i64).to_string();
+                    num_text.as_bytes()
+                }
             };
             if key.is_empty() || !key.iter().all(|b| b.is_ascii() && !b.is_ascii_uppercase()) {
                 zend::throw_value_error(c"a metadata key must be non-empty lower-case ASCII");
                 return false;
             }
-            let list = zend::deref(entry);
             if zend::zval_type(list) != IS_ARRAY || !rapira_array_is_list((*list).value.arr) {
                 not_a_list(key);
                 return false;
             }
             let binary = super::call::is_binary(key);
-            let mut vpos: HashPosition = 0;
-            zend_hash_internal_pointer_reset_ex((*list).value.arr, &mut vpos);
-            loop {
-                let item = zend_hash_get_current_data_ex((*list).value.arr, &raw mut vpos);
-                if item.is_null() {
-                    break;
-                }
-                let item = zend::deref(item);
+            for (_, item) in zend::entries((*list).value.arr) {
                 if zend::zval_type(item) != IS_STRING {
                     not_a_list(key);
                     return false;
@@ -126,10 +107,9 @@ unsafe fn metadata_valid(ht: *mut HashTable) -> bool {
                     );
                     return false;
                 }
-                zend_hash_move_forward_ex((*list).value.arr, &mut vpos);
             }
-            zend_hash_move_forward_ex(ht, &mut pos);
         }
+        true
     }
 }
 

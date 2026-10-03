@@ -29,9 +29,6 @@ pub use types::{Addr, ClientCert, Frame, Request, ResponseHead, Tls};
 pub const SUCCESS: c_int = 0;
 pub const FAILURE: c_int = -1;
 
-// HASH_KEY_IS_STRING is a #define on 8.4 and an enum constant on 8.5, so it is hardcoded and compared through i64::from at the call sites.
-pub const HASH_KEY_IS_STRING: i64 = 1;
-
 // The request shims return RAPIRA_OK, RAPIRA_BAILOUT or RAPIRA_THROW (rapira_sapi.h).
 unsafe extern "C" {
     pub fn rapira_finish_output() -> c_int;
