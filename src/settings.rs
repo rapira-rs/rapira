@@ -1,6 +1,6 @@
 use anyhow::{Context, bail};
 use rapira_config::{
-    LogSection, LogSettings, SupervisorSection, SupervisorSettings, resolve_log, resolve_supervisor,
+    LogSettings, SupervisorSection, SupervisorSettings, resolve_log, resolve_supervisor,
 };
 use serde::Deserialize;
 use std::path::Path;
@@ -15,7 +15,7 @@ struct FileConfig {
     #[serde(default)]
     supervisor: SupervisorSection,
     #[serde(default)]
-    log: LogSection,
+    log: LogSettings,
 }
 
 #[derive(Debug)]

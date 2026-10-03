@@ -33,28 +33,20 @@ pub enum LogFormat {
     Json,
 }
 
-#[derive(Debug)]
+/// The `[log]` table.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
 pub struct LogSettings {
     pub level: LogLevel,
     pub format: LogFormat,
     /// Keys match by prefix; BTreeMap keeps the rendered filter byte-stable.
+    /// Target names are free-form keys; `resolve_log` checks their shape.
     pub targets: BTreeMap<String, LogLevel>,
 }
 
-/// The `[log]` table.
-#[derive(Debug, Default, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct LogSection {
-    level: Option<LogLevel>,
-    format: Option<LogFormat>,
-    /// Target names are free-form keys; `resolve_log` checks their shape.
-    #[serde(default)]
-    targets: BTreeMap<String, LogLevel>,
-}
-
 /// Target names are open-ended module paths, so keys are pinned to the shape EnvFilter parses as a plain target: anything else is filter grammar (`[`, `,`, `=`) and would be reinterpreted.
-pub fn resolve_log(section: LogSection) -> anyhow::Result<LogSettings> {
-    for name in section.targets.keys() {
+pub fn resolve_log(settings: LogSettings) -> anyhow::Result<LogSettings> {
+    for name in settings.targets.keys() {
         let mut chars = name.chars();
         let ok = chars
             .next()
@@ -68,11 +60,7 @@ pub fn resolve_log(section: LogSection) -> anyhow::Result<LogSettings> {
         }
     }
 
-    Ok(LogSettings {
-        level: section.level.unwrap_or_default(),
-        format: section.format.unwrap_or_default(),
-        targets: section.targets,
-    })
+    Ok(settings)
 }
 
 #[cfg(test)]
@@ -141,7 +129,7 @@ mod tests {
             },
         ];
         for case in cases {
-            let err = toml::from_str::<LogSection>(case.toml)
+            let err = toml::from_str::<LogSettings>(case.toml)
                 .map_err(anyhow::Error::from)
                 .and_then(resolve_log)
                 .expect_err(case.name)
