@@ -5,7 +5,7 @@ use std::fs::File;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::{ConfigCtx, capped_timeout};
+use crate::{capped_timeout, opt_path};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolSettings {
@@ -55,11 +55,7 @@ fn default_processes() -> usize {
 }
 
 /// `table` is the qualified table of the calling plugin, such as `http.pool`. Every message carries it.
-pub fn resolve_pool(
-    section: PoolSection,
-    table: &str,
-    ctx: &ConfigCtx,
-) -> anyhow::Result<PoolSettings> {
+pub fn resolve_pool(section: PoolSection, table: &str, dir: &Path) -> anyhow::Result<PoolSettings> {
     let processes = section.processes.unwrap_or_else(default_processes);
     if processes == 0 {
         bail!("{table}.processes must be at least 1");
@@ -67,10 +63,9 @@ pub fn resolve_pool(
 
     let mode = section.mode.unwrap_or(Mode::Dispatcher);
 
-    let Some(ep) = section.entrypoint.as_deref().filter(|s| !s.is_empty()) else {
+    let Some(entrypoint) = opt_path(dir, section.entrypoint.as_deref())? else {
         bail!("{table}.entrypoint is required");
     };
-    let entrypoint = ctx.resolve_path(ep)?;
 
     Ok(PoolSettings {
         entrypoint,
@@ -109,16 +104,10 @@ pub fn check_entrypoint(table: &str, entrypoint: &Path) -> anyhow::Result<()> {
 mod tests {
     use super::*;
 
-    fn ctx() -> ConfigCtx {
-        ConfigCtx {
-            dir: PathBuf::from("/w"),
-        }
-    }
-
     /// The pool of `toml` under the table name the http plugin passes.
     fn pool(toml: &str) -> anyhow::Result<PoolSettings> {
         let section: PoolSection = toml::from_str(toml)?;
-        resolve_pool(section, "http.pool", &ctx())
+        resolve_pool(section, "http.pool", Path::new("/w"))
     }
 
     /// What `entrypoint = "a.php"` and `processes = 4` resolve to.
@@ -135,7 +124,7 @@ mod tests {
     /// Every message carries the caller's table, so a second pool reports its own keys.
     #[test]
     fn resolve_pool_prefixes_errors_with_the_table() {
-        let err = resolve_pool(PoolSection::default(), "grpc.pool", &ctx())
+        let err = resolve_pool(PoolSection::default(), "grpc.pool", Path::new("/w"))
             .unwrap_err()
             .to_string();
         assert_eq!(err, "grpc.pool.entrypoint is required");

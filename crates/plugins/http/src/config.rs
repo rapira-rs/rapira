@@ -5,7 +5,7 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail, ensure};
 use rapira_config::{
-    ConfigCtx, ListenAddr, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout,
+    ListenAddr, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, opt_path,
     parse_listen, resolve_pool,
 };
 use serde::Deserialize;
@@ -80,8 +80,8 @@ pub enum Middleware {
 // ---------------------------------------------
 
 /// Boot checks run here: entrypoint file, uploads dir, static root, middleware names.
-pub fn resolve(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
-    let settings = settings(section, ctx)?;
+pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
+    let settings = settings(section, dir)?;
     check_entrypoint("http.pool", &settings.pool.entrypoint)?;
     for mw in &settings.middleware {
         match mw {
@@ -95,7 +95,7 @@ pub fn resolve(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
 }
 
 /// The settings of `section`. Reads no file.
-fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
+fn settings(section: Section, dir: &Path) -> Result<Settings> {
     let listen = parse_listen(
         "http",
         section.listen.as_deref(),
@@ -129,9 +129,9 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
         section.keepalive_timeout_secs.unwrap_or(60),
     )?;
 
-    let pool = resolve_pool(section.pool, "http.pool", ctx)?;
+    let pool = resolve_pool(section.pool, "http.pool", dir)?;
     let uploads = if pool.mode == Mode::Dispatcher {
-        Some(resolve_uploads(section.uploads.unwrap_or_default(), ctx)?)
+        Some(resolve_uploads(section.uploads.unwrap_or_default(), dir)?)
     } else if section.uploads.is_some() {
         bail!(
             "http.uploads applies to dispatcher mode only (http.pool.mode = \"{}\")",
@@ -141,8 +141,8 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
         None
     };
 
-    let sendfile_root = match section.sendfile.root.filter(|r| !r.is_empty()) {
-        Some(r) => ctx.resolve_path(&r)?,
+    let sendfile_root = match opt_path(dir, section.sendfile.root.as_deref())? {
+        Some(r) => r,
         None => pool
             .entrypoint
             .parent()
@@ -152,7 +152,7 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
 
     let static_files = section
         .r#static
-        .map(|s| rapira_static_files::resolve(s, ctx))
+        .map(|s| rapira_static_files::resolve(s, dir))
         .transpose()?;
     let middleware = resolve_middleware(section.middleware, static_files)?;
 
@@ -211,11 +211,8 @@ fn resolve_middleware(
     Ok(middleware)
 }
 
-fn resolve_uploads(section: UploadsSection, ctx: &ConfigCtx) -> Result<Limits> {
-    let dir = match section.dir.filter(|d| !d.is_empty()) {
-        Some(d) => ctx.resolve_path(&d)?,
-        None => std::env::temp_dir(),
-    };
+fn resolve_uploads(section: UploadsSection, config_dir: &Path) -> Result<Limits> {
+    let dir = opt_path(config_dir, section.dir.as_deref())?.unwrap_or_else(std::env::temp_dir);
     let max_file_size_mb = section.max_file_size_mb.unwrap_or(2);
     if max_file_size_mb == 0 {
         bail!("http.uploads.max_file_size_mb must be at least 1");
@@ -325,15 +322,9 @@ impl Server {
 mod tests {
     use super::*;
 
-    fn ctx() -> ConfigCtx {
-        ConfigCtx {
-            dir: PathBuf::from("/w"),
-        }
-    }
-
     /// The settings of an `[http]` table in TOML, without the boot checks.
     fn settings_of(toml: &str) -> Result<Settings> {
-        settings(toml::from_str(toml)?, &ctx())
+        settings(toml::from_str(toml)?, Path::new("/w"))
     }
 
     struct Case {
@@ -369,7 +360,7 @@ mod tests {
         ];
         for case in cases {
             let section: Section = toml::from_str(case.toml).unwrap();
-            let err = resolve(section, &ctx()).unwrap_err().to_string();
+            let err = resolve(section, Path::new("/w")).unwrap_err().to_string();
             assert!(err.contains(case.error), "{}: {err}", case.name);
         }
     }
@@ -706,13 +697,7 @@ mod tests {
         let file: toml::Table = toml::from_str(include_str!("../../../../examples/rapira.toml"))
             .expect("the example parses");
         let section: Section = file["http"].clone().try_into().expect("[http] parses");
-        let http = settings(
-            section,
-            &ConfigCtx {
-                dir: PathBuf::from("/srv/app"),
-            },
-        )
-        .expect("[http] resolves");
+        let http = settings(section, Path::new("/srv/app")).expect("[http] resolves");
         assert_eq!(http.listen.to_string(), "127.0.0.1:8000");
         assert_eq!(http.server_port, 8000);
         assert_eq!(

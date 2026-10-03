@@ -1,7 +1,6 @@
 use anyhow::{Context, bail};
 use rapira_config::{
-    ConfigCtx, LogSection, LogSettings, SupervisorSection, SupervisorSettings, resolve_log,
-    resolve_supervisor,
+    LogSection, LogSettings, SupervisorSection, SupervisorSettings, resolve_log, resolve_supervisor,
 };
 use serde::Deserialize;
 use std::path::Path;
@@ -33,29 +32,27 @@ pub fn resolve(path: &Path) -> anyhow::Result<Settings> {
         .with_context(|| format!("reading config file {}", path.display()))?;
     let file: FileConfig =
         toml::from_str(&text).with_context(|| format!("parsing config file {}", path.display()))?;
-    let ctx = ConfigCtx {
-        dir: path.parent().unwrap_or(Path::new(".")).to_path_buf(),
-    };
-    settings(file, &ctx)
+    let dir = path.parent().unwrap_or(Path::new("."));
+    settings(file, dir)
 }
 
-fn settings(file: FileConfig, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
+fn settings(file: FileConfig, dir: &Path) -> anyhow::Result<Settings> {
     if file.http.is_none() && file.grpc.is_none() {
         bail!("no plugin configured: add an [http] or a [grpc] table");
     }
     let http = file
         .http
-        .map(|section| rapira_http::config::resolve(section, ctx))
+        .map(|section| rapira_http::config::resolve(section, dir))
         .transpose()?;
     let grpc = file
         .grpc
-        .map(|section| rapira_grpc::config::resolve(section, ctx))
+        .map(|section| rapira_grpc::config::resolve(section, dir))
         .transpose()?;
     let observability = file
         .observability
         .map(rapira_observability::config::resolve)
         .transpose()?;
-    let supervisor = resolve_supervisor(file.supervisor, ctx)?;
+    let supervisor = resolve_supervisor(file.supervisor, dir)?;
     let log = resolve_log(file.log)?;
 
     Ok(Settings {
@@ -70,13 +67,6 @@ fn settings(file: FileConfig, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::PathBuf;
-
-    fn ctx() -> ConfigCtx {
-        ConfigCtx {
-            dir: PathBuf::from("/w"),
-        }
-    }
 
     struct Case {
         name: &'static str,
@@ -182,7 +172,7 @@ mod tests {
         ];
         for case in cases {
             let file: FileConfig = toml::from_str(case.toml).unwrap();
-            let err = settings(file, &ctx()).unwrap_err().to_string();
+            let err = settings(file, Path::new("/w")).unwrap_err().to_string();
             assert_eq!(
                 err, "no plugin configured: add an [http] or a [grpc] table",
                 "{}",
