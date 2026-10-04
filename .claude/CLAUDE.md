@@ -10,48 +10,43 @@
 
 ## PHP contract
 
-- The PHP contract ([rapira-rs/contract](https://github.com/rapira-rs/contract), local checkout `../contract`; update it before you read it) comes first. Read it before you plan, design or change anything that PHP can see: stubs, classes, functions, exceptions, messages and behavior.
-- The extension follows the contract. To improve the contract or deviate from it, ask first.
+- Here are the [rapira-rs/contract](https://github.com/rapira-rs/contract), local checkout in `../contract`. Read it before you plan, design or change anything PHP can see: stubs, classes, functions, exceptions, messages or behavior.
+- Follow the contract. Ask before you change it or implement anything that differs from it.
 
 ## All text
 
-These rules apply to all text, such as comments and docs.
-
-- Write all English in ASD-STE100 Simplified Technical English (STE). Use short sentences, active voice, approved vocabulary, and one instruction per sentence. Avoid idioms, slang, and unnecessary synonyms. Do not write poems in the code comments.
-- Mannered prose substitutes metaphor and flourish for direct statement. Instead of "a parameter worth varying," the mannered writer produces "a dial worth turning." Instead of "this point still matters," they write "this point earns its keep." The phrases exist to display the writer, not to convey the idea, and readers can tell. That is why mannered prose irritates: it makes the reader work harder so the writer can perform. It is also imprecise. Metaphors drag in connotations the writer did not choose and cannot control. The fix is to say what you mean. When a literal phrase is available, use it.
-
-## Comments
-
-- `make stubs` generates each `*_arginfo.h` header under `crates/` from the `*.stub.php` next to it.
+- Use ASD-STE100 Simplified Technical English for all English text, including comments and docs.
+- Use short sentences, active voice and approved vocabulary. Give one instruction per sentence.
+- Use direct, literal language. Avoid idioms, slang, metaphors, decorative prose and unnecessary synonyms. Do not write poems in comments.
 
 ## Tests
 
-- A test proves a behavior from outside, through what a client or an operator sees. Its pass condition is simple: a response, a log record, an exit status or a scoreboard line.
-- Adding API for tests only, public or private, is forbidden: no function, method, constructor, accessor, `Default` impl or feature flag in production code that only tests call. A `#[cfg(test)]` gate or a `pub(crate)` visibility does not make one acceptable. No production branch that only a test path takes. A generic parameter or a trait that has one production type and a test type is a test seam. Helpers inside a `#[cfg(test)] mod tests` block are test code, not API.
-- If no path from outside reaches a behavior, do not add a hook for it. Test its pure logic in a unit test, or leave it without a test. Drop a test of a sequence that production never runs.
-- Assert on the effect that a client sees, not on internal state such as a counter, a queue or a join handle.
-- A unit test tests one small piece of code in its own scope, in its crate under `#[cfg(test)] mod tests`. It can call private items. It uses no fixture: no file or directory on disk, no socket, no child process or signal, no environment variable and no PHP. It uses no stand-in that copies another rapira component. A value that the test builds in memory as input (a future, an in-memory writer, a waker, a paused tokio clock) is not a fixture.
-- A test that needs a fixture is an e2e test in `crates/tests/tests/e2e/` behind the `e2e` feature, so a workspace run skips it. It spawns the `rapira` binary with the `Spawn` builder in `harness.rs`. A stand-in plugin or a fake PHP is a test double: use a PHP fixture on the real binary. A test that no e2e test can replace is deleted.
-- Shared client code is in `crates/tests/src/`: `wire` (an HTTP/1.1 client that returns `Frame`s), `grpc` (gRPC, gRPC-Web and Connect clients), `server_log` (the JSON log readers). Fixtures are in `crates/tests/fixtures/` and `crates/tests/tests/e2e/fixtures/`. No `testing.rs`, `testdata/` or harness `[dev-dependencies]` in a plugin crate. Never the root package's `tests/`.
+- Test behavior through simple results a client or operator sees: responses, log records, exit statuses or scoreboard lines. Assert on these results, not internal counters, queues or join handles.
+- Do not add public or private production API or branches only for tests. This includes functions, methods, constructors, accessors, `Default` implementations and feature flags. Do not add generics or traits with one production type and one test type. `#[cfg(test)]` and `pub(crate)` are not exceptions. Helpers inside `#[cfg(test)] mod tests` are test code.
+- If no external path reaches a behavior, test its pure logic in a unit test or leave it untested. Do not add test hooks. Delete tests of sequences that production never runs.
+- Unit tests belong in their crate's `#[cfg(test)] mod tests`. Test one small piece of code in its own scope. Private items are allowed. No fixtures: files, directories, sockets, child processes, signals, environment variables or PHP. Do not copy other rapira components as test doubles. In-memory inputs (futures, writers, wakers or paused tokio clocks) are not fixtures.
+- Put tests that need fixtures in `crates/tests/tests/e2e/` behind the `e2e` feature so workspace runs skip them. Use `Spawn` in `harness.rs` to run the real `rapira` binary. Use PHP fixtures instead of fake plugins or PHP. Delete fixture tests that cannot be replaced by e2e tests.
+- Reuse `crates/tests/src/`: `wire` (HTTP/1.1 client returning `Frame`s), `grpc` (gRPC, gRPC-Web and Connect clients), `server_log` (JSON log readers). Keep fixtures in `crates/tests/fixtures/` or `crates/tests/tests/e2e/fixtures/`. No `testing.rs`, `testdata/` or harness `[dev-dependencies]` in plugin crates. No tests in the root package's `tests/`.
 - Do not assert that a port refuses connections after a stop: another process can bind the free port.
-- New tests use worker or dispatcher mode, not classic.
-- Check PHP behavior against php-src or a short script rather than guessing.
-- To test a change on a PHP minor older than the system PHP, use Docker. Take the official `php:<minor>-cli-trixie` image at the digest in `.github/workflows/docker.yml`; it ships `libphp.so`. Add the Rust toolchain from `rust:1-trixie` (as the `Dockerfile` does), `clang`, `libclang-dev` and `procps` (`worker_pids` in `harness.rs` runs `ps`). Build with `RUSTFLAGS="-L native=/usr/local/lib"`, `LD_LIBRARY_PATH=/usr/local/lib` and a target dir outside the checkout.
-- The container differs from CI: PHP runs as root, and the image lacks some tools. A test can fail there for that reason alone. Run a failing test on `main` in the same container before you report it.
+- New tests use worker or dispatcher mode, rarely classic.
+- Check PHP behavior with php-src or a short script.
+- Use Docker to test PHP minors older than the system PHP. Use the official `php:<minor>-cli-trixie` image at the digest in `.github/workflows/docker.yml`. It includes `libphp.so`. Add Rust from `rust:1-trixie`, as in `Dockerfile`. Install `clang`, `libclang-dev` and `procps` (`worker_pids` in `harness.rs` needs `ps`). Set `RUSTFLAGS="-L native=/usr/local/lib"` and `LD_LIBRARY_PATH=/usr/local/lib`. Use a target directory outside the checkout.
+- The container runs PHP as root and lacks some CI tools. These differences can cause failures. Run a failing test on `main` in the same container before you report it.
 
 `make test` (test_nts then test_e2e), `make test_nts`, `make test_e2e`, `make coverage`, `make stubs`. All derived from `php-config`, no hardcoded distro paths.
 
 ## Fuzz targets
 
-- The libFuzzer targets in `crates/tests/tests/fuzz/` call the parsers of client bytes in process. Each target has an oracle beyond "no panic", seeds in `seeds/<target>/` and a dictionary in `dict/<target>.dict`.
-- When you add or change a feature, a plugin, a header or anything else that a client or PHP can see, update the fuzz targets in the same change. Extend the target that reaches the changed code, or add a target for new code that reads client bytes. Add a new target to the `long` matrix in `.github/workflows/fuzz.yml`. Add seeds and dictionary entries for the new inputs.
-- A target calls existing functions only. Make an existing item `pub` (or its module `pub mod`) when a target needs it. Do not add a function, a method or a type for a target.
+- The libFuzzer targets in `crates/tests/tests/fuzz/` call parsers of client bytes in process. Each needs an oracle beyond "no panic", seeds in `seeds/<target>/` and a dictionary in `dict/<target>.dict`.
+- Update fuzz targets in the same change as anything a client or PHP can see. Extend a target that reaches the changed code, or add one for new code that reads client bytes. Add new targets to the `long` matrix in `.github/workflows/fuzz.yml`. Add seeds and dictionary entries for new inputs.
+- Call existing functions only. If needed, make an existing item `pub` or its module `pub mod`. Do not add functions, methods or types for a target.
 - An oracle tolerates a known defect only with a one-line comment that links its issue. Remove the tolerance in the change that fixes the issue.
 - Run each changed target for at least 60 s with its seeds and its dictionary (the command is in `CONTRIBUTING.md`). Break the changed code on purpose and check that the target fails before you commit.
 
 ## Dependencies
 
-Prefer `libc` directly over wrappers.
+- Prefer `libc` directly over wrappers.
+- Update dependencies and toolchains, including PHP in GitHub Actions and Rust, even with breaking changes. Update old versions instead of adding compatibility wrappers.
 
 ## Docs
 
@@ -63,3 +58,7 @@ Prefer `libc` directly over wrappers.
 - PHP 8.5 warns that `--enable-opcache` is unrecognized. The flag stays for the 8.4 CI leg.
 - Extension visibility differs per CI leg; that is what the `extension_loaded` skip guards are for. Do not edit the test `php.ini`.
 - `.clang-tidy` runs in survey mode, so Zend macro signatures trip `bugprone-*`. No CI job runs it.
+
+## Design patterns
+
+- Follow [Rust idioms and design patterns](https://rust-unofficial.github.io/patterns/).
