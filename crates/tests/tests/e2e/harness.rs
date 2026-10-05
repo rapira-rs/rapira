@@ -53,6 +53,7 @@ impl Server {
     }
 
     pub fn wait_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
+        // A try_wait error ends the poll: transpose gives Some(Err), and Result::ok maps it to None.
         poll(timeout, || self.child.try_wait().transpose()).and_then(Result::ok)
     }
 

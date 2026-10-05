@@ -273,10 +273,11 @@ fn worker_bootstrap_that_never_serves_failboots() {
     let mut srv = spawn_with_config("lifecycle/never-loop-worker.php", 1, "mode = \"worker\"\n");
     let addr = srv.addr;
     let status = poll(Duration::from_secs(60), || {
-        srv.try_status().or_else(|| {
-            let _ = http_get(addr, "/", Duration::from_secs(2));
-            None
-        })
+        if let Some(st) = srv.try_status() {
+            return Some(st);
+        }
+        let _ = http_get(addr, "/", Duration::from_secs(2));
+        None
     })
     .unwrap_or_else(|| panic!("master never exited\n{}", diagnostics(&srv)));
     assert_exit_code(Some(status), MASTER_EXIT_FAILBOOT, &srv);

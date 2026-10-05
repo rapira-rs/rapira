@@ -176,7 +176,6 @@ fn grpc_pool_serves_from_rapira_toml() {
 fn http_and_grpc_pools_run_side_by_side() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
         .with_grpc(fixture_path("grpc/echo-worker.php"))
-        .services(None)
         .spawn();
     let ListenAddr::Tcp(grpc) = listen(&srv) else {
         panic!("a TCP grpc listener")
@@ -206,6 +205,7 @@ fn http_and_grpc_pools_run_side_by_side() {
 fn grpc_boot_fails_before_the_fork() {
     struct Case {
         name: &'static str,
+        /// The [grpc] descriptor_set; None = the staged echo.binpb.
         descriptor_set: Option<&'static str>,
         service: &'static str,
         log: &'static str,
@@ -239,9 +239,7 @@ fn grpc_boot_fails_before_the_fork() {
 /// SIGQUIT is a graceful stop: the worker finishes the call it holds, then the master exits clean.
 #[test]
 fn sigquit_drains_an_in_flight_grpc_call() {
-    let mut srv = Spawn::grpc(fixture_path("grpc/echo-worker.php"))
-        .services(None)
-        .spawn();
+    let mut srv = Spawn::grpc(fixture_path("grpc/echo-worker.php")).spawn();
     let addr = srv.addr;
     let call = std::thread::spawn(move || connect_json(addr, ECHO, r#"{"text":"slow-ok"}"#));
     assert!(

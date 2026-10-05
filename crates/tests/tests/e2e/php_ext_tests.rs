@@ -27,6 +27,7 @@ fn success(name: &str, token: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A request that throws must answer 500, and the next plain request must answer 200 with the token, so this also covers the success path of the extension.
 fn exception(name: &str, token: &str) -> anyhow::Result<()> {
     let out = run(name, &["/?boom=1", "/"])?;
     if out[0].1 == "skip" {
