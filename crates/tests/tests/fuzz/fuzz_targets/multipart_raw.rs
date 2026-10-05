@@ -5,15 +5,16 @@
 use std::sync::LazyLock;
 
 use rapira_http::check::Rejection;
-use rapira_http::multipart::{Limits, MAX_PART_HEADERS, boundary, is_multipart, parse};
+use rapira_http::multipart::{Limits, boundary, is_multipart, parse};
 
-/// Small limits, so that a 4 KiB input can go over each count and size limit. The header count limit is the fixed MAX_PART_HEADERS.
+/// Small limits, so that a 4 KiB input can go over each count and size limit.
 static LIMITS: LazyLock<Limits> = LazyLock::new(|| Limits {
     dir: rapira_fuzz::spool_dir(),
     max_file_size: 1024,
     max_field_size: 1024,
     max_files: 4,
     max_parts: 8,
+    max_part_headers: 4,
 });
 
 /// A malformed body gives 400 and a body over a limit gives 413. An I/O error gives 500, which the allowed list refuses.
@@ -51,12 +52,12 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     for f in &form.fields {
         assert!(!f.name.is_empty());
         assert!(f.value.len() <= l.max_field_size);
-        assert!(f.headers.len() <= MAX_PART_HEADERS);
+        assert!(f.headers.len() <= l.max_part_headers);
     }
     for f in &form.files {
         assert!(!f.name.is_empty());
         assert!(f.size <= l.max_file_size);
-        assert!(f.headers.len() <= MAX_PART_HEADERS);
+        assert!(f.headers.len() <= l.max_part_headers);
         let len = std::fs::metadata(&f.file.path).expect("spooled file").len();
         assert_eq!(len, f.size, "spooled file size");
     }

@@ -42,6 +42,7 @@ static LIMITS: LazyLock<Limits> = LazyLock::new(|| Limits {
     max_field_size: MAX_LEN,
     max_files: MAX_PARTS,
     max_parts: MAX_PARTS,
+    max_part_headers: 32,
 });
 
 /// RFC 2046 bchars: https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1

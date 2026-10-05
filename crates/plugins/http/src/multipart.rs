@@ -15,10 +15,8 @@ pub struct Limits {
     pub max_field_size: usize,
     pub max_files: usize,
     pub max_parts: usize,
+    pub max_part_headers: usize,
 }
-
-/// Header fields allowed in one part; the httparse buffer size.
-pub const MAX_PART_HEADERS: usize = 32;
 
 /// The spool dir of this worker process under `base`. The master sweeps the dirs whose process is gone.
 fn worker_spool_dir(base: &Path) -> PathBuf {
@@ -309,15 +307,13 @@ fn parse_part(
     fields: &mut Vec<FormField>,
     files: &mut Vec<UploadedFile>,
 ) -> Result<(), Rejection> {
-    let mut hbuf = [httparse::EMPTY_HEADER; MAX_PART_HEADERS];
+    let mut hbuf = vec![httparse::EMPTY_HEADER; limits.max_part_headers];
     let (body, parsed) = match httparse::parse_headers(part, &mut hbuf) {
         // the header section ends at the first empty line, CRLF or bare LF; len includes that line
         Ok(httparse::Status::Complete((len, headers))) => (&part[len..], headers),
         Ok(httparse::Status::Partial) => return Err(bad("part without a header/body separator")),
         Err(httparse::Error::TooManyHeaders) => {
-            return Err(over(format!(
-                "part with more than {MAX_PART_HEADERS} header fields"
-            )));
+            return Err(over("part headers over max_part_headers"));
         }
         // httparse enforces RFC 9110 token field names, stricter than rfc1867.c
         Err(_) => return Err(bad("unparseable part header section")),
@@ -397,6 +393,7 @@ mod tests {
             max_field_size: 256 * 1024,
             max_files: 20,
             max_parts: 1024,
+            max_part_headers: 32,
         }
     }
 
