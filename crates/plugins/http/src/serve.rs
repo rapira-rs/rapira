@@ -47,6 +47,7 @@ impl Serving {
         }
     }
 
+    /// Serves one connection under `graceful` on its own task and marks its `ConnectionState` closed when the connection ends.
     fn spawn_conn<S>(&self, stream: S, remote: Addr, server: Addr)
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
