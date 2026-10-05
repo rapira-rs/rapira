@@ -1,9 +1,9 @@
 use anyhow::Context;
+use clap::{Args, CommandFactory, Parser, Subcommand};
 use rapira_config::PoolSettings;
 use rapira_master::PoolConfig;
 use rapira_sapi::plugin::{Mode, Plugin};
-use std::ffi::OsString;
-use std::path::Path;
+use std::path::PathBuf;
 use std::time::Duration;
 use tracing::info;
 
@@ -18,7 +18,25 @@ mod worker;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
-const USAGE: &str = "usage: rapira serve <CONFIG> | rapira --version | rapira --help";
+#[derive(Parser)]
+#[command(name = "rapira", version, about)]
+struct Cli {
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand)]
+enum Commands {
+    /// Boot the server: start PHP, prepare the plugins, and serve requests.
+    Serve(ServeArgs),
+}
+
+#[derive(Args)]
+struct ServeArgs {
+    /// Path to rapira.toml. Relative paths inside the file resolve against its directory.
+    #[arg(value_name = "CONFIG")]
+    config: PathBuf,
+}
 
 /// One pool's fork-time payload. The master hands out `WorkerEnv::pool` as the index into the list.
 enum PoolRun {
@@ -49,20 +67,12 @@ fn main() -> anyhow::Result<()> {
         )
     };
 
-    let args: Vec<OsString> = std::env::args_os().skip(1).collect();
-    match args.as_slice() {
-        [cmd, config] if cmd == "serve" => serve(Path::new(config)),
-        [flag] if flag == "--version" || flag == "-V" => {
-            println!("rapira {}", env!("CARGO_PKG_VERSION"));
+    match Cli::parse().command {
+        Some(Commands::Serve(args)) => serve(args),
+        None => {
+            Cli::command().print_help()?;
+            println!();
             Ok(())
-        }
-        [flag] if flag == "--help" || flag == "-h" => {
-            println!("{USAGE}");
-            Ok(())
-        }
-        _ => {
-            eprintln!("{USAGE}");
-            std::process::exit(2)
         }
     }
 }
@@ -98,8 +108,8 @@ fn pool_run(
     Ok((PoolRun::Php { plugin, pool }, cfg))
 }
 
-fn serve(config: &Path) -> anyhow::Result<()> {
-    let settings: settings::Settings = settings::resolve(config)?;
+fn serve(args: ServeArgs) -> anyhow::Result<()> {
+    let settings: settings::Settings = settings::resolve(&args.config)?;
 
     logging::init(&settings.log);
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
