@@ -209,6 +209,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
 
         Some(len)
     })
+    // None: guard caught a panic in the body.
     .unwrap_or_else(|| {
         unsafe { *aborted = true };
         0

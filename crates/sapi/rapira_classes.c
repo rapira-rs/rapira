@@ -146,6 +146,7 @@ PHP_RSHUTDOWN_FUNCTION(rapira) {
     return SUCCESS;
 }
 
+// The module entry lives here: ext_functions is file-static in rapira_arginfo.h, and only this file includes it.
 // clang-format off
 zend_module_entry rapira_module_entry = {
     STANDARD_MODULE_HEADER,

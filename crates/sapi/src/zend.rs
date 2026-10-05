@@ -260,6 +260,7 @@ pub unsafe fn read_prop(
 // HASH_KEY_IS_STRING is a #define on 8.4 and an enum constant on 8.5, so it is hardcoded and compared through i64::from in `Entries::next`.
 const HASH_KEY_IS_STRING: i64 = 1;
 
+/// The key of one HashTable entry. `Str` is the engine-owned key string and lives as long as the table.
 pub enum Key {
     Str(*mut zend_string),
     Index(zend_ulong),

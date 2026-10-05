@@ -356,6 +356,7 @@ int rapira_request_teardown(void) {
         zend_clear_exception();
     }
 
+    // unbind_server_context (context.rs) clears the other request_info pointers after each job.
     // sapi_deactivate_module frees both without clearing them (main/SAPI.c);
     // the cycle-end sapi_deactivate would free them again
     SG(request_info).current_user = NULL;

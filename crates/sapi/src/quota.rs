@@ -6,6 +6,7 @@ use tracing::info;
 use crate::plugin::Stopper;
 use crate::scoreboard::{Event, sb_update};
 
+// The value order is the priority: a higher reason replaces a lower one.
 pub const STOP_QUOTA: u8 = 1;
 pub const STOP_UNHEALTHY: u8 = 2;
 
@@ -34,6 +35,7 @@ pub(crate) fn install(max_requests: u64, stopper: Stopper) {
     });
 }
 
+/// Drains and stops the plugin once per raise of the reason. fetch_max returns the previous reason, so a repeat or a lower reason is a no-op.
 fn stop(reason: u8, stopper: &Stopper) {
     if STOP_REASON.fetch_max(reason, SeqCst) < reason {
         sb_update(Event::Draining);

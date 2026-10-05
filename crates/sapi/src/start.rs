@@ -177,6 +177,7 @@ impl Drop for Rapira {
             return;
         };
 
+        // The PHP thread ends once every Sink clone is dropped. The caller drops the Sink, or the plugin that holds it, before Rapira.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline && !worker.is_finished() {
             std::thread::sleep(std::time::Duration::from_millis(20));
