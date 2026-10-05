@@ -159,6 +159,7 @@ impl<'w> Master<'w> {
             let mut got_chld: bool = false;
             if n > 0 && (pfd.revents & libc::POLLIN) != 0 {
                 let mut buf = [0u8; 64];
+                // Drain the nonblocking self-pipe: WouldBlock (empty), EOF or an error ends the loop.
                 while let Ok(len @ 1..) = (&self.spawner.self_pipe.rd).read(&mut buf) {
                     for &b in &buf[..len] {
                         if b == libc::SIGCHLD as u8 {

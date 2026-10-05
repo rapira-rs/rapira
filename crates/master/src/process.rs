@@ -119,8 +119,9 @@ pub(crate) fn kill(pid: libc::pid_t, sig: c_int) {
 /// Fork source for every pool. The boxed worker closure keeps `Pool` and `Master` free of the closure's type.
 pub(crate) struct Forker<'w> {
     pub self_pipe: SelfPipe,
-    /// `lifeline_wr` is never written: its close at master exit is what signals master death to every worker's read end. Both ends are CLOEXEC; fork still inherits them.
+    /// Both lifeline ends are CLOEXEC: fork still inherits them, the flag only keeps them out of exec'd processes.
     pub lifeline_rd: std::io::PipeReader,
+    /// Never written: its close at master exit is what signals master death to every worker's `lifeline_rd`.
     pub lifeline_wr: std::io::PipeWriter,
     /// The whole board, for every `WorkerEnv`.
     pub board: &'static [SharedSlot],

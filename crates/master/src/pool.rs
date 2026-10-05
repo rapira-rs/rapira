@@ -328,6 +328,7 @@ impl Pool {
         self.refill(now, spawner);
     }
 
+    /// Spawns workers until the running workers plus the scheduled respawns reach `processes`. At start both counts are 0, so this call forks the initial workers.
     pub(crate) fn refill(&mut self, now: Instant, spawner: &mut Forker<'_>) {
         let running = self.procs.len();
         let pending = (0..self.slot_states.len())
