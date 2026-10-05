@@ -43,6 +43,14 @@ on:
                 description: "Release tag that gets the assets. Empty keeps them as run artifacts."
                 type: string
                 default: ""
+            php_84:
+                description: "Override PHP 8.4 patch version (blank = latest)"
+                type: string
+                default: ""
+            php_85:
+                description: "Override PHP 8.5 patch version (blank = latest)"
+                type: string
+                default: ""
 
 permissions:
     contents: read
@@ -62,14 +70,25 @@ jobs:
         steps:
             - id: php
               shell: bash
+              env:
+                  PHP_84_OVERRIDE: ${{ inputs.php_84 }}
+                  PHP_85_OVERRIDE: ${{ inputs.php_85 }}
               run: |
                   set -euo pipefail
                   resolve() {
-                      curl -fsSL "https://www.php.net/releases/index.php?json&version=$1" \
-                        | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])'
+                      local branch="$1" override="$2"
+                      if [ -n "$override" ]; then
+                          if [[ ! "$override" =~ ^8\.[45]\.[0-9]+$ ]] || [ "${override%.*}" != "$branch" ]; then
+                              echo "::error::invalid PHP override '$override' for branch $branch" >&2; exit 1
+                          fi
+                          echo "$override"
+                      else
+                          curl -fsSL "https://www.php.net/releases/index.php?json&version=$branch" \
+                            | python3 -c 'import sys,json;print(json.load(sys.stdin)["version"])'
+                      fi
                   }
-                  PHP_84=$(resolve 8.4)
-                  PHP_85=$(resolve 8.5)
+                  PHP_84=$(resolve 8.4 "$PHP_84_OVERRIDE")
+                  PHP_85=$(resolve 8.5 "$PHP_85_OVERRIDE")
                   echo "php_84=$PHP_84" >> "$GITHUB_OUTPUT"
                   echo "php_85=$PHP_85" >> "$GITHUB_OUTPUT"
                   echo "PHP $PHP_84 / $PHP_85"
