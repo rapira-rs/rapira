@@ -59,7 +59,7 @@ fn boot_request_startup() -> bool {
         // PHP 8.4 adds argv only with register_argc_argv on, so its CLI and embed SAPIs force it on; PHP 8.5 adds argv when argc is set.
         // https://github.com/php/php-src/blob/php-8.4.26/sapi/embed/php_embed.c#L26-L32
         #[cfg(php84)]
-        let register_argc_argv = (&raw mut core_globals.register_argc_argv).replace(true);
+        let register_argc_argv = std::ptr::replace(&raw mut core_globals.register_argc_argv, true);
         let started = php_request_startup() == SUCCESS;
         if started {
             zend_is_auto_global_str(c"_SERVER".as_ptr(), c"_SERVER".count_bytes());
@@ -243,18 +243,20 @@ pub extern "C" fn rapira_rs_finish_response() {
 /// clear_last_error() keeps last_error_type/lineno set (main/main.c:1307-1316) so the message pointer is the only "slot filled" signal, and php_error_cb applies EG(error_reporting) only after filling it (main/main.c:1394-1411).
 fn log_and_clear_last_error() {
     unsafe {
-        let pg = &raw const core_globals;
-        let msg = (*pg).last_error_message;
+        let msg = core_globals.last_error_message;
         if !msg.is_null() {
-            let (level, label) =
-                error_type_to_level((*pg).last_error_type, executor_globals.error_reporting);
+            let lineno = core_globals.last_error_lineno;
+            let (level, label) = error_type_to_level(
+                core_globals.last_error_type,
+                executor_globals.error_reporting,
+            );
             crate::diagnostics::event_at!(
                 "php",
                 level,
                 "{label}: {} in {}:{}",
                 String::from_utf8_lossy(zend::zstr_bytes(msg)),
-                String::from_utf8_lossy(zend::zstr_bytes((*pg).last_error_file)),
-                (*pg).last_error_lineno
+                String::from_utf8_lossy(zend::zstr_bytes(core_globals.last_error_file)),
+                lineno
             );
         }
         rapira_clear_last_error();
