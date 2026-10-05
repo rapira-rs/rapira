@@ -30,48 +30,38 @@ pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
 
 pub const MAX_BUFFERED_BODY: usize = 1 << 30;
 
-struct SapiHeaders(*mut sapi_headers_struct);
-
-impl SapiHeaders {
-    /// http_response_code is an app-controlled c_int; clamping keeps the u16 cast from wrapping.
-    fn status(&self) -> u16 {
-        let h = unsafe { &*self.0 };
-        if h.http_response_code != 0 {
-            h.http_response_code.clamp(100, 599) as u16
-        } else {
-            200
-        }
-    }
-
-    fn lines(&self) -> impl Iterator<Item = SapiHeader> {
-        let mut el: *mut _zend_llist_element = unsafe { &mut *self.0 }.headers.head;
-        std::iter::from_fn(move || {
-            let e: &_zend_llist_element = unsafe { el.as_ref()? };
-            el = e.next;
-            Some(SapiHeader(e.data.as_ptr() as *const sapi_header_struct))
-        })
+/// http_response_code is an app-controlled c_int; clamping keeps the u16 cast from wrapping.
+fn head_status(h: &sapi_headers_struct) -> u16 {
+    if h.http_response_code != 0 {
+        h.http_response_code.clamp(100, 599) as u16
+    } else {
+        200
     }
 }
 
-struct SapiHeader(*const sapi_header_struct);
+fn head_lines(h: &sapi_headers_struct) -> impl Iterator<Item = &sapi_header_struct> {
+    let mut el: *mut _zend_llist_element = h.headers.head;
+    std::iter::from_fn(move || {
+        let e: &_zend_llist_element = unsafe { el.as_ref()? };
+        el = e.next;
+        Some(unsafe { &*(e.data.as_ptr() as *const sapi_header_struct) })
+    })
+}
 
-impl SapiHeader {
-    fn name_value(&self) -> Option<(HeaderName, HeaderValue)> {
-        let sh = unsafe { &*self.0 };
-        if sh.header.is_null() || sh.header_len == 0 {
-            return None;
-        }
-        let line: &[u8] = unsafe { slice::from_raw_parts(sh.header as *const u8, sh.header_len) };
-        let Some(field) = split_header_line(line) else {
-            tracing::debug!(
-                target: "php",
-                "dropped unrepresentable response header: {}",
-                String::from_utf8_lossy(line)
-            );
-            return None;
-        };
-        Some(field)
+fn header_field(sh: &sapi_header_struct) -> Option<(HeaderName, HeaderValue)> {
+    if sh.header.is_null() || sh.header_len == 0 {
+        return None;
     }
+    let line: &[u8] = unsafe { slice::from_raw_parts(sh.header as *const u8, sh.header_len) };
+    let Some(field) = split_header_line(line) else {
+        tracing::debug!(
+            target: "php",
+            "dropped unrepresentable response header: {}",
+            String::from_utf8_lossy(line)
+        );
+        return None;
+    };
+    Some(field)
 }
 
 /// `HeaderName::from_bytes` accepts only the RFC 9110 `tchar` set and `HeaderValue::from_bytes` only the field-value bytes.
@@ -176,55 +166,54 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
     len: usize,
     aborted: *mut bool,
 ) -> usize {
-    let mut completed = false;
-    let written = guard(0, || {
-        let n = (|| {
-            let ctx = unsafe {
-                let Some(c) = ctx() else {
-                    let data = slice::from_raw_parts(buf.cast::<u8>(), len);
-                    tracing::info!(target: "php", "{}", String::from_utf8_lossy(data));
-                    return len;
-                };
-                c
+    guard(None, || {
+        let ctx = unsafe {
+            let Some(c) = ctx() else {
+                let data = slice::from_raw_parts(buf.cast::<u8>(), len);
+                tracing::info!(target: "php", "{}", String::from_utf8_lossy(data));
+                return Some(len);
             };
+            c
+        };
 
-            if ctx.stream == StreamState::NotSent {
-                let status = unsafe { SapiHeaders(&mut (*rapira_sg()).sapi_headers).status() };
-                ctx.commit_head(status, HeaderMap::new());
+        if ctx.stream == StreamState::NotSent {
+            let status = unsafe {
+                let headers = &raw const sapi_globals.sapi_headers;
+                head_status(&*headers)
+            };
+            ctx.commit_head(status, HeaderMap::new());
+        }
+
+        if let Some(tx) = &ctx.sender {
+            if tx.is_closed() {
+                ctx.finish(false);
+                unsafe { *aborted = true };
+                return Some(0);
             }
-
-            if let Some(tx) = &ctx.sender {
-                if tx.is_closed() {
-                    ctx.finish(false);
-                    unsafe { *aborted = true };
-                    return 0;
-                }
-                if ctx.body.len() + len > MAX_BUFFERED_BODY {
-                    tracing::error!(
-                        target: "rapira",
-                        "response body exceeds the host buffer cap ({} + {len} > {MAX_BUFFERED_BODY} bytes); aborting the request",
-                        ctx.body.len()
-                    );
-                    ctx.finish(true);
-                    unsafe { *aborted = true };
-                    return 0;
-                }
-                let buf = unsafe { slice::from_raw_parts(buf.cast::<u8>(), len) };
-                ctx.body.extend_from_slice(buf);
-                if !ctx.tearing_down {
-                    ctx.stream = StreamState::BodyStreamed;
-                }
+            if ctx.body.len() + len > MAX_BUFFERED_BODY {
+                tracing::error!(
+                    target: "rapira",
+                    "response body exceeds the host buffer cap ({} + {len} > {MAX_BUFFERED_BODY} bytes); aborting the request",
+                    ctx.body.len()
+                );
+                ctx.finish(true);
+                unsafe { *aborted = true };
+                return Some(0);
             }
+            let buf = unsafe { slice::from_raw_parts(buf.cast::<u8>(), len) };
+            ctx.body.extend_from_slice(buf);
+            if !ctx.tearing_down {
+                ctx.stream = StreamState::BodyStreamed;
+            }
+        }
 
-            len
-        })();
-        completed = true;
-        n
-    });
-    if !completed {
+        Some(len)
+    })
+    // None: guard caught a panic in the body.
+    .unwrap_or_else(|| {
         unsafe { *aborted = true };
-    }
-    written
+        0
+    })
 }
 
 /// # Safety
@@ -243,12 +232,9 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
             ctx
         };
 
-        let h = SapiHeaders(h);
-        let headers: HeaderMap = h
-            .lines()
-            .filter_map(|l: SapiHeader| l.name_value())
-            .collect();
-        ctx.commit_head(h.status(), headers);
+        let h = unsafe { &*h };
+        let headers: HeaderMap = head_lines(h).filter_map(header_field).collect();
+        ctx.commit_head(head_status(h), headers);
         SAPI_HEADER_SENT_SUCCESSFULLY as c_int
     })
 }
@@ -275,9 +261,21 @@ pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
 const SERVER_VARS_MAX: u32 = 28;
 
 pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut zval) {
+    // Every name is valid for php_register_known_variable: the fixed names as written, HTTP_* through cgi_header_name.
+    let put_bytes = |name: &CStr, val: &[u8]| unsafe {
+        rapira_register_known_stringl(
+            name.as_ptr(),
+            name.to_bytes().len(),
+            val.as_ptr() as *const c_char,
+            val.len(),
+            track_vars_array,
+        );
+    };
     // No bound request: the boot run of the entrypoint in worker and dispatcher mode.
     if unsafe { ctx() }.is_none() {
-        guard((), || unsafe { register_boot_variables(track_vars_array) });
+        guard((), || unsafe {
+            register_boot_variables(track_vars_array, put_bytes)
+        });
         return;
     }
     with_ctx((), |ctx| {
@@ -285,16 +283,6 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         // One allocation for the whole array: the names below, one HTTP_* name per field, and the entries php_register_server_variables adds after this callback.
         let size = SERVER_VARS_MAX + ctx.req.headers.keys_len() as u32;
         unsafe { zend_hash_extend((*track_vars_array).value.arr, size, false) };
-        // Every name is valid for php_register_known_variable: the fixed names as written, HTTP_* through cgi_header_name.
-        let put_bytes = |name: &CStr, val: &[u8]| unsafe {
-            rapira_register_known_stringl(
-                name.as_ptr(),
-                name.to_bytes().len(),
-                val.as_ptr() as *const c_char,
-                val.len(),
-                track_vars_array,
-            );
-        };
         let put = |name: &CStr, val: &str| put_bytes(name, val.as_bytes());
         let script = crate::context::script();
         put(c"PHP_SELF", &script.script_name);
@@ -340,7 +328,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             .unwrap_or(b"");
         put_bytes(c"AUTH_TYPE", auth_type);
 
-        let auth_user = unsafe { (*rapira_sg()).request_info.auth_user };
+        let auth_user = unsafe { sapi_globals.request_info.auth_user };
         if !auth_user.is_null() {
             let user: &CStr = unsafe { CStr::from_ptr(auth_user as *const c_char) };
             put_bytes(c"REMOTE_USER", user.to_bytes());
@@ -356,21 +344,12 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
 
 /// The variables of `php entrypoint.php`, in its order: the process environment, then the entrypoint path, which wins over an environment variable of the same name.
 /// https://github.com/php/php-src/blob/php-8.5.11/sapi/cli/php_cli.c#L316-L347
-unsafe fn register_boot_variables(track_vars_array: *mut zval) {
+unsafe fn register_boot_variables(track_vars_array: *mut zval, put: impl Fn(&CStr, &[u8])) {
     unsafe {
         if let Some(import) = php_import_environment_variables {
             import(track_vars_array);
         }
     }
-    let put = |name: &CStr, val: &[u8]| unsafe {
-        rapira_register_known_stringl(
-            name.as_ptr(),
-            name.to_bytes().len(),
-            val.as_ptr() as *const c_char,
-            val.len(),
-            track_vars_array,
-        );
-    };
     let path = crate::context::script().filename.as_bytes();
     put(c"PHP_SELF", path);
     put(c"SCRIPT_NAME", path);
@@ -396,7 +375,7 @@ pub fn send_error_head(c: &mut Context, status: u16) {
 }
 
 pub(crate) fn finalize_response(c: &mut Context, errored: bool) -> bool {
-    let truncated = c.is_truncated(errored);
+    let truncated = errored && c.stream == StreamState::BodyStreamed;
     if errored {
         send_error_head(c, 500);
     }

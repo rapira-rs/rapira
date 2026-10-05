@@ -12,7 +12,7 @@ use std::{
 
 pub(crate) use crate::work::{DispatcherClasses, Held, release};
 pub(crate) use crate::{
-    RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
+    IS_NULL, RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
     callbacks::guard,
     object_init_ex, rapira_array_init, rapira_ce_closed_exception, rapira_ce_inet_address,
     rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
@@ -40,67 +40,34 @@ fn classes() -> DispatcherClasses {
         .expect("a dispatcher-mode worker started with no DispatcherClasses")
 }
 
+thread_local! {
+    /// The Box pointer of the unit handed out last, so paths where free_obj never runs (bailout) can still reclaim it.
+    pub(crate) static UNIT: Cell<Option<*mut dyn Held>> = const { Cell::new(None) };
+    pub(crate) static CLOSED_SEEN: Cell<bool> = const { Cell::new(false) };
+    /// A unit was handed out this cycle: a fatal after that is an app failure, not a boot failure.
+    pub(crate) static RECEIVED: Cell<bool> = const { Cell::new(false) };
+}
+
 /// Clears the cycle slot if it still points at `ptr`.
 pub(crate) fn forget_held(ptr: *const ()) {
-    update(|c| {
-        if c.unit.is_some_and(|u| std::ptr::addr_eq(u, ptr)) {
-            c.unit = None;
-        }
-    });
-}
-
-#[derive(Clone, Copy)]
-struct CycleState {
-    /// The Box pointer of the unit handed out last, so paths where free_obj never runs (bailout) can still reclaim it.
-    unit: Option<*mut dyn Held>,
-    closed_seen: bool,
-    /// A unit was handed out this cycle: a fatal after that is an app failure, not a boot failure.
-    received: bool,
-}
-
-const CYCLE_IDLE: CycleState = CycleState {
-    unit: None,
-    closed_seen: false,
-    received: false,
-};
-
-thread_local! {
-    static CYCLE: Cell<CycleState> = const { Cell::new(CYCLE_IDLE) };
-}
-
-fn update(f: impl FnOnce(&mut CycleState)) {
-    let mut c = CYCLE.get();
-    f(&mut c);
-    CYCLE.set(c);
+    if UNIT.get().is_some_and(|u| std::ptr::addr_eq(u, ptr)) {
+        UNIT.set(None);
+    }
 }
 
 pub(crate) fn cycle_reset() {
     reclaim_current();
-    CYCLE.set(CYCLE_IDLE);
+    UNIT.set(None);
+    CLOSED_SEEN.set(false);
+    RECEIVED.set(false);
 }
 
 /// Reclaim a unit free_obj never saw (shutdown bailout / allocation bailout).
 pub(crate) fn reclaim_current() {
-    if let Some(ptr) = CYCLE.get().unit {
+    if let Some(ptr) = UNIT.get() {
         // SAFETY: the pointer came from Box::into_raw in receive, and rapira_rs_exchange_drop clears the unit before it reclaims.
         drop(unsafe { release(ptr) });
     }
-}
-
-pub(crate) fn closed_seen() -> bool {
-    CYCLE.get().closed_seen
-}
-
-pub(crate) fn note_closed() {
-    update(|c| c.closed_seen = true);
-}
-
-pub(crate) fn note_received() {
-    update(|c| c.received = true);
-}
-
-pub(crate) fn received_any() -> bool {
-    CYCLE.get().received
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -160,7 +127,7 @@ pub unsafe fn add_list<'v>(
         let mut list: zval = std::mem::zeroed();
         rapira_array_init(&mut list, values.size_hint().0 as u32);
         for v in values {
-            zend::list_push_stringl(&mut list, v);
+            crate::add_next_index_stringl(&mut list, zend::ptr_or_empty(v), v.len());
         }
         add_assoc_zval_ex(dst, key, key_len, &mut list);
     }

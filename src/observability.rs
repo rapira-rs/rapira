@@ -3,20 +3,18 @@ use std::time::Duration;
 
 use anyhow::Context;
 use rapira_master::{PoolConfig, WorkerEnv};
-use rapira_net::PrepareCtx;
 
 use crate::PoolRun;
 
 /// The observability pool: one process without PHP and without a request timeout. The listener is bound here, before the fork.
 pub fn pool_run(
     settings: rapira_observability::config::Settings,
-    prepare: &mut PrepareCtx,
 ) -> anyhow::Result<(PoolRun, PoolConfig)> {
     let build = rapira_observability::Build {
         version: env!("CARGO_PKG_VERSION"),
         php_version: rapira_sapi::linked_php_version(),
     };
-    let server = rapira_observability::Server::new(settings, build, prepare)
+    let server = rapira_observability::Server::new(settings, build)
         .context("observability: prepare failed")?;
     let pool = PoolConfig {
         name: "observability",

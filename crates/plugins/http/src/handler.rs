@@ -6,10 +6,9 @@ use std::task::{Context, Poll};
 use std::time::Duration;
 
 use http::header::CONTENT_TYPE;
-use http_body::Body;
 use http_body_util::BodyExt;
-use hyper::body::Incoming;
-use rapira_sapi::work::{Intake, Refused};
+use hyper::body::{Body, Bytes, Incoming, SizeHint};
+use rapira_sapi::work::{Refused, Sink};
 use rapira_sapi::{Addr, Frame, Request};
 use tower::{Service as _, ServiceExt as _};
 
@@ -20,9 +19,7 @@ use crate::{Config, Exchange, bridge, multipart, request};
 
 pub(crate) struct Shared {
     pub cfg: Config,
-    pub intake: Intake<Exchange>,
-    /// The multipart limits; None outside dispatcher mode.
-    pub uploads: Option<Arc<multipart::Limits>>,
+    pub intake: Sink,
     pub inflight: Arc<AtomicUsize>,
 }
 
@@ -34,18 +31,6 @@ impl From<Refused> for Rejection {
                 Refused::Stopped => http::StatusCode::INTERNAL_SERVER_ERROR,
             },
             reason: e.to_string(),
-        }
-    }
-}
-
-impl From<multipart::ParseError> for Rejection {
-    fn from(e: multipart::ParseError) -> Self {
-        match e {
-            multipart::ParseError::Rejected { status, reason } => Self { status, reason },
-            multipart::ParseError::Io(e) => Self {
-                status: http::StatusCode::INTERNAL_SERVER_ERROR,
-                reason: format!("upload spool failed: {e}"),
-            },
         }
     }
 }
@@ -107,13 +92,13 @@ fn refused(status: http::StatusCode, req_count: Arc<InflightReqCount>) -> http::
 }
 
 impl Body for RespBody {
-    type Data = bytes::Bytes;
+    type Data = Bytes;
     type Error = BoxError;
 
     fn poll_frame(
         self: Pin<&mut Self>,
         cx: &mut Context<'_>,
-    ) -> Poll<Option<Result<http_body::Frame<bytes::Bytes>, BoxError>>> {
+    ) -> Poll<Option<Result<hyper::body::Frame<Bytes>, BoxError>>> {
         let this = self.get_mut();
         let poll = match &mut this.kind {
             BodyKind::Reply(b) => Pin::new(b).poll_frame(cx),
@@ -140,10 +125,10 @@ impl Body for RespBody {
         }
     }
 
-    fn size_hint(&self) -> http_body::SizeHint {
+    fn size_hint(&self) -> SizeHint {
         match &self.kind {
             BodyKind::Reply(b) => b.size_hint(),
-            BodyKind::Empty => http_body::SizeHint::with_exact(0),
+            BodyKind::Empty => SizeHint::with_exact(0),
             BodyKind::Boxed(b) => b.size_hint(),
         }
     }
@@ -194,15 +179,11 @@ fn framed_length(method: &http::Method, response: &http::Response<RespBody>) -> 
         .or_else(|| response.body().size_hint().exact())
 }
 
-async fn handle<B>(
+async fn handle(
     handler: Arc<Conn>,
     chain: Option<Service>,
-    req: http::Request<B>,
-) -> http::Response<RespBody>
-where
-    B: Body<Data = bytes::Bytes> + Unpin + Send + 'static,
-    B::Error: std::error::Error + Send + Sync + 'static,
-{
+    req: http::Request<Incoming>,
+) -> http::Response<RespBody> {
     let reqs_counter: Arc<InflightReqCount> =
         Arc::new(InflightReqCount::init(&handler.shared.inflight));
     let received_at: f64 = rapira_sapi::work::now_unix_f64();
@@ -342,7 +323,7 @@ async fn serve_php<B>(
     peer: Peer,
 ) -> http::Response<RespBody>
 where
-    B: Body<Data = bytes::Bytes> + Unpin,
+    B: Body<Data = Bytes> + Unpin,
     B::Error: std::fmt::Display,
 {
     let cfg = &shared.cfg;
@@ -475,16 +456,16 @@ async fn submit(
     shared: &Shared,
     request: Request,
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
-    let request = parse_multipart(request, shared.uploads.as_ref()).await?;
+    let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
     let (exchange, reply) = Exchange::new(request, shared.cfg.superglobals);
-    shared.intake.submit(exchange).await?;
+    shared.intake.submit(Box::new(exchange)).await?;
     Ok(reply)
 }
 
 /// Parses a multipart body before submit, so a rejected body never reaches the pending and active counters. `limits` is None outside dispatcher mode.
 async fn parse_multipart(
     mut req: Request,
-    limits: Option<&Arc<multipart::Limits>>,
+    limits: Option<&multipart::Limits>,
 ) -> Result<Request, Rejection> {
     let Some(limits) = limits else {
         return Ok(req);
@@ -513,7 +494,7 @@ async fn parse_multipart(
     }
     let boundary = multipart::boundary(content_type)?;
     let bytes = std::mem::take(raw.get_mut());
-    let limits = Arc::clone(limits);
+    let limits = limits.clone();
     let parsed = tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
         .await
         .map_err(|e| Rejection {

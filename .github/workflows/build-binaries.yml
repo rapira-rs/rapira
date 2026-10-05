@@ -107,56 +107,30 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
+                php_branch: ["8.4", "8.5"]
+                target: [linux-x86_64, linux-aarch64, macos-aarch64]
                 include:
                     - {
-                          name: linux-x86_64-php8.4,
+                          target: linux-x86_64,
                           runner: ubuntu-latest,
                           container: "rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6",
                           target_os: linux,
                           arch: x86_64,
                           nfpm_arch: amd64,
-                          php_branch: "8.4",
                       }
                     - {
-                          name: linux-x86_64-php8.5,
-                          runner: ubuntu-latest,
-                          container: "rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6",
-                          target_os: linux,
-                          arch: x86_64,
-                          nfpm_arch: amd64,
-                          php_branch: "8.5",
-                      }
-                    - {
-                          name: linux-aarch64-php8.4,
+                          target: linux-aarch64,
                           runner: ubuntu-24.04-arm,
                           container: "rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6",
                           target_os: linux,
                           arch: aarch64,
                           nfpm_arch: arm64,
-                          php_branch: "8.4",
                       }
                     - {
-                          name: linux-aarch64-php8.5,
-                          runner: ubuntu-24.04-arm,
-                          container: "rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6",
-                          target_os: linux,
-                          arch: aarch64,
-                          nfpm_arch: arm64,
-                          php_branch: "8.5",
-                      }
-                    - {
-                          name: macos-aarch64-php8.4,
+                          target: macos-aarch64,
                           runner: macos-14,
                           target_os: macos,
                           arch: aarch64,
-                          php_branch: "8.4",
-                      }
-                    - {
-                          name: macos-aarch64-php8.5,
-                          runner: macos-14,
-                          target_os: macos,
-                          arch: aarch64,
-                          php_branch: "8.5",
                       }
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-embed
@@ -323,7 +297,7 @@ jobs:
 
             - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
               with:
-                  name: art-${{ matrix.name }}
+                  name: art-${{ matrix.target }}-php${{ matrix.php_branch }}
                   path: |
                       dist/*.tar.gz
                       dist/pkgroot-*

@@ -11,9 +11,9 @@ use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
 use rapira_net::ListenAddr;
-use rapira_sapi::{Addr, Mode};
+use rapira_sapi::{Addr, plugin::Mode};
 use serde_json::Value;
-use tests::server_log;
+use tests::{poll, server_log};
 
 /// Connect budget for a freshly spawned master (CI macOS worst case).
 pub const BOOT: Duration = Duration::from_secs(30);
@@ -21,8 +21,6 @@ pub const BOOT: Duration = Duration::from_secs(30);
 /// Master could not bring up a serviceable gen-0 pool.
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
 pub const MASTER_EXIT_OK: i32 = 0;
-/// Master forced stop (a second signal arrived while draining).
-pub const MASTER_EXIT_FORCED: i32 = 130;
 
 /// Must outlast supervisor.process_control_timeout (30s): after it the master escalates a stuck worker QUIT/TERM/KILL and still exits 0.
 pub const STOP_BUDGET: Duration = Duration::from_secs(45);
@@ -55,18 +53,8 @@ impl Server {
     }
 
     pub fn wait_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
-        let end = Instant::now() + timeout;
-        loop {
-            match self.child.try_wait() {
-                Ok(Some(st)) => return Some(st),
-                Ok(None) => {}
-                Err(_) => return None,
-            }
-            if Instant::now() >= end {
-                return None;
-            }
-            std::thread::sleep(Duration::from_millis(50));
-        }
+        // A try_wait error ends the poll: transpose gives Some(Err), and Result::ok maps it to None.
+        poll(timeout, || self.child.try_wait().transpose()).and_then(Result::ok)
     }
 
     pub fn try_status(&mut self) -> Option<ExitStatus> {
@@ -336,20 +324,9 @@ fn render_config(
 
 pub use tests::grpc::ECHO_SERVICE;
 
-/// Copies `grpc/echo-worker.php` and its descriptor set into `dir` as `grpc-worker.php` and `echo.binpb`.
-fn stage_grpc(dir: &Path) {
-    std::fs::copy(
-        fixture_path("grpc/echo-worker.php"),
-        dir.join("grpc-worker.php"),
-    )
-    .expect("copy the grpc fixture");
-    std::fs::copy(tests::echo_descriptor_set(), dir.join("echo.binpb")).expect("copy echo.binpb");
-}
-
 /// A `[grpc]` pool over `entrypoint`. `listen`, `descriptor_set` and `extra` (keys inside `[grpc]`) go into the file verbatim; `services` becomes a TOML string array, and None leaves the key out.
 fn render_grpc(
     listen: &str,
-    processes: usize,
     entrypoint: &str,
     descriptor_set: &str,
     services: Option<&[String]>,
@@ -361,61 +338,8 @@ fn render_grpc(
     });
     format!(
         "[grpc]\nlisten = \"{listen}\"\ndescriptor_set = \"{descriptor_set}\"\n{services}{extra}\n\
-         [grpc.pool]\nprocesses = {processes}\nentrypoint = \"{entrypoint}\"\n"
+         [grpc.pool]\nprocesses = 1\nentrypoint = \"{entrypoint}\"\n"
     )
-}
-
-/// A master with only a `[grpc]` pool over the echo fixture; `addr` is the gRPC listener.
-pub fn spawn_grpc(processes: usize) -> Server {
-    let dir = scratch_dir();
-    stage_grpc(&dir);
-    let render = |port| {
-        render_grpc(
-            &tcp(port),
-            processes,
-            "grpc-worker.php",
-            "echo.binpb",
-            None,
-            "",
-        )
-    };
-    let mut srv = spawn_ready(dir, &render, None, Some("info"), None, &[]);
-    srv.grpc = Some(ListenAddr::Tcp(srv.addr));
-    srv
-}
-
-/// A master with an `[http]` pool over `http_fixture` and a `[grpc]` pool over the echo fixture, one process each.
-/// Returns the master, whose `addr` is the gRPC listener, and the HTTP listener.
-pub fn spawn_grpc_with_http(http_fixture: &str) -> (Server, SocketAddr) {
-    let (dir, entrypoint) = stage_fixture(http_fixture);
-    stage_grpc(&dir);
-    let http_port = std::cell::Cell::new(0);
-    let render = |port| {
-        http_port.set(free_port());
-        render_config(&tcp(http_port.get()), 1, &entrypoint, "", "")
-            + &render_grpc(&tcp(port), 1, "grpc-worker.php", "echo.binpb", None, "")
-    };
-    let mut srv = spawn_ready(dir, &render, None, Some("info"), None, &[]);
-    srv.grpc = Some(ListenAddr::Tcp(srv.addr));
-    (srv, SocketAddr::from(([127, 0, 0, 1], http_port.get())))
-}
-
-/// Boots a `[grpc]`-only config that must fail: returns the status with the whole log.
-pub fn spawn_grpc_boot_failure(descriptor_set: &str, service: &str) -> (ExitStatus, String) {
-    let dir = scratch_dir();
-    stage_grpc(&dir);
-    let services = [service.to_owned()];
-    let render = |port| {
-        render_grpc(
-            &tcp(port),
-            1,
-            "grpc-worker.php",
-            descriptor_set,
-            Some(&services),
-            "",
-        )
-    };
-    exit_of(dir, &render, Some("info"), None, &[])
 }
 
 /// A master to spawn with one worker process per pool: [`Spawn::http`] or [`Spawn::grpc`] starts the config, and each setter adds to it.
@@ -485,20 +409,10 @@ impl Spawn {
         self
     }
 
-    /// The `[http]` pool listens on the unix socket `sock`.
-    pub fn http_unix(self, sock: &Path) -> Spawn {
-        self.http_listen(ListenAddr::Unix(sock.to_owned()))
-    }
-
     /// The `[http]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
     pub fn http_listen(mut self, listen: ListenAddr) -> Spawn {
         self.http_listen = Some(listen);
         self
-    }
-
-    /// The `[grpc]` pool listens on the unix socket `sock`.
-    pub fn grpc_unix(self, sock: &Path) -> Spawn {
-        self.grpc_listen(ListenAddr::Unix(sock.to_owned()))
     }
 
     /// The `[grpc]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
@@ -669,7 +583,6 @@ impl Spawn {
                 };
                 config += &render_grpc(
                     &listen,
-                    1,
                     entrypoint,
                     descriptor_set,
                     self.services.as_deref(),
@@ -878,20 +791,16 @@ pub fn wait_workers(
     pred: impl Fn(&[u32]) -> bool,
 ) -> Vec<u32> {
     let master = srv.child.id();
-    let end = Instant::now() + deadline;
-    loop {
+    poll(deadline, || {
         let pids = worker_pids(master);
-        if pred(&pids) {
-            return pids;
-        }
-        if Instant::now() >= end {
-            panic!(
-                "timed out after {deadline:?} waiting for {what}\n{}",
-                diagnostics(srv)
-            );
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+        pred(&pids).then_some(pids)
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "timed out after {deadline:?} waiting for {what}\n{}",
+            diagnostics(srv)
+        )
+    })
 }
 
 pub fn signal(pid: u32, sig: i32) {
@@ -935,22 +844,12 @@ pub fn kill_master_as_subreaper(srv: &mut Server) {
 }
 
 /// Per-thread outcome counters: `refused` means the listener closed, `failed` means a non-200 response, a hang, or a corrupt reply; connection drops only record `last_err` (the balancer retries those).
+#[derive(Default)]
 pub struct Tally {
     pub ok: u64,
     pub refused: u64,
     pub failed: u64,
     pub last_err: Option<String>,
-}
-
-impl Tally {
-    fn new() -> Tally {
-        Tally {
-            ok: 0,
-            refused: 0,
-            failed: 0,
-            last_err: None,
-        }
-    }
 }
 
 /// A pool of threads hammering the server until [`Storm::halt`].
@@ -966,7 +865,7 @@ pub fn storm(addr: SocketAddr, threads: usize) -> Storm {
         .map(|_| {
             let stop = Arc::clone(&stop);
             std::thread::spawn(move || {
-                let mut tally = Tally::new();
+                let mut tally = Tally::default();
                 while !stop.load(Ordering::Relaxed) {
                     match http_get(addr, "/", Duration::from_secs(10)) {
                         Ok((200, _)) => tally.ok += 1,
@@ -1009,7 +908,7 @@ pub fn storm(addr: SocketAddr, threads: usize) -> Storm {
 impl Storm {
     pub fn halt(self) -> Tally {
         self.stop.store(true, Ordering::Relaxed);
-        let mut total = Tally::new();
+        let mut total = Tally::default();
         for h in self.threads {
             if let Ok(t) = h.join() {
                 total.ok += t.ok;
@@ -1027,26 +926,11 @@ impl Storm {
 pub fn assert_exit_code(status: Option<ExitStatus>, expected: i32, srv: &Server) {
     match status.and_then(|s| s.code()) {
         Some(code) if code == expected => {}
-        Some(code) => panic!(
-            "expected exit {expected} [{}], got {code} [{}]\n{}",
-            code_name(expected),
-            code_name(code),
-            diagnostics(srv)
-        ),
+        Some(code) => panic!("expected exit {expected}, got {code}\n{}", diagnostics(srv)),
         None => panic!(
-            "expected exit {expected} [{}], but the master was killed by a signal or is still running\n{}",
-            code_name(expected),
+            "expected exit {expected}, but the master was killed by a signal or is still running\n{}",
             diagnostics(srv)
         ),
-    }
-}
-
-fn code_name(code: i32) -> String {
-    match code {
-        MASTER_EXIT_OK => "DRAINED/OK".into(),
-        MASTER_EXIT_FAILBOOT => "MASTER_FAILBOOT".into(),
-        MASTER_EXIT_FORCED => "MASTER_FORCED".into(),
-        other => format!("code {other}"),
     }
 }
 
@@ -1366,19 +1250,12 @@ impl Conn {
 /// Poll `server.log` for `needle`, bounded.
 pub fn wait_log_contains(srv: &Server, needle: &str, deadline: Duration) -> bool {
     let path = srv.dir.join("server.log");
-    let end = std::time::Instant::now() + deadline;
-    loop {
-        if std::fs::read_to_string(&path)
-            .map(|s| s.contains(needle))
-            .unwrap_or(false)
-        {
-            return true;
-        }
-        if std::time::Instant::now() >= end {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
+    poll(deadline, || {
+        std::fs::read_to_string(&path)
+            .is_ok_and(|s| s.contains(needle))
+            .then_some(())
+    })
+    .is_some()
 }
 
 /// Sends SIGUSR1 until the master logs a scoreboard line of slot 0 that contains `fragment`, for at most 10 s; returns that line.

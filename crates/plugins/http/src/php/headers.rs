@@ -81,7 +81,6 @@ pub(super) fn parse_content_length(v: &[u8]) -> Option<u64> {
 /// A name outside the RFC 9110 `tchar` set or a value byte outside the field-value set is an error. `HeaderName::from_bytes` and `HeaderValue::from_bytes` apply these sets, as on the classic path.
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.5
-/// `&raw mut pos`: the pos parameter is *mut on PHP 8.4 and *const on 8.5.
 /// # Safety
 /// `ht` NULL or a live array; entries stay ZPP-owned.
 pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<HeaderMap, &'static CStr> {
@@ -90,35 +89,17 @@ pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<HeaderMap, &'
         return Ok(map);
     }
     unsafe {
-        let mut pos: HashPosition = 0;
-        zend_hash_internal_pointer_reset_ex(ht, &mut pos);
-        loop {
-            let entry = zend_hash_get_current_data_ex(ht, &raw mut pos);
-            if entry.is_null() {
-                break;
-            }
-            let mut str_key: *mut zend_string = std::ptr::null_mut();
-            let mut num_key = 0;
-            let kt = zend_hash_get_current_key_ex(ht, &mut str_key, &mut num_key, &pos);
-            if i64::from(kt) != rapira_sapi::HASH_KEY_IS_STRING || str_key.is_null() {
+        for (key, list) in zend::entries(ht) {
+            let zend::Key::Str(str_key) = key else {
                 return Err(c"header name is not representable on the wire");
-            }
+            };
             let Ok(name) = HeaderName::from_bytes(zend::zstr_bytes(str_key)) else {
                 return Err(c"header name is not representable on the wire");
             };
-            let list = zend::deref(entry);
             if zend::zval_type(list) != IS_ARRAY {
                 return Err(c"each header entry must be a list of strings");
             }
-            let inner = (*list).value.arr;
-            let mut ipos: HashPosition = 0;
-            zend_hash_internal_pointer_reset_ex(inner, &mut ipos);
-            loop {
-                let item = zend_hash_get_current_data_ex(inner, &raw mut ipos);
-                if item.is_null() {
-                    break;
-                }
-                let item = zend::deref(item);
+            for (_, item) in zend::entries((*list).value.arr) {
                 if zend::zval_type(item) != IS_STRING {
                     return Err(c"header value is not representable on the wire");
                 }
@@ -127,9 +108,7 @@ pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<HeaderMap, &'
                     return Err(c"header value is not representable on the wire");
                 };
                 map.append(&name, value);
-                zend_hash_move_forward_ex(inner, &mut ipos);
             }
-            zend_hash_move_forward_ex(ht, &mut pos);
         }
     }
     Ok(map)

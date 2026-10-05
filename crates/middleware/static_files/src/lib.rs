@@ -12,8 +12,8 @@ use bytes::Bytes;
 use http::{Method, StatusCode};
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Empty};
-use tower::util::BoxCloneServiceLayer;
-use tower::{Service, ServiceExt as _};
+use tower::ServiceExt as _;
+use tower::util::{BoxCloneService, BoxCloneServiceLayer};
 use tower_http::services::ServeDir;
 use tower_http::services::fs::DefaultServeDirFallback;
 
@@ -22,6 +22,8 @@ use cache::CachingBackend;
 type BoxError = Box<dyn std::error::Error + Send + Sync>;
 /// The body of the http plugin's middleware chain.
 type Body = UnsyncBoxBody<Bytes, BoxError>;
+/// The http plugin's inner service, the one type the layer wraps.
+type Inner = BoxCloneService<http::Request<Body>, http::Response<Body>, Infallible>;
 
 /// Serves files from a directory and hands every miss to the inner service.
 /// A permission error or a bad file name is also a miss. Any other read failure
@@ -88,18 +90,11 @@ fn is_miss(e: &std::io::Error) -> bool {
 
 impl StaticFiles {
     /// The middleware as a tower layer over the http plugin's inner service.
-    pub fn layer<S>(
+    pub fn layer(
         self,
-    ) -> BoxCloneServiceLayer<S, http::Request<Body>, http::Response<Body>, Infallible>
-    where
-        S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
-            + Clone
-            + Send
-            + 'static,
-        S::Future: Send + 'static,
-    {
+    ) -> BoxCloneServiceLayer<Inner, http::Request<Body>, http::Response<Body>, Infallible> {
         let files = Arc::new(self);
-        BoxCloneServiceLayer::new(tower::layer::layer_fn(move |inner: S| {
+        BoxCloneServiceLayer::new(tower::layer::layer_fn(move |inner: Inner| {
             let files = Arc::clone(&files);
             tower::service_fn(move |req| {
                 let files = Arc::clone(&files);
@@ -109,13 +104,7 @@ impl StaticFiles {
         }))
     }
 
-    async fn handle<S>(&self, req: http::Request<Body>, inner: S) -> http::Response<Body>
-    where
-        S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
-            + Send
-            + 'static,
-        S::Future: Send + 'static,
-    {
+    async fn handle(&self, req: http::Request<Body>, inner: Inner) -> http::Response<Body> {
         if req.method() != Method::GET && req.method() != Method::HEAD {
             return forward(inner, req).await;
         }
@@ -154,13 +143,7 @@ impl StaticFiles {
 /// Hands a miss to the inner service.
 /// The `Oneshot` is boxed as `Send` before the await: the compiler cannot prove `Send` for a held `Oneshot` over this request type.
 /// https://github.com/rust-lang/rust/issues/110338
-async fn forward<S>(inner: S, req: http::Request<Body>) -> http::Response<Body>
-where
-    S: Service<http::Request<Body>, Response = http::Response<Body>, Error = Infallible>
-        + Send
-        + 'static,
-    S::Future: Send + 'static,
-{
+async fn forward(inner: Inner, req: http::Request<Body>) -> http::Response<Body> {
     let call: Pin<Box<dyn Future<Output = Result<http::Response<Body>, Infallible>> + Send>> =
         Box::pin(inner.oneshot(req));
     let Ok(res) = call.await;

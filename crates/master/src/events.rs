@@ -1,12 +1,13 @@
-use std::os::fd::RawFd;
+use std::io::Read as _;
+use std::os::fd::AsRawFd as _;
 use std::time::{Duration, Instant};
 
 use libc::c_int;
 
 use crate::pctl::{Pctl, SignalAction};
 use crate::pool::Pool;
-use crate::process::{ExitVerdict, Forker, ProcTable, WorkerProc, reap_all};
-use crate::signals::{SIG_CHLD, errno_get};
+use crate::process::{Forker, reap_all};
+use crate::signals::errno_get;
 use crate::{MasterConfig, StopReason};
 
 /// Milliseconds until `next`, rounded up so a sub-millisecond remainder never busy-spins `poll` with a 0 timeout.
@@ -14,19 +15,6 @@ fn poll_timeout_ms(next: Instant, now: Instant) -> c_int {
     let d = next.saturating_duration_since(now);
     let ms = d.as_nanos().div_ceil(1_000_000);
     ms.min(i32::MAX as u128) as c_int
-}
-
-fn drain_pipe(fd: RawFd, buf: &mut [u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    loop {
-        // SAFETY: read into a live buffer from a valid nonblocking fd.
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-        if n <= 0 {
-            break;
-        }
-        out.extend_from_slice(&buf[..n as usize]);
-    }
-    out
 }
 
 /// The global half: signals, the stop escalation, and routing to the pools. Every per-pool decision lives in [`Pool`].
@@ -49,12 +37,7 @@ impl<'w> Master<'w> {
             .zip(spawner.regions)
             .enumerate()
             .map(|(i, (p, region))| {
-                Pool::new(
-                    i,
-                    p,
-                    spawner.board.slice(region.slots.clone()),
-                    control_timeout,
-                )
+                Pool::new(i, p, &spawner.board[region.slots.clone()], control_timeout)
             })
             .collect();
         Master {
@@ -67,22 +50,28 @@ impl<'w> Master<'w> {
     }
 
     /// `Some(reason)` means the loop must return now: forced stop, or a stop with nothing left to drain.
-    fn handle_signal(&mut self, byte: u8, now: Instant) -> Option<StopReason> {
-        match self.pctl.on_signal(byte, now + self.control_timeout) {
+    fn handle_signal(&mut self, signo: c_int, now: Instant) -> Option<StopReason> {
+        match self.pctl.on_signal(signo, now + self.control_timeout) {
             SignalAction::Stop => self.begin_stop(),
             SignalAction::Forced => {
-                self.force_stop();
+                for p in &self.pools {
+                    p.signal_all(libc::SIGTERM);
+                }
                 Some(StopReason::Forced)
             }
             SignalAction::Reload => {
                 // A pool that still drains its chain swallows the signal.
                 if self.pools.iter().all(|p| p.reload.is_none()) {
-                    self.begin_reload(now);
+                    for p in &mut self.pools {
+                        p.begin_reload(now, &mut self.spawner);
+                    }
                 }
                 None
             }
             SignalAction::Status => {
-                self.log_status();
+                for p in &self.pools {
+                    p.log_status();
+                }
                 None
             }
             SignalAction::Ignore => None,
@@ -99,56 +88,25 @@ impl<'w> Master<'w> {
         None
     }
 
-    fn force_stop(&self) {
-        for p in &self.pools {
-            p.signal_all(libc::SIGTERM);
-        }
-    }
-
-    fn escalate_stop(&mut self, now: Instant) {
-        let sig = self.pctl.escalate(now);
-        for p in &self.pools {
-            p.signal_all(sig);
-        }
-    }
-
     fn drained(&self) -> bool {
-        self.pools.iter().all(|p| p.table.procs.is_empty())
-    }
-
-    fn begin_reload(&mut self, now: Instant) {
-        for p in &mut self.pools {
-            p.begin_reload(now, &mut self.spawner);
-        }
-    }
-
-    fn route_exit(
-        &mut self,
-        pool: usize,
-        w: WorkerProc,
-        verdict: ExitVerdict,
-        now: Instant,
-    ) -> anyhow::Result<()> {
-        let stopping = self.pctl.is_stopping();
-        self.pools[pool].on_child_exit(w, verdict, now, stopping, &mut self.spawner)?;
-        Ok(())
+        self.pools.iter().all(|p| p.procs.is_empty())
     }
 
     fn reap(&mut self, now: Instant) -> anyhow::Result<()> {
-        let buried = {
-            let mut tables: Vec<&mut ProcTable> =
-                self.pools.iter_mut().map(|p| &mut p.table).collect();
-            reap_all(&mut tables)
-        };
+        let buried = reap_all(&mut self.pools);
+        let stopping = self.pctl.is_stopping();
         for (pool, w, verdict) in buried {
-            self.route_exit(pool, w, verdict, now)?;
+            self.pools[pool].on_child_exit(w, verdict, now, stopping, &mut self.spawner)?;
         }
         Ok(())
     }
 
     fn fire_due_deadlines(&mut self, now: Instant) {
         if self.pctl.stop_deadline().is_some_and(|t| now >= t) {
-            self.escalate_stop(now);
+            let sig = self.pctl.escalate(now);
+            for p in &self.pools {
+                p.signal_all(sig);
+            }
         }
         for p in &mut self.pools {
             p.fire_due(now, &mut self.spawner);
@@ -175,20 +133,14 @@ impl<'w> Master<'w> {
         next
     }
 
-    fn log_status(&self) {
-        for p in &self.pools {
-            p.log_status();
-        }
-    }
-
     pub(crate) fn run_loop(&mut self) -> anyhow::Result<StopReason> {
         let start = Instant::now();
         for p in &mut self.pools {
-            p.fork_initial(start, &mut self.spawner);
+            p.refill(start, &mut self.spawner);
         }
         loop {
             let mut pfd = libc::pollfd {
-                fd: self.spawner.signal_fd(),
+                fd: self.spawner.self_pipe.rd.as_raw_fd(),
                 events: libc::POLLIN,
                 revents: 0,
             };
@@ -207,11 +159,14 @@ impl<'w> Master<'w> {
             let mut got_chld: bool = false;
             if n > 0 && (pfd.revents & libc::POLLIN) != 0 {
                 let mut buf = [0u8; 64];
-                for b in drain_pipe(self.spawner.signal_fd(), &mut buf) {
-                    if b == SIG_CHLD {
-                        got_chld = true;
-                    } else if let Some(reason) = self.handle_signal(b, now) {
-                        return Ok(reason);
+                // Drain the nonblocking self-pipe: WouldBlock (empty), EOF or an error ends the loop.
+                while let Ok(len @ 1..) = (&self.spawner.self_pipe.rd).read(&mut buf) {
+                    for &b in &buf[..len] {
+                        if b == libc::SIGCHLD as u8 {
+                            got_chld = true;
+                        } else if let Some(reason) = self.handle_signal(c_int::from(b), now) {
+                            return Ok(reason);
+                        }
                     }
                 }
             }

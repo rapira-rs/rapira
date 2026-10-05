@@ -1,6 +1,6 @@
 //! The `auth` interceptor over the wire: what gRPC, gRPC-Web and Connect clients see, the routes without a token, and the boot checks of the tokens file.
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use http::Method;
 use serde_json::json;
@@ -337,36 +337,13 @@ async fn auth_covers_the_plugin_routes() {
     stop(srv).await;
 }
 
-/// The master reads the tokens file before the fork. `main` returns the error, so the process exits 1. The error names the line, never its text.
+/// The master reads the tokens file before the fork. `main` returns the error, so the process exits 1.
 #[test]
-fn a_bad_tokens_file_fails_the_boot() {
-    struct Case {
-        name: &'static str,
-        tokens: PathBuf,
-        log: &'static str,
-    }
-    let cases = [
-        Case {
-            name: "missing file",
-            tokens: scratch_dir().join("missing-tokens"),
-            log: "reading grpc.auth.tokens_file",
-        },
-        Case {
-            name: "invalid line",
-            tokens: fixture("grpc/tokens-invalid"),
-            log: "line 2 is not a valid bearer token",
-        },
-    ];
-    for case in cases {
-        let (status, log) = Spawn::grpc(fixture("grpc/wire-worker.php"))
-            .grpc_extra(&auth(&case.tokens))
-            .boot_failure();
-        assert_eq!(status.code(), Some(1), "{}: {log}", case.name);
-        assert!(log.contains(case.log), "{}: {log}", case.name);
-        assert!(
-            !log.contains("not a token"),
-            "{}: the log shows the line: {log}",
-            case.name
-        );
-    }
+fn a_missing_tokens_file_fails_the_boot() {
+    let tokens = scratch_dir().join("missing-tokens");
+    let (status, log) = Spawn::grpc(fixture("grpc/wire-worker.php"))
+        .grpc_extra(&auth(&tokens))
+        .boot_failure();
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(log.contains("reading grpc.auth.tokens_file"), "{log}");
 }

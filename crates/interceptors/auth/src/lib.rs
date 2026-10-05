@@ -3,9 +3,9 @@ mod config;
 pub use config::{Section, Settings, resolve};
 
 use anyhow::{Context, bail};
+use connectrpc::http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
+use connectrpc::http::{HeaderMap, HeaderValue};
 use connectrpc::{ConnectError, Interceptor, RequestHead};
-use http::header::{AUTHORIZATION, WWW_AUTHENTICATE};
-use http::{HeaderMap, HeaderValue};
 
 /// The gRPC health service. Kubernetes gRPC probes cannot send metadata, so it needs no token.
 const HEALTH: &str = "/grpc.health.v1.Health/";

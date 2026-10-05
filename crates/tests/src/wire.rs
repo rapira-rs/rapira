@@ -1,18 +1,14 @@
-//! An HTTP/1.1 client that sends a `rapira_sapi::Request` to a server and reads the response back as `Frame`s.
-//!
-//! The request carries the method, the target (else the `uri`), `Host` (from `authority`, else `localhost` on HTTP/1.1), the header lines in order, `Content-Type` from `content_type` when no header line sets it, and the raw body.
-//! The server sets the other `Request` fields itself: `remote`, `server`, `server_name`, `server_port`, `https`, `tls`, `received_at` and `content_length`.
+//! An HTTP/1.1 client that sends an `http::Request` to a server and reads the response back as `Frame`s.
 
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 
-use bytes::Bytes;
-use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST};
-use http::{HeaderMap, HeaderValue, Method, StatusCode, Uri, Version};
+use http::header::CONTENT_LENGTH;
+use http::{HeaderMap, Method, StatusCode};
 use http_body_util::{BodyExt, Full};
+use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
-use rapira_sapi::types::Body;
-use rapira_sapi::{Frame, Request, ResponseHead};
+use rapira_sapi::{Frame, types::ResponseHead};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
 
@@ -29,15 +25,21 @@ fn runtime() -> &'static tokio::runtime::Runtime {
 }
 
 /// [`submit_async`] for a caller outside a tokio runtime.
-pub fn submit(addr: SocketAddr, req: Request) -> anyhow::Result<mpsc::Receiver<Frame>> {
+pub fn submit(
+    addr: SocketAddr,
+    req: http::Request<Vec<u8>>,
+) -> anyhow::Result<mpsc::Receiver<Frame>> {
     runtime().block_on(submit_async(addr, req))
 }
 
 /// Sends `req` to `addr` on a new connection and returns once the connection is open.
 /// The receiver gets `Head`, one `Chunk` per body frame, and `End`; a body error is `End { truncated: true }`, and no frame means that no response head arrived.
 /// Dropping the receiver closes the connection at once.
-pub async fn submit_async(addr: SocketAddr, req: Request) -> anyhow::Result<mpsc::Receiver<Frame>> {
-    let request = to_http(req)?;
+pub async fn submit_async(
+    addr: SocketAddr,
+    req: http::Request<Vec<u8>>,
+) -> anyhow::Result<mpsc::Receiver<Frame>> {
+    let request = req.map(|body| Full::new(Bytes::from(body)));
     let head_only = request.method() == Method::HEAD;
     let stream = runtime().spawn(TcpStream::connect(addr)).await??;
     let (tx, rx) = mpsc::channel(16);
@@ -48,49 +50,6 @@ pub async fn submit_async(addr: SocketAddr, req: Request) -> anyhow::Result<mpsc
         }
     });
     Ok(rx)
-}
-
-fn to_http(req: Request) -> anyhow::Result<http::Request<Full<Bytes>>> {
-    let Body::Raw(body) = req.body else {
-        anyhow::bail!("a multipart body cannot travel: send its encoded bytes as Body::Raw");
-    };
-    let uri = match req.target {
-        Some(target) => Uri::try_from(target)?,
-        None => Uri::try_from(req.uri)?,
-    };
-    let version = if req.protocol == "HTTP/1.0" {
-        Version::HTTP_10
-    } else {
-        Version::HTTP_11
-    };
-
-    let mut headers = HeaderMap::new();
-    if !req.headers.contains_key(HOST) {
-        match req.authority {
-            Some(authority) => {
-                headers.insert(HOST, HeaderValue::from_bytes(&authority)?);
-            }
-            None if version == Version::HTTP_11 => {
-                headers.insert(HOST, HeaderValue::from_static("localhost"));
-            }
-            None => {}
-        }
-    }
-    for (name, value) in &req.headers {
-        headers.append(name, value.clone());
-    }
-    if let Some(content_type) = req.content_type
-        && !headers.contains_key(CONTENT_TYPE)
-    {
-        headers.insert(CONTENT_TYPE, HeaderValue::from_bytes(&content_type)?);
-    }
-
-    let mut request = http::Request::new(Full::new(Bytes::from(body.into_inner())));
-    *request.method_mut() = Method::from_bytes(req.method.as_bytes())?;
-    *request.uri_mut() = uri;
-    *request.version_mut() = version;
-    *request.headers_mut() = headers;
-    Ok(request)
 }
 
 async fn exchange(

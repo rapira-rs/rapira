@@ -5,9 +5,9 @@ use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use rapira_net::ListenAddr;
-use rapira_sapi::Mode;
+use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{Resp, drain_resp_deadline, req};
+use tests::{Resp, drain_resp_deadline, poll, req};
 
 use crate::harness::{
     Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_raw, php_version,
@@ -268,20 +268,17 @@ fn a_pool_whose_boot_failed_turns_ready_without_a_request() {
     );
     std::fs::write(srv.dir.join("http/up.flag"), "").expect("write up.flag");
     // No request goes to the app port, so only the worker itself can run the boot again.
-    let end = Instant::now() + Duration::from_secs(15);
-    loop {
+    let resp = poll(Duration::from_secs(15), || {
         let resp = get(observability, "/readyz");
-        if resp.status() == 200 {
-            assert_eq!(resp.body_string(), "ok\n");
-            break;
-        }
-        assert!(
-            Instant::now() < end,
+        (resp.status() == 200).then_some(resp)
+    })
+    .unwrap_or_else(|| {
+        panic!(
             "the pool is not ready within 15 s after the boot can succeed\n{}",
             diagnostics(&srv)
-        );
-        std::thread::sleep(Duration::from_millis(100));
-    }
+        )
+    });
+    assert_eq!(resp.body_string(), "ok\n");
 }
 
 /// A failed re-boot after the app served shows starting, so the request watchdog skips the worker.

@@ -10,7 +10,7 @@ use tokio::sync::watch;
 mod accept_linux;
 
 pub mod listen;
-pub use listen::{ListenAddr, PrepareCtx, PreparedListener};
+pub use listen::{ListenAddr, PreparedListener, bind};
 
 #[cfg(target_os = "linux")]
 use accept_linux::{TcpListener, UnixListener};
@@ -41,7 +41,6 @@ impl Acceptor {
         stop: watch::Receiver<bool>,
         rt: &Handle,
     ) -> std::io::Result<Self> {
-        use std::os::fd::{FromRawFd, IntoRawFd};
         // The blocked acceptor waits on an eventfd, so a task on rt passes the flag on to it.
         #[cfg(target_os = "linux")]
         let stop = {
@@ -53,22 +52,20 @@ impl Acceptor {
             });
             wake
         };
-        let addr = prepared.addr().clone();
+        let PreparedListener { fd, addr } = prepared;
         let tcp: bool = matches!(addr, ListenAddr::Tcp(_));
         // On other OSes from_std registers the tokio listener with the reactor of rt.
         let _guard = rt.enter();
-        // SAFETY: into_raw_fd transfers sole ownership of a listening socket.
-        // prepare set O_NONBLOCK: both acceptors need an accept that does not block.
+        // bind set O_NONBLOCK: both acceptors need an accept that does not block.
         let socket = if tcp {
-            let std = unsafe { std::net::TcpListener::from_raw_fd(prepared.into_raw_fd()) };
+            let std = std::net::TcpListener::from(fd);
             #[cfg(target_os = "linux")]
             let listener = TcpListener::from_std(std, stop)?;
             #[cfg(not(target_os = "linux"))]
             let listener = TcpListener::from_std(std)?;
             Socket::Tcp(listener)
         } else {
-            let std =
-                unsafe { std::os::unix::net::UnixListener::from_raw_fd(prepared.into_raw_fd()) };
+            let std = std::os::unix::net::UnixListener::from(fd);
             #[cfg(target_os = "linux")]
             let listener = UnixListener::from_std(std, stop)?;
             #[cfg(not(target_os = "linux"))]
@@ -172,17 +169,19 @@ fn is_skipped_accept(e: &std::io::Error) -> bool {
 #[cfg(target_os = "linux")]
 fn accept_blocking(socket: &Socket, serve: &impl Serve) -> std::io::Result<bool> {
     match socket {
-        Socket::Tcp(l) => match l.accept_blocking()? {
+        Socket::Tcp(l) => match l.accept_blocking(std::net::TcpListener::accept)? {
             None => return Ok(false),
             Some((stream, peer)) => {
+                stream.set_nonblocking(true)?;
                 let stream = tokio::net::TcpStream::from_std(stream)?;
                 let _ = stream.set_nodelay(true);
                 serve.spawn_tcp(stream, peer);
             }
         },
-        Socket::Unix(l) => match l.accept_blocking()? {
+        Socket::Unix(l) => match l.accept_blocking(std::os::unix::net::UnixListener::accept)? {
             None => return Ok(false),
             Some((stream, peer)) => {
+                stream.set_nonblocking(true)?;
                 serve.spawn_unix(
                     tokio::net::UnixStream::from_std(stream)?,
                     peer.as_pathname(),

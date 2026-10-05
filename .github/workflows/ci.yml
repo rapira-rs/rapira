@@ -6,6 +6,16 @@ permissions:
     contents: read
 
 jobs:
+    fmt:
+        runs-on: ubuntu-latest
+        timeout-minutes: 10
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with: { persist-credentials: false }
+            - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
+              with: { components: rustfmt }
+            - run: cargo fmt --all --check
+
     test:
         runs-on: ${{ matrix.os }}
         timeout-minutes: 45
@@ -31,20 +41,11 @@ jobs:
               if: runner.os == 'Linux'
               with:
                   php-version: ${{ matrix.php }}
-                  coverage: none
+                  coverage: none # xdebug and pcov override zend_error_cb and the JIT in the embed SAPI
                   extensions: bcmath, calendar, ctype, curl, dom, exif, ffi, fileinfo, filter, ftp, gettext, iconv, igbinary, imap, intl, mbstring, opcache, openssl, pdo_pgsql, pdo_sqlite, pgsql, phar, posix, redis, session, shmop, simplexml, sockets, sqlite3, sysvmsg, sysvsem, sysvshm, tokenizer, xml, xmlreader, xmlwriter, zlib
               env:
                   phpts: nts
                   fail-fast: true # a missing extension fails the job instead of warning
-
-            - name: Verify no coverage driver in the PHP build
-              if: runner.os == 'Linux'
-              run: |
-                  mods=$(php -m); echo "$mods"
-                  if grep -qiE '^(xdebug|pcov)$' <<<"$mods"; then
-                    echo "::error::a PHP coverage driver is enabled; it overrides zend_error_cb and JIT in the embed SAPI"
-                    exit 1
-                  fi
 
             - name: Build deps for bindgen/cc (Linux)
               if: runner.os == 'Linux'

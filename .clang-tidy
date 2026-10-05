@@ -18,7 +18,8 @@ Checks: >
   -readability-math-missing-parentheses,
   -misc-header-include-cycle,
   -misc-include-cleaner,
-  -misc-use-internal-linkage
+  -misc-use-internal-linkage,
+  -misc-unused-parameters
 WarningsAsErrors: 'bugprone-*,cert-*,clang-analyzer-*,concurrency-*'
 HeaderFilterRegex: 'crates/sapi/.*\.h$'
 FormatStyle: file

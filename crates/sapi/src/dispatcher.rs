@@ -1,17 +1,12 @@
-use std::{
-    ffi::{CStr, c_char, c_int},
-    ptr::null_mut,
-};
+use std::ffi::{CStr, c_char, c_int};
 
 use tracing::{Level, level_filters::LevelFilter};
 
 use crate::{
-    HashPosition, HashTable, IS_OBJECT, PHP_JSON_PARTIAL_OUTPUT_ON_ERROR, add_assoc_stringl_ex,
+    HashTable, IS_OBJECT, PHP_JSON_PARTIAL_OUTPUT_ON_ERROR, add_assoc_stringl_ex,
     add_assoc_zval_ex, callbacks::guard, php_json_encode, rapira_array_init, rapira_smart_str_free,
     smart_str, zend, zend_ce_throwable, zend_class_entry, zend_get_exception_base,
-    zend_hash_get_current_data_ex, zend_hash_get_current_key_ex, zend_hash_index_update,
-    zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object,
-    zend_read_property, zend_string, zval, zval_add_ref, zval_ptr_dtor,
+    zend_hash_index_update, zend_object, zend_string, zval, zval_add_ref, zval_ptr_dtor,
 };
 
 fn emit(level: Level, message: &[u8], context: &[u8]) {
@@ -47,7 +42,7 @@ unsafe fn add_prop(
 ) {
     unsafe {
         let mut rv: zval = std::mem::zeroed();
-        let src = zend_read_property(scope, ex, name.as_ptr(), name.count_bytes(), true, &mut rv);
+        let src = zend::read_prop(scope, ex, name, &mut rv);
         let mut copy: zval = *src;
         zval_add_ref(&mut copy);
         add_assoc_zval_ex(dst, name.as_ptr(), name.count_bytes(), &mut copy);
@@ -74,15 +69,8 @@ unsafe fn flatten_throwable(dst: *mut zval, ex: *mut zend_object, depth: i32) {
             return;
         }
         let mut rv: zval = std::mem::zeroed();
-        let prev = zend_read_property(
-            base,
-            ex,
-            c"previous".as_ptr(),
-            c"previous".count_bytes(),
-            true,
-            &mut rv,
-        );
-        if !prev.is_null() && zend::zval_type(prev) == IS_OBJECT {
+        let prev = zend::read_prop(base, ex, c"previous", &mut rv);
+        if zend::zval_type(prev) == IS_OBJECT {
             let mut flat: zval = std::mem::zeroed();
             flatten_throwable(&mut flat, (*prev).value.obj, depth - 1);
             add_assoc_zval_ex(
@@ -100,17 +88,7 @@ unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
     unsafe {
         let mut rebuilt: zval = std::mem::zeroed();
         rapira_array_init(&mut rebuilt, (*context).nNumOfElements);
-        let mut pos: HashPosition = 0;
-        zend_hash_internal_pointer_reset_ex(context, &mut pos);
-        loop {
-            let entry = zend_hash_get_current_data_ex(context, &raw mut pos);
-            if entry.is_null() {
-                break;
-            }
-            let entry = zend::deref(entry);
-            let mut skey: *mut zend_string = null_mut();
-            let mut nkey = 0;
-            let kt = zend_hash_get_current_key_ex(context, &mut skey, &mut nkey, &pos);
+        for (key, entry) in zend::entries(context) {
             let mut out: zval = std::mem::zeroed();
             if zend::zval_type(entry) == IS_OBJECT
                 && zend::instanceof((*(*entry).value.obj).ce, zend_ce_throwable)
@@ -120,13 +98,15 @@ unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
                 out = *entry;
                 zval_add_ref(&mut out);
             }
-            if i64::from(kt) == crate::HASH_KEY_IS_STRING && !skey.is_null() {
-                let kb = zend::zstr_bytes(skey);
-                add_assoc_zval_ex(&mut rebuilt, (*skey).val.as_ptr(), kb.len(), &mut out);
-            } else {
-                zend_hash_index_update(rebuilt.value.arr, nkey, &mut out);
+            match key {
+                zend::Key::Str(skey) => {
+                    let kb = zend::zstr_bytes(skey);
+                    add_assoc_zval_ex(&mut rebuilt, kb.as_ptr().cast(), kb.len(), &mut out);
+                }
+                zend::Key::Index(n) => {
+                    zend_hash_index_update(rebuilt.value.arr, n, &mut out);
+                }
             }
-            zend_hash_move_forward_ex(context, &mut pos);
         }
 
         let mut buf: smart_str = std::mem::zeroed();

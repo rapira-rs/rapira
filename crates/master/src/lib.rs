@@ -2,7 +2,8 @@ use std::os::fd::OwnedFd;
 use std::path::PathBuf;
 use std::time::Duration;
 
-use rapira_scoreboard::{PoolRegion, SB_MAX_SLOTS, Scoreboard, SharedSlot};
+use anyhow::Context as _;
+use rapira_scoreboard::{PoolRegion, SB_MAX_SLOTS, SharedSlot};
 
 mod events;
 mod lifeline;
@@ -34,13 +35,6 @@ pub struct PoolConfig {
     pub request_terminate_timeout: Duration,
 }
 
-impl PoolConfig {
-    /// Two slots per worker so a reload replacement fits next to the worker it replaces.
-    pub fn slots(&self) -> usize {
-        self.processes * 2
-    }
-}
-
 pub struct MasterConfig {
     pub pools: Vec<PoolConfig>,
     /// Stop/reload QUIT to TERM escalation grace.
@@ -49,13 +43,13 @@ pub struct MasterConfig {
 }
 
 impl MasterConfig {
-    /// Two slots per worker, pools contiguous in `pools` order. Names the pool that pushes the total past the cap.
+    /// Two slots per worker, so a reload replacement fits next to the worker it replaces; pools contiguous in `pools` order. Names the pool that pushes the total past the cap.
     fn regions(&self) -> anyhow::Result<Vec<PoolRegion>> {
         let mut base: usize = 0;
         self.pools
             .iter()
             .map(|p| {
-                let end = base.saturating_add(p.slots());
+                let end = base.saturating_add(p.processes * 2);
                 anyhow::ensure!(
                     end <= SB_MAX_SLOTS,
                     "{}.pool.processes ({}) raises the worker total to {}, above the supported maximum ({})",
@@ -84,7 +78,7 @@ pub struct WorkerEnv {
     pub lifeline: OwnedFd,
     pub slot_view: &'static SharedSlot,
     /// The whole board: the slots of every pool.
-    pub board: Scoreboard,
+    pub board: &'static [SharedSlot],
     /// The part of `board` that each pool owns, in `MasterConfig::pools` order.
     pub regions: &'static [PoolRegion],
 }
@@ -100,11 +94,12 @@ pub enum StopReason {
 /// Returns in the parent on a clean or forced stop; in a forked child it never returns: the worker closure runs and the child `_exit`s.
 pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::Result<StopReason> {
     let regions = cfg.regions()?;
-    let scoreboard: Scoreboard = Scoreboard::create(regions.last().map_or(0, |r| r.slots.end))?;
+    let board = rapira_scoreboard::create(regions.last().map_or(0, |r| r.slots.end))
+        .context("scoreboard mmap failed")?;
     // Built once per boot and never freed, as the board: every forked child reads the same regions.
     let regions: &'static [PoolRegion] = regions.leak();
     let self_pipe: signals::SelfPipe = signals::install_master_signals()?;
-    let lifeline: lifeline::Lifeline = lifeline::Lifeline::create()?;
+    let (lifeline_rd, lifeline_wr) = std::io::pipe().context("lifeline pipe")?;
     let _pidfile: Option<pidfile::PidFile> = match &cfg.pidfile {
         Some(p) => Some(pidfile::PidFile::write(p)?),
         None => None,
@@ -112,8 +107,9 @@ pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::R
 
     let forker = process::Forker {
         self_pipe,
-        lifeline,
-        board: scoreboard,
+        lifeline_rd,
+        lifeline_wr,
+        board,
         regions,
         worker: Box::new(worker),
     };

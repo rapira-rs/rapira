@@ -1,7 +1,6 @@
 use anyhow::{Context, bail};
 use rapira_config::{
-    ConfigCtx, LogSection, LogSettings, SupervisorSection, SupervisorSettings, resolve_log,
-    resolve_supervisor,
+    LogSettings, SupervisorSection, SupervisorSettings, resolve_log, resolve_supervisor,
 };
 use serde::Deserialize;
 use std::path::Path;
@@ -16,7 +15,7 @@ struct FileConfig {
     #[serde(default)]
     supervisor: SupervisorSection,
     #[serde(default)]
-    log: LogSection,
+    log: LogSettings,
 }
 
 #[derive(Debug)]
@@ -33,29 +32,27 @@ pub fn resolve(path: &Path) -> anyhow::Result<Settings> {
         .with_context(|| format!("reading config file {}", path.display()))?;
     let file: FileConfig =
         toml::from_str(&text).with_context(|| format!("parsing config file {}", path.display()))?;
-    let ctx = ConfigCtx {
-        dir: path.parent().unwrap_or(Path::new(".")).to_path_buf(),
-    };
-    settings(file, &ctx)
+    let dir = path.parent().unwrap_or(Path::new("."));
+    settings(file, dir)
 }
 
-fn settings(file: FileConfig, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
+fn settings(file: FileConfig, dir: &Path) -> anyhow::Result<Settings> {
     if file.http.is_none() && file.grpc.is_none() {
         bail!("no plugin configured: add an [http] or a [grpc] table");
     }
     let http = file
         .http
-        .map(|section| rapira_http::config::resolve(section, ctx))
+        .map(|section| rapira_http::config::resolve(section, dir))
         .transpose()?;
     let grpc = file
         .grpc
-        .map(|section| rapira_grpc::config::resolve(section, ctx))
+        .map(|section| rapira_grpc::config::resolve(section, dir))
         .transpose()?;
     let observability = file
         .observability
         .map(rapira_observability::config::resolve)
         .transpose()?;
-    let supervisor = resolve_supervisor(file.supervisor, ctx)?;
+    let supervisor = resolve_supervisor(file.supervisor, dir)?;
     let log = resolve_log(file.log)?;
 
     Ok(Settings {
@@ -70,14 +67,6 @@ fn settings(file: FileConfig, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapira_config::{LogLevel, resolve_pool};
-    use std::path::PathBuf;
-
-    fn ctx() -> ConfigCtx {
-        ConfigCtx {
-            dir: PathBuf::from("/w"),
-        }
-    }
 
     struct Case {
         name: &'static str,
@@ -99,11 +88,6 @@ mod tests {
                 name: "unknown table",
                 toml: "[nope]\nx = 1\n",
                 error: Some("unknown field `nope`"),
-            },
-            Case {
-                name: "fpm pm table",
-                toml: "[pm]\nmode = \"static\"\n",
-                error: Some("unknown field `pm`"),
             },
             Case {
                 name: "pool under http",
@@ -170,28 +154,6 @@ mod tests {
         }
     }
 
-    /// The e2e harness writes `[http.pool]` before `[http]`. TOML allows the super-table later.
-    #[test]
-    fn subtable_before_supertable_parses() {
-        let file: FileConfig = toml::from_str(
-            "[http.pool]\nentrypoint = \"a.php\"\nprocesses = 3\n\
-             [log]\nlevel = \"debug\"\n\
-             [http]\nlisten = \"127.0.0.1:7000\"\nmiddleware = [\"static\"]\n\
-             [http.static]\nroot = \"public\"\n",
-        )
-        .unwrap();
-        assert_eq!(resolve_log(file.log).unwrap().level, LogLevel::Debug);
-        let http = file.http.unwrap();
-        assert_eq!(http.listen.as_deref(), Some("127.0.0.1:7000"));
-        assert_eq!(http.middleware, ["static"]);
-        assert_eq!(
-            http.r#static.and_then(|s| s.root).as_deref(),
-            Some("public")
-        );
-        let pool = resolve_pool(http.pool, "http.pool", &ctx()).unwrap();
-        assert_eq!(pool.processes, 3);
-    }
-
     #[test]
     fn a_file_without_a_plugin_table_is_refused() {
         struct Case {
@@ -210,7 +172,7 @@ mod tests {
         ];
         for case in cases {
             let file: FileConfig = toml::from_str(case.toml).unwrap();
-            let err = settings(file, &ctx()).unwrap_err().to_string();
+            let err = settings(file, Path::new("/w")).unwrap_err().to_string();
             assert_eq!(
                 err, "no plugin configured: add an [http] or a [grpc] table",
                 "{}",

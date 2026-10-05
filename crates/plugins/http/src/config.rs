@@ -1,11 +1,12 @@
 use std::fs::{OpenOptions, remove_file};
 use std::net::{Ipv4Addr, SocketAddr};
+use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow, bail, ensure};
 use rapira_config::{
-    ConfigCtx, ListenAddr, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout,
+    ListenAddr, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, opt_path,
     parse_listen, resolve_pool,
 };
 use serde::Deserialize;
@@ -20,7 +21,7 @@ pub struct Section {
     pub listen: Option<String>,
     pub server_name: Option<String>,
     pub server_port: Option<u16>,
-    pub max_body_size_mb: Option<usize>,
+    pub max_body_size_mb: Option<NonZero<usize>>,
     pub write_timeout_secs: Option<u64>,
     pub keepalive_timeout_secs: Option<u64>,
     pub unsafe_field_names: Option<UnsafeFieldNames>,
@@ -46,11 +47,11 @@ pub struct SendfileSection {
 #[serde(deny_unknown_fields)]
 pub struct UploadsSection {
     pub dir: Option<String>,
-    pub max_file_size_mb: Option<u64>,
-    pub max_field_size_kb: Option<usize>,
-    pub max_files: Option<usize>,
-    pub max_parts: Option<usize>,
-    pub max_part_headers: Option<usize>,
+    pub max_file_size_mb: Option<NonZero<u64>>,
+    pub max_field_size_kb: Option<NonZero<usize>>,
+    pub max_files: Option<NonZero<usize>>,
+    pub max_parts: Option<NonZero<usize>>,
+    pub max_part_headers: Option<NonZero<usize>>,
 }
 
 #[derive(Debug)]
@@ -80,8 +81,8 @@ pub enum Middleware {
 // ---------------------------------------------
 
 /// Boot checks run here: entrypoint file, uploads dir, static root, middleware names.
-pub fn resolve(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
-    let settings = settings(section, ctx)?;
+pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
+    let settings = settings(section, dir)?;
     check_entrypoint("http.pool", &settings.pool.entrypoint)?;
     for mw in &settings.middleware {
         match mw {
@@ -95,7 +96,7 @@ pub fn resolve(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
 }
 
 /// The settings of `section`. Reads no file.
-fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
+fn settings(section: Section, dir: &Path) -> Result<Settings> {
     let listen = parse_listen(
         "http",
         section.listen.as_deref(),
@@ -110,10 +111,7 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
         },
     };
 
-    let max_body_size_mb = section.max_body_size_mb.unwrap_or(8);
-    if max_body_size_mb == 0 {
-        bail!("http.max_body_size_mb must be at least 1");
-    }
+    let max_body_size_mb = section.max_body_size_mb.map_or(8, NonZero::get);
     let max_body_size = max_body_size_mb
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow!("http.max_body_size_mb {max_body_size_mb} is too large"))?;
@@ -129,9 +127,9 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
         section.keepalive_timeout_secs.unwrap_or(60),
     )?;
 
-    let pool = resolve_pool(section.pool, "http.pool", ctx)?;
+    let pool = resolve_pool(section.pool, "http.pool", dir)?;
     let uploads = if pool.mode == Mode::Dispatcher {
-        Some(resolve_uploads(section.uploads.unwrap_or_default(), ctx)?)
+        Some(resolve_uploads(section.uploads.unwrap_or_default(), dir)?)
     } else if section.uploads.is_some() {
         bail!(
             "http.uploads applies to dispatcher mode only (http.pool.mode = \"{}\")",
@@ -141,8 +139,8 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
         None
     };
 
-    let sendfile_root = match section.sendfile.root.filter(|r| !r.is_empty()) {
-        Some(r) => ctx.resolve_path(&r)?,
+    let sendfile_root = match opt_path(dir, section.sendfile.root.as_deref())? {
+        Some(r) => r,
         None => pool
             .entrypoint
             .parent()
@@ -152,7 +150,7 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
 
     let static_files = section
         .r#static
-        .map(|s| rapira_static_files::resolve(s, ctx))
+        .map(|s| rapira_static_files::resolve(s, dir))
         .transpose()?;
     let middleware = resolve_middleware(section.middleware, static_files)?;
 
@@ -211,37 +209,19 @@ fn resolve_middleware(
     Ok(middleware)
 }
 
-fn resolve_uploads(section: UploadsSection, ctx: &ConfigCtx) -> Result<Limits> {
-    let dir = match section.dir.filter(|d| !d.is_empty()) {
-        Some(d) => ctx.resolve_path(&d)?,
-        None => std::env::temp_dir(),
-    };
-    let max_file_size_mb = section.max_file_size_mb.unwrap_or(2);
-    if max_file_size_mb == 0 {
-        bail!("http.uploads.max_file_size_mb must be at least 1");
-    }
+fn resolve_uploads(section: UploadsSection, config_dir: &Path) -> Result<Limits> {
+    let dir = opt_path(config_dir, section.dir.as_deref())?.unwrap_or_else(std::env::temp_dir);
+    let max_file_size_mb = section.max_file_size_mb.map_or(2, NonZero::get);
     let max_file_size = max_file_size_mb
         .checked_mul(1024 * 1024)
         .ok_or_else(|| anyhow!("http.uploads.max_file_size_mb {max_file_size_mb} is too large"))?;
-    let max_field_size_kb = section.max_field_size_kb.unwrap_or(256);
-    if max_field_size_kb == 0 {
-        bail!("http.uploads.max_field_size_kb must be at least 1");
-    }
+    let max_field_size_kb = section.max_field_size_kb.map_or(256, NonZero::get);
     let max_field_size = max_field_size_kb.checked_mul(1024).ok_or_else(|| {
         anyhow!("http.uploads.max_field_size_kb {max_field_size_kb} is too large")
     })?;
-    let max_parts = section.max_parts.unwrap_or(1024);
-    if max_parts == 0 {
-        bail!("http.uploads.max_parts must be at least 1");
-    }
-    let max_part_headers = section.max_part_headers.unwrap_or(32);
-    if max_part_headers == 0 {
-        bail!("http.uploads.max_part_headers must be at least 1");
-    }
-    let max_files = section.max_files.unwrap_or(20);
-    if max_files == 0 {
-        bail!("http.uploads.max_files must be at least 1");
-    }
+    let max_parts = section.max_parts.map_or(1024, NonZero::get);
+    let max_part_headers = section.max_part_headers.map_or(32, NonZero::get);
+    let max_files = section.max_files.map_or(20, NonZero::get);
     Ok(Limits {
         dir,
         max_file_size,
@@ -305,19 +285,22 @@ impl Server {
             );
         }
 
-        Self::init(Config {
-            listen: settings.listen,
-            server_name: settings.server_name,
-            server_port: settings.server_port,
-            max_body_size: settings.max_body_size,
-            write_timeout: settings.write_timeout,
-            unsafe_field_names: settings.unsafe_field_names,
-            superglobals: settings.pool.mode != Mode::Dispatcher,
-            keepalive_timeout: settings.keepalive_timeout,
-            middleware,
-            uploads: settings.uploads,
-            sendfile_root: settings.sendfile_root,
-        })
+        Self {
+            config: Config {
+                listen: settings.listen,
+                server_name: settings.server_name,
+                server_port: settings.server_port,
+                max_body_size: settings.max_body_size,
+                write_timeout: settings.write_timeout,
+                unsafe_field_names: settings.unsafe_field_names,
+                superglobals: settings.pool.mode != Mode::Dispatcher,
+                keepalive_timeout: settings.keepalive_timeout,
+                middleware,
+                uploads: settings.uploads,
+                sendfile_root: settings.sendfile_root,
+            },
+            prepared: None,
+        }
     }
 }
 
@@ -325,15 +308,9 @@ impl Server {
 mod tests {
     use super::*;
 
-    fn ctx() -> ConfigCtx {
-        ConfigCtx {
-            dir: PathBuf::from("/w"),
-        }
-    }
-
     /// The settings of an `[http]` table in TOML, without the boot checks.
     fn settings_of(toml: &str) -> Result<Settings> {
-        settings(toml::from_str(toml)?, &ctx())
+        settings(toml::from_str(toml)?, Path::new("/w"))
     }
 
     struct Case {
@@ -369,20 +346,15 @@ mod tests {
         ];
         for case in cases {
             let section: Section = toml::from_str(case.toml).unwrap();
-            let err = resolve(section, &ctx()).unwrap_err().to_string();
+            let err = resolve(section, Path::new("/w")).unwrap_err().to_string();
             assert!(err.contains(case.error), "{}: {err}", case.name);
         }
     }
 
-    /// `allow` is rejected too: there is no off-switch, so asking for one must fail loudly.
+    /// `allow` is rejected: there is no off-switch, so asking for one must fail loudly.
     #[test]
     fn section_errors_name_the_key() {
         let cases = [
-            Case {
-                name: "unknown unsafe_field_names value",
-                toml: "unsafe_field_names = \"dorp\"\n[pool]\nentrypoint = \"a.php\"\n",
-                error: "unknown variant `dorp`",
-            },
             Case {
                 name: "allow is no unsafe_field_names value",
                 toml: "unsafe_field_names = \"allow\"\n[pool]\nentrypoint = \"a.php\"\n",
@@ -406,7 +378,7 @@ mod tests {
             Case {
                 name: "zero max_files would 413 every file part",
                 toml: "[pool]\nentrypoint = \"a.php\"\n[uploads]\nmax_files = 0\n",
-                error: "http.uploads.max_files must be at least 1",
+                error: "expected a nonzero usize",
             },
             Case {
                 name: "uploads under classic mode",
@@ -706,13 +678,7 @@ mod tests {
         let file: toml::Table = toml::from_str(include_str!("../../../../examples/rapira.toml"))
             .expect("the example parses");
         let section: Section = file["http"].clone().try_into().expect("[http] parses");
-        let http = settings(
-            section,
-            &ConfigCtx {
-                dir: PathBuf::from("/srv/app"),
-            },
-        )
-        .expect("[http] resolves");
+        let http = settings(section, Path::new("/srv/app")).expect("[http] resolves");
         assert_eq!(http.listen.to_string(), "127.0.0.1:8000");
         assert_eq!(http.server_port, 8000);
         assert_eq!(

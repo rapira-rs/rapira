@@ -1,7 +1,8 @@
 use std::time::{Duration, Instant};
 
-use http::header::{HeaderName, HeaderValue};
-use rapira_sapi::Mode;
+use http::Method;
+use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
+use rapira_sapi::plugin::Mode;
 use serde_json::Value;
 use tests::wire::submit;
 use tests::{drain, drain_resp, drain_resp_deadline, fixture, req, server_log};
@@ -153,7 +154,7 @@ fn bootstrap_env_survives_late_compilation() -> anyhow::Result<()> {
 fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("worker/location-worker.php")).spawn();
     let mut rq = req("/");
-    rq.method = "POST".into();
+    *rq.method_mut() = Method::POST;
     let resp = drain_resp(submit(srv.addr, rq)?);
     assert_eq!(resp.status(), 303);
     assert_eq!(resp.header("location").as_deref(), Some("/elsewhere"));
@@ -168,7 +169,7 @@ fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
 fn post_location_redirects_303_in_classic_mode() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("worker/location-classic.php")).spawn();
     let mut rq = req("/");
-    rq.method = "POST".into();
+    *rq.method_mut() = Method::POST;
     let resp = drain_resp(submit(srv.addr, rq)?);
     assert_eq!(resp.status(), 303);
     Ok(())
@@ -296,12 +297,15 @@ fn server_keys_keep_order_and_mangling() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("worker/server-pairs-worker.php")).spawn();
     for case in &cases {
         let mut rq = req("/");
-        rq.content_type = case.content_type.map(Into::into);
         for &(field, value) in case.headers {
-            rq.headers.append(
+            rq.headers_mut().append(
                 HeaderName::from_static(field),
                 HeaderValue::from_static(value),
             );
+        }
+        if let Some(ct) = case.content_type {
+            rq.headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_str(ct).unwrap());
         }
         let resp = drain_resp(submit(srv.addr, rq)?);
         let pairs: Vec<(String, Value)> = serde_json::from_str(&resp.body_string())?;

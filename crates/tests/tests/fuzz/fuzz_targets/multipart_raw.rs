@@ -4,7 +4,8 @@
 
 use std::sync::LazyLock;
 
-use rapira_http::multipart::{Limits, ParseError, boundary, is_multipart, parse};
+use rapira_http::check::Rejection;
+use rapira_http::multipart::{Limits, boundary, is_multipart, parse};
 
 /// Small limits, so that a 4 KiB input can go over each count and size limit.
 static LIMITS: LazyLock<Limits> = LazyLock::new(|| Limits {
@@ -16,17 +17,12 @@ static LIMITS: LazyLock<Limits> = LazyLock::new(|| Limits {
     max_part_headers: 4,
 });
 
-/// A malformed body gives 400 and a body over a limit gives 413. The spool dir exists, so an I/O error is a failure.
-fn rejected(e: ParseError, allowed: &[u16]) {
-    match e {
-        ParseError::Rejected { status, reason } => {
-            assert!(
-                allowed.contains(&status.as_u16()),
-                "status {status}: {reason}"
-            );
-        }
-        ParseError::Io(e) => panic!("io error: {e}"),
-    }
+/// A malformed body gives 400 and a body over a limit gives 413. An I/O error gives 500, which the allowed list refuses.
+fn rejected(Rejection { status, reason }: Rejection, allowed: &[u16]) {
+    assert!(
+        allowed.contains(&status.as_u16()),
+        "status {status}: {reason}"
+    );
 }
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {

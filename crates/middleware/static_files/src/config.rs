@@ -1,7 +1,7 @@
 use anyhow::bail;
-use rapira_config::ConfigCtx;
+use rapira_config::opt_path;
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// The `[http.static]` table.
 #[derive(Debug, Deserialize)]
@@ -19,10 +19,9 @@ pub struct Settings {
     pub forbid: Vec<String>,
 }
 
-pub fn resolve(section: Section, ctx: &ConfigCtx) -> anyhow::Result<Settings> {
-    let root = match section.root.filter(|r| !r.is_empty()) {
-        Some(r) => ctx.resolve_path(&r)?,
-        None => bail!("http.static.root is required"),
+pub fn resolve(section: Section, dir: &Path) -> anyhow::Result<Settings> {
+    let Some(root) = opt_path(dir, section.root.as_deref())? else {
+        bail!("http.static.root is required");
     };
     let forbid = section.forbid.unwrap_or_else(|| vec![".php".to_owned()]);
     for entry in &forbid {

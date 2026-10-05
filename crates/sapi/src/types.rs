@@ -1,7 +1,6 @@
 use bytes::Bytes;
 use http::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderName};
 use std::ffi::CString;
-use std::os::raw::c_int;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 
@@ -28,25 +27,6 @@ pub struct Tls {
     /// PHP `Tls::$requestedServerName`.
     pub server_name: Option<String>,
     pub cert: Option<ClientCert>,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Outcome {
-    Ok = 0,
-    Bailout = 1,
-    Throw = 3,
-}
-
-impl Outcome {
-    pub fn from_c(v: c_int) -> Self {
-        match v {
-            0 => Self::Ok,
-            1 => Self::Bailout,
-            3 => Self::Throw,
-            _ => Self::Bailout,
-        }
-    }
 }
 
 /// A well-formed response stream is `Interim* Head? (Chunk|File)* End?`; a channel closing without `End` means the producer died.
@@ -271,10 +251,6 @@ impl Context {
             stream: StreamState::NotSent,
             tearing_down: false,
         }
-    }
-
-    pub fn is_truncated(&self, errored: bool) -> bool {
-        errored && self.stream == StreamState::BodyStreamed
     }
 
     pub fn commit_head(&mut self, mut status: u16, mut headers: HeaderMap) {

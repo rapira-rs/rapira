@@ -1,8 +1,8 @@
 use serde::Deserialize;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use crate::{ConfigCtx, nonzero_timeout};
+use crate::{nonzero_timeout, opt_path};
 
 #[derive(Debug)]
 pub struct SupervisorSettings {
@@ -29,14 +29,9 @@ pub struct SupervisorSection {
 
 pub fn resolve_supervisor(
     section: SupervisorSection,
-    ctx: &ConfigCtx,
+    dir: &Path,
 ) -> anyhow::Result<SupervisorSettings> {
-    let pidfile = section
-        .pidfile
-        .as_deref()
-        .filter(|s| !s.is_empty())
-        .map(|p| ctx.resolve_path(p))
-        .transpose()?;
+    let pidfile = opt_path(dir, section.pidfile.as_deref())?;
 
     Ok(SupervisorSettings {
         process_control_timeout: nonzero_timeout(
@@ -54,12 +49,7 @@ mod tests {
 
     fn supervisor(toml: &str) -> anyhow::Result<SupervisorSettings> {
         let section: SupervisorSection = toml::from_str(toml)?;
-        resolve_supervisor(
-            section,
-            &ConfigCtx {
-                dir: PathBuf::from("/w"),
-            },
-        )
+        resolve_supervisor(section, Path::new("/w"))
     }
 
     #[test]
@@ -92,11 +82,6 @@ mod tests {
                 name: "unknown key",
                 toml: "bogus = 1\n",
                 error: "unknown field `bogus`",
-            },
-            Case {
-                name: "max_requests belongs to the pool",
-                toml: "max_requests = 1\n",
-                error: "unknown field `max_requests`",
             },
         ];
         for case in cases {

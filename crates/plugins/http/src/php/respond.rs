@@ -67,7 +67,7 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
             Err(TrySendError::Closed(_)) => (Err(Closed), false),
             Err(TrySendError::Full(frame)) => unsafe {
                 let consumed = st.armed_at.elapsed();
-                let saved = (*rapira_eg()).timeout_seconds;
+                let saved = executor_globals.timeout_seconds;
                 if saved > 0 {
                     zend_unset_timeout();
                 }
@@ -427,7 +427,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_is_cancelled(job: *const c_void) -> 
 pub unsafe extern "C" fn rapira_rs_exchange_drop(job: *mut c_void) {
     guard((), || {
         let mut st = unsafe { release(job.cast::<ExchangeState>()) };
-        let cycle_died = unsafe { (*rapira_sapi::rapira_cg()).unclean_shutdown };
+        let cycle_died = unsafe { rapira_sapi::compiler_globals.unclean_shutdown };
         if st.stage != Stage::Finalized && !cycle_died {
             st.body.unlink_spools();
             if let Some(tx) = st.ctx.sender.take() {

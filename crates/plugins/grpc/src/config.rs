@@ -1,11 +1,11 @@
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::{Result, bail};
 use rapira_config::{
-    ConfigCtx, ListenAddr, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout,
+    ListenAddr, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, opt_path,
     parse_listen, resolve_pool,
 };
 use serde::Deserialize;
@@ -58,24 +58,23 @@ pub enum Interceptor {
 }
 
 /// Boot checks run here: entrypoint file.
-pub fn resolve(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
-    let settings = settings(section, ctx)?;
+pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
+    let settings = settings(section, dir)?;
     check_entrypoint("grpc.pool", &settings.pool.entrypoint)?;
     Ok(settings)
 }
 
 /// The settings of `section`. Reads no file.
-fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
+fn settings(section: Section, dir: &Path) -> Result<Settings> {
     let listen = parse_listen(
         "grpc",
         section.listen.as_deref(),
         ListenAddr::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 50051))),
     )?;
 
-    let Some(ds) = section.descriptor_set.as_deref().filter(|s| !s.is_empty()) else {
+    let Some(descriptor_set) = opt_path(dir, section.descriptor_set.as_deref())? else {
         bail!("grpc.descriptor_set is required");
     };
-    let descriptor_set = ctx.resolve_path(ds)?;
 
     let services = section.services;
     if services.as_ref().is_some_and(Vec::is_empty) {
@@ -106,11 +105,11 @@ fn settings(section: Section, ctx: &ConfigCtx) -> Result<Settings> {
 
     let auth = section
         .auth
-        .map(|s| rapira_grpc_auth::resolve(s, ctx))
+        .map(|s| rapira_grpc_auth::resolve(s, dir))
         .transpose()?;
     let interceptors = resolve_interceptors(section.interceptors, auth)?;
 
-    let pool = resolve_pool(section.pool, "grpc.pool", ctx)?;
+    let pool = resolve_pool(section.pool, "grpc.pool", dir)?;
 
     Ok(Settings {
         listen,
@@ -176,32 +175,27 @@ impl Server {
                 }
             }
         }
-        Ok(Self::init(Config {
-            listen: settings.listen,
-            schema,
-            reflection: settings.reflection,
-            default_timeout: settings.default_timeout,
-            max_timeout: settings.max_timeout,
-            keepalive_interval: settings.keepalive_interval,
-            keepalive_timeout: settings.keepalive_timeout,
-            interceptors,
-        }))
+        Ok(Self {
+            config: Config {
+                listen: settings.listen,
+                schema,
+                reflection: settings.reflection,
+                default_timeout: settings.default_timeout,
+                max_timeout: settings.max_timeout,
+                keepalive_interval: settings.keepalive_interval,
+                keepalive_timeout: settings.keepalive_timeout,
+                interceptors,
+            },
+            prepared: None,
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::path::Path;
-
     use rapira_config::Mode;
 
     use super::*;
-
-    fn ctx() -> ConfigCtx {
-        ConfigCtx {
-            dir: PathBuf::from("/w"),
-        }
-    }
 
     struct Want {
         listen: ListenAddr,
@@ -347,7 +341,7 @@ mod tests {
         for case in cases {
             let got = toml::from_str::<Section>(&case.toml)
                 .map_err(anyhow::Error::from)
-                .and_then(|section| settings(section, &ctx()));
+                .and_then(|section| settings(section, Path::new("/w")));
             match (got, case.expected) {
                 (Ok(g), Ok(want)) => {
                     assert_eq!(g.listen, want.listen, "{}", case.name);
@@ -450,7 +444,7 @@ mod tests {
         for case in cases {
             let got = toml::from_str::<Section>(&case.toml)
                 .map_err(anyhow::Error::from)
-                .and_then(|section| settings(section, &ctx()));
+                .and_then(|section| settings(section, Path::new("/w")));
             match (got, case.expected) {
                 (Ok(g), Ok(want)) => {
                     let files: Vec<PathBuf> = g

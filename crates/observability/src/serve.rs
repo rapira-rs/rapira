@@ -2,16 +2,14 @@ use std::convert::Infallible;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use bytes::Bytes;
-use http::header::CONTENT_TYPE;
-use http::{HeaderValue, Method, Request, Response, StatusCode};
-use http_body_util::Full;
 use hyper::body::Incoming;
+use hyper::header::{CONTENT_TYPE, HeaderValue};
 use hyper::server::conn::http1;
+use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
-use rapira_net::{Acceptor, PrepareCtx, PreparedListener, Serve};
-use rapira_scoreboard::{PoolRegion, Scoreboard};
+use rapira_net::{Acceptor, PreparedListener, Serve};
+use rapira_scoreboard::{PoolRegion, SharedSlot};
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 
@@ -30,8 +28,8 @@ pub struct Server {
 
 impl Server {
     /// Master side, before the fork: binds the listener.
-    pub fn new(settings: Settings, build: Build, ctx: &mut PrepareCtx) -> Result<Server> {
-        let prepared = ctx.bind(&settings.listen)?;
+    pub fn new(settings: Settings, build: Build) -> Result<Server> {
+        let prepared = rapira_net::bind(&settings.listen)?;
         tracing::info!(target: "observability", "prepared listener on {}", prepared.addr());
         Ok(Self {
             build,
@@ -45,7 +43,7 @@ impl Server {
     /// In the observability process. Serves the routes of the configured sub-tables until `stop` turns true, then waits for the requests in flight within `drain_grace`. `pools` are the pools that the metrics and `/readyz` report.
     pub fn serve(
         self,
-        board: Scoreboard,
+        board: &'static [SharedSlot],
         pools: &'static [PoolRegion],
         stop: watch::Receiver<bool>,
         drain_grace: Duration,
@@ -87,7 +85,7 @@ impl Server {
 
 /// What a request reads: the board, the pools it reports, the build and the routes that the config turns on.
 struct Routes {
-    board: Scoreboard,
+    board: &'static [SharedSlot],
     /// Every pool except the pool of the observability process.
     pools: &'static [PoolRegion],
     build: Build,
@@ -98,7 +96,7 @@ struct Routes {
 impl Routes {
     /// One pass over the board, then one `/proc` read for each live worker.
     fn metrics_text(&self) -> String {
-        let mut pools = stats::board_stats(&self.board, self.pools);
+        let mut pools = stats::board_stats(self.board, self.pools);
         for worker in pools.iter_mut().flat_map(|p| p.workers.iter_mut()) {
             worker.memory = memory::read(worker.pid);
         }
@@ -146,7 +144,7 @@ impl Serve for Serving {
 const PROBE_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 
 /// `GET /metrics` answers the text format when `[observability.metrics]` is configured, and `GET /livez` and `GET /readyz` answer when `[observability.probes]` is configured. Every other request gets 404.
-fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<Full<Bytes>> {
+fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<String> {
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/metrics") if routes.metrics => {
             reply(StatusCode::OK, text::CONTENT_TYPE, routes.metrics_text())
@@ -156,7 +154,7 @@ fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<Full<Bytes>> {
             reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
         }
         (&Method::GET, "/readyz") if routes.probes => {
-            let unready = probes::unready(&routes.board, routes.pools);
+            let unready = probes::unready(routes.board, routes.pools);
             if unready.is_empty() {
                 reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
             } else {
@@ -168,7 +166,7 @@ fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<Full<Bytes>> {
             }
         }
         _ => {
-            let mut not_found = Response::new(Full::new(Bytes::new()));
+            let mut not_found = Response::new(String::new());
             *not_found.status_mut() = StatusCode::NOT_FOUND;
             not_found
         }
@@ -178,9 +176,9 @@ fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<Full<Bytes>> {
 fn reply(
     status: StatusCode,
     content_type: &'static str,
-    body: impl Into<Bytes>,
-) -> Response<Full<Bytes>> {
-    let mut res = Response::new(Full::new(body.into()));
+    body: impl Into<String>,
+) -> Response<String> {
+    let mut res = Response::new(body.into());
     *res.status_mut() = status;
     res.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));

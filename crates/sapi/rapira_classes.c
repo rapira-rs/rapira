@@ -1,14 +1,7 @@
 #include "rapira_sapi.h"
-#include "ext/spl/spl_exceptions.h"
+
 #include "rapira_arginfo.h"
 #include "rapira_exception_arginfo.h"
-#include "zend_API.h"
-#include "zend_exceptions.h"
-#include "zend_object_handlers.h"
-#include "zend_objects.h"
-#include "zend_objects_API.h"
-#include "zend_property_hooks.h"
-#include "zend_types.h"
 
 // rust glue (src/values.rs): these return false with a PHP exception already pending
 extern bool rapira_rs_ctor_inet_address(zend_object *obj, zend_string *ip,
@@ -37,19 +30,20 @@ zend_class_entry *rapira_ce_inet_address;
 zend_class_entry *rapira_ce_unix_address;
 zend_class_entry *rapira_ce_tls;
 
-const zend_function_entry *rapira_php_functions(void) { return ext_functions; }
-
 // own copies: std_object_handlers is shared engine state
 zend_object_handlers rapira_dispatcher_handlers;
 zend_object_handlers rapira_info_handlers;
 
-zend_object *rapira_dispatcher_info_create(zend_class_entry *ce) {
-    rapira_dispatcher_info_obj *obj = zend_object_alloc(sizeof(*obj), ce);
-    obj->pending = 0;
-    obj->active = 0;
-    zend_object_std_init(&obj->std, ce);
-    object_properties_init(&obj->std, ce);
-    return &obj->std;
+// create_object for a class whose default_object_handlers set .offset: the C
+// prefix sits before std, and zend_object_alloc zeroes it
+// (Zend/zend_objects_API.h), so NULL and IS_UNDEF fields need no assignment.
+zend_object *rapira_object_create(zend_class_entry *ce) {
+    size_t offset = ce->default_object_handlers->offset;
+    char *obj = zend_object_alloc(offset + sizeof(zend_object), ce);
+    zend_object *std = (zend_object *)(obj + offset);
+    zend_object_std_init(std, ce);
+    object_properties_init(std, ce);
+    return std;
 }
 
 ZEND_METHOD(Rapira_InetAddress, __construct) {
@@ -60,10 +54,9 @@ ZEND_METHOD(Rapira_InetAddress, __construct) {
     Z_PARAM_LONG(port)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_inet_address(Z_OBJ_P(ZEND_THIS), ip, (int64_t)port)) {
-        rapira_throw_or_backstop("InetAddress construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_inet_address(Z_OBJ_P(ZEND_THIS), ip, (int64_t)port),
+        "InetAddress construction");
 }
 
 ZEND_METHOD(Rapira_UnixAddress, __construct) {
@@ -72,10 +65,9 @@ ZEND_METHOD(Rapira_UnixAddress, __construct) {
     Z_PARAM_STR_OR_NULL(path)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_unix_address(Z_OBJ_P(ZEND_THIS), path)) {
-        rapira_throw_or_backstop("UnixAddress construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_unix_address(Z_OBJ_P(ZEND_THIS), path),
+        "UnixAddress construction");
 }
 
 ZEND_METHOD(Rapira_Tls, __construct) {
@@ -91,11 +83,10 @@ ZEND_METHOD(Rapira_Tls, __construct) {
     Z_PARAM_STR_OR_NULL(fingerprint)
     ZEND_PARSE_PARAMETERS_END();
 
-    if (!rapira_rs_ctor_tls(Z_OBJ_P(ZEND_THIS), version, cipher, negotiated,
-                            server_name, serial, org, fingerprint)) {
-        rapira_throw_or_backstop("Tls construction");
-        RETURN_THROWS();
-    }
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_ctor_tls(Z_OBJ_P(ZEND_THIS), version, cipher, negotiated,
+                           server_name, serial, org, fingerprint),
+        "Tls construction");
 }
 
 void rapira_register_classes(void) {
@@ -132,12 +123,40 @@ void rapira_register_classes(void) {
     rapira_ce_tls = register_class_Rapira_Tls();
 
     // clone_obj = NULL: engine throws on clone (Zend/zend_vm_def.h:6050-6056)
-    memcpy(&rapira_dispatcher_handlers, &std_object_handlers,
-           sizeof(rapira_dispatcher_handlers));
+    rapira_dispatcher_handlers = std_object_handlers;
     rapira_dispatcher_handlers.clone_obj = NULL;
 
-    memcpy(&rapira_info_handlers, &std_object_handlers,
-           sizeof(rapira_info_handlers));
+    rapira_info_handlers = std_object_handlers;
     rapira_info_handlers.clone_obj = NULL;
     rapira_info_handlers.offset = offsetof(rapira_dispatcher_info_obj, std);
 }
+
+// start.rs: runs each plugin register function, in the boot order
+extern void rapira_rs_register_plugin_classes(void);
+
+// the plugin classes extend the base classes, so the base classes register first
+PHP_MINIT_FUNCTION(rapira) {
+    rapira_register_classes();
+    rapira_rs_register_plugin_classes();
+    return SUCCESS;
+}
+
+PHP_RSHUTDOWN_FUNCTION(rapira) {
+    rapira_rs_dispatcher_release();
+    return SUCCESS;
+}
+
+// The module entry lives here: ext_functions is file-static in rapira_arginfo.h, and only this file includes it.
+// clang-format off
+zend_module_entry rapira_module_entry = {
+    STANDARD_MODULE_HEADER,
+    "rapira",
+    ext_functions,
+    PHP_MINIT(rapira),
+    NULL,
+    NULL,
+    PHP_RSHUTDOWN(rapira),
+    NULL,
+    RAPIRA_VERSION,
+    STANDARD_MODULE_PROPERTIES};
+// clang-format on

@@ -11,14 +11,14 @@ enum RecvMode {
 unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
         let classes = classes();
-        if let Some(ptr) = CYCLE.get().unit
+        if let Some(ptr) = UNIT.get()
             && !(*ptr).finalized()
             && (*ptr).client_closed()
         {
             tracing::debug!(target: "rapira", "receive() discarded an unfinalized unit whose client left");
             (*ptr).discard();
         }
-        if let Some(ptr) = CYCLE.get().unit
+        if let Some(ptr) = UNIT.get()
             && !(*ptr).finalized()
         {
             zend::throw_error(classes.busy);
@@ -49,10 +49,8 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                     rapira_receive_timed();
                     // SAFETY: obj is a live object of classes.unit, allocated above on this thread.
                     let ptr: *mut dyn Held = unit.attach(obj.value.obj);
-                    update(|c| {
-                        c.unit = Some(ptr);
-                        c.received = true;
-                    });
+                    UNIT.set(Some(ptr));
+                    RECEIVED.set(true);
                     *return_value = obj;
                     return true;
                 }
@@ -62,7 +60,7 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                     rapira_receive_untimed();
                 }
                 Pulled::Closed => {
-                    update(|c| c.closed_seen = true);
+                    CLOSED_SEEN.set(true);
                     zval_ptr_dtor(&mut obj);
                     zend::throw_exception(
                         rapira_ce_closed_exception,
@@ -72,7 +70,7 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                 }
                 Pulled::Empty if matches!(mode, RecvMode::Try) => {
                     zval_ptr_dtor(&mut obj);
-                    zend::zval_null(return_value);
+                    (*return_value).u1.type_info = IS_NULL;
                     return true;
                 }
                 Pulled::Timeout | Pulled::Empty => {
@@ -118,7 +116,7 @@ pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> b
         let _ = object_init_ex(return_value, (classes().info)());
         let info = info_from((*return_value).value.obj);
         (*info).pending = pending_depth() as i64;
-        (*info).active = i64::from(CYCLE.get().unit.is_some_and(|p| !(*p).finalized()));
+        (*info).active = i64::from(UNIT.get().is_some_and(|p| !(*p).finalized()));
         true
     })
 }

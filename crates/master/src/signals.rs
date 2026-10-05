@@ -1,5 +1,5 @@
 use std::io;
-use std::os::fd::{AsRawFd, OwnedFd};
+use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicI32, Ordering};
 
@@ -8,15 +8,6 @@ use libc::c_int;
 
 /// Write end of the self-pipe; `-1` until install, set once before handlers are armed.
 static SELF_PIPE_WR: AtomicI32 = AtomicI32::new(-1);
-
-/// Control bytes emitted by the handler, consumed by the poll loop.
-pub(crate) const SIG_TERM: u8 = b'T';
-pub(crate) const SIG_INT: u8 = b'I';
-pub(crate) const SIG_USR1: u8 = b'1';
-pub(crate) const SIG_USR2: u8 = b'2';
-pub(crate) const SIG_QUIT: u8 = b'Q';
-pub(crate) const SIG_CHLD: u8 = b'C';
-pub(crate) const SIG_HUP: u8 = b'H';
 
 /// The full master disposition set: installed in the master, reset in children.
 pub(crate) const MASTER_SIGNALS: [c_int; 7] = [
@@ -30,8 +21,8 @@ pub(crate) const MASTER_SIGNALS: [c_int; 7] = [
 ];
 
 pub(crate) struct SelfPipe {
-    pub rd: OwnedFd,
-    pub wr: OwnedFd,
+    pub rd: UnixStream,
+    pub wr: UnixStream,
 }
 
 impl Drop for SelfPipe {
@@ -64,16 +55,8 @@ fn errno_set(v: c_int) {
 
 /// Async-signal-safe (`write`, errno save/restore).
 extern "C" fn master_sig_handler(signo: c_int) {
-    let byte: u8 = match signo {
-        libc::SIGTERM => SIG_TERM,
-        libc::SIGINT => SIG_INT,
-        libc::SIGUSR1 => SIG_USR1,
-        libc::SIGUSR2 => SIG_USR2,
-        libc::SIGQUIT => SIG_QUIT,
-        libc::SIGCHLD => SIG_CHLD,
-        libc::SIGHUP => SIG_HUP,
-        _ => return,
-    };
+    // The byte is the signal number; every master signal is below 256 on Linux and macOS.
+    let byte = signo as u8;
     let saved = errno_get();
     let fd = SELF_PIPE_WR.load(Ordering::Relaxed);
     if fd >= 0 {
@@ -153,8 +136,5 @@ pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
     unsafe { libc::sigfillset(&mut all) };
     sigprocmask(libc::SIG_UNBLOCK, &all);
 
-    Ok(SelfPipe {
-        rd: rd.into(),
-        wr: wr.into(),
-    })
+    Ok(SelfPipe { rd, wr })
 }

@@ -1,4 +1,4 @@
-fn main() -> anyhow::Result<()> {
+fn main() -> Result<(), Box<dyn std::error::Error>> {
     let php = rapira_php_build::discover()?;
     let sapi_include = std::env::var("DEP_RAPIRA_SAPI_INCLUDE")?;
     rapira_php_build::compile(
@@ -7,10 +7,6 @@ fn main() -> anyhow::Result<()> {
         &php,
         &[&sapi_include],
     );
-    rapira_php_build::rerun_if_changed(&[
-        "rapira_grpc.h",
-        "rapira_grpc.stub.php",
-        "rapira_grpc_arginfo.h",
-    ]);
+    rapira_php_build::rerun_if_changed(&["rapira_grpc.h", "rapira_grpc_arginfo.h"]);
     Ok(())
 }

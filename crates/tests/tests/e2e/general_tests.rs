@@ -1,14 +1,17 @@
-use rapira_sapi::{Mode, Request};
+use http::Method;
+use http::header::{CONTENT_TYPE, HeaderValue};
+use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
 use tests::{drain, drain_resp, fixture, req, server_log};
 
 use crate::harness::{Server, Spawn, slot_line};
 
-fn post(body: Vec<u8>) -> Request {
-    let mut r: Request = req("/");
-    r.method = "POST".into();
-    r.content_type = Some("text/plain".into());
-    r.body = rapira_sapi::types::Body::Raw(std::io::Cursor::new(body));
+fn post(body: Vec<u8>) -> http::Request<Vec<u8>> {
+    let mut r = req("/");
+    *r.method_mut() = Method::POST;
+    r.headers_mut()
+        .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+    *r.body_mut() = body;
     r
 }
 

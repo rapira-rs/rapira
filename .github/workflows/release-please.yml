@@ -28,13 +28,11 @@ jobs:
             tag_name: ${{ steps.rp.outputs.tag_name }}
             version: ${{ steps.rp.outputs.version }}
         steps:
+            # With no inputs, the action reads release-please-config.json and .release-please-manifest.json.
             # The config file is only read when release-type is absent from the inputs.
             # https://github.com/googleapis/release-please-action/blob/v5.0.0/src/index.ts
             - id: rp
               uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
-              with:
-                  config-file: release-please-config.json
-                  manifest-file: .release-please-manifest.json
 
     # The tag and the draft release come from the default GITHUB_TOKEN, which fires
     # no other workflows. The builds chain here through workflow_call.

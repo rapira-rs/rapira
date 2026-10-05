@@ -236,7 +236,7 @@ async fn each_protocol_reaches_php_over_the_wire() {
     let dir = scratch_dir();
     let on_tcp = Spawn::grpc(wire_worker()).json_log().spawn();
     let on_unix = Spawn::grpc(wire_worker())
-        .grpc_unix(&dir.join("grpc.sock"))
+        .grpc_listen(ListenAddr::Unix(dir.join("grpc.sock")))
         .json_log()
         .spawn();
     let tcp = listen(&on_tcp);

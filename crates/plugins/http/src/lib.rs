@@ -2,9 +2,9 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
-use rapira_net::{ListenAddr, PrepareCtx, PreparedListener};
-use rapira_sapi::plugin::{Mode, PhpPart, Plugin, Worker};
-use rapira_sapi::work::Intake;
+use rapira_net::{ListenAddr, PreparedListener};
+use rapira_sapi::plugin::{Mode, Plugin, Worker};
+use rapira_sapi::work::DispatcherClasses;
 
 use exchange::Exchange;
 
@@ -20,7 +20,7 @@ pub mod request;
 mod response;
 mod serve;
 
-pub use php::PHP_PART;
+pub use php::rapira_http_register_classes;
 
 #[derive(Clone)]
 pub struct Config {
@@ -34,7 +34,7 @@ pub struct Config {
     pub keepalive_timeout: Duration,
     /// `[http].middleware` in config order, the first listed outermost.
     pub middleware: Vec<middleware::Layer>,
-    /// Multipart limits of a dispatcher pool; None in the other modes, which feed php-src's own rfc1867 through read_post. Each worker spools in its own dir under `dir`, which `serve` creates.
+    /// Multipart limits of a dispatcher pool; None in the other modes, which feed php-src's own rfc1867 through read_post. `serve` replaces `dir` with the worker's own spool dir under it.
     pub uploads: Option<multipart::Limits>,
     /// sendFile() containment root.
     pub sendfile_root: PathBuf,
@@ -54,15 +54,6 @@ pub struct Server {
     prepared: Option<PreparedListener>,
 }
 
-impl Server {
-    pub(crate) fn init(config: Config) -> Self {
-        Self {
-            config,
-            prepared: None,
-        }
-    }
-}
-
 impl Plugin for Server {
     fn name(&self) -> &'static str {
         "http"
@@ -72,15 +63,15 @@ impl Plugin for Server {
         &[Mode::Classic, Mode::Worker, Mode::Dispatcher]
     }
 
-    fn php(&self) -> PhpPart {
-        PHP_PART
+    fn dispatcher(&self) -> DispatcherClasses {
+        php::DISPATCHER_CLASSES
     }
 
-    fn prepare(&mut self, ctx: &mut PrepareCtx) -> Result<()> {
+    fn prepare(&mut self) -> Result<()> {
         if let Some(uploads) = &self.config.uploads {
             multipart::sweep_spool_dirs(&uploads.dir);
         }
-        let prepared = ctx.bind(&self.config.listen)?;
+        let prepared = rapira_net::bind(&self.config.listen)?;
         tracing::info!(target: "http", "prepared listener on {}", prepared.addr());
         self.prepared = Some(prepared);
         Ok(())
@@ -92,7 +83,6 @@ impl Plugin for Server {
             return Err(anyhow!("http listener was not prepared"));
         };
         php::set_sendfile_root(config.sendfile_root.clone());
-        let intake = Intake::new(worker.sink.clone());
-        serve::serve(intake, config, prepared, worker)
+        serve::serve(worker.sink.clone(), config, prepared, worker)
     }
 }
