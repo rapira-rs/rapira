@@ -164,18 +164,42 @@ jobs:
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/build-php.sh', '.github/workflows/build-binaries.yml') }}
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/build-binaries.yml') }}
 
             - name: Build PHP embed from release tarball (Unix)
               if: steps.phpcache.outputs.cache-hit != 'true'
-              run: .github/build-php.sh "$PHP_FULL"
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  curl -fsSL "https://www.php.net/distributions/php-${PHP_FULL}.tar.gz" -o php.tar.gz
+                  tar xf php.tar.gz && cd "php-${PHP_FULL}"
+                  export CFLAGS="-O2"
+                  EXTRA=""
+                  SHA256=(sha256sum)
+                  if [ "$RUNNER_OS" = "macOS" ]; then
+                    export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix libffi)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig:$(brew --prefix libpq)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+                    EXTRA="--with-iconv=$(xcrun --show-sdk-path)/usr --with-gettext=$(brew --prefix gettext)"
+                    SHA256=(shasum -a 256)
+                  fi
+                  curl -fsSL --retry 3 https://pecl.php.net/get/igbinary-3.2.17RC1.tgz -o igbinary.tgz
+                  curl -fsSL --retry 3 https://pecl.php.net/get/redis-6.3.0.tgz -o redis.tgz
+                  echo '91da821443db125282a6aea039f24588dd28ff5d71e8187f6ecc41165bceafbc  igbinary.tgz' | "${SHA256[@]}" -c -
+                  echo '0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5  redis.tgz' | "${SHA256[@]}" -c -
+                  mkdir -p ext/igbinary ext/redis
+                  tar -xzf igbinary.tgz -C ext/igbinary --strip-components=1
+                  tar -xzf redis.tgz -C ext/redis --strip-components=1
+                  ./buildconf --force
+                  ./configure --prefix="$PHP_PREFIX" $(tr '\n' ' ' < "$GITHUB_WORKSPACE/.github/php-configure-flags.txt") \
+                    --enable-igbinary --enable-redis --enable-redis-igbinary $EXTRA
+                  make -j"$(getconf _NPROCESSORS_ONLN)"
+                  make install
 
             - name: Save PHP embed runtime
               if: steps.phpcache.outputs.cache-hit != 'true'
               uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/build-php.sh', '.github/workflows/build-binaries.yml') }}
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/build-binaries.yml') }}
 
             - name: Expose PHP + rpath (Linux)
               if: runner.os == 'Linux'
