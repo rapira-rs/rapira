@@ -41,7 +41,7 @@ jobs:
               if: runner.os == 'Linux'
               with:
                   php-version: ${{ matrix.php }}
-                  coverage: none
+                  coverage: none # xdebug and pcov override zend_error_cb and the JIT in the embed SAPI
                   extensions: bcmath, calendar, ctype, curl, dom, exif, ffi, fileinfo, filter, ftp, gettext, iconv, igbinary, imap, intl, mbstring, opcache, openssl, pdo_pgsql, pdo_sqlite, pgsql, phar, posix, redis, session, shmop, simplexml, sockets, sqlite3, sysvmsg, sysvsem, sysvshm, tokenizer, xml, xmlreader, xmlwriter, zlib
               env:
                   phpts: nts

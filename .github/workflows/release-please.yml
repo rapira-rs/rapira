@@ -28,6 +28,7 @@ jobs:
             tag_name: ${{ steps.rp.outputs.tag_name }}
             version: ${{ steps.rp.outputs.version }}
         steps:
+            # With no inputs, the action reads release-please-config.json and .release-please-manifest.json.
             # The config file is only read when release-type is absent from the inputs.
             # https://github.com/googleapis/release-please-action/blob/v5.0.0/src/index.ts
             - id: rp
