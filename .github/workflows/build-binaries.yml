@@ -128,7 +128,7 @@ jobs:
                       }
                     - {
                           target: macos-aarch64,
-                          runner: macos-14,
+                          runner: macos-latest,
                           target_os: macos,
                           arch: aarch64,
                       }
@@ -213,7 +213,8 @@ jobs:
               run: |
                   echo "PHP_CONFIG=$PHP_PREFIX/bin/php-config" >> "$GITHUB_ENV"
                   echo "$PHP_PREFIX/bin" >> "$GITHUB_PATH"
-                  echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+                  # The bundled Homebrew libraries need the macOS of the runner. The binary targets the same major version.
+                  echo "MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1).0" >> "$GITHUB_ENV"
                   echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,@loader_path/../lib/rapira -L native=$PHP_PREFIX/lib" >> "$GITHUB_ENV"
 
             - uses: dtolnay/rust-toolchain@c6590455eca8e79d081430ebfe2074192ae90290 # 1.98.1
