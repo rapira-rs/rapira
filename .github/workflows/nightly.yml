@@ -9,14 +9,12 @@ on:
 permissions:
     contents: read
 
-# concurrency is decided before any job `if`, so ineligible runs must not share the publishing group or they cancel an in-flight publish; the predicate mirrors the guard job's `if`.
 concurrency:
     group: nightly-${{ ((github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')) && 'publish' || github.run_id }}
     cancel-in-progress: true
 
 jobs:
     guard:
-        # the branches filter alone also admits CI runs of fork PRs whose branch is named main, so the run must additionally come from a push event
         if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
         runs-on: ubuntu-latest
         timeout-minutes: 5
@@ -38,17 +36,11 @@ jobs:
                   CARGO_VER=$(jq -er '.["."]' .release-please-manifest.json)
                   echo "version=${CARGO_VER}-nightly.${SHA:0:7}" >> "$GITHUB_OUTPUT"
                   echo "sha=${SHA}" >> "$GITHUB_OUTPUT"
-                  # The binaries job skips a commit that already carries a release tag:
-                  # release-please.yml builds it. The docker jobs still run. The tag
-                  # for a release commit is v<manifest version>; an absent tag or an
-                  # API error counts as not a release commit.
                   TAGGED=$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/tags/v${CARGO_VER}" --jq '.object.sha' 2>/dev/null || true)
                   if [ "$TAGGED" = "$SHA" ]; then
                       echo "release_commit=true" >> "$GITHUB_OUTPUT"
                   fi
 
-    # Same tag policy as docker.yml (every tag names its PHP minor): an immutable
-    # <version>-nightly.<shortsha>-phpN.M tag plus the moving nightly-phpN.M alias.
     images:
         needs: guard
         permissions:
@@ -77,7 +69,6 @@ jobs:
                   set -euo pipefail
                   API="/orgs/${GITHUB_REPOSITORY%%/*}/packages/container/${GITHUB_REPOSITORY#*/}/versions"
 
-                  # tagged nightly versions only: untagged versions hold multi-arch children and attestations and must never be deleted
                   gh api --paginate "${API}?per_page=100" --jq '
                     .[]
                     | .metadata.container.tags as $t
@@ -87,7 +78,6 @@ jobs:
                     | [$build, .created_at, .id] | @tsv
                   ' > candidates.tsv
 
-                  # self-check: the build this run just pushed must be selected, otherwise the filter no longer matches what merge publishes
                   awk -F'\t' -v v="$V" '$1 == v { found = 1 } END { exit !found }' candidates.tsv
 
                   keep=$(sort -t$'\t' -k2,2r candidates.tsv | awk -F'\t' -v k="$KEEP" '!seen[$1]++ { if (++n <= k) print $1 }')
@@ -98,8 +88,6 @@ jobs:
                       echo "deleted ${id} (${build}, ${created})"
                   done < candidates.tsv
 
-    # Independent of the docker chain: a failed native build does not block the
-    # docker nightlies, and the reverse holds.
     binaries:
         needs: guard
         if: needs.guard.outputs.release_commit != 'true'

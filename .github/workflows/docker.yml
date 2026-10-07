@@ -1,6 +1,4 @@
 name: Docker
-# Reusable: release-please.yml and nightly.yml call it with an explicit ref and
-# version. Tags created with the default GITHUB_TOKEN fire no push triggers.
 on:
     workflow_call:
         inputs:
@@ -30,7 +28,6 @@ on:
 permissions:
     contents: read
 
-# Every tag names its PHP minor: the payload only boots against the minor it was built for, so there is no `latest` and no unsuffixed version tag.
 env:
     IMAGE: ghcr.io/${{ github.repository }}
 
@@ -49,7 +46,6 @@ jobs:
                 include:
                     - { arch: amd64, runner: ubuntu-latest }
                     - { arch: arm64, runner: ubuntu-24.04-arm }
-                    # Dependabot does not update these digests. Change them, and PHP_BASE in Dockerfile, at each PHP patch release.
                     - {
                           php: "8.4",
                           base: "php:8.4-cli-trixie@sha256:1d2cf2b7d715b5b3aa959f0150ccbcc7b71e0181b637e443abf40a7fb56bf79a",
@@ -97,9 +93,6 @@ jobs:
                   registry: ghcr.io
                   username: ${{ github.actor }}
                   password: ${{ secrets.GITHUB_TOKEN }}
-            # The release aliases (X.Y-phpN.M, phpN.M) move in the publish job of
-            # release-please.yml after the release is published. The alias input
-            # adds a caller-owned moving alias (nightly).
             - shell: bash
               env:
                   PHP: ${{ matrix.php }}

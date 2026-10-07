@@ -1,7 +1,4 @@
 name: Build binaries
-# Reusable build for the stable release path (release-please.yml) and the nightly
-# path (nightly.yml). The jobs run inside the caller's run, under the caller's
-# concurrency group. A callee group that matches it is cancelled as a deadlock.
 on:
     workflow_call:
         inputs:
@@ -59,8 +56,6 @@ env:
     CARGO_TERM_COLOR: always
 
 jobs:
-    # One resolve per run: the legs must not split across a php.net patch release
-    # that lands while the matrix runs.
     prepare:
         runs-on: ubuntu-latest
         timeout-minutes: 5
@@ -96,12 +91,11 @@ jobs:
     build:
         needs: prepare
         runs-on: ${{ matrix.runner }}
-        # A caller job cannot carry a timeout for a reusable workflow. Without one
-        # here a wedged leg holds the release-please concurrency group for the
-        # 360-minute default and strands the release as a draft.
         timeout-minutes: 90
-        # Linux legs build inside rockylinux/rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the artifacts serve RHEL 9 as well as Ubuntu 22.04+/Debian 12, pinned to the multi-arch manifest-list digest; non-Linux legs leave `container` unset (empty expression = no container).
-        container: ${{ matrix.container }}
+        container:
+            image: ${{ matrix.container }}
+            env:
+                PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         permissions:
             contents: read
         strategy:
@@ -142,7 +136,6 @@ jobs:
                   ref: ${{ inputs.ref }}
                   persist-credentials: false
 
-            # oniguruma-devel only exists in the CRB repo.
             - name: Install build deps (Linux container)
               if: runner.os == 'Linux'
               run: |
@@ -158,7 +151,6 @@ jobs:
               if: runner.os == 'macOS'
               run: brew install autoconf pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq
 
-            # Split restore/save (as master.yml): the PHP build survives later failures.
             - name: Restore PHP embed runtime
               id: phpcache
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -213,7 +205,6 @@ jobs:
               run: |
                   echo "PHP_CONFIG=$PHP_PREFIX/bin/php-config" >> "$GITHUB_ENV"
                   echo "$PHP_PREFIX/bin" >> "$GITHUB_PATH"
-                  # The bundled Homebrew libraries need the macOS of the runner. The binary targets the same major version.
                   echo "MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1).0" >> "$GITHUB_ENV"
                   echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,@loader_path/../lib/rapira -L native=$PHP_PREFIX/lib" >> "$GITHUB_ENV"
 
@@ -239,7 +230,6 @@ jobs:
                   if [ "$RUNNER_OS" = "Linux" ]; then
                     LP=$(find "$PHP_PREFIX" -name 'libphp*.so' | head -1)
                     cp "$LP" "$ROOT/lib/rapira/libphp.so"
-                    # ICU uses versioned library names: https://unicode-org.github.io/icu/userguide/icu4c/packaging.html#posix-library-names
                     mapfile -t ICU_LIBS < <(ldd "$LP" | awk '$1 ~ /^libicu/ {print $3}')
                     test "${#ICU_LIBS[@]}" -gt 0
                     for lib in "${ICU_LIBS[@]}"; do
@@ -251,8 +241,6 @@ jobs:
                   else
                     BIN="$ROOT/bin/rapira"; LIB="$ROOT/lib/rapira"
                     cp "$PHP_PREFIX/lib/libphp.dylib" "$LIB/"
-                    # $1 is the file to fix. $2 is the directory that its @rpath and @loader_path dependencies resolve against.
-                    # Homebrew libraries load siblings through @loader_path, for example libbrotlidec and libicuuc.
                     bundle() {
                       otool -L "$1" | awk 'NR>1{print $1}' | while read -r dep; do
                         case "$dep" in
@@ -319,14 +307,11 @@ jobs:
             NFPM_VERSION: "2.47.0"
             NFPM_SHA256: "3f1cf344bd0b57373ca55636a78c08b0491f7293d609a456a9ac3b0b150fda97"
         steps:
-            # Only nfpm reads the working tree here.
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               if: inputs.packages
               with:
                   ref: ${{ inputs.ref }}
                   persist-credentials: false
-            # The pattern scopes the download to this workflow's build artifacts: a
-            # called workflow shares the caller's run artifact namespace.
             - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
               with: { path: incoming, pattern: "art-*", merge-multiple: true }
 
@@ -348,7 +333,6 @@ jobs:
                   sudo dpkg -i /tmp/nfpm.deb
                   for arch in amd64 arm64; do
                     for minor in 8.4 8.5; do
-                      # nfpm does not env-expand contents.src - stage each variant at the fixed path
                       rm -rf dist/pkgroot-current
                       cp -r "dist/pkgroot-${arch}-php${minor}" dist/pkgroot-current
                       NFPM_ARCH=$arch PHP_MINOR=$minor nfpm pkg -p deb -f nfpm.yaml -t dist/
@@ -364,7 +348,6 @@ jobs:
                   ( cd dist && sha256sum rapira-* > "rapira-v${VERSION}-SHA256SUMS.txt" )
                   ls -l dist
 
-            # Installing every amd64 package in a real container catches wrong dependency names and broken RUNPATH before anything is published; arm64 is skipped (no qemu).
             - name: Validate packages (amd64)
               if: inputs.packages
               shell: bash
@@ -379,7 +362,6 @@ jobs:
                       bash -ec "dnf install -yq /dist/$(basename "$rpm") && rapira --help"
                   done
 
-            # A dry run keeps the deb/rpm and checksums as run artifacts.
             - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
               if: inputs.upload_to == ''
               with:
@@ -403,9 +385,6 @@ jobs:
               shell: bash
               run: gh release upload "$TAG" dist/* --clobber
 
-            # Runs after the upload: an existing rolling tag never moves ahead of its
-            # assets. The first run's release create is the one case where the tag
-            # exists before them.
             - name: Move the rolling tag and drop old assets
               if: inputs.rolling
               shell: bash
@@ -413,8 +392,6 @@ jobs:
                   SHA: ${{ inputs.ref }}
               run: |
                   set -euo pipefail
-                  # gh release edit --target does not move an existing tag, the ref has to be forced.
-                  # https://docs.github.com/en/rest/git/refs#update-a-reference
                   if ! gh api -X PATCH "repos/$GH_REPO/git/refs/tags/$TAG" -f sha="$SHA" -F force=true >/dev/null; then
                       gh api -X POST "repos/$GH_REPO/git/refs" -f ref="refs/tags/$TAG" -f sha="$SHA" >/dev/null
                   fi

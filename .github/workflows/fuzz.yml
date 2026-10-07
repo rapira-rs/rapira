@@ -16,7 +16,6 @@ defaults:
         working-directory: crates/tests/tests/fuzz
 
 jobs:
-    # A short run with a fixed seed: each target replays its seeds and fuzzes for 60 s.
     pull-request:
         if: github.event_name == 'pull_request'
         runs-on: ubuntu-latest
@@ -38,7 +37,6 @@ jobs:
               name: Build deps for bindgen/cc
               run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
 
-            # The fuzz targets do not call PHP, but rapira_sapi links libphp.
             - &libphp
               name: Expose the PHP embed lib
               run: |
@@ -68,7 +66,6 @@ jobs:
                   path: crates/tests/tests/fuzz/artifacts
                   if-no-files-found: ignore
 
-    # A long run of each target with a new seed. Each run starts from the committed seeds.
     long:
         if: github.event_name != 'pull_request'
         runs-on: ubuntu-latest

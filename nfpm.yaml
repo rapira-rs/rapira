@@ -1,7 +1,3 @@
-# deb/rpm packaging config for nFPM (https://nfpm.goreleaser.com).
-# Invoked once per {NFPM_ARCH} x {PHP_MINOR} combination by build-binaries.yml;
-# nfpm expands ${VAR} from the environment. arch amd64/arm64 maps to
-# rpm x86_64/aarch64 automatically.
 name: "rapira-php${PHP_MINOR}"
 arch: "${NFPM_ARCH}"
 version: "${VERSION}"
@@ -15,16 +11,12 @@ description: |
   Rapira - PHP application server.
   Bundles an NTS PHP ${PHP_MINOR} embed runtime (libphp.so,
   common web extension set) under /usr/lib/rapira.
-# rapira-php8.4 and rapira-php8.5 install identical paths; the
-# provides/conflicts pair on the virtual "rapira" makes them mutually exclusive.
 provides:
   - "rapira"
 conflicts:
   - "rapira"
 replaces:
   - "rapira"
-# nfpm does not env-expand contents.src paths - the workflow stages the
-# arch/php-specific pkgroot at this fixed path before each invocation.
 contents:
   - src: "./dist/pkgroot-current/usr/bin/rapira"
     dst: "/usr/bin/rapira"
@@ -41,9 +33,6 @@ contents:
 overrides:
   deb:
     depends:
-      # built in a rockylinux:9 container (glibc 2.34, OpenSSL 3.0) so the same
-      # binary serves RHEL 9 and Ubuntu 22.04+/Debian 12; the "pkg | pkgt64"
-      # alternatives keep the package installable across the 24.04 t64 rename.
       - "libc6 (>= 2.34)"
       - "libgcc-s1"
       - "libstdc++6"
