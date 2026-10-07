@@ -1,6 +1,6 @@
+use core::fmt::NumBuffer;
 use std::{
     ffi::{CStr, CString, c_char, c_void},
-    fmt::NumBuffer,
     net::SocketAddr,
     time::Instant,
 };

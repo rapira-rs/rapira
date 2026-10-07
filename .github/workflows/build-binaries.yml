@@ -100,7 +100,7 @@ jobs:
         # here a wedged leg holds the release-please concurrency group for the
         # 360-minute default and strands the release as a draft.
         timeout-minutes: 90
-        # Linux legs build inside rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the artifacts serve RHEL 9 as well as Ubuntu 22.04+/Debian 12, pinned to the multi-arch manifest-list digest; non-Linux legs leave `container` unset (empty expression = no container).
+        # Linux legs build inside rockylinux/rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the artifacts serve RHEL 9 as well as Ubuntu 22.04+/Debian 12, pinned to the multi-arch manifest-list digest; non-Linux legs leave `container` unset (empty expression = no container).
         container: ${{ matrix.container }}
         permissions:
             contents: read
@@ -113,7 +113,7 @@ jobs:
                     - {
                           target: linux-x86_64,
                           runner: ubuntu-latest,
-                          container: "rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6",
+                          container: "rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f",
                           target_os: linux,
                           arch: x86_64,
                           nfpm_arch: amd64,
@@ -121,14 +121,14 @@ jobs:
                     - {
                           target: linux-aarch64,
                           runner: ubuntu-24.04-arm,
-                          container: "rockylinux:9@sha256:d7be1c094cc5845ee815d4632fe377514ee6ebcf8efaed6892889657e5ddaaa6",
+                          container: "rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f",
                           target_os: linux,
                           arch: aarch64,
                           nfpm_arch: arm64,
                       }
                     - {
                           target: macos-aarch64,
-                          runner: macos-14,
+                          runner: macos-latest,
                           target_os: macos,
                           arch: aarch64,
                       }
@@ -213,11 +213,12 @@ jobs:
               run: |
                   echo "PHP_CONFIG=$PHP_PREFIX/bin/php-config" >> "$GITHUB_ENV"
                   echo "$PHP_PREFIX/bin" >> "$GITHUB_PATH"
-                  echo "MACOSX_DEPLOYMENT_TARGET=14.0" >> "$GITHUB_ENV"
+                  # The bundled Homebrew libraries need the macOS of the runner. The binary targets the same major version.
+                  echo "MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1).0" >> "$GITHUB_ENV"
                   echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,@loader_path/../lib/rapira -L native=$PHP_PREFIX/lib" >> "$GITHUB_ENV"
 
-            - uses: dtolnay/rust-toolchain@4cda84d5c5c54efe2404f9d843567869ab1699d4 # stable
-            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+            - uses: dtolnay/rust-toolchain@c6590455eca8e79d081430ebfe2074192ae90290 # 1.98.1
+            - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
               with: { cache-on-failure: true }
 
             - name: Build rapira
@@ -374,7 +375,7 @@ jobs:
                       bash -ec "apt-get update -q && apt-get install -yq /dist/$(basename "$deb") && rapira --help"
                   done
                   for rpm in dist/*.x86_64.rpm; do
-                    docker run --rm -v "$PWD/dist:/dist:ro" rockylinux:9 \
+                    docker run --rm -v "$PWD/dist:/dist:ro" rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f \
                       bash -ec "dnf install -yq /dist/$(basename "$rpm") && rapira --help"
                   done
 

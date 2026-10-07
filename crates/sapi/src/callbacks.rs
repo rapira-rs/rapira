@@ -6,9 +6,9 @@ use ::http::header::{
     AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, FROM, HeaderMap, HeaderName, HeaderValue,
     PROXY_AUTHORIZATION, REFERER,
 };
+use core::fmt::NumBuffer;
 use core::slice;
 use std::ffi::CStr;
-use std::fmt::NumBuffer;
 use std::io::Read;
 use std::mem::ManuallyDrop;
 use std::os::raw::{c_char, c_int};

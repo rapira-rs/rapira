@@ -1,4 +1,6 @@
 [toolchain]
-channel = "stable"
+# rustc 1.99 on x86_64 does not clear bits 1-7 of a bool that an extern "C" fn returns: https://github.com/rust-lang/rust/issues/163911
+# Keep 1.98.1 until a stable release has the fix. The Dockerfile rust image and the dtolnay/rust-toolchain refs in .github/workflows use the same version.
+channel = "1.98.1"
 components = ["rustfmt", "clippy"]
 profile = "minimal"

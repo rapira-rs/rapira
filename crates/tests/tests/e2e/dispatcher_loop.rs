@@ -103,6 +103,22 @@ fn implicit_200_on_first_write_body() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `isCancelled()` and `isFinalized()` report false for a live unit inside a method that gets the unit as a call argument.
+#[test]
+fn state_verbs_report_a_live_unit_inside_a_method() -> anyhow::Result<()> {
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture("dispatcher/method-exchange-worker.php"),
+    )
+    .spawn();
+    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    assert_eq!(
+        (status, body.as_str()),
+        (200, "cancelled=false finalized=false")
+    );
+    Ok(())
+}
+
 /// A second finalizing verb after the unit sealed throws `AlreadyFinalizedError`; the sealed response is untouched.
 #[test]
 fn double_finalize_throws_already_finalized() -> anyhow::Result<()> {
