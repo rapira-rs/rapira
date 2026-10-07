@@ -100,8 +100,12 @@ jobs:
         # here a wedged leg holds the release-please concurrency group for the
         # 360-minute default and strands the release as a draft.
         timeout-minutes: 90
-        # Linux legs build inside rockylinux/rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the artifacts serve RHEL 9 as well as Ubuntu 22.04+/Debian 12, pinned to the multi-arch manifest-list digest; non-Linux legs leave `container` unset (empty expression = no container).
-        container: ${{ matrix.container }}
+        # Linux legs build inside rockylinux/rockylinux:9 (glibc 2.34, OpenSSL 3.0) so the artifacts serve RHEL 9 as well as Ubuntu 22.04+/Debian 12, pinned to the multi-arch manifest-list digest; non-Linux legs leave `container` unset (empty image = no container).
+        # The image sets no PATH. Without one, the runner gives the steps after a $GITHUB_PATH entry only that entry as PATH: https://github.com/actions/runner/blob/67f01c276e0a91d967ba499ce4cdc9a95efa0262/src/Runner.Worker/Handlers/StepHost.cs#L253
+        container:
+            image: ${{ matrix.container }}
+            env:
+                PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
         permissions:
             contents: read
         strategy:
