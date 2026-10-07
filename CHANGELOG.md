@@ -1,5 +1,14 @@
 # Changelog
 
+## [0.9.1](https://github.com/rapira-rs/rapira/compare/v0.9.0...v0.9.1) (2026-10-07)
+
+
+### Bug Fixes
+
+* **fuzz:** lock bindgen to syn 3 again ([88544d1](https://github.com/rapira-rs/rapira/commit/88544d1bf70d6b2689930740b67b30c05e4c762a))
+* pin Rust 1.98.1 ([#201](https://github.com/rapira-rs/rapira/issues/201)) ([49c395f](https://github.com/rapira-rs/rapira/commit/49c395f770049ba03f23b3c88a69db7404e0be44))
+* pin Rust 1.98.1 and align the build versions ([85eeae6](https://github.com/rapira-rs/rapira/commit/85eeae62d0f7c07dbbbce14be737889acf1fde68))
+
 ## [0.9.0](https://github.com/rapira-rs/rapira/compare/v0.8.1...v0.9.0) (2026-10-05)
 
 ### 🎯 Core

@@ -802,7 +802,7 @@ checksum = "f8dcc9c7d52a811697d2151c701e0d08956f92b0e24136cf4cf27b57a6a0d9bf"
 
 [[package]]
 name = "rapira_config"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "serde",
@@ -811,7 +811,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_core"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "clap",
@@ -833,7 +833,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_grpc"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
@@ -857,7 +857,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_grpc_auth"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "connectrpc",
@@ -867,7 +867,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_http"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "http",
@@ -891,7 +891,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_master"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -901,7 +901,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_net"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "libc",
@@ -913,7 +913,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_observability"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "hyper",
@@ -928,7 +928,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_php_build"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "cc",
@@ -936,7 +936,7 @@ dependencies = [
 
 [[package]]
 name = "rapira_sapi"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "bindgen",
@@ -951,14 +951,14 @@ dependencies = [
 
 [[package]]
 name = "rapira_scoreboard"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "libc",
 ]
 
 [[package]]
 name = "rapira_static_files"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "bytes",
@@ -1154,7 +1154,7 @@ checksum = "0bf256ce5efdfa370213c1dabab5935a12e49f2c58d15e9eac2870d3b4f27263"
 
 [[package]]
 name = "tests"
-version = "0.9.0"
+version = "0.9.1"
 dependencies = [
  "anyhow",
  "base64 0.23.1",
