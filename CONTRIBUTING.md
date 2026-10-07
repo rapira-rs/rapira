@@ -11,7 +11,7 @@ This repository contains the server: the SAPI crate (`crates/sapi`), the plugins
 
 ```sh
 sudo apt install php8.4-dev libphp8.4-embed   # Debian/Ubuntu (deb.sury.org / ppa:ondrej)
-sudo dnf install php-devel php-embedded       # Fedora/RHEL
+sudo dnf install php-devel php-embedded       # Fedora
 sudo pacman -S php php-embed                  # Arch
 sudo apk add php84-dev php84-embed            # Alpine
 ```
@@ -34,8 +34,8 @@ make test   # runs test_nts, then test_e2e - sequentially on purpose
 
 - `make test_nts` - the unit tests of every crate (`cargo test --workspace`; the e2e suite is feature-gated off here).
 - `make test_e2e` - the end-to-end suite (`crates/tests`, `--features e2e`): each test spawns the `rapira` binary, which forks workers and binds ports, and drives it over HTTP, gRPC and signals. Single-threaded on purpose; never run it concurrently with `test_nts`.
-- `cargo fuzz run --fuzz-dir crates/tests/tests/fuzz -s none multipart_raw crates/tests/tests/fuzz/corpus/multipart_raw crates/tests/tests/fuzz/seeds/multipart_raw -- -dict=crates/tests/tests/fuzz/dict/multipart_raw.dict -create_missing_dirs=1` - runs one fuzz target with its seeds and its dictionary until it finds a crash or you stop it. It needs `cargo install cargo-fuzz`. The targets, their seeds and their dictionaries are in `crates/tests/tests/fuzz/`. The `Fuzz` workflow runs each target with its seeds and its dictionary for 60 s on each pull request, and for 30 min twice a week.
-- `make coverage` - writes the line coverage of the unit and e2e suites to `lcov.info`. It needs `cargo install cargo-llvm-cov` and `rustup component add llvm-tools-preview`.
+- `cargo fuzz run --fuzz-dir crates/tests/tests/fuzz -s none multipart_raw crates/tests/tests/fuzz/corpus/multipart_raw crates/tests/tests/fuzz/seeds/multipart_raw -- -dict=crates/tests/tests/fuzz/dict/multipart_raw.dict -create_missing_dirs=1` - runs one fuzz target with its seeds and its dictionary until it finds a crash or you stop it. It needs `cargo install --locked cargo-fuzz@0.13.2`. The targets, their seeds and their dictionaries are in `crates/tests/tests/fuzz/`. The `Fuzz` workflow runs each target with its seeds and its dictionary for 60 s on each pull request, and for 30 min twice a week.
+- `make coverage` - writes the line coverage of the unit and e2e suites to `lcov.info`. It needs `cargo install --locked cargo-llvm-cov@0.9.1` and `rustup component add llvm-tools-preview`.
 - `make stubs` - maintainers only: regenerates each `*_arginfo.h` header under `crates/` from the `*.stub.php` stub next to it with PHP's `gen_stub.php`. Never edit the generated headers by hand.
 
 Test placement: unit tests live inside their crate and use no fixture: no file on disk, no socket, no child process, no environment variable and no PHP. Every test that needs a fixture spawns the `rapira` binary and lives under `crates/tests/tests/e2e/` behind the `e2e` feature. The shared harness (the wire clients and the log readers) is in `crates/tests/src/`, and the fixtures are in `crates/tests/fixtures/` and `crates/tests/tests/e2e/fixtures/`.
