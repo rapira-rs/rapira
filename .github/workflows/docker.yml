@@ -49,13 +49,14 @@ jobs:
                 include:
                     - { arch: amd64, runner: ubuntu-24.04 }
                     - { arch: arm64, runner: ubuntu-24.04-arm }
+                    # Dependabot does not update these digests. Change them, and PHP_BASE in Dockerfile, at each PHP patch release.
                     - {
                           php: "8.4",
-                          base: "php:8.4-cli-trixie@sha256:f78661b492226388a7057679cc731c3e43bc92ba66cd49a8cfe12374a56bee9f",
+                          base: "php:8.4-cli-trixie@sha256:1d2cf2b7d715b5b3aa959f0150ccbcc7b71e0181b637e443abf40a7fb56bf79a",
                       }
                     - {
                           php: "8.5",
-                          base: "php:8.5-cli-trixie@sha256:54d82ff9be6bd198145e90c917fc9b2e24230b42e52def8deb3554baf61c451a",
+                          base: "php:8.5-cli-trixie@sha256:01a109229f4465bc9ef042d9198f09a4d9da7775a825dbd8572dcdbd8756c4d3",
                       }
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
