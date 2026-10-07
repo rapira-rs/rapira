@@ -7,8 +7,6 @@ on:
 permissions:
     contents: read
 
-# One release run at a time. Pushes during a release build queue and only the newest
-# queued run survives; release-please rescans all commits, so nothing is lost.
 concurrency:
     group: release-please
     cancel-in-progress: false
@@ -20,26 +18,15 @@ jobs:
         permissions:
             contents: write
             pull-requests: write
-            # Upstream requires it: the autorelease labels go through the issues API.
-            # https://github.com/googleapis/release-please-action#workflow-permissions
             issues: write
         outputs:
             release_created: ${{ steps.rp.outputs.release_created }}
             tag_name: ${{ steps.rp.outputs.tag_name }}
             version: ${{ steps.rp.outputs.version }}
         steps:
-            # With no inputs, the action reads release-please-config.json and .release-please-manifest.json.
-            # The config file is only read when release-type is absent from the inputs.
-            # https://github.com/googleapis/release-please-action/blob/v5.0.0/src/index.ts
             - id: rp
               uses: googleapis/release-please-action@45996ed1f6d02564a971a2fa1b5860e934307cf7 # v5.0.0
 
-    # The tag and the draft release come from the default GITHUB_TOKEN, which fires
-    # no other workflows. The builds chain here through workflow_call.
-    # https://docs.github.com/en/actions/how-tos/write-workflows/choose-when-workflows-run/trigger-a-workflow#triggering-a-workflow-from-a-workflow
-    # If the action fails after it creates the tag, later runs report no release
-    # and the draft keeps no assets. Recovery: dispatch build-binaries and docker
-    # with the tag, then undraft and move the aliases by hand.
     binaries:
         needs: release-please
         if: needs.release-please.outputs.release_created == 'true'
@@ -62,8 +49,6 @@ jobs:
             ref: ${{ needs.release-please.outputs.tag_name }}
             version: ${{ needs.release-please.outputs.version }}
 
-    # The release stays a draft until the binaries and the images are published;
-    # the moving docker aliases follow after the release is out.
     publish:
         needs: [release-please, binaries, images]
         runs-on: ubuntu-latest
@@ -78,8 +63,6 @@ jobs:
             IMAGE: ghcr.io/${{ github.repository }}
             V: ${{ needs.release-please.outputs.version }}
         steps:
-            # A prerelease version, from a Release-As footer, gets the prerelease
-            # mark and must not become the latest release.
             - shell: bash
               run: |
                   set -euo pipefail
@@ -97,7 +80,6 @@ jobs:
               shell: bash
               run: |
                   set -euo pipefail
-                  # A prerelease version stays off the moving aliases.
                   case "$V" in *-*) exit 0 ;; esac
                   for PHP in 8.4 8.5; do
                       docker buildx imagetools create \
