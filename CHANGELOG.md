@@ -1,5 +1,20 @@
 # Changelog
 
+## [0.9.1](https://github.com/rapira-rs/rapira/compare/v0.9.0...v0.9.1) (2026-10-07)
+
+### 🎯 Core
+
+- 🐛 **Work State Checks**: Fixed worker crashes after `isCancelled()` or `isFinalized()` calls in x86_64 release builds. The builds use Rust 1.98.1 until a Rust release fixes the compiler defect, BUG [#201](https://github.com/rapira-rs/rapira/issues/201) (thanks @roxblnfk).
+
+### 📦 `http` plugin
+
+- 🐛 **HTTP/1.1 Headers**: Responses with `Transfer-Encoding` no longer send `Content-Length`. A `close` token in any `Connection` request header closes the connection, even when a later one says `keep-alive`, [#202](https://github.com/rapira-rs/rapira/pull/202).
+
+### 📦 PHP Packages
+
+- 🧹 **Docker Images**: Updated the PHP base images to 8.5.11 and 8.4.26, [#202](https://github.com/rapira-rs/rapira/pull/202).
+- 🧹 **macOS Archives**: The macOS archive requires macOS 26 or later. It bundles the Homebrew libraries of the `macos-latest` build runner, [#202](https://github.com/rapira-rs/rapira/pull/202).
+
 ## [0.9.0](https://github.com/rapira-rs/rapira/compare/v0.8.1...v0.9.0) (2026-10-05)
 
 ### 🎯 Core
