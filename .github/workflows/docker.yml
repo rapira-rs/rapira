@@ -47,7 +47,7 @@ jobs:
                 php: ["8.4", "8.5"]
                 arch: [amd64, arm64]
                 include:
-                    - { arch: amd64, runner: ubuntu-24.04 }
+                    - { arch: amd64, runner: ubuntu-latest }
                     - { arch: arm64, runner: ubuntu-24.04-arm }
                     # Dependabot does not update these digests. Change them, and PHP_BASE in Dockerfile, at each PHP patch release.
                     - {
@@ -81,7 +81,7 @@ jobs:
 
     merge:
         needs: build
-        runs-on: ubuntu-24.04
+        runs-on: ubuntu-latest
         timeout-minutes: 15
         permissions:
             contents: read

@@ -14,7 +14,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]
+                os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-master-debug
             RUST_BACKTRACE: "1"
