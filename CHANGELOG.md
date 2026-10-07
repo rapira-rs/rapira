@@ -2,12 +2,18 @@
 
 ## [0.9.1](https://github.com/rapira-rs/rapira/compare/v0.9.0...v0.9.1) (2026-10-07)
 
+### 🎯 Core
 
-### Bug Fixes
+- 🐛 **Work State Checks**: Fixed worker crashes after `isCancelled()` or `isFinalized()` calls in x86_64 release builds. The builds use Rust 1.98.1 until a Rust release fixes the compiler defect, BUG [#201](https://github.com/rapira-rs/rapira/issues/201) (thanks @roxblnfk).
 
-* **fuzz:** lock bindgen to syn 3 again ([88544d1](https://github.com/rapira-rs/rapira/commit/88544d1bf70d6b2689930740b67b30c05e4c762a))
-* pin Rust 1.98.1 ([#201](https://github.com/rapira-rs/rapira/issues/201)) ([49c395f](https://github.com/rapira-rs/rapira/commit/49c395f770049ba03f23b3c88a69db7404e0be44))
-* pin Rust 1.98.1 and align the build versions ([85eeae6](https://github.com/rapira-rs/rapira/commit/85eeae62d0f7c07dbbbce14be737889acf1fde68))
+### 📦 `http` plugin
+
+- 🐛 **HTTP/1.1 Headers**: Responses with `Transfer-Encoding` no longer send `Content-Length`. A `close` token in any `Connection` request header closes the connection, even when a later one says `keep-alive`, [#202](https://github.com/rapira-rs/rapira/pull/202).
+
+### 📦 PHP Packages
+
+- 🧹 **Docker Images**: Updated the PHP base images to 8.5.11 and 8.4.26, [#202](https://github.com/rapira-rs/rapira/pull/202).
+- 🧹 **macOS Archives**: The macOS archive requires macOS 26 or later. It bundles the Homebrew libraries of the `macos-latest` build runner, [#202](https://github.com/rapira-rs/rapira/pull/202).
 
 ## [0.9.0](https://github.com/rapira-rs/rapira/compare/v0.8.1...v0.9.0) (2026-10-05)
 
