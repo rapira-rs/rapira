@@ -4,7 +4,7 @@ This repository contains the server: the SAPI crate (`crates/sapi`), the plugins
 
 ## Prerequisites
 
-- Rust stable - `rust-toolchain.toml` selects the exact channel for you
+- Rust - `rust-toolchain.toml` selects the exact version for you
 - A C compiler (the build compiles `crates/sapi/*.c` and the C method shells of each plugin against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
 - PHP 8.4 or 8.5, **NTS**, built with the embed SAPI (`--enable-embed=shared`). ZTS builds are rejected at compile time.

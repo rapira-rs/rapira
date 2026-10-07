@@ -35,3 +35,7 @@ updates:
     commit-message:
       prefix: chore
       include: scope
+    # The rust image follows rust-toolchain.toml, which stays on 1.98.1 until a stable release fixes https://github.com/rust-lang/rust/issues/163911
+    ignore:
+      - dependency-name: rust
+        versions: [">= 1.99"]
