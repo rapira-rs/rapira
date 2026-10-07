@@ -14,7 +14,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+                os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-master-debug
             RUST_BACKTRACE: "1"
@@ -111,7 +111,7 @@ jobs:
                   done
 
             - uses: dtolnay/rust-toolchain@c6590455eca8e79d081430ebfe2074192ae90290 # 1.98.1
-            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+            - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
               with:
                   cache-on-failure: true
 

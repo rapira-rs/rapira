@@ -7,7 +7,7 @@ permissions:
 
 jobs:
   coverage:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     env:
       RUST_BACKTRACE: "1"
     permissions:
@@ -31,7 +31,8 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@c6590455eca8e79d081430ebfe2074192ae90290 # 1.98.1
         with: { components: llvm-tools-preview }
-      - uses: taiki-e/install-action@ab4220e067fa624f7930084426dbfb7440a52829 # cargo-llvm-cov
+      - uses: taiki-e/install-action@f7e5d7c961414b23f5b25b2da9294395d08513ad # v2.87.26
+        with: { tool: cargo-llvm-cov@0.9.1 }
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
           cache-on-failure: true
@@ -46,5 +47,6 @@ jobs:
         uses: codecov/codecov-action@303a32d7a59b442fa8d48b6a1cc6825c09c847a5 # v7.1.1
         with:
           files: lcov.info
+          version: v11.3.1
           use_oidc: ${{ github.event_name != 'pull_request' || github.event.pull_request.head.repo.full_name == github.repository }}
           fail_ci_if_error: true

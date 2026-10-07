@@ -19,7 +19,7 @@ jobs:
     # A short run with a fixed seed: each target replays its seeds and fuzzes for 60 s.
     pull-request:
         if: github.event_name == 'pull_request'
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         timeout-minutes: 20
         steps:
             - &checkout
@@ -71,7 +71,7 @@ jobs:
     # A long run of each target with a new seed. Each run starts from the committed seeds.
     long:
         if: github.event_name != 'pull_request'
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         timeout-minutes: 60
         strategy:
             fail-fast: false

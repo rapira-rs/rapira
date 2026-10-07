@@ -47,7 +47,7 @@ jobs:
                 php: ["8.4", "8.5"]
                 arch: [amd64, arm64]
                 include:
-                    - { arch: amd64, runner: ubuntu-latest }
+                    - { arch: amd64, runner: ubuntu-24.04 }
                     - { arch: arm64, runner: ubuntu-24.04-arm }
                     - {
                           php: "8.4",
@@ -80,7 +80,7 @@ jobs:
 
     merge:
         needs: build
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         timeout-minutes: 15
         permissions:
             contents: read

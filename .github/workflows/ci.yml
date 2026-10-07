@@ -7,7 +7,7 @@ permissions:
 
 jobs:
     fmt:
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-24.04
         timeout-minutes: 10
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -22,7 +22,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+                os: [ubuntu-24.04, ubuntu-24.04-arm, macos-latest]
                 php: ["8.4", "8.5"]
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-embed
@@ -182,7 +182,7 @@ jobs:
 
             - uses: dtolnay/rust-toolchain@c6590455eca8e79d081430ebfe2074192ae90290 # 1.98.1
               with: { components: clippy }
-            - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+            - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
               with:
                   cache-on-failure: true
             - run: cargo clippy --workspace --all-targets -- -D warnings
