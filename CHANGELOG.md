@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.9.2](https://github.com/rapira-rs/rapira/compare/v0.9.1...v0.9.2) (2026-10-10)
+
+
+### Bug Fixes
+
+* copy the libraries of libphp.so into the Linux release ([db82240](https://github.com/rapira-rs/rapira/commit/db82240af52a57cd4170a095306f2d874e4e12a9))
+* copy the libraries of libphp.so into the Linux release ([62206bf](https://github.com/rapira-rs/rapira/commit/62206bf04a9cbdffcabb98f7803e367aa194136a)), closes [#207](https://github.com/rapira-rs/rapira/issues/207)
+
 ## [0.9.1](https://github.com/rapira-rs/rapira/compare/v0.9.0...v0.9.1) (2026-10-07)
 
 ### 🎯 Core
