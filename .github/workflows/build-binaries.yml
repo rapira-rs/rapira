@@ -198,7 +198,7 @@ jobs:
               run: |
                   echo "PHP_CONFIG=$PHP_PREFIX/bin/php-config" >> "$GITHUB_ENV"
                   echo "$PHP_PREFIX/bin" >> "$GITHUB_PATH"
-                  echo 'RUSTFLAGS=-C link-arg=-Wl,-rpath,$ORIGIN/../lib/rapira -L native='"$PHP_PREFIX/lib" >> "$GITHUB_ENV"
+                  echo 'RUSTFLAGS=-C link-arg=-Wl,-rpath,$ORIGIN/../lib/rapira -C link-arg=-Wl,--enable-new-dtags -L native='"$PHP_PREFIX/lib" >> "$GITHUB_ENV"
 
             - name: Expose PHP + rpath (macOS)
               if: runner.os == 'macOS'
@@ -230,11 +230,8 @@ jobs:
                   if [ "$RUNNER_OS" = "Linux" ]; then
                     LP=$(find "$PHP_PREFIX" -name 'libphp*.so' | head -1)
                     cp "$LP" "$ROOT/lib/rapira/libphp.so"
-                    mapfile -t ICU_LIBS < <(ldd "$LP" | awk '$1 ~ /^libicu/ {print $3}')
-                    test "${#ICU_LIBS[@]}" -gt 0
-                    for lib in "${ICU_LIBS[@]}"; do
-                      cp "$lib" "$ROOT/lib/rapira/"
-                    done
+                    ldd "$LP" | awk '$3 ~ /^\// && $1 !~ /^(libc|libm|libresolv|libstdc\+\+|libgcc_s|libssl|libcrypto|libcurl|libnghttp2|libz)\.so/ {print $3}' \
+                      | xargs cp -t "$ROOT/lib/rapira/"
                     for lib in "$ROOT/lib/rapira/"*.so*; do
                       patchelf --set-rpath "\$ORIGIN" "$lib"
                     done
@@ -347,6 +344,15 @@ jobs:
                   set -euo pipefail
                   ( cd dist && sha256sum rapira-* > "rapira-v${VERSION}-SHA256SUMS.txt" )
                   ls -l dist
+
+            - name: Validate tarballs (amd64)
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  for tgz in dist/*-linux-x86_64.tar.gz; do
+                    tar -xzf "$tgz" -C "$RUNNER_TEMP"
+                    docker run --rm -v "$RUNNER_TEMP/$(basename "$tgz" .tar.gz):/r:ro" opensuse/tumbleweed /r/bin/rapira --version
+                  done
 
             - name: Validate packages (amd64)
               if: inputs.packages
