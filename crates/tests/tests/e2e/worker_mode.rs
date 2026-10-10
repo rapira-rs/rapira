@@ -181,13 +181,17 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("worker/held-worker.php"))
         .json_log()
         .spawn();
+    let release = srv.log_file().with_file_name("release");
+    let path = format!("/?release={}", release.display());
 
-    let rx_a = submit(srv.addr, req("/"))?;
+    let rx_a = submit(srv.addr, req(&path))?;
     server_log::wait_app_record(&srv.log_file(), "held");
-    let rx_b = submit(srv.addr, req("/"))?;
-    // No signal shows that B is queued. The wait lets the plugin read B and queue it before the close, well inside the 400 ms that A holds the worker.
-    std::thread::sleep(Duration::from_millis(100));
+    let rx_b = submit(srv.addr, req(&path))?;
+    // No signal shows that B is queued or that the server saw its close. A holds the worker until the release file exists, so each wait can be long.
+    std::thread::sleep(Duration::from_secs(1));
     drop(rx_b);
+    std::thread::sleep(Duration::from_secs(1));
+    std::fs::write(&release, "")?;
     let resp_a = drain_resp(rx_a);
     assert_eq!(resp_a.body_string(), "done");
 
