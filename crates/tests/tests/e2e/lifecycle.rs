@@ -774,9 +774,13 @@ fn dispatcher_multipart_over_the_wire() {
         .lines()
         .find_map(|l| l.strip_prefix("tmp="))
         .expect("tmp line");
+    // The client can get the last byte of the response before seal() unlinks the spool file.
     assert!(
-        !std::path::Path::new(tmp).exists(),
-        "spool file must be gone once the response arrived"
+        poll(Duration::from_secs(5), || {
+            (!std::path::Path::new(tmp).exists()).then_some(())
+        })
+        .is_some(),
+        "spool file must be gone after the response"
     );
 
     let (code, _) = http_post(

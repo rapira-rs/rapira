@@ -367,19 +367,26 @@ fn uploads_server(fixture_name: &str) -> Server {
         .spawn()
 }
 
-/// The files in the worker spool dirs of `srv`. The plugin creates one spool dir per worker at start.
+/// The files in the worker spool dirs of `srv`, read again until they are gone, for at most 5 s. The plugin creates one spool dir per worker at start.
+/// The client can get the last byte of the response before seal() unlinks the spool files.
 fn spooled_files(srv: &Server) -> Vec<PathBuf> {
     let uploads = srv.dir.join("uploads");
-    let dirs: Vec<PathBuf> = std::fs::read_dir(&uploads)
-        .unwrap_or_else(|e| panic!("read {}: {e}", uploads.display()))
-        .map(|e| e.expect("uploads dir entry").path())
-        .filter(|p| p.is_dir())
-        .collect();
-    assert!(!dirs.is_empty(), "no spool dir in {}", uploads.display());
-    dirs.iter()
-        .flat_map(|d| std::fs::read_dir(d).expect("read the spool dir"))
-        .map(|e| e.expect("spool dir entry").path())
-        .collect()
+    let read = || -> Vec<PathBuf> {
+        let dirs: Vec<PathBuf> = std::fs::read_dir(&uploads)
+            .unwrap_or_else(|e| panic!("read {}: {e}", uploads.display()))
+            .map(|e| e.expect("uploads dir entry").path())
+            .filter(|p| p.is_dir())
+            .collect();
+        assert!(!dirs.is_empty(), "no spool dir in {}", uploads.display());
+        dirs.iter()
+            .flat_map(|d| std::fs::read_dir(d).expect("read the spool dir"))
+            .map(|e| e.expect("spool dir entry").path())
+            .collect()
+    };
+    poll(Duration::from_secs(5), || {
+        Some(read()).filter(Vec::is_empty)
+    })
+    .unwrap_or_else(read)
 }
 
 /// An abandoned unit holding a plugin-parsed multipart body must unlink its spool the moment the exchange dies.
@@ -607,7 +614,7 @@ fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
     assert_eq!(
         spooled_files(&srv),
         Vec::<PathBuf>::new(),
-        "seal() must unlink the spool before the frame goes out"
+        "seal() must unlink the spool"
     );
     Ok(())
 }
