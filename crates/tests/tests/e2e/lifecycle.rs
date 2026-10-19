@@ -1,4 +1,5 @@
 use crate::harness::*;
+use rapira_sapi::plugin::Mode;
 use std::time::Duration;
 use tests::poll;
 
@@ -97,6 +98,72 @@ fn sigterm_master_stops() {
     let status = srv.wait_exit(STOP_BUDGET);
     assert_exit_code(status, MASTER_EXIT_OK, &srv);
     wait_pids_gone(&pids, Duration::from_secs(10), &srv);
+}
+
+/// The pidfile holds the pid of the master until the master exits after a stop. A second SIGTERM during the stop forces the exit with code 130 and stops the workers. A held request keeps the stop open.
+#[test]
+fn the_pidfile_names_the_master_until_its_exit() {
+    struct Case {
+        name: &'static str,
+        second_sigterm: bool,
+        want_exit: i32,
+    }
+    let cases = [
+        Case {
+            name: "stop",
+            second_sigterm: false,
+            want_exit: MASTER_EXIT_OK,
+        },
+        Case {
+            name: "forced stop",
+            second_sigterm: true,
+            want_exit: 130,
+        },
+    ];
+    for case in cases {
+        let mut srv = Spawn::http(Mode::Worker, tests::fixture("worker/held-worker.php"))
+            .toml("[supervisor]\npidfile = \"rapira.pid\"")
+            .json_log()
+            .spawn();
+        let pidfile = srv.dir.join("rapira.pid");
+        let release = srv.dir.join("release");
+        let content = std::fs::read_to_string(&pidfile).expect("read the pidfile");
+        assert_eq!(content.trim(), srv.pid().to_string(), "{}", case.name);
+        let pids = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+        let mut held = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
+        held.send(
+            format!(
+                "GET /?release={} HTTP/1.1\r\nHost: e2e\r\n\r\n",
+                release.display()
+            )
+            .as_bytes(),
+        )
+        .expect("send the held request");
+        tests::server_log::wait_app_record(&srv.log_file(), "held");
+
+        signal(srv.pid(), libc::SIGTERM);
+        // Two pending SIGTERMs merge into one, so the second goes after the master began the stop.
+        assert!(
+            wait_log_contains(&srv, "draining worker", Duration::from_secs(10)),
+            "{}: no drain\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        // Without the release the held request ends only with its worker.
+        if case.second_sigterm {
+            signal(srv.pid(), libc::SIGTERM);
+        } else {
+            std::fs::write(&release, "").expect("write the release file");
+        }
+        let status = srv.wait_exit(STOP_BUDGET);
+        assert_exit_code(status, case.want_exit, &srv);
+        assert!(
+            !pidfile.exists(),
+            "{}: the pidfile stays after the exit",
+            case.name
+        );
+        wait_pids_gone(&pids, Duration::from_secs(10), &srv);
+    }
 }
 
 /// Worker exit code after a clean drain (`rapira_master::WORKER_EXIT_DRAINED`).

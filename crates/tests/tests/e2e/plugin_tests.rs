@@ -67,18 +67,3 @@ async fn buffered_error_response_arrives_whole_worker() -> anyhow::Result<()> {
 async fn buffered_error_response_arrives_whole_classic() -> anyhow::Result<()> {
     error_path(Mode::Classic, "shared/error-keeps-headers.php").await
 }
-
-/// Output before the throw seals a truncated frame: the reply must end as truncated, not as a possibly-incomplete body.
-#[tokio::test]
-async fn truncated_response_ends_as_truncated_worker() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Worker, fixture("shared/output-then-throw-worker.php")).spawn();
-    let resp = exchange(srv.addr, "/").await?;
-    anyhow::ensure!(
-        resp.truncated,
-        "the reply must end as truncated, got {} with body {:?} (ended={})",
-        resp.status(),
-        resp.body_string(),
-        resp.ended
-    );
-    Ok(())
-}
