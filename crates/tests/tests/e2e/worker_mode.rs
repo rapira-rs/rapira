@@ -202,6 +202,41 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The bodies of the units that wait for PHP share a 64 MiB budget per worker. A body that does not fit gets 503 at once, before the 30 s intake wait.
+#[test]
+fn waiting_bodies_share_a_byte_budget() -> anyhow::Result<()> {
+    let srv = Spawn::http(Mode::Worker, fixture("worker/held-worker.php"))
+        .json_log()
+        .http_extra("max_body_size_mb = 40")
+        .spawn();
+    let release = srv.log_file().with_file_name("release");
+    let path = format!("/?release={}", release.display());
+    let post = |size: usize| {
+        let mut rq = req(&path);
+        *rq.method_mut() = Method::POST;
+        *rq.body_mut() = vec![b'x'; size];
+        rq
+    };
+
+    let rx_a = submit(srv.addr, req(&path))?;
+    server_log::wait_app_record(&srv.log_file(), "held");
+    let rx_b = submit(srv.addr, post(40 << 20))?;
+    // No signal shows that B waits in the queue. A holds the worker until the release file exists.
+    std::thread::sleep(Duration::from_secs(1));
+    let mut rx_c = submit(srv.addr, post(30 << 20))?;
+    let resp_c = drain_resp_deadline(&mut rx_c, Instant::now() + Duration::from_secs(10))
+        .expect("a body over the budget must be refused before the intake wait ends");
+    assert_eq!(resp_c.status(), 503);
+
+    std::fs::write(&release, "")?;
+    assert_eq!(drain_resp(rx_a).body_string(), "done");
+    assert_eq!(drain_resp(rx_b).body_string(), "done");
+    // PHP took B, so its bytes are back in the budget.
+    let resp = drain_resp(submit(srv.addr, post(30 << 20))?);
+    assert_eq!(resp.body_string(), "done");
+    Ok(())
+}
+
 /// handle_request() from inside its own handler is refused: no deadlock, and the outer unit completes.
 #[test]
 fn nested_handle_request_is_refused() -> anyhow::Result<()> {

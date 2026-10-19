@@ -104,6 +104,7 @@ async fn unary(
         }
     };
     let protocol = ctx.protocol();
+    let bytes = message.len();
     let call = UnaryCall {
         method: path.clone(),
         protocol,
@@ -119,7 +120,7 @@ async fn unary(
     };
     let (call, reply) = Call::new(call);
     // A refusal before dispatch: PHP never saw the call.
-    if let Err(e) = intake.submit(Box::new(call)).await {
+    if let Err(e) = intake.submit(Box::new(call), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));
     }
     // A closed channel means that PHP lost the call. Dropping this future closes the call for PHP.

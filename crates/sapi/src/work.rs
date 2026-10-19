@@ -1,15 +1,20 @@
 use std::ffi::CStr;
+use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::time::Duration;
 
 use rapira_scoreboard::SharedSlot;
+use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use tokio::time::Instant;
 
 use crate::scoreboard::{Event, count_shed, sb_update};
 use crate::{zend_class_entry, zend_object};
 
 pub(crate) const INTAKE_WAIT: Duration = Duration::from_secs(30);
+
+/// The body bytes that one worker holds for the units that PHP has not taken yet.
+const BODY_BUDGET: usize = 64 << 20;
 
 /// The cycle bookkeeping view of a unit that receive() handed out.
 pub trait Held {
@@ -64,6 +69,7 @@ pub struct DispatcherClasses {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Refused {
     Saturated,
+    OverBudget,
     Stopped,
 }
 
@@ -71,6 +77,11 @@ impl std::fmt::Display for Refused {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Saturated => write!(f, "worker pool saturated for {INTAKE_WAIT:?}"),
+            Self::OverBudget => write!(
+                f,
+                "request bodies that wait for the worker use all {} MiB",
+                BODY_BUDGET >> 20
+            ),
             Self::Stopped => write!(f, "worker pool stopped"),
         }
     }
@@ -91,6 +102,29 @@ pub struct Sink {
     tx: SyncSender<Box<dyn Work>>,
     /// The scoreboard slot of this worker.
     slot: &'static SharedSlot,
+    /// The body bytes of the units between submit and the PHP thread. All clones share it.
+    budget: Arc<Semaphore>,
+}
+
+/// A unit and its body bytes in the budget. PHP takes, skips or sheds the unit, and the bytes go back.
+struct Budgeted {
+    unit: Box<dyn Work>,
+    _bytes: OwnedSemaphorePermit,
+}
+
+impl Work for Budgeted {
+    fn cancelled(&self) -> bool {
+        self.unit.cancelled()
+    }
+    unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held {
+        unsafe { self.unit.attach(obj) }
+    }
+    fn into_cgi(self: Box<Self>) -> Option<crate::types::Context> {
+        self.unit.into_cgi()
+    }
+    fn shed(self: Box<Self>) {
+        self.unit.shed()
+    }
 }
 
 /// Keeps one unit in `pending` during the hand-off. A drop before `disarm` subtracts the unit from `pending`. If the unit found the queue full, the drop also adds 1 to `failed_on_full_queue`.
@@ -126,11 +160,24 @@ impl Drop for PendingGuard {
 
 impl Sink {
     pub(crate) fn new(tx: SyncSender<Box<dyn Work>>, slot: &'static SharedSlot) -> Self {
-        Self { tx, slot }
+        Self {
+            tx,
+            slot,
+            budget: Arc::new(Semaphore::new(BODY_BUDGET)),
+        }
     }
 
+    /// `bytes` is the body size that the unit keeps in memory. A body that does not fit the budget is refused at once, because a wait keeps the body in memory.
     /// pending is incremented before the send: the consumer decrements as soon as it wakes, so the reverse order could wrap the counter below zero.
-    pub async fn submit(&self, mut unit: Box<dyn Work>) -> Result<(), Refused> {
+    pub async fn submit(&self, unit: Box<dyn Work>, bytes: usize) -> Result<(), Refused> {
+        // A body larger than the budget takes all of it.
+        let Ok(held) =
+            Arc::clone(&self.budget).try_acquire_many_owned(bytes.min(BODY_BUDGET) as u32)
+        else {
+            count_shed(self.slot);
+            return Err(Refused::OverBudget);
+        };
+        let mut unit: Box<dyn Work> = Box::new(Budgeted { unit, _bytes: held });
         let mut pending = PendingGuard::arm(self.slot);
         loop {
             match self.tx.try_send(unit) {
@@ -192,7 +239,7 @@ mod tests {
         let (sink, slot) = sink(tx);
         drop(rx);
         assert_eq!(
-            sink.submit(Box::new(Probe)).await.unwrap_err(),
+            sink.submit(Box::new(Probe), 0).await.unwrap_err(),
             Refused::Stopped
         );
         assert_eq!(
@@ -255,7 +302,7 @@ mod tests {
             let (tx, rx) = sync_channel::<Box<dyn Work>>(1);
             tx.send(Box::new(Probe)).unwrap();
             let (sink, slot) = sink(tx);
-            let submit = sink.submit(Box::new(Probe));
+            let submit = sink.submit(Box::new(Probe), 0);
             let result = match case.during {
                 During::Nothing => Some(submit.await),
                 During::ClientLeaves => tokio::time::timeout(ACTION_DELAY, submit).await.ok(),

@@ -27,7 +27,7 @@ impl From<Refused> for Rejection {
     fn from(e: Refused) -> Self {
         Self {
             status: match e {
-                Refused::Saturated => http::StatusCode::SERVICE_UNAVAILABLE,
+                Refused::Saturated | Refused::OverBudget => http::StatusCode::SERVICE_UNAVAILABLE,
                 Refused::Stopped => http::StatusCode::INTERNAL_SERVER_ERROR,
             },
             reason: e.to_string(),
@@ -458,9 +458,10 @@ async fn submit(
     shared: &Shared,
     request: Request,
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
+    let bytes = request.content_length.max(0) as usize;
     let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
     let (exchange, reply) = Exchange::new(request, shared.cfg.superglobals);
-    shared.intake.submit(Box::new(exchange)).await?;
+    shared.intake.submit(Box::new(exchange), bytes).await?;
     Ok(reply)
 }
 
