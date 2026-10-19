@@ -109,8 +109,11 @@ jobs:
                       DD_TRACE_STARTUP_LOGS=0 php -d "extension=$EXT_DIR/ddtrace.so" -m)"
 
             - name: Install build deps (macOS)
+              id: brew
               if: runner.os == 'macOS'
-              run: brew install autoconf pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq
+              run: |
+                  brew install autoconf pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq
+                  echo "libs=$(brew list --versions openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
             - name: Resolve PHP patch version (macOS)
               id: php
@@ -128,7 +131,7 @@ jobs:
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-ci-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/ci.yml') }}
+                  key: php-embed-ci-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ steps.brew.outputs.libs }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/ci.yml') }}
 
             - name: Build PHP embed from release tarball (macOS)
               if: runner.os == 'macOS' && steps.phpcache.outputs.cache-hit != 'true'
@@ -161,7 +164,7 @@ jobs:
               uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-ci-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/ci.yml') }}
+                  key: php-embed-ci-${{ runner.os }}-${{ runner.arch }}-${{ steps.php.outputs.full }}-${{ steps.brew.outputs.libs }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/ci.yml') }}
 
             - name: Expose the PHP embed lib (macOS)
               if: runner.os == 'macOS'

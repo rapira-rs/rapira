@@ -148,15 +148,18 @@ jobs:
                     openssl-devel libcurl-devel libxml2-devel oniguruma-devel zlib-devel sqlite-devel libffi-devel gettext-devel libicu-devel libpq-devel
 
             - name: Install build deps (macOS)
+              id: brew
               if: runner.os == 'macOS'
-              run: brew install autoconf pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq
+              run: |
+                  brew install autoconf pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq
+                  echo "libs=$(brew list --versions openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
             - name: Restore PHP embed runtime
               id: phpcache
               uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/build-binaries.yml') }}
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ steps.brew.outputs.libs }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/build-binaries.yml') }}
 
             - name: Build PHP embed from release tarball (Unix)
               if: steps.phpcache.outputs.cache-hit != 'true'
@@ -191,7 +194,7 @@ jobs:
               uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
               with:
                   path: ${{ env.PHP_PREFIX }}
-                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/build-binaries.yml') }}
+                  key: php-embed-rel-${{ runner.os }}-${{ runner.arch }}-${{ env.PHP_FULL }}-${{ steps.brew.outputs.libs }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/build-binaries.yml') }}
 
             - name: Expose PHP + rpath (Linux)
               if: runner.os == 'Linux'
@@ -345,26 +348,33 @@ jobs:
                   ( cd dist && sha256sum rapira-* > "rapira-v${VERSION}-SHA256SUMS.txt" )
                   ls -l dist
 
-            - name: Validate tarballs (amd64)
+            - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+              with:
+                  platforms: arm64
+
+            - name: Validate tarballs
               shell: bash
               run: |
                   set -euo pipefail
-                  for tgz in dist/*-linux-x86_64.tar.gz; do
+                  for tgz in dist/*-linux-x86_64.tar.gz dist/*-linux-aarch64.tar.gz; do
+                    case "$tgz" in *aarch64*) p=linux/arm64 ;; *) p=linux/amd64 ;; esac
                     tar -xzf "$tgz" -C "$RUNNER_TEMP"
-                    docker run --rm -v "$RUNNER_TEMP/$(basename "$tgz" .tar.gz):/r:ro" opensuse/tumbleweed /r/bin/rapira --version
+                    docker run --rm --platform "$p" -v "$RUNNER_TEMP/$(basename "$tgz" .tar.gz):/r:ro" opensuse/tumbleweed /r/bin/rapira --version
                   done
 
-            - name: Validate packages (amd64)
+            - name: Validate packages
               if: inputs.packages
               shell: bash
               run: |
                   set -euo pipefail
-                  for deb in dist/*_amd64.deb; do
-                    docker run --rm -v "$PWD/dist:/dist:ro" debian:12 \
+                  for deb in dist/*_amd64.deb dist/*_arm64.deb; do
+                    case "$deb" in *_arm64.deb) p=linux/arm64 ;; *) p=linux/amd64 ;; esac
+                    docker run --rm --platform "$p" -v "$PWD/dist:/dist:ro" debian:12 \
                       bash -ec "apt-get update -q && apt-get install -yq /dist/$(basename "$deb") && rapira --help"
                   done
-                  for rpm in dist/*.x86_64.rpm; do
-                    docker run --rm -v "$PWD/dist:/dist:ro" rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f \
+                  for rpm in dist/*.x86_64.rpm dist/*.aarch64.rpm; do
+                    case "$rpm" in *.aarch64.rpm) p=linux/arm64 ;; *) p=linux/amd64 ;; esac
+                    docker run --rm --platform "$p" -v "$PWD/dist:/dist:ro" rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f \
                       bash -ec "dnf install -yq /dist/$(basename "$rpm") && rapira --help"
                   done
 
