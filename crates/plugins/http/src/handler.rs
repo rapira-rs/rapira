@@ -435,7 +435,9 @@ where
         transport: None,
     });
     *res.status_mut() = status;
-    *res.headers_mut() = response_headers(headers, declared_cl);
+    // A HEAD response keeps the declared length. RFC 9110 §8.6 forbids it on a 204, and on a 304 it must equal the 200 length.
+    let header_cl = content_length.filter(|_| !matches!(status.as_u16(), 204 | 304));
+    *res.headers_mut() = response_headers(headers, header_cl);
     res
 }
 

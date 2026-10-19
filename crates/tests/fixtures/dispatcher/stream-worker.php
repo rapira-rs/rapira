@@ -72,6 +72,17 @@ try {
             }
             continue;
         }
+        if ($probe === 'sendfile-over-cl') {
+            // The error comes before this call writes anything, so the handler can still send the 5 declared bytes.
+            $ex->writeHead(200, ['content-length' => ['5']]);
+            $length = isset($q['length']) ? (int) $q['length'] : null;
+            try {
+                $ex->sendFile($req->headers['x-path'][0] ?? '', (int) ($q['offset'] ?? 0), $length);
+            } catch (ContentLengthExceededError) {
+                $ex->writeBody('fixed');
+            }
+            continue;
+        }
         if ($probe === 'sendfile-shrink') {
             // The flushed head has no content-length, so the body is chunked and only a cut body lacks the last chunk.
             // The marker tells the test that the file is cut.

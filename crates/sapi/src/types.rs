@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use http::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderName};
+use http::header::{AUTHORIZATION, CONTENT_LENGTH, COOKIE, HeaderMap, HeaderName};
 use std::ffi::CString;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -278,10 +278,18 @@ impl Context {
         };
         let body = std::mem::take(&mut self.body);
         if let Some(head) = self.head.take() {
-            let bodiless = matches!(head.status, 204 | 304)
-                || (100..200).contains(&head.status)
-                || self.req.method.eq_ignore_ascii_case("HEAD");
-            let content_length = (!bodiless && !truncated).then_some(body.len() as u64);
+            let no_content = matches!(head.status, 204 | 304) || (100..200).contains(&head.status);
+            let bodiless = no_content || self.req.method.eq_ignore_ascii_case("HEAD");
+            let content_length = if no_content {
+                None
+            } else if bodiless {
+                // A HEAD response keeps the length that the app declared for the GET response.
+                head.headers
+                    .get(CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok()?.parse().ok())
+            } else {
+                (!truncated).then_some(body.len() as u64)
+            };
             send(
                 &tx,
                 Frame::Head {

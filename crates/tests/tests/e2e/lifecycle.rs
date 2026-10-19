@@ -773,7 +773,7 @@ fn dispatcher_request_fidelity_over_the_wire() {
     assert_eq!(code, 400, "missing Host on HTTP/1.1 must answer 400");
 }
 
-/// A PHP-written head crosses the wire: the status line, one field line per list value, the plugin's own framing, and a HEAD carrying neither body nor content-length.
+/// A PHP-written head crosses the wire: the status line, one field line per list value, and the plugin's own framing.
 /// RFC 9110 §8.6: https://www.rfc-editor.org/rfc/rfc9110#section-8.6
 #[test]
 fn dispatcher_write_head_reaches_the_wire() {
@@ -801,30 +801,64 @@ fn dispatcher_write_head_reaches_the_wire() {
         diagnostics(&srv)
     );
     assert!(text.ends_with("body"), "{text:?}\n{}", diagnostics(&srv));
+}
 
-    let raw = http_raw_bytes(
-        srv.addr,
-        b"HEAD /?probe=head HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
-        Duration::from_secs(10),
-    )
-    .expect("HEAD head probe");
-    let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
-    assert!(
-        text.starts_with("http/1.1 201"),
-        "got {:?}\n{}",
-        text.lines().next().unwrap_or(""),
-        diagnostics(&srv)
-    );
-    assert!(
-        !text.contains("\r\ncontent-length:"),
-        "no content-length on a HEAD response\n{}",
-        diagnostics(&srv)
-    );
-    assert!(
-        text.ends_with("\r\n\r\n"),
-        "no body bytes on a HEAD response\n{}",
-        diagnostics(&srv)
-    );
+/// A HEAD response keeps the content-length that the app declared for the GET response, and carries no body.
+/// RFC 9110 §9.3.2: https://www.rfc-editor.org/rfc/rfc9110#section-9.3.2
+#[test]
+fn head_keeps_the_declared_content_length() {
+    struct Case {
+        name: &'static str,
+        fixture: &'static str,
+        config: &'static str,
+        status: &'static str,
+        content_length: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "dispatcher writeHead",
+            fixture: "lifecycle/fidelity-worker.php",
+            config: "",
+            status: "http/1.1 201",
+            content_length: "999",
+        },
+        Case {
+            name: "classic header()",
+            fixture: "lifecycle/head-length-classic.php",
+            config: "mode = \"classic\"\n",
+            status: "http/1.1 200",
+            content_length: "11",
+        },
+    ];
+    for case in cases {
+        let srv = spawn_with_config(case.fixture, 1, case.config);
+        let raw = http_raw_bytes(
+            srv.addr,
+            b"HEAD /?probe=head HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+            Duration::from_secs(10),
+        )
+        .unwrap_or_else(|e| panic!("{}: HEAD: {e}\n{}", case.name, diagnostics(&srv)));
+        let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        assert!(
+            text.starts_with(case.status),
+            "{}: got {:?}\n{}",
+            case.name,
+            text.lines().next().unwrap_or(""),
+            diagnostics(&srv)
+        );
+        assert!(
+            text.contains(&format!("\r\ncontent-length: {}\r\n", case.content_length)),
+            "{}: the declared content-length must stay on HEAD: {text:?}\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        assert!(
+            text.ends_with("\r\n\r\n"),
+            "{}: no body bytes on a HEAD response: {text:?}\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+    }
 }
 
 /// RFC 9112 §3.2.2: for an absolute-form target the origin server must ignore Host and use the target's host information.

@@ -1281,6 +1281,50 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// sendFile() raises ContentLengthExceededError "before this call writes anything" when the bytes it would send go past the declared content-length (contract `Exchange::sendFile`).
+/// The check counts the slice, not the file size. The head declares 5 bytes, and the handler sends `fixed` when it gets the error.
+#[test]
+fn sendfile_past_the_declared_length_writes_nothing() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        query: &'static str,
+        body: &'static [u8],
+    }
+    let srv = sendfile_server();
+    let path = sendfile_payload(&srv);
+    let cases = [
+        Case {
+            name: "whole file",
+            query: "",
+            body: b"fixed",
+        },
+        Case {
+            name: "slice longer than the length",
+            query: "&offset=2&length=6",
+            body: b"fixed",
+        },
+        Case {
+            name: "slice of the length",
+            query: "&offset=2&length=5",
+            body: b"cdefg",
+        },
+        Case {
+            name: "rest of the file of the length",
+            query: "&offset=21",
+            body: b"vwxyz",
+        },
+    ];
+    for case in cases {
+        let target = format!("/?probe=sendfile-over-cl{}", case.query);
+        let resp = drain_resp(submit(srv.addr, with_path_header(&target, &path))?);
+        assert_eq!(resp.status(), 200, "{}", case.name);
+        assert_eq!(resp.content_length, Some(5), "{}", case.name);
+        assert_eq!(resp.body, case.body, "{}", case.name);
+        assert!(resp.ended && !resp.truncated, "{}", case.name);
+    }
+    Ok(())
+}
+
 /// A file that shrinks after sendFile() committed its slice ends the body with an error: the chunked body has no last chunk, and the plugin logs the cut. The bytes before the error are a prefix of the file up to the cut. The error gives hyper one flush pass, so a client that reads slowly can get fewer bytes than the file holds.
 #[test]
 fn sendfile_of_a_shrunken_file_ends_short() -> anyhow::Result<()> {
