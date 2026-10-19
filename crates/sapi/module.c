@@ -2,13 +2,25 @@
 
 extern void rapira_rs_finish_response(void);
 
-// php_handle_aborted_connection (main.c:2722) longjmps past Rust's catch_unwind
+// True while rapira_run_handler runs the handler and its shutdown functions.
+static bool rapira_in_handler = false;
+
+// php_handle_aborted_connection (main.c:2722) longjmps past Rust's
+// catch_unwind. In worker mode a bailout runs the boot again, so the abort
+// ends only the unit: the handler stops as on exit(), and the teardown drops
+// the output.
 extern size_t rapira_rs_ub_write(const char *str, size_t len, bool *aborted);
 size_t rapira_ub_write(const char *str, size_t len) {
     bool aborted = false;
     size_t written = rapira_rs_ub_write(str, len, &aborted);
-    if (aborted) {
+    if (aborted && rapira_mode != RAPIRA_MODE_WORKER) {
         php_handle_aborted_connection();
+    } else if (aborted) {
+        PG(connection_status) = PHP_CONNECTION_ABORTED;
+        php_output_set_status(PHP_OUTPUT_DISABLED);
+        if (rapira_in_handler && !PG(ignore_user_abort) && !EG(exception)) {
+            zend_throw_unwind_exit();
+        }
     }
     return written;
 }
@@ -251,6 +263,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     bool unclean_at_entry = CG(unclean_shutdown);
 
     zend_execute_data *observed_base = EG(current_observed_frame);
+    rapira_in_handler = true;
     RAPIRA_GUARD(
         {
             zend_call_function(fci, fcc);
@@ -291,6 +304,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     }
 
     gc_protect(false); // _zend_bailout can leave it engaged
+    rapira_in_handler = false;
 
     if (outcome != RAPIRA_BAILOUT && !unclean_at_entry &&
         CG(unclean_shutdown)) {

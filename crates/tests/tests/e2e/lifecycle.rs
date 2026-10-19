@@ -355,7 +355,7 @@ fn worker_bootstrap_that_never_serves_failboots() {
     assert_exit_code(Some(status), MASTER_EXIT_FAILBOOT, &srv);
 }
 
-/// A client that walks away mid-handler must not take the worker down: the abort recycles the cycle and the next request is served.
+/// A client that walks away mid-handler must not take the worker down: the abort ends only that unit, and the next request is served.
 #[test]
 fn worker_survives_client_leaving() {
     let srv = spawn_with_config("lifecycle/hold-worker.php", 1, "mode = \"worker\"\n");
