@@ -53,6 +53,22 @@ fn worker_singleton() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A fatal in the cycle-end header callback must not leave a freed dispatcher for the next cycle: the same worker serves the next request.
+#[test]
+fn header_callback_fatal_keeps_the_worker() -> anyhow::Result<()> {
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture("dispatcher/header-callback-fatal-worker.php"),
+    )
+    .spawn();
+    let (s1, pid1) = drain(submit(srv.addr, req("/"))?);
+    let (s2, pid2) = drain(submit(srv.addr, req("/"))?);
+
+    assert_eq!((s1, s2), (200, 200), "bodies: {pid1:?} {pid2:?}");
+    assert_eq!(pid1, pid2, "the worker must not crash between cycles");
+    Ok(())
+}
+
 /// `new` on the Internal classes must be refused by the private constructor.
 #[test]
 fn host_created_only() -> anyhow::Result<()> {

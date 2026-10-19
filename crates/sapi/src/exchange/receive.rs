@@ -122,7 +122,7 @@ pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> b
 }
 
 thread_local! {
-    static DISPATCHER: Cell<Option<zval>> = const { Cell::new(None) };
+    pub(super) static DISPATCHER: Cell<Option<zval>> = const { Cell::new(None) };
 }
 
 /// # Safety

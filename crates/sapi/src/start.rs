@@ -147,19 +147,23 @@ impl Rapira {
         };
 
         trace!(target: "rapira", "spawning worker thread");
-        let worker: JoinHandle<()> = thread::spawn(move || {
-            sb_set(slot);
-            quota::install(max_requests, stopper);
-            worker_main(
-                mode,
-                entrypoint,
-                UnitRx {
-                    rx: intake_rx,
-                    pending,
-                },
-                classes,
-            )
-        });
+        // PHP sets its stack limit from the stack size of this thread. 8 MiB matches the CLI and FPM main thread under the default RLIMIT_STACK. https://github.com/php/php-src/blob/php-8.5.11/Zend/zend_call_stack.c#L129-L173
+        let worker: JoinHandle<()> = thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(move || {
+                sb_set(slot);
+                quota::install(max_requests, stopper);
+                worker_main(
+                    mode,
+                    entrypoint,
+                    UnitRx {
+                        rx: intake_rx,
+                        pending,
+                    },
+                    classes,
+                )
+            })
+            .expect("spawn the PHP thread");
 
         (
             Self {

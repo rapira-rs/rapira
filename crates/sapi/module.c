@@ -259,9 +259,6 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     // cppcheck-suppress autoVariables
     fci->retval = &retval;
 
-    // only _zend_bailout sets it mid-request (zend.c:1264): 0->1 proves bailout
-    bool unclean_at_entry = CG(unclean_shutdown);
-
     zend_execute_data *observed_base = EG(current_observed_frame);
     rapira_in_handler = true;
     RAPIRA_GUARD(
@@ -306,8 +303,9 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     gc_protect(false); // _zend_bailout can leave it engaged
     rapira_in_handler = false;
 
-    if (outcome != RAPIRA_BAILOUT && !unclean_at_entry &&
-        CG(unclean_shutdown)) {
+    // only _zend_bailout sets it mid-request (zend.c:1264), and
+    // rapira_request_init clears it per unit
+    if (outcome != RAPIRA_BAILOUT && CG(unclean_shutdown)) {
         outcome = RAPIRA_BAILOUT;
         rapira_observer_end_to(observed_base);
     }
