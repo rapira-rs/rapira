@@ -62,6 +62,8 @@ const CASES: &[(&str, &str)] = &[
     ),
     ("grpc exception carries its status", "NotFound|nf|nf|0"),
     ("grpc exception subclass calls the parent", "Aborted"),
+    ("status needs its constructor", "ReflectionException"),
+    ("metadata needs its constructor", "ReflectionException"),
     (
         "context rejects a remote that is not an address",
         "TypeError",

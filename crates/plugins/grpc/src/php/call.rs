@@ -546,7 +546,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_respond(
     })
 }
 
-/// `status` is a `Rapira\Grpc\Status`; its constructor typed the three properties. A Status from ReflectionClass::newInstanceWithoutConstructor() is not supported. A detail that is not an ErrorDetail gives a TypeError before any state change.
+/// `status` is a `Rapira\Grpc\Status`; its constructor typed the three properties. A detail that is not an ErrorDetail gives a TypeError before any state change.
 /// # Safety
 /// `state` from receive; `status` a live object; engine active.
 #[unsafe(no_mangle)]
