@@ -13,7 +13,7 @@ use tests::poll;
 
 use crate::harness::{
     BOOT, Server, Spawn, diagnostics, fixture_path, free_port, http_get, parse_status_and_body,
-    scratch_dir, spawn_with_config, wait_workers,
+    scratch_dir, signal, spawn_with_config, wait_workers,
 };
 
 const REQ: Duration = Duration::from_secs(10);
@@ -204,6 +204,43 @@ fn signals_during_the_boot_do_not_stop_the_master() {
         // The preload script never ran: OPcache is not loaded.
         _ => tests::assert_skip_allowed("opcache"),
     }
+    drop(srv);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A stop closes the listener of the master, and each worker closes its listener before its drain. A new client then gets a refused connection at once, and the request in flight still gets its response. The socket file is in a scratch dir, so no other process can take its address.
+#[test]
+fn a_stop_refuses_new_connections_during_the_drain() {
+    let dir = scratch_dir();
+    let sock = dir.join("http.sock");
+    let release = dir.join("release");
+    let srv = Spawn::http(Mode::Worker, tests::fixture("worker/held-worker.php"))
+        .http_listen(ListenAddr::Unix(sock.clone()))
+        .json_log()
+        .spawn();
+    let mut held = UnixStream::connect(&sock).expect("connect");
+    held.set_read_timeout(Some(REQ)).expect("read timeout");
+    write!(held, "GET /?release={} HTTP/1.0\r\n\r\n", release.display())
+        .expect("write the request");
+    tests::server_log::wait_app_record(&srv.log_file(), "held");
+
+    signal(srv.pid(), libc::SIGTERM);
+    let refused = poll(Duration::from_secs(5), || {
+        UnixStream::connect(&sock)
+            .err()
+            .filter(|e| e.kind() == std::io::ErrorKind::ConnectionRefused)
+    });
+    std::fs::write(&release, "").expect("write the release file");
+    assert!(
+        refused.is_some(),
+        "a new connection waits in the backlog during the drain\n{}",
+        diagnostics(&srv)
+    );
+    let mut raw = Vec::new();
+    held.read_to_end(&mut raw).expect("read the held response");
+    let (code, body) = parse_status_and_body(&raw)
+        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&raw)));
+    assert_eq!((code, body), (200, &b"done"[..]), "\n{}", diagnostics(&srv));
     drop(srv);
     let _ = std::fs::remove_dir_all(&dir);
 }

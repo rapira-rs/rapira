@@ -8,7 +8,7 @@ use crate::pctl::{Pctl, SignalAction};
 use crate::pool::Pool;
 use crate::process::{Forker, reap_all};
 use crate::signals::errno_get;
-use crate::{MasterConfig, StopReason};
+use crate::{MasterConfig, StopReason, WORKER_EXIT_DRAINED};
 
 /// Milliseconds until `next`, rounded up so a sub-millisecond remainder never busy-spins `poll` with a 0 timeout.
 fn poll_timeout_ms(next: Instant, now: Instant) -> c_int {
@@ -82,6 +82,8 @@ impl<'w> Master<'w> {
         for p in &mut self.pools {
             p.begin_stop();
         }
+        // No worker starts after this point. The old closure drops and closes the listeners of the master, so new clients get a refused connection.
+        self.spawner.worker = Box::new(|_| WORKER_EXIT_DRAINED);
         if self.drained() {
             return Some(StopReason::Drained);
         }
@@ -93,8 +95,8 @@ impl<'w> Master<'w> {
     }
 
     fn reap(&mut self, now: Instant) -> anyhow::Result<()> {
-        let buried = reap_all(&mut self.pools);
         let stopping = self.pctl.is_stopping();
+        let buried = reap_all(&mut self.pools, stopping);
         for (pool, w, verdict) in buried {
             self.pools[pool].on_child_exit(w, verdict, now, stopping, &mut self.spawner)?;
         }

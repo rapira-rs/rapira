@@ -34,3 +34,26 @@ fn usr2_reload_replaces_workers_while_serving() {
         diagnostics(&srv),
     );
 }
+
+/// The first replacement of a reload takes the place of the last old worker. When that worker exits on its own before the replacement serves, for example by an OOM kill, the pool still has `processes` workers after the reload.
+#[test]
+fn reload_keeps_the_worker_count_when_the_last_old_worker_dies() {
+    let srv = spawn_with_config("lifecycle/slow-boot-worker.php", 1, "");
+    let old = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+
+    signal(srv.pid(), libc::SIGUSR2);
+    wait_workers(&srv, Duration::from_secs(20), "the replacement", |p| {
+        p.len() == 2
+    });
+    signal(old, libc::SIGKILL);
+    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET / after the kill");
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    wait_workers(
+        &srv,
+        Duration::from_secs(5),
+        "1 worker after the reload",
+        |p| p.len() == 1,
+    );
+}
