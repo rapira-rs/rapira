@@ -7,8 +7,8 @@ use rapira_sapi::zend_object;
 
 use crate::php::{ExchangeState, exchange_from};
 
-// cap 4 lets a buffered Head+Chunk+End trio, plus a stray interim head, queue without parking the PHP thread
-const FRAME_CAP: usize = 4;
+// cap 16 lets a buffered Head+Chunk+End trio, plus a stray interim head, queue without parking the PHP thread, and keeps a 1 MiB body in 64 KiB writes to about one park; tokio allocates one 32-slot block for any cap up to 32
+const FRAME_CAP: usize = 16;
 
 /// One HTTP request on the intake.
 pub(crate) struct Exchange {
