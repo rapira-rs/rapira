@@ -668,9 +668,10 @@ fn cached_entries_answer_until_they_go_stale() {
             .map(|t| t.join().expect("race thread"))
             .collect()
     });
+    let (first_etag, _) = &answers[0];
     for (etag, body) in &answers {
         assert!(!etag.is_empty(), "no etag");
-        assert_eq!(etag, &answers[0].0);
+        assert_eq!(etag, first_etag);
         assert_eq!(body, b"abcdefghij");
     }
 

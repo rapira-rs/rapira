@@ -30,50 +30,103 @@ mod tests {
 
     #[test]
     fn unready_lists_each_pool_without_a_serving_worker() {
+        struct Slot {
+            index: usize,
+            state: u32,
+            handled: u64,
+        }
         struct Case {
             name: &'static str,
             pools: Vec<PoolRegion>,
-            /// The index, the state and the `handled` count of each slot that the case sets. The other slots stay FREE with no counts.
-            slots: &'static [(usize, u32, u64)],
+            /// The slots that the case sets. The other slots stay FREE with no counts.
+            slots: &'static [Slot],
             want: &'static [&'static str],
         }
         let cases = [
             Case {
                 name: "an idle worker",
                 pools: vec![HTTP],
-                slots: &[(0, SLOT_IDLE, 0)],
+                slots: &[Slot {
+                    index: 0,
+                    state: SLOT_IDLE,
+                    handled: 0,
+                }],
                 want: &[],
             },
             Case {
                 name: "only busy workers",
                 pools: vec![HTTP],
-                slots: &[(0, SLOT_ACTIVE, 0), (1, SLOT_ACTIVE, 0)],
+                slots: &[
+                    Slot {
+                        index: 0,
+                        state: SLOT_ACTIVE,
+                        handled: 0,
+                    },
+                    Slot {
+                        index: 1,
+                        state: SLOT_ACTIVE,
+                        handled: 0,
+                    },
+                ],
                 want: &[],
             },
             Case {
                 name: "booting and draining workers",
                 pools: vec![HTTP],
-                slots: &[(0, SLOT_STARTING, 0), (1, SLOT_DRAINING, 0)],
+                slots: &[
+                    Slot {
+                        index: 0,
+                        state: SLOT_STARTING,
+                        handled: 0,
+                    },
+                    Slot {
+                        index: 1,
+                        state: SLOT_DRAINING,
+                        handled: 0,
+                    },
+                ],
                 want: &["http"],
             },
             Case {
                 name: "dead workers with counters",
                 pools: vec![HTTP],
-                slots: &[(0, SLOT_FREE, 5), (1, SLOT_FREE, 7)],
+                slots: &[
+                    Slot {
+                        index: 0,
+                        state: SLOT_FREE,
+                        handled: 5,
+                    },
+                    Slot {
+                        index: 1,
+                        state: SLOT_FREE,
+                        handled: 7,
+                    },
+                ],
                 want: &["http"],
             },
             Case {
                 name: "one of two pools not ready",
                 pools: vec![HTTP, GRPC],
-                slots: &[(0, SLOT_IDLE, 0), (4, SLOT_STARTING, 0)],
+                slots: &[
+                    Slot {
+                        index: 0,
+                        state: SLOT_IDLE,
+                        handled: 0,
+                    },
+                    Slot {
+                        index: 4,
+                        state: SLOT_STARTING,
+                        handled: 0,
+                    },
+                ],
                 want: &["grpc"],
             },
         ];
         for case in cases {
             let board = rapira_scoreboard::create(8).unwrap();
-            for &(i, state, handled) in case.slots {
-                board[i].state.store(state, Relaxed);
-                board[i].handled.store(handled, Relaxed);
+            for slot in case.slots {
+                board[slot.index].state.store(slot.state, Relaxed);
+                board[slot.index].handled.store(slot.handled, Relaxed);
             }
             assert_eq!(unready(board, &case.pools), case.want, "{}", case.name);
         }

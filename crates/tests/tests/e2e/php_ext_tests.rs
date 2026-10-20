@@ -1,28 +1,33 @@
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{assert_skip_allowed, drain, fixture, req};
+use tests::{Resp, assert_skip_allowed, drain_resp, fixture, req};
 
 use crate::harness::Spawn;
 
 /// One worker process serves every uri in order.
-fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
+fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<Resp>> {
     let srv = Spawn::http(Mode::Worker, fixture(name)).spawn();
     uris.iter()
-        .map(|uri| Ok(drain(submit(srv.addr, req(uri))?)))
+        .map(|uri| Ok(drain_resp(submit(srv.addr, req(uri))?)))
         .collect()
 }
 
 fn success(name: &str, token: &str) -> anyhow::Result<()> {
     let out = run(name, &["/"])?;
-    if out[0].1 == "skip" {
+    if out[0].body_string() == "skip" {
         assert_skip_allowed(name);
         return Ok(());
     }
-    assert_eq!(out[0].0, 200, "{name} must serve 200 (got: {:?})", out[0]);
+    assert_eq!(
+        out[0].status(),
+        200,
+        "{name} must serve 200 (got: {:?})",
+        out[0]
+    );
     assert!(
-        out[0].1.contains(token),
+        out[0].body_string().contains(token),
         "{name} must echo {token:?} (got: {:?})",
-        out[0].1
+        out[0].body_string()
     );
     Ok(())
 }
@@ -30,24 +35,26 @@ fn success(name: &str, token: &str) -> anyhow::Result<()> {
 /// A request that throws must answer 500, and the next plain request must answer 200 with the token, so this also covers the success path of the extension.
 fn exception(name: &str, token: &str) -> anyhow::Result<()> {
     let out = run(name, &["/?boom=1", "/"])?;
-    if out[0].1 == "skip" {
+    if out[0].body_string() == "skip" {
         assert_skip_allowed(name);
         return Ok(());
     }
     assert_eq!(
-        out[0].0, 500,
+        out[0].status(),
+        500,
         "{name} uncaught throw must be a 500 (got: {:?})",
         out[0]
     );
     assert_eq!(
-        out[1].0, 200,
+        out[1].status(),
+        200,
         "{name} must keep serving after the throw (got: {:?})",
         out[1]
     );
     assert!(
-        out[1].1.contains(token),
+        out[1].body_string().contains(token),
         "{name} follow-up must echo {token:?} (got: {:?})",
-        out[1].1
+        out[1].body_string()
     );
     Ok(())
 }
@@ -186,29 +193,30 @@ fn openssl_error_ring_outlives_the_request() -> anyhow::Result<()> {
             "/?step=drain",
         ],
     )?;
-    if out[0].1 == "skip" {
+    if out[0].body_string() == "skip" {
         assert_skip_allowed("php_ext/openssl-worker.php");
         return Ok(());
     }
     assert_eq!(
-        (out[1].0, out[1].1.as_str()),
+        (out[1].status(), out[1].body_string().as_str()),
         (200, "openssl:leaked"),
         "leak request must succeed (got: {:?})",
         out[1]
     );
     // the PEM reader leaves one PEM_R_NO_START_LINE entry; only the routine and reason substrings are stable across OpenSSL 1.1.1 and 3.x
     assert!(
-        out[2].1.starts_with("openssl:drained:1:"),
+        out[2].body_string().starts_with("openssl:drained:1:"),
         "the next request must drain exactly one error (got: {:?})",
-        out[2].1
+        out[2].body_string()
     );
     assert!(
-        out[2].1.contains("PEM routines") && out[2].1.contains("no start line"),
+        out[2].body_string().contains("PEM routines")
+            && out[2].body_string().contains("no start line"),
         "drained error must be the PEM no-start-line entry (got: {:?})",
-        out[2].1
+        out[2].body_string()
     );
     assert_eq!(
-        (out[3].0, out[3].1.as_str()),
+        (out[3].status(), out[3].body_string().as_str()),
         (200, "openssl:drained:0:"),
         "the ring is FIFO-drained, so the last request must find it empty (got: {:?})",
         out[3]
@@ -223,20 +231,20 @@ fn openssl_error_ring_overwrites_the_oldest() -> anyhow::Result<()> {
         "php_ext/openssl-worker.php",
         &["/?step=drain", "/?step=leak_many", "/?step=drain"],
     )?;
-    if out[0].1 == "skip" {
+    if out[0].body_string() == "skip" {
         assert_skip_allowed("php_ext/openssl-worker.php");
         return Ok(());
     }
     assert_eq!(
-        (out[1].0, out[1].1.as_str()),
+        (out[1].status(), out[1].body_string().as_str()),
         (200, "openssl:leaked:20"),
         "the leak request must push 20 errors (got: {:?})",
         out[1]
     );
     assert!(
-        out[2].1.starts_with("openssl:drained:15:"),
+        out[2].body_string().starts_with("openssl:drained:15:"),
         "20 pushes wrap the 16-slot ring down to 15 readable entries (got: {:?})",
-        out[2].1
+        out[2].body_string()
     );
     Ok(())
 }
@@ -249,21 +257,21 @@ fn browscap_unset_exception() -> anyhow::Result<()> {
 #[test]
 fn browscap_unset_warns() -> anyhow::Result<()> {
     let out = run("php_ext/browscap-worker.php", &["/"])?;
-    if out[0].1 == "skip" {
+    if out[0].body_string() == "skip" {
         return Ok(());
     }
-    assert_eq!(out[0].0, 200, "must serve 200 (got: {:?})", out[0]);
+    assert_eq!(out[0].status(), 200, "must serve 200 (got: {:?})", out[0]);
     assert!(
         out[0]
-            .1
+            .body_string()
             .contains("get_browser(): browscap ini directive not set"),
         "the E_WARNING must be visible in the body (got: {:?})",
-        out[0].1
+        out[0].body_string()
     );
     assert!(
-        out[0].1.contains("browscap:false"),
+        out[0].body_string().contains("browscap:false"),
         "get_browser() must return false (got: {:?})",
-        out[0].1
+        out[0].body_string()
     );
     Ok(())
 }

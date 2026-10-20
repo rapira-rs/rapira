@@ -1,6 +1,6 @@
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{assert_skip_allowed, drain, fixture, req, server_log};
+use tests::{Resp, assert_skip_allowed, drain, drain_resp, fixture, req, server_log};
 
 use crate::harness::Spawn;
 
@@ -10,12 +10,12 @@ const IMAP_INI: &str = concat!(
     "/fixtures/ini/imap_tests/imap.ini"
 );
 
-fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
+fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<Resp>> {
     let srv = Spawn::http(Mode::Worker, fixture(name))
         .php_ini(&std::fs::read_to_string(IMAP_INI)?)
         .spawn();
     uris.iter()
-        .map(|uri| Ok(drain(submit(srv.addr, req(uri))?)))
+        .map(|uri| Ok(drain_resp(submit(srv.addr, req(uri))?)))
         .collect()
 }
 
@@ -23,19 +23,19 @@ fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<(u16, String)>> {
 #[test]
 fn imap_timeout_is_snapshotted_at_minit() -> anyhow::Result<()> {
     let out = run("imap_tests/imap-timeout-worker.php", &["/", "/"])?;
-    if out[0].1 == "skip" {
+    if out[0].body_string() == "skip" {
         assert_skip_allowed("imap_tests/imap-timeout-worker.php");
         return Ok(());
     }
     let expected = "imap:open=17:after_ini_set=17:read=17:ini=5";
     assert_eq!(
-        (out[0].0, out[0].1.as_str()),
+        (out[0].status(), out[0].body_string().as_str()),
         (200, expected),
         "c-client must keep the MINIT snapshot after ini_set (got: {:?})",
         out[0]
     );
     assert_eq!(
-        (out[1].0, out[1].1.as_str()),
+        (out[1].status(), out[1].body_string().as_str()),
         (200, expected),
         "RINIT does not re-read the ini, so the next request sees the same snapshot (got: {:?})",
         out[1]
