@@ -106,6 +106,7 @@ pub fn boot_master(register: &[unsafe extern "C" fn()]) -> anyhow::Result<PhpMod
         error!(target: "rapira", "php_module_startup failed, shutting down");
         return Err(anyhow::anyhow!("php_module_startup failed"));
     }
+    unsafe { rapira_register_post_reader() };
     Ok(module)
 }
 

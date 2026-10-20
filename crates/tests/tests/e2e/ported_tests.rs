@@ -962,3 +962,101 @@ fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<
     assert!(resp.header("X-Ctl").is_none());
     Ok(())
 }
+
+/// Bodies reach $_POST and php://input whole in worker mode without a temp directory; post_max_size refuses $_POST only.
+#[test]
+fn request_bodies_worker() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        content_type: Option<&'static str>,
+        body: Vec<u8>,
+        ini: &'static str,
+        /// count($_POST) and its last value.
+        post: (usize, &'static str),
+        refused: bool,
+    }
+    // The body stays off the disk: an unwritable temp directory must not discard it.
+    const NO_TMP: &str = "sys_temp_dir = /nonexistent\nupload_tmp_dir = /nonexistent";
+    // n fields of 240 bytes, then z=end as the last field.
+    let form = |n: usize| -> Vec<u8> {
+        let mut fields: Vec<String> = (0..n)
+            .map(|i| format!("k{i}={}", "v".repeat(240)))
+            .collect();
+        fields.push("z=end".into());
+        fields.join("&").into_bytes()
+    };
+    let cases = [
+        Case {
+            name: "a 64 KiB urlencoded body builds $_POST past the 16 KiB post block",
+            method: Method::POST,
+            content_type: Some("application/x-www-form-urlencoded"),
+            body: form(256),
+            ini: NO_TMP,
+            post: (257, "end"),
+            refused: false,
+        },
+        Case {
+            name: "a 1 MiB octet-stream POST reaches php://input whole",
+            method: Method::POST,
+            content_type: Some("application/octet-stream"),
+            body: vec![b'x'; 1 << 20],
+            ini: NO_TMP,
+            post: (0, "-"),
+            refused: false,
+        },
+        Case {
+            name: "a 1 MiB PUT without a content type reaches php://input whole",
+            method: Method::PUT,
+            content_type: None,
+            body: vec![b'x'; 1 << 20],
+            ini: NO_TMP,
+            post: (0, "-"),
+            refused: false,
+        },
+        Case {
+            name: "post_max_size refuses $_POST and php://input keeps the body",
+            method: Method::POST,
+            content_type: Some("application/x-www-form-urlencoded"),
+            body: form(256),
+            ini: "post_max_size = 16K",
+            post: (0, "-"),
+            refused: true,
+        },
+    ];
+
+    let shared = std::fs::read_to_string(fixture("ini/shared/php.ini"))?;
+    for case in cases {
+        let srv = Spawn::http(Mode::Worker, fixture("ported_tests/body-worker.php"))
+            .php_ini(&format!("{shared}\n{}\n", case.ini))
+            .spawn();
+        let mut request = req("/");
+        *request.method_mut() = case.method.clone();
+        if let Some(ct) = case.content_type {
+            request
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+        }
+        request.body_mut().clone_from(&case.body);
+        let (status, got) = drain(submit(srv.addr, request)?);
+
+        let (count, last) = case.post;
+        let expected = format!(
+            "{count}|{last}|{}|{}",
+            case.body.len(),
+            String::from_utf8_lossy(&case.body)
+        );
+        assert_eq!(status, 200, "{}", case.name);
+        if case.refused {
+            let warning = format!(
+                "POST Content-Length of {} bytes exceeds the limit of 16384 bytes",
+                case.body.len()
+            );
+            assert!(got.contains(&warning), "{}: got {got:.300}", case.name);
+            assert!(got.ends_with(&expected), "{}: got {got:.300}", case.name);
+        } else {
+            assert!(got == expected, "{}: got {got:.300}", case.name);
+        }
+    }
+    Ok(())
+}
