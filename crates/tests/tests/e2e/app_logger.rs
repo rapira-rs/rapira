@@ -40,7 +40,7 @@ fn log_levels_map_onto_tracing_levels() {
 
     let got: Vec<(Level, &str)> = records
         .iter()
-        .map(|(lvl, msg, _)| (*lvl, msg.as_str()))
+        .map(|r| (r.level, r.message.as_str()))
         .collect();
 
     assert_eq!(
@@ -64,14 +64,22 @@ fn log_context_is_json_encoded() {
     let find = |needle: &str| {
         records
             .iter()
-            .find(|(_, msg, _)| msg == needle)
+            .find(|r| r.message == needle)
             .unwrap_or_else(|| panic!("no {needle:?} record in {records:?}"))
     };
 
-    assert_eq!(find("ctx-absent").2, "", "an omitted context adds no field");
-    assert_eq!(find("ctx-empty").2, "", "an empty array adds no field");
+    assert_eq!(
+        find("ctx-absent").context,
+        "",
+        "an omitted context adds no field"
+    );
+    assert_eq!(
+        find("ctx-empty").context,
+        "",
+        "an empty array adds no field"
+    );
 
-    let ctx = &find("ctx-full").2;
+    let ctx = &find("ctx-full").context;
     for fragment in [
         r#""route":"\/orders""#,
         r#""tries":3"#,
@@ -85,7 +93,11 @@ fn log_context_is_json_encoded() {
 /// PSR-3's `['exception' => $e]` stays diagnosable: Throwable state lives in private properties.
 #[test]
 fn log_context_carries_a_throwable() {
-    let (level, _, ctx) = app_record("app_logger/app-logger-exception.php");
+    let AppRecord {
+        level,
+        context: ctx,
+        ..
+    } = app_record("app_logger/app-logger-exception.php");
     assert_eq!(level, Level::ERROR);
 
     for fragment in [
@@ -112,7 +124,11 @@ fn log_context_carries_a_throwable() {
 /// A context value json_encode cannot represent must not throw, drop the record, or lose siblings.
 #[test]
 fn log_context_tolerates_unencodable_values() {
-    let (level, msg, ctx) = app_record("app_logger/app-logger-unencodable.php");
+    let AppRecord {
+        level,
+        message: msg,
+        context: ctx,
+    } = app_record("app_logger/app-logger-unencodable.php");
 
     assert_eq!(level, Level::ERROR);
     assert_eq!(msg, "hostile");
@@ -131,7 +147,7 @@ fn log_context_tolerates_unencodable_values() {
 /// Common context values encode as expected and non-public properties never leak.
 #[test]
 fn log_context_encodes_common_php_values() {
-    let (_, _, ctx) = app_record("app_logger/app-logger-values.php");
+    let AppRecord { context: ctx, .. } = app_record("app_logger/app-logger-values.php");
 
     for fragment in [
         r#""obj":{"id":"acc_1","note":null}"#,
@@ -153,7 +169,11 @@ fn log_context_encodes_common_php_values() {
 /// createFromDateString() DateIntervals encode as `from_string`/`date_string`, not y/m/d.
 #[test]
 fn app_logger_dateinterval_easy() {
-    let (level, msg, ctx) = app_record("app_logger/app-logger-dateinterval.php");
+    let AppRecord {
+        level,
+        message: msg,
+        context: ctx,
+    } = app_record("app_logger/app-logger-dateinterval.php");
 
     assert_eq!(level, Level::ERROR);
     assert_eq!(msg, "date-interval");
@@ -171,7 +191,14 @@ fn app_logger_dateinterval_easy() {
 #[test]
 fn cycles_are_broken_without_a_diagnostic() {
     let (records, phpdiag) = app_records("app_logger/limits-cycles.php");
-    let [(level, _, ctx)] = records.as_slice() else {
+    let [
+        AppRecord {
+            level,
+            context: ctx,
+            ..
+        },
+    ] = records.as_slice()
+    else {
         panic!("expected one app record, got {records:?}");
     };
 
@@ -194,7 +221,11 @@ fn cycles_are_broken_without_a_diagnostic() {
 /// A throwing jsonSerialize() must not escape log(): the record still reaches the log.
 #[test]
 fn log_survives_a_throwing_json_serializer() {
-    let (level, msg, ctx) = app_record("app_logger/app-logger-throwing-serializer.php");
+    let AppRecord {
+        level,
+        message: msg,
+        context: ctx,
+    } = app_record("app_logger/app-logger-throwing-serializer.php");
     assert_eq!(level, Level::ERROR);
     assert_eq!(msg, "bombed");
     assert!(ctx.contains(r#""keep":"visible""#), "got: {ctx:?}");

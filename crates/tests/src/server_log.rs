@@ -18,8 +18,14 @@ pub struct Captured {
     pub context: String,
 }
 
-/// One `app`-target record left by `\Rapira\log()`: level, message, context JSON.
-pub type AppRecord = (tracing::Level, String, String);
+/// One `app`-target record left by `\Rapira\log()`.
+#[derive(Debug)]
+pub struct AppRecord {
+    pub level: tracing::Level,
+    pub message: String,
+    /// The context as JSON.
+    pub context: String,
+}
 
 /// The `result` field of a record's context as text; a JSON string stays bare.
 fn result_text(ctx: &Value) -> String {
@@ -52,7 +58,11 @@ pub fn app_records(log: &Path) -> (Vec<AppRecord>, Vec<String>) {
     let app = all
         .iter()
         .filter(|c| c.target == "app")
-        .map(|c| (c.level, c.message.clone(), c.context.clone()))
+        .map(|c| AppRecord {
+            level: c.level,
+            message: c.message.clone(),
+            context: c.context.clone(),
+        })
         .collect();
     let php = all
         .into_iter()

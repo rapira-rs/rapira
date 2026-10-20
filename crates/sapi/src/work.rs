@@ -261,14 +261,19 @@ mod tests {
             WorkerStops,
             RoomFrees,
         }
+        struct Counts {
+            handled: u64,
+            errors: u64,
+            failed_on_full_queue: u64,
+            pending: u64,
+        }
         struct Case {
             name: &'static str,
             /// What happens 1 s into the wait.
             during: During,
             /// None: the client left, so the submit gives no result.
             result: Option<Result<(), Refused>>,
-            /// handled, errors, failed_on_full_queue, pending.
-            want: (u64, u64, u64, u64),
+            want: Counts,
         }
         const ACTION_DELAY: Duration = Duration::from_secs(1);
         let cases = [
@@ -276,26 +281,46 @@ mod tests {
                 name: "shed after the wait",
                 during: During::Nothing,
                 result: Some(Err(Refused::Saturated)),
-                want: (1, 1, 1, 0),
+                want: Counts {
+                    handled: 1,
+                    errors: 1,
+                    failed_on_full_queue: 1,
+                    pending: 0,
+                },
             },
             Case {
                 name: "the client leaves during the wait",
                 during: During::ClientLeaves,
                 result: None,
-                want: (0, 0, 1, 0),
+                want: Counts {
+                    handled: 0,
+                    errors: 0,
+                    failed_on_full_queue: 1,
+                    pending: 0,
+                },
             },
             Case {
                 name: "the worker stops during the wait",
                 during: During::WorkerStops,
                 result: Some(Err(Refused::Stopped)),
-                want: (0, 0, 1, 0),
+                want: Counts {
+                    handled: 0,
+                    errors: 0,
+                    failed_on_full_queue: 1,
+                    pending: 0,
+                },
             },
             Case {
                 name: "room frees during the wait",
                 during: During::RoomFrees,
                 result: Some(Ok(())),
                 // The unit is in the queue. Only the pull of the PHP thread subtracts it from `pending`.
-                want: (0, 0, 0, 1),
+                want: Counts {
+                    handled: 0,
+                    errors: 0,
+                    failed_on_full_queue: 0,
+                    pending: 1,
+                },
             },
         ];
         for case in cases {
@@ -329,7 +354,12 @@ mod tests {
                     slot.failed_on_full_queue.load(Ordering::Relaxed),
                     slot.pending.load(Ordering::Relaxed),
                 ),
-                case.want,
+                (
+                    case.want.handled,
+                    case.want.errors,
+                    case.want.failed_on_full_queue,
+                    case.want.pending,
+                ),
                 "{}: handled, errors, failed_on_full_queue, pending",
                 case.name
             );

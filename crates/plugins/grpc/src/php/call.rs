@@ -1047,12 +1047,17 @@ mod tests {
         }
     }
 
-    /// A status triple: the code, the message and the (type URL, value) details.
-    type Triple = (u32, &'static str, &'static [(&'static str, &'static [u8])]);
+    #[derive(Clone, Copy)]
+    struct Status {
+        code: u32,
+        message: &'static str,
+        /// The (type URL, value) details.
+        details: &'static [(&'static str, &'static [u8])],
+    }
 
     enum Finish {
         Respond(&'static [u8]),
-        Fail(Triple),
+        Fail(Status),
     }
 
     enum Sent {
@@ -1060,7 +1065,7 @@ mod tests {
         Outcome {
             headers: &'static [(&'static str, &'static str)],
             trailers: &'static [(&'static str, &'static str)],
-            result: Result<&'static [u8], Triple>,
+            result: Result<&'static [u8], Status>,
         },
         /// The state is dropped unfinalized: the receiver sees a closed channel.
         Lost,
@@ -1081,9 +1086,15 @@ mod tests {
 
     #[test]
     fn finish_sends_one_outcome_in_wire_form() {
+        struct Entry {
+            trailer: bool,
+            binary: bool,
+            name: &'static [u8],
+            value: &'static [u8],
+        }
         struct Case {
             name: &'static str,
-            adds: &'static [(bool, bool, &'static [u8], &'static [u8])],
+            adds: &'static [Entry],
             drop_receiver: bool,
             finishes: &'static [Finish],
             verbs: &'static [Verb],
@@ -1096,10 +1107,30 @@ mod tests {
             Case {
                 name: "respond carries both halves",
                 adds: &[
-                    (false, false, b"x-a", b"1"),
-                    (false, false, b"x-a", b"2"),
-                    (false, true, b"x-b-bin", b"\x01\x02"),
-                    (true, false, b"x-t", b"w"),
+                    Entry {
+                        trailer: false,
+                        binary: false,
+                        name: b"x-a",
+                        value: b"1",
+                    },
+                    Entry {
+                        trailer: false,
+                        binary: false,
+                        name: b"x-a",
+                        value: b"2",
+                    },
+                    Entry {
+                        trailer: false,
+                        binary: true,
+                        name: b"x-b-bin",
+                        value: b"\x01\x02",
+                    },
+                    Entry {
+                        trailer: true,
+                        binary: false,
+                        name: b"x-t",
+                        value: b"w",
+                    },
                 ],
                 drop_receiver: false,
                 finishes: &[Finish::Respond(b"\x0a\x02hi")],
@@ -1116,22 +1147,22 @@ mod tests {
                 name: "fail carries the status",
                 adds: &[],
                 drop_receiver: false,
-                finishes: &[Finish::Fail((
-                    5,
-                    "no invoice",
-                    &[("type.googleapis.com/google.rpc.ErrorInfo", b"\x0a\x01x")],
-                ))],
+                finishes: &[Finish::Fail(Status {
+                    code: 5,
+                    message: "no invoice",
+                    details: &[("type.googleapis.com/google.rpc.ErrorInfo", b"\x0a\x01x")],
+                })],
                 verbs: &[Verb::Ok],
                 finalized: true,
                 cancelled: false,
                 sent: Sent::Outcome {
                     headers: &[],
                     trailers: &[],
-                    result: Err((
-                        5,
-                        "no invoice",
-                        &[("type.googleapis.com/google.rpc.ErrorInfo", b"\x0a\x01x")],
-                    )),
+                    result: Err(Status {
+                        code: 5,
+                        message: "no invoice",
+                        details: &[("type.googleapis.com/google.rpc.ErrorInfo", b"\x0a\x01x")],
+                    }),
                 },
             },
             Case {
@@ -1172,9 +1203,9 @@ mod tests {
         for c in CASES {
             let (mut st, rx) = state();
             let mut rx = (!c.drop_receiver).then_some(rx);
-            for &(trailer, binary, name, value) in c.adds {
+            for e in c.adds {
                 assert_eq!(
-                    add_core(Some(&mut st), trailer, binary, name, value),
+                    add_core(Some(&mut st), e.trailer, e.binary, e.name, e.value),
                     Verb::Ok,
                     "{}",
                     c.name
@@ -1185,9 +1216,7 @@ mod tests {
                 .iter()
                 .map(|f| match f {
                     Finish::Respond(message) => finish(&mut st, Ok(Bytes::from_static(message))),
-                    Finish::Fail((code, message, details)) => {
-                        finish(&mut st, Err(status(*code, message, details)))
-                    }
+                    Finish::Fail(s) => finish(&mut st, Err(status(s.code, s.message, s.details))),
                 })
                 .collect();
             assert_eq!(verbs, c.verbs, "{}", c.name);
@@ -1206,7 +1235,7 @@ mod tests {
                         trailers: map(trailers),
                         outcome: result
                             .map(Bytes::from_static)
-                            .map_err(|(code, message, details)| status(code, message, details)),
+                            .map_err(|s| status(s.code, s.message, s.details)),
                     };
                     let got = rx.as_mut().map(|rx| rx.try_recv());
                     assert_eq!(got, Some(Ok(want)), "{}", c.name);

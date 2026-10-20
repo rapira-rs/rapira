@@ -15,16 +15,23 @@ pub struct Build {
 /// Prometheus 3 fails a scrape without a known content type: https://prometheus.io/docs/prometheus/latest/migration/#scrape-protocols
 pub(crate) const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
-/// A family with one sample for each pool: the name, the type, the help text and the function that gives the value of a pool.
-type PoolFamily = (
-    &'static str,
-    &'static str,
-    &'static str,
-    fn(&PoolStats) -> u64,
-);
+/// A family with one sample for each pool.
+struct PoolFamily {
+    name: &'static str,
+    /// The metric type.
+    kind: &'static str,
+    help: &'static str,
+    /// Gives the value of a pool.
+    value: fn(&PoolStats) -> u64,
+}
 
-/// A memory family: the name, the help text and the function that gives the value from the reading of a worker.
-type MemoryFamily = (&'static str, &'static str, fn(&Memory) -> Option<u64>);
+/// A memory family.
+struct MemoryFamily {
+    name: &'static str,
+    help: &'static str,
+    /// Gives the value from the reading of a worker.
+    value: fn(&Memory) -> Option<u64>,
+}
 
 /// The text format: each family is one group, with the HELP and TYPE lines first. All label values are fixed ASCII strings, so nothing needs escaping. https://prometheus.io/docs/instrumenting/exposition_formats/#prometheus-text-format
 pub(crate) fn render(pools: &[PoolStats], build: &Build) -> String {
@@ -43,44 +50,50 @@ pub(crate) fn render(pools: &[PoolStats], build: &Build) -> String {
     }
 
     let per_pool: [PoolFamily; 6] = [
-        (
-            "rapira_workers_configured",
-            "gauge",
-            "The processes value of the pool config.",
-            |p| p.configured as u64,
-        ),
-        (
-            "rapira_requests_total",
-            "counter",
-            "Units of work that the workers finished in any way.",
-            |p| p.requests,
-        ),
-        (
-            "rapira_requests_failed_total",
-            "counter",
-            "Units of work that the host could not complete.",
-            |p| p.failed,
-        ),
-        (
-            "rapira_requests_failed_on_full_queue_total",
-            "counter",
-            "Units of work that found the worker queue full and never entered it.",
-            |p| p.failed_on_full_queue,
-        ),
-        (
-            "rapira_requests_queued",
-            "gauge",
-            "Units of work that wait for the PHP thread.",
-            |p| p.queued,
-        ),
-        (
-            "rapira_script_restarts_total",
-            "counter",
-            "Entrypoint restarts inside a worker process.",
-            |p| p.script_restarts,
-        ),
+        PoolFamily {
+            name: "rapira_workers_configured",
+            kind: "gauge",
+            help: "The processes value of the pool config.",
+            value: |p| p.configured as u64,
+        },
+        PoolFamily {
+            name: "rapira_requests_total",
+            kind: "counter",
+            help: "Units of work that the workers finished in any way.",
+            value: |p| p.requests,
+        },
+        PoolFamily {
+            name: "rapira_requests_failed_total",
+            kind: "counter",
+            help: "Units of work that the host could not complete.",
+            value: |p| p.failed,
+        },
+        PoolFamily {
+            name: "rapira_requests_failed_on_full_queue_total",
+            kind: "counter",
+            help: "Units of work that found the worker queue full and never entered it.",
+            value: |p| p.failed_on_full_queue,
+        },
+        PoolFamily {
+            name: "rapira_requests_queued",
+            kind: "gauge",
+            help: "Units of work that wait for the PHP thread.",
+            value: |p| p.queued,
+        },
+        PoolFamily {
+            name: "rapira_script_restarts_total",
+            kind: "counter",
+            help: "Entrypoint restarts inside a worker process.",
+            value: |p| p.script_restarts,
+        },
     ];
-    for (name, kind, help, value) in per_pool {
+    for PoolFamily {
+        name,
+        kind,
+        help,
+        value,
+    } in per_pool
+    {
         family(&mut out, name, kind, help);
         for p in pools {
             sample(&mut out, name, &[("pool", p.name)], value(p));
@@ -105,18 +118,18 @@ pub(crate) fn render(pools: &[PoolStats], build: &Build) -> String {
     }
 
     let memory: [MemoryFamily; 2] = [
-        (
-            "rapira_worker_rss_bytes",
-            "Resident memory of a worker in bytes.",
-            |m| m.rss,
-        ),
-        (
-            "rapira_worker_pss_bytes",
-            "Proportional memory of a worker in bytes.",
-            |m| m.pss,
-        ),
+        MemoryFamily {
+            name: "rapira_worker_rss_bytes",
+            help: "Resident memory of a worker in bytes.",
+            value: |m| m.rss,
+        },
+        MemoryFamily {
+            name: "rapira_worker_pss_bytes",
+            help: "Proportional memory of a worker in bytes.",
+            value: |m| m.pss,
+        },
     ];
-    for (name, help, value) in memory {
+    for MemoryFamily { name, help, value } in memory {
         family(&mut out, name, "gauge", help);
         for p in pools {
             for w in &p.workers {
