@@ -326,19 +326,20 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
 
 #[test]
 fn scoreboard_counts_classic() -> anyhow::Result<()> {
-    // A classic worker runs one entrypoint, so each script gets its own worker: (handled, errors).
-    let counts = |script: &str, requests: usize| -> anyhow::Result<(u64, u64)> {
+    // A classic worker runs one entrypoint, so each script gets its own worker.
+    let counts = |script: &str, requests: usize| -> anyhow::Result<Slot> {
         let srv = Spawn::http(Mode::Classic, fixture(script)).spawn();
         for _ in 0..requests {
             let _ = drain(submit(srv.addr, req("/"))?);
         }
-        let snap = slot(&srv);
-        Ok((snap.handled, snap.errors))
+        Ok(slot(&srv))
     };
 
-    assert_eq!(counts("shared/hello.php", 2)?, (2, 0), "two clean requests");
+    let snap = counts("shared/hello.php", 2)?;
+    assert_eq!((snap.handled, snap.errors), (2, 0), "two clean requests");
+    let snap = counts("basic_tests/failboot.php", 1)?;
     assert_eq!(
-        counts("basic_tests/failboot.php", 1)?,
+        (snap.handled, snap.errors),
         (1, 1),
         "one PHP error (failboot.php fails to compile)"
     );

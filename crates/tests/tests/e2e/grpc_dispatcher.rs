@@ -158,10 +158,18 @@ fn application(map: &HeaderMap) -> HeaderMap {
 enum Want {
     /// The message, with no application metadata.
     Ok(&'static str),
-    /// The response headers, the trailers and the message.
-    Reply(Fields, Fields, &'static str),
-    /// grpc-status, grpc-message and the type URL of the one detail, with no application metadata. `tests::grpc::status_bytes` gives the `google.rpc.Status` of NOT_FOUND `no invoice` with a detail that packs 0a 01 78.
-    Status(&'static str, &'static str, &'static str),
+    Reply {
+        headers: Fields,
+        trailers: Fields,
+        message: &'static str,
+    },
+    /// A status with no application metadata. `tests::grpc::status_bytes` gives the `google.rpc.Status` of NOT_FOUND `no invoice` with a detail that packs 0a 01 78.
+    Status {
+        grpc_status: &'static str,
+        grpc_message: &'static str,
+        /// The type URL of the one detail.
+        type_url: &'static str,
+    },
     /// PHP drops the call without an outcome: the plugin answers INTERNAL `internal error`.
     Lost,
 }
@@ -170,8 +178,16 @@ impl Want {
     fn outcome(&self) -> Outcome {
         let (status, message, headers, trailers, reply) = match self {
             Self::Ok(reply) => ("0", None, &[][..], &[][..], Some(reply)),
-            Self::Reply(headers, trailers, reply) => ("0", None, *headers, *trailers, Some(reply)),
-            Self::Status(status, message, _) => (*status, Some(*message), &[][..], &[][..], None),
+            Self::Reply {
+                headers,
+                trailers,
+                message,
+            } => ("0", None, *headers, *trailers, Some(message)),
+            Self::Status {
+                grpc_status,
+                grpc_message,
+                ..
+            } => (*grpc_status, Some(*grpc_message), &[][..], &[][..], None),
             Self::Lost => ("13", Some("internal error"), &[][..], &[][..], None),
         };
         Outcome {
@@ -186,7 +202,7 @@ impl Want {
     /// The `google.rpc.Status` that grpc-status-details-bin must carry. None: not checked.
     fn details(&self) -> Option<Vec<u8>> {
         match self {
-            Self::Status(_, _, url) => Some(status_bytes(url)),
+            Self::Status { type_url, .. } => Some(status_bytes(type_url)),
             _ => None,
         }
     }
@@ -211,13 +227,24 @@ const OUTCOME_CASES: &[OutcomeCase] = &[
         name: "response metadata rides the outcome",
         steps: &[(
             "meta",
-            Want::Reply(&[("x-h", "v"), ("x-b-bin", "AQI")], &[("x-t", "w")], "meta"),
+            Want::Reply {
+                headers: &[("x-h", "v"), ("x-b-bin", "AQI")],
+                trailers: &[("x-t", "w")],
+                message: "meta",
+            },
         )],
         log: None,
     },
     OutcomeCase {
         name: "fail carries the status triple",
-        steps: &[("fail", Want::Status("5", "no invoice", ERROR_INFO))],
+        steps: &[(
+            "fail",
+            Want::Status {
+                grpc_status: "5",
+                grpc_message: "no invoice",
+                type_url: ERROR_INFO,
+            },
+        )],
         log: None,
     },
     OutcomeCase {
