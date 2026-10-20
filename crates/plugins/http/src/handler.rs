@@ -459,21 +459,22 @@ async fn submit(
     request: Request,
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
     let bytes = request.content_length.max(0) as usize;
-    let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
+    let request = parse_multipart(request, shared.cfg.uploads.as_ref())?;
     let (exchange, reply) = Exchange::new(request, shared.cfg.superglobals);
     shared.intake.submit(Box::new(exchange), bytes).await?;
     Ok(reply)
 }
 
 /// Parses a multipart body before submit, so a rejected body never reaches the pending and active counters. `limits` is None outside dispatcher mode.
-async fn parse_multipart(
+/// The parse and the spool writes run on the IO thread: this removes a thread switch per request and allows at most one spool file create per IO thread at a time.
+fn parse_multipart(
     mut req: Request,
     limits: Option<&multipart::Limits>,
 ) -> Result<Request, Rejection> {
     let Some(limits) = limits else {
         return Ok(req);
     };
-    let rapira_sapi::types::Body::Raw(raw) = &mut req.body else {
+    let rapira_sapi::types::Body::Raw(raw) = &req.body else {
         return Ok(req);
     };
     if raw.get_ref().is_empty() {
@@ -496,15 +497,8 @@ async fn parse_multipart(
         return Ok(req);
     }
     let boundary = multipart::boundary(content_type)?;
-    let bytes = std::mem::take(raw.get_mut());
-    let limits = limits.clone();
-    let parsed = tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
-        .await
-        .map_err(|e| Rejection {
-            status: http::StatusCode::INTERNAL_SERVER_ERROR,
-            reason: format!("multipart parse task failed: {e}"),
-        })?;
-    req.body = rapira_sapi::types::Body::Multipart(parsed?);
+    let parsed = multipart::parse(raw.get_ref(), &boundary, limits)?;
+    req.body = rapira_sapi::types::Body::Multipart(parsed);
     Ok(req)
 }
 
