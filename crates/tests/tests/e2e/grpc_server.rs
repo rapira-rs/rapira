@@ -38,7 +38,7 @@ enum On {
     Unix,
 }
 
-/// Sources: PROTOCOL-HTTP2 (envelope, `grpc-status`, 12 for an unknown method or encoding), PROTOCOL-WEB (the 0x80 trailer frame), the Connect protocol (unary request, GET for no-side-effects methods, 404 for an unknown procedure), proto3 JSON, and the plugin README (gzip messages, 8 for a message over 4 MiB).
+/// Sources: PROTOCOL-HTTP2 (envelope, `grpc-status`, 12 for an unknown method or encoding), PROTOCOL-WEB (the 0x80 trailer frame), the Connect protocol (unary request, GET for no-side-effects methods, 404 for an unknown procedure), proto3 JSON, and the plugin README (gzip requests, uncompressed replies, 8 for a message over 4 MiB).
 #[tokio::test]
 async fn each_protocol_reaches_php_over_the_wire() {
     struct Case<'a> {
@@ -53,12 +53,14 @@ async fn each_protocol_reaches_php_over_the_wire() {
         grpc_status: Option<&'static str>,
         content_type: Option<&'static str>,
         /// None: not checked.
-        reply: Option<&'static [u8]>,
+        reply: Option<&'a [u8]>,
         /// The call reaches PHP.
         php: bool,
     }
     let grpc: Fields = &[("content-type", "application/grpc"), ("te", "trailers")];
     let over_limit = envelope(&vec![0; 4 * 1024 * 1024 + 1]);
+    // EchoRequest.text of 2048 bytes, over the 1 KiB that connect-rust compresses from by default.
+    let large = envelope(&[&[0x0a, 0x80, 0x10][..], &[b'a'; 2048]].concat());
     let cases = [
         Case {
             name: "grpc over h2c tcp",
@@ -250,6 +252,25 @@ async fn each_protocol_reaches_php_over_the_wire() {
             content_type: None,
             // PHP echoes the message that it got, so the uncompressed reply shows that PHP got HI.
             reply: Some(HI_FRAME),
+            php: true,
+        },
+        Case {
+            name: "gzip accepted, reply stays plain",
+            on: On::Tcp,
+            wire: Wire::H2,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/grpc"),
+                ("te", "trailers"),
+                ("grpc-accept-encoding", "gzip"),
+            ],
+            body: &large,
+            status: 200,
+            grpc_status: Some("0"),
+            content_type: None,
+            // Compressed-Flag 0: the echoed message is not compressed.
+            reply: Some(&large),
             php: true,
         },
         Case {
