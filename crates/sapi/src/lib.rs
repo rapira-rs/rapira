@@ -39,6 +39,8 @@ unsafe extern "C" {
     // Holds boot-registered shutdown functions until cycle end (module.c).
     pub fn rapira_stash_boot_shutdown_functions();
     pub fn rapira_request_activate() -> c_int;
+    // The post readers that hand PHP the buffered body; runs after every MINIT (module.c).
+    pub fn rapira_register_post_reader();
     pub fn rapira_request_shutdown() -> c_int;
     // The execution timer is disarmed while parked in receive() and re-armed with the captured per-cycle budget on unit handout (module.c).
     pub fn rapira_receive_untimed();
