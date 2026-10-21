@@ -4,12 +4,10 @@ use std::time::Duration;
 use anyhow::Context;
 use rapira_master::{PoolConfig, WorkerEnv};
 
-use crate::PoolRun;
+use crate::{PoolRun, PoolRunRes};
 
 /// The observability pool: one process without PHP and without a request timeout. The listener is bound here, before the fork.
-pub fn pool_run(
-    settings: rapira_observability::config::Settings,
-) -> anyhow::Result<(PoolRun, PoolConfig)> {
+pub fn pool_run(settings: rapira_observability::config::Settings) -> anyhow::Result<PoolRunRes> {
     let build = rapira_observability::Build {
         version: env!("CARGO_PKG_VERSION"),
         php_version: rapira_sapi::linked_php_version(),
@@ -21,7 +19,10 @@ pub fn pool_run(
         processes: 1,
         request_terminate_timeout: Duration::ZERO,
     };
-    Ok((PoolRun::Observability { server }, pool))
+    Ok(PoolRunRes {
+        pr: PoolRun::Observability { server },
+        pc: pool,
+    })
 }
 
 /// Returns the process exit code for the master's fork bracket. The process runs no PHP.
