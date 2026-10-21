@@ -48,6 +48,13 @@ fn reload_keeps_the_worker_count_when_the_last_old_worker_dies() {
         p.len() == 2
     });
     signal(old, libc::SIGKILL);
+    // The master reaps a worker after all its threads exit. Before that, the blocked accept thread of the old worker can take the EPOLLEXCLUSIVE wakeup of the next connection.
+    let reaped = format!("http pool: worker {old} killed by signal {}", libc::SIGKILL);
+    assert!(
+        wait_log_contains(&srv, &reaped, Duration::from_secs(5)),
+        "no {reaped:?} record\n{}",
+        diagnostics(&srv)
+    );
     let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET / after the kill");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     wait_workers(
