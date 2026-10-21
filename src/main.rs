@@ -89,11 +89,13 @@ fn check_mode(name: &str, served: &[Mode], mode: Mode) -> anyhow::Result<()> {
     )
 }
 
+pub struct PoolRunRes {
+    pr: PoolRun,
+    pc: PoolConfig,
+}
+
 /// Checks the pool mode, binds the pool's listeners and packs what the master forks with.
-fn pool_run(
-    mut plugin: Box<dyn Plugin>,
-    pool: PoolSettings,
-) -> anyhow::Result<(PoolRun, PoolConfig)> {
+fn pool_run(mut plugin: Box<dyn Plugin>, pool: PoolSettings) -> anyhow::Result<PoolRunRes> {
     let name: &'static str = plugin.name();
     check_mode(name, plugin.modes(), pool.mode)?;
     // An address that an earlier pool bound fails here: that pool keeps its listener open.
@@ -105,7 +107,10 @@ fn pool_run(
         processes: pool.processes,
         request_terminate_timeout: pool.request_terminate_timeout,
     };
-    Ok((PoolRun::Php { plugin, pool }, cfg))
+    Ok(PoolRunRes {
+        pr: PoolRun::Php { plugin, pool },
+        pc: cfg,
+    })
 }
 
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
@@ -115,7 +120,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
     // `WorkerEnv::pool` indexes both lists, so they keep one order. The observability pool goes first, so the slot cap error of the master always names a PHP pool.
-    let mut runs: Vec<(PoolRun, PoolConfig)> = Vec::new();
+    let mut runs: Vec<PoolRunRes> = Vec::new();
     if let Some(observability) = settings.observability {
         runs.push(observability::pool_run(observability)?);
     }
@@ -129,7 +134,9 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         let plugin = rapira_grpc::Server::from_settings(grpc)?;
         runs.push(pool_run(Box::new(plugin), pool)?);
     }
-    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) = runs.into_iter().unzip();
+
+    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) =
+        runs.into_iter().map(|r| (r.pr, r.pc)).unzip();
 
     // MINIT once, after every pool bound its listeners. Every linked plugin registers its classes, whatever pools are configured.
     let module: rapira_sapi::PhpModule = rapira_sapi::boot_master(&[
