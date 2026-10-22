@@ -222,7 +222,7 @@ curl -H 'Content-Type: application/json' -d '{"text":"hi"}' http://127.0.0.1:500
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for build and test instructions. The documentation source is in [rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io).
+Outside contributors must request [contributor access](CONTRIBUTING.md#contributor-access) and wait for maintainer approval before opening a pull request. See [CONTRIBUTING.md](CONTRIBUTING.md) for build and test instructions. The documentation source is in [rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io).
 
 ## License
 

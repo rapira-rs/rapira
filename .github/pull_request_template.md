@@ -1,3 +1,5 @@
+Read the [contributor access policy](https://github.com/rapira-rs/rapira/blob/main/CONTRIBUTING.md#contributor-access) before you submit a pull request.
+
 # Reason for This PR
 
 `[Author TODO: add issue # or explain reasoning.]`

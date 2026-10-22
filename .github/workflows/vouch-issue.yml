@@ -1,0 +1,24 @@
+name: Vouch Issue
+
+on:
+    issues:
+        types: [opened, reopened]
+
+permissions: {}
+
+jobs:
+    check:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        permissions:
+            contents: read
+            issues: write
+        steps:
+            - uses: mitchellh/vouch/action/check-issue@d66fa29a64600490892131ad87597c30c91fcac4 # v1.5.0
+              with:
+                  issue-number: ${{ github.event.issue.number }}
+                  require-vouch: false
+                  auto-close: true
+                  vouched-file: .github/VOUCHED.td
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}

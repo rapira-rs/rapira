@@ -1,0 +1,30 @@
+name: Vouch PR
+
+on:
+    # The checker reads default-branch files and API data: https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target
+    pull_request_target: # zizmor: ignore[dangerous-triggers]
+        types: [opened, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+    check:
+        runs-on: ubuntu-latest
+        timeout-minutes: 5
+        permissions:
+            contents: read
+            pull-requests: write
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  ref: ${{ github.event.repository.default_branch }}
+                  persist-credentials: false
+            - uses: mitchellh/vouch/action/check-pr@d66fa29a64600490892131ad87597c30c91fcac4 # v1.5.0
+              with:
+                  pr-number: ${{ github.event.pull_request.number }}
+                  require-vouch: true
+                  auto-close: true
+                  vouched-file: .github/VOUCHED.td
+                  template-file: .github/vouch/closed.md
+              env:
+                  GITHUB_TOKEN: ${{ github.token }}
