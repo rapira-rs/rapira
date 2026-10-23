@@ -2,8 +2,8 @@ name: Vouch PR
 
 on:
     # The checker reads default-branch files and API data: https://docs.github.com/en/actions/reference/security/securely-using-pull_request_target
-    pull_request_target: # zizmor: ignore[dangerous-triggers]
-        types: [opened, reopened, synchronize]
+    pull_request_target:
+        types: [opened, reopened]
 
 permissions: {}
 

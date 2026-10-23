@@ -13,21 +13,20 @@ Rapira uses [Vouch](https://github.com/mitchellh/vouch) to manage permission to 
 
 Vouch closes pull requests from contributors without approval. An approval applies to this repository. It does not grant repository write access or replace code review. A maintainer must also approve external fork CI runs under the repository's GitHub Actions policy.
 
-You can report bugs and request features without Vouch approval. Vouch closes issues and pull requests from blocked external contributors. Vouch exempts accounts with repository write access and bot logins that end in `[bot]`.
+You can report bugs and request features without Vouch approval.
 
 ### Manage contributor access
 
-Maintainers record access decisions in [`.github/VOUCHED.td`](.github/VOUCHED.td):
+Maintainers record approvals in [`.github/VOUCHED.td`](.github/VOUCHED.td):
 
 - Approve a contributor: add `github:username`.
 - Withdraw approval: remove the contributor's entry.
-- Block a contributor: use `-github:username Reason`.
 
-Use the request author's GitHub username without `@`. Keep one entry per username. Replace an existing entry when the decision changes. Usernames are case-insensitive. Update the entry if the account is renamed.
+Use the request author's GitHub username without `@`. Keep one entry per username. Usernames are case-insensitive. Update the entry if the account is renamed.
 
-Commit the change with a signature and sign-off, for example `git commit -s -S -m "chore: update contributor access"`. Include the request issue link in the commit body. The decision takes effect when the change reaches `main`. Confirm the result in the request issue. An approved contributor can then reopen a PR that Vouch closed.
+Commit the change with a signature and sign-off, for example `git commit -s -S -m "chore: update contributor access"`. Include the request issue link in the commit body. The decision takes effect when the change reaches `main`. Confirm the result in the request issue. The contributor can then open a new PR. A maintainer can also reopen a PR that Vouch closed.
 
-The workflows check PRs when they are opened, reopened, or updated with new commits. They check issues when they are opened or reopened. After blocking a user, maintainers must close that user's existing contributions. Removing write access requires a separate GitHub permission change.
+The workflow checks PRs when they are opened or reopened. A list change does not affect PRs that are already open. To block a user, [block the account in the organization](https://docs.github.com/en/communities/maintaining-your-safety-on-github/blocking-a-user-from-your-organization). Then close the user's open issues and pull requests.
 
 Repository administrators can find the activation requirements in [the Vouch setup guide](.github/vouch/README.md).
 
