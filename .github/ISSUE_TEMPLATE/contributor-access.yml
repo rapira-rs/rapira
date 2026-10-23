@@ -1,0 +1,27 @@
+name: Contributor access
+description: Request permission to submit pull requests
+title: "[CONTRIBUTOR ACCESS]: "
+labels: ["needs-triage"]
+assignees:
+  - rustatian
+body:
+  - type: markdown
+    attributes:
+      value: |
+        This request is for you, the issue author. A maintainer must approve your access before you open a pull request. See [contributor access](https://github.com/rapira-rs/rapira/blob/main/CONTRIBUTING.md#contributor-access).
+
+  - type: textarea
+    id: proposed-contribution
+    attributes:
+      label: Proposed contribution
+      description: Describe the change you want to make, or link to an issue with the details.
+    validations:
+      required: true
+
+  - type: textarea
+    id: supporting-evidence
+    attributes:
+      label: Supporting evidence
+      description: Provide links to prior contributions, code samples, or other work a maintainer can review.
+    validations:
+      required: true

@@ -2,6 +2,34 @@
 
 This repository contains the server: the SAPI crate (`crates/sapi`), the plugins, the pre-fork master and the `rapira` binary. The documentation site is a separate repository, [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io) - docs changes go there (see [contributing to the docs](https://rapira.rs/docs/contributing)).
 
+## Contributor access
+
+Rapira uses [Vouch](https://github.com/mitchellh/vouch) to manage permission to submit pull requests. Contributors with repository write, maintain, or admin permission can submit pull requests. Other contributors need a maintainer's approval.
+
+1. Open a [contributor access request](https://github.com/rapira-rs/rapira/issues/new?template=contributor-access.yml).
+2. Describe your proposed contribution and provide evidence that a maintainer can review.
+3. Wait for a maintainer to approve your access.
+4. Open your pull request after the approval is recorded.
+
+Vouch closes pull requests from contributors without approval. An approval applies to this repository. It does not grant repository write access or replace code review. A maintainer must also approve external fork CI runs under the repository's GitHub Actions policy.
+
+You can report bugs and request features without Vouch approval.
+
+### Manage contributor access
+
+Maintainers record approvals in [`.github/VOUCHED.td`](.github/VOUCHED.td):
+
+- Approve a contributor: add `github:username`.
+- Withdraw approval: remove the contributor's entry.
+
+Use the request author's GitHub username without `@`. Keep one entry per username. Usernames are case-insensitive. Update the entry if the account is renamed.
+
+Commit the change with a signature and sign-off, for example `git commit -s -S -m "chore: update contributor access"`. Include the request issue link in the commit body. The decision takes effect when the change reaches `main`. Confirm the result in the request issue. The contributor can then open a new PR. A maintainer can also reopen a PR that Vouch closed.
+
+The workflow checks PRs when they are opened or reopened. A list change does not affect PRs that are already open. To block a user, [block the account in the organization](https://docs.github.com/en/communities/maintaining-your-safety-on-github/blocking-a-user-from-your-organization). Then close the user's open issues and pull requests.
+
+Repository administrators can find the activation requirements in [the Vouch setup guide](.github/vouch/README.md).
+
 ## Prerequisites
 
 - Rust - `rust-toolchain.toml` selects the exact version for you
