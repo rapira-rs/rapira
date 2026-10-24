@@ -451,7 +451,8 @@ void rapira_release_temporary_streams(void) {
 // multipart or empty body.
 extern size_t rapira_rs_raw_body(const char **body);
 
-// Hands the body to PHP as one memory stream. The cap len + 1 keeps
+// Hands the body to PHP in a temp stream: rapira_release_temporary_streams
+// frees only temp streams between units. The cap len + 1 keeps
 // php_stream_temp_write off the temp file (main/streams/memory.c); post_read
 // and read_post_bytes keep php://input off read_post.
 static void rapira_install_body(void) {
