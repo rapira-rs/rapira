@@ -658,7 +658,7 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, an empty name is a 400, and a field over the limit after a file part is a 413.
+/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, a file part in a body over 256 KiB (parsed on the blocking pool) reaches PHP, an empty name is a 400, and a field over the limit after a file part is a 413.
 /// No spool file outlives its request, also when a later part rejects the body after a file part was spooled.
 #[test]
 fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
@@ -670,6 +670,7 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
     }
     // max_field_size_kb = 1, so a field of 1025 bytes is over the limit.
     let long = "x".repeat(1025);
+    let big = "y".repeat(300 << 10);
     let cases = [
         Case {
             name: "file part between two fields",
@@ -706,6 +707,15 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
             parts: vec![("content-disposition: form-data; name=\"\"", "v")],
             status: 400,
             lines: &[],
+        },
+        Case {
+            name: "file part in a body over 256 KiB",
+            parts: vec![(
+                "content-disposition: form-data; name=\"f\"; filename=\"big.bin\"",
+                &big,
+            )],
+            status: 200,
+            lines: &["counts=0/1", "file0=f:big.bin:307200:yyyy"],
         },
         Case {
             name: "field over the limit after a file part",
