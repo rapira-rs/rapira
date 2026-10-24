@@ -29,7 +29,14 @@ pub(crate) struct ReplyBody {
     guard: Arc<InflightReqCount>,
 }
 
-type FileRead = tokio::task::JoinHandle<(std::fs::File, std::io::Result<Vec<u8>>)>;
+type FileRead = tokio::task::JoinHandle<SliceRead>;
+
+/// The result of one blocking read.
+struct SliceRead {
+    /// The file, for the read of the next slice.
+    file: std::fs::File,
+    slice: std::io::Result<Vec<u8>>,
+}
 
 /// Bytes per blocking read. hyper takes a frame while it queues less than 408 KiB, so a
 /// connection holds at most two queued slices and the slice in the read.
@@ -49,11 +56,11 @@ fn read_slice(file: std::fs::File, off: u64, want: usize) -> FileRead {
     tokio::task::spawn_blocking(move || {
         use std::os::unix::fs::FileExt;
         buf.resize(want, 0);
-        let res = file.read_at(&mut buf, off).map(|n| {
+        let slice = file.read_at(&mut buf, off).map(|n| {
             buf.truncate(n);
             buf
         });
-        (file, res)
+        SliceRead { file, slice }
     })
 }
 
@@ -103,7 +110,9 @@ impl hyper::body::Body for ReplyBody {
                 return Poll::Ready(Some(Err("php response truncated".into())));
             }
             if let Some(fp) = &mut this.file {
-                let (file, res) = match std::task::ready!(Pin::new(&mut fp.join).poll(cx)) {
+                let SliceRead { file, slice } = match std::task::ready!(
+                    Pin::new(&mut fp.join).poll(cx)
+                ) {
                     Ok(v) => v,
                     Err(e) => {
                         if e.is_cancelled() {
@@ -114,7 +123,7 @@ impl hyper::body::Body for ReplyBody {
                         return this.terminal_error(cx);
                     }
                 };
-                let buf = match res {
+                let buf = match slice {
                     Ok(buf) => buf,
                     Err(e) => {
                         tracing::error!(
@@ -355,18 +364,27 @@ mod tests {
     use std::sync::{Arc, Weak};
     use tokio::sync::mpsc;
 
-    /// A reply that yields `events`; it stays open while the caller holds the sender.
-    fn open_reply(events: Vec<Frame>) -> (Receiver<Frame>, mpsc::Sender<Frame>) {
+    struct OpenReply {
+        reply: Receiver<Frame>,
+        /// The sender of the reply; the reply stays open while the caller holds it.
+        events: mpsc::Sender<Frame>,
+    }
+
+    /// A reply that yields `events`.
+    fn open_reply(events: Vec<Frame>) -> OpenReply {
         let (tx, rx) = mpsc::channel(4);
         for ev in events {
             tx.try_send(ev).unwrap();
         }
-        (rx, tx)
+        OpenReply {
+            reply: rx,
+            events: tx,
+        }
     }
 
     /// A reply that yields `events` and then closes.
     fn reply(events: Vec<Frame>) -> Receiver<Frame> {
-        open_reply(events).0
+        open_reply(events).reply
     }
 
     fn end(truncated: bool) -> Frame {
@@ -475,7 +493,7 @@ mod tests {
     /// Dropping the body drops the reply synchronously: the client-gone signal for PHP.
     #[test]
     fn dropping_the_body_cancels_php() {
-        let (reply, events) = open_reply(vec![chunk("head-flushed")]);
+        let OpenReply { reply, events } = open_reply(vec![chunk("head-flushed")]);
         let b = ReplyBody::new(
             reply,
             None,
@@ -545,7 +563,7 @@ mod tests {
         let inflight = Arc::new(AtomicUsize::new(0));
         let guard = Arc::new(InflightReqCount::init(&inflight));
         let weak = Arc::downgrade(&guard);
-        let (reply, events) = open_reply(vec![chunk("queued")]);
+        let OpenReply { reply, events } = open_reply(vec![chunk("queued")]);
         let (state, state_rx) = watch::channel(ConnectionState::default());
         spawn_drain(reply, state_rx, guard);
         assert!(
@@ -632,14 +650,14 @@ mod tests {
     }
 
     /// One chunk and no End, the shape of an unfinalized PHP exchange; the sender closes when the reply is dropped.
-    fn parked_source() -> (Receiver<Frame>, mpsc::Sender<Frame>) {
+    fn parked_source() -> OpenReply {
         open_reply(vec![chunk("abc")])
     }
 
     /// A completed length-delimited body hands its reply to the drain once the watermark is set.
     #[tokio::test]
     async fn completed_body_keeps_the_reply_for_the_drain() {
-        let (reply, events) = parked_source();
+        let OpenReply { reply, events } = parked_source();
         let guard = guard();
         guard.end_flush.set(0).unwrap();
         let (state, state_rx) = watch::channel(ConnectionState::default());
@@ -658,7 +676,7 @@ mod tests {
     async fn queued_end_is_consumed_at_drop_without_a_task() {
         let guard = guard();
         guard.end_flush.set(0).unwrap();
-        let (reply, events) = open_reply(vec![chunk("hello"), end(false)]);
+        let OpenReply { reply, events } = open_reply(vec![chunk("hello"), end(false)]);
         let mut b = ReplyBody::new(
             reply,
             Some(5),
@@ -684,7 +702,7 @@ mod tests {
     /// A bodiless reply with End already queued behind the head is consumed in place.
     #[tokio::test]
     async fn queued_end_is_consumed_without_a_drain_task() {
-        let (reply, events) = open_reply(vec![end(false)]);
+        let OpenReply { reply, events } = open_reply(vec![end(false)]);
         let metrics = tokio::runtime::Handle::current().metrics();
         let tasks = metrics.num_alive_tasks();
         spawn_drain(reply, watch::channel(ConnectionState::default()).1, guard());
@@ -701,7 +719,7 @@ mod tests {
     async fn pending_reply_goes_to_the_drain_task() {
         let guard = guard();
         guard.end_flush.set(0).unwrap();
-        let (reply, events) = open_reply(vec![chunk("abc")]);
+        let OpenReply { reply, events } = open_reply(vec![chunk("abc")]);
         let (_state, state_rx) = watch::channel(ConnectionState::default());
         let mut b = ReplyBody::new(reply, Some(3), guard, None, state_rx);
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "abc");
@@ -722,7 +740,7 @@ mod tests {
     /// Without the watermark the bytes never reached hyper: dropping the body cancels PHP at once.
     #[tokio::test]
     async fn completed_body_without_a_watermark_cancels_php() {
-        let (reply, events) = parked_source();
+        let OpenReply { reply, events } = parked_source();
         let mut b = ReplyBody::new(
             reply,
             Some(3),
