@@ -225,8 +225,11 @@ pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartB
     }
 }
 
-/// (name, filename) from a content-disposition value.
-type Disposition = (Option<Vec<u8>>, Option<Vec<u8>>);
+/// The name and filename parameters of a content-disposition value.
+struct Disposition {
+    name: Option<Vec<u8>>,
+    filename: Option<Vec<u8>>,
+}
 
 /// The disposition type token is not enforced: php-src rfc1867.c reads the parameters regardless.
 fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
@@ -287,7 +290,7 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
             .map(|o| o + next + 1)
             .unwrap_or(v.len());
     }
-    Ok((name, filename))
+    Ok(Disposition { name, filename })
 }
 
 /// Spool file names are unique per process; the fuzz targets share one dir across processes, so the pid stays in the name.
@@ -344,7 +347,7 @@ fn parse_part(
         return Err(bad("part without content-disposition"));
     };
 
-    let (name, filename) = disposition_params(disposition)?;
+    let Disposition { name, filename } = disposition_params(disposition)?;
     let Some(name) = name.filter(|n| !n.is_empty()) else {
         return Err(bad(
             "content-disposition without a non-empty name parameter",

@@ -612,11 +612,18 @@ mod tests {
         }
     }
 
+    /// The root and forbid list of one static middleware.
+    #[derive(Debug, PartialEq)]
+    struct StaticSettings {
+        root: PathBuf,
+        forbid: Vec<String>,
+    }
+
     struct StaticCase {
         name: &'static str,
         toml: &'static str,
-        /// The root and forbid list of the one static middleware; None for no middleware.
-        want: Option<(&'static str, &'static [&'static str])>,
+        /// The one static middleware; None for no middleware.
+        want: Option<StaticSettings>,
     }
 
     /// The root resolves config-relative like every other path key; forbid defaults to the PHP source guard. The resolver validates shape only. The middleware constructor normalizes the case.
@@ -626,22 +633,34 @@ mod tests {
             StaticCase {
                 name: "relative root and default forbid",
                 toml: "middleware = [\"static\"]\n[pool]\nentrypoint = \"a.php\"\n[static]\nroot = \"public\"\n",
-                want: Some(("/w/public", &[".php"])),
+                want: Some(StaticSettings {
+                    root: "/w/public".into(),
+                    forbid: vec![".php".into()],
+                }),
             },
             StaticCase {
                 name: "absolute root",
                 toml: "middleware = [\"static\"]\n[pool]\nentrypoint = \"a.php\"\n[static]\nroot = \"/srv/pub\"\n",
-                want: Some(("/srv/pub", &[".php"])),
+                want: Some(StaticSettings {
+                    root: "/srv/pub".into(),
+                    forbid: vec![".php".into()],
+                }),
             },
             StaticCase {
                 name: "forbid keeps its case",
                 toml: "middleware = [\"static\"]\n[pool]\nentrypoint = \"a.php\"\n[static]\nroot = \"p\"\nforbid = [\".PHP\", \".Phtml\"]\n",
-                want: Some(("/w/p", &[".PHP", ".Phtml"])),
+                want: Some(StaticSettings {
+                    root: "/w/p".into(),
+                    forbid: vec![".PHP".into(), ".Phtml".into()],
+                }),
             },
             StaticCase {
                 name: "empty forbid",
                 toml: "middleware = [\"static\"]\n[pool]\nentrypoint = \"a.php\"\n[static]\nroot = \"p\"\nforbid = []\n",
-                want: Some(("/w/p", &[])),
+                want: Some(StaticSettings {
+                    root: "/w/p".into(),
+                    forbid: vec![],
+                }),
             },
             StaticCase {
                 name: "no middleware",
@@ -651,23 +670,17 @@ mod tests {
         ];
         for case in cases {
             let got = settings_of(case.toml).unwrap_or_else(|e| panic!("{}: {e}", case.name));
-            let got: Vec<(PathBuf, Vec<String>)> = got
+            let got: Vec<StaticSettings> = got
                 .middleware
                 .into_iter()
                 .map(|mw| match mw {
-                    Middleware::Static(st) => (st.root, st.forbid),
+                    Middleware::Static(st) => StaticSettings {
+                        root: st.root,
+                        forbid: st.forbid,
+                    },
                 })
                 .collect();
-            let want: Vec<(PathBuf, Vec<String>)> = case
-                .want
-                .into_iter()
-                .map(|(root, forbid)| {
-                    (
-                        PathBuf::from(root),
-                        forbid.iter().map(|s| (*s).to_owned()).collect(),
-                    )
-                })
-                .collect();
+            let want: Vec<StaticSettings> = case.want.into_iter().collect();
             assert_eq!(got, want, "{}", case.name);
         }
     }

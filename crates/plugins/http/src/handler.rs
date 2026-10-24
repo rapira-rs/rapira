@@ -68,9 +68,15 @@ struct ReqState {
 pub(crate) struct RespBody {
     kind: BodyKind,
     guard: Arc<InflightReqCount>,
-    /// Declared body bytes still to pass through, with the connection state that holds the flush count.
     /// Armed by [`respond`] once every middleware has returned.
-    transport: Option<(u64, tokio::sync::watch::Receiver<bridge::ConnectionState>)>,
+    transport: Option<Declared>,
+}
+
+struct Declared {
+    /// Declared body bytes still to pass through.
+    remaining: u64,
+    /// The connection state that holds the flush count.
+    closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
 }
 
 #[expect(
@@ -105,7 +111,7 @@ impl Body for RespBody {
             BodyKind::Empty => Poll::Ready(None),
             BodyKind::Boxed(b) => Pin::new(b).poll_frame(cx),
         };
-        if let Some((remaining, closed)) = &mut this.transport
+        if let Some(Declared { remaining, closed }) = &mut this.transport
             && let Poll::Ready(Some(Ok(frame))) = &poll
             && let Some(data) = frame.data_ref()
         {
@@ -149,7 +155,10 @@ pub(crate) async fn respond(
         if length == 0 {
             body.guard.end_flush.get_or_init(|| closed.borrow().flushes);
         } else {
-            body.transport = Some((length, closed));
+            body.transport = Some(Declared {
+                remaining: length,
+                closed,
+            });
         }
     }
     response
@@ -460,7 +469,8 @@ async fn submit(
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
     let bytes = request.content_length.max(0) as usize;
     let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
-    let (exchange, reply) = Exchange::new(request, shared.cfg.superglobals);
+    let (tx, reply) = tokio::sync::mpsc::channel(crate::exchange::FRAME_CAP);
+    let exchange = Exchange::new(request, tx, shared.cfg.superglobals);
     shared.intake.submit(Box::new(exchange), bytes).await?;
     Ok(reply)
 }
