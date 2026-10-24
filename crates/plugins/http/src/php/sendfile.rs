@@ -76,6 +76,10 @@ pub(super) unsafe fn send_file_core(
         Ok(opened) => opened,
         Err(msg) => return Verb::FileNotSendable(msg),
     };
+    // The slice length is known here, so the call writes nothing when the slice goes past the declared length.
+    if st.declared_cl.is_some_and(|cl| st.sent_body + len > cl) {
+        return Verb::ContentLengthExceeded;
+    }
     unsafe {
         send_body(st, len, eos, |n| Frame::File {
             file,

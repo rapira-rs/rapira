@@ -27,10 +27,18 @@ fn worker_spool_dir(base: &Path) -> PathBuf {
 pub(crate) fn create_worker_spool_dir(base: &Path) -> anyhow::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
     let dir = worker_spool_dir(base);
+    // A dir with this pid is left by a killed worker that had the same pid.
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&dir)
         .map_err(|e| anyhow::anyhow!("creating spool dir {}: {e}", dir.display()))?;
+    // systemd-tmpfiles does not age a dir with a BSD lock. The fd stays open until the worker exits: https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html#Age
+    if let Ok(lock) = std::fs::File::open(&dir)
+        && lock.lock_shared().is_ok()
+    {
+        std::mem::forget(lock);
+    }
     Ok(dir)
 }
 

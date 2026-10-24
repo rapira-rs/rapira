@@ -38,17 +38,17 @@ enum On {
     Unix,
 }
 
-/// Sources: PROTOCOL-HTTP2 (envelope, `grpc-status`, 12 for an unknown method or encoding), PROTOCOL-WEB (the 0x80 trailer frame), the Connect protocol (unary request, GET for no-side-effects methods, 404 for an unknown procedure), and proto3 JSON.
+/// Sources: PROTOCOL-HTTP2 (envelope, `grpc-status`, 12 for an unknown method or encoding), PROTOCOL-WEB (the 0x80 trailer frame), the Connect protocol (unary request, GET for no-side-effects methods, 404 for an unknown procedure), proto3 JSON, and the plugin README (gzip messages, 8 for a message over 4 MiB).
 #[tokio::test]
 async fn each_protocol_reaches_php_over_the_wire() {
-    struct Case {
+    struct Case<'a> {
         name: &'static str,
         on: On,
         wire: Wire,
         method: Method,
         path: &'static str,
         headers: Fields,
-        body: &'static [u8],
+        body: &'a [u8],
         status: u16,
         grpc_status: Option<&'static str>,
         content_type: Option<&'static str>,
@@ -58,6 +58,7 @@ async fn each_protocol_reaches_php_over_the_wire() {
         php: bool,
     }
     let grpc: Fields = &[("content-type", "application/grpc"), ("te", "trailers")];
+    let over_limit = envelope(&vec![0; 4 * 1024 * 1024 + 1]);
     let cases = [
         Case {
             name: "grpc over h2c tcp",
@@ -227,6 +228,45 @@ async fn each_protocol_reaches_php_over_the_wire() {
             body: b"\x01\x00\x00\x00\x04\x28\xb5\x2f\xfd",
             status: 200,
             grpc_status: Some("12"),
+            content_type: None,
+            reply: Some(b""),
+            php: false,
+        },
+        Case {
+            name: "gzip request",
+            on: On::Tcp,
+            wire: Wire::H2,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/grpc"),
+                ("te", "trailers"),
+                ("grpc-encoding", "gzip"),
+            ],
+            // HI compressed with gzip, in an envelope with the compressed flag.
+            body: b"\x01\x00\x00\x00\x18\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xe3\x62\xca\xc8\x04\x00\x45\xd3\x37\xd4\x04\x00\x00\x00",
+            status: 200,
+            grpc_status: Some("0"),
+            content_type: None,
+            // PHP echoes the message that it got, so the uncompressed reply shows that PHP got HI.
+            reply: Some(HI_FRAME),
+            php: true,
+        },
+        Case {
+            name: "message over 4 MiB",
+            on: On::Tcp,
+            wire: Wire::H2,
+            method: Method::POST,
+            path: ECHO_PATH,
+            // A short reply keeps a failure message short when the call reaches PHP.
+            headers: &[
+                ("content-type", "application/grpc"),
+                ("te", "trailers"),
+                ("x-reply", "ff"),
+            ],
+            body: &over_limit,
+            status: 200,
+            grpc_status: Some("8"),
             content_type: None,
             reply: Some(b""),
             php: false,

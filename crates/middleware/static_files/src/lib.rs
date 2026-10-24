@@ -9,7 +9,7 @@ use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use http::{Method, StatusCode};
+use http::{Method, StatusCode, header};
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Empty};
 use tower::ServiceExt as _;
@@ -45,7 +45,10 @@ impl StaticFiles {
             // The URL space belongs to PHP: a directory URL is the app's route, not an
             // implicit index.html.
             dir: ServeDir::with_backend(root, CachingBackend::default())
-                .append_index_html_on_directories(false),
+                .append_index_html_on_directories(false)
+                // ServeDir has no multipart/byteranges, so a multi-range request gets the
+                // whole file, not 416.
+                .ignore_multi_range_requests(true),
             forbid,
         }
     }
@@ -112,15 +115,20 @@ impl StaticFiles {
             return forward(inner, req).await;
         }
 
-        // The probe carries only the head. The original request stays unchanged for the
-        // miss path, so its extensions reach the inner service.
-        let mut probe = http::Request::new(Empty::<Bytes>::new());
-        *probe.method_mut() = req.method().clone();
-        *probe.uri_mut() = req.uri().clone();
-        *probe.headers_mut() = req.headers().clone();
-
         let mut dir = self.dir.clone();
-        match dir.try_call(probe).await {
+        let mut served = dir.try_call(probe(&req)).await;
+        // ServeDir does not check If-Range. A validator other than the current strong ETag gets
+        // the whole file: https://www.rfc-editor.org/rfc/rfc9110#section-13.1.5
+        if let Ok(res) = &served
+            && res.headers().contains_key(header::CONTENT_RANGE)
+            && let Some(validator) = req.headers().get(header::IF_RANGE)
+            && res.headers().get(header::ETAG) != Some(validator)
+        {
+            let mut whole = probe(&req);
+            whole.headers_mut().remove(header::RANGE);
+            served = dir.try_call(whole).await;
+        }
+        match served {
             Ok(res) if res.status() != StatusCode::NOT_FOUND => {
                 res.map(|b| b.map_err(|e| -> BoxError { Box::new(e) }).boxed_unsync())
             }
@@ -138,6 +146,16 @@ impl StaticFiles {
             }
         }
     }
+}
+
+/// The probe carries only the head. The original request stays unchanged for the miss path,
+/// so its extensions reach the inner service.
+fn probe(req: &http::Request<Body>) -> http::Request<Empty<Bytes>> {
+    let mut probe = http::Request::new(Empty::<Bytes>::new());
+    *probe.method_mut() = req.method().clone();
+    *probe.uri_mut() = req.uri().clone();
+    *probe.headers_mut() = req.headers().clone();
+    probe
 }
 
 /// Hands a miss to the inner service.

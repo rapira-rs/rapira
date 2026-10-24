@@ -27,7 +27,7 @@ impl From<Refused> for Rejection {
     fn from(e: Refused) -> Self {
         Self {
             status: match e {
-                Refused::Saturated => http::StatusCode::SERVICE_UNAVAILABLE,
+                Refused::Saturated | Refused::OverBudget => http::StatusCode::SERVICE_UNAVAILABLE,
                 Refused::Stopped => http::StatusCode::INTERNAL_SERVER_ERROR,
             },
             reason: e.to_string(),
@@ -435,7 +435,9 @@ where
         transport: None,
     });
     *res.status_mut() = status;
-    *res.headers_mut() = response_headers(headers, declared_cl);
+    // A HEAD response keeps the declared length. RFC 9110 §8.6 forbids it on a 204, and on a 304 it must equal the 200 length.
+    let header_cl = content_length.filter(|_| !matches!(status.as_u16(), 204 | 304));
+    *res.headers_mut() = response_headers(headers, header_cl);
     res
 }
 
@@ -456,9 +458,10 @@ async fn submit(
     shared: &Shared,
     request: Request,
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
+    let bytes = request.content_length.max(0) as usize;
     let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
     let (exchange, reply) = Exchange::new(request, shared.cfg.superglobals);
-    shared.intake.submit(Box::new(exchange)).await?;
+    shared.intake.submit(Box::new(exchange), bytes).await?;
     Ok(reply)
 }
 

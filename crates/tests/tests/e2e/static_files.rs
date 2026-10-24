@@ -425,6 +425,19 @@ fn static_files_route_each_request_over_the_wire() {
     assert_eq!(head_field(&raw, "content-range"), "bytes */10");
     assert_eq!(head_field(&raw, "x-rapira-target"), "");
 
+    // ServeDir sends no multipart/byteranges, so it ignores a Range with two ranges and sends
+    // the whole file. "A server MAY ignore the Range header field" (RFC 9110 section 14.2,
+    // https://www.rfc-editor.org/rfc/rfc9110#section-14.2).
+    let raw =
+        http_get_raw(srv.addr, "/data.bin", &[("Range", "bytes=0-1,3-4")], T).expect("multi-range");
+    assert_eq!(
+        split_response(&raw),
+        (200, &b"abcdefghij"[..]),
+        "{}",
+        String::from_utf8_lossy(&raw)
+    );
+    assert_eq!(head_field(&raw, "content-range"), "");
+
     let raw = http_get_raw(srv.addr, "/loop.css", &[], T).expect("GET /loop.css");
     assert_eq!(
         split_response(&raw),
@@ -434,6 +447,88 @@ fn static_files_route_each_request_over_the_wire() {
     );
     assert_eq!(head_field(&raw, "x-rapira-target"), "");
 
+    let _ = std::fs::remove_dir_all(&root);
+}
+
+/// "A recipient of an If-Range header field MUST ignore the Range header field if the If-Range
+/// condition evaluates to false" (RFC 9110 section 13.1.5,
+/// https://www.rfc-editor.org/rfc/rfc9110#section-13.1.5). An entity tag matches only by the
+/// strong comparison (section 8.8.3.2, https://www.rfc-editor.org/rfc/rfc9110#section-8.8.3.2).
+#[test]
+fn static_files_check_if_range() {
+    let root = static_root(&[("data.bin", "abcdefghij")]);
+    let srv = spawn_echo_loop(&root, None);
+    let raw = http_get_raw(srv.addr, "/data.bin", &[], T).expect("GET /data.bin");
+    let etag = head_field(&raw, "etag");
+    assert!(etag.starts_with('"'), "no strong etag: {etag:?}");
+    let weak = format!("W/{etag}");
+
+    struct Case<'a> {
+        name: &'static str,
+        range: &'static str,
+        if_range: &'a str,
+        status: u16,
+        content_range: &'static str,
+        body: &'static [u8],
+    }
+    let cases = [
+        Case {
+            name: "current etag",
+            range: "bytes=5-",
+            if_range: &etag,
+            status: 206,
+            content_range: "bytes 5-9/10",
+            body: b"fghij",
+        },
+        Case {
+            name: "stale etag",
+            range: "bytes=5-",
+            if_range: "\"stale\"",
+            status: 200,
+            content_range: "",
+            body: b"abcdefghij",
+        },
+        Case {
+            name: "weak form of the current etag",
+            range: "bytes=5-",
+            if_range: &weak,
+            status: 200,
+            content_range: "",
+            body: b"abcdefghij",
+        },
+        Case {
+            name: "stale date",
+            range: "bytes=5-",
+            if_range: "Thu, 01 Jan 1970 00:00:00 GMT",
+            status: 200,
+            content_range: "",
+            body: b"abcdefghij",
+        },
+        Case {
+            name: "stale etag with an unsatisfiable range",
+            range: "bytes=100-200",
+            if_range: "\"stale\"",
+            status: 200,
+            content_range: "",
+            body: b"abcdefghij",
+        },
+    ];
+    for case in &cases {
+        let fields = [("Range", case.range), ("If-Range", case.if_range)];
+        let raw = http_get_raw(srv.addr, "/data.bin", &fields, T).expect(case.name);
+        assert_eq!(
+            split_response(&raw),
+            (case.status, case.body),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            head_field(&raw, "content-range"),
+            case.content_range,
+            "{}",
+            case.name
+        );
+    }
     let _ = std::fs::remove_dir_all(&root);
 }
 

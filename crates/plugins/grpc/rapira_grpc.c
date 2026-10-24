@@ -41,8 +41,7 @@ extern bool rapira_rs_grpc_add(void *state, bool trailer, bool binary,
                                const char *value, size_t value_len);
 extern bool rapira_rs_grpc_snapshot(const void *state, bool trailer, zval *rv);
 
-// $entries is property slot 0 and the constructor always sets it. An instance
-// from ReflectionClass::newInstanceWithoutConstructor() is not supported.
+// $entries is property slot 0 and the constructor always sets it.
 static zend_always_inline zval *
 rapira_grpc_metadata_entries(zend_object *metadata) {
     return OBJ_PROP_NUM(metadata, 0);

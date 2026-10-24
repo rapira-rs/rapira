@@ -1,3 +1,4 @@
+use std::net::SocketAddr;
 use std::time::{Duration, Instant};
 
 use http::Method;
@@ -5,9 +6,9 @@ use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use rapira_sapi::plugin::Mode;
 use serde_json::Value;
 use tests::wire::submit;
-use tests::{drain, drain_resp, drain_resp_deadline, fixture, req, server_log};
+use tests::{drain, drain_resp, drain_resp_deadline, fixture, poll, req, server_log};
 
-use crate::harness::{Spawn, slot_line};
+use crate::harness::{Spawn, free_port, http_get, slot_line};
 
 /// Superglobals are rebuilt per unit over the resident loop: query state must not leak.
 #[test]
@@ -199,6 +200,50 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     assert_eq!(resp.body_string(), "runs=1");
     // A unit discarded at handout counts as handled with an error, so this line shows that B reached the intake.
     slot_line(&srv, "handled 3 errors 1 ");
+    Ok(())
+}
+
+/// The bodies of the units that wait for PHP share a 64 MiB budget per worker. A body that does not fit gets 503 at once, before the 30 s intake wait.
+#[test]
+fn waiting_bodies_share_a_byte_budget() -> anyhow::Result<()> {
+    let observability = SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let srv = Spawn::http(Mode::Worker, fixture("worker/held-worker.php"))
+        .json_log()
+        .http_extra("max_body_size_mb = 40")
+        .toml(&format!(
+            "[observability]\nlisten = \"{observability}\"\n[observability.metrics]"
+        ))
+        .spawn();
+    let release = srv.log_file().with_file_name("release");
+    let path = format!("/?release={}", release.display());
+    let post = |size: usize| {
+        let mut rq = req(&path);
+        *rq.method_mut() = Method::POST;
+        *rq.body_mut() = vec![b'x'; size];
+        rq
+    };
+
+    let rx_a = submit(srv.addr, req(&path))?;
+    server_log::wait_app_record(&srv.log_file(), "held");
+    let rx_b = submit(srv.addr, post(40 << 20))?;
+    // B holds its bytes in the budget before it counts as queued. A holds the worker until the release file exists.
+    poll(Duration::from_secs(10), || {
+        let (_, body) = http_get(observability, "/metrics", Duration::from_secs(10)).ok()?;
+        let samples = tests::metrics::samples(&String::from_utf8_lossy(&body));
+        (samples.get(r#"rapira_requests_queued{pool="http"}"#) == Some(&1)).then_some(())
+    })
+    .expect("B never waited in the queue");
+    let mut rx_c = submit(srv.addr, post(30 << 20))?;
+    let resp_c = drain_resp_deadline(&mut rx_c, Instant::now() + Duration::from_secs(10))
+        .expect("a body over the budget must be refused before the intake wait ends");
+    assert_eq!(resp_c.status(), 503);
+
+    std::fs::write(&release, "")?;
+    assert_eq!(drain_resp(rx_a).body_string(), "done");
+    assert_eq!(drain_resp(rx_b).body_string(), "done");
+    // PHP took B, so its bytes are back in the budget.
+    let resp = drain_resp(submit(srv.addr, post(30 << 20))?);
+    assert_eq!(resp.body_string(), "done");
     Ok(())
 }
 

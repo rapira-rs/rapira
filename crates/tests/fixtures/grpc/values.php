@@ -5,6 +5,7 @@ use Rapira\Grpc\Call\Protocol;
 use Rapira\Grpc\Exception\GrpcException;
 use Rapira\Grpc\Metadata;
 use Rapira\Grpc\MethodKind;
+use Rapira\Grpc\Status;
 use Rapira\Grpc\StatusCode;
 use Rapira\InetAddress;
 
@@ -77,6 +78,15 @@ $cases = [
                 parent::__construct(StatusCode::Aborted, $message);
             }
         })->status->code->name,
+    ],
+    // The host reads the properties that the constructor sets.
+    [
+        'name' => 'status needs its constructor',
+        'run' => fn () => (new \ReflectionClass(Status::class))->newInstanceWithoutConstructor()::class,
+    ],
+    [
+        'name' => 'metadata needs its constructor',
+        'run' => fn () => (string) count((new \ReflectionClass(Metadata::class))->newInstanceWithoutConstructor()),
     ],
     ['name' => 'context rejects a remote that is not an address', 'run' => fn () => $context('nope')],
     [
