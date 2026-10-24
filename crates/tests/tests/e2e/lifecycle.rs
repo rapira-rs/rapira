@@ -127,8 +127,6 @@ fn the_pidfile_names_the_master_until_its_exit() {
             .spawn();
         let pidfile = srv.dir.join("rapira.pid");
         let release = srv.dir.join("release");
-        let content = std::fs::read_to_string(&pidfile).expect("read the pidfile");
-        assert_eq!(content.trim(), srv.pid().to_string(), "{}", case.name);
         let pids = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
         let mut held = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
         held.send(
@@ -148,6 +146,13 @@ fn the_pidfile_names_the_master_until_its_exit() {
             "{}: no drain\n{}",
             case.name,
             diagnostics(&srv)
+        );
+        let content = std::fs::read_to_string(&pidfile).expect("read the pidfile during the stop");
+        assert_eq!(
+            content.trim(),
+            srv.pid().to_string(),
+            "{}: the pidfile during the stop",
+            case.name
         );
         // Without the release the held request ends only with its worker.
         if case.second_sigterm {
