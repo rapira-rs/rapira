@@ -4,8 +4,8 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use connectrpc::server::serve_connection;
 use connectrpc::{
-    Chain, CompressionPolicy, CompressionRegistry, ConnectRpcBody, ConnectRpcService,
-    ConnectionConfig, ConnectionInfo, DeadlinePolicy, GzipProvider, Router, http,
+    Chain, CompressionRegistry, ConnectRpcBody, ConnectRpcService, ConnectionConfig,
+    ConnectionInfo, DeadlinePolicy, GzipProvider, Router, http,
 };
 use connectrpc_health::StaticChecker;
 use rapira_net::{Acceptor, Serve};
@@ -46,9 +46,8 @@ impl Serving {
         let mut service = ConnectRpcService::new(Chain(router, dispatcher))
             .with_deadline_policy(deadlines)
             // The default registry offers every codec that the build compiles, zstd included.
-            .with_compression(CompressionRegistry::new().register(GzipProvider::default()))
-            // The registry decodes gzip requests. Replies stay uncompressed, so the IO threads spend no CPU on compression.
-            .with_compression_policy(CompressionPolicy::disabled());
+            // The default policy compresses a reply of 1 KiB or more for a client that accepts gzip. The dispatcher turns it off per reply.
+            .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
         // The interceptors cover GET and POST requests to every route: PHP methods, health, reflection and unknown paths.
         for interceptor in &config.interceptors {
             service = service.with_interceptor_arc(Arc::clone(interceptor));

@@ -47,12 +47,13 @@ Each connection goes to `serve_connection` of [connect-rust](https://github.com/
 - Binary gRPC-Web (`application/grpc-web+proto`). https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-WEB.md
 - Connect with proto or JSON messages. https://connectrpc.com/docs/protocol/
 
-connect-rust handles the framing, the request decompression, the timeout headers and the error encoding. PHP always gets the binary protobuf encoding of the input message. The plugin transcodes a Connect JSON request to binary protobuf before dispatch, and transcodes the reply back to JSON. The JSON decoder ignores unknown fields, but not an unknown enum value name. A JSON body that does not decode, also one with an enum value name that the descriptor set does not declare, answers INVALID_ARGUMENT, and PHP does not see the call. In binary protobuf, PHP gets an unknown enum value as its number.
+connect-rust handles the framing, the compression, the timeout headers and the error encoding. PHP always gets the binary protobuf encoding of the input message. The plugin transcodes a Connect JSON request to binary protobuf before dispatch, and transcodes the reply back to JSON. The JSON decoder ignores unknown fields, but not an unknown enum value name. A JSON body that does not decode, also one with an enum value name that the descriptor set does not declare, answers INVALID_ARGUMENT, and PHP does not see the call. In binary protobuf, PHP gets an unknown enum value as its number.
 
 - The boot logs a warning for each streaming method of a configured service.
 - A streaming method, a method of a service the pool does not serve, and an unknown method answer UNIMPLEMENTED. A Connect unary request (`application/proto` or `application/json`) gets the HTTP status 404. A Connect streaming request (`application/connect+proto` or `application/connect+json`) gets the HTTP status 200 with the error in the end-of-stream message.
 - A method with `option idempotency_level = NO_SIDE_EFFECTS;` also accepts a Connect GET request. A GET to any other method answers 405.
-- A request can use gzip compression. A request with a different message encoding answers UNIMPLEMENTED. The reply is not compressed.
+- A request can use gzip compression. A request with a different message encoding answers UNIMPLEMENTED.
+- A reply from PHP of 1 KiB or more uses gzip when the client accepts gzip. A gRPC or gRPC-Web reply from PHP uses gzip only when its request did. A successful Connect reply from PHP carries `Vary: Accept-Encoding`. Health and reflection replies use the connect-rust default: gzip from 1 KiB when the client accepts gzip.
 
 ## Remote address
 
