@@ -29,12 +29,19 @@ pub(crate) struct UnaryReply {
     pub outcome: std::result::Result<bytes::Bytes, RpcStatus>,
 }
 
-/// `google.rpc.Status`. `code` is 1..=16. Each detail is a (type URL, packed message) pair. https://github.com/googleapis/googleapis/blob/master/google/rpc/status.proto
+/// `google.rpc.Status`. `code` is 1..=16. https://github.com/googleapis/googleapis/blob/master/google/rpc/status.proto
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct RpcStatus {
     pub code: u32,
     pub message: String,
-    pub details: Vec<(String, bytes::Bytes)>,
+    pub details: Vec<StatusDetail>,
+}
+
+/// One `google.protobuf.Any` detail of a status. `value` is the packed message.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct StatusDetail {
+    pub type_url: String,
+    pub value: bytes::Bytes,
 }
 
 /// The gRPC status of a boot-failed worker's shed call: https://github.com/grpc/grpc/blob/master/doc/statuscodes.md
@@ -50,14 +57,12 @@ pub(crate) struct Call {
 
 impl Call {
     /// A dropped sender means that PHP lost the call; dropping the receiver closes the call for PHP.
-    pub(crate) fn new(call: UnaryCall) -> (Self, oneshot::Receiver<UnaryReply>) {
-        let (reply, rx) = oneshot::channel();
-        let call = Self {
+    pub(crate) fn new(call: UnaryCall, reply: oneshot::Sender<UnaryReply>) -> Self {
+        Self {
             call,
             received_at: now_unix_f64(),
             reply,
-        };
-        (call, rx)
+        }
     }
 }
 
