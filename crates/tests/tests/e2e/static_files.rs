@@ -1,11 +1,11 @@
 use crate::harness::{
-    Conn, Server, Spawn, diagnostics, http_get, http_get_raw, http_post, http_raw_bytes,
-    parse_status_and_body, scratch_dir, spawn_boot_failure, spawn_with_http_extra,
+    Conn, Exited, Head, Server, Spawn, diagnostics, http_get, http_get_raw, http_post,
+    http_raw_bytes, parse_status_and_body, scratch_dir, spawn_boot_failure, spawn_with_http_extra,
 };
 use rapira_sapi::plugin::Mode;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
-use tests::fixture;
+use tests::{StatusBody, fixture};
 
 const T: Duration = Duration::from_secs(10);
 
@@ -67,17 +67,17 @@ fn static_files_serve_over_the_wire() {
     assert!(head.contains("\r\naccept-ranges: bytes\r\n"), "{head}");
     assert!(text.ends_with("body{color:red}"), "{text}");
 
-    let (code, body) = http_get(srv.addr, "/nope", T).expect("GET /nope");
+    let StatusBody { status: code, body } = http_get(srv.addr, "/nope", T).expect("GET /nope");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert!(body.starts_with(b"ok:"), "a miss must reach php");
 
-    let (code, body) =
+    let StatusBody { status: code, body } =
         http_post(srv.addr, "/nope", b"text/plain", b"payload", T).expect("POST /nope");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert!(body.starts_with(b"ok:"), "a post must reach php");
 
     for path in ["/index.php", "/.env"] {
-        let (_, body) = http_get(srv.addr, path, T).expect(path);
+        let body = http_get(srv.addr, path, T).expect(path).body;
         assert!(
             body.starts_with(b"ok:"),
             "{path} must reach php, got {}",
@@ -207,14 +207,14 @@ fn the_chain_serves_sequential_requests_on_one_connection() {
 
     c.send(b"GET /nope HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("first request");
-    let (status, fields) = c.read_head(T).expect("first head");
+    let Head { status, fields } = c.read_head(T).expect("first head");
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     let body = c.read_n(content_length(&fields), T).expect("first body");
     assert!(body.starts_with(b"ok:"), "first body must come from php");
 
     c.send(b"GET /app.css HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("second request");
-    let (status, fields) = c.read_head(T).expect("second head");
+    let Head { status, fields } = c.read_head(T).expect("second head");
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     let body = c.read_n(content_length(&fields), T).expect("second body");
     assert_eq!(body.as_slice(), b"body{}", "the hit must serve the file");
@@ -224,14 +224,14 @@ fn the_chain_serves_sequential_requests_on_one_connection() {
     std::fs::remove_file(root.join("app.css")).expect("remove the served file");
     c.send(b"GET /app.css HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("cached request");
-    let (status, fields) = c.read_head(T).expect("cached head");
+    let Head { status, fields } = c.read_head(T).expect("cached head");
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     let body = c.read_n(content_length(&fields), T).expect("cached body");
     assert_eq!(body.as_slice(), b"body{}", "the cache must serve the file");
 
     c.send(b"GET /nope HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
         .expect("third request on the same connection");
-    let (status, fields) = c.read_head(T).expect("reused connection must serve");
+    let Head { status, fields } = c.read_head(T).expect("reused connection must serve");
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     let body = c.read_n(content_length(&fields), T).expect("third body");
     assert!(body.starts_with(b"ok:"), "third body must come from php");
@@ -340,7 +340,7 @@ fn static_files_route_each_request_over_the_wire() {
     ];
     for case in &to_php {
         let raw = http_get_raw(srv.addr, &case.path, &[], T).expect(case.name);
-        let (status, body) = split_response(&raw);
+        let StatusBody { status, body } = split_response(&raw);
         assert_eq!(status, 200, "{}\n{}", case.name, diagnostics(&srv));
         assert_eq!(
             head_field(&raw, "x-rapira-target"),
@@ -375,7 +375,7 @@ fn static_files_route_each_request_over_the_wire() {
     ];
     for case in &served {
         let raw = http_get_raw(srv.addr, case.path, &[], T).expect(case.name);
-        let (status, body) = split_response(&raw);
+        let StatusBody { status, body } = split_response(&raw);
         assert_eq!(status, 200, "{}\n{}", case.name, diagnostics(&srv));
         assert_eq!(head_field(&raw, "x-rapira-target"), "", "{}", case.name);
         assert_eq!(body, case.body, "{}", case.name);
@@ -389,7 +389,7 @@ fn static_files_route_each_request_over_the_wire() {
     )
     .expect("HEAD /a%00.css");
     assert_eq!(
-        split_response(&raw).0,
+        split_response(&raw).status,
         200,
         "{}",
         String::from_utf8_lossy(&raw)
@@ -404,9 +404,15 @@ fn static_files_route_each_request_over_the_wire() {
         T,
     )
     .expect("GET /nope.txt with a body");
-    assert_eq!(split_response(&raw), (200, &b"method=GET body=ping"[..]));
+    assert_eq!(
+        split_response(&raw),
+        StatusBody {
+            status: 200,
+            body: &b"method=GET body=ping"[..]
+        }
+    );
 
-    let (code, body) =
+    let StatusBody { status: code, body } =
         http_post(srv.addr, "/styles.css", b"text/plain", b"p", T).expect("POST /styles.css");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert_eq!(body, b"method=POST body=p");
@@ -417,7 +423,7 @@ fn static_files_route_each_request_over_the_wire() {
     let raw = http_get_raw(srv.addr, "/data.bin", &[("Range", "bytes=100-200")], T)
         .expect("unsatisfiable range");
     assert_eq!(
-        split_response(&raw).0,
+        split_response(&raw).status,
         416,
         "{}",
         String::from_utf8_lossy(&raw)
@@ -432,7 +438,10 @@ fn static_files_route_each_request_over_the_wire() {
         http_get_raw(srv.addr, "/data.bin", &[("Range", "bytes=0-1,3-4")], T).expect("multi-range");
     assert_eq!(
         split_response(&raw),
-        (200, &b"abcdefghij"[..]),
+        StatusBody {
+            status: 200,
+            body: &b"abcdefghij"[..]
+        },
         "{}",
         String::from_utf8_lossy(&raw)
     );
@@ -441,7 +450,10 @@ fn static_files_route_each_request_over_the_wire() {
     let raw = http_get_raw(srv.addr, "/loop.css", &[], T).expect("GET /loop.css");
     assert_eq!(
         split_response(&raw),
-        (500, &b""[..]),
+        StatusBody {
+            status: 500,
+            body: &b""[..]
+        },
         "{}",
         String::from_utf8_lossy(&raw)
     );
@@ -518,7 +530,10 @@ fn static_files_check_if_range() {
         let raw = http_get_raw(srv.addr, "/data.bin", &fields, T).expect(case.name);
         assert_eq!(
             split_response(&raw),
-            (case.status, case.body),
+            StatusBody {
+                status: case.status,
+                body: case.body
+            },
             "{}",
             case.name
         );
@@ -561,7 +576,10 @@ fn the_forbid_list_decides_which_sources_reach_php() {
         let raw = http_get_raw(srv.addr, "/index.php", &[], T).expect(case.name);
         assert_eq!(
             split_response(&raw),
-            (200, case.body),
+            StatusBody {
+                status: 200,
+                body: case.body
+            },
             "{}\n{}",
             case.name,
             diagnostics(&srv)
@@ -608,7 +626,13 @@ fn cached_entries_answer_until_they_go_stale() {
     assert!(!modified.is_empty(), "no last-modified");
     std::fs::remove_file(root.join("memory.css")).expect("remove memory.css");
     let raw = get("/memory.css", &[]);
-    assert_eq!(split_response(&raw), (200, &b"body{}"[..]));
+    assert_eq!(
+        split_response(&raw),
+        StatusBody {
+            status: 200,
+            body: &b"body{}"[..]
+        }
+    );
     assert_eq!(head_field(&raw, "x-rapira-target"), "");
     assert_eq!(head_field(&raw, "etag"), etag);
     assert_eq!(head_field(&raw, "last-modified"), modified);
@@ -623,27 +647,57 @@ fn cached_entries_answer_until_they_go_stale() {
     // Content-Range carries first-pos "-" last-pos "/" complete-length (RFC 9110 section
     // 14.4, https://www.rfc-editor.org/rfc/rfc9110#section-14.4).
     let raw = get("/data.bin", &[("Range", "bytes=6-9")]);
-    assert_eq!(split_response(&raw), (206, &b"ghij"[..]));
+    assert_eq!(
+        split_response(&raw),
+        StatusBody {
+            status: 206,
+            body: &b"ghij"[..]
+        }
+    );
     assert_eq!(head_field(&raw, "content-range"), "bytes 6-9/10");
     let raw = get("/data.bin", &[("If-None-Match", &etag)]);
-    assert_eq!(split_response(&raw), (304, &b""[..]));
+    assert_eq!(
+        split_response(&raw),
+        StatusBody {
+            status: 304,
+            body: &b""[..]
+        }
+    );
     let raw = head("/data.bin");
-    assert_eq!(split_response(&raw), (200, &b""[..]));
+    assert_eq!(
+        split_response(&raw),
+        StatusBody {
+            status: 200,
+            body: &b""[..]
+        }
+    );
     assert_eq!(head_field(&raw, "content-length"), "10");
     assert_eq!(head_field(&raw, "x-rapira-target"), "");
 
     // The echo loop also answers 200, so only the content-length shows the cache hit.
-    assert_eq!(split_response(&get("/empty.css", &[])).0, 200);
+    assert_eq!(split_response(&get("/empty.css", &[])).status, 200);
     std::fs::remove_file(root.join("empty.css")).expect("remove empty.css");
     let raw = get("/empty.css", &[]);
-    assert_eq!(split_response(&raw), (200, &b""[..]));
+    assert_eq!(
+        split_response(&raw),
+        StatusBody {
+            status: 200,
+            body: &b""[..]
+        }
+    );
     assert_eq!(head_field(&raw, "content-length"), "0");
     assert_eq!(head_field(&raw, "x-rapira-target"), "");
 
     // A file over the 256 KiB cap gets no entry.
     let raw = get("/big.bin", &[]);
     assert_eq!(head_field(&raw, "content-length"), "262145");
-    assert_eq!(split_response(&raw), (200, big.as_bytes()));
+    assert_eq!(
+        split_response(&raw),
+        StatusBody {
+            status: 200,
+            body: big.as_bytes()
+        }
+    );
     std::fs::remove_file(root.join("big.bin")).expect("remove big.bin");
     assert_eq!(head_field(&head("/big.bin"), "x-rapira-target"), "/big.bin");
     assert_eq!(
@@ -652,14 +706,21 @@ fn cached_entries_answer_until_they_go_stale() {
     );
 
     // Eight requests arrive for one cold path at the same time. Every answer matches.
+    struct Answer {
+        etag: String,
+        body: Vec<u8>,
+    }
     let gate = std::sync::Barrier::new(8);
-    let answers: Vec<(String, Vec<u8>)> = std::thread::scope(|s| {
+    let answers: Vec<Answer> = std::thread::scope(|s| {
         let tasks: Vec<_> = (0..8)
             .map(|_| {
                 s.spawn(|| {
                     gate.wait();
                     let raw = get("/race.bin", &[]);
-                    (head_field(&raw, "etag"), split_response(&raw).1.to_vec())
+                    Answer {
+                        etag: head_field(&raw, "etag"),
+                        body: split_response(&raw).body.to_vec(),
+                    }
                 })
             })
             .collect();
@@ -668,8 +729,8 @@ fn cached_entries_answer_until_they_go_stale() {
             .map(|t| t.join().expect("race thread"))
             .collect()
     });
-    let (first_etag, _) = &answers[0];
-    for (etag, body) in &answers {
+    let first_etag = &answers[0].etag;
+    for Answer { etag, body } in &answers {
         assert!(!etag.is_empty(), "no etag");
         assert_eq!(etag, first_etag);
         assert_eq!(body, b"abcdefghij");
@@ -681,24 +742,30 @@ fn cached_entries_answer_until_they_go_stale() {
     let first = get("/rewrite.css", &[]);
     let rewrite_etag = head_field(&first, "etag");
     assert!(!rewrite_etag.is_empty(), "no etag");
-    assert_eq!(split_response(&first).1, b"aaaaaa");
+    assert_eq!(split_response(&first).body, b"aaaaaa");
     write_at(&rewrite, "bbbbbb", 1_000_002);
     let inside = get("/rewrite.css", &[]);
     assert_eq!(head_field(&inside, "etag"), rewrite_etag);
-    assert_eq!(split_response(&inside).1, b"aaaaaa");
+    assert_eq!(split_response(&inside).body, b"aaaaaa");
 
     // Both writes keep the mtime. Only the length shows the difference.
     let resize = root.join("resize.css");
     write_at(&resize, "aaaaaa", 1_000_000);
-    assert_eq!(split_response(&get("/resize.css", &[])).1, b"aaaaaa");
+    assert_eq!(split_response(&get("/resize.css", &[])).body, b"aaaaaa");
     write_at(&resize, "aaaaaaaaa", 1_000_000);
 
-    assert_eq!(split_response(&get("/kept.bin", &[])).1, b"abcdefghij");
+    assert_eq!(split_response(&get("/kept.bin", &[])).body, b"abcdefghij");
 
-    assert_eq!(split_response(&get("/gone.css", &[])).1, b"body{}");
+    assert_eq!(split_response(&get("/gone.css", &[])).body, b"body{}");
     std::fs::remove_file(root.join("gone.css")).expect("remove gone.css");
     let raw = get("/gone.css", &[]);
-    assert_eq!(split_response(&raw), (200, &b"body{}"[..]));
+    assert_eq!(
+        split_response(&raw),
+        StatusBody {
+            status: 200,
+            body: &b"body{}"[..]
+        }
+    );
     assert_eq!(head_field(&raw, "x-rapira-target"), "");
 
     // An entry is fresh for one second (TTL in crates/middleware/static_files/src/cache.rs).
@@ -706,18 +773,24 @@ fn cached_entries_answer_until_they_go_stale() {
 
     let after = get("/rewrite.css", &[]);
     assert_ne!(head_field(&after, "etag"), rewrite_etag);
-    assert_eq!(split_response(&after).1, b"bbbbbb");
+    assert_eq!(split_response(&after).body, b"bbbbbb");
 
     let after = get("/resize.css", &[]);
     assert_eq!(head_field(&after, "content-length"), "9");
-    assert_eq!(split_response(&after).1, b"aaaaaaaaa");
+    assert_eq!(split_response(&after).body, b"aaaaaaaaa");
 
     // A HEAD revalidation reads only the metadata. The body must survive it, so the GET after
     // the delete still answers from memory.
-    assert_eq!(split_response(&head("/kept.bin")).0, 200);
+    assert_eq!(split_response(&head("/kept.bin")).status, 200);
     std::fs::remove_file(root.join("kept.bin")).expect("remove kept.bin");
     let raw = get("/kept.bin", &[]);
-    assert_eq!(split_response(&raw), (200, &b"abcdefghij"[..]));
+    assert_eq!(
+        split_response(&raw),
+        StatusBody {
+            status: 200,
+            body: &b"abcdefghij"[..]
+        }
+    );
     assert_eq!(head_field(&raw, "x-rapira-target"), "");
 
     let raw = get("/gone.css", &[]);
@@ -780,7 +853,7 @@ fn a_bad_static_root_refuses_to_boot() {
             let _ = std::fs::remove_dir_all(&dir);
             continue;
         }
-        let (status, log) = spawn_boot_failure(
+        let Exited { status, log } = spawn_boot_failure(
             "shared/echo-worker.php",
             &format!(
                 "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
@@ -814,7 +887,7 @@ fn spawn_echo_loop(root: &Path, forbid: Option<&str>) -> Server {
         .spawn()
 }
 
-fn split_response(raw: &[u8]) -> (u16, &[u8]) {
+fn split_response(raw: &[u8]) -> StatusBody<&[u8]> {
     parse_status_and_body(raw).unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(raw)))
 }
 

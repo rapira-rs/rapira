@@ -1,6 +1,6 @@
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{Resp, assert_skip_allowed, drain, drain_resp, fixture, req, server_log};
+use tests::{Resp, StatusBody, assert_skip_allowed, drain, drain_resp, fixture, req, server_log};
 
 use crate::harness::Spawn;
 
@@ -52,7 +52,10 @@ fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
         .json_log()
         .spawn();
 
-    let (s1, b1) = drain(submit(srv.addr, req("/?step=leak"))?);
+    let StatusBody {
+        status: s1,
+        body: b1,
+    } = drain(submit(srv.addr, req("/?step=leak"))?);
     if b1 == "skip" {
         assert_skip_allowed(name);
         return Ok(());
@@ -62,7 +65,10 @@ fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
         (200, "imap:leaked:1"),
         "the leak request must push one entry and keep it undrained"
     );
-    let (s2, b2) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody {
+        status: s2,
+        body: b2,
+    } = drain(submit(srv.addr, req("/"))?);
     assert_eq!(
         (s2, b2.as_str()),
         (200, "imap:errors:empty"),

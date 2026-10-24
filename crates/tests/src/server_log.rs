@@ -52,8 +52,16 @@ fn record(line: &str) -> Option<Captured> {
     })
 }
 
+/// The `app` and `php` records of a log.
+pub struct AppLog {
+    /// The `app`-target records.
+    pub records: Vec<AppRecord>,
+    /// The messages of the `php`-target records.
+    pub php_messages: Vec<String>,
+}
+
 /// The `app` records of `log` and the messages of its `php` records.
-pub fn app_records(log: &Path) -> (Vec<AppRecord>, Vec<String>) {
+pub fn app_records(log: &Path) -> AppLog {
     let all = records(log);
     let app = all
         .iter()
@@ -69,7 +77,10 @@ pub fn app_records(log: &Path) -> (Vec<AppRecord>, Vec<String>) {
         .filter(|c| c.target == "php")
         .map(|c| c.message)
         .collect();
-    (app, php)
+    AppLog {
+        records: app,
+        php_messages: php,
+    }
 }
 
 /// The contexts of the `app` records of `log` named `message`, in log order.

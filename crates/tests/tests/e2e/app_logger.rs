@@ -1,19 +1,19 @@
 use rapira_sapi::plugin::Mode;
-use tests::server_log::{self, AppRecord};
+use tests::server_log::{self, AppLog, AppRecord};
 use tests::wire::submit;
-use tests::{drain, fixture, req};
+use tests::{StatusBody, drain, fixture, req};
 use tracing::Level;
 
 use crate::harness::Spawn;
 
 /// Runs `script` in classic mode and returns its `app` records and its `php` messages; the fixture must echo `logged` last, so a script that died half way cannot masquerade as one that logged nothing.
-fn app_records(script: &str) -> (Vec<AppRecord>, Vec<String>) {
+fn app_records(script: &str) -> AppLog {
     // Every level of the `app` and `php` targets reaches the log.
     let mut srv = Spawn::http(Mode::Classic, fixture(script))
         .json_log()
         .rust_log("info,app=trace,php=trace")
         .spawn();
-    let (status, body) = drain(submit(srv.addr, req("/")).expect("dispatch"));
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/")).expect("dispatch"));
     // The stop waits for the worker exit, so the log holds every record.
     srv.stop();
 
@@ -24,7 +24,7 @@ fn app_records(script: &str) -> (Vec<AppRecord>, Vec<String>) {
 
 /// The one `app` record `script` must leave; asserting the count fails the test on a stray extra record instead of ignoring it.
 fn app_record(script: &str) -> AppRecord {
-    let (records, _) = app_records(script);
+    let records = app_records(script).records;
     assert_eq!(
         records.len(),
         1,
@@ -36,22 +36,49 @@ fn app_record(script: &str) -> AppRecord {
 /// Every LogLevel case reaches the matching tracing level; an omitted argument lands on Info.
 #[test]
 fn log_levels_map_onto_tracing_levels() {
-    let (records, _) = app_records("app_logger/app-logger-levels.php");
+    #[derive(Debug, PartialEq)]
+    struct Logged<'a> {
+        level: Level,
+        message: &'a str,
+    }
 
-    let got: Vec<(Level, &str)> = records
+    let records = app_records("app_logger/app-logger-levels.php").records;
+
+    let got: Vec<Logged> = records
         .iter()
-        .map(|r| (r.level, r.message.as_str()))
+        .map(|r| Logged {
+            level: r.level,
+            message: &r.message,
+        })
         .collect();
 
     assert_eq!(
         got,
         vec![
-            (Level::ERROR, "lvl-error"),
-            (Level::WARN, "lvl-warning"),
-            (Level::INFO, "lvl-info"),
-            (Level::DEBUG, "lvl-debug"),
-            (Level::TRACE, "lvl-trace"),
-            (Level::INFO, "lvl-omitted"),
+            Logged {
+                level: Level::ERROR,
+                message: "lvl-error"
+            },
+            Logged {
+                level: Level::WARN,
+                message: "lvl-warning"
+            },
+            Logged {
+                level: Level::INFO,
+                message: "lvl-info"
+            },
+            Logged {
+                level: Level::DEBUG,
+                message: "lvl-debug"
+            },
+            Logged {
+                level: Level::TRACE,
+                message: "lvl-trace"
+            },
+            Logged {
+                level: Level::INFO,
+                message: "lvl-omitted"
+            },
         ],
         "each case must map to its own level, in order"
     );
@@ -60,7 +87,7 @@ fn log_levels_map_onto_tracing_levels() {
 /// Absent and empty contexts carry no field at all rather than an empty JSON object.
 #[test]
 fn log_context_is_json_encoded() {
-    let (records, _) = app_records("app_logger/app-logger-context.php");
+    let records = app_records("app_logger/app-logger-context.php").records;
     let find = |needle: &str| {
         records
             .iter()
@@ -190,7 +217,10 @@ fn app_logger_dateinterval_easy() {
 /// Cycles are cut at the back-edge and raise no PHP diagnostic.
 #[test]
 fn cycles_are_broken_without_a_diagnostic() {
-    let (records, phpdiag) = app_records("app_logger/limits-cycles.php");
+    let AppLog {
+        records,
+        php_messages: phpdiag,
+    } = app_records("app_logger/limits-cycles.php");
     let [
         AppRecord {
             level,
@@ -240,7 +270,7 @@ fn log_preserves_exit_from_a_serializer() {
         fixture("app_logger/app-logger-exit-in-serializer.php"),
     )
     .spawn();
-    let (status, body) = drain(submit(srv.addr, req("/")).expect("dispatch"));
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/")).expect("dispatch"));
 
     assert_eq!(status, 200);
     assert!(body.contains("quitting"), "got: {body:?}");

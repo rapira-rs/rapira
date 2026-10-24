@@ -40,7 +40,9 @@ fn usr2_reload_replaces_workers_while_serving() {
 fn reload_keeps_the_worker_count_when_the_last_old_worker_dies() {
     let srv = spawn_with_config("lifecycle/slow-boot-worker.php", 1, "");
     let old = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET /")
+        .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 
     signal(srv.pid(), libc::SIGUSR2);
@@ -55,7 +57,9 @@ fn reload_keeps_the_worker_count_when_the_last_old_worker_dies() {
         "no {reaped:?} record\n{}",
         diagnostics(&srv)
     );
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET / after the kill");
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET / after the kill")
+        .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     wait_workers(
         &srv,

@@ -1,7 +1,10 @@
 use std::time::{Duration, Instant};
 
+use tests::StatusBody;
+
 use crate::harness::{
-    Conn, diagnostics, http_get, http_get_raw, spawn_with_config, wait_log_contains, wait_workers,
+    Conn, Head, diagnostics, http_get, http_get_raw, spawn_with_config, wait_log_contains,
+    wait_workers,
 };
 
 const T: Duration = Duration::from_secs(10);
@@ -15,7 +18,7 @@ fn sse_head_and_events_reach_the_wire_incrementally() {
         .expect("send");
 
     let started = Instant::now();
-    let (status, fields) = c.read_head(T).expect("flushed head");
+    let Head { status, fields } = c.read_head(T).expect("flushed head");
     assert_eq!(status, 200);
     assert!(
         started.elapsed() < Duration::from_millis(350),
@@ -46,7 +49,7 @@ fn chunked_stream_preserves_keepalive() {
 
     c.send(b"GET /?probe=chunks HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send");
-    let (status, fields) = c.read_head(T).expect("head");
+    let Head { status, fields } = c.read_head(T).expect("head");
     assert_eq!(status, 200);
     assert!(
         fields
@@ -58,7 +61,7 @@ fn chunked_stream_preserves_keepalive() {
 
     c.send(b"GET /?probe=chunks HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
         .expect("second request on the same connection");
-    let (status, _) = c.read_head(T).expect("reused connection must serve");
+    let status = c.read_head(T).expect("reused connection must serve").status;
     assert_eq!(status, 200);
 }
 
@@ -70,7 +73,7 @@ fn interim_heads_never_reach_the_wire() {
     c.send(b"GET /?probe=interim HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
         .expect("send");
 
-    let (status, _) = c.read_head(T).expect("final head");
+    let status = c.read_head(T).expect("final head").status;
     assert_eq!(status, 200, "the first head block must be the final one");
     c.read_body_until(b"hello", T).expect("body");
 }
@@ -83,7 +86,7 @@ fn http10_gets_no_interim_and_no_chunked() {
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=interim HTTP/1.0\r\n\r\n")
         .expect("send");
-    let (status, fields) = c.read_head(T).expect("head");
+    let Head { status, fields } = c.read_head(T).expect("head");
     assert_eq!(status, 200, "the interim head must be dropped for 1.0");
     assert!(
         !fields.iter().any(|(k, _)| k == "transfer-encoding"),
@@ -102,7 +105,7 @@ fn declared_length_head_beats_a_slow_body() {
         .expect("send");
 
     let started = Instant::now();
-    let (status, fields) = c.read_head(T).expect("head");
+    let Head { status, fields } = c.read_head(T).expect("head");
     assert_eq!(status, 200);
     assert!(
         started.elapsed() < Duration::from_millis(1000),
@@ -145,7 +148,7 @@ fn head_completion_does_not_cancel_php() {
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"HEAD /body HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
         .expect("send");
-    let (status, _) = c.read_head(T).expect("head");
+    let status = c.read_head(T).expect("head").status;
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     assert!(
         c.read_remaining(T).expect("response closed").is_empty(),
@@ -154,7 +157,7 @@ fn head_completion_does_not_cancel_php() {
     );
 
     std::fs::write(srv.dir.join("client-read"), b"read").expect("release PHP");
-    let (status, body) = http_get(srv.addr, "/state", T)
+    let StatusBody { status, body } = http_get(srv.addr, "/state", T)
         .unwrap_or_else(|e| panic!("GET /state: {e}\n{}", diagnostics(&srv)));
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     assert_eq!(
@@ -180,7 +183,7 @@ fn assert_completed_response_finalizes(path: &str, contents: &[u8]) {
         let connection = if close { "Connection: close\r\n" } else { "" };
         c.send(format!("GET {path} HTTP/1.1\r\nHost: e2e\r\n{connection}\r\n").as_bytes())
             .expect("send");
-        let (status, fields) = c.read_head(T).expect("head");
+        let Head { status, fields } = c.read_head(T).expect("head");
         assert_eq!(status, 200, "\n{}", diagnostics(&srv));
         assert!(
             fields
@@ -201,7 +204,7 @@ fn assert_completed_response_finalizes(path: &str, contents: &[u8]) {
         std::fs::write(srv.dir.join("client-read"), b"read").expect("release PHP");
         c.send(b"GET /state HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
             .expect("next request");
-        let (status, _) = c.read_head(T).expect("next head");
+        let status = c.read_head(T).expect("next head").status;
         assert_eq!(status, 200, "\n{}", diagnostics(&srv));
         assert_eq!(
             c.read_remaining(T).expect("finalization result"),
@@ -224,19 +227,19 @@ fn later_connection_error_does_not_cancel_completed_response() {
     client
         .send(b"GET /body HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send first request");
-    let (status, _) = client.read_head(T).expect("head");
+    let status = client.read_head(T).expect("head").status;
     assert_eq!(status, 200);
     assert_eq!(client.read_n(5, T).expect("complete body"), b"01234");
 
     client
         .send(b"GET / HTTP/1.1\r\nHost: e2e\r\ninvalid\r\n\r\n")
         .expect("send malformed next request");
-    let (status, _) = client.read_head(T).expect("error response");
+    let status = client.read_head(T).expect("error response").status;
     assert_eq!(status, 400);
     client.read_remaining(T).expect("failed connection closes");
 
     std::fs::write(srv.dir.join("client-read"), b"read").expect("release PHP");
-    let (status, body) = http_get(srv.addr, "/state", T)
+    let StatusBody { status, body } = http_get(srv.addr, "/state", T)
         .unwrap_or_else(|e| panic!("GET /state: {e}\n{}", diagnostics(&srv)));
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     assert_eq!(
@@ -315,7 +318,7 @@ fn reset_during_buffered_write_cancels_php() {
     );
     drop(client);
 
-    let (status, body) = http_get(srv.addr, "/state", T)
+    let StatusBody { status, body } = http_get(srv.addr, "/state", T)
         .unwrap_or_else(|e| panic!("GET /state after reset: {e}\n{}", diagnostics(&srv)));
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     assert_eq!(
@@ -349,7 +352,7 @@ fn client_abort_discards_the_unit() {
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=discard HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send");
-    let (status, _) = c.read_head(T).expect("flushed head");
+    let status = c.read_head(T).expect("flushed head").status;
     assert_eq!(status, 200);
     c.leave();
 
@@ -366,7 +369,7 @@ fn worker_death_mid_stream_truncates_the_response() {
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=die-mid-stream HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send");
-    let (status, _) = c.read_head(T).expect("head");
+    let status = c.read_head(T).expect("head").status;
     assert_eq!(status, 200);
     c.read_body_until(b"first,", T).expect("first chunk");
     let rest = c.read_remaining(T).expect("connection drops");
@@ -393,7 +396,7 @@ fn sendfile_streams_from_disk_with_length() {
         .as_bytes(),
     )
     .expect("send");
-    let (status, fields) = c.read_head(T).expect("head");
+    let Head { status, fields } = c.read_head(T).expect("head");
     assert_eq!(status, 200);
     assert!(
         fields
@@ -414,7 +417,7 @@ fn trailers_are_dropped_on_h1_and_the_response_ends_cleanly() {
     c.send(b"GET /?probe=trailers HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send");
 
-    let (status, fields) = c.read_head(T).expect("head");
+    let Head { status, fields } = c.read_head(T).expect("head");
     assert_eq!(status, 200);
     assert!(
         fields
@@ -428,6 +431,6 @@ fn trailers_are_dropped_on_h1_and_the_response_ends_cleanly() {
 
     c.send(b"GET /?probe=chunks HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
         .expect("second request");
-    let (status, _) = c.read_head(T).expect("reused connection must serve");
+    let status = c.read_head(T).expect("reused connection must serve").status;
     assert_eq!(status, 200);
 }

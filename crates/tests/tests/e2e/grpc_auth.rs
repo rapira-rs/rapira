@@ -7,7 +7,7 @@ use serde_json::json;
 use tests::fixture;
 use tests::grpc::{Conn, ECHO_PATH, HI, HI_FRAME, Wire, envelope, web_trailers};
 
-use crate::harness::{Spawn, calls, listen, scratch_dir, stop};
+use crate::harness::{Exited, Spawn, calls, listen, scratch_dir, stop};
 
 /// The `[grpc]` lines that enable `auth` with the tokens file `tokens`.
 fn auth(tokens: &Path) -> String {
@@ -341,7 +341,7 @@ async fn auth_covers_the_plugin_routes() {
 #[test]
 fn a_missing_tokens_file_fails_the_boot() {
     let tokens = scratch_dir().join("missing-tokens");
-    let (status, log) = Spawn::grpc(fixture("grpc/wire-worker.php"))
+    let Exited { status, log } = Spawn::grpc(fixture("grpc/wire-worker.php"))
         .grpc_extra(&auth(&tokens))
         .boot_failure();
     assert_eq!(status.code(), Some(1), "{log}");

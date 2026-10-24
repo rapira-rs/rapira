@@ -1,7 +1,7 @@
 use rapira_sapi::plugin::Mode;
 use serde_json::{Value, json};
 use tests::wire::submit;
-use tests::{drain, fixture, req};
+use tests::{StatusBody, drain, fixture, req};
 
 use crate::harness::Spawn;
 
@@ -69,7 +69,7 @@ fn boot_server_follows_the_cli() -> anyhow::Result<()> {
             spawn = spawn.env(key, value);
         }
         let srv = spawn.spawn();
-        let (status, body) = drain(submit(srv.addr, req("/"))?);
+        let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
         assert_eq!(status, 200, "{}: {body}", case.name);
 
         let name = case.fixture.rsplit('/').next().expect("file name");

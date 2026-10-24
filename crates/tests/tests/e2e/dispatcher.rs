@@ -1,7 +1,7 @@
 use rapira_sapi::plugin::Mode;
 use serde_json::json;
 use tests::wire::submit;
-use tests::{drain, fixture, req, server_log};
+use tests::{StatusBody, drain, fixture, req, server_log};
 
 use crate::harness::Spawn;
 
@@ -13,7 +13,7 @@ fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
         fixture("dispatcher/not-in-dispatcher-mode.php"),
     )
     .spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(
         status, 200,
@@ -61,8 +61,14 @@ fn header_callback_fatal_keeps_the_worker() -> anyhow::Result<()> {
         fixture("dispatcher/header-callback-fatal-worker.php"),
     )
     .spawn();
-    let (s1, pid1) = drain(submit(srv.addr, req("/"))?);
-    let (s2, pid2) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody {
+        status: s1,
+        body: pid1,
+    } = drain(submit(srv.addr, req("/"))?);
+    let StatusBody {
+        status: s2,
+        body: pid2,
+    } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!((s1, s2), (200, 200), "bodies: {pid1:?} {pid2:?}");
     assert_eq!(pid1, pid2, "the worker must not crash between cycles");
@@ -73,7 +79,7 @@ fn header_callback_fatal_keeps_the_worker() -> anyhow::Result<()> {
 #[test]
 fn host_created_only() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("dispatcher/host-created-only.php")).spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(status, 200, "the refusal must be caught (body: {body:?})");
     assert!(

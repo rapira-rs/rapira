@@ -1,6 +1,8 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use tests::StatusBody;
+
 use crate::harness::{
     Server, diagnostics, fan_out, fixture_path, http_get, http_get_with_headers, spawn_with_config,
     spawn_with_phprc_and_config, wait_workers,
@@ -8,7 +10,14 @@ use crate::harness::{
 
 const REQ: Duration = Duration::from_secs(10);
 
-fn rng_draw(body: &str) -> (u32, String) {
+/// One answer of openssl-rng-worker.php.
+struct RngDraw {
+    pid: u32,
+    /// The first draw of the worker, as hex.
+    first: String,
+}
+
+fn rng_draw(body: &str) -> RngDraw {
     let (pid, first) = body
         .strip_prefix("pid=")
         .and_then(|r| r.split_once(" first="))
@@ -16,7 +25,10 @@ fn rng_draw(body: &str) -> (u32, String) {
     let pid: u32 = pid
         .parse()
         .unwrap_or_else(|_| panic!("bad pid in {body:?}"));
-    (pid, first.to_owned())
+    RngDraw {
+        pid,
+        first: first.to_owned(),
+    }
 }
 
 /// No two workers may emit identical first draws; the cached draw also pins that the entrypoint top level runs once per worker (random_bytes() never uses OpenSSL).
@@ -27,7 +39,7 @@ fn forked_workers_do_not_share_the_openssl_drbg() {
 
     let mut per_pid: HashMap<u32, String> = HashMap::new();
     for _ in 0..5 {
-        for (pid, first) in fan_out(srv.addr, "/", 4, 10, rng_draw) {
+        for RngDraw { pid, first } in fan_out(srv.addr, "/", 4, 10, rng_draw) {
             assert!(
                 first.len() == 32
                     && first
@@ -73,7 +85,7 @@ fn browscap_ini() -> String {
 }
 
 fn browscap_probe(srv: &Server, ua: &str) -> String {
-    let (code, body) =
+    let StatusBody { status: code, body } =
         http_get_with_headers(srv.addr, "/", &[("User-Agent", ua)], REQ).expect("GET /");
     assert_eq!(code, 200, "UA {ua:?}\n{}", diagnostics(srv));
     String::from_utf8_lossy(&body).into_owned()
@@ -90,43 +102,47 @@ fn get_browser_uses_browscap_and_isolates_user_agent_requests() {
     );
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
+    struct Case {
+        ua: &'static str,
+        expected: &'static str,
+    }
     let cases = [
-        (
-            "Rapira/1.0 (Linux x86_64) Bot/9",
-            "browser=RapiraBot\n\
+        Case {
+            ua: "Rapira/1.0 (Linux x86_64) Bot/9",
+            expected: "browser=RapiraBot\n\
              platform=unknown\n\
              crawler=1\n\
              version=1.0\n\
              parent=RapiraBase\n\
              browser_name_pattern=Rapira/1.0 (Linux*) Bot*\n\
              browser_name_regex=~^rapira/1\\.0 \\(linux.*\\) bot.*$~",
-        ),
-        (
-            "Rapira/1.0 (Darwin)",
-            "browser=RapiraProbe\n\
+        },
+        Case {
+            ua: "Rapira/1.0 (Darwin)",
+            expected: "browser=RapiraProbe\n\
              platform=unknown\n\
              crawler=\n\
              version=1.0\n\
              parent=RapiraBase\n\
              browser_name_pattern=Rapira/1.0*\n\
              browser_name_regex=~^rapira/1\\.0.*$~",
-        ),
-        (
-            "curl/8.5.0",
-            "browser=RapiraDefault\n\
+        },
+        Case {
+            ua: "curl/8.5.0",
+            expected: "browser=RapiraDefault\n\
              platform=unknown\n\
              crawler=\n\
              version=0\n\
              parent=<unset>\n\
              browser_name_pattern=Default Browser Capability Settings\n\
              browser_name_regex=~^default browser capability settings$~",
-        ),
+        },
     ];
-    for (ua, expected) in cases {
+    for Case { ua, expected } in cases {
         assert_eq!(browscap_probe(&srv, ua), expected, "UA {ua:?}");
     }
 
-    let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
+    let StatusBody { status: code, body } = http_get(srv.addr, "/", REQ).expect("GET /");
     let body = String::from_utf8_lossy(&body);
     assert_eq!(code, 200, "{}", diagnostics(&srv));
     assert!(
@@ -135,15 +151,22 @@ fn get_browser_uses_browscap_and_isolates_user_agent_requests() {
     );
 }
 
-fn table_and_pid(body: &str) -> (String, u32) {
+/// One answer of browscap-worker.php to `?probe=pid`.
+struct BrowscapReply {
+    table: String,
+    pid: u32,
+}
+
+fn table_and_pid(body: &str) -> BrowscapReply {
     let (table, pid) = body
         .rsplit_once("\npid=")
         .unwrap_or_else(|| panic!("no pid line in {body:?}"));
-    (
-        table.to_owned(),
-        pid.parse()
+    BrowscapReply {
+        table: table.to_owned(),
+        pid: pid
+            .parse()
             .unwrap_or_else(|_| panic!("bad pid in {body:?}")),
-    )
+    }
 }
 
 /// One MINIT parse in the master serves every worker: identical answers from distinct pids, request after request.
@@ -159,7 +182,7 @@ fn browscap_table_is_shared_and_stable_across_workers() {
     let mut tables: Vec<String> = Vec::new();
     let mut pids: Vec<u32> = Vec::new();
     for _ in 0..5 {
-        for (table, pid) in fan_out(srv.addr, "/?probe=pid", 4, 10, table_and_pid) {
+        for BrowscapReply { table, pid } in fan_out(srv.addr, "/?probe=pid", 4, 10, table_and_pid) {
             tables.push(table);
             pids.push(pid);
         }
