@@ -93,8 +93,11 @@ pub(crate) fn bury(
     None
 }
 
-/// Drains `waitpid` fully so every child ready at this point is buried in one pass.
-pub(crate) fn reap_all(pools: &mut [Pool]) -> Vec<(usize, WorkerProc, ExitVerdict)> {
+/// Drains `waitpid` fully so every child ready at this point is buried in one pass. Each crash outside a stop gets an error record; a stop ends workers with signals and forced exits on purpose.
+pub(crate) fn reap_all(
+    pools: &mut [Pool],
+    stopping: bool,
+) -> Vec<(usize, WorkerProc, ExitVerdict)> {
     let mut buried = Vec::new();
     loop {
         let mut status: c_int = 0;
@@ -104,7 +107,21 @@ pub(crate) fn reap_all(pools: &mut [Pool]) -> Vec<(usize, WorkerProc, ExitVerdic
             break;
         }
         match bury(pools, pid, status) {
-            Some(entry) => buried.push(entry),
+            Some(entry) => {
+                if entry.2 == ExitVerdict::Crash && !stopping {
+                    let how = if libc::WIFSIGNALED(status) {
+                        format!("killed by signal {}", libc::WTERMSIG(status))
+                    } else {
+                        format!("exited with code {}", libc::WEXITSTATUS(status))
+                    };
+                    tracing::error!(
+                        target: "master",
+                        "{} pool: worker {pid} {how}",
+                        pools[entry.0].cfg.name
+                    );
+                }
+                buried.push(entry);
+            }
             None => tracing::warn!(target: "master", "reaped unknown child {pid}"),
         }
     }

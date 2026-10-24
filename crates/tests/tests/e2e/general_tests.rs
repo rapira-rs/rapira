@@ -15,28 +15,50 @@ fn post(body: Vec<u8>) -> http::Request<Vec<u8>> {
     r
 }
 
-// PHP core ignores ub_write's return value, so the SAPI must raise php_handle_aborted_connection() itself, and the aborted status must not leak into the next request.
+// PHP core ignores ub_write's return value, so the SAPI must end the unit itself. The abort ends only that unit: the worker keeps its boot state, and the aborted status does not leak into the next request.
 #[test]
 fn client_disconnect_aborts_request() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Worker, fixture("general_tests/abort-worker.php"))
-        .json_log()
-        .spawn();
+    struct Case {
+        name: &'static str,
+        path: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "echo in the handler",
+            path: "/?case=echo",
+        },
+        Case {
+            name: "output buffer flush after the handler returns",
+            path: "/?case=flush",
+        },
+        Case {
+            name: "echo in a shutdown function",
+            path: "/?case=shutdown",
+        },
+        Case {
+            name: "echo in a destructor",
+            path: "/?case=destruct",
+        },
+    ];
+    for c in cases {
+        let srv = Spawn::http(Mode::Worker, fixture("general_tests/abort-worker.php"))
+            .json_log()
+            .spawn();
 
-    let rx = submit(srv.addr, req("/"))?;
-    server_log::wait_app_record(&srv.log_file(), "held");
-    drop(rx);
+        let rx = submit(srv.addr, req(c.path))?;
+        server_log::wait_app_record(&srv.log_file(), "held");
+        drop(rx);
 
-    let (s2, b2) = drain(submit(srv.addr, req("/?probe=1"))?);
+        let (s2, b2) = drain(submit(srv.addr, req("/?case=probe"))?);
 
-    assert_eq!(s2, 200, "worker must survive the aborted request");
-    assert!(
-        b2.contains("done=0"),
-        "work after the disconnect must not run (got: {b2:?})"
-    );
-    assert!(
-        b2.contains("aborted=0"),
-        "connection status must reset for the next request (got: {b2:?})"
-    );
+        // served=2: the aborted unit and the probe ran in one boot
+        assert_eq!(
+            (s2, b2.as_str()),
+            (200, "served=2 done=0 aborted=0"),
+            "{}",
+            c.name
+        );
+    }
     Ok(())
 }
 

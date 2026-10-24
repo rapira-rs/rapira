@@ -104,7 +104,9 @@ impl<L: AsRawFd> Listener<L> {
 
     /// A thread blocked in epoll_wait is what makes EPOLLEXCLUSIVE hand one connection
     /// to one worker: the kernel walks the socket wait queue and stops at the first
-    /// waiter it wakes.
+    /// waiter it wakes. A worker that a signal ends while its thread waits here can take the
+    /// wakeup of one connection with it, and that connection waits in the accept queue until
+    /// the next connection wakes another worker.
     fn listener_control(&self, operation: libc::c_int) -> io::Result<()> {
         self.control(
             operation,

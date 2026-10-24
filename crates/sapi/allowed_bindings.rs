@@ -20,7 +20,7 @@
     "rapira_ce_no_dispatcher_error",
     "zend_argument_value_error", "zend_argument_type_error",
     "rapira_ce_work_discarded_exception",
-    // re-arms the wall timer the send-park guard disarms around a full-channel wait
+    // re-arms the execution timer the send-park guard disarms around a full-channel wait
     "zend_set_timeout",
     // the FOREACH macros are header-only, so the array walk uses the exported position API
     "zend_hash_internal_pointer_reset_ex", "zend_hash_get_current_key_ex",

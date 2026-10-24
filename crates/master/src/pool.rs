@@ -253,25 +253,27 @@ impl Pool {
         if stopping {
             return Ok(());
         }
+        if verdict == ExitVerdict::Unhealthy
+            && w.generation == 0
+            && self.total_successful() == 0
+            && !self.board.iter().any(SharedSlot::serving)
+        {
+            anyhow::bail!(
+                "{} pool: worker {} exited unhealthy before the pool served any request",
+                self.cfg.name,
+                w.pid
+            );
+        }
+        // The first replacement of the reload takes the place of the last old worker.
+        if self.reload.is_some() && w.generation < self.generation && !self.has_old_gen() {
+            return Ok(());
+        }
 
         match verdict {
             ExitVerdict::Recycle | ExitVerdict::Drain | ExitVerdict::TimeoutKill => {
                 self.slot_states[slot].schedule_immediate(now);
             }
-            ExitVerdict::Unhealthy => {
-                if w.generation == 0
-                    && self.total_successful() == 0
-                    && !self.board.iter().any(SharedSlot::serving)
-                {
-                    anyhow::bail!(
-                        "{} pool: worker {} exited unhealthy before the pool served any request",
-                        self.cfg.name,
-                        w.pid
-                    );
-                }
-                self.slot_states[slot].schedule_backoff(lived, now);
-            }
-            ExitVerdict::Crash => {
+            ExitVerdict::Unhealthy | ExitVerdict::Crash => {
                 self.slot_states[slot].schedule_backoff(lived, now);
             }
         }

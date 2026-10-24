@@ -56,9 +56,59 @@ fn killed_worker_respawns() {
         "respawn to 2 with a fresh pid",
         |p| p.len() == 2 && p.iter().any(|x| !pids0.contains(x)),
     );
+    let crash = format!(
+        "http pool: worker {} killed by signal {}",
+        pids0[0],
+        libc::SIGKILL
+    );
+    assert!(
+        wait_log_contains(&srv, &crash, Duration::from_secs(5)),
+        "no {crash:?} record\n{}",
+        diagnostics(&srv)
+    );
     for _ in 0..5 {
         let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
         assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    }
+}
+
+/// Workers ignore SIGUSR1 and SIGUSR2, so `pkill -USR2 rapira` does not stop them. Classic mode starts PHP again for each request, and PHP sets its signal handlers again at each start.
+#[test]
+fn workers_ignore_usr_signals() {
+    struct Case {
+        name: &'static str,
+        signal: i32,
+    }
+    let cases = [
+        Case {
+            name: "SIGUSR1",
+            signal: libc::SIGUSR1,
+        },
+        Case {
+            name: "SIGUSR2",
+            signal: libc::SIGUSR2,
+        },
+    ];
+    let srv = spawn_with_config("classic/cwd.php", 1, "mode = \"classic\"\n");
+    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    for _ in 0..2 {
+        let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    }
+    for case in cases {
+        signal(pid, case.signal);
+        // A worker that the signal stops exits in a few milliseconds.
+        std::thread::sleep(Duration::from_millis(200));
+        let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10))
+            .unwrap_or_else(|e| panic!("{}: GET /: {e}\n{}", case.name, diagnostics(&srv)));
+        assert_eq!(code, 200, "{}\n{}", case.name, diagnostics(&srv));
+        assert_eq!(
+            worker_pids(srv.pid()),
+            [pid],
+            "{}: the worker must survive\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
     }
 }
 
@@ -355,7 +405,7 @@ fn worker_bootstrap_that_never_serves_failboots() {
     assert_exit_code(Some(status), MASTER_EXIT_FAILBOOT, &srv);
 }
 
-/// A client that walks away mid-handler must not take the worker down: the abort recycles the cycle and the next request is served.
+/// A client that walks away mid-handler must not take the worker down: the abort ends only that unit, and the next request is served.
 #[test]
 fn worker_survives_client_leaving() {
     let srv = spawn_with_config("lifecycle/hold-worker.php", 1, "mode = \"worker\"\n");

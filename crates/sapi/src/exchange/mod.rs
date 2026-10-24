@@ -60,6 +60,8 @@ pub(crate) fn cycle_reset() {
     UNIT.set(None);
     CLOSED_SEEN.set(false);
     RECEIVED.set(false);
+    // A bailout in RSHUTDOWN skips rapira_rs_dispatcher_release(). The request shutdown freed the object, so drop the zval without a dtor.
+    receive::DISPATCHER.set(None);
 }
 
 /// Reclaim a unit free_obj never saw (shutdown bailout / allocation bailout).
