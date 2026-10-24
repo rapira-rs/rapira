@@ -75,6 +75,13 @@ pub struct Rapira {
     worker: Option<JoinHandle<()>>,
 }
 
+/// The PHP thread of one worker and its intake.
+pub struct StartedWorker {
+    pub rapira: Rapira,
+    /// The intake of this worker. The PHP thread sees the intake closed once every clone of the Sink is dropped.
+    pub sink: Sink,
+}
+
 /// Zend structs are bound by bindgen at build time, so a libphp from another PHP minor is an ABI mismatch (`sapi_startup` handed a differently shaped struct), not a load error.
 fn check_linked_php() -> anyhow::Result<()> {
     // SAFETY: php_version_id() returns a compile-time constant and touches no engine state, so this is valid pre-startup.
@@ -133,7 +140,6 @@ pub extern "C" fn rapira_rs_register_plugin_classes() {
 impl Rapira {
     /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `max_requests`: 0 = unlimited; jitter already applied by the caller.
     /// `slot`: the scoreboard slot this worker reports into. `stopper` stops the plugin when the quota ends or PHP turns unhealthy. `classes`: the dispatcher surface receive() serves in dispatcher mode.
-    /// The returned Sink is the intake of this worker. The PHP thread sees the intake closed once every clone of the Sink is dropped.
     pub fn start_worker(
         mode: Mode,
         entrypoint: PathBuf,
@@ -141,7 +147,7 @@ impl Rapira {
         slot: &'static rapira_scoreboard::SharedSlot,
         stopper: Stopper,
         classes: DispatcherClasses,
-    ) -> (Self, Sink) {
+    ) -> StartedWorker {
         let pending: &'static AtomicU64 = &slot.pending;
         let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
         let sink = Sink::new(intake_tx, slot);
@@ -175,12 +181,12 @@ impl Rapira {
             })
             .expect("spawn the PHP thread");
 
-        (
-            Self {
+        StartedWorker {
+            rapira: Self {
                 worker: Some(worker),
             },
             sink,
-        )
+        }
     }
 }
 

@@ -8,7 +8,7 @@ use std::time::{Duration, Instant};
 
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{drain, drain_resp_deadline, fixture, req, server_log};
+use tests::{StatusBody, drain, drain_resp_deadline, fixture, req, server_log};
 
 use crate::harness::{Spawn, http_get, scratch_dir, slot_line, worker_pids};
 
@@ -24,11 +24,11 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
         .php_ini(&timeout_ini())
         .spawn();
 
-    let (status, body) = drain(submit(srv.addr, req("/warmup"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/warmup"))?);
     assert_eq!((status, body.as_str()), (200, "method=GET body="));
 
     std::thread::sleep(Duration::from_secs(2));
-    let (status, body) = drain(submit(srv.addr, req("/first"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/first"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "method=GET body="),
@@ -44,7 +44,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
         .php_ini(&timeout_ini())
         .spawn();
 
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     assert_eq!((status, body.as_str()), (200, "state=false"));
 
     let mut rx = submit(srv.addr, req("/?probe=spin"))?;
@@ -57,7 +57,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
         resp.status()
     );
 
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "state=false"),
@@ -73,7 +73,7 @@ fn max_execution_time_fires_on_rearmed_units() -> anyhow::Result<()> {
         .php_ini(&timeout_ini())
         .spawn();
 
-    let (status, body) = drain(submit(srv.addr, req("/timeout-worker.php"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/timeout-worker.php"))?);
     assert_eq!((status, body.as_str()), (200, "ok"));
 
     let mut rx = submit(srv.addr, req("/timeout-worker.php?mode=spin"))?;
@@ -88,7 +88,7 @@ fn max_execution_time_fires_on_rearmed_units() -> anyhow::Result<()> {
     );
     assert_eq!(resp.status(), 200);
 
-    let (status, body) = drain(submit(srv.addr, req("/timeout-worker.php"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/timeout-worker.php"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "ok"),
@@ -210,7 +210,10 @@ fn queued_unit_gets_a_fresh_budget() -> anyhow::Result<()> {
         let mut queued = submit(srv.addr, req(c.queued))?;
         assert_eq!(
             drain(first),
-            (200, "pending=1".to_owned()),
+            StatusBody {
+                status: 200,
+                body: "pending=1".to_owned()
+            },
             "{}: the second unit must be queued before the next receive()",
             c.name
         );
@@ -239,7 +242,7 @@ fn queued_unit_gets_a_fresh_budget() -> anyhow::Result<()> {
             assert!(!fatal, "{}: no timeout fatal expected", c.name);
         }
 
-        let (status, body) = drain(submit(srv.addr, req("/"))?);
+        let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
         assert_eq!(
             (status, body.as_str()),
             (200, "pending=0"),

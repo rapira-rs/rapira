@@ -76,7 +76,7 @@ unsafe fn not_a_list(key: &[u8]) {
 /// `ht` a live array; entries stay ZPP-owned.
 unsafe fn metadata_valid(ht: *mut HashTable) -> bool {
     unsafe {
-        for (key, list) in zend::entries(ht) {
+        for zend::Entry { key, val: list } in zend::entries(ht) {
             let num_text;
             let key = match key {
                 zend::Key::Str(s) => zend::zstr_bytes(s),
@@ -94,7 +94,7 @@ unsafe fn metadata_valid(ht: *mut HashTable) -> bool {
                 return false;
             }
             let binary = super::call::is_binary(key);
-            for (_, item) in zend::entries((*list).value.arr) {
+            for zend::Entry { val: item, .. } in zend::entries((*list).value.arr) {
                 if zend::zval_type(item) != IS_STRING {
                     not_a_list(key);
                     return false;

@@ -11,6 +11,7 @@ use connectrpc::{
 };
 use rapira_sapi::Addr;
 use rapira_sapi::work::{Sink, now_unix_f64};
+use tokio::sync::oneshot;
 
 use crate::schema::Schema;
 use crate::{Call, RpcStatus, UnaryCall};
@@ -121,7 +122,8 @@ async fn unary(
             .unwrap_or(Addr::Unix(None)),
         message,
     };
-    let (call, reply) = Call::new(call);
+    let (tx, reply) = oneshot::channel();
+    let call = Call::new(call, tx);
     // A refusal before dispatch: PHP never saw the call.
     if let Err(e) = intake.submit(Box::new(call), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));
@@ -173,12 +175,12 @@ fn status_error(status: RpcStatus, protocol: Option<Protocol>) -> ConnectError {
     err.details = status
         .details
         .into_iter()
-        .map(|(url, value)| ErrorDetail {
-            type_url: match url.rsplit_once('/') {
+        .map(|d| ErrorDetail {
+            type_url: match d.type_url.rsplit_once('/') {
                 Some((_, name)) if !whole_url => name.to_owned(),
-                _ => url,
+                _ => d.type_url,
             },
-            value: Some(STANDARD_NO_PAD.encode(value)),
+            value: Some(STANDARD_NO_PAD.encode(d.value)),
             debug: None,
         })
         .collect();

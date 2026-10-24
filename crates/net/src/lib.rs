@@ -13,7 +13,7 @@ pub mod listen;
 pub use listen::{ListenAddr, PreparedListener, bind};
 
 #[cfg(target_os = "linux")]
-use accept_linux::{TcpListener, UnixListener};
+use accept_linux::{Accepted, TcpListener, UnixListener};
 
 /// Takes the accepted connections. [`Acceptor::run`] calls it inside its runtime.
 pub trait Serve {
@@ -171,7 +171,7 @@ fn accept_blocking(socket: &Socket, serve: &impl Serve) -> std::io::Result<bool>
     match socket {
         Socket::Tcp(l) => match l.accept_blocking(std::net::TcpListener::accept)? {
             None => return Ok(false),
-            Some((stream, peer)) => {
+            Some(Accepted { stream, peer }) => {
                 stream.set_nonblocking(true)?;
                 let stream = tokio::net::TcpStream::from_std(stream)?;
                 let _ = stream.set_nodelay(true);
@@ -180,7 +180,7 @@ fn accept_blocking(socket: &Socket, serve: &impl Serve) -> std::io::Result<bool>
         },
         Socket::Unix(l) => match l.accept_blocking(std::os::unix::net::UnixListener::accept)? {
             None => return Ok(false),
-            Some((stream, peer)) => {
+            Some(Accepted { stream, peer }) => {
                 stream.set_nonblocking(true)?;
                 serve.spawn_unix(
                     tokio::net::UnixStream::from_std(stream)?,

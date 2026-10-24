@@ -228,15 +228,15 @@ mod tests {
     }
 
     /// A sink on slot 0 of a board in memory.
-    fn sink(tx: SyncSender<Box<dyn Work>>) -> (Sink, &'static SharedSlot) {
-        let slot = &rapira_scoreboard::create(1).unwrap()[0];
-        (Sink::new(tx, slot), slot)
+    fn sink(tx: SyncSender<Box<dyn Work>>) -> Sink {
+        Sink::new(tx, &rapira_scoreboard::create(1).unwrap()[0])
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn intake_reports_stopped_after_the_receiver_is_gone() {
         let (tx, rx) = sync_channel(1);
-        let (sink, slot) = sink(tx);
+        let sink = sink(tx);
+        let slot = sink.slot;
         drop(rx);
         assert_eq!(
             sink.submit(Box::new(Probe), 0).await.unwrap_err(),
@@ -326,7 +326,8 @@ mod tests {
         for case in cases {
             let (tx, rx) = sync_channel::<Box<dyn Work>>(1);
             tx.send(Box::new(Probe)).unwrap();
-            let (sink, slot) = sink(tx);
+            let sink = sink(tx);
+            let slot = sink.slot;
             let submit = sink.submit(Box::new(Probe), 0);
             let result = match case.during {
                 During::Nothing => Some(submit.await),

@@ -2,7 +2,7 @@ use tracing::error;
 
 use crate::{
     callbacks::*,
-    diagnostics::error_type_to_level,
+    diagnostics::{Severity, error_type_to_level},
     scoreboard::sb_update,
     start::{Pulled, pull_unit, pull_unit_to_shed, run_script},
 };
@@ -257,7 +257,7 @@ fn log_and_clear_last_error() {
             && core_globals.error_log.is_null();
         if !msg.is_null() && !php_logged {
             let lineno = core_globals.last_error_lineno;
-            let (level, label) = error_type_to_level(core_globals.last_error_type, mask);
+            let Severity { level, label } = error_type_to_level(core_globals.last_error_type, mask);
             crate::diagnostics::event_at!(
                 "php",
                 level,

@@ -7,7 +7,14 @@ use anyhow::Context;
 pub struct Php {
     pub includes: Vec<String>,
     pub lib_dirs: Vec<String>,
-    pub version: (u32, u32),
+    pub version: PhpVersion,
+}
+
+/// The PHP version from `php-config --version`.
+#[derive(PartialEq, PartialOrd)]
+pub struct PhpVersion {
+    pub major: u32,
+    pub minor: u32,
 }
 
 /// Runs `php-config` (or `$PHP_CONFIG`) and fails with its stderr when it cannot run.
@@ -17,7 +24,7 @@ pub fn discover() -> anyhow::Result<Php> {
         .map(|s| s.trim_start_matches("-I").to_string())
         .collect();
     let prefix: String = php_config("--prefix")?;
-    let version: (u32, u32) = parse_version(&php_config("--version")?)?;
+    let version: PhpVersion = parse_version(&php_config("--version")?)?;
     Ok(Php {
         includes,
         lib_dirs: vec![format!("{prefix}/lib"), format!("{prefix}/lib64")],
@@ -49,11 +56,11 @@ pub fn rerun_if_changed(files: &[&str]) {
     }
 }
 
-fn parse_version(v: &str) -> anyhow::Result<(u32, u32)> {
+fn parse_version(v: &str) -> anyhow::Result<PhpVersion> {
     let mut it = v.trim().split('.');
     let major: u32 = it.next().context("php version missing major")?.parse()?;
     let minor: u32 = it.next().context("php version missing minor")?.parse()?;
-    Ok((major, minor))
+    Ok(PhpVersion { major, minor })
 }
 
 fn php_config(arg: &str) -> anyhow::Result<String> {

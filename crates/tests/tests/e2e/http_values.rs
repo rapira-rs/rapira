@@ -1,6 +1,6 @@
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{drain, fixture, req};
+use tests::{StatusBody, drain, fixture, req};
 
 use crate::harness::Spawn;
 
@@ -8,7 +8,7 @@ use crate::harness::Spawn;
 #[test]
 fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("http_values/construct.php")).spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(status, 200, "construction must succeed (body: {body:?})");
     for line in [

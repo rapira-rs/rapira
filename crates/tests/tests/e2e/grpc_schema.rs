@@ -1,14 +1,13 @@
 //! The descriptor set behind a gRPC pool: what the boot accepts, and the JSON transcoding that Connect clients get from it.
 
 use std::path::{Path, PathBuf};
-use std::process::ExitStatus;
 
 use http::Method;
 use serde_json::{Value, json};
 use tests::grpc::{Conn, ECHO_PATH, ECHO_SERVICE, HI, Wire};
 use tests::{fixture, server_log};
 
-use crate::harness::{Spawn, calls, listen, scratch_dir, stop};
+use crate::harness::{Exited, Spawn, calls, listen, scratch_dir, stop};
 
 /// The services that `getServices()` lists in a pool over echo.binpb that serves `services`.
 fn services_of(services: Option<&[&str]>) -> Vec<Value> {
@@ -22,8 +21,8 @@ fn services_of(services: Option<&[&str]>) -> Vec<Value> {
     ctx["services"].as_array().expect("a service list").clone()
 }
 
-/// The exit status and the log of a boot over `path` that serves `services`.
-fn boot_failure(path: &Path, services: &[&str]) -> (ExitStatus, String) {
+/// The exit of a boot over `path` that serves `services`.
+fn boot_failure(path: &Path, services: &[&str]) -> Exited {
     Spawn::grpc(fixture("grpc/identity.php"))
         .descriptor_set(path)
         .services(Some(services))
@@ -133,7 +132,7 @@ fn load_rejects_a_set_it_cannot_serve() {
         },
     ];
     for case in cases {
-        let (status, log) = boot_failure(&case.path, &[case.service]);
+        let Exited { status, log } = boot_failure(&case.path, &[case.service]);
         assert_eq!(status.code(), Some(1), "{}: {log}", case.name);
         assert!(log.contains(case.error), "{}: {log}", case.name);
     }
@@ -158,7 +157,7 @@ fn load_rejects_a_service_listed_twice() {
         },
     ];
     for case in cases {
-        let (status, log) = boot_failure(&tests::echo_descriptor_set(), &case.services);
+        let Exited { status, log } = boot_failure(&tests::echo_descriptor_set(), &case.services);
         assert_eq!(status.code(), Some(1), "{}: {log}", case.name);
         assert!(
             log.contains("grpc.services lists `rapira.test.v1.EchoService` twice"),

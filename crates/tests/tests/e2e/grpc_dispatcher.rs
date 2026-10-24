@@ -176,26 +176,43 @@ enum Want {
 
 impl Want {
     fn outcome(&self) -> Outcome {
-        let (status, message, headers, trailers, reply) = match self {
-            Self::Ok(reply) => ("0", None, &[][..], &[][..], Some(reply)),
+        // Status 0 with no message, no application metadata and no reply.
+        let base = Outcome {
+            grpc_status: Some("0".to_owned()),
+            grpc_message: None,
+            headers: HeaderMap::new(),
+            trailers: HeaderMap::new(),
+            reply: None,
+        };
+        match self {
+            Self::Ok(reply) => Outcome {
+                reply: Some(reply.as_bytes().to_vec()),
+                ..base
+            },
             Self::Reply {
                 headers,
                 trailers,
                 message,
-            } => ("0", None, *headers, *trailers, Some(message)),
+            } => Outcome {
+                headers: fields(headers),
+                trailers: fields(trailers),
+                reply: Some(message.as_bytes().to_vec()),
+                ..base
+            },
             Self::Status {
                 grpc_status,
                 grpc_message,
                 ..
-            } => (*grpc_status, Some(*grpc_message), &[][..], &[][..], None),
-            Self::Lost => ("13", Some("internal error"), &[][..], &[][..], None),
-        };
-        Outcome {
-            grpc_status: Some(status.to_owned()),
-            grpc_message: message.map(str::to_owned),
-            headers: fields(headers),
-            trailers: fields(trailers),
-            reply: reply.map(|r| r.as_bytes().to_vec()),
+            } => Outcome {
+                grpc_status: Some((*grpc_status).to_owned()),
+                grpc_message: Some((*grpc_message).to_owned()),
+                ..base
+            },
+            Self::Lost => Outcome {
+                grpc_status: Some("13".to_owned()),
+                grpc_message: Some("internal error".to_owned()),
+                ..base
+            },
         }
     }
 
@@ -208,79 +225,121 @@ impl Want {
     }
 }
 
+/// One call and its expected outcome.
+struct Step {
+    message: &'static str,
+    want: Want,
+}
+
+/// An app record the fixture must log.
+struct AppResult {
+    message: &'static str,
+    /// A text that the `result` of the record must contain.
+    text: &'static str,
+}
+
 struct OutcomeCase {
     name: &'static str,
-    /// Calls in order, each with its expected outcome.
-    steps: &'static [(&'static str, Want)],
-    /// An app record the fixture must log, and a text its `result` must contain.
-    log: Option<(&'static str, &'static str)>,
+    /// Calls in order.
+    steps: &'static [Step],
+    log: Option<AppResult>,
 }
 
 // Expected values: the contract (Work.php, Responder.php, Status.php, ResponseMetadata.php) and RFC 4648: 01 02 is `AQI`.
 const OUTCOME_CASES: &[OutcomeCase] = &[
     OutcomeCase {
         name: "respond echoes the message",
-        steps: &[("echo:hi", Want::Ok("hi"))],
+        steps: &[Step {
+            message: "echo:hi",
+            want: Want::Ok("hi"),
+        }],
         log: None,
     },
     OutcomeCase {
         name: "response metadata rides the outcome",
-        steps: &[(
-            "meta",
-            Want::Reply {
+        steps: &[Step {
+            message: "meta",
+            want: Want::Reply {
                 headers: &[("x-h", "v"), ("x-b-bin", "AQI")],
                 trailers: &[("x-t", "w")],
                 message: "meta",
             },
-        )],
+        }],
         log: None,
     },
     OutcomeCase {
         name: "fail carries the status triple",
-        steps: &[(
-            "fail",
-            Want::Status {
+        steps: &[Step {
+            message: "fail",
+            want: Want::Status {
                 grpc_status: "5",
                 grpc_message: "no invoice",
                 type_url: ERROR_INFO,
             },
-        )],
+        }],
         log: None,
     },
     OutcomeCase {
         name: "fail with a detail that is not an ErrorDetail",
-        steps: &[("bad-fail", Want::Ok("recovered"))],
-        log: Some(("bad-fail", "TypeError")),
+        steps: &[Step {
+            message: "bad-fail",
+            want: Want::Ok("recovered"),
+        }],
+        log: Some(AppResult {
+            message: "bad-fail",
+            text: "TypeError",
+        }),
     },
     OutcomeCase {
         name: "finalizing twice",
-        steps: &[("twice", Want::Ok("a"))],
-        log: Some((
-            "twice",
-            "Rapira\\Exception\\AlreadyFinalizedError: the call was already finalized",
-        )),
+        steps: &[Step {
+            message: "twice",
+            want: Want::Ok("a"),
+        }],
+        log: Some(AppResult {
+            message: "twice",
+            text: "Rapira\\Exception\\AlreadyFinalizedError: the call was already finalized",
+        }),
     },
     OutcomeCase {
         name: "receive while a call is open",
-        steps: &[("busy", Want::Ok("busy"))],
-        log: Some((
-            "busy",
-            "receive() while a Rapira\\Grpc\\UnaryCall is unfinalized",
-        )),
+        steps: &[Step {
+            message: "busy",
+            want: Want::Ok("busy"),
+        }],
+        log: Some(AppResult {
+            message: "busy",
+            text: "receive() while a Rapira\\Grpc\\UnaryCall is unfinalized",
+        }),
     },
     OutcomeCase {
         name: "a dropped call is lost",
-        steps: &[("drop", Want::Lost)],
+        steps: &[Step {
+            message: "drop",
+            want: Want::Lost,
+        }],
         log: None,
     },
     OutcomeCase {
         name: "an uncaught throwable loses the call and the worker recovers",
-        steps: &[("throw", Want::Lost), ("echo:after", Want::Ok("after"))],
+        steps: &[
+            Step {
+                message: "throw",
+                want: Want::Lost,
+            },
+            Step {
+                message: "echo:after",
+                want: Want::Ok("after"),
+            },
+        ],
         log: None,
     },
     OutcomeCase {
         name: "active count while the call is open",
-        steps: &[("info", Want::Ok("1"))],
+        steps: &[Step {
+            message: "info",
+            want: Want::Ok("1"),
+        }],
         log: None,
     },
 ];
@@ -291,7 +350,7 @@ async fn unary_outcomes() {
 
     let mut mismatches = Vec::new();
     for c in OUTCOME_CASES {
-        for (message, want) in c.steps {
+        for Step { message, want } in c.steps {
             let got = call(listen(&srv), message.as_bytes().to_vec(), &[]).await;
             let outcome = Outcome::of(&got);
             let details = want.details();
@@ -309,11 +368,11 @@ async fn unary_outcomes() {
     let srv = stop(srv).await;
 
     for c in OUTCOME_CASES {
-        if let Some((record, text)) = c.log {
-            let got = server_log::app_results(&srv.log_file(), record);
+        if let Some(AppResult { message, text }) = c.log {
+            let got = server_log::app_results(&srv.log_file(), message);
             if !got.iter().any(|r| r.contains(text)) {
                 mismatches.push(format!(
-                    "{}: no {record} record with {text:?} (got {got:?})",
+                    "{}: no {message} record with {text:?} (got {got:?})",
                     c.name
                 ));
             }

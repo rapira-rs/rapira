@@ -162,10 +162,20 @@ pub fn drain_resp(mut rx: mpsc::Receiver<Frame>) -> Resp {
     resp
 }
 
-/// Drain to `(status, body)`; status is 0 when no head was produced.
-pub fn drain(rx: mpsc::Receiver<Frame>) -> (u16, String) {
+/// The status code and the body of one response.
+#[derive(Debug, PartialEq)]
+pub struct StatusBody<B> {
+    pub status: u16,
+    pub body: B,
+}
+
+/// Drain to the status and the body as text; status is 0 when no head was produced.
+pub fn drain(rx: mpsc::Receiver<Frame>) -> StatusBody<String> {
     let r = drain_resp(rx);
-    (r.status(), r.body_string())
+    StatusBody {
+        status: r.status(),
+        body: r.body_string(),
+    }
 }
 
 pub async fn drain_resp_async(mut rx: mpsc::Receiver<Frame>) -> Resp {
@@ -178,7 +188,10 @@ pub async fn drain_resp_async(mut rx: mpsc::Receiver<Frame>) -> Resp {
     resp
 }
 
-pub async fn drain_async(rx: mpsc::Receiver<Frame>) -> (u16, String) {
+pub async fn drain_async(rx: mpsc::Receiver<Frame>) -> StatusBody<String> {
     let r = drain_resp_async(rx).await;
-    (r.status(), r.body_string())
+    StatusBody {
+        status: r.status(),
+        body: r.body_string(),
+    }
 }

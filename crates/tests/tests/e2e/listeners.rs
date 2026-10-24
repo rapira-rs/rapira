@@ -9,11 +9,11 @@ use std::time::Duration;
 
 use rapira_net::ListenAddr;
 use rapira_sapi::plugin::Mode;
-use tests::poll;
+use tests::{StatusBody, poll};
 
 use crate::harness::{
-    BOOT, Server, Spawn, diagnostics, fixture_path, free_port, http_get, parse_status_and_body,
-    scratch_dir, signal, spawn_with_config, wait_workers,
+    BOOT, Exited, Server, Spawn, diagnostics, fixture_path, free_port, http_get,
+    parse_status_and_body, scratch_dir, signal, spawn_with_config, wait_workers,
 };
 
 const REQ: Duration = Duration::from_secs(10);
@@ -30,7 +30,8 @@ fn port_zero_serves_on_the_logged_port() {
     let addr = logged_http_addr(&srv);
     assert_ne!(addr.port(), 0, "\n{}", diagnostics(&srv));
 
-    let (code, body) = http_get(addr, "/", REQ).expect("GET / on the logged port");
+    let StatusBody { status: code, body } =
+        http_get(addr, "/", REQ).expect("GET / on the logged port");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert!(
         String::from_utf8_lossy(&body).starts_with("ok:"),
@@ -44,7 +45,7 @@ fn port_zero_serves_on_the_logged_port() {
 fn php_child_processes_inherit_no_socket() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path("listeners/fds-worker.php")).spawn();
 
-    let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
+    let StatusBody { status: code, body } = http_get(srv.addr, "/", REQ).expect("GET /");
     let body = String::from_utf8_lossy(&body);
     assert_eq!(code, 200, "{body}\n{}", diagnostics(&srv));
     assert!(body.contains(" 0 -> "), "no fd listing: {body}");
@@ -79,7 +80,7 @@ fn unix_socket_file_mode_live_refusal_and_stale_reclaim() {
     let mut live = spawn().spawn();
     assert_eq!(mode(&sock), 0o666);
 
-    let (status, log) = spawn().boot_failure();
+    let Exited { status, log } = spawn().boot_failure();
     assert!(!status.success(), "{status:?}\n{log}");
     assert!(log.contains("already listening"), "{log}");
     assert_eq!(unix_status(&sock), 200, "\n{}", diagnostics(&live));
@@ -119,7 +120,7 @@ fn two_pools_on_one_address_fail_the_boot() {
     ];
 
     for case in &cases {
-        let (status, log) = Spawn::http(Mode::Dispatcher, fixture_path(ECHO))
+        let Exited { status, log } = Spawn::http(Mode::Dispatcher, fixture_path(ECHO))
             .http_listen(case.listen.clone())
             .with_grpc(fixture_path(GRPC_ECHO))
             .grpc_listen(case.listen.clone())
@@ -190,7 +191,7 @@ fn signals_during_the_boot_do_not_stop_the_master() {
     let mut srv = Spawn::http(Mode::Dispatcher, fixture_path(ECHO))
         .php_ini(&ini)
         .spawn();
-    let (code, _) = http_get(srv.addr, "/", REQ).expect("GET /");
+    let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert!(
         srv.child.try_wait().ok().flatten().is_none(),
@@ -238,7 +239,7 @@ fn a_stop_refuses_new_connections_during_the_drain() {
     );
     let mut raw = Vec::new();
     held.read_to_end(&mut raw).expect("read the held response");
-    let (code, body) = parse_status_and_body(&raw)
+    let StatusBody { status: code, body } = parse_status_and_body(&raw)
         .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&raw)));
     assert_eq!((code, body), (200, &b"done"[..]), "\n{}", diagnostics(&srv));
     drop(srv);
@@ -282,5 +283,5 @@ fn unix_status(sock: &Path) -> u16 {
     stream.read_to_end(&mut raw).expect("read the response");
     parse_status_and_body(&raw)
         .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&raw)))
-        .0
+        .status
 }

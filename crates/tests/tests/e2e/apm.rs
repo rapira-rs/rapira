@@ -4,6 +4,8 @@ use std::collections::BTreeSet;
 use std::process::Command;
 use std::time::Duration;
 
+use tests::StatusBody;
+
 use crate::harness::{
     Server, assert_only_workers, diagnostics, fan_out, http_get, php_extension,
     spawn_with_phprc_and_config, wait_file_contains_all, wait_log_contains, wait_workers,
@@ -38,7 +40,7 @@ fn newrelic_srv(processes: usize, extra_toml: &str) -> Option<Server> {
 }
 
 fn probe(srv: &Server) -> String {
-    let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
+    let StatusBody { status: code, body } = http_get(srv.addr, "/", REQ).expect("GET /");
     let body = String::from_utf8_lossy(&body).into_owned();
     assert_eq!(code, 200, "probe failed: {body:?}\n{}", diagnostics(srv));
     body
@@ -154,7 +156,9 @@ fn newrelic_uncaught_throw_path_is_unchanged() {
     };
     wait_workers(&srv, BOOT_POOL, "1 worker", |p| p.len() == 1);
     let before = nr_pid(&probe(&srv));
-    let (code, _) = http_get(srv.addr, "/?boom=1", REQ).expect("GET /?boom=1");
+    let code = http_get(srv.addr, "/?boom=1", REQ)
+        .expect("GET /?boom=1")
+        .status;
     assert_eq!(code, 500, "{}", diagnostics(&srv));
     let after = nr_pid(&probe(&srv));
     assert_eq!(

@@ -6,7 +6,7 @@ use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
 use rapira_sapi::plugin::Mode;
 use serde_json::Value;
 use tests::wire::submit;
-use tests::{drain, drain_resp, drain_resp_deadline, fixture, poll, req, server_log};
+use tests::{StatusBody, drain, drain_resp, drain_resp_deadline, fixture, poll, req, server_log};
 
 use crate::harness::{Spawn, free_port, http_get, slot_line};
 
@@ -54,7 +54,7 @@ fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
 #[test]
 fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("worker/gate-classic.php")).spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(status, 200, "every throw must be caught (body: {body:?})");
     for line in [
@@ -228,7 +228,9 @@ fn waiting_bodies_share_a_byte_budget() -> anyhow::Result<()> {
     let rx_b = submit(srv.addr, post(40 << 20))?;
     // B holds its bytes in the budget before it counts as queued. A holds the worker until the release file exists.
     poll(Duration::from_secs(10), || {
-        let (_, body) = http_get(observability, "/metrics", Duration::from_secs(10)).ok()?;
+        let body = http_get(observability, "/metrics", Duration::from_secs(10))
+            .ok()?
+            .body;
         let samples = tests::metrics::samples(&String::from_utf8_lossy(&body));
         (samples.get(r#"rapira_requests_queued{pool="http"}"#) == Some(&1)).then_some(())
     })

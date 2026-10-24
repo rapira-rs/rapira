@@ -7,7 +7,9 @@ use tests::poll;
 #[test]
 fn json_format_shapes_the_log() {
     let srv = spawn_with_config("shared/echo-worker.php", 1, "[log]\nformat = \"json\"\n");
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET /")
+        .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 
     poll(Duration::from_secs(2), || {
@@ -38,7 +40,9 @@ fn json_format_shapes_the_log() {
 #[test]
 fn plain_format_is_uncolored_when_redirected() {
     let srv = spawn_with_config("shared/echo-worker.php", 1, "");
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET /")
+        .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 
     poll(Duration::from_secs(2), || {
@@ -58,7 +62,9 @@ fn plain_format_is_uncolored_when_redirected() {
 #[test]
 fn log_targets_php_restores_php_diagnostics() {
     let srv = spawn_without_rust_log("logging/warn-worker.php", 1, "[log]\nlevel = \"error\"\n");
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET /")
+        .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     std::thread::sleep(Duration::from_millis(300));
     let text = std::fs::read_to_string(srv.dir.join("server.log")).unwrap_or_default();
@@ -73,7 +79,9 @@ fn log_targets_php_restores_php_diagnostics() {
         1,
         "[log]\nlevel = \"error\"\n[log.targets]\nphp = \"warn\"\n",
     );
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET /")
+        .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert!(
         wait_log_contains(&srv, "WARN-MARK", Duration::from_secs(2)),
@@ -86,7 +94,9 @@ fn log_targets_php_restores_php_diagnostics() {
 #[test]
 fn rust_log_replaces_the_config_filter() {
     let srv = spawn_with_config("logging/warn-worker.php", 1, "[log]\nlevel = \"error\"\n");
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET /")
+        .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 
     assert!(
@@ -148,7 +158,9 @@ fn log_filter_source_and_target_prefix() {
                 .rust_log(filter)
                 .spawn(),
         };
-        let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+        let code = http_get(srv.addr, "/", Duration::from_secs(10))
+            .expect("GET /")
+            .status;
         assert_eq!(code, 200, "{}\n{}", case.name, diagnostics(&srv));
         srv.stop();
         let text = std::fs::read_to_string(srv.log_file()).expect("read server.log");
@@ -175,7 +187,9 @@ fn json_record_shape() {
     let mut srv = Spawn::http(Mode::Dispatcher, fixture_path(MARKS))
         .json_log()
         .spawn();
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET /")
+        .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     srv.stop();
     let text = std::fs::read_to_string(srv.log_file()).expect("read server.log");
