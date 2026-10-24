@@ -16,7 +16,7 @@ pub mod php;
 pub mod schema;
 mod serve;
 
-use call::{Call, RpcStatus, UnaryCall, UnaryReply};
+use call::{Call, RpcStatus, StatusDetail, UnaryCall, UnaryReply};
 pub use php::rapira_grpc_register_classes;
 use schema::{MethodInfo, Schema, set_services};
 

@@ -88,7 +88,7 @@ unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
     unsafe {
         let mut rebuilt: zval = std::mem::zeroed();
         rapira_array_init(&mut rebuilt, (*context).nNumOfElements);
-        for (key, entry) in zend::entries(context) {
+        for zend::Entry { key, val: entry } in zend::entries(context) {
             let mut out: zval = std::mem::zeroed();
             if zend::zval_type(entry) == IS_OBJECT
                 && zend::instanceof((*(*entry).value.obj).ce, zend_ce_throwable)
