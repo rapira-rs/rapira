@@ -6,7 +6,7 @@ use libc::c_int;
 
 use crate::pctl::{Pctl, SignalAction};
 use crate::pool::Pool;
-use crate::process::{Forker, reap_all};
+use crate::process::{Buried, Forker, reap_all};
 use crate::signals::errno_get;
 use crate::{MasterConfig, StopReason, WORKER_EXIT_DRAINED};
 
@@ -97,7 +97,12 @@ impl<'w> Master<'w> {
     fn reap(&mut self, now: Instant) -> anyhow::Result<()> {
         let stopping = self.pctl.is_stopping();
         let buried = reap_all(&mut self.pools, stopping);
-        for (pool, w, verdict) in buried {
+        for Buried {
+            pool,
+            worker: w,
+            verdict,
+        } in buried
+        {
             self.pools[pool].on_child_exit(w, verdict, now, stopping, &mut self.spawner)?;
         }
         Ok(())
