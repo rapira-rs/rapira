@@ -32,7 +32,7 @@ Repository administrators can find the activation requirements in [the Vouch set
 
 ## Prerequisites
 
-- Rust - `rust-toolchain.toml` selects the exact version for you
+- Rust stable - `rust-toolchain.toml` selects the exact channel for you
 - A C compiler (the build compiles `crates/sapi/*.c` and the C method shells of each plugin against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
 - PHP 8.4 or 8.5, **NTS**, built with the embed SAPI (`--enable-embed=shared`). ZTS builds are rejected at compile time.
