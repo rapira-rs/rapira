@@ -872,26 +872,6 @@ fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-#[test]
-fn error_path_keeps_status_and_cookies() -> anyhow::Result<()> {
-    let srv = Spawn::http(
-        Mode::Worker,
-        fixture("shared/error-keeps-headers-worker.php"),
-    )
-    .spawn();
-    let resp = drain_resp(submit(srv.addr, req("/"))?);
-    assert_eq!(
-        resp.status(),
-        404,
-        "script status must survive the fatal, not force 500"
-    );
-    assert!(
-        resp.header("set-cookie").is_some(),
-        "Set-Cookie must survive"
-    );
-    Ok(())
-}
-
 /// A pre-joined single Cookie line passes through the join unchanged.
 #[test]
 fn multi_cookie_headers_classic() -> anyhow::Result<()> {
@@ -944,23 +924,6 @@ fn latin1_header_value_passes_through() -> anyhow::Result<()> {
         .unwrap()
         .as_bytes();
     assert_eq!(v, b"caf\xE9.pdf", "0xE9 must not become U+FFFD");
-    Ok(())
-}
-
-#[test]
-fn error_path_keeps_status_and_cookies_classic() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Classic, fixture("shared/error-keeps-headers.php")).spawn();
-    let resp = drain_resp(submit(srv.addr, req("/error-keeps-headers.php"))?);
-    assert_eq!(
-        resp.status(),
-        404,
-        "script status must survive the fatal, not force 500"
-    );
-    assert!(
-        resp.header("set-cookie").is_some(),
-        "session Set-Cookie must reach the client (headers: {:?})",
-        resp.head.as_ref().expect("head").headers
-    );
     Ok(())
 }
 

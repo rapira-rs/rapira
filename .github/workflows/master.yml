@@ -104,7 +104,7 @@ jobs:
                   for ext in bcmath calendar ctype curl dom exif ffi fileinfo filter ftp gettext iconv \
                              igbinary intl mbstring openssl pdo_pgsql pdo_sqlite pgsql phar redis session \
                              shmop simplexml sockets sqlite3 sysvmsg sysvsem sysvshm tokenizer xml \
-                             xmlreader xmlwriter zlib; do
+                             xmlreader xmlwriter zend_test zlib; do
                     grep -qix "$ext" <<<"$mods" || { echo "missing extension: $ext"; exit 1; }
                   done
 
