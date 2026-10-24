@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.10.0](https://github.com/rapira-rs/rapira/compare/v0.9.1...v0.10.0) (2026-10-24)
+
+
+### Features
+
+* **http:** expose server_name and server_port on HttpDispatcherInfo ([0a18793](https://github.com/rapira-rs/rapira/commit/0a1879311be015e6f9dd0670baafb4b5d055e4dd))
+* **http:** expose server_name and server_port on HttpDispatcherInfo ([ca32802](https://github.com/rapira-rs/rapira/commit/ca328021dc6fdbfb467d2e6aa1710c64eca63808))
+
+
+### Bug Fixes
+
+* classic mode speedup ([5670520](https://github.com/rapira-rs/rapira/commit/5670520f58fdfb4b83eddc29d474437dd9282dd8))
+* classic mode speedup ([abae8d3](https://github.com/rapira-rs/rapira/commit/abae8d3a366a3631a09395fac1ef55ac45cc1f0a))
+* copy the libraries of libphp.so into the Linux release ([db82240](https://github.com/rapira-rs/rapira/commit/db82240af52a57cd4170a095306f2d874e4e12a9))
+* copy the libraries of libphp.so into the Linux release ([62206bf](https://github.com/rapira-rs/rapira/commit/62206bf04a9cbdffcabb98f7803e367aa194136a)), closes [#207](https://github.com/rapira-rs/rapira/issues/207)
+* seal a teardown flush bailout as an error ([f7199ca](https://github.com/rapira-rs/rapira/commit/f7199ca5cd76d8fc1d9d03c00efd923b372752ef))
+
 ## [0.9.1](https://github.com/rapira-rs/rapira/compare/v0.9.0...v0.9.1) (2026-10-07)
 
 ### 🎯 Core
