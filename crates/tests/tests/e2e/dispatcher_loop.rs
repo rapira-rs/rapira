@@ -1203,7 +1203,7 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
 }
 
 /// sendFile rejects a directory, an offset or a slice past the end of the file, and a symlink out of the root before anything is written, so the handler answers 403.
-/// A symlink inside the root stays sendable, and a slice longer than one 64 KiB plugin read keeps its offset across the reads.
+/// A symlink inside the root stays sendable, and a slice longer than two 256 KiB plugin reads keeps its offset across the reads.
 #[test]
 fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
     struct Case {
@@ -1216,7 +1216,7 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
     let srv = sendfile_server();
     let payload = sendfile_payload(&srv);
     // A prime period, so a read at a wrong offset returns other bytes.
-    let pattern: Vec<u8> = (0..100 * 1024).map(|i| (i % 251) as u8).collect();
+    let pattern: Vec<u8> = (0..600 * 1024).map(|i| (i % 251) as u8).collect();
     let patterned = srv.dir.join("patterned");
     std::fs::write(&patterned, &pattern)?;
     let link_in = srv.dir.join("link-in");
@@ -1260,11 +1260,11 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
             body: b"abcdefghijklmnopqrstuvwxyz".to_vec(),
         },
         Case {
-            name: "slice over two plugin reads",
+            name: "slice over three plugin reads",
             path: patterned,
-            query: "&offset=1024&length=81920",
+            query: "&offset=1024&length=540672",
             status: 200,
-            body: pattern[1024..1024 + 80 * 1024].to_vec(),
+            body: pattern[1024..1024 + 528 * 1024].to_vec(),
         },
     ];
 
