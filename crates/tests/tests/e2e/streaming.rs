@@ -382,7 +382,7 @@ fn worker_death_mid_stream_truncates_the_response() {
 fn sendfile_streams_from_disk_with_length() {
     let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
     let payload = srv.dir.join("payload.bin");
-    std::fs::write(&payload, vec![b'z'; 100_000]).expect("payload");
+    std::fs::write(&payload, vec![b'z'; 600_000]).expect("payload");
 
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(
@@ -398,11 +398,11 @@ fn sendfile_streams_from_disk_with_length() {
     assert!(
         fields
             .iter()
-            .any(|(k, v)| k == "content-length" && v == "100000"),
+            .any(|(k, v)| k == "content-length" && v == "600000"),
         "the file length is known up front: {fields:?}"
     );
     let rest = c.read_remaining(T).expect("body");
-    assert_eq!(rest.len(), 100_000);
+    assert_eq!(rest.len(), 600_000);
     assert!(rest.iter().all(|&b| b == b'z'), "file bytes intact");
 }
 

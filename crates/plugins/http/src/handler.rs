@@ -465,7 +465,11 @@ async fn submit(
     Ok(reply)
 }
 
+/// The largest multipart body that the IO thread parses. The parse and the spool writes keep a thread for about 0.1 to 0.25 ms per MiB, and each file part adds one file create of about 15 us on xfs. During that time the other connections on that IO thread wait.
+const INLINE_PARSE_MAX: usize = 256 << 10;
+
 /// Parses a multipart body before submit, so a rejected body never reaches the pending and active counters. `limits` is None outside dispatcher mode.
+/// A body up to INLINE_PARSE_MAX is parsed on the IO thread, which saves the switch to the blocking pool. A larger body is parsed on the blocking pool.
 async fn parse_multipart(
     mut req: Request,
     limits: Option<&multipart::Limits>,
@@ -496,6 +500,11 @@ async fn parse_multipart(
         return Ok(req);
     }
     let boundary = multipart::boundary(content_type)?;
+    if raw.get_ref().len() <= INLINE_PARSE_MAX {
+        let parsed = multipart::parse(raw.get_ref(), &boundary, limits)?;
+        req.body = rapira_sapi::types::Body::Multipart(parsed);
+        return Ok(req);
+    }
     let bytes = std::mem::take(raw.get_mut());
     let limits = limits.clone();
     let parsed = tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))

@@ -38,7 +38,7 @@ enum On {
     Unix,
 }
 
-/// Sources: PROTOCOL-HTTP2 (envelope, `grpc-status`, 12 for an unknown method or encoding), PROTOCOL-WEB (the 0x80 trailer frame), the Connect protocol (unary request, GET for no-side-effects methods, 404 for an unknown procedure), proto3 JSON, and the plugin README (gzip messages, 8 for a message over 4 MiB).
+/// Sources: PROTOCOL-HTTP2 (envelope, `grpc-status`, 12 for an unknown method or encoding), PROTOCOL-WEB (the 0x80 trailer frame), the Connect protocol (unary request, GET for no-side-effects methods, 404 for an unknown procedure), proto3 JSON, and the plugin README (gzip requests, 8 for a message over 4 MiB).
 #[tokio::test]
 async fn each_protocol_reaches_php_over_the_wire() {
     struct Case<'a> {
@@ -53,7 +53,7 @@ async fn each_protocol_reaches_php_over_the_wire() {
         grpc_status: Option<&'static str>,
         content_type: Option<&'static str>,
         /// None: not checked.
-        reply: Option<&'static [u8]>,
+        reply: Option<&'a [u8]>,
         /// The call reaches PHP.
         php: bool,
     }
@@ -327,6 +327,188 @@ async fn each_protocol_reaches_php_over_the_wire() {
     stop(on_tcp).await;
     stop(on_unix).await;
     let _ = std::fs::remove_dir_all(dir);
+}
+
+/// Sources: compression.md (a reply MAY use another compression or none), the grpc-go server (a reply uses the compressor of its request), the Connect protocol (Accept-Encoding for a unary reply), RFC 9110 section 12.5.5 (Vary), and the plugin README (gzip replies from 1 KiB).
+#[tokio::test]
+async fn reply_compression_follows_the_client() {
+    struct Case<'a> {
+        name: &'static str,
+        wire: Wire,
+        method: Method,
+        path: &'a str,
+        headers: Fields,
+        body: &'a [u8],
+        grpc_status: Option<&'static str>,
+        /// gRPC and gRPC-Web: the Compressed-Flag of the reply message. Connect: `content-encoding: gzip`.
+        compressed: bool,
+        vary: Option<&'static str>,
+    }
+    // EchoRequest.text of 2048 bytes, over the 1 KiB that connect-rust compresses from.
+    let large = [&[0x0a, 0x80, 0x10][..], &[b'a'; 2048]].concat();
+    let large_frame = envelope(&large);
+    // The same message compressed with gzip, in an envelope with the compressed flag.
+    let large_gzip: &[u8] = b"\x01\x00\x00\x00\x25\x1f\x8b\x08\x00\x00\x00\x00\x00\x02\xff\xe3\x6a\x10\x48\x1c\x05\xa3\x60\x14\x8c\x82\x51\x30\x0a\x46\xc1\x88\x03\x00\x93\x5d\xf0\xa7\x03\x08\x00\x00";
+    let large_json = format!(r#"{{"text":"{}"}}"#, "a".repeat(2048));
+    let get = format!(
+        "/rapira.test.v1.EchoService/Get?encoding=json&message=%7B%22text%22%3A%22{}%22%7D",
+        "a".repeat(2048)
+    );
+    let cases = [
+        Case {
+            name: "grpc, gzip accepted, plain request",
+            wire: Wire::H2,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/grpc"),
+                ("te", "trailers"),
+                ("grpc-accept-encoding", "gzip"),
+            ],
+            body: &large_frame,
+            grpc_status: Some("0"),
+            compressed: false,
+            vary: None,
+        },
+        Case {
+            name: "grpc, gzip request",
+            wire: Wire::H2,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/grpc"),
+                ("te", "trailers"),
+                ("grpc-encoding", "gzip"),
+                ("grpc-accept-encoding", "gzip"),
+            ],
+            body: large_gzip,
+            grpc_status: Some("0"),
+            compressed: true,
+            vary: None,
+        },
+        Case {
+            name: "grpc-web, gzip accepted, identity request",
+            wire: Wire::Http1,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/grpc-web+proto"),
+                ("grpc-encoding", "identity"),
+                ("grpc-accept-encoding", "gzip"),
+            ],
+            body: &large_frame,
+            grpc_status: Some("0"),
+            compressed: false,
+            vary: None,
+        },
+        Case {
+            name: "grpc-web, gzip request",
+            wire: Wire::Http1,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/grpc-web+proto"),
+                ("grpc-encoding", "gzip"),
+                ("grpc-accept-encoding", "gzip"),
+            ],
+            body: large_gzip,
+            grpc_status: Some("0"),
+            compressed: true,
+            vary: None,
+        },
+        Case {
+            name: "connect proto, gzip accepted",
+            wire: Wire::Http1,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/proto"),
+                ("accept-encoding", "gzip"),
+            ],
+            body: &large,
+            grpc_status: None,
+            compressed: true,
+            vary: Some("accept-encoding"),
+        },
+        Case {
+            name: "connect json, gzip not accepted",
+            wire: Wire::Http1,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[("content-type", "application/json")],
+            body: large_json.as_bytes(),
+            grpc_status: None,
+            compressed: false,
+            vary: Some("accept-encoding"),
+        },
+        Case {
+            name: "connect get, gzip accepted",
+            wire: Wire::Http1,
+            method: Method::GET,
+            path: &get,
+            headers: &[("accept-encoding", "gzip")],
+            body: b"",
+            grpc_status: None,
+            compressed: true,
+            vary: Some("accept-encoding"),
+        },
+        Case {
+            name: "connect proto, reply under 1 KiB",
+            wire: Wire::Http1,
+            method: Method::POST,
+            path: ECHO_PATH,
+            headers: &[
+                ("content-type", "application/proto"),
+                ("accept-encoding", "gzip"),
+            ],
+            body: HI,
+            grpc_status: None,
+            compressed: false,
+            vary: Some("accept-encoding"),
+        },
+    ];
+
+    let srv = Spawn::grpc(wire_worker()).json_log().spawn();
+    let tcp = listen(&srv);
+    for case in cases {
+        let mut conn = Conn::open(&tcp, case.wire).await.expect("connect");
+        let got = conn
+            .send(case.method, case.path, case.headers, case.body)
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
+        assert_eq!(got.status, 200, "{}: {:?}", case.name, got.headers);
+        let content_type = case
+            .headers
+            .iter()
+            .find(|(name, _)| *name == "content-type")
+            .map_or("", |(_, value)| *value);
+        // gRPC-Web sends the status in the trailer frame of the body.
+        let web = (content_type == "application/grpc-web+proto").then(|| web_trailers(&got.body));
+        let grpc_status = match &web {
+            Some(web) => web.get("grpc-status").and_then(|v| v.to_str().ok()),
+            None => got.grpc_status(),
+        };
+        assert_eq!(grpc_status, case.grpc_status, "{}", case.name);
+        let compressed = if content_type.starts_with("application/grpc") {
+            got.body.first() == Some(&1)
+        } else {
+            got.headers
+                .get("content-encoding")
+                .is_some_and(|v| v == "gzip")
+        };
+        assert_eq!(
+            compressed, case.compressed,
+            "{}: {:?}",
+            case.name, got.headers
+        );
+        assert_eq!(
+            got.headers.get("vary").map(|v| v.as_bytes()),
+            case.vary.map(str::as_bytes),
+            "{}",
+            case.name
+        );
+    }
+    stop(srv).await;
 }
 
 /// Sources: PROTOCOL-HTTP2 and PROTOCOL-WEB (the status fields, `grpc-status-details-bin`, Response-Headers without a status field), the Connect protocol (error codes, unpadded base64 detail values, `trailer-` fields of a unary response). connectrpc adds `type.googleapis.com/` to a bare name, so gRPC keeps a type URL whole and Connect sends the bare name.

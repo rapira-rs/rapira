@@ -46,6 +46,7 @@ impl Serving {
         let mut service = ConnectRpcService::new(Chain(router, dispatcher))
             .with_deadline_policy(deadlines)
             // The default registry offers every codec that the build compiles, zstd included.
+            // The default policy compresses a reply of 1 KiB or more for a client that accepts gzip. The dispatcher turns it off per reply.
             .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
         // The interceptors cover GET and POST requests to every route: PHP methods, health, reflection and unknown paths.
         for interceptor in &config.interceptors {

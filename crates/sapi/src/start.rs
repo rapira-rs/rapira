@@ -28,13 +28,22 @@ struct UnitRx {
     pending: &'static AtomicU64,
 }
 
+/// The idle wait after which the PHP thread calls `mi_collect`. mimalloc purges freed arena slices only from a page free or a collect, so an idle worker keeps the slices of the last burst committed.
+const IDLE_PURGE_AFTER: Duration = Duration::from_secs(2);
+
 impl UnitRx {
     /// Waits for one unit, with no time limit when `timeout` is None. A pulled unit leaves `pending`.
     fn recv(&self, timeout: Option<Duration>) -> Pulled {
-        let got = match timeout {
-            None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            Some(t) => self.rx.recv_timeout(t),
-        };
+        let first = timeout.map_or(IDLE_PURGE_AFTER, |t| t.min(IDLE_PURGE_AFTER));
+        let mut got = self.rx.recv_timeout(first);
+        if matches!(got, Err(RecvTimeoutError::Timeout)) && first == IDLE_PURGE_AFTER {
+            // SAFETY: plain allocator call on this thread; the arena purge is process-wide and locked inside mimalloc.
+            unsafe { libmimalloc_sys::mi_collect(true) };
+            got = match timeout {
+                None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                Some(t) => self.rx.recv_timeout(t - first),
+            };
+        }
         match got {
             Ok(unit) => {
                 self.pending.fetch_sub(1, Ordering::Relaxed);
@@ -106,6 +115,7 @@ pub fn boot_master(register: &[unsafe extern "C" fn()]) -> anyhow::Result<PhpMod
         error!(target: "rapira", "php_module_startup failed, shutting down");
         return Err(anyhow::anyhow!("php_module_startup failed"));
     }
+    unsafe { rapira_register_post_reader() };
     Ok(module)
 }
 

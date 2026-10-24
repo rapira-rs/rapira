@@ -38,6 +38,7 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         pretty_name: c"Rapira".as_ptr() as *mut c_char,
         startup: None,
         shutdown: None,
+        // rapira_register_post_reader (module.c) sets activate and default_post_reader after php_module_startup, which resets default_post_reader (main/main.c:2329).
         activate: None,
         deactivate: None,
         ub_write: Some(rapira_ub_write),

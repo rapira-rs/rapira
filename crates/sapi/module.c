@@ -1,5 +1,7 @@
 #include "rapira_sapi.h"
 
+#include <main/php_content_types.h>
+
 extern void rapira_rs_finish_response(void);
 
 // True while rapira_run_handler runs the handler and its shutdown functions.
@@ -443,6 +445,75 @@ void rapira_release_temporary_streams(void) {
         }
     }
     ZEND_HASH_FOREACH_END();
+}
+
+// The whole raw body of the bound request (callbacks.rs); 0 for a host-parsed
+// multipart or empty body.
+extern size_t rapira_rs_raw_body(const char **body);
+
+// Hands the body to PHP in a temp stream: rapira_release_temporary_streams
+// frees only temp streams between units. The cap len + 1 keeps
+// php_stream_temp_write off the temp file (main/streams/memory.c); post_read
+// and read_post_bytes keep php://input off read_post.
+static void rapira_install_body(void) {
+    const char *body = NULL;
+    size_t len = rapira_rs_raw_body(&body);
+    if (len == 0) {
+        return;
+    }
+    php_stream *stream = php_stream_temp_create(TEMP_STREAM_DEFAULT, len + 1);
+    php_stream_write(stream, body, len);
+    php_stream_rewind(stream);
+    SG(request_info).request_body = stream;
+    SG(read_post_bytes) = (int64_t)len;
+    SG(post_read) = 1;
+}
+
+// The post reader of the urlencoded entry: the post_max_size check of
+// sapi_read_standard_form_data (main/SAPI.c), then the body.
+static void rapira_post_reader(void) {
+    zend_long post_max_size =
+        REQUEST_PARSE_BODY_OPTION_GET(post_max_size, SG(post_max_size));
+    if (post_max_size > 0 && SG(request_info).content_length > post_max_size) {
+        php_error_docref(NULL, E_WARNING,
+                         "POST Content-Length of " ZEND_LONG_FMT
+                         " bytes exceeds the limit of " ZEND_LONG_FMT " bytes",
+                         SG(request_info).content_length, post_max_size);
+        return;
+    }
+    rapira_install_body();
+}
+
+// As php_default_post_reader (main/php_content_types.c): a POST with no entry.
+static void rapira_default_post_reader(void) {
+    if (!strcmp(SG(request_info).request_method, "POST") &&
+        !SG(request_info).post_entry) {
+        rapira_post_reader();
+    }
+}
+
+// Every other request with a body: PUT, PATCH, a POST without a content type.
+// A multipart POST has an entry: rfc1867 reads it through read_post.
+static int rapira_activate(void) {
+    if (!SG(request_info).request_body && !SG(request_info).post_entry) {
+        rapira_install_body();
+    }
+    return SUCCESS;
+}
+
+// Runs after php_module_startup: it resets default_post_reader
+// (main/main.c:2329), and mbstring's MINIT re-registers the urlencoded entry
+// (ext/mbstring/mbstring.c). Only post_reader changes: the registered post
+// handler stays (php_mb_post_handler with mbstring.encoding_translation).
+void rapira_register_post_reader(void) {
+    sapi_register_default_post_reader(rapira_default_post_reader);
+    sapi_module.activate = rapira_activate;
+    sapi_post_entry *entry = zend_hash_str_find_ptr(
+        &SG(known_post_content_types), DEFAULT_POST_CONTENT_TYPE,
+        sizeof(DEFAULT_POST_CONTENT_TYPE) - 1);
+    if (entry) {
+        entry->post_reader = rapira_post_reader;
+    }
 }
 
 // Boot-registered shutdown functions run once, at cycle end.

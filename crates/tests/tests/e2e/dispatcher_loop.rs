@@ -658,7 +658,7 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, an empty name is a 400, and a field over the limit after a file part is a 413.
+/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, a file part in a body over 256 KiB (parsed on the blocking pool) reaches PHP, an empty name is a 400, and a field over the limit after a file part is a 413.
 /// No spool file outlives its request, also when a later part rejects the body after a file part was spooled.
 #[test]
 fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
@@ -670,6 +670,7 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
     }
     // max_field_size_kb = 1, so a field of 1025 bytes is over the limit.
     let long = "x".repeat(1025);
+    let big = "y".repeat(300 << 10);
     let cases = [
         Case {
             name: "file part between two fields",
@@ -706,6 +707,15 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
             parts: vec![("content-disposition: form-data; name=\"\"", "v")],
             status: 400,
             lines: &[],
+        },
+        Case {
+            name: "file part in a body over 256 KiB",
+            parts: vec![(
+                "content-disposition: form-data; name=\"f\"; filename=\"big.bin\"",
+                &big,
+            )],
+            status: 200,
+            lines: &["counts=0/1", "file0=f:big.bin:307200:yyyy"],
         },
         Case {
             name: "field over the limit after a file part",
@@ -1193,7 +1203,7 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
 }
 
 /// sendFile rejects a directory, an offset or a slice past the end of the file, and a symlink out of the root before anything is written, so the handler answers 403.
-/// A symlink inside the root stays sendable, and a slice longer than one 64 KiB plugin read keeps its offset across the reads.
+/// A symlink inside the root stays sendable, and a slice longer than two 256 KiB plugin reads keeps its offset across the reads.
 #[test]
 fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
     struct Case {
@@ -1206,7 +1216,7 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
     let srv = sendfile_server();
     let payload = sendfile_payload(&srv);
     // A prime period, so a read at a wrong offset returns other bytes.
-    let pattern: Vec<u8> = (0..100 * 1024).map(|i| (i % 251) as u8).collect();
+    let pattern: Vec<u8> = (0..600 * 1024).map(|i| (i % 251) as u8).collect();
     let patterned = srv.dir.join("patterned");
     std::fs::write(&patterned, &pattern)?;
     let link_in = srv.dir.join("link-in");
@@ -1250,11 +1260,11 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
             body: b"abcdefghijklmnopqrstuvwxyz".to_vec(),
         },
         Case {
-            name: "slice over two plugin reads",
+            name: "slice over three plugin reads",
             path: patterned,
-            query: "&offset=1024&length=81920",
+            query: "&offset=1024&length=540672",
             status: 200,
-            body: pattern[1024..1024 + 80 * 1024].to_vec(),
+            body: pattern[1024..1024 + 528 * 1024].to_vec(),
         },
     ];
 

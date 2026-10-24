@@ -7,7 +7,7 @@ use bytes::Bytes;
 use connectrpc::dispatcher::{RequestStream, StreamingResult, UnaryResult};
 use connectrpc::{
     CodecFormat, ConnectError, Dispatcher, EncodedBody, EncodedResponse, ErrorCode, ErrorDetail,
-    MethodDescriptor, Payload, Protocol, RequestContext,
+    MethodDescriptor, Payload, Protocol, RequestContext, http,
 };
 use rapira_sapi::Addr;
 use rapira_sapi::work::{Sink, now_unix_f64};
@@ -104,6 +104,9 @@ async fn unary(
         }
     };
     let protocol = ctx.protocol();
+    // Most gRPC clients accept gzip on every call. As in grpc-go, a gRPC reply uses gzip only when the request did: https://github.com/grpc/grpc-go/blob/v1.84.0/server.go#L1408-L1421
+    let plain_reply = matches!(protocol, Some(Protocol::Grpc | Protocol::GrpcWeb))
+        && ctx.header("grpc-encoding").is_none_or(|v| v == "identity");
     let bytes = message.len();
     let call = UnaryCall {
         method: path.clone(),
@@ -149,6 +152,16 @@ async fn unary(
     let mut response = EncodedResponse::new(EncodedBody::from(body));
     response.headers = reply.headers;
     response.trailers = reply.trailers;
+    if plain_reply {
+        response.compress = Some(false);
+    }
+    // A Connect reply is compressed when the client accepts it, so a cache keys a Connect GET reply on Accept-Encoding: https://www.rfc-editor.org/rfc/rfc9110#section-12.5.5
+    if protocol == Some(Protocol::Connect) {
+        response.headers.append(
+            http::header::VARY,
+            http::HeaderValue::from_static("accept-encoding"),
+        );
+    }
     Ok(response)
 }
 

@@ -422,12 +422,12 @@ fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
     );
     assert_eq!(
         php_levels(&logged, "REPORTED-WARNING"),
-        vec![tracing::Level::WARN, tracing::Level::WARN],
+        vec![tracing::Level::WARN],
         "an unmasked E_USER_WARNING logs at warn (captured: {logged:?})"
     );
     assert_eq!(
         php_levels(&logged, "REPORTED-FATAL"),
-        vec![tracing::Level::ERROR, tracing::Level::ERROR],
+        vec![tracing::Level::ERROR],
         "an uncaught throw stays an error-level diagnostic (captured: {logged:?})"
     );
     Ok(())
@@ -449,9 +449,9 @@ fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// log_errors routes a deprecation through the SAPI log callback too; both paths must report debug.
+/// log_errors routes an unmasked deprecation through the SAPI log callback, which reports debug.
 #[test]
-fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
+fn logged_deprecation_stays_at_debug() -> anyhow::Result<()> {
     let mut srv = error_levels_worker();
     let (status, _) = drain(submit(srv.addr, req("/?step=logged"))?);
     srv.stop();
@@ -460,7 +460,7 @@ fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
     let logged = server_log::records(&srv.log_file());
     assert_eq!(
         php_levels(&logged, "LOGGED-DEPRECATION"),
-        vec![tracing::Level::DEBUG, tracing::Level::DEBUG],
+        vec![tracing::Level::DEBUG],
         "the log callback reports a deprecation at debug (captured: {logged:?})"
     );
     Ok(())

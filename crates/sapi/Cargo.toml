@@ -16,6 +16,7 @@ rapira_config = { workspace = true }
 rapira_scoreboard = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
+libmimalloc-sys = { version = "0.1", features = ["extended"] }
 
 [build-dependencies]
 bindgen = { version = "0", default-features = false, features = ["runtime"] }
