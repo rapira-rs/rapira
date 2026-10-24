@@ -13,7 +13,7 @@ use std::time::{Duration, Instant};
 use rapira_net::ListenAddr;
 use rapira_sapi::{Addr, plugin::Mode};
 use serde_json::Value;
-use tests::{poll, server_log};
+use tests::{StatusBody, poll, server_log};
 
 /// Connect budget for a freshly spawned master (CI macOS worst case).
 pub const BOOT: Duration = Duration::from_secs(30);
@@ -173,7 +173,7 @@ fn spawn_with_extras(
     rust_log: Option<&str>,
     cwd_ini: Option<CwdIni<'_>>,
 ) -> Server {
-    let (dir, entrypoint) = stage_fixture(fixture);
+    let Staged { dir, entrypoint } = stage_fixture(fixture);
     if let Some(ini) = &cwd_ini {
         std::fs::write(dir.join("php.ini"), ini.contents).expect("write php.ini");
     }
@@ -197,7 +197,7 @@ fn spawn_ready(
 ) -> Server {
     let mut last_log = String::new();
     for _ in 0..3 {
-        let (mut child, addr) = spawn_attempt(&dir, render, rust_log, cwd_ini, env);
+        let Attempt { mut child, addr } = spawn_attempt(&dir, render, rust_log, cwd_ini, env);
         let ready = match unix {
             Some(path) => ListenAddr::Unix(path.to_owned()),
             None => ListenAddr::Tcp(addr),
@@ -218,8 +218,15 @@ fn spawn_ready(
     panic!("rapira never accepted a connection after 3 attempts\n{last_log}");
 }
 
-/// A scratch dir holding a copy of the fixture, plus the entrypoint name for the config.
-fn stage_fixture(fixture: &str) -> (PathBuf, String) {
+/// A scratch dir that holds a copy of a fixture.
+struct Staged {
+    dir: PathBuf,
+    /// The file name of the fixture, for the config.
+    entrypoint: String,
+}
+
+/// Copies `fixture` into a new scratch dir.
+fn stage_fixture(fixture: &str) -> Staged {
     let dir = scratch_dir();
     let name = Path::new(fixture)
         .file_name()
@@ -227,7 +234,14 @@ fn stage_fixture(fixture: &str) -> (PathBuf, String) {
     std::fs::copy(fixture_path(fixture), dir.join(name))
         .unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
     let entrypoint = name.to_str().expect("fixture name is utf-8").to_owned();
-    (dir, entrypoint)
+    Staged { dir, entrypoint }
+}
+
+/// A master that one spawn started.
+struct Attempt {
+    child: Child,
+    /// The TCP address of the port that `render` got.
+    addr: SocketAddr,
 }
 
 /// One spawn on a fresh port; `render` writes the config for that port, and the caller decides how to wait.
@@ -237,7 +251,7 @@ fn spawn_attempt(
     rust_log: Option<&str>,
     cwd_ini: Option<&CwdIni<'_>>,
     env: &[(String, String)],
-) -> (Child, SocketAddr) {
+) -> Attempt {
     let port = free_port();
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     std::fs::write(dir.join("rapira.toml"), render(port)).expect("write config");
@@ -263,37 +277,44 @@ fn spawn_attempt(
         .stderr(Stdio::from(log))
         .spawn()
         .expect("spawn rapira");
-    (child, addr)
+    Attempt { child, addr }
 }
 
-/// Boots expecting a startup failure: waits for the exit and returns the status with the log.
-/// The function returns the whole log, not the tail: with `RUST_BACKTRACE` set, the backtrace
+/// A master that exited.
+pub struct Exited {
+    pub status: ExitStatus,
+    /// The whole server.log.
+    pub log: String,
+}
+
+/// Boots expecting a boot failure and waits for the exit.
+/// [`Exited::log`] holds the whole log, not the tail: with `RUST_BACKTRACE` set, the backtrace
 /// after the error line is longer than the tail window.
-pub fn spawn_boot_failure(fixture: &str, http_extra: &str) -> (ExitStatus, String) {
-    let (dir, entrypoint) = stage_fixture(fixture);
+pub fn spawn_boot_failure(fixture: &str, http_extra: &str) -> Exited {
+    let Staged { dir, entrypoint } = stage_fixture(fixture);
     boot_failure(dir, &entrypoint, http_extra)
 }
 
 /// [`spawn_boot_failure`] with the entrypoint written into the config verbatim, so a path no
 /// fixture can stage reaches the boot check.
-pub fn spawn_boot_failure_with_entrypoint(entrypoint: &str) -> (ExitStatus, String) {
+pub fn spawn_boot_failure_with_entrypoint(entrypoint: &str) -> Exited {
     boot_failure(scratch_dir(), entrypoint, "")
 }
 
-fn boot_failure(dir: PathBuf, entrypoint: &str, http_extra: &str) -> (ExitStatus, String) {
+fn boot_failure(dir: PathBuf, entrypoint: &str, http_extra: &str) -> Exited {
     let render = |port| render_config(&tcp(port), 1, entrypoint, http_extra, "");
     exit_of(dir, &render, Some("info"), None, &[])
 }
 
-/// One spawn that must exit: returns the status with the whole log.
+/// One spawn that must exit.
 fn exit_of(
     dir: PathBuf,
     render: &dyn Fn(u16) -> String,
     rust_log: Option<&str>,
     cwd_ini: Option<&CwdIni<'_>>,
     env: &[(String, String)],
-) -> (ExitStatus, String) {
-    let (child, addr) = spawn_attempt(&dir, render, rust_log, cwd_ini, env);
+) -> Exited {
+    let Attempt { child, addr } = spawn_attempt(&dir, render, rust_log, cwd_ini, env);
     let mut srv = Server {
         child,
         addr,
@@ -304,7 +325,7 @@ fn exit_of(
         panic!("rapira did not exit");
     };
     let log = std::fs::read_to_string(srv.dir.join("server.log")).unwrap_or_default();
-    (status, log)
+    Exited { status, log }
 }
 
 /// Renders `[http.pool]` before `[http]`.
@@ -346,7 +367,7 @@ fn render_grpc(
 /// The directory of each pool's fixture is copied into `http/` or `grpc/` in the scratch dir, so a fixture can include its siblings.
 /// PHPRC names a `php.ini` in the scratch dir with the contents of `crates/tests/fixtures/ini/shared/php.ini`, unless [`Spawn::php_ini`] replaces them.
 pub struct Spawn {
-    http: Option<(Mode, PathBuf)>,
+    http: Option<HttpPool>,
     /// The listener of the `[http]` pool; None listens on a TCP port that the harness picks.
     http_listen: Option<ListenAddr>,
     grpc: Option<PathBuf>,
@@ -366,11 +387,20 @@ pub struct Spawn {
     rust_log: String,
 }
 
+/// The `[http]` pool of a [`Spawn`].
+struct HttpPool {
+    mode: Mode,
+    fixture: PathBuf,
+}
+
 impl Spawn {
     /// An `[http]` pool in `mode` over `fixture`. `Server::addr` is its listener.
     pub fn http(mode: Mode, fixture: impl Into<PathBuf>) -> Spawn {
         Spawn {
-            http: Some((mode, fixture.into())),
+            http: Some(HttpPool {
+                mode,
+                fixture: fixture.into(),
+            }),
             ..Spawn::empty()
         }
     }
@@ -487,7 +517,8 @@ impl Spawn {
     /// Spawns the master and returns when its first listener accepts a connection.
     pub fn spawn(self) -> Server {
         let grpc_port = Cell::new(0);
-        let (dir, render) = self.stage(&grpc_port);
+        let dir = scratch_dir();
+        let render = self.stage(&dir, &grpc_port);
         let ini = self.ini();
         let mut srv = spawn_ready(
             dir,
@@ -521,10 +552,11 @@ impl Spawn {
             })
     }
 
-    /// Spawns a master that must fail its boot: returns the exit status with the whole log.
-    pub fn boot_failure(self) -> (ExitStatus, String) {
+    /// Spawns a master that must fail its boot and waits for its exit.
+    pub fn boot_failure(self) -> Exited {
         let grpc_port = Cell::new(0);
-        let (dir, render) = self.stage(&grpc_port);
+        let dir = scratch_dir();
+        let render = self.stage(&dir, &grpc_port);
         exit_of(
             dir,
             &render,
@@ -541,14 +573,25 @@ impl Spawn {
         }
     }
 
-    /// Fills a scratch dir and returns it with the config for a port; `grpc_port` gets the port of the `[grpc]` pool.
-    fn stage<'a>(&'a self, grpc_port: &'a Cell<u16>) -> (PathBuf, impl Fn(u16) -> String + 'a) {
-        let dir = scratch_dir();
+    /// Fills the scratch dir `dir` and returns the config for a port; `grpc_port` gets the port of the `[grpc]` pool.
+    fn stage<'a>(
+        &'a self,
+        dir: &Path,
+        grpc_port: &'a Cell<u16>,
+    ) -> impl Fn(u16) -> String + use<'a> {
+        struct StagedHttp {
+            mode: Mode,
+            entrypoint: String,
+        }
+        struct StagedGrpc {
+            entrypoint: String,
+            descriptor_set: String,
+        }
         std::fs::write(dir.join("php.ini"), &self.php_ini).expect("write php.ini");
-        let http = self
-            .http
-            .as_ref()
-            .map(|(mode, fixture)| (*mode, stage_dir(&dir, "http", fixture)));
+        let http = self.http.as_ref().map(|pool| StagedHttp {
+            mode: pool.mode,
+            entrypoint: stage_dir(dir, "http", &pool.fixture),
+        });
         let grpc = self.grpc.as_ref().map(|fixture| {
             let descriptor_set = match &self.descriptor_set {
                 Some(path) => path.display().to_string(),
@@ -558,13 +601,16 @@ impl Spawn {
                     "echo.binpb".to_owned()
                 }
             };
-            (stage_dir(&dir, "grpc", fixture), descriptor_set)
+            StagedGrpc {
+                entrypoint: stage_dir(dir, "grpc", fixture),
+                descriptor_set,
+            }
         });
-        let render = move |port| {
+        move |port| {
             // The spawn waits for `port`, so it goes to the first pool without a listen address.
             let mut port = Some(port);
             let mut config = String::new();
-            if let Some((mode, entrypoint)) = &http {
+            if let Some(StagedHttp { mode, entrypoint }) = &http {
                 let listen = match &self.http_listen {
                     Some(listen) => listen.to_string(),
                     None => tcp(port.take().unwrap_or_else(free_port)),
@@ -573,7 +619,11 @@ impl Spawn {
                 config += &render_config(&listen, 1, entrypoint, &self.http_extra, &pool);
                 config.push('\n');
             }
-            if let Some((entrypoint, descriptor_set)) = &grpc {
+            if let Some(StagedGrpc {
+                entrypoint,
+                descriptor_set,
+            }) = &grpc
+            {
                 let listen = match &self.grpc_listen {
                     Some(listen) => listen.to_string(),
                     None => {
@@ -591,8 +641,7 @@ impl Spawn {
                 config.push('\n');
             }
             config + &self.toml
-        };
-        (dir, render)
+        }
     }
 }
 
@@ -639,7 +688,11 @@ fn wait_for_listener(listen: &ListenAddr, child: &mut Child, timeout: Duration) 
 }
 
 /// HTTP/1.1 GET with `Connection: close`: the body is close-delimited, so no chunked or keep-alive parsing is needed.
-pub fn http_get(addr: SocketAddr, path: &str, timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
+pub fn http_get(
+    addr: SocketAddr,
+    path: &str,
+    timeout: Duration,
+) -> io::Result<StatusBody<Vec<u8>>> {
     http_get_with_headers(addr, path, &[], timeout)
 }
 
@@ -649,9 +702,12 @@ pub fn http_get_with_headers(
     path: &str,
     fields: &[(&str, &str)],
     timeout: Duration,
-) -> io::Result<(u16, Vec<u8>)> {
+) -> io::Result<StatusBody<Vec<u8>>> {
     let raw = http_get_raw(addr, path, fields, timeout)?;
-    parse_status_and_body(&raw).map(|(status, body)| (status, body.to_vec()))
+    parse_status_and_body(&raw).map(|StatusBody { status, body }| StatusBody {
+        status,
+        body: body.to_vec(),
+    })
 }
 
 /// The whole response, head included: for assertions about which fields reached the client.
@@ -695,14 +751,22 @@ pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io
 }
 
 /// A caller-controlled request: no implicit Host or Connection line.
-pub fn http_raw(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<(u16, Vec<u8>)> {
+pub fn http_raw(
+    addr: SocketAddr,
+    request: &[u8],
+    timeout: Duration,
+) -> io::Result<StatusBody<Vec<u8>>> {
     let raw = http_raw_bytes(addr, request, timeout)?;
-    parse_status_and_body(&raw).map(|(status, body)| (status, body.to_vec()))
+    parse_status_and_body(&raw).map(|StatusBody { status, body }| StatusBody {
+        status,
+        body: body.to_vec(),
+    })
 }
 
 /// The pid of the worker that serves one `GET /`. The fixture answers `ok:<pid>`.
 pub fn serving_pid(srv: &Server) -> u32 {
-    let (code, body) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    let StatusBody { status: code, body } =
+        http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
     assert_eq!(code, 200, "\n{}", diagnostics(srv));
     let body = String::from_utf8_lossy(&body);
     body.strip_prefix("ok:")
@@ -717,7 +781,7 @@ pub fn http_post(
     content_type: &[u8],
     body: &[u8],
     timeout: Duration,
-) -> io::Result<(u16, Vec<u8>)> {
+) -> io::Result<StatusBody<Vec<u8>>> {
     let mut req = Vec::new();
     write!(
         req,
@@ -731,7 +795,7 @@ pub fn http_post(
 }
 
 /// The status code and the body of a close-delimited response.
-pub fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, &[u8])> {
+pub fn parse_status_and_body(raw: &[u8]) -> io::Result<StatusBody<&[u8]>> {
     if raw.is_empty() {
         return Err(io::Error::new(
             io::ErrorKind::UnexpectedEof,
@@ -753,7 +817,10 @@ pub fn parse_status_and_body(raw: &[u8]) -> io::Result<(u16, &[u8])> {
         .nth(1)
         .and_then(|c| c.parse::<u16>().ok())
         .ok_or_else(|| io::Error::new(io::ErrorKind::InvalidData, "no status code"))?;
-    Ok((code, &raw[head_end + 4..]))
+    Ok(StatusBody {
+        status: code,
+        body: &raw[head_end + 4..],
+    })
 }
 
 /// Direct children of `master`; the `ps` field syntax is valid on both procps and BSD ps, and `Z` is excluded so a dead-but-unreaped worker is not counted.
@@ -868,8 +935,8 @@ pub fn storm(addr: SocketAddr, threads: usize) -> Storm {
                 let mut tally = Tally::default();
                 while !stop.load(Ordering::Relaxed) {
                     match http_get(addr, "/", Duration::from_secs(10)) {
-                        Ok((200, _)) => tally.ok += 1,
-                        Ok((code, _)) => {
+                        Ok(StatusBody { status: 200, .. }) => tally.ok += 1,
+                        Ok(StatusBody { status: code, .. }) => {
                             tally.failed += 1;
                             tally.last_err = Some(format!("status {code}"));
                         }
@@ -1034,7 +1101,7 @@ pub fn fan_out<T: Send + 'static>(
             std::thread::spawn(move || {
                 let mut out = Vec::with_capacity(each);
                 for _ in 0..each {
-                    let (code, body) =
+                    let StatusBody { status: code, body } =
                         http_get(addr, path, Duration::from_secs(10)).expect("fan_out GET");
                     let body = String::from_utf8_lossy(&body);
                     assert_eq!(code, 200, "got {body:?}");
@@ -1098,6 +1165,13 @@ pub fn wait_file_contains_all(
 pub fn free_port() -> u16 {
     let l = TcpListener::bind(("127.0.0.1", 0)).expect("bind ephemeral port");
     l.local_addr().expect("local_addr").port()
+}
+
+/// One response head that [`Conn::read_head`] read.
+pub struct Head {
+    pub status: u16,
+    /// The fields in wire order: lowercase names, trimmed values.
+    pub fields: Vec<(String, String)>,
 }
 
 /// An open connection for incremental reads: the read-to-EOF helpers would block until the stream ends.
@@ -1167,7 +1241,7 @@ impl Conn {
     }
 
     /// Read one head block; interim heads are separate blocks, so call again for the next one.
-    pub fn read_head(&mut self, deadline: Duration) -> io::Result<(u16, Vec<(String, String)>)> {
+    pub fn read_head(&mut self, deadline: Duration) -> io::Result<Head> {
         let head_end = self.fill_until(b"\r\n\r\n", deadline)?;
         let head = &self.buf[self.consumed..head_end];
         let text = String::from_utf8_lossy(head).into_owned();
@@ -1187,7 +1261,7 @@ impl Conn {
             .filter_map(|l| l.split_once(':'))
             .map(|(k, v)| (k.trim().to_ascii_lowercase(), v.trim().to_owned()))
             .collect();
-        Ok((status, fields))
+        Ok(Head { status, fields })
     }
 
     /// Block until `pat` is on the wire while the response is still open; consumes through it.

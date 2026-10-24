@@ -1,6 +1,6 @@
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{drain, drain_resp, fixture, req, server_log};
+use tests::{StatusBody, drain, drain_resp, fixture, req, server_log};
 
 use crate::harness::Spawn;
 
@@ -30,13 +30,16 @@ fn dispatcher_mode_answers_dispatcher() -> anyhow::Result<()> {
     server_log::wait_app_record(&srv.log_file(), "mode");
     srv.stop();
 
-    let records: Vec<(String, String)> = server_log::records(&srv.log_file())
+    let records: Vec<server_log::Captured> = server_log::records(&srv.log_file())
         .into_iter()
         .filter(|c| c.target == "app")
-        .map(|c| (c.message, c.context))
         .collect();
     assert_eq!(records.len(), 1, "one mode record (got {records:?})");
-    let (msg, ctx) = &records[0];
+    let server_log::Captured {
+        message: msg,
+        context: ctx,
+        ..
+    } = &records[0];
     assert_eq!(msg, "mode");
     for fragment in [
         r#""name":"Dispatcher""#,
@@ -52,7 +55,7 @@ fn dispatcher_mode_answers_dispatcher() -> anyhow::Result<()> {
 #[test]
 fn classic_mode_answers_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("mode/classic.php")).spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(status, 200, "the script must run clean (body: {body:?})");
     assert_eq!(body, "Classic:case:done");

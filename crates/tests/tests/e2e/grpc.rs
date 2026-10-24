@@ -6,10 +6,10 @@ use rapira_net::ListenAddr;
 use rapira_sapi::plugin::Mode;
 use serde_json::Value;
 use tests::grpc::{Conn, ECHO_PATH as ECHO, Fields, Wire, envelope, fields};
-use tests::server_log;
+use tests::{StatusBody, server_log};
 
 use crate::harness::{
-    BOOT, ECHO_SERVICE, MASTER_EXIT_OK, STOP_BUDGET, Spawn, assert_exit_code, diagnostics,
+    BOOT, ECHO_SERVICE, Exited, MASTER_EXIT_OK, STOP_BUDGET, Spawn, assert_exit_code, diagnostics,
     fixture_path, http_get, listen, signal, wait_log_contains, wait_workers,
 };
 
@@ -37,8 +37,10 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
         grpc_status: &'static str,
         headers: Fields,
         trailers: Fields,
-        /// An app record that PHP leaves, and its context.
-        log: (&'static str, &'static str),
+        /// The message of an app record that PHP leaves.
+        log_message: &'static str,
+        /// The context of that record, as JSON.
+        log_context: &'static str,
     }
     // The metadata case has no deadline, so it waits out the worker boot, and PHP is in its loop when the deadline case starts.
     let cases = [
@@ -49,7 +51,8 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
             grpc_status: "0",
             headers: &[("x-echo", "a")],
             trailers: &[("x-echo-bin", "AP8")],
-            log: ("meta", r#"{"keys":["x-echo","x-echo-bin"]}"#),
+            log_message: "meta",
+            log_context: r#"{"keys":["x-echo","x-echo-bin"]}"#,
         },
         Case {
             name: "the deadline cancels the php call",
@@ -58,10 +61,8 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
             grpc_status: "4",
             headers: &[],
             trailers: &[],
-            log: (
-                "slow",
-                r#"{"cancelled":"yes","respond":"Rapira\\Exception\\WorkDiscardedException"}"#,
-            ),
+            log_message: "slow",
+            log_context: r#"{"cancelled":"yes","respond":"Rapira\\Exception\\WorkDiscardedException"}"#,
         },
     ];
 
@@ -98,11 +99,12 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
                 case.name
             );
         }
-        let (message, context) = case.log;
-        let got: Value =
-            serde_json::from_str(&server_log::wait_app_record(&srv.log_file(), message))?;
-        let want: Value = serde_json::from_str(context)?;
-        assert_eq!(got, want, "{}: {message} record", case.name);
+        let got: Value = serde_json::from_str(&server_log::wait_app_record(
+            &srv.log_file(),
+            case.log_message,
+        ))?;
+        let want: Value = serde_json::from_str(case.log_context)?;
+        assert_eq!(got, want, "{}: {} record", case.name, case.log_message);
     }
     // The client runtime holds the client connections. Dropping it closes them, so the drain does not wait on them.
     drop(rt);
@@ -111,7 +113,7 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
 }
 
 /// A Connect unary call with a JSON body over HTTP/1.1. The server may send the reply chunked, so hyper reads it.
-fn connect_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<(u16, String)> {
+fn connect_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<StatusBody<String>> {
     let call = async {
         let mut conn = Conn::open(&ListenAddr::Tcp(addr), Wire::Http1).await?;
         let got = conn
@@ -122,7 +124,10 @@ fn connect_json(addr: SocketAddr, path: &str, body: &str) -> anyhow::Result<(u16
                 body.as_bytes(),
             )
             .await?;
-        anyhow::Ok((got.status, String::from_utf8_lossy(&got.body).into_owned()))
+        anyhow::Ok(StatusBody {
+            status: got.status,
+            body: String::from_utf8_lossy(&got.body).into_owned(),
+        })
     };
     runtime().block_on(async { tokio::time::timeout(BOOT, call).await })?
 }
@@ -163,7 +168,7 @@ fn grpc_pool_serves_from_rapira_toml() {
     for case in cases {
         let got = connect_json(srv.addr, case.path, case.body);
         assert!(
-            matches!(&got, Ok((200, reply)) if reply == case.reply),
+            matches!(&got, Ok(StatusBody { status: 200, body }) if body == case.reply),
             "{}: {got:?}\n{}",
             case.name,
             diagnostics(&srv)
@@ -182,7 +187,7 @@ fn http_and_grpc_pools_run_side_by_side() {
     };
     wait_workers(&srv, BOOT, "1 http and 1 grpc worker", |p| p.len() == 2);
 
-    let (code, body) = http_get(srv.addr, "/", BOOT)
+    let StatusBody { status: code, body } = http_get(srv.addr, "/", BOOT)
         .unwrap_or_else(|e| panic!("GET /: {e}\n{}", diagnostics(&srv)));
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert!(
@@ -194,7 +199,7 @@ fn http_and_grpc_pools_run_side_by_side() {
 
     let got = connect_json(grpc, ECHO, r#"{"text":"hi"}"#);
     assert!(
-        matches!(&got, Ok((200, reply)) if reply == r#"{"text":"hi"}"#),
+        matches!(&got, Ok(StatusBody { status: 200, body }) if body == r#"{"text":"hi"}"#),
         "{got:?}\n{}",
         diagnostics(&srv)
     );
@@ -230,7 +235,7 @@ fn grpc_boot_fails_before_the_fork() {
         if let Some(path) = case.descriptor_set {
             spawn = spawn.descriptor_set(Path::new(path));
         }
-        let (status, log) = spawn.boot_failure();
+        let Exited { status, log } = spawn.boot_failure();
         assert_eq!(status.code(), Some(1), "{}: {log}", case.name);
         assert!(log.contains(case.log), "{}: {log}", case.name);
     }
@@ -251,7 +256,7 @@ fn sigquit_drains_an_in_flight_grpc_call() {
 
     let got = call.join().expect("the client thread");
     assert!(
-        matches!(&got, Ok((200, reply)) if reply == r#"{"text":"slow-ok"}"#),
+        matches!(&got, Ok(StatusBody { status: 200, body }) if body == r#"{"text":"slow-ok"}"#),
         "{got:?}\n{}",
         diagnostics(&srv)
     );

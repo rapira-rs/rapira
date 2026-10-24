@@ -16,7 +16,7 @@ fn bailing_save_handler_leaves_no_dangling_observer_frame() -> anyhow::Result<()
         .spawn();
 
     for _ in 0..3 {
-        let (_, body) = drain(submit(srv.addr, req("/"))?);
+        let body = drain(submit(srv.addr, req("/"))?).body;
         assert!(
             body.contains("sid="),
             "worker must keep serving (got {body:?})"

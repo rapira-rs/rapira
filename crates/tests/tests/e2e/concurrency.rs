@@ -1,5 +1,7 @@
 use std::time::Duration;
 
+use tests::StatusBody;
+
 use crate::harness::{http_get, spawn_with_config, wait_workers};
 
 /// Concurrent producers over a worker pool must never get another request's body.
@@ -14,8 +16,9 @@ fn concurrent_unique_requests_never_mix() {
             std::thread::spawn(move || {
                 for i in 0..50u32 {
                     let n = t * 1000 + i;
-                    let (code, body) = http_get(addr, &format!("/?n={n}"), Duration::from_secs(10))
-                        .unwrap_or_else(|e| panic!("GET /?n={n}: {e}"));
+                    let StatusBody { status: code, body } =
+                        http_get(addr, &format!("/?n={n}"), Duration::from_secs(10))
+                            .unwrap_or_else(|e| panic!("GET /?n={n}: {e}"));
                     assert_eq!(code, 200, "n={n}");
                     assert_eq!(
                         String::from_utf8_lossy(&body),
