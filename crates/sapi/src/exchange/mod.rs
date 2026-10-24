@@ -1,4 +1,3 @@
-use core::fmt::NumBuffer;
 pub(crate) use std::{
     cell::Cell,
     ffi::{c_char, c_int},
@@ -6,6 +5,7 @@ pub(crate) use std::{
     time::Duration,
 };
 use std::{
+    fmt::NumBuffer,
     net::{IpAddr, Ipv4Addr},
     sync::OnceLock,
 };

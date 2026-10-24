@@ -211,7 +211,7 @@ jobs:
                   echo "MACOSX_DEPLOYMENT_TARGET=$(sw_vers -productVersion | cut -d. -f1).0" >> "$GITHUB_ENV"
                   echo "RUSTFLAGS=-C link-arg=-Wl,-rpath,@loader_path/../lib/rapira -L native=$PHP_PREFIX/lib" >> "$GITHUB_ENV"
 
-            - uses: dtolnay/rust-toolchain@c6590455eca8e79d081430ebfe2074192ae90290 # 1.98.1
+            - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
             - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
               with: { cache-on-failure: true }
 
