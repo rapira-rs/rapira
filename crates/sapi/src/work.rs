@@ -167,7 +167,7 @@ impl Sink {
         }
     }
 
-    /// `bytes` is the body size that the unit keeps in memory. A body that does not fit the budget is refused at once, because a wait keeps the body in memory.
+    /// `bytes` is the body size of the unit. A multipart body that the plugin parsed keeps its file parts in spool files and its other parts in memory. submit refuses a body that does not fit the free budget immediately, because the body stays in memory or in the spool dir while it waits. A spool dir on tmpfs is also memory.
     /// pending is incremented before the send: the consumer decrements as soon as it wakes, so the reverse order could wrap the counter below zero.
     pub async fn submit(&self, unit: Box<dyn Work>, bytes: usize) -> Result<(), Refused> {
         // A body larger than the budget takes all of it.
