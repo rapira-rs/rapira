@@ -141,7 +141,6 @@ fn socket_wait_under_static_load_keeps_the_worker() -> anyhow::Result<()> {
     for t in load {
         t.join().expect("load thread");
     }
-    answer.join().expect("backend thread")?;
 
     let resp = resp.expect("the waiting unit never ended");
     assert!(
@@ -154,6 +153,8 @@ fn socket_wait_under_static_load_keeps_the_worker() -> anyhow::Result<()> {
         body.contains("Maximum execution time"),
         "the static load must use up the budget during the wait (got: {body:?})"
     );
+    // accept() returns only after the unit connects, so a run where the unit never connects fails at the checks above and does not hang here.
+    answer.join().expect("backend thread")?;
     assert_eq!(
         worker_pids(srv.pid()),
         workers,
