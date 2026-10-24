@@ -164,12 +164,24 @@ pub struct ReqC {
     pub server_port: String,
 }
 
-fn cgi_addr_strings(addr: &Addr) -> (String, String) {
+/// The REMOTE_ADDR and REMOTE_PORT values of one peer.
+struct CgiAddr {
+    addr: String,
+    port: String,
+}
+
+fn cgi_addr_strings(addr: &Addr) -> CgiAddr {
     match addr {
-        Addr::Inet(sa) => (sa.ip().to_string(), sa.port().to_string()),
+        Addr::Inet(sa) => CgiAddr {
+            addr: sa.ip().to_string(),
+            port: sa.port().to_string(),
+        },
         // REMOTE_ADDR must hold a hostnumber (RFC 3875 §4.1.8); loopback stands in for a unix peer.
         // https://www.rfc-editor.org/rfc/rfc3875#section-4.1.8
-        Addr::Unix(_) => ("127.0.0.1".to_owned(), "0".to_owned()),
+        Addr::Unix(_) => CgiAddr {
+            addr: "127.0.0.1".to_owned(),
+            port: "0".to_owned(),
+        },
     }
 }
 
@@ -194,7 +206,10 @@ impl ReqC {
             .get(AUTHORIZATION)
             .map(|v| cgi_cstring("Authorization", v.as_bytes()));
 
-        let (remote_addr, remote_port) = cgi_addr_strings(&r.remote);
+        let CgiAddr {
+            addr: remote_addr,
+            port: remote_port,
+        } = cgi_addr_strings(&r.remote);
 
         Self {
             method: cgi_cstring("REQUEST_METHOD", r.method.as_bytes()),

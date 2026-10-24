@@ -1,6 +1,8 @@
 use std::env;
 use std::path::PathBuf;
 
+use rapira_php_build::PhpVersion;
+
 const ALLOWED_BINDINGS: &[&str] = include!("allowed_bindings.rs");
 
 const C_FILES: &[&str] = &[
@@ -23,12 +25,12 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("cargo:rustc-link-lib=dylib=php");
 
-    if php.version >= (8, 5) {
+    if php.version >= (PhpVersion { major: 8, minor: 5 }) {
         println!("cargo:rustc-cfg=php85");
     } else {
         println!("cargo:rustc-cfg=php84");
     }
-    if php.version >= (8, 7) {
+    if php.version >= (PhpVersion { major: 8, minor: 7 }) {
         println!("cargo:rustc-cfg=php87");
     }
 

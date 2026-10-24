@@ -20,6 +20,12 @@ pub(crate) struct Listener<L> {
     wake: Wake,
 }
 
+/// One connection that this worker owns.
+pub(crate) struct Accepted<S, A> {
+    pub stream: S,
+    pub peer: A,
+}
+
 impl Wake {
     pub fn new() -> io::Result<Self> {
         // SAFETY: eventfd takes no pointers and returns a new descriptor.
@@ -69,7 +75,7 @@ impl<L: AsRawFd> Listener<L> {
     pub(crate) fn accept_blocking<S, A>(
         &self,
         mut accept: impl FnMut(&L) -> io::Result<(S, A)>,
-    ) -> io::Result<Option<(S, A)>> {
+    ) -> io::Result<Option<Accepted<S, A>>> {
         loop {
             if self.wait()? {
                 return Ok(None);
@@ -84,7 +90,7 @@ impl<L: AsRawFd> Listener<L> {
                 // also fail the tokio registration of the stream.
                 result => {
                     self.rotate().map_err(io::Error::other)?;
-                    return result.map(Some);
+                    return result.map(|(stream, peer)| Some(Accepted { stream, peer }));
                 }
             }
         }

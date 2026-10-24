@@ -6,12 +6,30 @@ use rapira_scoreboard::{
 
 use crate::memory::Memory;
 
+/// A slot state and its `state` label value.
+pub(crate) struct StateLabel {
+    pub state: u32,
+    pub label: &'static str,
+}
+
 /// Slot states in output order, with their label values.
-pub(crate) const STATES: [(u32, &str); 4] = [
-    (SLOT_STARTING, "starting"),
-    (SLOT_IDLE, "idle"),
-    (SLOT_ACTIVE, "active"),
-    (SLOT_DRAINING, "draining"),
+pub(crate) const STATES: [StateLabel; 4] = [
+    StateLabel {
+        state: SLOT_STARTING,
+        label: "starting",
+    },
+    StateLabel {
+        state: SLOT_IDLE,
+        label: "idle",
+    },
+    StateLabel {
+        state: SLOT_ACTIVE,
+        label: "active",
+    },
+    StateLabel {
+        state: SLOT_DRAINING,
+        label: "draining",
+    },
 ];
 
 /// Exit reasons in output order. `PoolStats::exits` holds the counts in this order.
@@ -59,7 +77,7 @@ fn pool_stats(board: &[SharedSlot], region: &PoolRegion) -> PoolStats {
     };
     for (index, s) in board[region.slots.clone()].iter().enumerate() {
         let state = s.state.load(Relaxed);
-        if let Some(i) = STATES.iter().position(|&(known, _)| known == state) {
+        if let Some(i) = STATES.iter().position(|known| known.state == state) {
             stats.states[i] += 1;
         }
         let pid = s.pid.load(Relaxed);
