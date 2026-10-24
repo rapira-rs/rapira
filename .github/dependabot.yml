@@ -35,6 +35,3 @@ updates:
     commit-message:
       prefix: chore
       include: scope
-    ignore:
-      - dependency-name: rust
-        versions: [">= 1.99"]

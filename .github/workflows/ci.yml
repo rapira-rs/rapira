@@ -12,7 +12,7 @@ jobs:
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with: { persist-credentials: false }
-            - uses: dtolnay/rust-toolchain@c6590455eca8e79d081430ebfe2074192ae90290 # 1.98.1
+            - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
               with: { components: rustfmt }
             - run: cargo fmt --all --check
 
@@ -174,7 +174,7 @@ jobs:
                   echo "DYLD_LIBRARY_PATH=$PHP_PREFIX/lib" >> "$GITHUB_ENV"
                   echo "RUSTFLAGS=-L native=$PHP_PREFIX/lib" >> "$GITHUB_ENV"
 
-            - uses: dtolnay/rust-toolchain@c6590455eca8e79d081430ebfe2074192ae90290 # 1.98.1
+            - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
               with: { components: clippy }
             - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
               with:
