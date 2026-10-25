@@ -125,6 +125,8 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                 sb_update(scoreboard::Event::BootFailed);
                 match pull_unit_to_shed(BOOT_RETRY) {
                     Pulled::Closed => break WorkerExit::Closed,
+                    // A reload during a failed boot: the next boot starts at once.
+                    Pulled::Unit(unit) if unit.restarts_app() => {}
                     Pulled::Unit(unit) => {
                         unit.shed();
                         sb_update(scoreboard::Event::Shed);
@@ -219,6 +221,10 @@ fn next_unit() -> Option<Context> {
         }
         match pull_unit() {
             Some(unit) => {
+                if unit.restarts_app() {
+                    crate::quota::exhaust();
+                    continue;
+                }
                 if unit.cancelled() {
                     sb_update(scoreboard::Event::Handled(true));
                     continue;

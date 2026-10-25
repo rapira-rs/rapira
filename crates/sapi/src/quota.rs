@@ -60,6 +60,11 @@ pub(crate) fn exhausted() -> bool {
     Q.with_borrow(|q| q.served >= q.max)
 }
 
+/// A reload: the current app instance takes no more units.
+pub(crate) fn exhaust() {
+    Q.with_borrow_mut(|q| q.served = q.max);
+}
+
 /// A new app instance starts with the whole quota.
 pub(crate) fn renew() {
     Q.with_borrow_mut(|q| q.served = 0);

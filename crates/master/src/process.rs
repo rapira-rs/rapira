@@ -151,7 +151,7 @@ pub(crate) struct Forker<'w> {
 }
 
 impl Forker<'_> {
-    /// Fork bracket: the child leaves {QUIT, INT} blocked for the worker's sigwait watcher and `_exit`s under `catch_unwind`, so no master Drop (pidfile unlink, PHP shutdown) can ever run in a child.
+    /// Fork bracket: the child leaves {QUIT, INT, USR2} blocked for the worker's sigwait watcher and `_exit`s under `catch_unwind`, so no master Drop (pidfile unlink, PHP shutdown) can ever run in a child.
     pub(crate) fn spawn(
         &mut self,
         pool: usize,
@@ -184,12 +184,12 @@ impl Forker<'_> {
                     ign.sa_sigaction = libc::SIG_IGN;
                     libc::sigemptyset(&mut ign.sa_mask);
                     libc::sigaction(libc::SIGUSR1, &ign, std::ptr::null_mut());
-                    libc::sigaction(libc::SIGUSR2, &ign, std::ptr::null_mut());
 
                     #[cfg(target_os = "linux")]
                     libc::prctl(libc::PR_SET_NAME, c"rapira-worker".as_ptr());
 
-                    let hold = sigset(&[libc::SIGQUIT, libc::SIGINT]);
+                    // USR2 keeps SIG_DFL: POSIX lets a kernel discard an ignored signal even while it is blocked. https://pubs.opengroup.org/onlinepubs/9799919799/functions/V2_chap02.html#tag_16_04_01
+                    let hold = sigset(&[libc::SIGQUIT, libc::SIGINT, libc::SIGUSR2]);
                     libc::sigprocmask(libc::SIG_SETMASK, &hold, std::ptr::null_mut());
                 }
 

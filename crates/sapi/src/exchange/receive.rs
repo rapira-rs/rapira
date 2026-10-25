@@ -49,6 +49,10 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
             };
             match pulled {
                 Pulled::Unit(unit) => {
+                    if unit.restarts_app() {
+                        crate::quota::exhaust();
+                        continue;
+                    }
                     if unit.cancelled() {
                         sb_update(Event::Handled(true));
                         continue;

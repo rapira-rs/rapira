@@ -74,7 +74,7 @@ fn killed_worker_respawns() {
     }
 }
 
-/// Workers ignore SIGUSR1 and SIGUSR2, so `pkill -USR2 rapira` does not stop them. Classic mode starts PHP again for each request, and PHP sets its signal handlers again at each start.
+/// Workers ignore SIGUSR1, and SIGUSR2 only asks them to restart their app, so `pkill -USR2 rapira` does not stop them. Classic mode starts PHP again for each request, and PHP sets its signal handlers again at each start.
 #[test]
 fn workers_ignore_usr_signals() {
     struct Case {
@@ -1064,6 +1064,44 @@ fn the_request_watchdog_skips_the_boot_after_an_app_restart() {
         worker_pids(srv.pid()),
         vec![pid],
         "the watchdog did not kill the worker during the boot\n{}",
+        diagnostics(&srv)
+    );
+}
+
+/// SIGUSR2 to a worker whose app fails its boot boots the fixed app at once and logs no false "reload skipped" warning.
+#[test]
+fn a_reload_during_a_failing_boot_boots_the_fixed_app() {
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/breakable-boot-worker.php"),
+    )
+    .json_log()
+    .spawn();
+    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    let log = srv.log_file();
+    tests::server_log::wait_app_record(&log, "booted");
+    let flag = srv.dir.join("http/broken.flag");
+    std::fs::write(&flag, "").expect("break the boot");
+    signal(pid, libc::SIGUSR2);
+    assert!(
+        wait_log_contains(&srv, "broken deploy", Duration::from_secs(10)),
+        "no failed boot\n{}",
+        diagnostics(&srv)
+    );
+    std::fs::remove_file(&flag).expect("fix the boot");
+    signal(pid, libc::SIGUSR2);
+    let booted = poll(Duration::from_secs(10), || {
+        (tests::server_log::app_contexts(&log, "booted").len() >= 2).then_some(())
+    });
+    assert!(
+        booted.is_some(),
+        "the fixed app booted\n{}",
+        diagnostics(&srv)
+    );
+    let text = std::fs::read_to_string(&log).expect("read the log");
+    assert!(
+        !text.contains("reload skipped"),
+        "a false reload warning\n{}",
         diagnostics(&srv)
     );
 }

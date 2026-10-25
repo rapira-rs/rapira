@@ -1,5 +1,8 @@
 use crate::harness::*;
+use rapira_sapi::plugin::Mode;
 use std::time::Duration;
+use tests::poll;
+use tests::server_log::{app_contexts, wait_app_record};
 
 /// USR2 replaces every worker while the master keeps the listener bound; connection drops during the swap are the load balancer's concern, served responses are ours.
 #[test]
@@ -66,5 +69,34 @@ fn reload_keeps_the_worker_count_when_the_last_old_worker_dies() {
         Duration::from_secs(5),
         "1 worker after the reload",
         |p| p.len() == 1,
+    );
+}
+
+/// SIGUSR2 to a worker that waits for work restarts its app without a request, in the same process.
+#[test]
+fn usr2_restarts_an_idle_app() {
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/boot-log-worker.php"),
+    )
+    .json_log()
+    .spawn();
+    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    let log = srv.log_file();
+    wait_app_record(&log, "booted");
+    signal(pid, libc::SIGUSR2);
+    let booted = poll(Duration::from_secs(10), || {
+        (app_contexts(&log, "booted").len() >= 2).then_some(())
+    });
+    assert!(
+        booted.is_some(),
+        "the idle app booted again\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(
+        worker_pids(srv.pid()),
+        vec![pid],
+        "the worker process stays\n{}",
+        diagnostics(&srv)
     );
 }
