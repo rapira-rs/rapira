@@ -1,4 +1,5 @@
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -14,7 +15,7 @@ use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Sink;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
-use tower::util::MapResponse;
+use tower::ServiceExt as _;
 
 use crate::dispatch::PhpDispatcher;
 use crate::{Config, Prepared};
@@ -26,6 +27,24 @@ struct Serving {
     health: Arc<StaticChecker>,
     /// Each connection holds a receiver until it ends, so `closed()` resolves when the last connection is gone.
     shutdown: watch::Sender<bool>,
+    /// The calls whose response is not ready yet.
+    inflight: Arc<AtomicUsize>,
+}
+
+/// Counts one call in flight until it drops, also when the client leaves first.
+struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    fn start(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Relaxed);
+        Self(Arc::clone(count))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Relaxed);
+    }
 }
 
 impl Serving {
@@ -59,6 +78,7 @@ impl Serving {
                 .with_http2_keepalive_timeout(config.keepalive_timeout),
             health,
             shutdown: watch::Sender::new(false),
+            inflight: Arc::new(AtomicUsize::new(0)),
         }
     }
 
@@ -68,9 +88,42 @@ impl Serving {
     {
         let open = self.shutdown.subscribe();
         let mut stop = open.clone();
-        let service = MapResponse::new(self.service.clone(), status_in_trailers);
+        let draining = open.clone();
+        // During the drain an HTTP/1.1 connection closes itself after its next response, and h2 gets GOAWAY.
+        let http1 = Arc::new(AtomicBool::new(false));
+        let (mark, close) = (Arc::clone(&http1), Arc::clone(&http1));
+        let inflight = Arc::clone(&self.inflight);
+        let service = self
+            .service
+            .clone()
+            .map_request(move |req: http::Request<_>| {
+                mark.store(req.version() < http::Version::HTTP_2, Relaxed);
+                req
+            })
+            .map_future(move |call| {
+                let counted = InFlight::start(&inflight);
+                async move {
+                    let response = call.await;
+                    drop(counted);
+                    response
+                }
+            })
+            .map_response(move |response| {
+                let mut response = status_in_trailers(response);
+                if close.load(Relaxed) && *draining.borrow() {
+                    response.headers_mut().insert(
+                        http::header::CONNECTION,
+                        http::HeaderValue::from_static("close"),
+                    );
+                }
+                response
+            });
         let connection = serve_connection(io, info, service, self.connection.clone(), async move {
             let _ = stop.wait_for(|stop| *stop).await;
+            if http1.load(Relaxed) {
+                // The connection closes after its next response, or the drain deadline cuts it.
+                std::future::pending::<()>().await;
+            }
         });
         tokio::spawn(async move {
             // The shutdown future drops its receiver when shutdown starts, and the calls in flight continue after that. `open` keeps `closed()` pending until the connection ends.
@@ -87,6 +140,7 @@ impl Serving {
         for name in self.health.services() {
             self.health.remove_service(&name);
         }
+        tracing::info!(target: "grpc", "draining open connections");
         self.shutdown.send_replace(true);
         let drained = tokio::time::timeout(grace, self.shutdown.closed())
             .await
@@ -94,9 +148,11 @@ impl Serving {
         if let Some(e) = fatal {
             return Err(e);
         }
-        if !drained {
+        // An HTTP/1.1 connection that stays idle until the deadline holds no call, so only a call in flight fails the drain.
+        let cut = self.inflight.load(Relaxed);
+        if !drained && cut > 0 {
             return Err(anyhow!(
-                "grpc drain timed out after {grace:?}; open connections were cut"
+                "grpc drain timed out after {grace:?}; {cut} call(s) in flight were cut"
             ));
         }
         tracing::info!(target: "grpc", "drained cleanly; accept loop stopped");

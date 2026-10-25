@@ -68,3 +68,63 @@ fn a_stopping_worker_answers_requests_on_the_connections_it_holds() {
         p.len() == 1 && p[0] != pid
     });
 }
+
+/// One Connect unary call to EchoService/Echo on `conn`.
+async fn connect_call(conn: &mut tests::grpc::Conn) -> tests::grpc::Response {
+    let exchange = conn.send(
+        http::Method::POST,
+        tests::grpc::ECHO_PATH,
+        &[
+            ("content-type", "application/proto"),
+            ("connect-protocol-version", "1"),
+        ],
+        tests::grpc::HI,
+    );
+    tokio::time::timeout(READ, exchange)
+        .await
+        .expect("no response within 10 s")
+        .expect("the call")
+}
+
+/// A stopping gRPC worker answers the next Connect call on each HTTP/1.1 connection it holds, and that response closes the connection.
+#[tokio::test]
+async fn a_stopping_grpc_worker_answers_on_its_http1_connections() {
+    let srv = Spawn::grpc(fixture_path("grpc/echo-worker.php"))
+        .json_log()
+        .spawn();
+    let pid = wait_workers(&srv, READ, "1 worker", |p| p.len() == 1)[0];
+    let mut conns = Vec::new();
+    for _ in 0..4 {
+        let mut conn = tests::grpc::Conn::open(&listen(&srv), tests::grpc::Wire::Http1)
+            .await
+            .expect("connect");
+        let response = connect_call(&mut conn).await;
+        assert_eq!(response.status, 200, "\n{}", diagnostics(&srv));
+        conns.push(conn);
+    }
+
+    signal(pid, libc::SIGQUIT);
+    assert!(
+        wait_log_contains(&srv, "draining open connections", READ),
+        "no drain record\n{}",
+        diagnostics(&srv)
+    );
+
+    for (i, conn) in conns.iter_mut().enumerate() {
+        let response = connect_call(conn).await;
+        assert_eq!(
+            response.status,
+            200,
+            "connection {i}\n{}",
+            diagnostics(&srv)
+        );
+        assert_eq!(
+            response
+                .headers
+                .get(http::header::CONNECTION)
+                .and_then(|v| v.to_str().ok()),
+            Some("close"),
+            "connection {i}"
+        );
+    }
+}
