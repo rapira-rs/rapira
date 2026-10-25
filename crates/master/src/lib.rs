@@ -18,9 +18,7 @@ pub use signals::{block_early_signals, wait_signal};
 
 /// Worker exit-code protocol: the worker emits, the master consumes; any other code is a crash.
 pub const WORKER_EXIT_DRAINED: i32 = 0;
-/// Quota recycle (e.g. max_requests): immediate respawn, no backoff.
-pub const WORKER_EXIT_RECYCLE: i32 = 88;
-/// Self-reported unhealthy: respawn with backoff; gen-0 with zero handled requests is a boot failure.
+/// Self-reported unhealthy: respawn with backoff; before the pool served a request or recycled an app, it is a boot failure.
 pub const WORKER_EXIT_UNHEALTHY: i32 = 89;
 /// Exit code the caller uses when [`run`] returns a boot-failure error.
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
@@ -37,26 +35,26 @@ pub struct PoolConfig {
 
 pub struct MasterConfig {
     pub pools: Vec<PoolConfig>,
-    /// Stop/reload QUIT to TERM escalation grace.
+    /// Stop QUIT to TERM escalation grace.
     pub process_control_timeout: Duration,
     pub pidfile: Option<PathBuf>,
 }
 
 impl MasterConfig {
-    /// Two slots per worker, so a reload replacement fits next to the worker it replaces; pools contiguous in `pools` order. Names the pool that pushes the total past the cap.
+    /// One slot per worker; pools contiguous in `pools` order. Names the pool that pushes the total past the cap.
     fn regions(&self) -> anyhow::Result<Vec<PoolRegion>> {
         let mut base: usize = 0;
         self.pools
             .iter()
             .map(|p| {
-                let end = base.saturating_add(p.processes * 2);
+                let end = base.saturating_add(p.processes);
                 anyhow::ensure!(
                     end <= SB_MAX_SLOTS,
                     "{}.pool.processes ({}) raises the worker total to {}, above the supported maximum ({})",
                     p.name,
                     p.processes,
-                    end / 2,
-                    SB_MAX_SLOTS / 2
+                    end,
+                    SB_MAX_SLOTS
                 );
                 let slots = base..end;
                 base = end;
@@ -139,7 +137,7 @@ mod tests {
 
     #[test]
     fn regions_name_the_pool_that_crosses_the_cap() {
-        let e = cfg(vec![pool("http", SB_MAX_SLOTS / 2), pool("grpc", 1)])
+        let e = cfg(vec![pool("http", SB_MAX_SLOTS), pool("grpc", 1)])
             .regions()
             .unwrap_err()
             .to_string();
@@ -148,8 +146,8 @@ mod tests {
         assert!(
             e.contains(&format!(
                 "raises the worker total to {}, above the supported maximum ({})",
-                SB_MAX_SLOTS / 2 + 1,
-                SB_MAX_SLOTS / 2
+                SB_MAX_SLOTS + 1,
+                SB_MAX_SLOTS
             )),
             "{e}"
         );
@@ -164,32 +162,32 @@ mod tests {
         }
         let cases = [
             Case {
-                name: "pool order with two slots per worker",
+                name: "pool order with one slot per worker",
                 pools: vec![pool("observability", 1), pool("http", 3), pool("grpc", 2)],
                 want: vec![
                     PoolRegion {
                         name: "observability",
                         processes: 1,
-                        slots: 0..2,
+                        slots: 0..1,
                     },
                     PoolRegion {
                         name: "http",
                         processes: 3,
-                        slots: 2..8,
+                        slots: 1..4,
                     },
                     PoolRegion {
                         name: "grpc",
                         processes: 2,
-                        slots: 8..12,
+                        slots: 4..6,
                     },
                 ],
             },
             Case {
                 name: "one pool fills the board up to the cap",
-                pools: vec![pool("http", SB_MAX_SLOTS / 2)],
+                pools: vec![pool("http", SB_MAX_SLOTS)],
                 want: vec![PoolRegion {
                     name: "http",
-                    processes: SB_MAX_SLOTS / 2,
+                    processes: SB_MAX_SLOTS,
                     slots: 0..SB_MAX_SLOTS,
                 }],
             },

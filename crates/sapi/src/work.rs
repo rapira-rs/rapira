@@ -54,6 +54,30 @@ pub trait Work: Send + 'static {
     fn into_cgi(self: Box<Self>) -> Option<crate::types::Context>;
     /// A worker that cannot serve: the plugin's refusal, 503 or UNAVAILABLE.
     fn shed(self: Box<Self>);
+    /// A reload: the app instance takes no more units, and the next one takes the rest.
+    fn restarts_app(&self) -> bool {
+        false
+    }
+}
+
+/// The reload request. It goes through the intake, so it also wakes a PHP thread that waits for work.
+pub(crate) struct RestartApp;
+
+impl Work for RestartApp {
+    fn cancelled(&self) -> bool {
+        false
+    }
+    unsafe fn attach(self: Box<Self>, _: *mut zend_object) -> *mut dyn Held {
+        unreachable!("the pull loops take a restart entry before attach")
+    }
+    fn into_cgi(self: Box<Self>) -> Option<crate::types::Context> {
+        None
+    }
+    // The boot-failure wait skips restart entries, so nothing sheds this one.
+    fn shed(self: Box<Self>) {}
+    fn restarts_app(&self) -> bool {
+        true
+    }
 }
 
 /// The class entries of one plugin's dispatcher surface. Set once per worker.
@@ -124,6 +148,9 @@ impl Work for Budgeted {
     }
     fn shed(self: Box<Self>) {
         self.unit.shed()
+    }
+    fn restarts_app(&self) -> bool {
+        self.unit.restarts_app()
     }
 }
 

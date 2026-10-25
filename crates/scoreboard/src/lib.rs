@@ -23,7 +23,6 @@ pub struct SharedSlot {
     pub pending: AtomicU64,
     /// Worker exits per verdict. The master counts them.
     pub exits_drained: AtomicU64,
-    pub exits_recycled: AtomicU64,
     pub exits_unhealthy: AtomicU64,
     pub exits_timeout: AtomicU64,
     pub exits_crashed: AtomicU64,

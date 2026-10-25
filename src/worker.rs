@@ -3,9 +3,9 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::time::Duration;
 
 use rapira_config::PoolSettings;
-use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
-use rapira_sapi::plugin::{Plugin, Stopper, run_plugin};
-use rapira_sapi::quota::{STOP_QUOTA, STOP_REASON, STOP_UNHEALTHY};
+use rapira_master::{WORKER_EXIT_UNHEALTHY, WorkerEnv};
+use rapira_sapi::plugin::{Mode, Plugin, Stopper, run_plugin};
+use rapira_sapi::quota::{STOP_REASON, STOP_UNHEALTHY};
 use rapira_sapi::{Rapira, StartedWorker};
 
 /// Jitter avoids lockstep recycling. The hash mixes in the pid because every child inherits the same seed from the pre-fork master.
@@ -49,6 +49,12 @@ pub fn worker_body(
         return WORKER_EXIT_UNHEALTHY;
     }
     let stopper = Stopper::default();
+    // Classic mode runs every request in a new request cycle, so max_requests has nothing to restart there.
+    let max_requests = if mode == Mode::Classic {
+        0
+    } else {
+        max_requests
+    };
     let StartedWorker { rapira, sink } = Rapira::start_worker(
         mode,
         entrypoint,
@@ -71,7 +77,14 @@ pub fn worker_body(
     let name: &str = plugin.name();
     let outcome: anyhow::Result<()> = run_plugin(plugin, sink, stopper.clone(), grace, drain_grace)
         .and_then(|running| {
-            spawn_signal_thread(move || stopper.stop());
+            let restarter = stopper.clone();
+            let restart = move || {
+                if mode != Mode::Classic {
+                    tracing::info!(target: "rapira", "reload requested; restarting the app");
+                    restarter.restart_app();
+                }
+            };
+            spawn_signal_thread(move || stopper.stop(), restart);
             running.join()
         });
     if let Err(e) = &outcome {
@@ -80,22 +93,30 @@ pub fn worker_body(
     drop(rapira);
 
     match STOP_REASON.load(SeqCst) {
-        STOP_QUOTA => WORKER_EXIT_RECYCLE,
         STOP_UNHEALTHY => WORKER_EXIT_UNHEALTHY,
         _ if outcome.is_err() => 1,
         _ => 0,
     }
 }
 
-/// Requires the fork bracket to have masked exactly {QUIT, INT} in the child: the first signal runs `stop`, a second force-exits 131.
-pub fn spawn_signal_thread(stop: impl FnOnce() + Send + 'static) {
+/// Requires the fork bracket to have masked exactly {QUIT, INT, USR2} in the child: USR2 runs `restart`, the first QUIT or INT runs `stop`, a second force-exits 131.
+pub fn spawn_signal_thread(
+    stop: impl FnOnce() + Send + 'static,
+    restart: impl Fn() + Send + 'static,
+) {
+    const SIGNALS: [libc::c_int; 3] = [libc::SIGQUIT, libc::SIGINT, libc::SIGUSR2];
     std::thread::Builder::new()
         .name("rapira-worker-signal".into())
         .spawn(move || {
-            let sig = rapira_master::wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
+            let sig = loop {
+                match rapira_master::wait_signal(&SIGNALS) {
+                    libc::SIGUSR2 => restart(),
+                    sig => break sig,
+                }
+            };
             tracing::info!(target: "rapira", "signal {sig} received; draining worker");
             stop();
-            let _ = rapira_master::wait_signal(&[libc::SIGQUIT, libc::SIGINT]);
+            while rapira_master::wait_signal(&SIGNALS) == libc::SIGUSR2 {}
             tracing::warn!(target: "rapira", "second signal; forcing worker exit");
             std::process::exit(131);
         })

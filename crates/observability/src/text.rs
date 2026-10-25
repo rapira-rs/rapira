@@ -213,7 +213,6 @@ rapira_script_restarts_total{pool="http"} 1
 # HELP rapira_worker_exits_total Worker process exits.
 # TYPE rapira_worker_exits_total counter
 rapira_worker_exits_total{pool="http",reason="drained"} 1
-rapira_worker_exits_total{pool="http",reason="recycled"} 2
 rapira_worker_exits_total{pool="http",reason="unhealthy"} 0
 rapira_worker_exits_total{pool="http",reason="timeout"} 0
 rapira_worker_exits_total{pool="http",reason="crashed"} 1
@@ -265,12 +264,10 @@ rapira_script_restarts_total{pool="grpc"} 0
 # HELP rapira_worker_exits_total Worker process exits.
 # TYPE rapira_worker_exits_total counter
 rapira_worker_exits_total{pool="http",reason="drained"} 0
-rapira_worker_exits_total{pool="http",reason="recycled"} 0
 rapira_worker_exits_total{pool="http",reason="unhealthy"} 0
 rapira_worker_exits_total{pool="http",reason="timeout"} 0
 rapira_worker_exits_total{pool="http",reason="crashed"} 0
 rapira_worker_exits_total{pool="grpc",reason="drained"} 0
-rapira_worker_exits_total{pool="grpc",reason="recycled"} 0
 rapira_worker_exits_total{pool="grpc",reason="unhealthy"} 0
 rapira_worker_exits_total{pool="grpc",reason="timeout"} 0
 rapira_worker_exits_total{pool="grpc",reason="crashed"} 0
@@ -302,7 +299,7 @@ rapira_build_info{version="0.8.1",php_version="8.5.10"} 1
                     failed_on_full_queue: 4,
                     queued: 2,
                     script_restarts: 1,
-                    exits: [1, 2, 0, 0, 1],
+                    exits: [1, 0, 0, 1],
                     workers: vec![
                         Worker {
                             index: 0,

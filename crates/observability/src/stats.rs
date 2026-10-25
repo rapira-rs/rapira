@@ -33,8 +33,7 @@ pub(crate) const STATES: [StateLabel; 4] = [
 ];
 
 /// Exit reasons in output order. `PoolStats::exits` holds the counts in this order.
-pub(crate) const EXIT_REASONS: [&str; 5] =
-    ["drained", "recycled", "unhealthy", "timeout", "crashed"];
+pub(crate) const EXIT_REASONS: [&str; 4] = ["drained", "unhealthy", "timeout", "crashed"];
 
 /// A live worker: a slot with a pid other than 0 and a state other than FREE.
 #[derive(Debug, PartialEq)]
@@ -59,7 +58,7 @@ pub(crate) struct PoolStats {
     pub queued: u64,
     pub script_restarts: u64,
     /// Exit counts in `EXIT_REASONS` order.
-    pub exits: [u64; 5],
+    pub exits: [u64; 4],
     pub workers: Vec<Worker>,
 }
 
@@ -95,7 +94,6 @@ fn pool_stats(board: &[SharedSlot], region: &PoolRegion) -> PoolStats {
         stats.script_restarts += s.recycles.load(Relaxed);
         let exits = [
             &s.exits_drained,
-            &s.exits_recycled,
             &s.exits_unhealthy,
             &s.exits_timeout,
             &s.exits_crashed,
@@ -131,7 +129,6 @@ mod tests {
         // http slot 1: an idle worker.
         place(1, SLOT_IDLE, 202);
         slot(1).handled.store(5, Relaxed);
-        slot(1).exits_recycled.store(2, Relaxed);
         // http slot 2: free. Its counts stay in the totals.
         place(2, SLOT_FREE, 0);
         slot(2).handled.store(7, Relaxed);
@@ -141,7 +138,6 @@ mod tests {
         // grpc slots 0 to 3: one starting, two draining and one active worker.
         place(4, SLOT_STARTING, 301);
         slot(4).exits_drained.store(1, Relaxed);
-        slot(4).exits_recycled.store(2, Relaxed);
         place(5, SLOT_DRAINING, 302);
         slot(5).exits_unhealthy.store(3, Relaxed);
         place(6, SLOT_DRAINING, 303);
@@ -176,7 +172,7 @@ mod tests {
                     failed_on_full_queue: 9,
                     queued: 2,
                     script_restarts: 1,
-                    exits: [1, 2, 0, 0, 1],
+                    exits: [1, 0, 0, 1],
                     workers: vec![
                         Worker {
                             index: 0,
@@ -199,7 +195,7 @@ mod tests {
                     failed_on_full_queue: 6,
                     queued: 0,
                     script_restarts: 0,
-                    exits: [1, 2, 3, 4, 5],
+                    exits: [1, 3, 4, 5],
                     workers: vec![
                         Worker {
                             index: 0,

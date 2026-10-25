@@ -17,7 +17,7 @@ The worker set of one plugin, with its entrypoint, mode and process count.
 _Avoid_: worker group, cluster, farm
 
 **Recycle**:
-The replacement of a worker by a fresh one, after a quota such as max requests or after a failure.
+The replacement of the app instance inside a worker by a fresh one, after max requests or a reload. The worker process stays.
 _Avoid_: restart, respawn, reboot
 
 **Drain**:

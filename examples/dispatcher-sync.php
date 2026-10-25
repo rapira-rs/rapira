@@ -54,7 +54,7 @@ while (true) {
         } catch (\Throwable) {
         }
     } catch (ClosedException) {
-        // Drained: no more work will ever arrive.
+        // No more work for this app instance: leave the loop.
         break;
     } catch (RapiraThrowable) {
         // The http plugin closed the exchange first - nothing to answer, move on.

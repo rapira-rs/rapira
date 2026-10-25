@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 use std::pin::Pin;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
@@ -21,6 +21,8 @@ pub(crate) struct Shared {
     pub cfg: Config,
     pub intake: Sink,
     pub inflight: Arc<AtomicUsize>,
+    /// The worker drains: every response closes its connection, so the client sends its next request to another worker.
+    pub closing: AtomicBool,
 }
 
 impl From<Refused> for Rejection {
@@ -148,7 +150,15 @@ pub(crate) async fn respond(
 ) -> http::Response<RespBody> {
     let closed = handler.closed.clone();
     let method = req.method().clone();
+    let shared = Arc::clone(&handler.shared);
     let mut response = handle(handler, chain, req).await;
+    // Read after the request: one that ends during the drain must close its connection too.
+    if shared.closing.load(Ordering::Acquire) {
+        response.headers_mut().insert(
+            http::header::CONNECTION,
+            http::HeaderValue::from_static("close"),
+        );
+    }
     // Track the body sent to hyper after all middleware has returned.
     if let Some(length) = framed_length(&method, &response) {
         let body = response.body_mut();

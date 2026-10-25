@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::anyhow;
 use tokio::sync::watch;
 
-use crate::work::{DispatcherClasses, Sink};
+use crate::work::{DispatcherClasses, RestartApp, Sink};
 
 pub use rapira_config::Mode;
 
@@ -86,6 +86,7 @@ impl Running {
 pub struct Stopper {
     flag: watch::Sender<bool>,
     events: Arc<JoinEvents>,
+    restart: Arc<tokio::sync::Notify>,
 }
 
 impl Stopper {
@@ -94,6 +95,11 @@ impl Stopper {
         let mut state = self.events.lock();
         state.stopped_at.get_or_insert_with(Instant::now);
         self.events.changed.notify_all();
+    }
+
+    /// Asks the app to restart in this worker. Works from a plain thread.
+    pub fn restart_app(&self) {
+        self.restart.notify_one();
     }
 }
 
@@ -145,6 +151,17 @@ pub fn run_plugin(
         .build()
         .map_err(|e| anyhow!("building the {name} runtime: {e}"))?;
     let ended = Ended(Arc::clone(&stopper.events));
+    // The task and its Sink clone drop with the runtime when serve returns, so the clone never keeps the intake open after a stop.
+    let restart = Arc::clone(&stopper.restart);
+    let restart_sink = sink.clone();
+    rt.spawn(async move {
+        loop {
+            restart.notified().await;
+            if let Err(e) = restart_sink.submit(Box::new(RestartApp), 0).await {
+                tracing::warn!(target: "rapira", "reload skipped: {e}");
+            }
+        }
+    });
     let worker = Worker {
         handle: rt.handle().clone(),
         sink,

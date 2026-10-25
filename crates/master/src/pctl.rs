@@ -26,7 +26,7 @@ impl KillPhase {
     }
 }
 
-/// Master-wide control state. Each pool owns its reload chain.
+/// Master-wide control state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Pctl {
     #[default]
@@ -80,7 +80,7 @@ impl Pctl {
         }
     }
 
-    /// Runs only at the stop deadline: re-arms it one second out and returns the next signal for every worker of every pool. A reload escalates per pool, against the one worker that drains.
+    /// Runs only at the stop deadline: re-arms it one second out and returns the next signal for every worker of every pool.
     pub fn escalate(&mut self, now: Instant) -> c_int {
         let Pctl::Stopping { phase, deadline } = self else {
             unreachable!("stop escalation outside a stop");

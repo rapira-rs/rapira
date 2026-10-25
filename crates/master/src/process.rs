@@ -6,7 +6,7 @@ use libc::c_int;
 use crate::WorkerEnv;
 use crate::pool::Pool;
 use crate::signals::{MASTER_SIGNALS, SelfPipe, sigset};
-use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY};
+use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_UNHEALTHY};
 use rapira_scoreboard::{PoolRegion, SharedSlot};
 
 pub(crate) const QUICK_CRASH: Duration = Duration::from_secs(10);
@@ -16,7 +16,6 @@ pub(crate) const RESPAWN_BASE: Duration = Duration::from_millis(100);
 pub(crate) struct WorkerProc {
     pub pid: libc::pid_t,
     pub slot: usize,
-    pub generation: u32,
     pub spawned_at: Instant,
     /// The request watchdog sent SIGTERM: a SIGTERM or SIGKILL exit is a timeout kill, not a crash.
     pub timeout_kill: bool,
@@ -51,7 +50,6 @@ pub(crate) fn backoff_delay(streak: u32) -> Duration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExitVerdict {
     Drain,
-    Recycle,
     Unhealthy,
     TimeoutKill,
     Crash,
@@ -61,7 +59,6 @@ pub(crate) fn classify(status: c_int, timeout_kill: bool) -> ExitVerdict {
     if libc::WIFEXITED(status) {
         match libc::WEXITSTATUS(status) {
             WORKER_EXIT_DRAINED => ExitVerdict::Drain,
-            WORKER_EXIT_RECYCLE => ExitVerdict::Recycle,
             WORKER_EXIT_UNHEALTHY => ExitVerdict::Unhealthy,
             _ => ExitVerdict::Crash,
         }
@@ -153,7 +150,7 @@ pub(crate) struct Forker<'w> {
 }
 
 impl Forker<'_> {
-    /// Fork bracket: the child leaves {QUIT, INT} blocked for the worker's sigwait watcher and `_exit`s under `catch_unwind`, so no master Drop (pidfile unlink, PHP shutdown) can ever run in a child.
+    /// Fork bracket: the child leaves {QUIT, INT, USR2} blocked for the worker's sigwait watcher and `_exit`s under `catch_unwind`, so no master Drop (pidfile unlink, PHP shutdown) can ever run in a child.
     pub(crate) fn spawn(
         &mut self,
         pool: usize,
@@ -186,12 +183,12 @@ impl Forker<'_> {
                     ign.sa_sigaction = libc::SIG_IGN;
                     libc::sigemptyset(&mut ign.sa_mask);
                     libc::sigaction(libc::SIGUSR1, &ign, std::ptr::null_mut());
-                    libc::sigaction(libc::SIGUSR2, &ign, std::ptr::null_mut());
 
                     #[cfg(target_os = "linux")]
                     libc::prctl(libc::PR_SET_NAME, c"rapira-worker".as_ptr());
 
-                    let hold = sigset(&[libc::SIGQUIT, libc::SIGINT]);
+                    // USR2 keeps SIG_DFL: POSIX lets a kernel discard an ignored signal even while it is blocked. https://pubs.opengroup.org/onlinepubs/9799919799/functions/V2_chap02.html#tag_16_04_01
+                    let hold = sigset(&[libc::SIGQUIT, libc::SIGINT, libc::SIGUSR2]);
                     libc::sigprocmask(libc::SIG_SETMASK, &hold, std::ptr::null_mut());
                 }
 
@@ -243,7 +240,6 @@ mod tests {
     #[test]
     fn classify_exit_codes() {
         assert_eq!(classify(exited(0), false), ExitVerdict::Drain);
-        assert_eq!(classify(exited(88), false), ExitVerdict::Recycle);
         assert_eq!(classify(exited(89), false), ExitVerdict::Unhealthy);
         assert_eq!(classify(exited(42), false), ExitVerdict::Crash);
         assert_eq!(classify(exited(1), false), ExitVerdict::Crash);

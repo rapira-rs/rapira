@@ -139,7 +139,7 @@ pub extern "C" fn rapira_rs_register_plugin_classes() {
 
 impl Rapira {
     /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `max_requests`: 0 = unlimited; jitter already applied by the caller.
-    /// `slot`: the scoreboard slot this worker reports into. `stopper` stops the plugin when the quota ends or PHP turns unhealthy. `classes`: the dispatcher surface receive() serves in dispatcher mode.
+    /// `slot`: the scoreboard slot this worker reports into. `stopper` stops the plugin when PHP turns unhealthy. `classes`: the dispatcher surface receive() serves in dispatcher mode.
     pub fn start_worker(
         mode: Mode,
         entrypoint: PathBuf,

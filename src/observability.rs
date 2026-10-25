@@ -37,15 +37,19 @@ pub fn observability_body(
     unsafe {
         libc::prctl(libc::PR_SET_NAME, c"rapira-obs".as_ptr())
     };
-    // The observability process never pulls PHP work, so it reports idle itself. The reload gate waits for it.
+    // The observability process never pulls PHP work, so it reports idle itself.
     env.slot_view
         .state
         .store(rapira_scoreboard::SLOT_IDLE, Release);
     rapira_master::spawn_lifeline_watch(env.lifeline);
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    crate::worker::spawn_signal_thread(move || {
-        stop_tx.send_replace(true);
-    });
+    // The master sends a reload to every pool, and this process has no app to restart.
+    crate::worker::spawn_signal_thread(
+        move || {
+            stop_tx.send_replace(true);
+        },
+        || {},
+    );
     // main.rs puts the observability pool first, so the other pools follow it.
     match server.serve(env.board, &env.regions[1..], stop_rx, drain_grace) {
         Ok(()) => 0,
