@@ -58,7 +58,7 @@ COPY --from=builder /usr/local/lib/libphp.so /out/usr/local/lib/libphp.so
 # PHP 8.4 builds opcache as a shared module and 8.5 links it into libphp, so the copy is conditional.
 RUN set -eux; \
     ext_dir="$(php-config --extension-dir)"; \
-    for ext in bcmath intl pdo_pgsql pgsql igbinary redis; do \
+    for ext in bcmath intl pdo_pgsql pgsql igbinary redis sodium; do \
         install -D "$ext_dir/$ext.so" "/out$ext_dir/$ext.so"; \
         install -D -m 0644 "$PHP_INI_DIR/conf.d/docker-php-ext-$ext.ini" \
                            "/out$PHP_INI_DIR/conf.d/docker-php-ext-$ext.ini"; \

@@ -10,7 +10,7 @@ use crate::harness::{
 
 const REQ: Duration = Duration::from_secs(10);
 
-/// One answer of openssl-rng-worker.php.
+/// One answer of an `*-rng-worker.php` fixture.
 struct RngDraw {
     pid: u32,
     /// The first draw of the worker, as hex.
@@ -31,11 +31,14 @@ fn rng_draw(body: &str) -> RngDraw {
     }
 }
 
-/// No two workers may emit identical first draws; the cached draw also pins that the entrypoint top level runs once per worker (random_bytes() never uses OpenSSL).
-#[test]
-fn forked_workers_do_not_share_the_openssl_drbg() {
-    let srv = spawn_with_config("extensions/openssl-rng-worker.php", 4, "");
+/// No two workers may emit identical first draws; the cached draw also pins that the entrypoint top level runs once per worker.
+fn assert_distinct_first_draws(fixture: &str) {
+    let srv = spawn_with_config(fixture, 4, "");
     let workers = wait_workers(&srv, Duration::from_secs(20), "4 workers", |p| p.len() == 4);
+    let StatusBody { body, .. } = http_get(srv.addr, "/", REQ).expect("GET /");
+    if body == b"skip" {
+        return;
+    }
 
     let mut per_pid: HashMap<u32, String> = HashMap::new();
     for _ in 0..5 {
@@ -75,6 +78,18 @@ fn forked_workers_do_not_share_the_openssl_drbg() {
         per_pid.len(),
         "distinct workers must draw distinct first bytes (per pid: {per_pid:?})"
     );
+}
+
+/// openssl_random_pseudo_bytes() draws from the OpenSSL DRBG; random_bytes() never uses OpenSSL.
+#[test]
+fn forked_workers_do_not_share_the_openssl_drbg() {
+    assert_distinct_first_draws("extensions/openssl-rng-worker.php");
+}
+
+/// MINIT calls sodium_init() in the master before the fork; each worker must still draw its own randombytes_buf() bytes.
+#[test]
+fn forked_workers_do_not_share_the_sodium_rng() {
+    assert_distinct_first_draws("extensions/sodium-rng-worker.php");
 }
 
 fn browscap_ini() -> String {

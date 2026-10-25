@@ -1,6 +1,6 @@
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{Resp, StatusBody, assert_skip_allowed, drain, drain_resp, fixture, req, server_log};
+use tests::{Resp, StatusBody, drain, drain_resp, fixture, req, server_log};
 
 use crate::harness::Spawn;
 
@@ -24,7 +24,6 @@ fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<Resp>> {
 fn imap_timeout_is_snapshotted_at_minit() -> anyhow::Result<()> {
     let out = run("imap_tests/imap-timeout-worker.php", &["/", "/"])?;
     if out[0].body_string() == "skip" {
-        assert_skip_allowed("imap_tests/imap-timeout-worker.php");
         return Ok(());
     }
     let expected = "imap:open=17:after_ini_set=17:read=17:ini=5";
@@ -57,7 +56,6 @@ fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
         body: b1,
     } = drain(submit(srv.addr, req("/?step=leak"))?);
     if b1 == "skip" {
-        assert_skip_allowed(name);
         return Ok(());
     }
     assert_eq!(

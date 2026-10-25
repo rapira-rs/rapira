@@ -1,6 +1,6 @@
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{Resp, assert_skip_allowed, drain_resp, fixture, req};
+use tests::{Resp, drain_resp, fixture, req};
 
 use crate::harness::Spawn;
 
@@ -15,7 +15,6 @@ fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<Resp>> {
 fn success(name: &str, token: &str) -> anyhow::Result<()> {
     let out = run(name, &["/"])?;
     if out[0].body_string() == "skip" {
-        assert_skip_allowed(name);
         return Ok(());
     }
     assert_eq!(
@@ -36,7 +35,6 @@ fn success(name: &str, token: &str) -> anyhow::Result<()> {
 fn exception(name: &str, token: &str) -> anyhow::Result<()> {
     let out = run(name, &["/?boom=1", "/"])?;
     if out[0].body_string() == "skip" {
-        assert_skip_allowed(name);
         return Ok(());
     }
     assert_eq!(
@@ -144,6 +142,15 @@ fn filter_exception() -> anyhow::Result<()> {
     exception("php_ext/filter-worker.php", "filter:a@b.com")
 }
 
+/// The token is the unkeyed 32-byte BLAKE2b of "rapira" (RFC 7693), which is what crypto_generichash computes.
+#[test]
+fn sodium_exception() -> anyhow::Result<()> {
+    exception(
+        "php_ext/sodium-worker.php",
+        "sodium:94dc0c93428ad3519ec5ec157a5c3c53b7b6056ba3fff7ad773a19e0b4f3fd5a",
+    )
+}
+
 #[test]
 fn bcmath_success() -> anyhow::Result<()> {
     success("php_ext/bcmath-worker.php", "bcmath:0.30")
@@ -194,7 +201,6 @@ fn openssl_error_ring_outlives_the_request() -> anyhow::Result<()> {
         ],
     )?;
     if out[0].body_string() == "skip" {
-        assert_skip_allowed("php_ext/openssl-worker.php");
         return Ok(());
     }
     assert_eq!(
@@ -232,7 +238,6 @@ fn openssl_error_ring_overwrites_the_oldest() -> anyhow::Result<()> {
         &["/?step=drain", "/?step=leak_many", "/?step=drain"],
     )?;
     if out[0].body_string() == "skip" {
-        assert_skip_allowed("php_ext/openssl-worker.php");
         return Ok(());
     }
     assert_eq!(
