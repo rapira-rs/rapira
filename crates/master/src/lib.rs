@@ -18,8 +18,6 @@ pub use signals::{block_early_signals, wait_signal};
 
 /// Worker exit-code protocol: the worker emits, the master consumes; any other code is a crash.
 pub const WORKER_EXIT_DRAINED: i32 = 0;
-/// Quota recycle (e.g. max_requests): immediate respawn, no backoff.
-pub const WORKER_EXIT_RECYCLE: i32 = 88;
 /// Self-reported unhealthy: respawn with backoff; gen-0 with zero handled requests is a boot failure.
 pub const WORKER_EXIT_UNHEALTHY: i32 = 89;
 /// Exit code the caller uses when [`run`] returns a boot-failure error.

@@ -77,6 +77,7 @@ fn boot_request_startup() -> bool {
 /// Logs PG(last_error_message) before php_request_shutdown frees it (main/main.c:2024).
 fn run_cycle(script: &Path) -> Cycle {
     crate::exchange::cycle_reset();
+    crate::quota::renew();
     let started = boot_request_startup();
     if started {
         unsafe { run_script(script) };
@@ -95,7 +96,7 @@ fn run_cycle(script: &Path) -> Cycle {
 
     if crate::exchange::CLOSED_SEEN.get() {
         Cycle::Stop
-    } else if recycle || crate::exchange::RECEIVED.get() {
+    } else if recycle || crate::quota::exhausted() || crate::exchange::RECEIVED.get() {
         Cycle::Recycle
     } else {
         Cycle::Failed
@@ -110,6 +111,8 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
             Cycle::Restart => break WorkerExit::Restart,
             Cycle::Recycle => {
                 sb_update(scoreboard::Event::Recycled);
+                // No request runs while the app boots again, so the request watchdog skips the slot.
+                sb_update(scoreboard::Event::Idle);
                 failures = 0;
             }
             Cycle::Failed => {
@@ -210,6 +213,10 @@ fn next_unit() -> Option<Context> {
     }
     log_and_clear_last_error();
     loop {
+        // The app instance took its last unit: handle_request() returns false, and the worker stays.
+        if crate::quota::exhausted() {
+            return None;
+        }
         match pull_unit() {
             Some(unit) => {
                 if unit.cancelled() {

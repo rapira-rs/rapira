@@ -1,5 +1,7 @@
 use super::*;
 
+const CLOSED: &std::ffi::CStr = c"no more work for this app instance";
+
 enum RecvMode {
     Wait(i64),
     Try,
@@ -33,6 +35,12 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
             rapira_receive_untimed();
         }
         loop {
+            // The app instance took its last unit: it sees the source closed, and the worker stays.
+            if crate::quota::exhausted() {
+                zval_ptr_dtor(&mut obj);
+                zend::throw_exception(rapira_ce_closed_exception, CLOSED);
+                return false;
+            }
             let pulled = match mode {
                 RecvMode::Wait(_) if armed => pull_unit_try(),
                 RecvMode::Try | RecvMode::Wait(0) => pull_unit_try(),
@@ -62,10 +70,7 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                 Pulled::Closed => {
                     CLOSED_SEEN.set(true);
                     zval_ptr_dtor(&mut obj);
-                    zend::throw_exception(
-                        rapira_ce_closed_exception,
-                        c"no more work will ever arrive",
-                    );
+                    zend::throw_exception(rapira_ce_closed_exception, CLOSED);
                     return false;
                 }
                 Pulled::Empty if matches!(mode, RecvMode::Try) => {

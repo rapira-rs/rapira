@@ -270,7 +270,7 @@ impl Pool {
         }
 
         match verdict {
-            ExitVerdict::Recycle | ExitVerdict::Drain | ExitVerdict::TimeoutKill => {
+            ExitVerdict::Drain | ExitVerdict::TimeoutKill => {
                 self.slot_states[slot].schedule_immediate(now);
             }
             ExitVerdict::Unhealthy | ExitVerdict::Crash => {
@@ -402,7 +402,6 @@ impl Pool {
 fn count_exit(slot: &SharedSlot, verdict: ExitVerdict) {
     let counter = match verdict {
         ExitVerdict::Drain => &slot.exits_drained,
-        ExitVerdict::Recycle => &slot.exits_recycled,
         ExitVerdict::Unhealthy => &slot.exits_unhealthy,
         ExitVerdict::TimeoutKill => &slot.exits_timeout,
         ExitVerdict::Crash => &slot.exits_crashed,
@@ -477,10 +476,9 @@ mod tests {
         assert!(pools[1].procs.is_empty());
     }
 
-    fn exits(slot: &SharedSlot) -> [u64; 5] {
+    fn exits(slot: &SharedSlot) -> [u64; 4] {
         [
             slot.exits_drained.load(Relaxed),
-            slot.exits_recycled.load(Relaxed),
             slot.exits_unhealthy.load(Relaxed),
             slot.exits_timeout.load(Relaxed),
             slot.exits_crashed.load(Relaxed),
@@ -492,33 +490,28 @@ mod tests {
         struct Case {
             name: &'static str,
             verdict: ExitVerdict,
-            want: [u64; 5],
+            want: [u64; 4],
         }
         let cases = [
             Case {
                 name: "drain",
                 verdict: ExitVerdict::Drain,
-                want: [1, 0, 0, 0, 0],
-            },
-            Case {
-                name: "recycle",
-                verdict: ExitVerdict::Recycle,
-                want: [0, 1, 0, 0, 0],
+                want: [1, 0, 0, 0],
             },
             Case {
                 name: "unhealthy",
                 verdict: ExitVerdict::Unhealthy,
-                want: [0, 0, 1, 0, 0],
+                want: [0, 1, 0, 0],
             },
             Case {
                 name: "timeout kill",
                 verdict: ExitVerdict::TimeoutKill,
-                want: [0, 0, 0, 1, 0],
+                want: [0, 0, 1, 0],
             },
             Case {
                 name: "crash",
                 verdict: ExitVerdict::Crash,
-                want: [0, 0, 0, 0, 1],
+                want: [0, 0, 0, 1],
             },
         ];
         for case in cases {

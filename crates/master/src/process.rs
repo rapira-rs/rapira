@@ -6,7 +6,7 @@ use libc::c_int;
 use crate::WorkerEnv;
 use crate::pool::Pool;
 use crate::signals::{MASTER_SIGNALS, SelfPipe, sigset};
-use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY};
+use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_UNHEALTHY};
 use rapira_scoreboard::{PoolRegion, SharedSlot};
 
 pub(crate) const QUICK_CRASH: Duration = Duration::from_secs(10);
@@ -51,7 +51,6 @@ pub(crate) fn backoff_delay(streak: u32) -> Duration {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum ExitVerdict {
     Drain,
-    Recycle,
     Unhealthy,
     TimeoutKill,
     Crash,
@@ -61,7 +60,6 @@ pub(crate) fn classify(status: c_int, timeout_kill: bool) -> ExitVerdict {
     if libc::WIFEXITED(status) {
         match libc::WEXITSTATUS(status) {
             WORKER_EXIT_DRAINED => ExitVerdict::Drain,
-            WORKER_EXIT_RECYCLE => ExitVerdict::Recycle,
             WORKER_EXIT_UNHEALTHY => ExitVerdict::Unhealthy,
             _ => ExitVerdict::Crash,
         }
@@ -243,7 +241,6 @@ mod tests {
     #[test]
     fn classify_exit_codes() {
         assert_eq!(classify(exited(0), false), ExitVerdict::Drain);
-        assert_eq!(classify(exited(88), false), ExitVerdict::Recycle);
         assert_eq!(classify(exited(89), false), ExitVerdict::Unhealthy);
         assert_eq!(classify(exited(42), false), ExitVerdict::Crash);
         assert_eq!(classify(exited(1), false), ExitVerdict::Crash);

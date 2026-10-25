@@ -409,36 +409,26 @@ fn each_live_worker_reports_its_memory() {
     }
 }
 
-/// max_requests = 2 gives a quota of exactly 3: effective_quota adds 1 + hash % max(2 / 2, 1). Five requests recycle the worker once.
+/// A worker that a signal kills, and that the master did not signal, counts as crashed. Its request counts stay in the totals after the master replaces it.
 #[test]
-fn counts_survive_a_recycle() {
-    let ObservedServer { srv, observability } =
-        spawn(HANG, "max_requests = 2", "[observability.metrics]");
-    for _ in 0..3 {
+fn a_killed_worker_counts_as_crashed() {
+    let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
+    for _ in 0..2 {
         let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
         assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     }
-    // The third request reaches the quota. The master counts the exit before it forks the new worker, so the next requests cannot reach the draining worker.
-    scrape_until(&srv, observability, "the recycle", |s| {
-        value(s, &exits("recycled")) == 1
+    // serving_pid() sends the third request.
+    signal(serving_pid(&srv), libc::SIGKILL);
+    // The master counts the exit when it reaps the worker, so the next requests cannot reach the killed one.
+    scrape_until(&srv, observability, "1 crashed exit", |s| {
+        value(s, &exits("crashed")) == 1
     });
     for _ in 0..2 {
         let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
         assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     }
-    let samples = scrape_until(&srv, observability, "5 requests and 1 recycle", |s| {
-        value(s, REQUESTS) == 5 && value(s, &exits("recycled")) == 1
-    });
-    assert_eq!(value(&samples, &exits("crashed")), 0);
-}
-
-/// A worker that a signal kills, and that the master did not signal, counts as crashed.
-#[test]
-fn a_killed_worker_counts_as_crashed() {
-    let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
-    signal(serving_pid(&srv), libc::SIGKILL);
-    scrape_until(&srv, observability, "1 crashed exit", |s| {
-        value(s, &exits("crashed")) == 1
+    scrape_until(&srv, observability, "5 requests", |s| {
+        value(s, REQUESTS) == 5
     });
 }
 

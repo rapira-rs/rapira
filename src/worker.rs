@@ -3,9 +3,9 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::time::Duration;
 
 use rapira_config::PoolSettings;
-use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
-use rapira_sapi::plugin::{Plugin, Stopper, run_plugin};
-use rapira_sapi::quota::{STOP_QUOTA, STOP_REASON, STOP_UNHEALTHY};
+use rapira_master::{WORKER_EXIT_UNHEALTHY, WorkerEnv};
+use rapira_sapi::plugin::{Mode, Plugin, Stopper, run_plugin};
+use rapira_sapi::quota::{STOP_REASON, STOP_UNHEALTHY};
 use rapira_sapi::{Rapira, StartedWorker};
 
 /// Jitter avoids lockstep recycling. The hash mixes in the pid because every child inherits the same seed from the pre-fork master.
@@ -49,6 +49,12 @@ pub fn worker_body(
         return WORKER_EXIT_UNHEALTHY;
     }
     let stopper = Stopper::default();
+    // Classic mode runs every request in a new request cycle, so max_requests has nothing to restart there.
+    let max_requests = if mode == Mode::Classic {
+        0
+    } else {
+        max_requests
+    };
     let StartedWorker { rapira, sink } = Rapira::start_worker(
         mode,
         entrypoint,
@@ -80,7 +86,6 @@ pub fn worker_body(
     drop(rapira);
 
     match STOP_REASON.load(SeqCst) {
-        STOP_QUOTA => WORKER_EXIT_RECYCLE,
         STOP_UNHEALTHY => WORKER_EXIT_UNHEALTHY,
         _ if outcome.is_err() => 1,
         _ => 0,

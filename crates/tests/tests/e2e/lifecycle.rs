@@ -255,35 +255,66 @@ fn killed_master_leaves_workers_to_drain() {
     }
 }
 
+/// max_requests = 2 is a quota of 3, so the storm restarts the app many times. Each restart boots the app again in the same process, and no request fails.
 #[test]
-fn max_requests_recycles() {
-    let srv = spawn_with_config("shared/echo-worker.php", 1, "max_requests = 5\n");
-    let pids0 = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-    let pid0 = pids0[0];
-    for _ in 0..40 {
-        let code = http_get(srv.addr, "/", Duration::from_secs(10))
-            .or_else(|e| {
-                if e.kind() == std::io::ErrorKind::UnexpectedEof {
-                    http_get(srv.addr, "/", Duration::from_secs(10))
-                } else {
-                    Err(e)
-                }
-            })
-            .expect("GET / (after one responseless-close retry)")
-            .status;
+fn max_requests_restarts_the_app_without_losing_requests() {
+    struct Case {
+        name: &'static str,
+        mode: Mode,
+        fixture: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "dispatcher mode",
+            mode: Mode::Dispatcher,
+            fixture: "lifecycle/boot-log-worker.php",
+        },
+        Case {
+            name: "worker mode",
+            mode: Mode::Worker,
+            fixture: "lifecycle/boot-log-handle-worker.php",
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(case.mode, fixture_path(case.fixture))
+            .http_pool("max_requests = 2")
+            .json_log()
+            .spawn();
+        let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+        let storm = storm(srv.addr, 8);
+        std::thread::sleep(Duration::from_secs(2));
+        let tally = storm.halt();
         assert_eq!(
-            code,
-            200,
-            "request lost across a recycle\n{}",
+            (tally.failed, tally.refused),
+            (0, 0),
+            "{}: failed and refused requests; last error: {:?}\n{}",
+            case.name,
+            tally.last_err,
+            diagnostics(&srv)
+        );
+        assert!(tally.ok > 0, "{}: the storm got no response", case.name);
+        assert_eq!(
+            worker_pids(srv.pid()),
+            vec![pid],
+            "{}: the worker process stays\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        let log = srv.log_file();
+        assert!(
+            tests::server_log::app_contexts(&log, "booted").len() >= 2,
+            "{}: the app booted again\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        // In worker mode, handle_request() returned false, so the code after the loop ran.
+        assert!(
+            !tests::server_log::app_contexts(&log, "app loop ended").is_empty(),
+            "{}: the app left its loop\n{}",
+            case.name,
             diagnostics(&srv)
         );
     }
-    wait_workers(
-        &srv,
-        Duration::from_secs(30),
-        "worker recycled to a new pid",
-        |p| p.len() == 1 && p[0] != pid0,
-    );
 }
 
 #[test]
@@ -999,4 +1030,40 @@ fn dispatcher_multipart_over_the_wire() {
     .expect("over-limit POST")
     .status;
     assert_eq!(code, 413, "over-limit file part must answer 413");
+}
+
+/// The request watchdog does not count the boot of the next app instance. The last request and the boot take 2 s each, under the 3 s limit, and the worker survives.
+#[test]
+fn the_request_watchdog_skips_the_boot_after_an_app_restart() {
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/slow-reboot-worker.php"),
+    )
+    .http_pool("max_requests = 1\nrequest_terminate_timeout_secs = 3")
+    .json_log()
+    .spawn();
+    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    let log = srv.log_file();
+    tests::server_log::wait_app_record(&log, "booted");
+    // max_requests = 1 is a quota of 2, so the slow second request ends the app instance.
+    for path in ["/", "/?slow"] {
+        let code = http_get(srv.addr, path, Duration::from_secs(10))
+            .expect("GET")
+            .status;
+        assert_eq!(code, 200, "{path}\n{}", diagnostics(&srv));
+    }
+    let booted = poll(Duration::from_secs(10), || {
+        (tests::server_log::app_contexts(&log, "booted").len() >= 2).then_some(())
+    });
+    assert!(
+        booted.is_some(),
+        "the app booted again\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(
+        worker_pids(srv.pid()),
+        vec![pid],
+        "the watchdog did not kill the worker during the boot\n{}",
+        diagnostics(&srv)
+    );
 }
