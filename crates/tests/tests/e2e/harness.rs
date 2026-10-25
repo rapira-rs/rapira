@@ -916,6 +916,8 @@ pub struct Tally {
     pub ok: u64,
     pub refused: u64,
     pub failed: u64,
+    /// Connections that closed without a response.
+    pub dropped: u64,
     pub last_err: Option<String>,
 }
 
@@ -944,7 +946,7 @@ pub fn storm(addr: SocketAddr, threads: usize) -> Storm {
                             tally.refused += 1;
                             tally.last_err = Some(e.to_string());
                         }
-                        // tolerated connection drops: reset, zero-byte close, abort, closed write side
+                        // connection drops: reset, zero-byte close, abort, closed write side
                         Err(e)
                             if matches!(
                                 e.kind(),
@@ -954,6 +956,7 @@ pub fn storm(addr: SocketAddr, threads: usize) -> Storm {
                                     | io::ErrorKind::BrokenPipe
                             ) =>
                         {
+                            tally.dropped += 1;
                             tally.last_err = Some(e.to_string());
                         }
                         Err(e) => {
@@ -981,6 +984,7 @@ impl Storm {
                 total.ok += t.ok;
                 total.refused += t.refused;
                 total.failed += t.failed;
+                total.dropped += t.dropped;
                 if t.last_err.is_some() {
                     total.last_err = t.last_err;
                 }
