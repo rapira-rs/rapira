@@ -28,9 +28,9 @@ fn usr2_reload_restarts_the_apps_while_serving() {
         diagnostics(&srv)
     );
     assert_eq!(
-        (tally.failed, tally.refused),
-        (0, 0),
-        "failed and refused requests; last error: {:?}\n{}",
+        (tally.failed, tally.refused, tally.dropped),
+        (0, 0, 0),
+        "failed, refused and dropped requests; last error: {:?}\n{}",
         tally.last_err,
         diagnostics(&srv),
     );
