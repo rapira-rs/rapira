@@ -7,6 +7,7 @@ mod classic;
 mod concurrency;
 mod dispatcher;
 mod dispatcher_loop;
+mod drain;
 mod extensions;
 mod failboot_worker_tests;
 mod general_tests;

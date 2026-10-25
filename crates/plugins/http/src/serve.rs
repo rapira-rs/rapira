@@ -1,6 +1,6 @@
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -35,6 +35,7 @@ impl Serving {
             cfg: config,
             intake,
             inflight: Arc::new(AtomicUsize::new(0)),
+            closing: AtomicBool::new(false),
         });
         let mut builder = http1::Builder::new();
         builder
@@ -78,8 +79,18 @@ impl Serving {
     }
 
     /// Waits out the connections in flight. The acceptor is already gone.
+    /// A connection closes after its next response, so a request on an idle keep-alive connection still gets an answer.
     async fn drain(self, fatal: Option<anyhow::Error>, grace: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + grace;
+        self.shared.closing.store(true, Ordering::Release);
+        tracing::info!(
+            target: "http",
+            "draining {} open connections",
+            self.graceful.count()
+        );
+        while self.graceful.count() > 0 && tokio::time::Instant::now() < deadline {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
         if tokio::time::timeout_at(deadline, self.graceful.shutdown())
             .await
             .is_err()
