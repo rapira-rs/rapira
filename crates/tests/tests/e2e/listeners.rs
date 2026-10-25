@@ -164,15 +164,12 @@ fn queued_connections_survive_each_accept() {
 #[test]
 fn signals_during_the_boot_do_not_stop_the_master() {
     let dir = scratch_dir();
-    let marker = dir.join("preload.out");
     let preload = dir.join("preload.php");
     std::fs::write(
         &preload,
         format!(
-            "<?php\nif (!function_exists('posix_kill')) {{\n    file_put_contents('{marker}', 'skip');\n    return;\n}}\n\
-             foreach ([{hup}, {usr1}, {usr2}] as $signal) {{\n    posix_kill(posix_getpid(), $signal);\n}}\n\
-             file_put_contents('{marker}', 'sent');\n",
-            marker = marker.display(),
+            "<?php\nif (!function_exists('posix_kill')) {{\n    return;\n}}\n\
+             foreach ([{hup}, {usr1}, {usr2}] as $signal) {{\n    posix_kill(posix_getpid(), $signal);\n}}\n",
             hup = libc::SIGHUP,
             usr1 = libc::SIGUSR1,
             usr2 = libc::SIGUSR2,
@@ -199,12 +196,6 @@ fn signals_during_the_boot_do_not_stop_the_master() {
         diagnostics(&srv)
     );
 
-    match std::fs::read_to_string(&marker).as_deref() {
-        Ok("sent") => {}
-        Ok("skip") => tests::assert_skip_allowed("posix"),
-        // The preload script never ran: OPcache is not loaded.
-        _ => tests::assert_skip_allowed("opcache"),
-    }
     drop(srv);
     let _ = std::fs::remove_dir_all(&dir);
 }

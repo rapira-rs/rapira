@@ -145,14 +145,14 @@ jobs:
                   dnf -y install \
                     gcc gcc-c++ make git tar gzip xz findutils autoconf patchelf \
                     pkgconf-pkg-config clang-devel llvm-devel \
-                    openssl-devel libcurl-devel libxml2-devel oniguruma-devel zlib-devel sqlite-devel libffi-devel gettext-devel libicu-devel libpq-devel
+                    openssl-devel libcurl-devel libxml2-devel oniguruma-devel zlib-devel sqlite-devel libffi-devel gettext-devel libicu-devel libpq-devel libsodium-devel
 
             - name: Install build deps (macOS)
               id: brew
               if: runner.os == 'macOS'
               run: |
-                  brew install autoconf pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq
-                  echo "libs=$(brew list --versions openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+                  brew install autoconf pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq libsodium
+                  echo "libs=$(brew list --versions openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq libsodium | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
             - name: Restore PHP embed runtime
               id: phpcache
@@ -172,7 +172,7 @@ jobs:
                   EXTRA=""
                   SHA256=(sha256sum)
                   if [ "$RUNNER_OS" = "macOS" ]; then
-                    export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix libffi)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig:$(brew --prefix libpq)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+                    export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix libffi)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig:$(brew --prefix libpq)/lib/pkgconfig:$(brew --prefix libsodium)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
                     EXTRA="--with-iconv=$(xcrun --show-sdk-path)/usr --with-gettext=$(brew --prefix gettext)"
                     SHA256=(shasum -a 256)
                   fi

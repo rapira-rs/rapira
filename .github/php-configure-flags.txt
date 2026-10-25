@@ -40,3 +40,4 @@
 --with-gettext
 --enable-bcmath
 --enable-intl
+--with-sodium

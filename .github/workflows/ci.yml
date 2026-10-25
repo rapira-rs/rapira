@@ -39,7 +39,7 @@ jobs:
               with:
                   php-version: ${{ matrix.php }}
                   coverage: none
-                  extensions: bcmath, calendar, ctype, curl, dom, exif, ffi, fileinfo, filter, ftp, gettext, iconv, igbinary, imap, intl, mbstring, opcache, openssl, pdo_pgsql, pdo_sqlite, pgsql, phar, posix, redis, session, shmop, simplexml, sockets, sqlite3, sysvmsg, sysvsem, sysvshm, tokenizer, xml, xmlreader, xmlwriter, zlib
+                  extensions: bcmath, calendar, ctype, curl, dom, exif, ffi, fileinfo, filter, ftp, gettext, iconv, igbinary, imap, intl, mbstring, opcache, openssl, pdo_pgsql, pdo_sqlite, pgsql, phar, posix, redis, session, shmop, simplexml, sockets, sodium, sqlite3, sysvmsg, sysvsem, sysvshm, tokenizer, xml, xmlreader, xmlwriter, zlib
               env:
                   phpts: nts
                   fail-fast: true
@@ -112,8 +112,8 @@ jobs:
               id: brew
               if: runner.os == 'macOS'
               run: |
-                  brew install autoconf pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq
-                  echo "libs=$(brew list --versions openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+                  brew install autoconf pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq libsodium
+                  echo "libs=$(brew list --versions openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq libsodium | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
 
             - name: Resolve PHP patch version (macOS)
               id: php
@@ -149,7 +149,7 @@ jobs:
                   tar -xzf igbinary.tgz -C ext/igbinary --strip-components=1
                   tar -xzf redis.tgz -C ext/redis --strip-components=1
                   ./buildconf --force
-                  export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix libffi)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig:$(brew --prefix libpq)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+                  export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix libffi)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig:$(brew --prefix libpq)/lib/pkgconfig:$(brew --prefix libsodium)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
                   export CFLAGS="-O2"
                   ./configure --prefix="$PHP_PREFIX" \
                     $(tr '\n' ' ' < "$GITHUB_WORKSPACE/.github/php-configure-flags.txt") \
@@ -188,14 +188,9 @@ jobs:
                     echo "::error::rapira_master must not depend on tokio (it forks)"; exit 1
                   fi
             - run: cargo test --workspace
-              env:
-                  RAPIRA_REQUIRE_EXTS: ${{ runner.os == 'Linux' && 'imap,newrelic,ddtrace,openssl' || '' }}
             - if: runner.os != 'Linux' || runner.arch != 'X64'
               run: cargo build -p rapira_core --bin rapira && cargo test -p tests --test e2e --features e2e -- --test-threads=1
-              env:
-                  RAPIRA_REQUIRE_EXTS: ${{ runner.os == 'Linux' && 'imap,newrelic,ddtrace,openssl' || '' }}
             - if: runner.os == 'Linux' && runner.arch == 'X64'
               run: cargo build --release -p rapira_core --bin rapira && cargo test -p tests --test e2e --features e2e -- --test-threads=1
               env:
                   RAPIRA_BIN: ${{ github.workspace }}/target/release/rapira
-                  RAPIRA_REQUIRE_EXTS: imap,newrelic,ddtrace,openssl

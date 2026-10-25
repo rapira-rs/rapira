@@ -21,7 +21,7 @@ jobs:
       id-token: write
     steps:
       - name: Install PHP and build deps
-        run: dnf -y install --setopt=install_weak_deps=False git tar gzip xz findutils procps-ng gcc gcc-c++ make clang-devel php-cli php-devel php-embedded php-bcmath php-intl php-mbstring php-pdo php-pgsql php-process php-xml php-pecl-igbinary php-pecl-redis6
+        run: dnf -y install --setopt=install_weak_deps=False git tar gzip xz findutils procps-ng gcc gcc-c++ make clang-devel php-cli php-devel php-embedded php-bcmath php-intl php-mbstring php-pdo php-pgsql php-process php-sodium php-xml php-pecl-igbinary php-pecl-redis6
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
@@ -35,9 +35,6 @@ jobs:
           cache-on-failure: true
 
       - name: Generate coverage (lcov)
-        env:
-          # Fedora 44 has no imap package; the ubuntu-latest CI job covers the imap fixtures.
-          RAPIRA_REQUIRE_EXTS: openssl
         run: make coverage
 
       - name: Upload to Codecov

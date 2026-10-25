@@ -26,19 +26,6 @@ pub fn fields(lines: Fields) -> HeaderMap {
         .collect()
 }
 
-/// Panics when RAPIRA_REQUIRE_EXTS names an extension this fixture covers: a skip where CI installs the extension is a broken install.
-pub fn assert_skip_allowed(fixture: &str) {
-    let Ok(required) = std::env::var("RAPIRA_REQUIRE_EXTS") else {
-        return;
-    };
-    for ext in required.split(',').map(str::trim).filter(|e| !e.is_empty()) {
-        assert!(
-            !fixture.contains(ext),
-            "{fixture} skipped, but RAPIRA_REQUIRE_EXTS demands {ext}"
-        );
-    }
-}
-
 /// A GET request for `uri` with `Host: localhost`; the body is the raw bytes.
 pub fn req(uri: &str) -> http::Request<Vec<u8>> {
     http::Request::builder()

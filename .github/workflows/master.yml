@@ -31,12 +31,12 @@ jobs:
                     build-essential pkg-config curl git autoconf bison re2c \
                     libclang-dev llvm-dev \
                     libssl-dev libcurl4-openssl-dev libxml2-dev libonig-dev \
-                    libsqlite3-dev zlib1g-dev libffi-dev libicu-dev libpq-dev
+                    libsqlite3-dev zlib1g-dev libffi-dev libicu-dev libpq-dev libsodium-dev
 
             - name: Install build deps (macOS)
               if: runner.os == 'macOS'
               run: |
-                  brew install autoconf bison re2c pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq
+                  brew install autoconf bison re2c pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq libsodium
                   echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
 
             - name: Resolve php-src master commit
@@ -60,7 +60,7 @@ jobs:
                   EXTRA=""
                   SHA256=(sha256sum)
                   if [ "$RUNNER_OS" = "macOS" ]; then
-                    export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix libffi)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig:$(brew --prefix libpq)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
+                    export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix libffi)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig:$(brew --prefix libpq)/lib/pkgconfig:$(brew --prefix libsodium)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
                     EXTRA="--with-iconv=$(xcrun --show-sdk-path)/usr --with-gettext=$(brew --prefix gettext)"
                     SHA256=(shasum -a 256)
                   fi
@@ -103,7 +103,7 @@ jobs:
                   mods=$("${PHP_PREFIX}/bin/php" -m); echo "$mods"
                   for ext in bcmath calendar ctype curl dom exif ffi fileinfo filter ftp gettext iconv \
                              igbinary intl mbstring openssl pdo_pgsql pdo_sqlite pgsql phar redis session \
-                             shmop simplexml sockets sqlite3 sysvmsg sysvsem sysvshm tokenizer xml \
+                             shmop simplexml sockets sodium sqlite3 sysvmsg sysvsem sysvshm tokenizer xml \
                              xmlreader xmlwriter zend_test zlib; do
                     grep -qix "$ext" <<<"$mods" || { echo "missing extension: $ext"; exit 1; }
                   done

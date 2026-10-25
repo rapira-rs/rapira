@@ -38,7 +38,7 @@ entrypoint = "/app/public/index.php"
 mode = "classic"
 ```
 
-The payload includes `bcmath`, `intl`, `pdo_pgsql`, `pgsql`, `igbinary`, and `redis` with igbinary serialization support. The package manifest lists their runtime libraries. See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
+The payload includes `bcmath`, `intl`, `pdo_pgsql`, `pgsql`, `igbinary`, `redis` with igbinary serialization support, and `sodium`. The package manifest lists their runtime libraries. See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
 
 ## Usage
 

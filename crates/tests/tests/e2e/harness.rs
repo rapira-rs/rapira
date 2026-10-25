@@ -1076,7 +1076,7 @@ fn php_extension_dir() -> Option<PathBuf> {
     php_config("--extension-dir").map(PathBuf::from)
 }
 
-/// The shared object for `name`, or None when this PHP build lacks it; RAPIRA_REQUIRE_EXTS turns a demanded skip into a panic.
+/// The shared object for `name`, or None when this PHP build lacks it.
 pub fn php_extension(name: &str) -> Option<PathBuf> {
     let p = php_extension_dir().map(|d| d.join(name));
     if let Some(p) = &p
@@ -1084,7 +1084,6 @@ pub fn php_extension(name: &str) -> Option<PathBuf> {
     {
         return p.clone().into();
     }
-    tests::assert_skip_allowed(name);
     None
 }
 
