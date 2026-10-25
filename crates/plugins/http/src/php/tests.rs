@@ -61,28 +61,33 @@ fn recv_sealed(rx: &mut tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>) 
     Sealed::Nothing
 }
 
-/// Channel is sized for a full event trio so seal never parks with no reader.
-fn state_of(
-    req: Request,
-) -> (
-    ExchangeState,
-    tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>,
-) {
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
-    (ExchangeState::new(req, tx), rx)
+/// An exchange state as `Exchange::attach` makes it.
+struct Attached {
+    state: ExchangeState,
+    /// The reply that `state` sends to.
+    reply: tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>,
 }
 
-fn state() -> (
-    ExchangeState,
-    tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>,
-) {
+/// Channel is sized for a full event trio so seal never parks with no reader.
+fn state_of(req: Request) -> Attached {
+    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    Attached {
+        state: ExchangeState::new(req, tx),
+        reply: rx,
+    }
+}
+
+fn state() -> Attached {
     state_of(base_req())
 }
 
 /// An unsealed overflow would leave the unit unfinalized and wedge every later receive() on the single-flight check.
 #[test]
 fn overflow_seals_the_unit_truncated() {
-    let (mut st, mut rx) = state();
+    let Attached {
+        state: mut st,
+        reply: mut rx,
+    } = state();
     let v = unsafe { write_body_core(&mut st, c"x".as_ptr(), MAX_BUFFERED_BODY + 1, false) };
     assert_eq!(v, Verb::Overflow);
 
@@ -101,7 +106,10 @@ fn overflow_seals_the_unit_truncated() {
 /// A 304 head drops accepted body chunks at seal, like 204 and HEAD.
 #[test]
 fn seal_drops_the_body_for_304() {
-    let (mut st, mut rx) = state();
+    let Attached {
+        state: mut st,
+        reply: mut rx,
+    } = state();
     assert_eq!(
         unsafe { write_head_core(&mut st, 304, HeaderMap::new()) },
         Verb::Ok
@@ -118,7 +126,10 @@ fn seal_drops_the_body_for_304() {
 /// Contract: an empty chunk without eos does nothing - no head commits.
 #[test]
 fn empty_non_eos_chunk_commits_nothing() {
-    let (mut st, mut rx) = state();
+    let Attached {
+        state: mut st,
+        reply: mut rx,
+    } = state();
     let v = unsafe { write_body_core(&mut st, c"".as_ptr(), 0, false) };
     assert_eq!(v, Verb::Ok);
     assert_eq!(
@@ -303,7 +314,10 @@ fn view_spells_uri_and_addresses() {
 #[test]
 fn head_frame_length_follows_the_write_shape() {
     use rapira_sapi::types::Frame;
-    let (mut st, mut rx) = state();
+    let Attached {
+        state: mut st,
+        reply: mut rx,
+    } = state();
     let v = unsafe { write_body_core(&mut st, c"abc".as_ptr(), 3, true) };
     assert_eq!(v, Verb::Ok);
     let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
@@ -311,7 +325,10 @@ fn head_frame_length_follows_the_write_shape() {
     };
     assert_eq!(content_length, Some(3));
 
-    let (mut st, mut rx) = state();
+    let Attached {
+        state: mut st,
+        reply: mut rx,
+    } = state();
     let v = unsafe { write_body_core(&mut st, c"abc".as_ptr(), 3, false) };
     assert_eq!(v, Verb::Ok);
     let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
@@ -324,7 +341,10 @@ fn head_frame_length_follows_the_write_shape() {
 #[test]
 fn content_length_exceeded_sends_the_prefix_and_seals() {
     use rapira_sapi::types::Frame;
-    let (mut st, mut rx) = state();
+    let Attached {
+        state: mut st,
+        reply: mut rx,
+    } = state();
     let v = unsafe { write_head_core(&mut st, 200, map(&[("content-length", "5")])) };
     assert_eq!(v, Verb::Ok);
     let v = unsafe { write_body_core(&mut st, c"0123456789".as_ptr(), 10, true) };
@@ -350,7 +370,10 @@ fn content_length_exceeded_sends_the_prefix_and_seals() {
 /// A repeated content-length in the head table is a `\ValueError`.
 #[test]
 fn repeated_content_length_is_a_bad_field() {
-    let (mut st, _rx) = state();
+    let Attached {
+        state: mut st,
+        reply: _rx,
+    } = state();
     let v = unsafe {
         write_head_core(
             &mut st,
@@ -366,7 +389,10 @@ fn repeated_content_length_is_a_bad_field() {
 #[test]
 fn interim_head_emits_its_fields_and_leaves_the_final_head_open() {
     use rapira_sapi::types::Frame;
-    let (mut st, mut rx) = state();
+    let Attached {
+        state: mut st,
+        reply: mut rx,
+    } = state();
     let fields = map(&[
         ("link", "</a.css>; rel=preload"),
         ("content-length", "5"),
@@ -386,7 +412,10 @@ fn interim_head_emits_its_fields_and_leaves_the_final_head_open() {
 /// A gone client discards the unit once and the latch stays sticky: finalized plus cancelled.
 #[test]
 fn gone_client_discards_once_and_stays_discarded() {
-    let (mut st, rx) = state();
+    let Attached {
+        state: mut st,
+        reply: rx,
+    } = state();
     drop(rx);
     let v = unsafe { write_body_core(&mut st, c"x".as_ptr(), 1, false) };
     assert_eq!(v, Verb::Discarded);
@@ -402,7 +431,10 @@ fn gone_client_discards_once_and_stays_discarded() {
 #[test]
 fn flush_emits_the_implicit_head_once() {
     use rapira_sapi::types::Frame;
-    let (mut st, mut rx) = state();
+    let Attached {
+        state: mut st,
+        reply: mut rx,
+    } = state();
     let unit: *mut c_void = (&raw mut st).cast();
     assert!(unsafe { rapira_rs_exchange_flush(unit) });
     let Ok(Frame::Head {
@@ -424,7 +456,10 @@ fn flush_emits_the_implicit_head_once() {
 #[test]
 fn a_101_head_drops_body_chunks() {
     use rapira_sapi::types::Frame;
-    let (mut st, mut rx) = state();
+    let Attached {
+        state: mut st,
+        reply: mut rx,
+    } = state();
     assert_eq!(
         unsafe { write_head_core(&mut st, 101, HeaderMap::new()) },
         Verb::Ok
@@ -445,7 +480,10 @@ fn a_101_head_drops_body_chunks() {
 #[test]
 fn trailers_finalize_with_a_committed_head() {
     use rapira_sapi::types::Frame;
-    let (mut st, mut rx) = state();
+    let Attached {
+        state: mut st,
+        reply: mut rx,
+    } = state();
     let v = unsafe { write_trailers_core(&mut st, map(&[("x", "y")])) };
     assert_eq!(v, Verb::HeadNotWritten, "nothing here commits a head");
 

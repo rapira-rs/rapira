@@ -27,7 +27,7 @@ impl From<Refused> for Rejection {
     fn from(e: Refused) -> Self {
         Self {
             status: match e {
-                Refused::Saturated => http::StatusCode::SERVICE_UNAVAILABLE,
+                Refused::Saturated | Refused::OverBudget => http::StatusCode::SERVICE_UNAVAILABLE,
                 Refused::Stopped => http::StatusCode::INTERNAL_SERVER_ERROR,
             },
             reason: e.to_string(),
@@ -68,9 +68,15 @@ struct ReqState {
 pub(crate) struct RespBody {
     kind: BodyKind,
     guard: Arc<InflightReqCount>,
-    /// Declared body bytes still to pass through, with the connection state that holds the flush count.
     /// Armed by [`respond`] once every middleware has returned.
-    transport: Option<(u64, tokio::sync::watch::Receiver<bridge::ConnectionState>)>,
+    transport: Option<Declared>,
+}
+
+struct Declared {
+    /// Declared body bytes still to pass through.
+    remaining: u64,
+    /// The connection state that holds the flush count.
+    closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
 }
 
 #[expect(
@@ -105,7 +111,7 @@ impl Body for RespBody {
             BodyKind::Empty => Poll::Ready(None),
             BodyKind::Boxed(b) => Pin::new(b).poll_frame(cx),
         };
-        if let Some((remaining, closed)) = &mut this.transport
+        if let Some(Declared { remaining, closed }) = &mut this.transport
             && let Poll::Ready(Some(Ok(frame))) = &poll
             && let Some(data) = frame.data_ref()
         {
@@ -149,7 +155,10 @@ pub(crate) async fn respond(
         if length == 0 {
             body.guard.end_flush.get_or_init(|| closed.borrow().flushes);
         } else {
-            body.transport = Some((length, closed));
+            body.transport = Some(Declared {
+                remaining: length,
+                closed,
+            });
         }
     }
     response
@@ -435,7 +444,9 @@ where
         transport: None,
     });
     *res.status_mut() = status;
-    *res.headers_mut() = response_headers(headers, declared_cl);
+    // A HEAD response keeps the declared length. RFC 9110 §8.6 forbids it on a 204, and on a 304 it must equal the 200 length.
+    let header_cl = content_length.filter(|_| !matches!(status.as_u16(), 204 | 304));
+    *res.headers_mut() = response_headers(headers, header_cl);
     res
 }
 
@@ -456,13 +467,19 @@ async fn submit(
     shared: &Shared,
     request: Request,
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
+    let bytes = request.content_length.max(0) as usize;
     let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
-    let (exchange, reply) = Exchange::new(request, shared.cfg.superglobals);
-    shared.intake.submit(Box::new(exchange)).await?;
+    let (tx, reply) = tokio::sync::mpsc::channel(crate::exchange::FRAME_CAP);
+    let exchange = Exchange::new(request, tx, shared.cfg.superglobals);
+    shared.intake.submit(Box::new(exchange), bytes).await?;
     Ok(reply)
 }
 
+/// The largest multipart body that the IO thread parses. The parse and the spool writes keep a thread for about 0.1 to 0.25 ms per MiB, and each file part adds one file create of about 15 us on xfs. During that time the other connections on that IO thread wait.
+const INLINE_PARSE_MAX: usize = 256 << 10;
+
 /// Parses a multipart body before submit, so a rejected body never reaches the pending and active counters. `limits` is None outside dispatcher mode.
+/// A body up to INLINE_PARSE_MAX is parsed on the IO thread, which saves the switch to the blocking pool. A larger body is parsed on the blocking pool.
 async fn parse_multipart(
     mut req: Request,
     limits: Option<&multipart::Limits>,
@@ -493,6 +510,11 @@ async fn parse_multipart(
         return Ok(req);
     }
     let boundary = multipart::boundary(content_type)?;
+    if raw.get_ref().len() <= INLINE_PARSE_MAX {
+        let parsed = multipart::parse(raw.get_ref(), &boundary, limits)?;
+        req.body = rapira_sapi::types::Body::Multipart(parsed);
+        return Ok(req);
+    }
     let bytes = std::mem::take(raw.get_mut());
     let limits = limits.clone();
     let parsed = tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))

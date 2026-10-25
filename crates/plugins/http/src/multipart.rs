@@ -27,10 +27,18 @@ fn worker_spool_dir(base: &Path) -> PathBuf {
 pub(crate) fn create_worker_spool_dir(base: &Path) -> anyhow::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
     let dir = worker_spool_dir(base);
+    // A dir with this pid is left by a killed worker that had the same pid.
+    let _ = std::fs::remove_dir_all(&dir);
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&dir)
         .map_err(|e| anyhow::anyhow!("creating spool dir {}: {e}", dir.display()))?;
+    // systemd-tmpfiles does not age a dir with a BSD lock. The fd stays open until the worker exits: https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html#Age
+    if let Ok(lock) = std::fs::File::open(&dir)
+        && lock.lock_shared().is_ok()
+    {
+        std::mem::forget(lock);
+    }
     Ok(dir)
 }
 
@@ -217,8 +225,11 @@ pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartB
     }
 }
 
-/// (name, filename) from a content-disposition value.
-type Disposition = (Option<Vec<u8>>, Option<Vec<u8>>);
+/// The name and filename parameters of a content-disposition value.
+struct Disposition {
+    name: Option<Vec<u8>>,
+    filename: Option<Vec<u8>>,
+}
 
 /// The disposition type token is not enforced: php-src rfc1867.c reads the parameters regardless.
 fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
@@ -279,7 +290,7 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
             .map(|o| o + next + 1)
             .unwrap_or(v.len());
     }
-    Ok((name, filename))
+    Ok(Disposition { name, filename })
 }
 
 /// Spool file names are unique per process; the fuzz targets share one dir across processes, so the pid stays in the name.
@@ -336,7 +347,7 @@ fn parse_part(
         return Err(bad("part without content-disposition"));
     };
 
-    let (name, filename) = disposition_params(disposition)?;
+    let Disposition { name, filename } = disposition_params(disposition)?;
     let Some(name) = name.filter(|n| !n.is_empty()) else {
         return Err(bad(
             "content-disposition without a non-empty name parameter",

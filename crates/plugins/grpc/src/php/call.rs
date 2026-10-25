@@ -25,7 +25,7 @@ use super::{
     rapira_ce_grpc_protocol, rapira_ce_grpc_service_info, rapira_ce_grpc_status,
     rapira_ce_internal_grpc_response_metadata,
 };
-use crate::{Call, MethodInfo, RpcStatus, UnaryCall, UnaryReply};
+use crate::{Call, MethodInfo, RpcStatus, StatusDetail, UnaryCall, UnaryReply};
 
 /// # Safety
 /// `dst` writable; engine active on this thread.
@@ -432,13 +432,13 @@ unsafe fn detail_prop<'a>(obj: *mut zend_object, name: &CStr) -> Option<&'a [u8]
     }
 }
 
-/// `Status::$details` as owned pairs, or the first item that is not an ErrorDetail.
+/// `Status::$details` as owned details, or the first item that is not an ErrorDetail.
 /// # Safety
 /// `details` a live array.
-unsafe fn read_details(details: *mut HashTable) -> Result<Vec<(String, Bytes)>, *mut zval> {
+unsafe fn read_details(details: *mut HashTable) -> Result<Vec<StatusDetail>, *mut zval> {
     unsafe {
         let mut out = Vec::new();
-        for (_, item) in zend::entries(details) {
+        for zend::Entry { val: item, .. } in zend::entries(details) {
             let pair = if zend::zval_type(item) == IS_OBJECT
                 && zend::instanceof((*(*item).value.obj).ce, rapira_ce_grpc_error_detail)
             {
@@ -450,10 +450,10 @@ unsafe fn read_details(details: *mut HashTable) -> Result<Vec<(String, Bytes)>, 
             let Some((url, value)) = pair else {
                 return Err(item);
             };
-            out.push((
-                String::from_utf8_lossy(url).into_owned(),
-                Bytes::copy_from_slice(value),
-            ));
+            out.push(StatusDetail {
+                type_url: String::from_utf8_lossy(url).into_owned(),
+                value: Bytes::copy_from_slice(value),
+            });
         }
         Ok(out)
     }
@@ -546,7 +546,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_respond(
     })
 }
 
-/// `status` is a `Rapira\Grpc\Status`; its constructor typed the three properties. A Status from ReflectionClass::newInstanceWithoutConstructor() is not supported. A detail that is not an ErrorDetail gives a TypeError before any state change.
+/// `status` is a `Rapira\Grpc\Status`; its constructor typed the three properties. A detail that is not an ErrorDetail gives a TypeError before any state change.
 /// # Safety
 /// `state` from receive; `status` a live object; engine active.
 #[unsafe(no_mangle)]
@@ -644,7 +644,7 @@ mod tests {
 
     use super::*;
 
-    fn state() -> (GrpcState, oneshot::Receiver<UnaryReply>) {
+    fn state(reply: oneshot::Sender<UnaryReply>) -> GrpcState {
         let req = UnaryCall {
             method: "rapira.test.v1.EchoService/Echo".into(),
             protocol: Some(Protocol::Grpc),
@@ -653,8 +653,7 @@ mod tests {
             remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
             message: Bytes::new(),
         };
-        let (call, rx) = Call::new(req);
-        (GrpcState::new(call), rx)
+        GrpcState::new(Call::new(req, reply))
     }
 
     /// `from_bytes` takes the obs-text bytes that a client can send.
@@ -684,28 +683,90 @@ mod tests {
 
     #[test]
     fn reserved_names_cover_the_transport() {
-        for (header, reserved) in [
-            ("grpc-timeout", true),
-            ("grpc-status-details-bin", true),
-            ("content-type", true),
-            ("connect-timeout-ms", true),
-            ("trailer-x", true),
-            ("te", true),
-            ("trailer", true),
-            ("host", true),
-            ("connection", true),
-            ("keep-alive", true),
-            ("proxy-connection", true),
-            ("transfer-encoding", true),
-            ("upgrade", true),
-            ("accept-encoding", true),
-            ("user-agent", false),
-            ("x-user", false),
-            ("authorization", false),
-            ("grpcx", false),
-            ("x-grpc-web", false),
-        ] {
-            assert_eq!(super::reserved(header), reserved, "{header}");
+        struct Case {
+            header: &'static str,
+            reserved: bool,
+        }
+        const CASES: &[Case] = &[
+            Case {
+                header: "grpc-timeout",
+                reserved: true,
+            },
+            Case {
+                header: "grpc-status-details-bin",
+                reserved: true,
+            },
+            Case {
+                header: "content-type",
+                reserved: true,
+            },
+            Case {
+                header: "connect-timeout-ms",
+                reserved: true,
+            },
+            Case {
+                header: "trailer-x",
+                reserved: true,
+            },
+            Case {
+                header: "te",
+                reserved: true,
+            },
+            Case {
+                header: "trailer",
+                reserved: true,
+            },
+            Case {
+                header: "host",
+                reserved: true,
+            },
+            Case {
+                header: "connection",
+                reserved: true,
+            },
+            Case {
+                header: "keep-alive",
+                reserved: true,
+            },
+            Case {
+                header: "proxy-connection",
+                reserved: true,
+            },
+            Case {
+                header: "transfer-encoding",
+                reserved: true,
+            },
+            Case {
+                header: "upgrade",
+                reserved: true,
+            },
+            Case {
+                header: "accept-encoding",
+                reserved: true,
+            },
+            Case {
+                header: "user-agent",
+                reserved: false,
+            },
+            Case {
+                header: "x-user",
+                reserved: false,
+            },
+            Case {
+                header: "authorization",
+                reserved: false,
+            },
+            Case {
+                header: "grpcx",
+                reserved: false,
+            },
+            Case {
+                header: "x-grpc-web",
+                reserved: false,
+            },
+        ];
+        for c in CASES {
+            assert_eq!(reserved(c.header), c.reserved, "{}", c.header);
         }
     }
 
@@ -852,7 +913,10 @@ mod tests {
 
     #[derive(Debug)]
     enum Want {
-        Stored(&'static str, &'static [u8]),
+        Stored {
+            name: &'static str,
+            value: &'static [u8],
+        },
         Bad,
         BadField(&'static CStr),
         Finalized,
@@ -878,7 +942,10 @@ mod tests {
                 binary: false,
                 key: b"X-Cost",
                 value: b"2.7",
-                want: Want::Stored("x-cost", b"2.7"),
+                want: Want::Stored {
+                    name: "x-cost",
+                    value: b"2.7",
+                },
             },
             Case {
                 name: "binary header keeps raw bytes",
@@ -887,7 +954,10 @@ mod tests {
                 binary: true,
                 key: b"x-tok-bin",
                 value: b"\x00\xff",
-                want: Want::Stored("x-tok-bin", b"\x00\xff"),
+                want: Want::Stored {
+                    name: "x-tok-bin",
+                    value: b"\x00\xff",
+                },
             },
             Case {
                 name: "text trailer goes to the trailer half",
@@ -896,7 +966,10 @@ mod tests {
                 binary: false,
                 key: b"x-t",
                 value: b"w",
-                want: Want::Stored("x-t", b"w"),
+                want: Want::Stored {
+                    name: "x-t",
+                    value: b"w",
+                },
             },
             Case {
                 name: "reserved name refused",
@@ -950,7 +1023,10 @@ mod tests {
                 binary: false,
                 key: b"x-a",
                 value: b"",
-                want: Want::Stored("x-a", b""),
+                want: Want::Stored {
+                    name: "x-a",
+                    value: b"",
+                },
             },
             Case {
                 name: "plus in the name",
@@ -1004,7 +1080,10 @@ mod tests {
                 binary: false,
                 key: b"x-a",
                 value: b"a",
-                want: Want::Stored("x-a", b"a"),
+                want: Want::Stored {
+                    name: "x-a",
+                    value: b"a",
+                },
             },
             Case {
                 name: "detached accumulator",
@@ -1017,7 +1096,8 @@ mod tests {
             },
         ];
         for c in CASES {
-            let (mut st, rx) = state();
+            let (tx, rx) = oneshot::channel();
+            let mut st = state(tx);
             let _rx = match c.setup {
                 Setup::Responded => {
                     assert_eq!(finish(&mut st, Ok(Bytes::new())), Verb::Ok, "{}", c.name);
@@ -1035,7 +1115,7 @@ mod tests {
             };
             let v = add_core(target, c.trailer, c.binary, c.key, c.value);
             match c.want {
-                Want::Stored(name, value) => {
+                Want::Stored { name, value } => {
                     assert_eq!(v, Verb::Ok, "{}", c.name);
                     let half = if c.trailer { &st.trailers } else { &st.headers };
                     assert_eq!(named(half), owned(&[(name, &[value])]), "{}", c.name);
@@ -1047,12 +1127,21 @@ mod tests {
         }
     }
 
-    /// A status triple: the code, the message and the (type URL, value) details.
-    type Triple = (u32, &'static str, &'static [(&'static str, &'static [u8])]);
+    #[derive(Clone, Copy)]
+    struct Status {
+        code: u32,
+        message: &'static str,
+        details: &'static [Detail],
+    }
+
+    struct Detail {
+        type_url: &'static str,
+        value: &'static [u8],
+    }
 
     enum Finish {
         Respond(&'static [u8]),
-        Fail(Triple),
+        Fail(Status),
     }
 
     enum Sent {
@@ -1060,7 +1149,7 @@ mod tests {
         Outcome {
             headers: &'static [(&'static str, &'static str)],
             trailers: &'static [(&'static str, &'static str)],
-            result: Result<&'static [u8], Triple>,
+            result: Result<&'static [u8], Status>,
         },
         /// The state is dropped unfinalized: the receiver sees a closed channel.
         Lost,
@@ -1068,22 +1157,31 @@ mod tests {
         Nothing,
     }
 
-    fn status(code: u32, message: &str, details: &[(&str, &[u8])]) -> RpcStatus {
+    fn status(code: u32, message: &str, details: &[Detail]) -> RpcStatus {
         RpcStatus {
             code,
             message: message.to_owned(),
             details: details
                 .iter()
-                .map(|&(url, value)| (url.to_owned(), Bytes::copy_from_slice(value)))
+                .map(|d| StatusDetail {
+                    type_url: d.type_url.to_owned(),
+                    value: Bytes::copy_from_slice(d.value),
+                })
                 .collect(),
         }
     }
 
     #[test]
     fn finish_sends_one_outcome_in_wire_form() {
+        struct Entry {
+            trailer: bool,
+            binary: bool,
+            name: &'static [u8],
+            value: &'static [u8],
+        }
         struct Case {
             name: &'static str,
-            adds: &'static [(bool, bool, &'static [u8], &'static [u8])],
+            adds: &'static [Entry],
             drop_receiver: bool,
             finishes: &'static [Finish],
             verbs: &'static [Verb],
@@ -1096,10 +1194,30 @@ mod tests {
             Case {
                 name: "respond carries both halves",
                 adds: &[
-                    (false, false, b"x-a", b"1"),
-                    (false, false, b"x-a", b"2"),
-                    (false, true, b"x-b-bin", b"\x01\x02"),
-                    (true, false, b"x-t", b"w"),
+                    Entry {
+                        trailer: false,
+                        binary: false,
+                        name: b"x-a",
+                        value: b"1",
+                    },
+                    Entry {
+                        trailer: false,
+                        binary: false,
+                        name: b"x-a",
+                        value: b"2",
+                    },
+                    Entry {
+                        trailer: false,
+                        binary: true,
+                        name: b"x-b-bin",
+                        value: b"\x01\x02",
+                    },
+                    Entry {
+                        trailer: true,
+                        binary: false,
+                        name: b"x-t",
+                        value: b"w",
+                    },
                 ],
                 drop_receiver: false,
                 finishes: &[Finish::Respond(b"\x0a\x02hi")],
@@ -1116,22 +1234,28 @@ mod tests {
                 name: "fail carries the status",
                 adds: &[],
                 drop_receiver: false,
-                finishes: &[Finish::Fail((
-                    5,
-                    "no invoice",
-                    &[("type.googleapis.com/google.rpc.ErrorInfo", b"\x0a\x01x")],
-                ))],
+                finishes: &[Finish::Fail(Status {
+                    code: 5,
+                    message: "no invoice",
+                    details: &[Detail {
+                        type_url: "type.googleapis.com/google.rpc.ErrorInfo",
+                        value: b"\x0a\x01x",
+                    }],
+                })],
                 verbs: &[Verb::Ok],
                 finalized: true,
                 cancelled: false,
                 sent: Sent::Outcome {
                     headers: &[],
                     trailers: &[],
-                    result: Err((
-                        5,
-                        "no invoice",
-                        &[("type.googleapis.com/google.rpc.ErrorInfo", b"\x0a\x01x")],
-                    )),
+                    result: Err(Status {
+                        code: 5,
+                        message: "no invoice",
+                        details: &[Detail {
+                            type_url: "type.googleapis.com/google.rpc.ErrorInfo",
+                            value: b"\x0a\x01x",
+                        }],
+                    }),
                 },
             },
             Case {
@@ -1170,11 +1294,12 @@ mod tests {
             },
         ];
         for c in CASES {
-            let (mut st, rx) = state();
+            let (tx, rx) = oneshot::channel();
+            let mut st = state(tx);
             let mut rx = (!c.drop_receiver).then_some(rx);
-            for &(trailer, binary, name, value) in c.adds {
+            for e in c.adds {
                 assert_eq!(
-                    add_core(Some(&mut st), trailer, binary, name, value),
+                    add_core(Some(&mut st), e.trailer, e.binary, e.name, e.value),
                     Verb::Ok,
                     "{}",
                     c.name
@@ -1185,9 +1310,7 @@ mod tests {
                 .iter()
                 .map(|f| match f {
                     Finish::Respond(message) => finish(&mut st, Ok(Bytes::from_static(message))),
-                    Finish::Fail((code, message, details)) => {
-                        finish(&mut st, Err(status(*code, message, details)))
-                    }
+                    Finish::Fail(s) => finish(&mut st, Err(status(s.code, s.message, s.details))),
                 })
                 .collect();
             assert_eq!(verbs, c.verbs, "{}", c.name);
@@ -1206,7 +1329,7 @@ mod tests {
                         trailers: map(trailers),
                         outcome: result
                             .map(Bytes::from_static)
-                            .map_err(|(code, message, details)| status(code, message, details)),
+                            .map_err(|s| status(s.code, s.message, s.details)),
                     };
                     let got = rx.as_mut().map(|rx| rx.try_recv());
                     assert_eq!(got, Some(Ok(want)), "{}", c.name);

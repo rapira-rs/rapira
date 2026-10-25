@@ -1,15 +1,24 @@
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit_async;
-use tests::{drain_async, fixture, req};
+use tests::{StatusBody, drain_async, fixture, req};
 
 use crate::harness::Spawn;
 
 #[tokio::test]
 async fn worker_survives_exit() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/bailout-worker.php")).spawn();
-    let (s1, b1) = drain_async(submit_async(srv.addr, req("/?boom=0")).await?).await;
-    let (s2, b2) = drain_async(submit_async(srv.addr, req("/?boom=1")).await?).await;
-    let (s3, b3) = drain_async(submit_async(srv.addr, req("/?boom=0")).await?).await;
+    let StatusBody {
+        status: s1,
+        body: b1,
+    } = drain_async(submit_async(srv.addr, req("/?boom=0")).await?).await;
+    let StatusBody {
+        status: s2,
+        body: b2,
+    } = drain_async(submit_async(srv.addr, req("/?boom=1")).await?).await;
+    let StatusBody {
+        status: s3,
+        body: b3,
+    } = drain_async(submit_async(srv.addr, req("/?boom=0")).await?).await;
 
     assert_eq!(s1, 200);
     assert!(b1.contains("ok counter=1"), "req1 (got: {b1:?})");
@@ -44,7 +53,7 @@ async fn many_producers_test() -> anyhow::Result<()> {
                     let rx = submit_async(addr, req(&format!("/?name={name}")))
                         .await
                         .expect("ruuuun!");
-                    let (status, body) = drain_async(rx).await;
+                    let StatusBody { status, body } = drain_async(rx).await;
                     assert_eq!(
                         status, 200,
                         "worker must serve (got {status}, body {body:?})"

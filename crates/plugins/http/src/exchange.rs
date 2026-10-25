@@ -1,4 +1,4 @@
-use tokio::sync::mpsc::{self, Sender};
+use tokio::sync::mpsc::Sender;
 
 use rapira_sapi::callbacks::send_error_head;
 use rapira_sapi::types::{Context, Frame, Request};
@@ -7,8 +7,8 @@ use rapira_sapi::zend_object;
 
 use crate::php::{ExchangeState, exchange_from};
 
-// cap 4 lets a buffered Head+Chunk+End trio, plus a stray interim head, queue without parking the PHP thread
-const FRAME_CAP: usize = 4;
+// cap 16 lets a buffered Head+Chunk+End trio, plus a stray interim head, queue without parking the PHP thread, and keeps a 1 MiB body in 64 KiB writes to about one park; tokio allocates one 32-slot block for any cap up to 32
+pub(crate) const FRAME_CAP: usize = 16;
 
 /// One HTTP request on the intake.
 pub(crate) struct Exchange {
@@ -17,12 +17,11 @@ pub(crate) struct Exchange {
 }
 
 impl Exchange {
-    /// `rx` is the reply the transport reads.
+    /// `tx` sends the reply the transport reads.
     /// `superglobals` builds the CGI view here, on the transport thread: true in the classic and worker modes.
-    pub(crate) fn new(req: Request, superglobals: bool) -> (Self, mpsc::Receiver<Frame>) {
-        let (tx, rx) = mpsc::channel(FRAME_CAP);
+    pub(crate) fn new(req: Request, tx: Sender<Frame>, superglobals: bool) -> Self {
         let ctx = Context::new(req, tx, superglobals);
-        (Self { ctx }, rx)
+        Self { ctx }
     }
 }
 

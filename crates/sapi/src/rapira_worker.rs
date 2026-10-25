@@ -2,7 +2,7 @@ use tracing::error;
 
 use crate::{
     callbacks::*,
-    diagnostics::error_type_to_level,
+    diagnostics::{Severity, error_type_to_level},
     scoreboard::sb_update,
     start::{Pulled, pull_unit, pull_unit_to_shed, run_script},
 };
@@ -245,15 +245,19 @@ pub extern "C" fn rapira_rs_finish_response() {
 }
 
 /// clear_last_error() keeps last_error_type/lineno set (main/main.c:1307-1316) so the message pointer is the only "slot filled" signal, and php_error_cb applies EG(error_reporting) only after filling it (main/main.c:1394-1411).
+/// The record covers the last diagnostic that php_error_cb did not log: EG(error_reporting) at this call masks its type, log_errors is 0, or error_log is set.
+/// The check reads the mask at this call. When @ or a temporary error_reporting() call masked the diagnostic and the code restored the mask before this call, the diagnostic gets no record. PHP does not log it either.
 fn log_and_clear_last_error() {
     unsafe {
         let msg = core_globals.last_error_message;
-        if !msg.is_null() {
+        let mask = executor_globals.error_reporting;
+        // php_error_cb logs an unmasked diagnostic through log_message when log_errors is set and error_log is empty (main/main.c:1410-1463, 935-988)
+        let php_logged = core_globals.last_error_type & (mask | E_CORE as c_int) != 0
+            && core_globals.log_errors
+            && core_globals.error_log.is_null();
+        if !msg.is_null() && !php_logged {
             let lineno = core_globals.last_error_lineno;
-            let (level, label) = error_type_to_level(
-                core_globals.last_error_type,
-                executor_globals.error_reporting,
-            );
+            let Severity { level, label } = error_type_to_level(core_globals.last_error_type, mask);
             crate::diagnostics::event_at!(
                 "php",
                 level,

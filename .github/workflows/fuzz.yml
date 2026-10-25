@@ -45,7 +45,7 @@ jobs:
                   echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
 
             - &toolchain
-              uses: dtolnay/rust-toolchain@c6590455eca8e79d081430ebfe2074192ae90290 # 1.98.1
+              uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
 
             - &cargo-fuzz
               run: cargo install --locked cargo-fuzz@0.13.2

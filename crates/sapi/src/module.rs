@@ -7,7 +7,12 @@ use std::{
 
 /// Runs before php.ini is parsed (main/php_ini.c:420) so an explicit user value still wins; startup-stage interned strings are permanent, so config_zval_dtor's release is a no-op.
 unsafe extern "C" fn ini_defaults(configuration_hash: *mut HashTable) {
-    for (name, value) in [(c"display_errors", c"0"), (c"log_errors", c"1")] {
+    for (name, value) in [
+        (c"display_errors", c"0"),
+        (c"log_errors", c"1"),
+        // The execution timer also counts the CPU time of the IO threads, so the hard timeout can end the worker process while PHP waits.
+        (c"hard_timeout", c"0"),
+    ] {
         unsafe {
             let intern = zend_string_init_interned.expect("set by zend_startup");
             let mut v: zval = std::mem::zeroed();
@@ -33,6 +38,7 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         pretty_name: c"Rapira".as_ptr() as *mut c_char,
         startup: None,
         shutdown: None,
+        // rapira_register_post_reader (module.c) sets activate and default_post_reader after php_module_startup, which resets default_post_reader (main/main.c:2329).
         activate: None,
         deactivate: None,
         ub_write: Some(rapira_ub_write),

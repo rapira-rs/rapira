@@ -2,14 +2,14 @@ use http::Method;
 use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{drain, drain_resp, fixture, req, server_log};
+use tests::{StatusBody, drain, drain_resp, fixture, req, server_log};
 
 use crate::harness::{Server, Spawn, scratch_dir, slot_line};
 
 #[test]
 fn fibers_stress_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("basic_tests/fibers.php")).spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(
         status, 200,
@@ -25,8 +25,8 @@ fn fibers_stress_classic() -> anyhow::Result<()> {
 #[test]
 fn worker_request_isolation() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/leak-worker.php")).spawn();
-    let (_, body1) = drain(submit(srv.addr, req("/?x=1"))?);
-    let (_, body2) = drain(submit(srv.addr, req("/?x=2"))?);
+    let body1 = drain(submit(srv.addr, req("/?x=1"))?).body;
+    let body2 = drain(submit(srv.addr, req("/?x=2"))?).body;
     assert!(
         body1.contains("counter=1") && body1.contains("session=clean"),
         "req1 baseline (got: {body1:?})"
@@ -45,7 +45,7 @@ fn worker_request_isolation() -> anyhow::Result<()> {
 #[test]
 fn fibers_stress_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/fibers-worker.php")).spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(
         status, 200,
@@ -86,7 +86,10 @@ fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
         },
     ];
     let srv = Spawn::http(Mode::Worker, fixture("shared/teardown-bailout-worker.php")).spawn();
-    let (s1, b1) = drain(submit(srv.addr, req("/?boom=0"))?);
+    let StatusBody {
+        status: s1,
+        body: b1,
+    } = drain(submit(srv.addr, req("/?boom=0"))?);
     assert_eq!(s1, 200);
     assert!(b1.contains("ok counter=1"), "baseline (got: {b1:?})");
 
@@ -102,7 +105,7 @@ fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
         assert_eq!(resp.body_string(), case.body, "{}: body", case.name);
         assert_eq!(resp.truncated, case.truncated, "{}: truncated", case.name);
 
-        let (status, body) = drain(submit(srv.addr, req("/?boom=0"))?);
+        let StatusBody { status, body } = drain(submit(srv.addr, req("/?boom=0"))?);
         assert_eq!(
             status, 200,
             "{}: worker must recover after a teardown bailout",
@@ -126,9 +129,15 @@ fn worker_basic_auth() -> anyhow::Result<()> {
         AUTHORIZATION,
         HeaderValue::from_static("Basic dXNlcjpwYXNz"),
     );
-    let (s_auth, b_auth) = drain(submit(srv.addr, with_auth)?);
+    let StatusBody {
+        status: s_auth,
+        body: b_auth,
+    } = drain(submit(srv.addr, with_auth)?);
 
-    let (s_none, b_none) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody {
+        status: s_none,
+        body: b_none,
+    } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(s_auth, 200);
     assert!(
@@ -162,7 +171,7 @@ fn server_variables() -> anyhow::Result<()> {
         HeaderValue::from_static("Basic dmFsZXJ5OnBhc3N3b3Jk"),
     );
 
-    let (status, body) = drain(submit(srv.addr, request)?);
+    let StatusBody { status, body } = drain(submit(srv.addr, request)?);
 
     assert_eq!(status, 200);
     for expected in [
@@ -208,8 +217,14 @@ fn server_variables() -> anyhow::Result<()> {
 fn worker_finish_request() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/finish-request-worker.php")).spawn();
 
-    let (s1, b1) = drain(submit(srv.addr, req("/"))?);
-    let (s2, b2) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody {
+        status: s1,
+        body: b1,
+    } = drain(submit(srv.addr, req("/"))?);
+    let StatusBody {
+        status: s2,
+        body: b2,
+    } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(s1, 200);
     assert!(
@@ -239,7 +254,7 @@ fn getenv_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("basic_tests/env.php"))
         .env("FOO", "BAR")
         .spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     assert_eq!(status, 200);
     assert!(body.contains("BAR"), "expected FOO=BAR (got: {body:?})");
     Ok(())
@@ -250,7 +265,7 @@ fn getenv_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/env-worker.php"))
         .env("FOO", "BAR")
         .spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     assert_eq!(status, 200);
     assert!(body.contains("BAR"), "expected FOO=BAR (got: {body:?})");
     Ok(())
@@ -259,7 +274,7 @@ fn getenv_worker() -> anyhow::Result<()> {
 #[test]
 fn failboot_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("basic_tests/failboot.php")).spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     assert_eq!(status, 200);
     assert!(
         body.contains("syntax error, unexpected end of file, expecting variable or"),
@@ -311,7 +326,7 @@ fn scoreboard_counts_worker() -> anyhow::Result<()> {
 fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/shutdown-fatal-worker.php")).spawn();
     let _ = drain(submit(srv.addr, req("/?boom=1"))?);
-    let (s2, _) = drain(submit(srv.addr, req("/"))?);
+    let s2 = drain(submit(srv.addr, req("/"))?).status;
     let snap = slot(&srv);
 
     assert_eq!(s2, 200, "worker recovers after the recycle");
@@ -326,19 +341,20 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
 
 #[test]
 fn scoreboard_counts_classic() -> anyhow::Result<()> {
-    // A classic worker runs one entrypoint, so each script gets its own worker: (handled, errors).
-    let counts = |script: &str, requests: usize| -> anyhow::Result<(u64, u64)> {
+    // A classic worker runs one entrypoint, so each script gets its own worker.
+    let counts = |script: &str, requests: usize| -> anyhow::Result<Slot> {
         let srv = Spawn::http(Mode::Classic, fixture(script)).spawn();
         for _ in 0..requests {
             let _ = drain(submit(srv.addr, req("/"))?);
         }
-        let snap = slot(&srv);
-        Ok((snap.handled, snap.errors))
+        Ok(slot(&srv))
     };
 
-    assert_eq!(counts("shared/hello.php", 2)?, (2, 0), "two clean requests");
+    let snap = counts("shared/hello.php", 2)?;
+    assert_eq!((snap.handled, snap.errors), (2, 0), "two clean requests");
+    let snap = counts("basic_tests/failboot.php", 1)?;
     assert_eq!(
-        counts("basic_tests/failboot.php", 1)?,
+        (snap.handled, snap.errors),
         (1, 1),
         "one PHP error (failboot.php fails to compile)"
     );
@@ -348,8 +364,14 @@ fn scoreboard_counts_classic() -> anyhow::Result<()> {
 #[test]
 fn worker_session_isolation() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/session-worker.php")).spawn();
-    let (s1, b1) = drain(submit(srv.addr, req("/"))?);
-    let (s2, b2) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody {
+        status: s1,
+        body: b1,
+    } = drain(submit(srv.addr, req("/"))?);
+    let StatusBody {
+        status: s2,
+        body: b2,
+    } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(s1, 200);
     assert_eq!(s2, 200);
@@ -375,7 +397,7 @@ fn worker_bootstrap_output_is_logged() -> anyhow::Result<()> {
     let mut srv = Spawn::http(Mode::Worker, fixture("basic_tests/boot-output-worker.php"))
         .json_log()
         .spawn();
-    let (status, _) = drain(submit(srv.addr, req("/"))?);
+    let status = drain(submit(srv.addr, req("/"))?).status;
     srv.stop();
 
     assert_eq!(status, 200, "worker still serves after no-context output");
@@ -422,12 +444,12 @@ fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
     );
     assert_eq!(
         php_levels(&logged, "REPORTED-WARNING"),
-        vec![tracing::Level::WARN, tracing::Level::WARN],
+        vec![tracing::Level::WARN],
         "an unmasked E_USER_WARNING logs at warn (captured: {logged:?})"
     );
     assert_eq!(
         php_levels(&logged, "REPORTED-FATAL"),
-        vec![tracing::Level::ERROR, tracing::Level::ERROR],
+        vec![tracing::Level::ERROR],
         "an uncaught throw stays an error-level diagnostic (captured: {logged:?})"
     );
     Ok(())
@@ -449,18 +471,18 @@ fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// log_errors routes a deprecation through the SAPI log callback too; both paths must report debug.
+/// log_errors routes an unmasked deprecation through the SAPI log callback, which reports debug.
 #[test]
-fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
+fn logged_deprecation_stays_at_debug() -> anyhow::Result<()> {
     let mut srv = error_levels_worker();
-    let (status, _) = drain(submit(srv.addr, req("/?step=logged"))?);
+    let status = drain(submit(srv.addr, req("/?step=logged"))?).status;
     srv.stop();
 
     assert_eq!(status, 200);
     let logged = server_log::records(&srv.log_file());
     assert_eq!(
         php_levels(&logged, "LOGGED-DEPRECATION"),
-        vec![tracing::Level::DEBUG, tracing::Level::DEBUG],
+        vec![tracing::Level::DEBUG],
         "the log callback reports a deprecation at debug (captured: {logged:?})"
     );
     Ok(())
@@ -469,7 +491,7 @@ fn logged_deprecation_stays_at_debug_on_both_paths() -> anyhow::Result<()> {
 #[test]
 fn sapi_ini_entries_applied() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("basic_tests/ini.php")).spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(status, 200);
     assert!(
@@ -482,8 +504,11 @@ fn sapi_ini_entries_applied() -> anyhow::Result<()> {
 #[test]
 fn status_code_does_not_leak_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("basic_tests/status-worker.php")).spawn();
-    let (s1, _) = drain(submit(srv.addr, req("/?code=404"))?);
-    let (s2, b2) = drain(submit(srv.addr, req("/"))?);
+    let s1 = drain(submit(srv.addr, req("/?code=404"))?).status;
+    let StatusBody {
+        status: s2,
+        body: b2,
+    } = drain(submit(srv.addr, req("/"))?);
 
     assert_eq!(s1, 404, "explicit http_response_code(404)");
     assert_eq!(
@@ -496,8 +521,8 @@ fn status_code_does_not_leak_worker() -> anyhow::Result<()> {
 #[test]
 fn status_code_does_not_leak_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("basic_tests/status.php")).spawn();
-    let (s1, _) = drain(submit(srv.addr, req("/?code=404"))?);
-    let (s2, _) = drain(submit(srv.addr, req("/"))?);
+    let s1 = drain(submit(srv.addr, req("/?code=404"))?).status;
+    let s2 = drain(submit(srv.addr, req("/"))?).status;
 
     assert_eq!(s1, 404);
     assert_eq!(
@@ -514,7 +539,7 @@ fn worker_finish_request_header_only() -> anyhow::Result<()> {
         fixture("basic_tests/finish-request-headers-worker.php"),
     )
     .spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     assert_eq!(status, 302);
     assert!(body.is_empty());
     Ok(())
@@ -523,12 +548,12 @@ fn worker_finish_request_header_only() -> anyhow::Result<()> {
 #[test]
 fn teardown_bailout_does_not_leave_gc_protected() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("basic_tests/gc-protect-worker.php")).spawn();
-    let (_, b1) = drain(submit(srv.addr, req("/?seed=1"))?);
+    let b1 = drain(submit(srv.addr, req("/?seed=1"))?).body;
     assert!(
         b1.contains("seeded"),
         "req1 seeds + bails in teardown (got {b1:?})"
     );
-    let (_, b2) = drain(submit(srv.addr, req("/?probe=1"))?);
+    let b2 = drain(submit(srv.addr, req("/?probe=1"))?).body;
     assert!(
         b2.contains("unprotected"),
         "worker recovers from a teardown bailout with GC unprotected (got {b2:?})"
@@ -539,9 +564,9 @@ fn teardown_bailout_does_not_leave_gc_protected() -> anyhow::Result<()> {
 #[test]
 fn error_get_last_cleared_between_worker_requests() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("basic_tests/last-error-worker.php")).spawn();
-    let (_, b1) = drain(submit(srv.addr, req("/?step=warn"))?);
+    let b1 = drain(submit(srv.addr, req("/?step=warn"))?).body;
     assert!(b1.contains("warned"), "req1 warns (got {b1:?})");
-    let (_, b2) = drain(submit(srv.addr, req("/"))?);
+    let b2 = drain(submit(srv.addr, req("/"))?).body;
     assert_eq!(
         b2, "clean",
         "error_get_last() must reset between units (got {b2:?})"
@@ -557,7 +582,7 @@ fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() ->
     let srv = Spawn::http(Mode::Worker, fixture("basic_tests/h2-boot-bail-worker.php"))
         .env("TMPDIR", tmp.to_str().expect("utf-8 scratch dir"))
         .spawn();
-    let (_, body) = drain(submit(srv.addr, req("/"))?);
+    let body = drain(submit(srv.addr, req("/"))?).body;
     assert_eq!(
         body, "2",
         "first-call teardown bailout must recycle + re-bootstrap, not serve in cycle 1 (got {body:?})"
@@ -575,18 +600,18 @@ fn filter_raw_input_does_not_accumulate() -> anyhow::Result<()> {
             .and_then(|s| s.parse().ok())
             .expect("mem= output")
     };
-    let (_, first) = drain(submit(srv.addr, req("/?x=warmup"))?);
+    let first = drain(submit(srv.addr, req("/?x=warmup"))?).body;
     if first.trim() == "skip" {
         return Ok(());
     }
     for i in 0..5 {
         let _ = drain(submit(srv.addr, req(&format!("/?x=w{i}")))?);
     }
-    let m1 = mem(drain(submit(srv.addr, req("/?x=base"))?).1);
+    let m1 = mem(drain(submit(srv.addr, req("/?x=base"))?).body);
     for i in 0..200 {
         let _ = drain(submit(srv.addr, req(&format!("/?x=v{i}")))?);
     }
-    let m2 = mem(drain(submit(srv.addr, req("/?x=end"))?).1);
+    let m2 = mem(drain(submit(srv.addr, req("/?x=end"))?).body);
     let leaked = m2 - m1;
     assert!(
         leaked < 32 * 1024,
@@ -602,9 +627,18 @@ fn worker_finish_request_flush_bailout_recycles() -> anyhow::Result<()> {
         fixture("basic_tests/finish-request-bailout-worker.php"),
     )
     .spawn();
-    let (s1, b1) = drain(submit(srv.addr, req("/?boom=0"))?);
-    let (s2, b2) = drain(submit(srv.addr, req("/?boom=1"))?);
-    let (s3, b3) = drain(submit(srv.addr, req("/?boom=0"))?);
+    let StatusBody {
+        status: s1,
+        body: b1,
+    } = drain(submit(srv.addr, req("/?boom=0"))?);
+    let StatusBody {
+        status: s2,
+        body: b2,
+    } = drain(submit(srv.addr, req("/?boom=1"))?);
+    let StatusBody {
+        status: s3,
+        body: b3,
+    } = drain(submit(srv.addr, req("/?boom=0"))?);
 
     assert_eq!(s1, 200);
     assert!(b1.contains("ok counter=1"), "req1 baseline (got: {b1:?})");
@@ -630,7 +664,7 @@ fn classic_finish_request() -> anyhow::Result<()> {
     let mut srv = Spawn::http(Mode::Classic, fixture("shared/finish-request-classic.php"))
         .json_log()
         .spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     // The graceful stop waits for the script, which keeps running after the early flush.
     srv.stop();
 

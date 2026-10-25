@@ -16,12 +16,12 @@ fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
         .php_ini(&std::fs::read_to_string(OBSERVER_INI)?)
         .spawn();
 
-    let (_, probe) = drain(submit(srv.addr, req("/?mode=ok"))?);
+    let probe = drain(submit(srv.addr, req("/?mode=ok"))?).body;
     if probe.contains("skip") {
         return Ok(());
     }
 
-    let (_, b1) = drain(submit(srv.addr, req("/?mode=fatal"))?);
+    let b1 = drain(submit(srv.addr, req("/?mode=fatal"))?).body;
     let mut pos = 0;
     for marker in ["<outer>", "<inner>", "</inner>", "</outer>"] {
         let i = b1[pos..].find(marker).unwrap_or_else(|| {
@@ -37,7 +37,7 @@ fn observer_frames_balanced_after_bailout() -> anyhow::Result<()> {
         );
     }
 
-    let (_, b2) = drain(submit(srv.addr, req("/?mode=ok"))?);
+    let b2 = drain(submit(srv.addr, req("/?mode=ok"))?).body;
     assert!(
         b2.contains("</outer>") && b2.contains("ok"),
         "worker survives, next request balanced (got {b2:?})"

@@ -3,7 +3,7 @@
 # Dependabot does not update this digest. Change it together with the 8.5 base in .github/workflows/docker.yml at each PHP patch release.
 ARG PHP_BASE=php:8.5-cli-trixie@sha256:01a109229f4465bc9ef042d9198f09a4d9da7775a825dbd8572dcdbd8756c4d3
 
-FROM rust:1.98.1-trixie@sha256:a8a5f0a1e5fe7dfe1d352591e4a1c7dd2c08fd70475cae872cf3458ba0df0546 AS rust
+FROM rust:1-trixie@sha256:931c2c0531a8b143e044f0f3914dfe802f15bb3d1955f0b657e9359327ac2ffc AS rust
 
 FROM ${PHP_BASE} AS php-extensions
 

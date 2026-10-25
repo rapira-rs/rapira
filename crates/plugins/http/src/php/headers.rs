@@ -89,7 +89,7 @@ pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<HeaderMap, &'
         return Ok(map);
     }
     unsafe {
-        for (key, list) in zend::entries(ht) {
+        for zend::Entry { key, val: list } in zend::entries(ht) {
             let zend::Key::Str(str_key) = key else {
                 return Err(c"header name is not representable on the wire");
             };
@@ -99,7 +99,7 @@ pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<HeaderMap, &'
             if zend::zval_type(list) != IS_ARRAY {
                 return Err(c"each header entry must be a list of strings");
             }
-            for (_, item) in zend::entries((*list).value.arr) {
+            for zend::Entry { val: item, .. } in zend::entries((*list).value.arr) {
                 if zend::zval_type(item) != IS_STRING {
                     return Err(c"header value is not representable on the wire");
                 }

@@ -77,6 +77,10 @@ void rapira_grpc_register_classes(void) {
     rapira_ce_grpc_status = register_class_Rapira_Grpc_Status();
     rapira_ce_grpc_metadata = register_class_Rapira_Grpc_Metadata(
         zend_ce_countable, zend_ce_aggregate);
+    // The host reads the properties that the constructor sets. Reflection does
+    // not skip the constructor of a final class with create_object.
+    rapira_ce_grpc_status->create_object = rapira_object_create;
+    rapira_ce_grpc_metadata->create_object = rapira_object_create;
     rapira_ce_grpc_method_info = register_class_Rapira_Grpc_MethodInfo();
     rapira_ce_grpc_service_info = register_class_Rapira_Grpc_ServiceInfo();
     rapira_ce_grpc_context = register_class_Rapira_Grpc_Call_Context();

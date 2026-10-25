@@ -4,7 +4,7 @@ use http::Method;
 use http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderValue, SET_COOKIE};
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{Resp, drain, drain_resp, fixture, req, server_log};
+use tests::{Resp, StatusBody, drain, drain_resp, fixture, req, server_log};
 
 use crate::harness::Spawn;
 
@@ -43,7 +43,7 @@ fn post_superglobals_classic() -> anyhow::Result<()> {
         Some("application/x-www-form-urlencoded"),
         b"bam=bam&some=10".to_vec(),
     );
-    let (status, body) = drain(submit(srv.addr, request)?);
+    let StatusBody { status, body } = drain(submit(srv.addr, request)?);
 
     assert_eq!(status, 200);
     for expected in [
@@ -68,7 +68,10 @@ fn post_superglobals_worker() -> anyhow::Result<()> {
         fixture("ported_tests/post-superglobals-worker.php"),
     )
     .spawn();
-    let (s1, b1) = drain(submit(
+    let StatusBody {
+        status: s1,
+        body: b1,
+    } = drain(submit(
         srv.addr,
         post(
             "ported_tests/post-superglobals-worker.php",
@@ -77,7 +80,10 @@ fn post_superglobals_worker() -> anyhow::Result<()> {
             b"baz=bat&i=7".to_vec(),
         ),
     )?);
-    let (s2, b2) = drain(submit(
+    let StatusBody {
+        status: s2,
+        body: b2,
+    } = drain(submit(
         srv.addr,
         post(
             "ported_tests/post-superglobals-worker.php",
@@ -108,7 +114,7 @@ fn post_superglobals_worker() -> anyhow::Result<()> {
 #[test]
 fn request_merge_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("ported_tests/request-merge.php")).spawn();
-    let (status, body) = drain(submit(
+    let StatusBody { status, body } = drain(submit(
         srv.addr,
         post(
             "ported_tests/request-merge.php",
@@ -136,7 +142,7 @@ fn request_merge_worker() -> anyhow::Result<()> {
     .spawn();
     for i in 1..=3 {
         let body_bytes = format!("post_key=post_value_{i}").into_bytes();
-        let (status, body) = drain(submit(
+        let StatusBody { status, body } = drain(submit(
             srv.addr,
             post(
                 "ported_tests/request-merge-worker.php",
@@ -165,7 +171,7 @@ fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
         } else {
             format!("val={i}")
         };
-        let (status, body) = drain(submit(
+        let StatusBody { status, body } = drain(submit(
             srv.addr,
             req(&format!("/jit-request-worker.php?{query}")),
         )?);
@@ -200,7 +206,7 @@ fn cookies_refresh_worker() -> anyhow::Result<()> {
             COOKIE,
             HeaderValue::try_from(format!("foo=bar; i={i}")).unwrap(),
         );
-        let (status, body) = drain(submit(srv.addr, request)?);
+        let StatusBody { status, body } = drain(submit(srv.addr, request)?);
         assert_eq!(status, 200);
         assert!(
             body.contains("'foo' => 'bar'") && body.contains(&format!("'i' => '{i}'")),
@@ -221,7 +227,7 @@ fn malformed_cookies_classic() -> anyhow::Result<()> {
             "foo =bar; ===;;==;  .dot.=val  ; PHPSESSID=1234; dup=first; dup=second",
         ),
     );
-    let (status, body) = drain(submit(srv.addr, request)?);
+    let StatusBody { status, body } = drain(submit(srv.addr, request)?);
 
     assert_eq!(status, 200);
     for expected in [
@@ -301,11 +307,17 @@ fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
         fixture("ported_tests/session-handler-worker.php"),
     )
     .spawn();
-    let (s1, b1) = drain(submit(
+    let StatusBody {
+        status: s1,
+        body: b1,
+    } = drain(submit(
         srv.addr,
         req("/session-handler-worker.php?action=register"),
     )?);
-    let (s2, b2) = drain(submit(srv.addr, req("/session-handler-worker.php"))?);
+    let StatusBody {
+        status: s2,
+        body: b2,
+    } = drain(submit(srv.addr, req("/session-handler-worker.php"))?);
 
     assert_eq!(s1, 200);
     assert!(
@@ -332,15 +344,24 @@ fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
         fixture("ported_tests/preloop-session-handler-worker.php"),
     )
     .spawn();
-    let (s1, b1) = drain(submit(
+    let StatusBody {
+        status: s1,
+        body: b1,
+    } = drain(submit(
         srv.addr,
         req("/preloop-session-handler-worker.php?action=check"),
     )?);
-    let (s2, b2) = drain(submit(
+    let StatusBody {
+        status: s2,
+        body: b2,
+    } = drain(submit(
         srv.addr,
         req("/preloop-session-handler-worker.php?action=use_session"),
     )?);
-    let (s3, b3) = drain(submit(
+    let StatusBody {
+        status: s3,
+        body: b3,
+    } = drain(submit(
         srv.addr,
         req("/preloop-session-handler-worker.php?action=check"),
     )?);
@@ -479,7 +500,7 @@ fn large_post_body_worker() -> anyhow::Result<()> {
     )
     .spawn();
     for _ in 0..2 {
-        let (status, body) = drain(submit(
+        let StatusBody { status, body } = drain(submit(
             srv.addr,
             post(
                 "ported_tests/large-request-worker.php",
@@ -532,7 +553,7 @@ fn assert_upload_and_cleanup(status: u16, body: &str) {
 #[test]
 fn multipart_upload_classic() -> anyhow::Result<()> {
     let mut srv = Spawn::http(Mode::Classic, fixture("ported_tests/upload.php")).spawn();
-    let (status, body) = drain(submit(
+    let StatusBody { status, body } = drain(submit(
         srv.addr,
         post(
             "ported_tests/upload.php",
@@ -551,7 +572,7 @@ fn multipart_upload_classic() -> anyhow::Result<()> {
 fn multipart_upload_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("ported_tests/upload-worker.php")).spawn();
     for _ in 0..2 {
-        let (status, body) = drain(submit(
+        let StatusBody { status, body } = drain(submit(
             srv.addr,
             post(
                 "ported_tests/upload-worker.php",
@@ -569,7 +590,10 @@ fn multipart_upload_worker() -> anyhow::Result<()> {
 #[test]
 fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("ported_tests/upload-worker.php")).spawn();
-    let (s1, b1) = drain(submit(
+    let StatusBody {
+        status: s1,
+        body: b1,
+    } = drain(submit(
         srv.addr,
         post(
             "ported_tests/upload-worker.php",
@@ -584,7 +608,10 @@ fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<(
         "req1 must see the upload (got {b1:?})"
     );
 
-    let (s2, b2) = drain(submit(srv.addr, req("/upload-worker.php"))?);
+    let StatusBody {
+        status: s2,
+        body: b2,
+    } = drain(submit(srv.addr, req("/upload-worker.php"))?);
     assert_eq!(s2, 200);
     assert_eq!(
         b2, "NO FILE",
@@ -622,8 +649,14 @@ fn no_destructor_sweep_between_units_worker() -> anyhow::Result<()> {
         fixture("ported_tests/preloop-destruct-worker.php"),
     )
     .spawn();
-    let (s1, b1) = drain(submit(srv.addr, req("/preloop-destruct-worker.php"))?);
-    let (s2, b2) = drain(submit(srv.addr, req("/preloop-destruct-worker.php"))?);
+    let StatusBody {
+        status: s1,
+        body: b1,
+    } = drain(submit(srv.addr, req("/preloop-destruct-worker.php"))?);
+    let StatusBody {
+        status: s2,
+        body: b2,
+    } = drain(submit(srv.addr, req("/preloop-destruct-worker.php"))?);
 
     assert_eq!((s1, s2), (200, 200));
     assert!(b1.contains("write=ok dtors=0"), "req1 (got {b1:?})");
@@ -648,8 +681,14 @@ fn throwing_destructor_after_unit_stays_contained_worker() -> anyhow::Result<()>
         fixture("ported_tests/dtor-throw-shutdown-worker.php"),
     )
     .spawn();
-    let (s1, b1) = drain(submit(srv.addr, req("/dtor-throw-shutdown-worker.php"))?);
-    let (s2, b2) = drain(submit(srv.addr, req("/dtor-throw-shutdown-worker.php"))?);
+    let StatusBody {
+        status: s1,
+        body: b1,
+    } = drain(submit(srv.addr, req("/dtor-throw-shutdown-worker.php"))?);
+    let StatusBody {
+        status: s2,
+        body: b2,
+    } = drain(submit(srv.addr, req("/dtor-throw-shutdown-worker.php"))?);
 
     assert_eq!((s1, b1.as_str()), (200, "served=1"));
     assert_eq!(
@@ -670,7 +709,8 @@ fn boot_shutdown_function_fires_once_at_worker_exit() -> anyhow::Result<()> {
     .json_log()
     .spawn();
     for _ in 0..2 {
-        let (status, body) = drain(submit(srv.addr, req("/boot-shutdown-worker.php"))?);
+        let StatusBody { status, body } =
+            drain(submit(srv.addr, req("/boot-shutdown-worker.php"))?);
         assert_eq!(status, 200);
         assert_eq!(
             body, "fired=0",
@@ -707,7 +747,8 @@ fn unit_shutdown_function_fires_at_end_of_its_unit() -> anyhow::Result<()> {
         "req=2 unit_fired=1 boot_fired=0",
         "req=3 unit_fired=1 boot_fired=0",
     ] {
-        let (status, body) = drain(submit(srv.addr, req("/unit-shutdown-worker.php"))?);
+        let StatusBody { status, body } =
+            drain(submit(srv.addr, req("/unit-shutdown-worker.php"))?);
         assert_eq!((status, body.as_str()), (200, want));
     }
 
@@ -739,7 +780,8 @@ fn late_shutdown_function_runs_after_boot_entries() -> anyhow::Result<()> {
     .json_log()
     .spawn();
     for _ in 0..2 {
-        let (status, body) = drain(submit(srv.addr, req("/late-shutdown-worker.php"))?);
+        let StatusBody { status, body } =
+            drain(submit(srv.addr, req("/late-shutdown-worker.php"))?);
         assert_eq!((status, body.as_str()), (200, "ok"));
     }
 
@@ -771,7 +813,8 @@ fn fatal_in_boot_shutdown_function_exits_clean() -> anyhow::Result<()> {
     )
     .json_log()
     .spawn();
-    let (status, body) = drain(submit(srv.addr, req("/shutdown-fatal-boot-worker.php"))?);
+    let StatusBody { status, body } =
+        drain(submit(srv.addr, req("/shutdown-fatal-boot-worker.php"))?);
     assert_eq!((status, body.as_str()), (200, "ok"));
 
     srv.stop();
@@ -795,7 +838,7 @@ fn boot_global_object_survives_requests() -> anyhow::Result<()> {
         "kernel=ok calls=2",
         "kernel=ok calls=3",
     ] {
-        let (status, body) = drain(submit(srv.addr, req("/boot-global-worker.php"))?);
+        let StatusBody { status, body } = drain(submit(srv.addr, req("/boot-global-worker.php"))?);
         assert_eq!((status, body.as_str()), (200, want));
     }
     assert_eq!(
@@ -862,7 +905,7 @@ fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
 fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("ported_tests/file-stream-worker.php")).spawn();
     for expected in ["word1", "word2", "word3"] {
-        let (status, body) = drain(submit(srv.addr, req("/file-stream-worker.php"))?);
+        let StatusBody { status, body } = drain(submit(srv.addr, req("/file-stream-worker.php"))?);
         assert_eq!(status, 200);
         assert_eq!(
             body, expected,
@@ -880,7 +923,7 @@ fn multi_cookie_headers_classic() -> anyhow::Result<()> {
     request
         .headers_mut()
         .append(COOKIE, HeaderValue::from_static("a=1; b=2"));
-    let (status, body) = drain(submit(srv.addr, request)?);
+    let StatusBody { status, body } = drain(submit(srv.addr, request)?);
     assert_eq!((status, body.as_str()), (200, "1,2,a=1; b=2"));
     Ok(())
 }
@@ -903,7 +946,7 @@ fn per_line_repeats_fold_for_superglobals_classic() -> anyhow::Result<()> {
             .headers_mut()
             .append(name, HeaderValue::from_static(value));
     }
-    let (status, body) = drain(submit(srv.addr, request)?);
+    let StatusBody { status, body } = drain(submit(srv.addr, request)?);
     assert_eq!(
         (status, body.as_str()),
         (200, "1,2,a=1; b=2,1.2.3.4, 5.6.7.8,Bearer one")
@@ -943,7 +986,7 @@ fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     request
         .headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_bytes(&ctype).unwrap());
-    let (status, body) = drain(submit(srv.addr, request)?);
+    let StatusBody { status, body } = drain(submit(srv.addr, request)?);
     srv.stop();
     assert_upload_and_cleanup(status, &body);
     Ok(())
@@ -960,5 +1003,110 @@ fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<
     assert_eq!(resp.header("X-Keep").as_deref(), Some("kept"));
     assert!(resp.header("Content Type").is_none());
     assert!(resp.header("X-Ctl").is_none());
+    Ok(())
+}
+
+/// Bodies reach $_POST and php://input whole in worker mode without a temp directory; post_max_size refuses $_POST only.
+#[test]
+fn request_bodies_worker() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        content_type: Option<&'static str>,
+        body: Vec<u8>,
+        ini: &'static str,
+        /// count($_POST).
+        post_count: usize,
+        /// The last value of $_POST, `-` when it is empty.
+        post_last: &'static str,
+        refused: bool,
+    }
+    // The body stays off the disk: an unwritable temp directory must not discard it.
+    const NO_TMP: &str = "sys_temp_dir = /nonexistent\nupload_tmp_dir = /nonexistent";
+    // n fields of 240 bytes, then z=end as the last field.
+    let form = |n: usize| -> Vec<u8> {
+        let mut fields: Vec<String> = (0..n)
+            .map(|i| format!("k{i}={}", "v".repeat(240)))
+            .collect();
+        fields.push("z=end".into());
+        fields.join("&").into_bytes()
+    };
+    let cases = [
+        Case {
+            name: "a 64 KiB urlencoded body builds $_POST past the 16 KiB post block",
+            method: Method::POST,
+            content_type: Some("application/x-www-form-urlencoded"),
+            body: form(256),
+            ini: NO_TMP,
+            post_count: 257,
+            post_last: "end",
+            refused: false,
+        },
+        Case {
+            name: "a 1 MiB octet-stream POST reaches php://input whole",
+            method: Method::POST,
+            content_type: Some("application/octet-stream"),
+            body: vec![b'x'; 1 << 20],
+            ini: NO_TMP,
+            post_count: 0,
+            post_last: "-",
+            refused: false,
+        },
+        Case {
+            name: "a 1 MiB PUT without a content type reaches php://input whole",
+            method: Method::PUT,
+            content_type: None,
+            body: vec![b'x'; 1 << 20],
+            ini: NO_TMP,
+            post_count: 0,
+            post_last: "-",
+            refused: false,
+        },
+        Case {
+            name: "post_max_size refuses $_POST and php://input keeps the body",
+            method: Method::POST,
+            content_type: Some("application/x-www-form-urlencoded"),
+            body: form(256),
+            ini: "post_max_size = 16K",
+            post_count: 0,
+            post_last: "-",
+            refused: true,
+        },
+    ];
+
+    let shared = std::fs::read_to_string(fixture("ini/shared/php.ini"))?;
+    for case in cases {
+        let srv = Spawn::http(Mode::Worker, fixture("ported_tests/body-worker.php"))
+            .php_ini(&format!("{shared}\n{}\n", case.ini))
+            .spawn();
+        let mut request = req("/");
+        *request.method_mut() = case.method.clone();
+        if let Some(ct) = case.content_type {
+            request
+                .headers_mut()
+                .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+        }
+        request.body_mut().clone_from(&case.body);
+        let StatusBody { status, body: got } = drain(submit(srv.addr, request)?);
+
+        let expected = format!(
+            "{}|{}|{}|{}",
+            case.post_count,
+            case.post_last,
+            case.body.len(),
+            String::from_utf8_lossy(&case.body)
+        );
+        assert_eq!(status, 200, "{}", case.name);
+        if case.refused {
+            let warning = format!(
+                "POST Content-Length of {} bytes exceeds the limit of 16384 bytes",
+                case.body.len()
+            );
+            assert!(got.contains(&warning), "{}: got {got:.300}", case.name);
+            assert!(got.ends_with(&expected), "{}: got {got:.300}", case.name);
+        } else {
+            assert!(got == expected, "{}: got {got:.300}", case.name);
+        }
+    }
     Ok(())
 }

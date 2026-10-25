@@ -19,11 +19,17 @@ pub(crate) fn set_sendfile_root(root: PathBuf) {
     let _ = SENDFILE_ROOT.set(canonical);
 }
 
+struct FileSlice {
+    file: std::fs::File,
+    /// The slice length in bytes, checked against the file size.
+    len: u64,
+}
+
 fn open_send_file(
     path: &[u8],
     offset: u64,
     length: Option<u64>,
-) -> Result<(std::fs::File, u64), &'static CStr> {
+) -> Result<FileSlice, &'static CStr> {
     use std::os::unix::ffi::OsStrExt;
     let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
     let canonical = std::fs::canonicalize(path).map_err(|_| c"no readable file at the path")?;
@@ -53,7 +59,7 @@ fn open_send_file(
         }
         None => size - offset,
     };
-    Ok((file, len))
+    Ok(FileSlice { file, len })
 }
 
 /// # Safety
@@ -72,10 +78,14 @@ pub(super) unsafe fn send_file_core(
     if st.stage == Stage::Finalized {
         return Verb::Finalized;
     }
-    let (file, len) = match open_send_file(path, offset, length) {
+    let FileSlice { file, len } = match open_send_file(path, offset, length) {
         Ok(opened) => opened,
         Err(msg) => return Verb::FileNotSendable(msg),
     };
+    // The slice length is known here, so the call writes nothing when the slice goes past the declared length.
+    if st.declared_cl.is_some_and(|cl| st.sent_body + len > cl) {
+        return Verb::ContentLengthExceeded;
+    }
     unsafe {
         send_body(st, len, eos, |n| Frame::File {
             file,

@@ -18,8 +18,14 @@ pub struct Captured {
     pub context: String,
 }
 
-/// One `app`-target record left by `\Rapira\log()`: level, message, context JSON.
-pub type AppRecord = (tracing::Level, String, String);
+/// One `app`-target record left by `\Rapira\log()`.
+#[derive(Debug)]
+pub struct AppRecord {
+    pub level: tracing::Level,
+    pub message: String,
+    /// The context as JSON.
+    pub context: String,
+}
 
 /// The `result` field of a record's context as text; a JSON string stays bare.
 fn result_text(ctx: &Value) -> String {
@@ -46,20 +52,35 @@ fn record(line: &str) -> Option<Captured> {
     })
 }
 
+/// The `app` and `php` records of a log.
+pub struct AppLog {
+    /// The `app`-target records.
+    pub records: Vec<AppRecord>,
+    /// The messages of the `php`-target records.
+    pub php_messages: Vec<String>,
+}
+
 /// The `app` records of `log` and the messages of its `php` records.
-pub fn app_records(log: &Path) -> (Vec<AppRecord>, Vec<String>) {
+pub fn app_records(log: &Path) -> AppLog {
     let all = records(log);
     let app = all
         .iter()
         .filter(|c| c.target == "app")
-        .map(|c| (c.level, c.message.clone(), c.context.clone()))
+        .map(|c| AppRecord {
+            level: c.level,
+            message: c.message.clone(),
+            context: c.context.clone(),
+        })
         .collect();
     let php = all
         .into_iter()
         .filter(|c| c.target == "php")
         .map(|c| c.message)
         .collect();
-    (app, php)
+    AppLog {
+        records: app,
+        php_messages: php,
+    }
 }
 
 /// The contexts of the `app` records of `log` named `message`, in log order.

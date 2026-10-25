@@ -1,7 +1,7 @@
 use crate::harness::*;
 use rapira_sapi::plugin::Mode;
 use std::time::Duration;
-use tests::poll;
+use tests::{StatusBody, poll};
 
 #[test]
 fn retained_spl_tempfile_survives_next_request() {
@@ -17,7 +17,7 @@ fn retained_spl_tempfile_survives_next_request() {
         .into_iter()
         .enumerate()
     {
-        let (code, body) = http_post(
+        let StatusBody { status: code, body } = http_post(
             srv.addr,
             "/export",
             b"text/plain",
@@ -33,7 +33,7 @@ fn retained_spl_tempfile_survives_next_request() {
             diagnostics(&srv)
         );
 
-        let (code, body) = http_get(srv.addr, "/export", timeout)
+        let StatusBody { status: code, body } = http_get(srv.addr, "/export", timeout)
             .unwrap_or_else(|e| panic!("GET /export: {e}\n{}", diagnostics(&srv)));
         assert_eq!(code, 200, "\n{}", diagnostics(&srv));
         assert_eq!(
@@ -56,9 +56,64 @@ fn killed_worker_respawns() {
         "respawn to 2 with a fresh pid",
         |p| p.len() == 2 && p.iter().any(|x| !pids0.contains(x)),
     );
+    let crash = format!(
+        "http pool: worker {} killed by signal {}",
+        pids0[0],
+        libc::SIGKILL
+    );
+    assert!(
+        wait_log_contains(&srv, &crash, Duration::from_secs(5)),
+        "no {crash:?} record\n{}",
+        diagnostics(&srv)
+    );
     for _ in 0..5 {
-        let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+        let code = http_get(srv.addr, "/", Duration::from_secs(10))
+            .expect("GET /")
+            .status;
         assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    }
+}
+
+/// Workers ignore SIGUSR1 and SIGUSR2, so `pkill -USR2 rapira` does not stop them. Classic mode starts PHP again for each request, and PHP sets its signal handlers again at each start.
+#[test]
+fn workers_ignore_usr_signals() {
+    struct Case {
+        name: &'static str,
+        signal: i32,
+    }
+    let cases = [
+        Case {
+            name: "SIGUSR1",
+            signal: libc::SIGUSR1,
+        },
+        Case {
+            name: "SIGUSR2",
+            signal: libc::SIGUSR2,
+        },
+    ];
+    let srv = spawn_with_config("classic/cwd.php", 1, "mode = \"classic\"\n");
+    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    for _ in 0..2 {
+        let code = http_get(srv.addr, "/", Duration::from_secs(10))
+            .expect("GET /")
+            .status;
+        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    }
+    for case in cases {
+        signal(pid, case.signal);
+        // A worker that the signal stops exits in a few milliseconds.
+        std::thread::sleep(Duration::from_millis(200));
+        let code = http_get(srv.addr, "/", Duration::from_secs(10))
+            .unwrap_or_else(|e| panic!("{}: GET /: {e}\n{}", case.name, diagnostics(&srv)))
+            .status;
+        assert_eq!(code, 200, "{}\n{}", case.name, diagnostics(&srv));
+        assert_eq!(
+            worker_pids(srv.pid()),
+            [pid],
+            "{}: the worker must survive\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
     }
 }
 
@@ -82,7 +137,9 @@ fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
 fn sigquit_master_graceful() {
     let mut srv = spawn_with_config("shared/echo-worker.php", 2, "");
     let pids = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET /")
+        .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     signal(srv.pid(), libc::SIGQUIT);
     let status = srv.wait_exit(STOP_BUDGET);
@@ -181,7 +238,9 @@ const WORKER_EXIT_DRAINED: i32 = 0;
 fn killed_master_leaves_workers_to_drain() {
     let mut srv = spawn_with_config("shared/echo-worker.php", 2, "");
     let pids = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET /")
+        .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 
     kill_master_as_subreaper(&mut srv);
@@ -202,7 +261,7 @@ fn max_requests_recycles() {
     let pids0 = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
     let pid0 = pids0[0];
     for _ in 0..40 {
-        let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10))
+        let code = http_get(srv.addr, "/", Duration::from_secs(10))
             .or_else(|e| {
                 if e.kind() == std::io::ErrorKind::UnexpectedEof {
                     http_get(srv.addr, "/", Duration::from_secs(10))
@@ -210,7 +269,8 @@ fn max_requests_recycles() {
                     Err(e)
                 }
             })
-            .expect("GET / (after one responseless-close retry)");
+            .expect("GET / (after one responseless-close retry)")
+            .status;
         assert_eq!(
             code,
             200,
@@ -234,7 +294,9 @@ fn request_timeout_kills_and_replaces_worker() {
         "request_terminate_timeout_secs = 2\n",
     );
     let pids0 = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET /")
+        .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     let hung = http_get(srv.addr, "/?hang=1", Duration::from_secs(15));
     assert!(
@@ -248,14 +310,17 @@ fn request_timeout_kills_and_replaces_worker() {
         "worker replaced after timeout kill",
         |p| p.len() == 1 && p[0] != pids0[0],
     );
-    let (code, _) = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET / after kill");
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET / after kill")
+        .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 }
 
 /// A top-level `[pool]` table is a parse error: the pool belongs under `[http.pool]`.
 #[test]
 fn a_top_level_pool_table_refuses_to_boot() {
-    let (status, log) = spawn_boot_failure("shared/echo-worker.php", "[pool]\nprocesses = 1\n");
+    let Exited { status, log } =
+        spawn_boot_failure("shared/echo-worker.php", "[pool]\nprocesses = 1\n");
     assert_eq!(status.code(), Some(1), "\n{log}");
     assert!(log.contains("parsing config file"), "\n{log}");
     assert!(log.contains("unknown field `pool`"), "\n{log}");
@@ -264,7 +329,7 @@ fn a_top_level_pool_table_refuses_to_boot() {
 /// The entrypoint is fixed for the pool's lifetime, so the master proves it is readable at boot.
 #[test]
 fn a_missing_entrypoint_refuses_to_boot() {
-    let (status, log) = spawn_boot_failure_with_entrypoint("no-such-entrypoint.php");
+    let Exited { status, log } = spawn_boot_failure_with_entrypoint("no-such-entrypoint.php");
     assert_eq!(status.code(), Some(1), "\n{log}");
     assert!(log.contains("http.pool.entrypoint"), "\n{log}");
     assert!(log.contains("no-such-entrypoint.php"), "\n{log}");
@@ -283,7 +348,7 @@ fn an_unreadable_entrypoint_refuses_to_boot() {
         let _ = std::fs::remove_dir_all(&dir);
         return;
     }
-    let (status, log) = spawn_boot_failure_with_entrypoint(&script.display().to_string());
+    let Exited { status, log } = spawn_boot_failure_with_entrypoint(&script.display().to_string());
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(status.code(), Some(1), "\n{log}");
     assert!(log.contains("http.pool.entrypoint"), "\n{log}");
@@ -329,7 +394,7 @@ fn a_worker_that_never_boots_next_to_a_serving_worker_keeps_the_master_up() {
         "the master exited: {status:?}\n{}",
         diagnostics(&srv)
     );
-    let (code, body) =
+    let StatusBody { status: code, body } =
         http_get(observability, "/readyz", Duration::from_secs(10)).expect("GET /readyz");
     assert_eq!(
         (code, body.as_slice()),
@@ -355,7 +420,7 @@ fn worker_bootstrap_that_never_serves_failboots() {
     assert_exit_code(Some(status), MASTER_EXIT_FAILBOOT, &srv);
 }
 
-/// A client that walks away mid-handler must not take the worker down: the abort recycles the cycle and the next request is served.
+/// A client that walks away mid-handler must not take the worker down: the abort ends only that unit, and the next request is served.
 #[test]
 fn worker_survives_client_leaving() {
     let srv = spawn_with_config("lifecycle/hold-worker.php", 1, "mode = \"worker\"\n");
@@ -369,7 +434,8 @@ fn worker_survives_client_leaving() {
     );
     c.leave();
 
-    let (code, body) = http_get(srv.addr, "/?probe=1", Duration::from_secs(10)).expect("GET");
+    let StatusBody { status: code, body } =
+        http_get(srv.addr, "/?probe=1", Duration::from_secs(10)).expect("GET");
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert_eq!(body, b"ok", "\n{}", diagnostics(&srv));
 }
@@ -387,7 +453,7 @@ fn cancelled_exchange_is_discarded_by_next_receive() {
     client
         .send(b"GET /events HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send /events");
-    let (status, fields) = client
+    let Head { status, fields } = client
         .read_head(BOOT)
         .unwrap_or_else(|e| panic!("/events head: {e}\n{}", diagnostics(&srv)));
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
@@ -404,7 +470,7 @@ fn cancelled_exchange_is_discarded_by_next_receive() {
         .unwrap_or_else(|e| panic!("/events body: {e}\n{}", diagnostics(&srv)));
     client.leave();
 
-    let (status, body) = http_get(srv.addr, "/next", BOOT)
+    let StatusBody { status, body } = http_get(srv.addr, "/next", BOOT)
         .unwrap_or_else(|e| panic!("GET /next: {e}\n{}", diagnostics(&srv)));
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     assert_eq!(
@@ -429,7 +495,7 @@ fn repeated_request_fields_reach_php_combined() {
         "mode = \"worker\"\n",
     );
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-    let (code, body) = http_get_with_headers(
+    let StatusBody { status: code, body } = http_get_with_headers(
         srv.addr,
         "/",
         &[
@@ -459,7 +525,7 @@ fn alias_names_never_reach_a_cgi_variable() {
         "mode = \"worker\"\n",
     );
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-    let (code, body) = http_get_with_headers(
+    let StatusBody { status: code, body } = http_get_with_headers(
         srv.addr,
         "/",
         &[
@@ -488,22 +554,24 @@ fn reject_policy_answers_400_for_an_alias_name() {
     );
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
-    let (code, _) = http_get_with_headers(
+    let code = http_get_with_headers(
         srv.addr,
         "/",
         &[("X_Forwarded_For", "1.2.3.4")],
         Duration::from_secs(10),
     )
-    .expect("GET / with an alias name");
+    .expect("GET / with an alias name")
+    .status;
     assert_eq!(code, 400, "\n{}", diagnostics(&srv));
 
-    let (code, _) = http_get_with_headers(
+    let code = http_get_with_headers(
         srv.addr,
         "/",
         &[("X-Forwarded-For", "203.0.113.7")],
         Duration::from_secs(10),
     )
-    .expect("GET / with a safe name");
+    .expect("GET / with a safe name")
+    .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 }
 
@@ -514,13 +582,14 @@ fn a_second_host_field_line_answers_400() {
     let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
-    let (code, _) = http_get_with_headers(
+    let code = http_get_with_headers(
         srv.addr,
         "/",
         &[("Host", "evil.example")],
         Duration::from_secs(10),
     )
-    .expect("GET / with two Host field lines");
+    .expect("GET / with two Host field lines")
+    .status;
     assert_eq!(code, 400, "\n{}", diagnostics(&srv));
 }
 
@@ -566,7 +635,10 @@ fn chunked_body_over_the_cap_answers_413() {
             break;
         }
     }
-    let (status, _) = c.read_head(Duration::from_secs(10)).expect("413 head");
+    let status = c
+        .read_head(Duration::from_secs(10))
+        .expect("413 head")
+        .status;
     assert_eq!(status, 413, "\n{}", diagnostics(&srv));
 }
 
@@ -582,7 +654,7 @@ fn chunked_body_under_the_cap_is_served() {
     )
     .expect("head");
     c.send(b"5\r\nhello\r\n0\r\n\r\n").expect("body");
-    let (status, _) = c.read_head(Duration::from_secs(10)).expect("head");
+    let status = c.read_head(Duration::from_secs(10)).expect("head").status;
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     c.read_body_until(b"ok", Duration::from_secs(10))
         .expect("body");
@@ -597,10 +669,16 @@ fn expect_100_continue_gets_the_interim_then_the_response() {
     let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
     c.send(b"POST / HTTP/1.1\r\nHost: e2e\r\nExpect: 100-continue\r\nContent-Length: 5\r\nConnection: close\r\n\r\n")
         .expect("head");
-    let (status, _) = c.read_head(Duration::from_secs(10)).expect("interim head");
+    let status = c
+        .read_head(Duration::from_secs(10))
+        .expect("interim head")
+        .status;
     assert_eq!(status, 100, "\n{}", diagnostics(&srv));
     c.send(b"hello").expect("body");
-    let (status, _) = c.read_head(Duration::from_secs(10)).expect("final head");
+    let status = c
+        .read_head(Duration::from_secs(10))
+        .expect("final head")
+        .status;
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
 }
 
@@ -615,9 +693,10 @@ fn expect_100_continue_is_skipped_when_the_request_is_refused() {
         b"POST / HTTP/1.1\r\nHost: e2e\r\nExpect: 100-continue\r\nContent-Length: 2097152\r\n\r\n",
     )
     .expect("head");
-    let (status, _) = c
+    let status = c
         .read_head(Duration::from_secs(10))
-        .expect("direct refusal");
+        .expect("direct refusal")
+        .status;
     assert_eq!(
         status,
         413,
@@ -684,7 +763,7 @@ fn dispatcher_request_fidelity_over_the_wire() {
     let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
 
     let before = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs_f64();
-    let (code, body) = http_get_with_headers(
+    let StatusBody { status: code, body } = http_get_with_headers(
         srv.addr,
         "/?probe=headers",
         &[
@@ -701,7 +780,7 @@ fn dispatcher_request_fidelity_over_the_wire() {
         "x-probe=one|two\nx_forwarded_for=1.2.3.4"
     );
 
-    let (code, body) =
+    let StatusBody { status: code, body } =
         http_get(srv.addr, "/?probe=received", Duration::from_secs(10)).expect("GET received");
     assert_eq!(code, 200);
     let after = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs_f64();
@@ -714,16 +793,17 @@ fn dispatcher_request_fidelity_over_the_wire() {
         "receivedAt {received} outside [{before}, {after}]"
     );
 
-    let (code, _) = http_raw(
+    let code = http_raw(
         srv.addr,
         b"GET / HTTP/1.1\r\nConnection: close\r\n\r\n",
         Duration::from_secs(10),
     )
-    .expect("Host-less request");
+    .expect("Host-less request")
+    .status;
     assert_eq!(code, 400, "missing Host on HTTP/1.1 must answer 400");
 }
 
-/// A PHP-written head crosses the wire: the status line, one field line per list value, the plugin's own framing, and a HEAD carrying neither body nor content-length.
+/// A PHP-written head crosses the wire: the status line, one field line per list value, and the plugin's own framing.
 /// RFC 9110 §8.6: https://www.rfc-editor.org/rfc/rfc9110#section-8.6
 #[test]
 fn dispatcher_write_head_reaches_the_wire() {
@@ -751,30 +831,64 @@ fn dispatcher_write_head_reaches_the_wire() {
         diagnostics(&srv)
     );
     assert!(text.ends_with("body"), "{text:?}\n{}", diagnostics(&srv));
+}
 
-    let raw = http_raw_bytes(
-        srv.addr,
-        b"HEAD /?probe=head HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
-        Duration::from_secs(10),
-    )
-    .expect("HEAD head probe");
-    let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
-    assert!(
-        text.starts_with("http/1.1 201"),
-        "got {:?}\n{}",
-        text.lines().next().unwrap_or(""),
-        diagnostics(&srv)
-    );
-    assert!(
-        !text.contains("\r\ncontent-length:"),
-        "no content-length on a HEAD response\n{}",
-        diagnostics(&srv)
-    );
-    assert!(
-        text.ends_with("\r\n\r\n"),
-        "no body bytes on a HEAD response\n{}",
-        diagnostics(&srv)
-    );
+/// A HEAD response keeps the content-length that the app declared for the GET response, and carries no body.
+/// RFC 9110 §9.3.2: https://www.rfc-editor.org/rfc/rfc9110#section-9.3.2
+#[test]
+fn head_keeps_the_declared_content_length() {
+    struct Case {
+        name: &'static str,
+        fixture: &'static str,
+        config: &'static str,
+        status: &'static str,
+        content_length: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "dispatcher writeHead",
+            fixture: "lifecycle/fidelity-worker.php",
+            config: "",
+            status: "http/1.1 201",
+            content_length: "999",
+        },
+        Case {
+            name: "classic header()",
+            fixture: "lifecycle/head-length-classic.php",
+            config: "mode = \"classic\"\n",
+            status: "http/1.1 200",
+            content_length: "11",
+        },
+    ];
+    for case in cases {
+        let srv = spawn_with_config(case.fixture, 1, case.config);
+        let raw = http_raw_bytes(
+            srv.addr,
+            b"HEAD /?probe=head HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+            Duration::from_secs(10),
+        )
+        .unwrap_or_else(|e| panic!("{}: HEAD: {e}\n{}", case.name, diagnostics(&srv)));
+        let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
+        assert!(
+            text.starts_with(case.status),
+            "{}: got {:?}\n{}",
+            case.name,
+            text.lines().next().unwrap_or(""),
+            diagnostics(&srv)
+        );
+        assert!(
+            text.contains(&format!("\r\ncontent-length: {}\r\n", case.content_length)),
+            "{}: the declared content-length must stay on HEAD: {text:?}\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        assert!(
+            text.ends_with("\r\n\r\n"),
+            "{}: no body bytes on a HEAD response: {text:?}\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+    }
 }
 
 /// RFC 9112 §3.2.2: for an absolute-form target the origin server must ignore Host and use the target's host information.
@@ -830,7 +944,10 @@ fn dispatcher_multipart_over_the_wire() {
     );
     body.extend_from_slice(b"--RAP\xff\xfeIRA\r\ncontent-disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\r\nPAYLOAD\r\n");
     body.extend_from_slice(b"--RAP\xff\xfeIRA--");
-    let (code, resp) = http_post(
+    let StatusBody {
+        status: code,
+        body: resp,
+    } = http_post(
         srv.addr,
         "/?probe=multipart",
         &ct,
@@ -855,14 +972,15 @@ fn dispatcher_multipart_over_the_wire() {
         "spool file must be gone after the response"
     );
 
-    let (code, _) = http_post(
+    let code = http_post(
         srv.addr,
         "/?probe=multipart",
         b"multipart/form-data; boundary=B",
         b"no boundary line at all",
         Duration::from_secs(10),
     )
-    .expect("malformed POST");
+    .expect("malformed POST")
+    .status;
     assert_eq!(code, 400, "malformed multipart must answer 400");
 
     let mut big = Vec::new();
@@ -871,13 +989,14 @@ fn dispatcher_multipart_over_the_wire() {
     );
     big.extend(std::iter::repeat_n(b'x', 2 * 1024 * 1024));
     big.extend_from_slice(b"\r\n--B--");
-    let (code, _) = http_post(
+    let code = http_post(
         srv.addr,
         "/?probe=multipart",
         b"multipart/form-data; boundary=B",
         &big,
         Duration::from_secs(10),
     )
-    .expect("over-limit POST");
+    .expect("over-limit POST")
+    .status;
     assert_eq!(code, 413, "over-limit file part must answer 413");
 }

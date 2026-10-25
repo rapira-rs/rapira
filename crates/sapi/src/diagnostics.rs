@@ -23,8 +23,15 @@ macro_rules! event_at {
 }
 pub(crate) use event_at;
 
+/// The log level and the PHP message label of one error type.
+pub(crate) struct Severity {
+    pub level: tracing::Level,
+    /// The prefix PHP prints before the message, for example "Fatal error".
+    pub label: &'static str,
+}
+
 /// A masked non-fatal drops to `Trace` rather than vanishing; fatals ignore the mask. https://www.php.net/manual/en/function.error-reporting.php
-pub(crate) fn error_type_to_level(err_type: c_int, mask: c_int) -> (tracing::Level, &'static str) {
+pub(crate) fn error_type_to_level(err_type: c_int, mask: c_int) -> Severity {
     let (err_type, mask) = (err_type as u32, mask as u32);
     let (level, label) = match err_type {
         t if t & E_FATAL_ERRORS != 0 => (tracing::Level::ERROR, "Fatal error"),
@@ -34,9 +41,12 @@ pub(crate) fn error_type_to_level(err_type: c_int, mask: c_int) -> (tracing::Lev
         _ => (tracing::Level::WARN, "Unknown error"),
     };
     if err_type != 0 && err_type & E_FATAL_ERRORS == 0 && err_type & (mask | E_CORE) == 0 {
-        return (tracing::Level::TRACE, label);
+        return Severity {
+            level: tracing::Level::TRACE,
+            label,
+        };
     }
-    (level, label)
+    Severity { level, label }
 }
 
 /// Syslog priorities LOG_EMERG(0)..LOG_DEBUG(7); php-src reports deprecations at LOG_INFO (main/main.c:1443-1446).
@@ -58,48 +68,50 @@ mod tests {
     // E_ERROR is outside the bindgen allowlist; it is the lowest bit of php-src's fatal group.
     const E_ERROR: u32 = 1 << E_FATAL_ERRORS.trailing_zeros();
 
-    fn level_of(err_type: u32, mask: u32) -> (Level, &'static str) {
+    fn level_of(err_type: u32, mask: u32) -> Severity {
         error_type_to_level(err_type as c_int, mask as c_int)
     }
 
     /// The fatal arm matches before the warning arm, and the mask clause skips fatals.
     #[test]
     fn fatals_outrank_a_warning_bit_and_ignore_the_mask() {
-        assert_eq!(
-            level_of(E_ERROR | E_WARNING, E_WARNING),
-            (Level::ERROR, "Fatal error")
-        );
-        assert_eq!(level_of(E_ERROR, 0), (Level::ERROR, "Fatal error"));
+        let Severity { level, label } = level_of(E_ERROR | E_WARNING, E_WARNING);
+        assert_eq!((level, label), (Level::ERROR, "Fatal error"));
+        let Severity { level, label } = level_of(E_ERROR, 0);
+        assert_eq!((level, label), (Level::ERROR, "Fatal error"));
     }
 
     /// A masked non-fatal drops to `Trace` with its label intact.
     #[test]
     fn a_masked_warning_drops_to_trace_with_its_label() {
-        assert_eq!(level_of(E_USER_WARNING, 0), (Level::TRACE, "Warning"));
-        assert_eq!(
-            level_of(E_USER_WARNING, E_USER_WARNING),
-            (Level::WARN, "Warning")
-        );
+        let Severity { level, label } = level_of(E_USER_WARNING, 0);
+        assert_eq!((level, label), (Level::TRACE, "Warning"));
+        let Severity { level, label } = level_of(E_USER_WARNING, E_USER_WARNING);
+        assert_eq!((level, label), (Level::WARN, "Warning"));
     }
 
     /// `mask | E_CORE` exempts core diagnostics, which the sampled `EG(error_reporting)` does not describe.
     #[test]
     fn core_warnings_survive_an_empty_mask() {
-        assert_eq!(level_of(E_CORE_WARNING, 0), (Level::WARN, "Warning"));
+        let Severity { level, label } = level_of(E_CORE_WARNING, 0);
+        assert_eq!((level, label), (Level::WARN, "Warning"));
     }
 
     /// A type no arm recognizes reports at `Warn` and is still subject to the mask.
     #[test]
     fn an_unknown_error_type_still_obeys_the_mask() {
         let unknown = 1 << 20;
-        assert_eq!(level_of(unknown, unknown), (Level::WARN, "Unknown error"));
-        assert_eq!(level_of(unknown, 0), (Level::TRACE, "Unknown error"));
+        let Severity { level, label } = level_of(unknown, unknown);
+        assert_eq!((level, label), (Level::WARN, "Unknown error"));
+        let Severity { level, label } = level_of(unknown, 0);
+        assert_eq!((level, label), (Level::TRACE, "Unknown error"));
     }
 
     /// Without the `err_type != 0` guard, a zero type would test as masked and report at `Trace`.
     #[test]
     fn a_zero_error_type_reports_unknown_at_warn() {
-        assert_eq!(level_of(0, 0), (Level::WARN, "Unknown error"));
+        let Severity { level, label } = level_of(0, 0);
+        assert_eq!((level, label), (Level::WARN, "Unknown error"));
     }
 
     /// The boundaries are a contract with `[log] level`; LOG_INFO lands below `Info` because php-src reports deprecations there.
@@ -129,7 +141,7 @@ mod tests {
     /// Both tables sort a deprecation below `Info`, so `[log] level = "info"` does not surface deprecations.
     #[test]
     fn both_paths_sort_deprecations_below_info() {
-        let (level, label) = level_of(E_DEPRECATED, E_DEPRECATED);
+        let Severity { level, label } = level_of(E_DEPRECATED, E_DEPRECATED);
         assert_eq!(label, "Deprecated");
         assert!(level > Level::INFO);
         assert!(syslog_to_level(6) > Level::INFO);

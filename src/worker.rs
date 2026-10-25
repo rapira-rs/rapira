@@ -4,9 +4,9 @@ use std::time::Duration;
 
 use rapira_config::PoolSettings;
 use rapira_master::{WORKER_EXIT_RECYCLE, WORKER_EXIT_UNHEALTHY, WorkerEnv};
-use rapira_sapi::Rapira;
 use rapira_sapi::plugin::{Plugin, Stopper, run_plugin};
 use rapira_sapi::quota::{STOP_QUOTA, STOP_REASON, STOP_UNHEALTHY};
+use rapira_sapi::{Rapira, StartedWorker};
 
 /// Jitter avoids lockstep recycling. The hash mixes in the pid because every child inherits the same seed from the pre-fork master.
 fn effective_quota(max_requests: u64) -> u64 {
@@ -49,7 +49,7 @@ pub fn worker_body(
         return WORKER_EXIT_UNHEALTHY;
     }
     let stopper = Stopper::default();
-    let (rapira, sink) = Rapira::start_worker(
+    let StartedWorker { rapira, sink } = Rapira::start_worker(
         mode,
         entrypoint,
         effective_quota(max_requests),
@@ -57,6 +57,14 @@ pub fn worker_body(
         stopper.clone(),
         plugin.dispatcher(),
     );
+    // The max_execution_time timer sends SIGPROF to the process. Threads started from here inherit this block, so only the PHP thread gets the signal.
+    // SAFETY: set is a live sigset_t.
+    unsafe {
+        let mut set: libc::sigset_t = std::mem::zeroed();
+        libc::sigemptyset(&mut set);
+        libc::sigaddset(&mut set, libc::SIGPROF);
+        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+    }
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 

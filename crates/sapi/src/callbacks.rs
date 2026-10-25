@@ -6,9 +6,9 @@ use ::http::header::{
     AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, FROM, HeaderMap, HeaderName, HeaderValue,
     PROXY_AUTHORIZATION, REFERER,
 };
-use core::fmt::NumBuffer;
 use core::slice;
 use std::ffi::CStr;
+use std::fmt::NumBuffer;
 use std::io::Read;
 use std::mem::ManuallyDrop;
 use std::os::raw::{c_char, c_int};
@@ -247,6 +247,20 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
         };
         let dst = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), count) };
         reader.read(dst).unwrap_or(0)
+    })
+}
+/// The whole raw body of the bound request, for the post readers in module.c; 0 for a host-parsed multipart or empty body.
+/// # Safety
+/// `body` must point at a writable `*const c_char`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_raw_body(body: *mut *const c_char) -> usize {
+    with_ctx(0, |ctx| {
+        let crate::types::Body::Raw(reader) = &ctx.req.body else {
+            return 0;
+        };
+        let bytes = reader.get_ref();
+        unsafe { *body = bytes.as_ptr().cast() };
+        bytes.len()
     })
 }
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {

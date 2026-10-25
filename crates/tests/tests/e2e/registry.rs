@@ -1,6 +1,6 @@
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{drain, fixture, req};
+use tests::{StatusBody, drain, fixture, req};
 
 use crate::harness::Spawn;
 
@@ -8,7 +8,7 @@ use crate::harness::Spawn;
 #[test]
 fn every_plugin_class_exists_after_boot_with_both_parts() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("registry/classes.php")).spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     assert_eq!(status, 200, "body: {body:?}");
     for class in [
         "Rapira\\Work",

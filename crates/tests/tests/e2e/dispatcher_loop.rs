@@ -10,7 +10,7 @@ use http::{HeaderValue, Method, Version};
 use rapira_net::ListenAddr;
 use rapira_sapi::{Frame, plugin::Mode};
 use tests::wire::submit;
-use tests::{drain, drain_resp, fixture, poll, req, server_log};
+use tests::{StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::{
     Server, Spawn, parse_status_and_body, scratch_dir, slot_line, wait_log_contains,
@@ -19,19 +19,25 @@ use crate::harness::{
 /// Read budget of a raw socket exchange.
 const READ: Duration = Duration::from_secs(10);
 
-fn verbs_probe(query: &str) -> anyhow::Result<(u16, String)> {
+fn verbs_probe(query: &str) -> anyhow::Result<StatusBody<String>> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php")).spawn();
     Ok(drain(submit(srv.addr, req(query))?))
 }
 
-/// Writes `request` on `stream` and reads the response to EOF; returns the status and the body.
+/// Writes `request` on `stream` and reads the response to EOF.
 /// The request must end the connection (HTTP/1.0, or `connection: close`), and the response must be length-framed.
-fn raw_exchange(mut stream: impl Read + Write, request: &[u8]) -> anyhow::Result<(u16, String)> {
+fn raw_exchange(
+    mut stream: impl Read + Write,
+    request: &[u8],
+) -> anyhow::Result<StatusBody<String>> {
     stream.write_all(request)?;
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw)?;
-    let (status, body) = parse_status_and_body(&raw)?;
-    Ok((status, String::from_utf8_lossy(body).into_owned()))
+    let StatusBody { status, body } = parse_status_and_body(&raw)?;
+    Ok(StatusBody {
+        status,
+        body: String::from_utf8_lossy(body).into_owned(),
+    })
 }
 
 /// Two sequential units through the echo loop, then the graceful stop must land as `ClosedException` in the parked `receive()`.
@@ -98,7 +104,7 @@ fn recv_probes_on_an_empty_channel() -> anyhow::Result<()> {
 /// A `writeBody()` with no prior `writeHead()` commits an implicit 200.
 #[test]
 fn implicit_200_on_first_write_body() -> anyhow::Result<()> {
-    let (status, body) = verbs_probe("/")?;
+    let StatusBody { status, body } = verbs_probe("/")?;
     assert_eq!((status, body.as_str()), (200, "state=false"));
     Ok(())
 }
@@ -111,7 +117,7 @@ fn state_verbs_report_a_live_unit_inside_a_method() -> anyhow::Result<()> {
         fixture("dispatcher/method-exchange-worker.php"),
     )
     .spawn();
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "cancelled=false finalized=false")
@@ -126,7 +132,7 @@ fn double_finalize_throws_already_finalized() -> anyhow::Result<()> {
         .json_log()
         .spawn();
 
-    let (status, body) = drain(submit(srv.addr, req("/?probe=double-finalize"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/?probe=double-finalize"))?);
     assert_eq!((status, body.as_str()), (200, "first"));
 
     srv.stop();
@@ -144,7 +150,7 @@ fn double_finalize_throws_already_finalized() -> anyhow::Result<()> {
 /// A second `writeHead()` after the final head throws `HeadAlreadyWrittenError`; the first head stands.
 #[test]
 fn double_head_throws_head_already_written() -> anyhow::Result<()> {
-    let (status, body) = verbs_probe("/?probe=double-head")?;
+    let StatusBody { status, body } = verbs_probe("/?probe=double-head")?;
     assert_eq!(status, 201, "the first head must stand");
     assert_eq!(
         body,
@@ -156,7 +162,7 @@ fn double_head_throws_head_already_written() -> anyhow::Result<()> {
 /// Out-of-range statuses and malformed header names, values, and shapes raise `\ValueError` before anything reaches the plugin.
 #[test]
 fn status_range_and_header_shape_value_errors() -> anyhow::Result<()> {
-    let (status, body) = verbs_probe("/?probe=value-errors")?;
+    let StatusBody { status, body } = verbs_probe("/?probe=value-errors")?;
     assert_eq!(
         (status, body.as_str()),
         (200, "range:99;range:600;name;value;shape;intkey;item")
@@ -167,7 +173,7 @@ fn status_range_and_header_shape_value_errors() -> anyhow::Result<()> {
 /// An empty chunk without eos must not commit the implicit 200 and lock out a later `writeHead()`.
 #[test]
 fn empty_non_eos_chunk_does_nothing() -> anyhow::Result<()> {
-    let (status, body) = verbs_probe("/?probe=empty-chunk")?;
+    let StatusBody { status, body } = verbs_probe("/?probe=empty-chunk")?;
     assert_eq!((status, body.as_str()), (404, "body"));
     Ok(())
 }
@@ -178,7 +184,7 @@ fn verb_edges_throw_their_documented_classes() -> anyhow::Result<()> {
     let mut srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php"))
         .json_log()
         .spawn();
-    let (status, body) = drain(submit(srv.addr, req("/?probe=verb-edges"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/?probe=verb-edges"))?);
     assert_eq!((status, body.as_str()), (200, "try-busy;neg-timeout"));
     srv.stop();
 
@@ -197,16 +203,16 @@ fn verb_edges_throw_their_documented_classes() -> anyhow::Result<()> {
 fn try_and_timed_receive_serve_units() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/poll-worker.php")).spawn();
 
-    let (status, body) = drain(submit(srv.addr, req("/one"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/one"))?);
     assert_eq!((status, body.as_str()), (200, "served-by=try target=/one"));
 
-    let (status, body) = drain(submit(srv.addr, req("/two?mode=timed"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/two?mode=timed"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "served-by=try target=/two?mode=timed")
     );
 
-    let (status, body) = drain(submit(srv.addr, req("/three"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/three"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "served-by=timed target=/three")
@@ -244,10 +250,10 @@ fn writehead_101_commits_as_final() -> anyhow::Result<()> {
 /// Buffered chunks concatenate and the first commits the implicit 200: a later `writeHead()` must throw instead of restamping the status.
 #[test]
 fn chunked_body_buffers_and_locks_the_head() -> anyhow::Result<()> {
-    let (status, body) = verbs_probe("/?probe=chunks")?;
+    let StatusBody { status, body } = verbs_probe("/?probe=chunks")?;
     assert_eq!((status, body.as_str()), (200, "one-mid=false"));
 
-    let (status, body) = verbs_probe("/?probe=head-after-chunk")?;
+    let StatusBody { status, body } = verbs_probe("/?probe=head-after-chunk")?;
     assert_eq!((status, body.as_str()), (200, "partial|locked"));
     Ok(())
 }
@@ -270,7 +276,7 @@ fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
 /// `receive()` while a unit is unfinalized throws the single-flight `\Error` instead of deadlocking the worker on itself.
 #[test]
 fn receive_while_unfinalized_throws() -> anyhow::Result<()> {
-    let (status, body) = verbs_probe("/?probe=busy")?;
+    let StatusBody { status, body } = verbs_probe("/?probe=busy")?;
     assert_eq!(status, 200);
     assert!(
         body.contains("busy:receive() while a Rapira\\Http\\Exchange is unfinalized"),
@@ -296,7 +302,7 @@ fn lost_exchange_fails_that_unit_only() -> anyhow::Result<()> {
         "a lost unit is failed by the plugin with a complete 500"
     );
 
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "state=false"),
@@ -317,7 +323,7 @@ fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
         "a cycle-death loss must get no head from PHP"
     );
 
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "state=false"),
@@ -336,17 +342,23 @@ fn lost_mid_stream_exchange_truncates() -> anyhow::Result<()> {
     assert_eq!(resp.body, b"partial");
     assert!(resp.truncated, "the cut must be visible to the client");
 
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     assert_eq!((status, body.as_str()), (200, "state=false"));
     Ok(())
 }
 
 const BOUNDARY: &str = "rapira-test-boundary";
 
-/// A POST of a multipart/form-data body; each part is its header lines and its content.
-fn multipart(uri: &str, parts: &[(&str, &str)]) -> http::Request<Vec<u8>> {
+/// One part of a multipart/form-data body: its header lines and its content.
+struct Part<'a> {
+    headers: &'a str,
+    content: &'a str,
+}
+
+/// A POST of a multipart/form-data body.
+fn multipart(uri: &str, parts: &[Part<'_>]) -> http::Request<Vec<u8>> {
     let mut body = String::new();
-    for (headers, content) in parts {
+    for Part { headers, content } in parts {
         body += &format!("--{BOUNDARY}\r\n{headers}\r\n\r\n{content}\r\n");
     }
     body += &format!("--{BOUNDARY}--\r\n");
@@ -396,12 +408,12 @@ fn lost_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
 
     let rq = multipart(
         "/?probe=lose",
-        &[(
-            "content-disposition: form-data; name=\"f\"; filename=\"a.bin\"",
-            "PAYLOAD",
-        )],
+        &[Part {
+            headers: "content-disposition: form-data; name=\"f\"; filename=\"a.bin\"",
+            content: "PAYLOAD",
+        }],
     );
-    let (status, body) = drain(submit(srv.addr, rq)?);
+    let StatusBody { status, body } = drain(submit(srv.addr, rq)?);
     assert_eq!(
         (status, body.as_str()),
         (500, ""),
@@ -420,10 +432,10 @@ fn lost_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
 fn exit_after_serving_recycles_the_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php")).spawn();
 
-    let (status, body) = drain(submit(srv.addr, req("/?probe=exit"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/?probe=exit"))?);
     assert_eq!((status, body.as_str()), (200, "bye"));
 
-    let (status, body) = drain(submit(srv.addr, req("/"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
     assert_eq!(
         (status, body.as_str()),
         (200, "state=false"),
@@ -440,10 +452,10 @@ fn head_and_204_drop_the_body() -> anyhow::Result<()> {
 
     let mut head_rq = req("/");
     *head_rq.method_mut() = Method::HEAD;
-    let (status, _) = drain(submit(srv.addr, head_rq)?);
+    let status = drain(submit(srv.addr, head_rq)?).status;
     assert_eq!(status, 200, "HEAD keeps the GET head");
 
-    let (status, _) = drain(submit(srv.addr, req("/?probe=head204"))?);
+    let status = drain(submit(srv.addr, req("/?probe=head204"))?).status;
     assert_eq!(status, 204);
     Ok(())
 }
@@ -472,7 +484,7 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
          \r\n\
          hello"
     );
-    let (status, body) = raw_exchange(stream, request.as_bytes())?;
+    let StatusBody { status, body } = raw_exchange(stream, request.as_bytes())?;
     assert_eq!(status, 200, "body: {body:?}");
     let target_hex = format!(
         "target-hex={}",
@@ -508,7 +520,7 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
         assert!(body.contains(line), "missing {line:?} in {body:?}");
     }
 
-    let (status, body) = drain(submit(srv.addr, req("/again"))?);
+    let StatusBody { status, body } = drain(submit(srv.addr, req("/again"))?);
     assert_eq!(status, 200, "body: {body:?}");
     assert!(
         body.contains("memo-same=true"),
@@ -525,7 +537,7 @@ fn plugin_stamped_fields_pass_through() -> anyhow::Result<()> {
     let mut rq = req("/p");
     *rq.version_mut() = Version::HTTP_10;
     rq.headers_mut().remove(HOST);
-    let (status, body) = drain(submit(srv.addr, rq)?);
+    let StatusBody { status, body } = drain(submit(srv.addr, rq)?);
     assert_eq!(status, 200);
     let uri = format!("uri=http://{}/p", srv.addr);
     for line in ["protocol=HTTP/1.0", "authority=NULL", &uri] {
@@ -546,7 +558,7 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
     // An unbound client socket, so the server gets no peer path. HTTP/1.0 with no Host takes the `$uri` fallback.
     let stream = UnixStream::connect(&sock)?;
     stream.set_read_timeout(Some(READ))?;
-    let (status, body) = raw_exchange(stream, b"GET / HTTP/1.0\r\n\r\n")?;
+    let StatusBody { status, body } = raw_exchange(stream, b"GET / HTTP/1.0\r\n\r\n")?;
     drop(srv);
     std::fs::remove_file(&sock).ok();
 
@@ -574,7 +586,7 @@ fn uri_synthesis_covers_asterisk_form() -> anyhow::Result<()> {
     *rq.method_mut() = Method::OPTIONS;
     rq.headers_mut()
         .insert(HOST, HeaderValue::from_str(&srv.addr.to_string())?);
-    let (status, body) = drain(submit(srv.addr, rq)?);
+    let StatusBody { status, body } = drain(submit(srv.addr, rq)?);
     assert_eq!(status, 200);
     let uri = format!("uri=http://{}/", srv.addr);
     for line in ["method=OPTIONS", &uri, "target-hex=2a"] {
@@ -591,15 +603,18 @@ fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
     let rq = multipart(
         "/",
         &[
-            ("content-disposition: form-data; name=\"note\"", "hello"),
-            (
-                "content-disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\
-                 content-type: application/octet-stream",
-                "PAYLOAD",
-            ),
+            Part {
+                headers: "content-disposition: form-data; name=\"note\"",
+                content: "hello",
+            },
+            Part {
+                headers: "content-disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\
+                          content-type: application/octet-stream",
+                content: "PAYLOAD",
+            },
         ],
     );
-    let (status, body) = drain(submit(srv.addr, rq)?);
+    let StatusBody { status, body } = drain(submit(srv.addr, rq)?);
     assert_eq!(status, 200, "body: {body:?}");
     for line in [
         "class=Rapira\\Http\\Multipart",
@@ -627,19 +642,25 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     let rq = multipart(
         "/",
         &[
-            ("content-disposition: form-data; name=\"one\"", "1"),
-            ("content-disposition: form-data; name=\"two\"", "22"),
-            (
-                "content-disposition: form-data; name=\"fa\"; filename=\"a.bin\"",
-                "AAA",
-            ),
-            (
-                "content-disposition: form-data; name=\"fb\"; filename=\"b.bin\"",
-                "BBBBB",
-            ),
+            Part {
+                headers: "content-disposition: form-data; name=\"one\"",
+                content: "1",
+            },
+            Part {
+                headers: "content-disposition: form-data; name=\"two\"",
+                content: "22",
+            },
+            Part {
+                headers: "content-disposition: form-data; name=\"fa\"; filename=\"a.bin\"",
+                content: "AAA",
+            },
+            Part {
+                headers: "content-disposition: form-data; name=\"fb\"; filename=\"b.bin\"",
+                content: "BBBBB",
+            },
         ],
     );
-    let (status, body) = drain(submit(srv.addr, rq)?);
+    let StatusBody { status, body } = drain(submit(srv.addr, rq)?);
     assert_eq!(status, 200, "body: {body:?}");
     for line in [
         "counts=2/2",
@@ -658,29 +679,36 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, an empty name is a 400, and a field over the limit after a file part is a 413.
+/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, a file part in a body over 256 KiB (parsed on the blocking pool) reaches PHP, an empty name is a 400, and a field over the limit after a file part is a 413.
 /// No spool file outlives its request, also when a later part rejects the body after a file part was spooled.
 #[test]
 fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
     struct Case<'a> {
         name: &'static str,
-        parts: Vec<(&'static str, &'a str)>,
+        parts: Vec<Part<'a>>,
         status: u16,
         lines: &'static [&'static str],
     }
     // max_field_size_kb = 1, so a field of 1025 bytes is over the limit.
     let long = "x".repeat(1025);
+    let big = "y".repeat(300 << 10);
     let cases = [
         Case {
             name: "file part between two fields",
             parts: vec![
-                ("content-disposition: form-data; name=\"a\"", "one"),
-                (
-                    "content-disposition: form-data; name=\"f\"; filename=\"x.bin\"\r\n\
-                     content-type: application/octet-stream",
-                    "PAYLOAD",
-                ),
-                ("content-disposition: form-data; name=\"b\"", "two"),
+                Part {
+                    headers: "content-disposition: form-data; name=\"a\"",
+                    content: "one",
+                },
+                Part {
+                    headers: "content-disposition: form-data; name=\"f\"; filename=\"x.bin\"\r\n\
+                              content-type: application/octet-stream",
+                    content: "PAYLOAD",
+                },
+                Part {
+                    headers: "content-disposition: form-data; name=\"b\"",
+                    content: "two",
+                },
             ],
             status: 200,
             lines: &[
@@ -694,27 +722,42 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
         },
         Case {
             name: "empty filename",
-            parts: vec![(
-                "content-disposition: form-data; name=\"f\"; filename=\"\"",
-                "",
-            )],
+            parts: vec![Part {
+                headers: "content-disposition: form-data; name=\"f\"; filename=\"\"",
+                content: "",
+            }],
             status: 200,
             lines: &["counts=0/1", "file0=f::0:"],
         },
         Case {
             name: "empty name",
-            parts: vec![("content-disposition: form-data; name=\"\"", "v")],
+            parts: vec![Part {
+                headers: "content-disposition: form-data; name=\"\"",
+                content: "v",
+            }],
             status: 400,
             lines: &[],
         },
         Case {
+            name: "file part in a body over 256 KiB",
+            parts: vec![Part {
+                headers: "content-disposition: form-data; name=\"f\"; filename=\"big.bin\"",
+                content: &big,
+            }],
+            status: 200,
+            lines: &["counts=0/1", "file0=f:big.bin:307200:yyyy"],
+        },
+        Case {
             name: "field over the limit after a file part",
             parts: vec![
-                (
-                    "content-disposition: form-data; name=\"f\"; filename=\"a\"",
-                    "DATA",
-                ),
-                ("content-disposition: form-data; name=\"x\"", &long),
+                Part {
+                    headers: "content-disposition: form-data; name=\"f\"; filename=\"a\"",
+                    content: "DATA",
+                },
+                Part {
+                    headers: "content-disposition: form-data; name=\"x\"",
+                    content: &long,
+                },
             ],
             status: 413,
             lines: &[],
@@ -725,7 +768,7 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
         .http_extra("[http.uploads]\ndir = \"uploads\"\nmax_field_size_kb = 1")
         .spawn();
     for case in cases {
-        let (status, body) = drain(submit(srv.addr, multipart("/", &case.parts))?);
+        let StatusBody { status, body } = drain(submit(srv.addr, multipart("/", &case.parts))?);
         assert_eq!(status, case.status, "{}: {body:?}", case.name);
         for line in case.lines {
             assert!(
@@ -889,7 +932,7 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
                 .append(CONTENT_TYPE, HeaderValue::from_static(line));
         }
         *rq.body_mut() = case.body.clone();
-        let (status, body) = drain(submit(srv.addr, rq)?);
+        let StatusBody { status, body } = drain(submit(srv.addr, rq)?);
         assert_eq!(
             status,
             case.status.unwrap_or(200),
@@ -920,7 +963,7 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
 /// `getInfo()` while handling: the outstanding unit counts as active and was already decremented from `pending` at pull.
 #[test]
 fn get_info_counts_the_outstanding_unit() -> anyhow::Result<()> {
-    let (status, body) = verbs_probe("/?probe=info")?;
+    let StatusBody { status, body } = verbs_probe("/?probe=info")?;
     assert_eq!((status, body.as_str()), (200, "pending=0 active=1"));
     Ok(())
 }
@@ -955,7 +998,7 @@ fn get_info_reports_the_server_identity() -> anyhow::Result<()> {
             .http_extra(case.http_extra)
             .spawn();
         let want_port = case.want_port.unwrap_or(srv.addr.port());
-        let (status, body) = drain(submit(srv.addr, req("/?probe=server"))?);
+        let StatusBody { status, body } = drain(submit(srv.addr, req("/?probe=server"))?);
         assert_eq!(
             (status, body),
             (200, format!("name={} port={want_port}", case.want_name)),
@@ -968,19 +1011,28 @@ fn get_info_reports_the_server_identity() -> anyhow::Result<()> {
 
 // ---- streaming (stream-worker.php): the frame protocol past the buffered one-shot
 
+/// A running pool and the frames of one request to it.
+struct StreamProbe {
+    srv: Server,
+    frames: tokio::sync::mpsc::Receiver<Frame>,
+}
+
 /// A dispatcher pool over stream-worker.php with a JSON log, and the frames of one request to `query`.
-fn stream_probe(query: &str) -> anyhow::Result<(Server, tokio::sync::mpsc::Receiver<Frame>)> {
+fn stream_probe(query: &str) -> anyhow::Result<StreamProbe> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/stream-worker.php"))
         .json_log()
         .spawn();
-    let rx = submit(srv.addr, req(query))?;
-    Ok((srv, rx))
+    let frames = submit(srv.addr, req(query))?;
+    Ok(StreamProbe { srv, frames })
 }
 
 /// `flush()` puts the head on the wire while the body is still 300ms away.
 #[test]
 fn flush_puts_the_head_on_the_wire_before_eos() -> anyhow::Result<()> {
-    let (_srv, mut rx) = stream_probe("/?probe=flush-park")?;
+    let StreamProbe {
+        srv: _srv,
+        frames: mut rx,
+    } = stream_probe("/?probe=flush-park")?;
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     let first = loop {
@@ -1037,7 +1089,10 @@ fn flush_puts_the_head_on_the_wire_before_eos() -> anyhow::Result<()> {
 /// `writeBody(eos: false)` chunks stream in order and the head carries no computed length.
 #[test]
 fn streamed_chunks_arrive_in_order() -> anyhow::Result<()> {
-    let (_srv, rx) = stream_probe("/?probe=chunks")?;
+    let StreamProbe {
+        srv: _srv,
+        frames: rx,
+    } = stream_probe("/?probe=chunks")?;
     let resp = drain_resp(rx);
 
     assert_eq!(resp.status(), 200);
@@ -1050,7 +1105,7 @@ fn streamed_chunks_arrive_in_order() -> anyhow::Result<()> {
 /// The prefix rule on an exceeded content-length: the fitting bytes are sent, the response completes per its declaration, the write throws.
 #[test]
 fn content_length_exceeded_sends_the_fitting_prefix() -> anyhow::Result<()> {
-    let (srv, rx) = stream_probe("/?probe=cl-exceeded")?;
+    let StreamProbe { srv, frames: rx } = stream_probe("/?probe=cl-exceeded")?;
     let resp = drain_resp(rx);
 
     assert_eq!(resp.status(), 200);
@@ -1100,7 +1155,10 @@ fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
 /// A declared content-length rides the head as the framing. On an under-run the plugin cuts the body, and nothing is PHP-visible.
 #[test]
 fn declared_content_length_rides_the_head_frame() -> anyhow::Result<()> {
-    let (_srv, rx) = stream_probe("/?probe=declared-cl")?;
+    let StreamProbe {
+        srv: _srv,
+        frames: rx,
+    } = stream_probe("/?probe=declared-cl")?;
     let resp = drain_resp(rx);
 
     assert_eq!(resp.content_length, Some(10));
@@ -1193,7 +1251,7 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
 }
 
 /// sendFile rejects a directory, an offset or a slice past the end of the file, and a symlink out of the root before anything is written, so the handler answers 403.
-/// A symlink inside the root stays sendable, and a slice longer than one 64 KiB plugin read keeps its offset across the reads.
+/// A symlink inside the root stays sendable, and a slice longer than two 256 KiB plugin reads keeps its offset across the reads.
 #[test]
 fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
     struct Case {
@@ -1206,7 +1264,7 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
     let srv = sendfile_server();
     let payload = sendfile_payload(&srv);
     // A prime period, so a read at a wrong offset returns other bytes.
-    let pattern: Vec<u8> = (0..100 * 1024).map(|i| (i % 251) as u8).collect();
+    let pattern: Vec<u8> = (0..600 * 1024).map(|i| (i % 251) as u8).collect();
     let patterned = srv.dir.join("patterned");
     std::fs::write(&patterned, &pattern)?;
     let link_in = srv.dir.join("link-in");
@@ -1250,11 +1308,11 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
             body: b"abcdefghijklmnopqrstuvwxyz".to_vec(),
         },
         Case {
-            name: "slice over two plugin reads",
+            name: "slice over three plugin reads",
             path: patterned,
-            query: "&offset=1024&length=81920",
+            query: "&offset=1024&length=540672",
             status: 200,
-            body: pattern[1024..1024 + 80 * 1024].to_vec(),
+            body: pattern[1024..1024 + 528 * 1024].to_vec(),
         },
     ];
 
@@ -1277,6 +1335,50 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
             );
             assert!(resp.ended && !resp.truncated, "{}", case.name);
         }
+    }
+    Ok(())
+}
+
+/// sendFile() raises ContentLengthExceededError "before this call writes anything" when the bytes it would send go past the declared content-length (contract `Exchange::sendFile`).
+/// The check counts the slice, not the file size. The head declares 5 bytes, and the handler sends `fixed` when it gets the error.
+#[test]
+fn sendfile_past_the_declared_length_writes_nothing() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        query: &'static str,
+        body: &'static [u8],
+    }
+    let srv = sendfile_server();
+    let path = sendfile_payload(&srv);
+    let cases = [
+        Case {
+            name: "whole file",
+            query: "",
+            body: b"fixed",
+        },
+        Case {
+            name: "slice longer than the length",
+            query: "&offset=2&length=6",
+            body: b"fixed",
+        },
+        Case {
+            name: "slice of the length",
+            query: "&offset=2&length=5",
+            body: b"cdefg",
+        },
+        Case {
+            name: "rest of the file of the length",
+            query: "&offset=21",
+            body: b"vwxyz",
+        },
+    ];
+    for case in cases {
+        let target = format!("/?probe=sendfile-over-cl{}", case.query);
+        let resp = drain_resp(submit(srv.addr, with_path_header(&target, &path))?);
+        assert_eq!(resp.status(), 200, "{}", case.name);
+        assert_eq!(resp.content_length, Some(5), "{}", case.name);
+        assert_eq!(resp.body, case.body, "{}", case.name);
+        assert!(resp.ended && !resp.truncated, "{}", case.name);
     }
     Ok(())
 }
@@ -1318,7 +1420,10 @@ fn sendfile_of_a_shrunken_file_ends_short() -> anyhow::Result<()> {
         head.contains("\r\ntransfer-encoding: chunked"),
         "head: {head:?}"
     );
-    let (body, last_chunk) = dechunk(&raw[split + 4..])?;
+    let Dechunked {
+        data: body,
+        last_chunk,
+    } = dechunk(&raw[split + 4..])?;
     assert!(
         body.len() as u64 <= CUT,
         "the body stops at the cut: {} bytes",
@@ -1342,7 +1447,10 @@ fn sendfile_of_a_shrunken_file_ends_short() -> anyhow::Result<()> {
 /// `writeTrailers()` after streamed chunks ends the response cleanly. The plugin does not forward response trailers.
 #[test]
 fn trailers_end_a_streamed_response() -> anyhow::Result<()> {
-    let (_srv, rx) = stream_probe("/?probe=trailers")?;
+    let StreamProbe {
+        srv: _srv,
+        frames: rx,
+    } = stream_probe("/?probe=trailers")?;
     let resp = drain_resp(rx);
 
     assert_eq!(resp.status(), 200);
@@ -1354,7 +1462,10 @@ fn trailers_end_a_streamed_response() -> anyhow::Result<()> {
 /// A trailers-only response keeps real length framing: content-length 0, not empty chunked.
 #[test]
 fn trailers_only_response_keeps_length_framing() -> anyhow::Result<()> {
-    let (_srv, rx) = stream_probe("/?probe=trailers-only")?;
+    let StreamProbe {
+        srv: _srv,
+        frames: rx,
+    } = stream_probe("/?probe=trailers-only")?;
     let resp = drain_resp(rx);
 
     assert_eq!(resp.status(), 200);
@@ -1366,7 +1477,7 @@ fn trailers_only_response_keeps_length_framing() -> anyhow::Result<()> {
 /// Trailers before any head throw a catchable HeadNotWrittenError and the unit still serves.
 #[test]
 fn trailers_before_a_head_throw_head_not_written() -> anyhow::Result<()> {
-    let (srv, rx) = stream_probe("/?probe=trailers-no-head")?;
+    let StreamProbe { srv, frames: rx } = stream_probe("/?probe=trailers-no-head")?;
     let resp = drain_resp(rx);
 
     assert_eq!(resp.status(), 200, "the handler recovers with a body");
@@ -1379,7 +1490,10 @@ fn trailers_before_a_head_throw_head_not_written() -> anyhow::Result<()> {
 /// A field from the forbidden categories raises `\ValueError` regardless of protocol; the handler recovers.
 #[test]
 fn forbidden_trailer_field_is_rejected() -> anyhow::Result<()> {
-    let (_srv, rx) = stream_probe("/?probe=trailers-forbidden")?;
+    let StreamProbe {
+        srv: _srv,
+        frames: rx,
+    } = stream_probe("/?probe=trailers-forbidden")?;
     let resp = drain_resp(rx);
 
     assert_eq!(resp.status(), 200);
@@ -1387,14 +1501,24 @@ fn forbidden_trailer_field_is_rejected() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Decodes the chunked body `raw`; returns the data and whether the last chunk arrived.
+/// The decoded data of a chunked body.
+struct Dechunked {
+    data: Vec<u8>,
+    /// True if the last chunk arrived.
+    last_chunk: bool,
+}
+
+/// Decodes the chunked body `raw`.
 /// https://www.rfc-editor.org/rfc/rfc9112#section-7.1
-fn dechunk(mut raw: &[u8]) -> anyhow::Result<(Vec<u8>, bool)> {
+fn dechunk(mut raw: &[u8]) -> anyhow::Result<Dechunked> {
     let mut data = Vec::new();
     while let Some(eol) = raw.windows(2).position(|w| w == b"\r\n") {
         let size = usize::from_str_radix(std::str::from_utf8(&raw[..eol])?, 16)?;
         if size == 0 {
-            return Ok((data, true));
+            return Ok(Dechunked {
+                data,
+                last_chunk: true,
+            });
         }
         raw = &raw[eol + 2..];
         data.extend_from_slice(&raw[..size.min(raw.len())]);
@@ -1403,5 +1527,8 @@ fn dechunk(mut raw: &[u8]) -> anyhow::Result<(Vec<u8>, bool)> {
         }
         raw = &raw[size + 2..];
     }
-    Ok((data, false))
+    Ok(Dechunked {
+        data,
+        last_chunk: false,
+    })
 }

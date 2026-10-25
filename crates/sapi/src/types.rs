@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use http::header::{AUTHORIZATION, COOKIE, HeaderMap, HeaderName};
+use http::header::{AUTHORIZATION, CONTENT_LENGTH, COOKIE, HeaderMap, HeaderName};
 use std::ffi::CString;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -164,12 +164,24 @@ pub struct ReqC {
     pub server_port: String,
 }
 
-fn cgi_addr_strings(addr: &Addr) -> (String, String) {
+/// The REMOTE_ADDR and REMOTE_PORT values of one peer.
+struct CgiAddr {
+    addr: String,
+    port: String,
+}
+
+fn cgi_addr_strings(addr: &Addr) -> CgiAddr {
     match addr {
-        Addr::Inet(sa) => (sa.ip().to_string(), sa.port().to_string()),
+        Addr::Inet(sa) => CgiAddr {
+            addr: sa.ip().to_string(),
+            port: sa.port().to_string(),
+        },
         // REMOTE_ADDR must hold a hostnumber (RFC 3875 §4.1.8); loopback stands in for a unix peer.
         // https://www.rfc-editor.org/rfc/rfc3875#section-4.1.8
-        Addr::Unix(_) => ("127.0.0.1".to_owned(), "0".to_owned()),
+        Addr::Unix(_) => CgiAddr {
+            addr: "127.0.0.1".to_owned(),
+            port: "0".to_owned(),
+        },
     }
 }
 
@@ -194,7 +206,10 @@ impl ReqC {
             .get(AUTHORIZATION)
             .map(|v| cgi_cstring("Authorization", v.as_bytes()));
 
-        let (remote_addr, remote_port) = cgi_addr_strings(&r.remote);
+        let CgiAddr {
+            addr: remote_addr,
+            port: remote_port,
+        } = cgi_addr_strings(&r.remote);
 
         Self {
             method: cgi_cstring("REQUEST_METHOD", r.method.as_bytes()),
@@ -278,10 +293,18 @@ impl Context {
         };
         let body = std::mem::take(&mut self.body);
         if let Some(head) = self.head.take() {
-            let bodiless = matches!(head.status, 204 | 304)
-                || (100..200).contains(&head.status)
-                || self.req.method.eq_ignore_ascii_case("HEAD");
-            let content_length = (!bodiless && !truncated).then_some(body.len() as u64);
+            let no_content = matches!(head.status, 204 | 304) || (100..200).contains(&head.status);
+            let bodiless = no_content || self.req.method.eq_ignore_ascii_case("HEAD");
+            let content_length = if no_content {
+                None
+            } else if bodiless {
+                // A HEAD response keeps the length that the app declared for the GET response.
+                head.headers
+                    .get(CONTENT_LENGTH)
+                    .and_then(|v| v.to_str().ok()?.parse().ok())
+            } else {
+                (!truncated).then_some(body.len() as u64)
+            };
             send(
                 &tx,
                 Frame::Head {

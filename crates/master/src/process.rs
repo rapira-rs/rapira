@@ -77,24 +77,32 @@ pub(crate) fn classify(status: c_int, timeout_kill: bool) -> ExitVerdict {
     }
 }
 
+/// A dead worker removed from its pool.
+pub(crate) struct Buried {
+    /// Index of the pool that owned the worker.
+    pub pool: usize,
+    pub worker: WorkerProc,
+    pub verdict: ExitVerdict,
+}
+
 /// Routes one dead pid to the pool that owns it. `waitpid(-1)` returns a bare pid, so the pools resolve the owner.
-pub(crate) fn bury(
-    pools: &mut [Pool],
-    pid: libc::pid_t,
-    status: c_int,
-) -> Option<(usize, WorkerProc, ExitVerdict)> {
+pub(crate) fn bury(pools: &mut [Pool], pid: libc::pid_t, status: c_int) -> Option<Buried> {
     for (i, pool) in pools.iter_mut().enumerate() {
         let Some(at) = pool.procs.iter().position(|p| p.pid == pid) else {
             continue;
         };
         let w = pool.procs.swap_remove(at);
-        return Some((i, w, classify(status, w.timeout_kill)));
+        return Some(Buried {
+            pool: i,
+            worker: w,
+            verdict: classify(status, w.timeout_kill),
+        });
     }
     None
 }
 
-/// Drains `waitpid` fully so every child ready at this point is buried in one pass.
-pub(crate) fn reap_all(pools: &mut [Pool]) -> Vec<(usize, WorkerProc, ExitVerdict)> {
+/// Drains `waitpid` fully so every child ready at this point is buried in one pass. Each crash outside a stop gets an error record; a stop ends workers with signals and forced exits on purpose.
+pub(crate) fn reap_all(pools: &mut [Pool], stopping: bool) -> Vec<Buried> {
     let mut buried = Vec::new();
     loop {
         let mut status: c_int = 0;
@@ -104,7 +112,21 @@ pub(crate) fn reap_all(pools: &mut [Pool]) -> Vec<(usize, WorkerProc, ExitVerdic
             break;
         }
         match bury(pools, pid, status) {
-            Some(entry) => buried.push(entry),
+            Some(entry) => {
+                if entry.verdict == ExitVerdict::Crash && !stopping {
+                    let how = if libc::WIFSIGNALED(status) {
+                        format!("killed by signal {}", libc::WTERMSIG(status))
+                    } else {
+                        format!("exited with code {}", libc::WEXITSTATUS(status))
+                    };
+                    tracing::error!(
+                        target: "master",
+                        "{} pool: worker {pid} {how}",
+                        pools[entry.pool].cfg.name
+                    );
+                }
+                buried.push(entry);
+            }
             None => tracing::warn!(target: "master", "reaped unknown child {pid}"),
         }
     }

@@ -266,6 +266,12 @@ pub enum Key {
     Index(zend_ulong),
 }
 
+/// One entry of an `Entries` walk.
+pub struct Entry {
+    pub key: Key,
+    pub val: *mut zval,
+}
+
 /// A walk over the entries of a HashTable, with each value dereferenced. It has no Drop glue, so a Zend bailout can longjmp through a frame that holds it. The position moves before the caller gets the entry, so the caller must not change the walked table.
 pub struct Entries {
     ht: *mut HashTable,
@@ -281,7 +287,7 @@ pub unsafe fn entries(ht: *mut HashTable) -> Entries {
 }
 
 impl Iterator for Entries {
-    type Item = (Key, *mut zval);
+    type Item = Entry;
 
     /// `&raw mut self.pos`: the pos parameter is *mut on PHP 8.4 and *const on 8.5.
     fn next(&mut self) -> Option<Self::Item> {
@@ -299,7 +305,10 @@ impl Iterator for Entries {
             } else {
                 Key::Index(nkey)
             };
-            Some((key, deref(entry)))
+            Some(Entry {
+                key,
+                val: deref(entry),
+            })
         }
     }
 }

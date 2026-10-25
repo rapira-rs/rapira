@@ -94,11 +94,19 @@ fn sigprocmask(how: c_int, set: &libc::sigset_t) {
 }
 
 /// Blocks the terminate-by-default signals before any handler exists; as pid 1 the stop trio joins them because a SIGNAL_UNKILLABLE init drops signals still on SIG_DFL instead of applying the default action. https://man7.org/linux/man-pages/man7/signal.7.html
+/// USR1 and USR2 also get SIG_IGN: PHP MINIT saves this action, and each PHP request startup in a worker sets it again. https://github.com/php/php-src/blob/PHP-8.5/Zend/zend_signal.c
 pub fn block_early_signals() {
     sigprocmask(
         libc::SIG_BLOCK,
         &sigset(&[libc::SIGUSR1, libc::SIGUSR2, libc::SIGCHLD, libc::SIGHUP]),
     );
+    // SAFETY: SIG_IGN takes no handler code; a null old-action pointer discards the previous action.
+    unsafe {
+        let mut ign: libc::sigaction = std::mem::zeroed();
+        ign.sa_sigaction = libc::SIG_IGN;
+        libc::sigaction(libc::SIGUSR1, &ign, std::ptr::null_mut());
+        libc::sigaction(libc::SIGUSR2, &ign, std::ptr::null_mut());
+    }
     // SAFETY: getpid is always safe.
     if unsafe { libc::getpid() } == 1 {
         sigprocmask(

@@ -1,5 +1,6 @@
 use crate::harness::{self, http_get};
 use std::time::Duration;
+use tests::StatusBody;
 
 const REQ: Duration = Duration::from_secs(10);
 
@@ -11,7 +12,7 @@ fn classic_mode_keeps_the_working_directory_across_requests() {
     let entrypoint_dir = std::fs::canonicalize(&srv.dir).expect("canonicalize the scratch dir");
     let entrypoint_dir = entrypoint_dir.to_string_lossy().into_owned();
 
-    let (code, body) = http_get(srv.addr, "/", REQ).expect("request");
+    let StatusBody { status: code, body } = http_get(srv.addr, "/", REQ).expect("request");
     assert_eq!(code, 200, "{}", harness::diagnostics(&srv));
     assert_eq!(
         String::from_utf8_lossy(&body),
@@ -20,7 +21,7 @@ fn classic_mode_keeps_the_working_directory_across_requests() {
         harness::diagnostics(&srv)
     );
 
-    let (code, body) = http_get(srv.addr, "/chdir", REQ).expect("request");
+    let StatusBody { status: code, body } = http_get(srv.addr, "/chdir", REQ).expect("request");
     assert_eq!(code, 200, "{}", harness::diagnostics(&srv));
     let moved = String::from_utf8_lossy(&body).into_owned();
     assert_ne!(
@@ -30,7 +31,7 @@ fn classic_mode_keeps_the_working_directory_across_requests() {
         harness::diagnostics(&srv)
     );
 
-    let (code, body) = http_get(srv.addr, "/", REQ).expect("request");
+    let StatusBody { status: code, body } = http_get(srv.addr, "/", REQ).expect("request");
     assert_eq!(code, 200, "{}", harness::diagnostics(&srv));
     assert_eq!(
         String::from_utf8_lossy(&body),

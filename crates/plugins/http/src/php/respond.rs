@@ -54,7 +54,7 @@ pub(super) unsafe fn throw_verb(v: Verb) -> bool {
 
 pub(super) struct Closed;
 
-/// On a full channel, park with the wall timer disarmed: a parked thread never reaches an opcode boundary, and on NTS a second expiry would `_exit(124)`; the re-arm grants the remaining budget (floor 1s).
+/// On a full channel, park with the execution timer disarmed: a parked thread never reaches an opcode boundary, and on NTS a second expiry would `_exit(124)`; the re-arm grants the remaining budget (floor 1s).
 /// # Safety
 /// Engine active on this thread.
 pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {

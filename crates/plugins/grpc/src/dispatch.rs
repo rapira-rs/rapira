@@ -7,10 +7,11 @@ use bytes::Bytes;
 use connectrpc::dispatcher::{RequestStream, StreamingResult, UnaryResult};
 use connectrpc::{
     CodecFormat, ConnectError, Dispatcher, EncodedBody, EncodedResponse, ErrorCode, ErrorDetail,
-    MethodDescriptor, Payload, Protocol, RequestContext,
+    MethodDescriptor, Payload, Protocol, RequestContext, http,
 };
 use rapira_sapi::Addr;
 use rapira_sapi::work::{Sink, now_unix_f64};
+use tokio::sync::oneshot;
 
 use crate::schema::Schema;
 use crate::{Call, RpcStatus, UnaryCall};
@@ -104,6 +105,10 @@ async fn unary(
         }
     };
     let protocol = ctx.protocol();
+    // Most gRPC clients accept gzip on every call. As in grpc-go, a gRPC reply uses gzip only when the request did: https://github.com/grpc/grpc-go/blob/v1.84.0/server.go#L1408-L1421
+    let plain_reply = matches!(protocol, Some(Protocol::Grpc | Protocol::GrpcWeb))
+        && ctx.header("grpc-encoding").is_none_or(|v| v == "identity");
+    let bytes = message.len();
     let call = UnaryCall {
         method: path.clone(),
         protocol,
@@ -117,9 +122,10 @@ async fn unary(
             .unwrap_or(Addr::Unix(None)),
         message,
     };
-    let (call, reply) = Call::new(call);
+    let (tx, reply) = oneshot::channel();
+    let call = Call::new(call, tx);
     // A refusal before dispatch: PHP never saw the call.
-    if let Err(e) = intake.submit(Box::new(call)).await {
+    if let Err(e) = intake.submit(Box::new(call), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));
     }
     // A closed channel means that PHP lost the call. Dropping this future closes the call for PHP.
@@ -148,6 +154,16 @@ async fn unary(
     let mut response = EncodedResponse::new(EncodedBody::from(body));
     response.headers = reply.headers;
     response.trailers = reply.trailers;
+    if plain_reply {
+        response.compress = Some(false);
+    }
+    // A Connect reply is compressed when the client accepts it, so a cache keys a Connect GET reply on Accept-Encoding: https://www.rfc-editor.org/rfc/rfc9110#section-12.5.5
+    if protocol == Some(Protocol::Connect) {
+        response.headers.append(
+            http::header::VARY,
+            http::HeaderValue::from_static("accept-encoding"),
+        );
+    }
     Ok(response)
 }
 
@@ -159,12 +175,12 @@ fn status_error(status: RpcStatus, protocol: Option<Protocol>) -> ConnectError {
     err.details = status
         .details
         .into_iter()
-        .map(|(url, value)| ErrorDetail {
-            type_url: match url.rsplit_once('/') {
+        .map(|d| ErrorDetail {
+            type_url: match d.type_url.rsplit_once('/') {
                 Some((_, name)) if !whole_url => name.to_owned(),
-                _ => url,
+                _ => d.type_url,
             },
-            value: Some(STANDARD_NO_PAD.encode(value)),
+            value: Some(STANDARD_NO_PAD.encode(d.value)),
             debug: None,
         })
         .collect();

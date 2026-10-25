@@ -102,6 +102,9 @@ zend_object *rapira_object_create(zend_class_entry *ce);
 
 // called from PHP_MINIT_FUNCTION
 void rapira_register_classes(void);
+// called from start.rs after php_module_startup: the post readers that hand
+// PHP the buffered body (module.c)
+void rapira_register_post_reader(void);
 
 // The Dispatcher and DispatcherInfo method bodies; a plugin's method shells call them.
 void rapira_sapi_receive(INTERNAL_FUNCTION_PARAMETERS);

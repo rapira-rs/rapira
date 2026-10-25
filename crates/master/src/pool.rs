@@ -253,25 +253,27 @@ impl Pool {
         if stopping {
             return Ok(());
         }
+        if verdict == ExitVerdict::Unhealthy
+            && w.generation == 0
+            && self.total_successful() == 0
+            && !self.board.iter().any(SharedSlot::serving)
+        {
+            anyhow::bail!(
+                "{} pool: worker {} exited unhealthy before the pool served any request",
+                self.cfg.name,
+                w.pid
+            );
+        }
+        // The first replacement of the reload takes the place of the last old worker.
+        if self.reload.is_some() && w.generation < self.generation && !self.has_old_gen() {
+            return Ok(());
+        }
 
         match verdict {
             ExitVerdict::Recycle | ExitVerdict::Drain | ExitVerdict::TimeoutKill => {
                 self.slot_states[slot].schedule_immediate(now);
             }
-            ExitVerdict::Unhealthy => {
-                if w.generation == 0
-                    && self.total_successful() == 0
-                    && !self.board.iter().any(SharedSlot::serving)
-                {
-                    anyhow::bail!(
-                        "{} pool: worker {} exited unhealthy before the pool served any request",
-                        self.cfg.name,
-                        w.pid
-                    );
-                }
-                self.slot_states[slot].schedule_backoff(lived, now);
-            }
-            ExitVerdict::Crash => {
+            ExitVerdict::Unhealthy | ExitVerdict::Crash => {
                 self.slot_states[slot].schedule_backoff(lived, now);
             }
         }
@@ -465,12 +467,12 @@ mod tests {
 
         assert!(bury(&mut pools, 2_000_000_009, 0).is_none());
         // Raw wait status: exit code 89 in bits 8..16.
-        let (pool, w, verdict) =
+        let buried =
             bury(&mut pools, 2_000_000_002, 89 << 8).expect("the second pool owns the pid");
 
-        assert_eq!(pool, 1);
-        assert_eq!((w.slot, w.generation), (1, 3));
-        assert_eq!(verdict, ExitVerdict::Unhealthy);
+        assert_eq!(buried.pool, 1);
+        assert_eq!((buried.worker.slot, buried.worker.generation), (1, 3));
+        assert_eq!(buried.verdict, ExitVerdict::Unhealthy);
         assert_eq!(pools[0].procs.len(), 1, "the other pool is untouched");
         assert!(pools[1].procs.is_empty());
     }

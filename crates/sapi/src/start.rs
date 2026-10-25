@@ -28,13 +28,22 @@ struct UnitRx {
     pending: &'static AtomicU64,
 }
 
+/// The idle wait after which the PHP thread calls `mi_collect`. mimalloc purges freed arena slices only from a page free or a collect, so an idle worker keeps the slices of the last burst committed.
+const IDLE_PURGE_AFTER: Duration = Duration::from_secs(2);
+
 impl UnitRx {
     /// Waits for one unit, with no time limit when `timeout` is None. A pulled unit leaves `pending`.
     fn recv(&self, timeout: Option<Duration>) -> Pulled {
-        let got = match timeout {
-            None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
-            Some(t) => self.rx.recv_timeout(t),
-        };
+        let first = timeout.map_or(IDLE_PURGE_AFTER, |t| t.min(IDLE_PURGE_AFTER));
+        let mut got = self.rx.recv_timeout(first);
+        if matches!(got, Err(RecvTimeoutError::Timeout)) && first == IDLE_PURGE_AFTER {
+            // SAFETY: plain allocator call on this thread; the arena purge is process-wide and locked inside mimalloc.
+            unsafe { libmimalloc_sys::mi_collect(true) };
+            got = match timeout {
+                None => self.rx.recv().map_err(|_| RecvTimeoutError::Disconnected),
+                Some(t) => self.rx.recv_timeout(t - first),
+            };
+        }
         match got {
             Ok(unit) => {
                 self.pending.fetch_sub(1, Ordering::Relaxed);
@@ -64,6 +73,13 @@ impl Drop for PhpModule {
 
 pub struct Rapira {
     worker: Option<JoinHandle<()>>,
+}
+
+/// The PHP thread of one worker and its intake.
+pub struct StartedWorker {
+    pub rapira: Rapira,
+    /// The intake of this worker. The PHP thread sees the intake closed once every clone of the Sink is dropped.
+    pub sink: Sink,
 }
 
 /// Zend structs are bound by bindgen at build time, so a libphp from another PHP minor is an ABI mismatch (`sapi_startup` handed a differently shaped struct), not a load error.
@@ -106,6 +122,7 @@ pub fn boot_master(register: &[unsafe extern "C" fn()]) -> anyhow::Result<PhpMod
         error!(target: "rapira", "php_module_startup failed, shutting down");
         return Err(anyhow::anyhow!("php_module_startup failed"));
     }
+    unsafe { rapira_register_post_reader() };
     Ok(module)
 }
 
@@ -123,7 +140,6 @@ pub extern "C" fn rapira_rs_register_plugin_classes() {
 impl Rapira {
     /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `max_requests`: 0 = unlimited; jitter already applied by the caller.
     /// `slot`: the scoreboard slot this worker reports into. `stopper` stops the plugin when the quota ends or PHP turns unhealthy. `classes`: the dispatcher surface receive() serves in dispatcher mode.
-    /// The returned Sink is the intake of this worker. The PHP thread sees the intake closed once every clone of the Sink is dropped.
     pub fn start_worker(
         mode: Mode,
         entrypoint: PathBuf,
@@ -131,7 +147,7 @@ impl Rapira {
         slot: &'static rapira_scoreboard::SharedSlot,
         stopper: Stopper,
         classes: DispatcherClasses,
-    ) -> (Self, Sink) {
+    ) -> StartedWorker {
         let pending: &'static AtomicU64 = &slot.pending;
         let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
         let sink = Sink::new(intake_tx, slot);
@@ -147,26 +163,30 @@ impl Rapira {
         };
 
         trace!(target: "rapira", "spawning worker thread");
-        let worker: JoinHandle<()> = thread::spawn(move || {
-            sb_set(slot);
-            quota::install(max_requests, stopper);
-            worker_main(
-                mode,
-                entrypoint,
-                UnitRx {
-                    rx: intake_rx,
-                    pending,
-                },
-                classes,
-            )
-        });
+        // PHP sets its stack limit from the stack size of this thread. 8 MiB matches the CLI and FPM main thread under the default RLIMIT_STACK. https://github.com/php/php-src/blob/php-8.5.11/Zend/zend_call_stack.c#L129-L173
+        let worker: JoinHandle<()> = thread::Builder::new()
+            .stack_size(8 << 20)
+            .spawn(move || {
+                sb_set(slot);
+                quota::install(max_requests, stopper);
+                worker_main(
+                    mode,
+                    entrypoint,
+                    UnitRx {
+                        rx: intake_rx,
+                        pending,
+                    },
+                    classes,
+                )
+            })
+            .expect("spawn the PHP thread");
 
-        (
-            Self {
+        StartedWorker {
+            rapira: Self {
                 worker: Some(worker),
             },
             sink,
-        )
+        }
     }
 }
 

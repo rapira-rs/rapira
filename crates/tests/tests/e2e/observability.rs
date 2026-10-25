@@ -7,10 +7,10 @@ use std::time::{Duration, Instant};
 use rapira_net::ListenAddr;
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{Resp, drain_resp_deadline, poll, req};
+use tests::{Resp, StatusBody, drain_resp_deadline, poll, req};
 
 use crate::harness::{
-    Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_raw, php_version,
+    Exited, Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_raw, php_version,
     rapira_version, serving_pid, signal, wait_log_contains, wait_workers,
 };
 #[cfg(target_os = "linux")]
@@ -34,8 +34,14 @@ fn exits(reason: &str) -> String {
     format!(r#"rapira_worker_exits_total{{pool="http",reason="{reason}"}}"#)
 }
 
+/// A server and the address of its `[observability]` listener.
+struct ObservedServer {
+    srv: Server,
+    observability: SocketAddr,
+}
+
 /// One `[http]` pool of one worker over `fixture`, with `pool` keys in `[http.pool]` and an `[observability]` listener on a free port. `tables` follows the `listen` key: more `[observability]` keys, the sub-tables and other tables.
-fn spawn(fixture: &str, pool: &str, tables: &str) -> (Server, SocketAddr) {
+fn spawn(fixture: &str, pool: &str, tables: &str) -> ObservedServer {
     let observability = SocketAddr::from(([127, 0, 0, 1], free_port()));
     let srv = Spawn::http(Mode::Dispatcher, fixture_path(fixture))
         .http_pool(pool)
@@ -43,7 +49,7 @@ fn spawn(fixture: &str, pool: &str, tables: &str) -> (Server, SocketAddr) {
             "[observability]\nlisten = \"{observability}\"\n{tables}\n"
         ))
         .spawn();
-    (srv, observability)
+    ObservedServer { srv, observability }
 }
 
 /// One `GET` on its own connection.
@@ -98,9 +104,9 @@ fn scrape_until(
 /// Three requests on one worker. The endpoint reports them for the `http` pool and leaves out the observability pool.
 #[test]
 fn a_scrape_reports_the_pool() {
-    let (srv, observability) = spawn(HANG, "", "[observability.metrics]");
+    let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
     for _ in 0..3 {
-        let (code, _) = http_get(srv.addr, "/", REQ).expect("GET /");
+        let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
         assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     }
     let samples = scrape_until(&srv, observability, "3 requests", |s| {
@@ -151,9 +157,11 @@ fn only_get_metrics_is_served() {
             request: "GET /readyz HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
         },
     ];
-    let (srv, observability) = spawn(HANG, "", "[observability.metrics]");
+    let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
     for case in &cases {
-        let (status, _) = http_raw(observability, case.request.as_bytes(), REQ).expect(case.name);
+        let status = http_raw(observability, case.request.as_bytes(), REQ)
+            .expect(case.name)
+            .status;
         assert_eq!(status, 404, "{}\n{}", case.name, diagnostics(&srv));
     }
 }
@@ -161,7 +169,7 @@ fn only_get_metrics_is_served() {
 /// With only `[observability.probes]`, `/livez` answers ok and `/metrics` answers 404.
 #[test]
 fn livez_answers_ok() {
-    let (srv, observability) = spawn(HANG, "", "[observability.probes]");
+    let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.probes]");
     let resp = get(observability, "/livez");
     assert_eq!(
         (resp.status(), resp.body_string().as_str()),
@@ -176,24 +184,28 @@ fn livez_answers_ok() {
 /// An idle keep-alive connection closes after `keepalive_timeout_secs`. With 1 s the close comes within the 5 s read; the 60 s default misses it.
 #[test]
 fn an_idle_connection_closes_after_the_keepalive_timeout() {
-    let (_srv, observability) = spawn(
+    let ObservedServer {
+        srv: _srv,
+        observability,
+    } = spawn(
         HANG,
         "",
         "keepalive_timeout_secs = 1\n[observability.metrics]",
     );
-    let (status, _) = http_raw(
+    let status = http_raw(
         observability,
         b"GET /metrics HTTP/1.1\r\nHost: e2e\r\n\r\n",
         Duration::from_secs(5),
     )
-    .expect("the server closes the idle connection");
+    .expect("the server closes the idle connection")
+    .status;
     assert_eq!(status, 200);
 }
 
 /// A booting worker shows starting until its first pull, and its pool is not ready. The fixture sleeps 3 s before its first receive().
 #[test]
 fn a_booting_worker_is_starting_and_not_ready_until_its_first_pull() {
-    let (srv, observability) = spawn(
+    let ObservedServer { srv, observability } = spawn(
         "lifecycle/slow-boot-worker.php",
         "",
         "[observability.metrics]\n[observability.probes]",
@@ -227,12 +239,12 @@ fn a_booting_worker_is_starting_and_not_ready_until_its_first_pull() {
 /// A worker whose boot fails stays starting: the host's shed pull does not count as the app's first pull. The 503 shows that the host shed the request in its shed pull. The slot stays starting through the re-boot and the next shed pull.
 #[test]
 fn a_worker_whose_boot_fails_stays_starting() {
-    let (srv, observability) = spawn(
+    let ObservedServer { srv, observability } = spawn(
         "lifecycle/never-loop-worker.php",
         "",
         "[observability.metrics]",
     );
-    let (code, _) = http_get(srv.addr, "/", REQ).expect("GET /");
+    let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
     assert_eq!(code, 503, "\n{}", diagnostics(&srv));
     let samples = scrape(observability);
     assert_eq!(
@@ -249,7 +261,7 @@ fn a_worker_whose_boot_fails_stays_starting() {
 /// A pool whose boot failed turns ready without a request when a later boot succeeds. The fixture fails its boot until up.flag exists next to it.
 #[test]
 fn a_pool_whose_boot_failed_turns_ready_without_a_request() {
-    let (srv, observability) = spawn(
+    let ObservedServer { srv, observability } = spawn(
         "lifecycle/dependency-boot-worker.php",
         "",
         "[observability.probes]",
@@ -284,12 +296,12 @@ fn a_pool_whose_boot_failed_turns_ready_without_a_request() {
 /// A failed re-boot after the app served shows starting, so the request watchdog skips the worker.
 #[test]
 fn a_failed_reboot_stays_starting() {
-    let (srv, observability) = spawn(
+    let ObservedServer { srv, observability } = spawn(
         "lifecycle/reboot-fails-worker.php",
         "request_terminate_timeout_secs = 1",
         "[observability.metrics]",
     );
-    let (code, body) = http_get(srv.addr, "/", REQ).expect("GET /");
+    let StatusBody { status: code, body } = http_get(srv.addr, "/", REQ).expect("GET /");
     assert_eq!(
         (code, body.as_slice()),
         (200, b"ok".as_slice()),
@@ -320,7 +332,7 @@ fn a_failed_reboot_stays_starting() {
 #[test]
 fn an_observability_listener_on_the_http_address_fails_the_boot() {
     let tcp = SocketAddr::from(([127, 0, 0, 1], free_port()));
-    let (status, log) = Spawn::http(Mode::Dispatcher, fixture_path(HANG))
+    let Exited { status, log } = Spawn::http(Mode::Dispatcher, fixture_path(HANG))
         .http_listen(ListenAddr::Tcp(tcp))
         .toml(&format!(
             "[observability]\nlisten = \"{tcp}\"\n[observability.metrics]\n"
@@ -336,7 +348,7 @@ fn an_observability_listener_on_the_http_address_fails_the_boot() {
 /// A USR2 reload replaces the observability process too. It never pulls PHP work, so it stores idle itself: otherwise the reload gate of its pool waits the whole control timeout, 30 s by default.
 #[test]
 fn a_reload_replaces_the_observability_process() {
-    let (srv, observability) = spawn(HANG, "", "[observability.metrics]");
+    let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
     let before = wait_workers(
         &srv,
         Duration::from_secs(20),
@@ -371,7 +383,7 @@ fn each_live_worker_reports_its_memory() {
             family: "rapira_worker_pss_bytes",
         },
     ];
-    let (srv, observability) = spawn(HANG, "", "[observability.metrics]");
+    let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
     let samples = scrape_until(&srv, observability, "the memory of the worker", |s| {
         s.contains_key(r#"rapira_worker_pss_bytes{pool="http",worker="0"}"#)
     });
@@ -400,9 +412,10 @@ fn each_live_worker_reports_its_memory() {
 /// max_requests = 2 gives a quota of exactly 3: effective_quota adds 1 + hash % max(2 / 2, 1). Five requests recycle the worker once.
 #[test]
 fn counts_survive_a_recycle() {
-    let (srv, observability) = spawn(HANG, "max_requests = 2", "[observability.metrics]");
+    let ObservedServer { srv, observability } =
+        spawn(HANG, "max_requests = 2", "[observability.metrics]");
     for _ in 0..3 {
-        let (code, _) = http_get(srv.addr, "/", REQ).expect("GET /");
+        let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
         assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     }
     // The third request reaches the quota. The master counts the exit before it forks the new worker, so the next requests cannot reach the draining worker.
@@ -410,7 +423,7 @@ fn counts_survive_a_recycle() {
         value(s, &exits("recycled")) == 1
     });
     for _ in 0..2 {
-        let (code, _) = http_get(srv.addr, "/", REQ).expect("GET /");
+        let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
         assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     }
     let samples = scrape_until(&srv, observability, "5 requests and 1 recycle", |s| {
@@ -422,7 +435,7 @@ fn counts_survive_a_recycle() {
 /// A worker that a signal kills, and that the master did not signal, counts as crashed.
 #[test]
 fn a_killed_worker_counts_as_crashed() {
-    let (srv, observability) = spawn(HANG, "", "[observability.metrics]");
+    let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
     signal(serving_pid(&srv), libc::SIGKILL);
     scrape_until(&srv, observability, "1 crashed exit", |s| {
         value(s, &exits("crashed")) == 1
@@ -432,7 +445,7 @@ fn a_killed_worker_counts_as_crashed() {
 /// The held request takes the only PHP thread, so the next two requests wait in the worker queue. The held request never ends, so a 1 s control timeout ends the stop at the end of the test.
 #[test]
 fn requests_behind_a_held_worker_count_as_queued() {
-    let (srv, observability) = spawn(
+    let ObservedServer { srv, observability } = spawn(
         HANG,
         "",
         "[observability.metrics]\n[supervisor]\nprocess_control_timeout_secs = 1",
@@ -455,7 +468,10 @@ fn requests_behind_a_held_worker_count_as_queued() {
 #[cfg(target_os = "linux")]
 #[test]
 fn a_new_server_takes_the_observability_address_while_an_orphan_drains() {
-    let (mut first, observability) = spawn(
+    let ObservedServer {
+        srv: mut first,
+        observability,
+    } = spawn(
         HANG,
         "",
         "[observability.metrics]\n[supervisor]\nprocess_control_timeout_secs = 60",
