@@ -36,9 +36,7 @@ impl<'w> Master<'w> {
             .into_iter()
             .zip(spawner.regions)
             .enumerate()
-            .map(|(i, (p, region))| {
-                Pool::new(i, p, &spawner.board[region.slots.clone()], control_timeout)
-            })
+            .map(|(i, (p, region))| Pool::new(i, p, &spawner.board[region.slots.clone()]))
             .collect();
         Master {
             pools,
@@ -60,11 +58,9 @@ impl<'w> Master<'w> {
                 Some(StopReason::Forced)
             }
             SignalAction::Reload => {
-                // A pool that still drains its chain swallows the signal.
-                if self.pools.iter().all(|p| p.reload.is_none()) {
-                    for p in &mut self.pools {
-                        p.begin_reload(now, &mut self.spawner);
-                    }
+                // Each worker restarts its app on its own.
+                for p in &self.pools {
+                    p.signal_all(libc::SIGUSR2);
                 }
                 None
             }
@@ -103,7 +99,7 @@ impl<'w> Master<'w> {
             verdict,
         } in buried
         {
-            self.pools[pool].on_child_exit(w, verdict, now, stopping, &mut self.spawner)?;
+            self.pools[pool].on_child_exit(w, verdict, now, stopping)?;
         }
         Ok(())
     }

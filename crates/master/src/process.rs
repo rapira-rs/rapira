@@ -16,7 +16,6 @@ pub(crate) const RESPAWN_BASE: Duration = Duration::from_millis(100);
 pub(crate) struct WorkerProc {
     pub pid: libc::pid_t,
     pub slot: usize,
-    pub generation: u32,
     pub spawned_at: Instant,
     /// The request watchdog sent SIGTERM: a SIGTERM or SIGKILL exit is a timeout kill, not a crash.
     pub timeout_kill: bool,

@@ -37,7 +37,7 @@ pub fn observability_body(
     unsafe {
         libc::prctl(libc::PR_SET_NAME, c"rapira-obs".as_ptr())
     };
-    // The observability process never pulls PHP work, so it reports idle itself. The reload gate waits for it.
+    // The observability process never pulls PHP work, so it reports idle itself.
     env.slot_view
         .state
         .store(rapira_scoreboard::SLOT_IDLE, Release);

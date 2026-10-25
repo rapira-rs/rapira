@@ -11,7 +11,7 @@ use tests::{Resp, StatusBody, drain_resp_deadline, poll, req};
 
 use crate::harness::{
     Exited, Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_raw, php_version,
-    rapira_version, serving_pid, signal, wait_log_contains, wait_workers,
+    rapira_version, serving_pid, signal, wait_log_contains, wait_workers, worker_pids,
 };
 #[cfg(target_os = "linux")]
 use crate::harness::{kill_master_as_subreaper, wait_child_exit};
@@ -345,24 +345,24 @@ fn an_observability_listener_on_the_http_address_fails_the_boot() {
     );
 }
 
-/// A USR2 reload replaces the observability process too. It never pulls PHP work, so it stores idle itself: otherwise the reload gate of its pool waits the whole control timeout, 30 s by default.
+/// The master sends a USR2 reload to every pool. The observability process has no app to restart, so it keeps running.
 #[test]
-fn a_reload_replaces_the_observability_process() {
+fn a_reload_leaves_the_observability_process_alone() {
     let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
-    let before = wait_workers(
+    let mut before = wait_workers(
         &srv,
         Duration::from_secs(20),
         "the worker and the observability process",
         |p| p.len() == 2,
     );
     signal(srv.pid(), libc::SIGUSR2);
-    wait_workers(
-        &srv,
-        Duration::from_secs(20),
-        "a new worker and a new observability process",
-        |p| p.len() == 2 && p.iter().all(|pid| !before.contains(pid)),
-    );
+    // Nothing must happen to the processes, so the test waits a fixed time before it looks.
+    std::thread::sleep(Duration::from_secs(1));
     assert_eq!(get(observability, "/metrics").status(), 200);
+    let mut after = worker_pids(srv.pid());
+    before.sort();
+    after.sort();
+    assert_eq!(after, before, "the processes stay\n{}", diagnostics(&srv));
 }
 
 /// Linux only: the endpoint reads `/proc/<pid>/smaps_rollup` of each live worker.
