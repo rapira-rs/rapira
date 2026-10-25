@@ -285,9 +285,9 @@ fn max_requests_restarts_the_app_without_losing_requests() {
         std::thread::sleep(Duration::from_secs(2));
         let tally = storm.halt();
         assert_eq!(
-            (tally.failed, tally.refused),
-            (0, 0),
-            "{}: failed and refused requests; last error: {:?}\n{}",
+            (tally.failed, tally.refused, tally.dropped),
+            (0, 0, 0),
+            "{}: failed, refused and dropped requests; last error: {:?}\n{}",
             case.name,
             tally.last_err,
             diagnostics(&srv)
