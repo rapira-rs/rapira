@@ -1,5 +1,5 @@
 use crate::{
-    callbacks::{finalize_response, send_error_head},
+    callbacks::{fatal_error_recorded, finalize_response, send_error_head},
     context::{bind_server_context, populate_request_context, unbind_server_context},
     scoreboard::{Event, sb_update},
     start::{pull_unit, run_script},
@@ -25,7 +25,7 @@ struct Executed {
     truncated: bool,
 }
 
-// run_script is also false for exit()/die(), so only unclean_shutdown or a fresh last_error_message marks a real failure.
+// run_script is also false for exit()/die(), so only a recorded fatal error marks a failure.
 fn classic_executor(ctx: &mut Context) -> Executed {
     bind_server_context(ctx);
     let (is_errored, truncated) = unsafe {
@@ -42,10 +42,7 @@ fn classic_executor(ctx: &mut Context) -> Executed {
         crate::context::apply_proto_num(ctx);
 
         let failed = !run_script(std::path::Path::new(&crate::context::script().filename));
-        let exec_err: bool = failed
-            && (compiler_globals.unclean_shutdown
-                || (!core_globals.last_error_message.is_null()
-                    && core_globals.last_error_type & E_FATAL_ERRORS as i32 != 0));
+        let exec_err: bool = failed && fatal_error_recorded();
         ctx.tearing_down = true;
         ctx.errored = exec_err;
         rapira_request_shutdown();

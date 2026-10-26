@@ -388,6 +388,15 @@ pub fn send_error_head(c: &mut Context, status: u16) {
     c.commit_head(status, HeaderMap::new());
 }
 
+/// php_error_cb records each fatal error before its bailout. A bailout with no such record is a normal end, such as exit(), or a client abort. The record holds only the last diagnostic.
+/// https://github.com/php/php-src/blob/php-8.5.11/main/main.c#L1393-L1540
+pub(crate) fn fatal_error_recorded() -> bool {
+    unsafe {
+        !core_globals.last_error_message.is_null()
+            && core_globals.last_error_type & E_FATAL_ERRORS as c_int != 0
+    }
+}
+
 pub(crate) fn finalize_response(c: &mut Context, errored: bool) -> bool {
     let truncated = errored && c.stream == StreamState::BodyStreamed;
     if errored {
