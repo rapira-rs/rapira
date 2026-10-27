@@ -50,8 +50,8 @@ pub trait Work: Send + 'static {
     /// # Safety
     /// `obj` is a live object of that class on the PHP thread.
     unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held;
-    /// The classic and worker modes. None: this unit cannot run there.
-    fn into_cgi(self: Box<Self>) -> Option<crate::types::Context>;
+    /// The classic and worker modes.
+    fn into_cgi(self: Box<Self>) -> crate::types::Context;
     /// A worker that cannot serve: the plugin's refusal, 503 or UNAVAILABLE.
     fn shed(self: Box<Self>);
 }
@@ -227,8 +227,8 @@ mod tests {
         unsafe fn attach(self: Box<Self>, _: *mut zend_object) -> *mut dyn Held {
             unreachable!()
         }
-        fn into_cgi(self: Box<Self>) -> Option<crate::types::Context> {
-            None
+        fn into_cgi(self: Box<Self>) -> crate::types::Context {
+            unreachable!()
         }
         fn shed(self: Box<Self>) {}
     }

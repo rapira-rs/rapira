@@ -228,10 +228,7 @@ fn next_unit() -> Option<Context> {
                     continue;
                 }
                 crate::exchange::RECEIVED.set(true);
-                let Some(ctx) = unit.into_cgi() else {
-                    unreachable!("a unit with no CGI form goes to dispatcher-mode workers only");
-                };
-                return Some(ctx);
+                return Some(unit.into_cgi());
             }
             // With no timeout the wait ends only with an entry or the closed intake.
             Pulled::Closed | Pulled::Timeout | Pulled::Empty => {

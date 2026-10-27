@@ -39,8 +39,8 @@ impl Work for Exchange {
         ptr
     }
 
-    fn into_cgi(self: Box<Self>) -> Option<Context> {
-        Some(self.ctx)
+    fn into_cgi(self: Box<Self>) -> Context {
+        self.ctx
     }
 
     fn shed(self: Box<Self>) {
