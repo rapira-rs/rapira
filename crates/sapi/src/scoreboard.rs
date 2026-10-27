@@ -6,7 +6,7 @@ use rapira_scoreboard::{
 };
 
 thread_local! {
-    pub static SB: Cell<Option<&'static SharedSlot>> = const { Cell::new(None) };
+    static SB: Cell<Option<&'static SharedSlot>> = const { Cell::new(None) };
     static DRAINING: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -21,7 +21,7 @@ pub enum Event {
     BootFailed,
 }
 
-pub fn sb_set(slot: &'static SharedSlot) {
+pub(crate) fn sb_set(slot: &'static SharedSlot) {
     SB.set(Some(slot));
 }
 
