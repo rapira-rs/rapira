@@ -19,14 +19,14 @@ const BODY_BUDGET: usize = 64 << 20;
 /// The cycle bookkeeping view of a unit that receive() handed out.
 pub trait Held {
     /// The worker committed the outcome, or discarded the unit.
-    fn finalized(&self) -> bool;
+    fn settled(&self) -> bool;
     /// The unit takes no outcome: the client left, or the plugin closed the unit. Work::isCancelled().
-    fn client_closed(&self) -> bool;
+    fn cancelled(&self) -> bool;
     fn discard(&mut self);
 
     /// Work::isFinalized().
     fn is_finalized(&self) -> bool {
-        self.finalized() || self.client_closed()
+        self.settled() || self.cancelled()
     }
 }
 
@@ -34,9 +34,9 @@ pub trait Held {
 /// # Safety
 /// `ptr` came from `Box::into_raw` in receive and was not reclaimed before.
 pub unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
-    crate::exchange::forget_held(ptr.cast::<()>());
+    crate::dispatcher::forget_held(ptr.cast::<()>());
     let st = unsafe { Box::from_raw(ptr) };
-    if !st.finalized() {
+    if !st.settled() {
         sb_update(Event::Handled(true));
     }
     st
@@ -109,7 +109,7 @@ pub fn now_unix_f64() -> f64 {
 
 /// The queue from a plugin thread to the PHP thread. Clone per plugin task.
 #[derive(Clone)]
-pub struct Sink {
+pub struct Intake {
     tx: SyncSender<Entry>,
     /// The scoreboard slot of this worker.
     slot: &'static SharedSlot,
@@ -148,7 +148,7 @@ impl Drop for PendingGuard {
     }
 }
 
-impl Sink {
+impl Intake {
     pub(crate) fn new(tx: SyncSender<Entry>, slot: &'static SharedSlot) -> Self {
         Self {
             tx,
@@ -233,19 +233,19 @@ mod tests {
         fn shed(self: Box<Self>) {}
     }
 
-    /// A sink on slot 0 of a board in memory.
-    fn sink(tx: SyncSender<Entry>) -> Sink {
-        Sink::new(tx, &rapira_scoreboard::create(1).unwrap()[0])
+    /// An intake on slot 0 of a board in memory.
+    fn intake(tx: SyncSender<Entry>) -> Intake {
+        Intake::new(tx, &rapira_scoreboard::create(1).unwrap()[0])
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn intake_reports_stopped_after_the_receiver_is_gone() {
         let (tx, rx) = sync_channel(1);
-        let sink = sink(tx);
-        let slot = sink.slot;
+        let intake = intake(tx);
+        let slot = intake.slot;
         drop(rx);
         assert_eq!(
-            sink.submit(Box::new(Probe), 0).await.unwrap_err(),
+            intake.submit(Box::new(Probe), 0).await.unwrap_err(),
             Refused::Stopped
         );
         assert_eq!(
@@ -262,10 +262,10 @@ mod tests {
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_reload_waits_for_room_without_a_deadline() {
         let (tx, rx) = sync_channel(1);
-        let sink = sink(tx);
-        let slot = sink.slot;
-        sink.submit(Box::new(Probe), 0).await.unwrap();
-        let (sent, _) = tokio::join!(sink.restart_app(), async {
+        let intake = intake(tx);
+        let slot = intake.slot;
+        intake.submit(Box::new(Probe), 0).await.unwrap();
+        let (sent, _) = tokio::join!(intake.restart_app(), async {
             tokio::time::sleep(INTAKE_WAIT * 2).await;
             rx.try_recv().unwrap()
         });
@@ -282,7 +282,7 @@ mod tests {
         );
     }
 
-    /// Each case fills a queue of one with a reload entry before the sink takes the sender, so `pending` does not count it and the submit finds the queue full. The paused clock moves to the next timer at once, so the waits take no real time.
+    /// Each case fills a queue of one with a reload entry before the intake takes the sender, so `pending` does not count it and the submit finds the queue full. The paused clock moves to the next timer at once, so the waits take no real time.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_full_intake_counts_each_unit_that_never_enters() {
         enum During {
@@ -356,9 +356,9 @@ mod tests {
         for case in cases {
             let (tx, rx) = sync_channel::<Entry>(1);
             tx.send(Entry::RestartApp).unwrap();
-            let sink = sink(tx);
-            let slot = sink.slot;
-            let submit = sink.submit(Box::new(Probe), 0);
+            let intake = intake(tx);
+            let slot = intake.slot;
+            let submit = intake.submit(Box::new(Probe), 0);
             let result = match case.during {
                 During::Nothing => Some(submit.await),
                 During::ClientLeaves => tokio::time::timeout(ACTION_DELAY, submit).await.ok(),

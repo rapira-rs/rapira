@@ -8,8 +8,8 @@ use bytes::Bytes;
 use connectrpc::Protocol;
 use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::guard;
-use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};
+use rapira_sapi::values::{AddrOwned, add_list, build_address, header_key};
 use rapira_sapi::work::{Held, release};
 use rapira_sapi::{
     HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
@@ -212,18 +212,18 @@ impl GrpcState {
 }
 
 impl Held for GrpcState {
-    fn finalized(&self) -> bool {
+    fn settled(&self) -> bool {
         self.reply.is_none()
     }
 
     /// The plugin dropped the receiver: the deadline passed or the client left.
-    fn client_closed(&self) -> bool {
+    fn cancelled(&self) -> bool {
         self.discarded || self.reply.as_ref().is_some_and(oneshot::Sender::is_closed)
     }
 
     /// Dropping `reply` finalizes the call, so `rapira_rs_grpc_drop`/`reclaim_current` do not count it a second time.
     fn discard(&mut self) {
-        if self.finalized() {
+        if self.settled() {
             return;
         }
         self.discarded = true;
@@ -282,7 +282,7 @@ fn add_core(
         return Verb::Finalized;
     };
     // a call that the plugin closed keeps the entry, and finish() gives WorkDiscardedException
-    if st.finalized() {
+    if st.settled() {
         return Verb::Finalized;
     }
     let half = if trailer {
@@ -299,11 +299,11 @@ fn add_core(
 
 /// Sends the one outcome of the call, with both metadata halves in wire form.
 fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
-    if st.client_closed() {
+    if st.cancelled() {
         st.discard();
         return Verb::Discarded;
     }
-    if st.finalized() {
+    if st.settled() {
         return Verb::Finalized;
     }
     let outcome = UnaryReply {
@@ -311,7 +311,7 @@ fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
         trailers: wire(&st.trailers),
         outcome: result,
     };
-    // the receiver can drop after the client_closed() check
+    // the receiver can drop after the cancelled() check
     if st
         .reply
         .take()
@@ -473,7 +473,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_is_finalized(state: *const c_void) -> bo
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_is_cancelled(state: *const c_void) -> bool {
     guard(false, || unsafe {
-        (*state.cast::<GrpcState>()).client_closed()
+        (*state.cast::<GrpcState>()).cancelled()
     })
 }
 
@@ -1315,7 +1315,7 @@ mod tests {
                 .collect();
             assert_eq!(verbs, c.verbs, "{}", c.name);
             assert_eq!(st.is_finalized(), c.finalized, "{}: finalized", c.name);
-            assert_eq!(st.client_closed(), c.cancelled, "{}: cancelled", c.name);
+            assert_eq!(st.cancelled(), c.cancelled, "{}: cancelled", c.name);
             drop(st);
 
             match &c.sent {

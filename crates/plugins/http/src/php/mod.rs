@@ -8,11 +8,9 @@ use std::{
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::body::Bytes;
 use rapira_sapi::callbacks::{MAX_BUFFERED_BODY, guard};
-use rapira_sapi::exchange::{
-    AddrOwned, add_list, build_address, header_key, path_bytes, push_ipv4,
-};
 use rapira_sapi::scoreboard::{Event, sb_update};
 use rapira_sapi::types::{Addr, Body, FormField, Frame, Request, ResponseHead, Tls, UploadedFile};
+use rapira_sapi::values::{AddrOwned, add_list, build_address, header_key, path_bytes, push_ipv4};
 use rapira_sapi::work::{DispatcherClasses, Held, release};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, executor_globals, object_init_ex,
@@ -246,11 +244,11 @@ impl ExchangeState {
 }
 
 impl Held for ExchangeState {
-    fn finalized(&self) -> bool {
+    fn settled(&self) -> bool {
         self.stage == Stage::Finalized
     }
 
-    fn client_closed(&self) -> bool {
+    fn cancelled(&self) -> bool {
         self.discarded
             || (self.stage != Stage::Finalized
                 && self.sender.as_ref().is_some_and(Sender::is_closed))

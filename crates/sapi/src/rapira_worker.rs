@@ -76,7 +76,7 @@ fn boot_request_startup() -> bool {
 
 /// Logs PG(last_error_message) before php_request_shutdown frees it (main/main.c:2024).
 fn run_cycle(script: &Path) -> Cycle {
-    crate::exchange::cycle_reset();
+    crate::dispatcher::cycle_reset();
     crate::quota::renew();
     let started = boot_request_startup();
     if started {
@@ -94,9 +94,9 @@ fn run_cycle(script: &Path) -> Cycle {
         return Cycle::Restart;
     }
 
-    if crate::exchange::CLOSED_SEEN.get() {
+    if crate::dispatcher::CLOSED_SEEN.get() {
         Cycle::Stop
-    } else if recycle || crate::quota::exhausted() || crate::exchange::RECEIVED.get() {
+    } else if recycle || crate::quota::exhausted() || crate::dispatcher::RECEIVED.get() {
         Cycle::Recycle
     } else {
         Cycle::Failed
@@ -136,7 +136,7 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
             }
         }
     };
-    crate::exchange::reclaim_current();
+    crate::dispatcher::reclaim_current();
     exit
 }
 
@@ -227,12 +227,12 @@ fn next_unit() -> Option<Context> {
                     sb_update(scoreboard::Event::Shed);
                     continue;
                 }
-                crate::exchange::RECEIVED.set(true);
+                crate::dispatcher::RECEIVED.set(true);
                 return Some(unit.into_cgi());
             }
             // With no timeout the wait ends only with an entry or the closed intake.
             Pulled::Closed | Pulled::Timeout | Pulled::Empty => {
-                crate::exchange::CLOSED_SEEN.set(true);
+                crate::dispatcher::CLOSED_SEEN.set(true);
                 return None;
             }
         }

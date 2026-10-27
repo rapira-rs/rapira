@@ -5,14 +5,14 @@ use std::time::{Duration, Instant};
 use anyhow::anyhow;
 use tokio::sync::watch;
 
-use crate::work::{DispatcherClasses, Sink};
+use crate::work::{DispatcherClasses, Intake};
 
 pub use rapira_config::Mode;
 
 /// What the worker hands to [`Plugin::serve`].
 pub struct Worker {
     pub handle: tokio::runtime::Handle,
-    pub sink: Sink,
+    pub intake: Intake,
     /// Set to true once. The plugin stops accepting, drains within `drain_grace`, and returns from `serve`.
     pub stop: watch::Receiver<bool>,
     /// The bound of the plugin's drain after the stop. The root sets it below the join bound of [`run_plugin`].
@@ -138,7 +138,7 @@ impl Drop for Ended {
 /// `stopper` stops the plugin. `grace` bounds the join after the stop. `drain_grace` goes to [`Worker::drain_grace`].
 pub fn run_plugin(
     plugin: Box<dyn Plugin>,
-    sink: Sink,
+    intake: Intake,
     stopper: Stopper,
     grace: Duration,
     drain_grace: Duration,
@@ -151,20 +151,20 @@ pub fn run_plugin(
         .build()
         .map_err(|e| anyhow!("building the {name} runtime: {e}"))?;
     let ended = Ended(Arc::clone(&stopper.events));
-    // The task and its Sink clone drop with the runtime when serve returns, so the clone never keeps the intake open after a stop.
+    // The task and its Intake clone drop with the runtime when serve returns, so the clone never keeps the intake open after a stop.
     let restart = Arc::clone(&stopper.restart);
-    let restart_sink = sink.clone();
+    let restart_intake = intake.clone();
     rt.spawn(async move {
         loop {
             restart.notified().await;
-            if let Err(e) = restart_sink.restart_app().await {
+            if let Err(e) = restart_intake.restart_app().await {
                 tracing::warn!(target: "rapira", "reload skipped: {e}");
             }
         }
     });
     let worker = Worker {
         handle: rt.handle().clone(),
-        sink,
+        intake,
         stop: stopper.flag.subscribe(),
         drain_grace,
     };

@@ -9,7 +9,7 @@ use http::header::CONTENT_TYPE;
 use http_body_util::BodyExt;
 use hyper::body::{Body, Bytes, Incoming, SizeHint};
 use rapira_sapi::types::ResponseHead;
-use rapira_sapi::work::{Refused, Sink};
+use rapira_sapi::work::{Intake, Refused};
 use rapira_sapi::{Addr, Frame, Request};
 use tower::{Service as _, ServiceExt as _};
 
@@ -20,7 +20,7 @@ use crate::{Config, Exchange, bridge, multipart, request};
 
 pub(crate) struct Shared {
     pub cfg: Config,
-    pub intake: Sink,
+    pub intake: Intake,
     pub inflight: Arc<AtomicUsize>,
     /// The worker drains: every response closes its connection, so the client sends its next request to another worker.
     pub closing: AtomicBool,

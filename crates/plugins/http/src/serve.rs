@@ -10,7 +10,7 @@ use hyper_util::server::graceful::GracefulShutdown;
 use rapira_net::{Acceptor, ListenAddr, PreparedListener, Serve};
 use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
-use rapira_sapi::work::Sink;
+use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch::channel;
 
@@ -26,7 +26,7 @@ struct Serving {
 }
 
 impl Serving {
-    fn start(intake: Sink, config: Config) -> Self {
+    fn start(intake: Intake, config: Config) -> Self {
         match &config.listen {
             ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
             unix => tracing::info!(target: "http", "listening on {unix}"),
@@ -145,7 +145,7 @@ impl Serve for Serving {
 pub(crate) fn serve(mut config: Config, prepared: PreparedListener, worker: Worker) -> Result<()> {
     let Worker {
         handle,
-        sink: intake,
+        intake,
         stop,
         drain_grace,
     } = worker;

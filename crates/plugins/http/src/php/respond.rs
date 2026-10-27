@@ -142,7 +142,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
 /// # Safety
 /// As `send_frame`.
 pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: HeaderMap) -> Verb {
-    if st.client_closed() {
+    if st.cancelled() {
         discard_unit(st);
         return Verb::Discarded;
     }
@@ -203,7 +203,7 @@ pub(super) unsafe fn write_head_core(
     status: u16,
     headers: HeaderMap,
 ) -> Verb {
-    if st.client_closed() {
+    if st.cancelled() {
         discard_unit(st);
         return Verb::Discarded;
     }
@@ -273,7 +273,7 @@ pub(super) unsafe fn write_body_core(
     len: usize,
     eos: bool,
 ) -> Verb {
-    if st.client_closed() {
+    if st.cancelled() {
         discard_unit(st);
         return Verb::Discarded;
     }
@@ -383,7 +383,7 @@ pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: Hea
 pub unsafe extern "C" fn rapira_rs_exchange_flush(unit: *mut c_void) -> bool {
     guard(false, || unsafe {
         let st = &mut *unit.cast::<ExchangeState>();
-        let v = if st.client_closed() {
+        let v = if st.cancelled() {
             discard_unit(st);
             Verb::Discarded
         } else if st.stage == Stage::Finalized {
@@ -416,7 +416,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_is_finalized(unit: *const c_void) ->
 pub unsafe extern "C" fn rapira_rs_exchange_is_cancelled(unit: *const c_void) -> bool {
     guard(false, || unsafe {
         let st = &*unit.cast::<ExchangeState>();
-        st.client_closed()
+        st.cancelled()
     })
 }
 

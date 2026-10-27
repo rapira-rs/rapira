@@ -12,7 +12,7 @@ use connectrpc_health::StaticChecker;
 use rapira_net::{Acceptor, Serve};
 use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
-use rapira_sapi::work::Sink;
+use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 use tower::ServiceExt as _;
@@ -48,7 +48,7 @@ impl Drop for InFlight {
 }
 
 impl Serving {
-    fn start(intake: Sink, config: &Config, router: Router, health: Arc<StaticChecker>) -> Self {
+    fn start(intake: Intake, config: &Config, router: Router, health: Arc<StaticChecker>) -> Self {
         tracing::info!(target: "grpc", "listening on {}", config.listen);
         let mut deadlines = DeadlinePolicy::new();
         if let Some(timeout) = config.default_timeout {
@@ -189,7 +189,7 @@ fn status_in_trailers(
 pub(crate) fn serve(config: Config, prepared: Prepared, worker: Worker) -> Result<()> {
     let Worker {
         handle,
-        sink: intake,
+        intake,
         stop,
         drain_grace,
     } = worker;

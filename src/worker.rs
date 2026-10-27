@@ -55,7 +55,7 @@ pub fn worker_body(
     } else {
         max_requests
     };
-    let StartedWorker { rapira, sink } = Rapira::start_worker(
+    let StartedWorker { rapira, intake } = Rapira::start_worker(
         mode,
         entrypoint,
         effective_quota(max_requests),
@@ -75,8 +75,8 @@ pub fn worker_body(
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
     let name: &str = plugin.name();
-    let outcome: anyhow::Result<()> = run_plugin(plugin, sink, stopper.clone(), grace, drain_grace)
-        .and_then(|running| {
+    let outcome: anyhow::Result<()> =
+        run_plugin(plugin, intake, stopper.clone(), grace, drain_grace).and_then(|running| {
             let restarter = stopper.clone();
             let restart = move || {
                 if mode != Mode::Classic {

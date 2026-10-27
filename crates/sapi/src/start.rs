@@ -11,7 +11,7 @@ use tracing::{error, info, trace};
 use crate::quota;
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
-use crate::work::{DispatcherClasses, Entry, Sink, Work};
+use crate::work::{DispatcherClasses, Entry, Intake, Work};
 use crate::{
     classic_worker::classic_worker,
     plugin::{Mode, Stopper},
@@ -86,8 +86,8 @@ pub struct Rapira {
 /// The PHP thread of one worker and its intake.
 pub struct StartedWorker {
     pub rapira: Rapira,
-    /// The intake of this worker. The PHP thread sees the intake closed once every clone of the Sink is dropped.
-    pub sink: Sink,
+    /// The intake of this worker. The PHP thread sees it closed once every clone is dropped.
+    pub intake: Intake,
 }
 
 /// Zend structs are bound by bindgen at build time, so a libphp from another PHP minor is an ABI mismatch (`sapi_startup` handed a differently shaped struct), not a load error.
@@ -158,7 +158,7 @@ impl Rapira {
     ) -> StartedWorker {
         let pending: &'static AtomicU64 = &slot.pending;
         let (intake_tx, intake_rx) = sync_channel::<Entry>(1024);
-        let sink = Sink::new(intake_tx, slot);
+        let intake = Intake::new(intake_tx, slot);
 
         crate::context::set_script(&entrypoint);
         // SAFETY: written once, before the PHP thread that reads it exists.
@@ -193,7 +193,7 @@ impl Rapira {
             rapira: Self {
                 worker: Some(worker),
             },
-            sink,
+            intake,
         }
     }
 }
@@ -205,7 +205,7 @@ impl Drop for Rapira {
             return;
         };
 
-        // The PHP thread ends once every Sink clone is dropped. The caller drops the Sink, or the plugin that holds it, before Rapira.
+        // The PHP thread ends once every Intake clone is dropped. The caller drops the Intake, or the plugin that holds it, before Rapira.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline && !worker.is_finished() {
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -223,7 +223,7 @@ impl Drop for Rapira {
 fn worker_main(mode: Mode, entrypoint: PathBuf, rx: UnitRx, classes: DispatcherClasses) {
     UNIT_RX.with_borrow_mut(|slot| *slot = Some(rx));
     if mode == Mode::Dispatcher {
-        crate::exchange::set_classes(classes);
+        crate::dispatcher::set_classes(classes);
     }
     loop {
         unsafe {

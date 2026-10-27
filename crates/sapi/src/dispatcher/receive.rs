@@ -14,14 +14,14 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
         let classes = classes();
         if let Some(ptr) = UNIT.get()
-            && !(*ptr).finalized()
-            && (*ptr).client_closed()
+            && !(*ptr).settled()
+            && (*ptr).cancelled()
         {
             tracing::debug!(target: "rapira", "receive() discarded an unfinalized unit whose client left");
             (*ptr).discard();
         }
         if let Some(ptr) = UNIT.get()
-            && !(*ptr).finalized()
+            && !(*ptr).settled()
         {
             zend::throw_error(classes.busy);
             return false;
