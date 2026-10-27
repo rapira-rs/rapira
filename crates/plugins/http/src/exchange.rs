@@ -1,7 +1,7 @@
 use tokio::sync::mpsc::Sender;
 
 use rapira_sapi::callbacks::send_error_head;
-use rapira_sapi::types::{Context, Frame, Request};
+use rapira_sapi::types::{Context, Frame, ReqC, Request};
 use rapira_sapi::work::{Held, Work};
 use rapira_sapi::zend_object;
 
@@ -12,39 +12,42 @@ pub(crate) const FRAME_CAP: usize = 16;
 
 /// One HTTP request on the intake.
 pub(crate) struct Exchange {
-    /// The request, the frame sender, and the CGI view when `new` built one.
-    ctx: Context,
+    req: Request,
+    /// Sends the reply the transport reads.
+    tx: Sender<Frame>,
+    /// The CGI view, built on the transport thread in the classic and worker modes.
+    cgi: Option<ReqC>,
 }
 
 impl Exchange {
-    /// `tx` sends the reply the transport reads.
     /// `superglobals` builds the CGI view here, on the transport thread: true in the classic and worker modes.
     pub(crate) fn new(req: Request, tx: Sender<Frame>, superglobals: bool) -> Self {
-        let ctx = Context::new(req, tx, superglobals);
-        Self { ctx }
+        let cgi = superglobals.then(|| ReqC::build(&req));
+        Self { req, tx, cgi }
     }
 }
 
 impl Work for Exchange {
     fn cancelled(&self) -> bool {
-        self.ctx.sender.as_ref().is_some_and(Sender::is_closed)
+        self.tx.is_closed()
     }
 
     unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held {
-        let Context { req, sender, .. } = self.ctx;
-        let tx = sender.expect("a queued exchange holds its sender");
-        let ptr = Box::into_raw(Box::new(ExchangeState::new(req, tx)));
+        let ptr = Box::into_raw(Box::new(ExchangeState::new(self.req, self.tx)));
         // SAFETY: the caller passes a live Rapira\Internal\Http\Exchange object.
         unsafe { (*exchange_from(obj)).unit = ptr.cast() };
         ptr
     }
 
     fn into_cgi(self: Box<Self>) -> Context {
-        self.ctx
+        let Self { req, tx, cgi } = *self;
+        let cgi = cgi.unwrap_or_else(|| ReqC::build(&req));
+        Context::new(req, tx, cgi)
     }
 
+    /// A dispatcher-mode unit has no CGI view yet; the shed after a failed boot builds one to write the 503.
     fn shed(self: Box<Self>) {
-        let mut ctx = self.ctx;
+        let mut ctx = self.into_cgi();
         send_error_head(&mut ctx, 503);
         ctx.finish(false);
     }

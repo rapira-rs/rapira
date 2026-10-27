@@ -245,8 +245,7 @@ pub enum StreamState {
 
 pub struct Context {
     pub req: Request,
-    /// None on the dispatcher path, which binds no server context and runs no CGI callbacks.
-    pub c: Option<ReqC>,
+    pub c: ReqC,
     pub sender: Option<Sender<Frame>>,
     pub head: Option<ResponseHead>,
     pub body: Vec<u8>,
@@ -256,8 +255,7 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(req: Request, sender: Sender<Frame>, superglobals: bool) -> Self {
-        let c = superglobals.then(|| ReqC::build(&req));
+    pub fn new(req: Request, sender: Sender<Frame>, c: ReqC) -> Self {
         Self {
             req,
             c,
@@ -375,7 +373,18 @@ mod tests {
                 received_at: 0.0,
                 tls: None,
             },
-            c: None,
+            c: ReqC {
+                method: CString::default(),
+                query: CString::default(),
+                uri: CString::default(),
+                script: CString::default(),
+                ctype: None,
+                cookie: None,
+                authorization: None,
+                remote_addr: String::new(),
+                remote_port: String::new(),
+                server_port: String::new(),
+            },
             sender: None,
             head: None,
             body: Vec::new(),

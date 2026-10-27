@@ -74,9 +74,6 @@ pub(crate) fn unbind_server_context() {
 
 /// Must run after sapi_activate, which hard-resets proto_num to 1000 (main/SAPI.c:448).
 pub(crate) unsafe fn apply_proto_num(ctx: &Context) {
-    if ctx.c.is_none() {
-        return;
-    }
     let proto_num = match ctx.req.protocol.as_str() {
         "HTTP/1.0" => 1000,
         "HTTP/1.1" => 1001,
@@ -89,7 +86,7 @@ pub(crate) unsafe fn apply_proto_num(ctx: &Context) {
 
 /// Resets `http_response_code` because the engine keeps the previous request's status (reset commented out in main/SAPI.c:435-437).
 pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
-    let Some(reqc) = ctx.c.as_ref() else { return };
+    let reqc = &ctx.c;
     let sg = &raw mut sapi_globals;
     unsafe { (*sg).sapi_headers.http_response_code = 200 };
     let ri: &mut sapi_request_info = unsafe { &mut (*sg).request_info };

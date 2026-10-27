@@ -12,9 +12,7 @@ use rapira_sapi::exchange::{
     AddrOwned, add_list, build_address, header_key, path_bytes, push_ipv4,
 };
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::types::{
-    Addr, Body, Context, FormField, Frame, Request, ResponseHead, Tls, UploadedFile,
-};
+use rapira_sapi::types::{Addr, Body, FormField, Frame, Request, ResponseHead, Tls, UploadedFile};
 use rapira_sapi::work::{DispatcherClasses, Held, release};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, executor_globals, object_init_ex,
@@ -188,9 +186,10 @@ impl RequestView {
 }
 
 pub struct ExchangeState {
-    // body above ctx: declaration drop order unlinks the spool files before the frame sender closes
+    // body above sender: declaration drop order unlinks the spool files before the frame sender closes
     body: BodyState,
-    ctx: Context,
+    req: Request,
+    sender: Option<Sender<Frame>>,
     /// Filled by the first `getRequest()`.
     view: Option<RequestView>,
     stage: Stage,
@@ -207,12 +206,8 @@ pub struct ExchangeState {
 }
 
 impl ExchangeState {
-    pub(crate) fn new(req: Request, tx: Sender<Frame>) -> Self {
-        let mut ctx = Context::new(req, tx, false);
-        let taken = std::mem::replace(
-            &mut ctx.req.body,
-            Body::Raw(std::io::Cursor::new(Vec::new())),
-        );
+    pub(crate) fn new(mut req: Request, tx: Sender<Frame>) -> Self {
+        let taken = std::mem::replace(&mut req.body, Body::Raw(std::io::Cursor::new(Vec::new())));
         let body = match taken {
             Body::Raw(cursor) => BodyState::Raw(cursor.into_inner()),
             Body::Multipart(mb) => BodyState::Multipart {
@@ -235,11 +230,12 @@ impl ExchangeState {
                     .collect(),
             },
         };
-        let bodiless = ctx.req.method == "HEAD";
+        let bodiless = req.method == "HEAD";
 
         Self {
-            ctx,
             body,
+            req,
+            sender: Some(tx),
             view: None,
             stage: Stage::Open,
             head_sent: false,
@@ -261,7 +257,7 @@ impl Held for ExchangeState {
     fn client_closed(&self) -> bool {
         self.discarded
             || (self.stage != Stage::Finalized
-                && self.ctx.sender.as_ref().is_some_and(Sender::is_closed))
+                && self.sender.as_ref().is_some_and(Sender::is_closed))
     }
 
     fn discard(&mut self) {
