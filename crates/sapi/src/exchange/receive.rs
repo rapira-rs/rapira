@@ -125,7 +125,7 @@ pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> b
         let _ = object_init_ex(return_value, (classes().info)());
         let info = info_from((*return_value).value.obj);
         (*info).pending = pending_depth() as i64;
-        (*info).active = i64::from(UNIT.get().is_some_and(|p| !(*p).finalized()));
+        (*info).active = i64::from(UNIT.get().is_some_and(|p| !(*p).is_finalized()));
         true
     })
 }

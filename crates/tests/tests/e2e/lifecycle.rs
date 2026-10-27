@@ -471,7 +471,7 @@ fn worker_survives_client_leaving() {
     assert_eq!(body, b"ok", "\n{}", diagnostics(&srv));
 }
 
-/// An unfinalized exchange whose client left is discarded by the next `receive()`, and the discard is logged.
+/// An unfinalized exchange whose client left is finalized, so `activeCount()` no longer counts it. The next `receive()` discards it, and the discard is logged.
 #[test]
 fn cancelled_exchange_is_discarded_by_next_receive() {
     let srv = spawn_without_rust_log(
@@ -506,7 +506,7 @@ fn cancelled_exchange_is_discarded_by_next_receive() {
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     assert_eq!(
         body,
-        format!("{pid}:2:cancelled").into_bytes(),
+        format!("{pid}:2:cancelled active=0").into_bytes(),
         "the next request must preserve the worker and script cycle\n{}",
         diagnostics(&srv)
     );

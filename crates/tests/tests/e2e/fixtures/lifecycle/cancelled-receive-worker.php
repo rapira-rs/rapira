@@ -18,7 +18,7 @@ try {
                 usleep(1_000);
             }
             if ($ex->isCancelled()) {
-                $result = 'cancelled';
+                $result = 'cancelled active=' . $d->getInfo()->activeCount();
             } else {
                 $result = 'timeout';
                 $ex->writeBody('', eos: true);
