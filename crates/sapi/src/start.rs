@@ -161,7 +161,7 @@ impl Rapira {
         let sink = Sink::new(intake_tx, slot);
 
         crate::context::set_script(&entrypoint);
-        // SAFETY: safe, trust me, I'm a developer
+        // SAFETY: written once, before the PHP thread that reads it exists.
         unsafe {
             crate::rapira_mode = match mode {
                 Mode::Classic => RAPIRA_MODE_CLASSIC,

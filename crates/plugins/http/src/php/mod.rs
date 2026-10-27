@@ -1,5 +1,5 @@
 use std::{
-    ffi::{CStr, CString, c_char, c_void},
+    ffi::{CStr, c_char, c_void},
     fmt::NumBuffer,
     net::SocketAddr,
     time::Instant,
@@ -109,23 +109,19 @@ struct FilePart {
     headers: Grouped,
 }
 
-/// Multipart part headers, one entry per name. Keys are CStrings: the symtable prefilter in add_assoc_zval_ex reads one byte past a leading `-`, which the terminator covers.
-struct Grouped(Vec<(CString, Vec<Vec<u8>>)>);
+/// Multipart part headers, one entry per name.
+struct Grouped(Vec<(String, Vec<Vec<u8>>)>);
 
 impl Grouped {
     fn new(headers: &[(String, Vec<u8>)]) -> Self {
-        let mut out: Vec<(CString, Vec<Vec<u8>>)> = Vec::new();
+        let mut out: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
         for (name, value) in headers {
-            let nb = name.as_bytes();
-            if nb.is_empty() {
+            if name.is_empty() {
                 continue;
             }
-            match out.iter_mut().find(|(n, _)| n.as_bytes() == nb) {
+            match out.iter_mut().find(|(n, _)| n == name) {
                 Some((_, values)) => values.push(value.clone()),
-                None => {
-                    let Ok(key) = CString::new(nb) else { continue };
-                    out.push((key, vec![value.clone()]));
-                }
+                None => out.push((name.clone(), vec![value.clone()])),
             }
         }
         Self(out)

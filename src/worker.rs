@@ -5,7 +5,7 @@ use std::time::Duration;
 use rapira_config::PoolSettings;
 use rapira_master::{WORKER_EXIT_UNHEALTHY, WorkerEnv};
 use rapira_sapi::plugin::{Mode, Plugin, Stopper, run_plugin};
-use rapira_sapi::quota::{STOP_REASON, STOP_UNHEALTHY};
+use rapira_sapi::quota::UNHEALTHY;
 use rapira_sapi::{Rapira, StartedWorker};
 
 /// Jitter avoids lockstep recycling. The hash mixes in the pid because every child inherits the same seed from the pre-fork master.
@@ -92,10 +92,12 @@ pub fn worker_body(
     }
     drop(rapira);
 
-    match STOP_REASON.load(SeqCst) {
-        STOP_UNHEALTHY => WORKER_EXIT_UNHEALTHY,
-        _ if outcome.is_err() => 1,
-        _ => 0,
+    if UNHEALTHY.load(SeqCst) {
+        WORKER_EXIT_UNHEALTHY
+    } else if outcome.is_err() {
+        1
+    } else {
+        0
     }
 }
 

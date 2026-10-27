@@ -186,16 +186,15 @@ fn status_in_trailers(
 }
 
 /// Runs the accept loop on the calling thread until the stop flag, then drains the connections.
-pub(crate) fn serve(
-    intake: Sink,
-    config: Config,
-    prepared: Prepared,
-    worker: Worker,
-) -> Result<()> {
-    let acceptor = Acceptor::adopt(prepared.listener, worker.stop.clone(), &worker.handle)?;
+pub(crate) fn serve(config: Config, prepared: Prepared, worker: Worker) -> Result<()> {
+    let Worker {
+        handle,
+        sink: intake,
+        stop,
+        drain_grace,
+    } = worker;
+    let acceptor = Acceptor::adopt(prepared.listener, stop, &handle)?;
     let serving = Serving::start(intake, &config, prepared.router, prepared.health);
-    let fatal = acceptor.run(&worker.handle, &serving);
-    worker
-        .handle
-        .block_on(serving.drain(fatal, worker.drain_grace))
+    let fatal = acceptor.run(&handle, &serving);
+    handle.block_on(serving.drain(fatal, drain_grace))
 }

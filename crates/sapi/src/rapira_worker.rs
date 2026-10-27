@@ -120,7 +120,7 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                 failures += 1;
                 if failures == UNHEALTHY_AFTER {
                     error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
-                    sb_update(scoreboard::Event::Unhealthy);
+                    crate::quota::fire_unhealthy();
                 }
                 sb_update(scoreboard::Event::BootFailed);
                 match pull_unit_to_shed(BOOT_RETRY) {

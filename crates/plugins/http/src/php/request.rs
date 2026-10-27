@@ -8,8 +8,8 @@ unsafe fn emit_headers(dst: *mut zval, g: &Grouped) {
         for (name, values) in &g.0 {
             add_list(
                 dst,
-                name.as_ptr(),
-                name.count_bytes(),
+                header_key(name),
+                name.len(),
                 values.iter().map(Vec::as_slice),
             );
         }
