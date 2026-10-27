@@ -25,7 +25,7 @@ pub use php::rapira_http_register_classes;
 #[derive(Clone)]
 pub struct Config {
     pub listen: ListenAddr,
-    pub server_name: String,
+    pub server_name: &'static str,
     pub server_port: u16,
     pub max_body_size: usize,
     pub unsafe_field_names: UnsafeFieldNames,
@@ -69,7 +69,7 @@ impl Plugin for Server {
 
     fn prepare(&mut self) -> Result<()> {
         // Before the fork: the PHP thread of a worker can read the identity at boot, before serve() runs.
-        php::set_server_identity(self.config.server_name.clone(), self.config.server_port);
+        php::set_server_identity(self.config.server_name, self.config.server_port);
         if let Some(uploads) = &self.config.uploads {
             multipart::sweep_spool_dirs(&uploads.dir);
         }

@@ -13,8 +13,9 @@ use rapira_sapi::Addr;
 use rapira_sapi::work::{Intake, now_unix_f64};
 use tokio::sync::oneshot;
 
+use crate::php::GrpcState;
 use crate::schema::Schema;
-use crate::{Call, RpcStatus, UnaryCall};
+use crate::{RpcStatus, UnaryCall};
 
 /// Routes the unary methods of the configured services to PHP.
 pub(crate) struct PhpDispatcher {
@@ -123,7 +124,7 @@ async fn unary(
         message,
     };
     let (tx, reply) = oneshot::channel();
-    let call = Call::new(call, tx);
+    let call = GrpcState::new(call, tx);
     // A refusal before dispatch: PHP never saw the call.
     if let Err(e) = intake.submit(Box::new(call), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));

@@ -74,11 +74,9 @@ pub(crate) fn unbind_server_context() {
 
 /// Must run after sapi_activate, which hard-resets proto_num to 1000 (main/SAPI.c:448).
 pub(crate) unsafe fn apply_proto_num(ctx: &Context) {
-    let proto_num = match ctx.req.protocol.as_str() {
+    let proto_num = match ctx.req.protocol {
         "HTTP/1.0" => 1000,
-        "HTTP/1.1" => 1001,
-        p if p.starts_with("HTTP/2.0") => 2000,
-        p if p.starts_with("HTTP/3.0") => 3000,
+        "HTTP/2.0" => 2000,
         _ => 1001,
     };
     unsafe { sapi_globals.request_info.proto_num = proto_num };

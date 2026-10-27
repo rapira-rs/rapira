@@ -12,10 +12,11 @@ pub fn build(
     peer: Peer,
     cfg: &Config,
 ) -> Request {
+    // hyper's HTTP/1 server parses only HTTP/1.0 and HTTP/1.1; HTTP/2 is planned.
     let protocol = match parts.version {
-        http::Version::HTTP_11 => "HTTP/1.1".to_owned(),
-        http::Version::HTTP_10 => "HTTP/1.0".to_owned(),
-        v => format!("{v:?}"),
+        http::Version::HTTP_10 => "HTTP/1.0",
+        http::Version::HTTP_2 => "HTTP/2.0",
+        _ => "HTTP/1.1",
     };
     let headers = std::mem::take(&mut parts.headers);
     Request {
@@ -40,7 +41,7 @@ pub fn build(
         protocol,
         remote: peer.remote,
         server: peer.server,
-        server_name: cfg.server_name.clone(),
+        server_name: cfg.server_name,
         server_port: cfg.server_port,
         tls: None,
         received_at: peer.received_at,
@@ -62,7 +63,7 @@ mod tests {
     fn config() -> Config {
         Config {
             listen: rapira_net::ListenAddr::Tcp(([127, 0, 0, 1], 8000).into()),
-            server_name: "localhost".to_owned(),
+            server_name: "localhost",
             server_port: 8000,
             max_body_size: 0,
             unsafe_field_names: crate::UnsafeFieldNames::Drop,

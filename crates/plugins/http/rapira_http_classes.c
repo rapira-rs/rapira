@@ -35,35 +35,6 @@ ZEND_METHOD(Rapira_Internal_Http_Dispatcher, name) {
     RETURN_STRING("http");
 }
 
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, __construct) {
-    zend_throw_error(NULL,
-                     "host-created; obtain it from \\Rapira\\get_dispatcher()");
-}
-
-ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, __construct) {
-    zend_throw_error(NULL, "host-created");
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, receive) {
-    rapira_sapi_receive(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, tryReceive) {
-    rapira_sapi_try_receive(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, getInfo) {
-    rapira_sapi_get_info(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
-ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, pendingCount) {
-    rapira_sapi_pending_count(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
-ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, activeCount) {
-    rapira_sapi_active_count(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverName) {
     ZEND_PARSE_PARAMETERS_NONE();
     RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_http_server_name(return_value),

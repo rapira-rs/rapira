@@ -106,12 +106,16 @@ void rapira_register_classes(void);
 // PHP the buffered body (module.c)
 void rapira_register_post_reader(void);
 
-// The Dispatcher and DispatcherInfo method bodies; a plugin's method shells call them.
-void rapira_sapi_receive(INTERNAL_FUNCTION_PARAMETERS);
-void rapira_sapi_try_receive(INTERNAL_FUNCTION_PARAMETERS);
-void rapira_sapi_get_info(INTERNAL_FUNCTION_PARAMETERS);
-void rapira_sapi_pending_count(INTERNAL_FUNCTION_PARAMETERS);
-void rapira_sapi_active_count(INTERNAL_FUNCTION_PARAMETERS);
+// The Dispatcher and DispatcherInfo methods that every plugin shares, and the
+// private constructors of its host-created classes. The plugin stubs name them
+// with @implementation-alias, so the plugin arginfo points at them directly.
+ZEND_FUNCTION(rapira_sapi_receive);
+ZEND_FUNCTION(rapira_sapi_try_receive);
+ZEND_FUNCTION(rapira_sapi_get_info);
+ZEND_FUNCTION(rapira_sapi_pending_count);
+ZEND_FUNCTION(rapira_sapi_active_count);
+ZEND_FUNCTION(rapira_sapi_dispatcher_construct);
+ZEND_FUNCTION(rapira_sapi_host_created);
 
 // Returns from the internal function when `call` reports false. Rust throws
 // before it reports false; the backstop covers a missing throw.

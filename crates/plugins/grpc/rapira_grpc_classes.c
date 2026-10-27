@@ -40,35 +40,6 @@ static void rapira_grpc_call_free(zend_object *std) {
     zend_object_std_dtor(std);
 }
 
-ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, __construct) {
-    zend_throw_error(NULL,
-                     "host-created; obtain it from \\Rapira\\get_dispatcher()");
-}
-
-ZEND_METHOD(Rapira_Internal_Grpc_DispatcherInfo, __construct) {
-    zend_throw_error(NULL, "host-created");
-}
-
-ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, receive) {
-    rapira_sapi_receive(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
-ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, tryReceive) {
-    rapira_sapi_try_receive(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
-ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, getInfo) {
-    rapira_sapi_get_info(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
-ZEND_METHOD(Rapira_Internal_Grpc_DispatcherInfo, pendingCount) {
-    rapira_sapi_pending_count(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
-ZEND_METHOD(Rapira_Internal_Grpc_DispatcherInfo, activeCount) {
-    rapira_sapi_active_count(INTERNAL_FUNCTION_PARAM_PASSTHRU);
-}
-
 void rapira_grpc_register_classes(void) {
     rapira_ce_grpc_status_code = register_class_Rapira_Grpc_StatusCode();
     rapira_ce_grpc_method_kind = register_class_Rapira_Grpc_MethodKind();

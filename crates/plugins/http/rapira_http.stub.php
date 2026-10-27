@@ -198,15 +198,22 @@ namespace Rapira\Internal\Http {
      */
     final class Dispatcher implements \Rapira\Http\HttpDispatcher
     {
-        /** Host-created: obtain it from \Rapira\get_dispatcher(). */
+        /**
+         * Host-created: obtain it from \Rapira\get_dispatcher().
+         *
+         * @implementation-alias rapira_sapi_dispatcher_construct
+         */
         private function __construct() {}
 
         public function name(): string {}
 
+        /** @implementation-alias rapira_sapi_try_receive */
         public function tryReceive(): ?\Rapira\Http\Exchange {}
 
+        /** @implementation-alias rapira_sapi_receive */
         public function receive(int $timeout = -1): \Rapira\Http\Exchange {}
 
+        /** @implementation-alias rapira_sapi_get_info */
         public function getInfo(): \Rapira\Http\HttpDispatcherInfo {}
     }
 
@@ -216,11 +223,17 @@ namespace Rapira\Internal\Http {
      */
     final class DispatcherInfo implements \Rapira\Http\HttpDispatcherInfo
     {
-        /** Host-created. */
+        /**
+         * Host-created.
+         *
+         * @implementation-alias rapira_sapi_host_created
+         */
         private function __construct() {}
 
+        /** @implementation-alias rapira_sapi_pending_count */
         public function pendingCount(): int {}
 
+        /** @implementation-alias rapira_sapi_active_count */
         public function activeCount(): int {}
 
         public function serverName(): string {}
@@ -237,7 +250,7 @@ namespace Rapira\Internal\Http {
         /**
          * Host-created.
          *
-         * @implementation-alias Rapira\Internal\Http\DispatcherInfo::__construct
+         * @implementation-alias rapira_sapi_host_created
          */
         private function __construct() {}
 

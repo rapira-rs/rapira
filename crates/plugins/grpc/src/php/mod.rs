@@ -6,7 +6,7 @@ use rapira_sapi::{zend_class_entry, zend_object, zval};
 pub mod call;
 mod values;
 
-pub(crate) use call::{GrpcState, grpc_call_from};
+pub(crate) use call::GrpcState;
 
 // Class entries of the grpc stub; rapira_grpc_register_classes assigns them in MINIT (rapira_grpc.h).
 unsafe extern "C" {
