@@ -13,7 +13,7 @@ use std::io::Read;
 use std::mem::ManuallyDrop;
 use std::os::raw::{c_char, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
 
 // Only this catch_unwind turns a panic inside PHP into a failed request and a
 // recycled worker instead of a process abort. The build enforces the strategy.
@@ -261,6 +261,16 @@ pub unsafe extern "C" fn rapira_rs_raw_body(body: *mut *const c_char) -> usize {
         let bytes = reader.get_ref();
         unsafe { *body = bytes.as_ptr().cast() };
         bytes.len()
+    })
+}
+/// The Authorization field of the bound request, for php_handle_auth_data in rapira_activate (module.c); NULL with no bound request or no field.
+#[unsafe(no_mangle)]
+pub extern "C" fn rapira_rs_authorization() -> *const c_char {
+    with_ctx(null(), |ctx| {
+        ctx.c
+            .as_ref()
+            .and_then(|c| c.authorization.as_ref())
+            .map_or(null(), |a| a.as_ptr())
     })
 }
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {

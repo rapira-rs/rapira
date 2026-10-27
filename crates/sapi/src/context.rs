@@ -99,12 +99,4 @@ pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     ri.path_translated = reqc.script.as_ptr() as *mut c_char;
     ri.content_type = reqc.ctype.as_ref().map_or(null(), |s| s.as_ptr());
     ri.content_length = ctx.req.content_length;
-
-    unsafe {
-        php_handle_auth_data(
-            reqc.authorization
-                .as_ref()
-                .map_or(null(), |auth| auth.as_ptr()),
-        )
-    };
 }

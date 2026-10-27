@@ -297,10 +297,10 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     // freeing the table releases closure captures, which can run __destruct
     RAPIRA_OBSERVER_CLOSE(php_free_shutdown_functions(), observed_base);
 
-    // must follow every step that runs userland code, or it rethrows later
-    if (EG(exception)) {
-        zend_clear_exception();
-    }
+    // must follow every step that runs userland code, or it rethrows later;
+    // the release can run a __destruct that bails out
+    RAPIRA_GUARD(
+        if (EG(exception)) { zend_clear_exception(); }, outcome, observed_base);
 
     gc_protect(false); // _zend_bailout can leave it engaged
     rapira_in_handler = false;
@@ -374,13 +374,13 @@ int rapira_request_teardown(void) {
     zend_try { zend_unset_timeout(); }
     zend_end_try();
 
+    // teardown can run __destruct; a pending throw surfaces in the next unit.
+    // The release can run a __destruct that bails out.
+    RAPIRA_GUARD(
+        if (EG(exception)) { zend_clear_exception(); }, bailed, observed_base);
+
     // _zend_bailout leaves gc_protect engaged, disabling GC for the next unit
     gc_protect(false);
-
-    // teardown can run __destruct; a pending throw surfaces in the next unit
-    if (EG(exception)) {
-        zend_clear_exception();
-    }
 
     // unbind_server_context (context.rs) clears the other request_info pointers
     // after each unit. sapi_deactivate_module frees both without clearing them
@@ -450,6 +450,8 @@ void rapira_release_temporary_streams(void) {
 // The whole raw body of the bound request (callbacks.rs); 0 for a host-parsed
 // multipart or empty body.
 extern size_t rapira_rs_raw_body(const char **body);
+// The Authorization field of the bound request (callbacks.rs); NULL when none.
+extern const char *rapira_rs_authorization(void);
 
 // Hands the body to PHP in a temp stream: rapira_release_temporary_streams
 // frees only temp streams between units. The cap len + 1 keeps
@@ -498,6 +500,9 @@ static int rapira_activate(void) {
     if (!SG(request_info).request_body && !SG(request_info).post_entry) {
         rapira_install_body();
     }
+    // allocates, and a memory_limit bailout must land in the zend_try around
+    // sapi_activate, not cross a Rust frame
+    php_handle_auth_data(rapira_rs_authorization());
     return SUCCESS;
 }
 
