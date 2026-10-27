@@ -10,7 +10,8 @@ use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::work::{Held, release};
+use rapira_sapi::types::Context;
+use rapira_sapi::work::{Held, now_unix_f64, release};
 use rapira_sapi::{
     HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_zval_enum_case,
@@ -25,7 +26,7 @@ use super::{
     rapira_ce_grpc_protocol, rapira_ce_grpc_service_info, rapira_ce_grpc_status,
     rapira_ce_internal_grpc_response_metadata,
 };
-use crate::{Call, MethodInfo, RpcStatus, StatusDetail, UnaryCall, UnaryReply};
+use crate::{MethodInfo, RpcStatus, StatusDetail, UnaryCall, UnaryReply};
 
 /// # Safety
 /// `dst` writable; engine active on this thread.
@@ -193,20 +194,51 @@ pub(crate) struct GrpcState {
 }
 
 impl GrpcState {
-    pub(crate) fn new(call: Call) -> Self {
-        let Call {
-            call: req,
-            received_at,
-            reply,
-        } = call;
+    /// One unary call on the intake. A dropped `reply` means that PHP lost the call; dropping its receiver closes the call for PHP.
+    pub(crate) fn new(req: UnaryCall, reply: oneshot::Sender<UnaryReply>) -> Self {
         Self {
             req,
-            received_at,
+            received_at: now_unix_f64(),
             reply: Some(reply),
             discarded: false,
             headers: Fields::new(),
             trailers: Fields::new(),
             view: None,
+        }
+    }
+}
+
+/// The gRPC status of a boot-failed worker's shed call: https://github.com/grpc/grpc/blob/master/doc/statuscodes.md
+const GRPC_UNAVAILABLE: u32 = 14;
+
+/// The queued call is the state that PHP later holds, so the hand-out needs no second allocation.
+impl rapira_sapi::work::Work for GrpcState {
+    fn cancelled(&self) -> bool {
+        Held::cancelled(self)
+    }
+
+    unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held {
+        let ptr = Box::into_raw(self);
+        // SAFETY: the caller passes a live Rapira\Internal\Grpc\UnaryCall object.
+        unsafe { (*grpc_call_from(obj)).state = ptr.cast() };
+        ptr
+    }
+
+    fn into_cgi(self: Box<Self>) -> Context {
+        unreachable!("the root refuses a grpc pool outside dispatcher mode at boot")
+    }
+
+    fn shed(self: Box<Self>) {
+        if let Some(reply) = self.reply {
+            let _ = reply.send(UnaryReply {
+                headers: HeaderMap::new(),
+                trailers: HeaderMap::new(),
+                outcome: Err(RpcStatus {
+                    code: GRPC_UNAVAILABLE,
+                    message: "the worker failed to boot".into(),
+                    details: Vec::new(),
+                }),
+            });
         }
     }
 }
@@ -653,7 +685,7 @@ mod tests {
             remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
             message: Bytes::new(),
         };
-        GrpcState::new(Call::new(req, reply))
+        GrpcState::new(req, reply)
     }
 
     /// `from_bytes` takes the obs-text bytes that a client can send.

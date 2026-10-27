@@ -1,10 +1,5 @@
 use connectrpc::http::HeaderMap;
 use rapira_sapi::types::Addr;
-use rapira_sapi::work::{Held, Work, now_unix_f64};
-use rapira_sapi::zend_object;
-use tokio::sync::oneshot;
-
-use crate::php::{GrpcState, grpc_call_from};
 
 /// One unary RPC. `message` is the binary protobuf encoding of the method's input message.
 #[derive(Debug)]
@@ -42,55 +37,4 @@ pub(crate) struct RpcStatus {
 pub(crate) struct StatusDetail {
     pub type_url: String,
     pub value: bytes::Bytes,
-}
-
-/// The gRPC status of a boot-failed worker's shed call: https://github.com/grpc/grpc/blob/master/doc/statuscodes.md
-const GRPC_UNAVAILABLE: u32 = 14;
-
-/// One unary gRPC call on the intake.
-pub(crate) struct Call {
-    pub(crate) call: UnaryCall,
-    /// Unix timestamp of the enqueue.
-    pub(crate) received_at: f64,
-    pub(crate) reply: oneshot::Sender<UnaryReply>,
-}
-
-impl Call {
-    /// A dropped sender means that PHP lost the call; dropping the receiver closes the call for PHP.
-    pub(crate) fn new(call: UnaryCall, reply: oneshot::Sender<UnaryReply>) -> Self {
-        Self {
-            call,
-            received_at: now_unix_f64(),
-            reply,
-        }
-    }
-}
-
-impl Work for Call {
-    fn cancelled(&self) -> bool {
-        self.reply.is_closed()
-    }
-
-    unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held {
-        let ptr = Box::into_raw(Box::new(GrpcState::new(*self)));
-        // SAFETY: the caller passes a live Rapira\Internal\Grpc\UnaryCall object.
-        unsafe { (*grpc_call_from(obj)).state = ptr.cast() };
-        ptr
-    }
-
-    fn into_cgi(self: Box<Self>) -> rapira_sapi::types::Context {
-        unreachable!("the root refuses a grpc pool outside dispatcher mode at boot")
-    }
-
-    fn shed(self: Box<Self>) {
-        let _ = self.reply.send(UnaryReply {
-            headers: HeaderMap::new(),
-            trailers: HeaderMap::new(),
-            outcome: Err(RpcStatus {
-                code: GRPC_UNAVAILABLE,
-                message: "the worker failed to boot".into(),
-                details: Vec::new(),
-            }),
-        });
-    }
 }
