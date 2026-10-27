@@ -8,7 +8,10 @@ namespace Rapira\Exception {
     {
     }
 
-    /** No more work will ever arrive. Thrown again by every later call. */
+    /**
+     * No more units for this app instance: finish the units in flight and leave the worker loop.
+     * The next app instance in the same worker gets the units that wait. Thrown again by every later call.
+     */
     class ClosedException extends \RuntimeException implements RapiraThrowable
     {
     }

@@ -141,7 +141,8 @@ namespace Rapira {
 
     /**
      * Hand one unit to $handler, which reads the superglobals and responds through
-     * echo/header(). False means the worker is draining: exit the loop.
+     * echo/header(). False means the host hands out no more requests to this
+     * app instance: exit the loop.
      * Call it only from the boot script's top level; a call from a shutdown
      * function or a destructor is undefined.
      *

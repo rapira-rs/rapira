@@ -84,7 +84,7 @@ To add a built-in interceptor:
 
 ## Schemas
 
-The master reads one descriptor set at boot: a binary `google.protobuf.FileDescriptorSet` that contains every imported file. The plugin routes and transcodes with these descriptors. A changed descriptor set needs a stop and a start of rapira, not a new `rapira` binary. A reload (SIGHUP or SIGUSR2) forks new workers from the master and keeps the old descriptor set.
+The master reads one descriptor set at boot: a binary `google.protobuf.FileDescriptorSet` that contains every imported file. The plugin routes and transcodes with these descriptors. A changed descriptor set needs a stop and a start of rapira, not a new `rapira` binary. A reload (SIGHUP or SIGUSR2) restarts the app in each worker and keeps the old descriptor set.
 
 Build the set with `buf build`. https://buf.build/docs/reference/cli/buf/build/
 
