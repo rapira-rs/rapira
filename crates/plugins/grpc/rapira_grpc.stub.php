@@ -367,15 +367,22 @@ namespace Rapira\Internal\Grpc {
      */
     final class Dispatcher implements \Rapira\Grpc\GrpcDispatcher
     {
-        /** Host-created: obtain it from \Rapira\get_dispatcher(). */
+        /**
+         * Host-created: obtain it from \Rapira\get_dispatcher().
+         *
+         * @implementation-alias rapira_sapi_dispatcher_construct
+         */
         private function __construct() {}
 
         public function name(): string {}
 
+        /** @implementation-alias rapira_sapi_try_receive */
         public function tryReceive(): \Rapira\Grpc\UnaryCall|\Rapira\Grpc\ServerStreamingCall|\Rapira\Grpc\ClientStreamingCall|\Rapira\Grpc\BidiStreamingCall|null {}
 
+        /** @implementation-alias rapira_sapi_receive */
         public function receive(int $timeout = -1): \Rapira\Grpc\UnaryCall|\Rapira\Grpc\ServerStreamingCall|\Rapira\Grpc\ClientStreamingCall|\Rapira\Grpc\BidiStreamingCall {}
 
+        /** @implementation-alias rapira_sapi_get_info */
         public function getInfo(): \Rapira\Grpc\GrpcDispatcherInfo {}
 
         public function getServices(): array {}
@@ -387,11 +394,17 @@ namespace Rapira\Internal\Grpc {
      */
     final class DispatcherInfo implements \Rapira\Grpc\GrpcDispatcherInfo
     {
-        /** Host-created. */
+        /**
+         * Host-created.
+         *
+         * @implementation-alias rapira_sapi_host_created
+         */
         private function __construct() {}
 
+        /** @implementation-alias rapira_sapi_pending_count */
         public function pendingCount(): int {}
 
+        /** @implementation-alias rapira_sapi_active_count */
         public function activeCount(): int {}
     }
 
@@ -406,7 +419,7 @@ namespace Rapira\Internal\Grpc {
         /**
          * Host-created.
          *
-         * @implementation-alias Rapira\Internal\Grpc\DispatcherInfo::__construct
+         * @implementation-alias rapira_sapi_host_created
          */
         private function __construct() {}
 
@@ -436,7 +449,7 @@ namespace Rapira\Internal\Grpc {
         /**
          * Host-created.
          *
-         * @implementation-alias Rapira\Internal\Grpc\DispatcherInfo::__construct
+         * @implementation-alias rapira_sapi_host_created
          */
         private function __construct() {}
 
