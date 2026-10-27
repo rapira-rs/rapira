@@ -329,7 +329,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put(c"QUERY_STRING", query);
         put_bytes(c"SCRIPT_FILENAME", reqc.script.to_bytes());
         put(c"SCRIPT_NAME", &script.script_name);
-        put(c"SERVER_PROTOCOL", &ctx.req.protocol);
+        put(c"SERVER_PROTOCOL", ctx.req.protocol);
         put(c"SERVER_SOFTWARE", "Rapira");
         put(c"SERVER_NAME", &ctx.req.server_name);
         put(c"SERVER_PORT", &reqc.server_port);

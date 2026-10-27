@@ -240,7 +240,7 @@ unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> b
         let target = req.target.as_deref().unwrap_or(req.uri.as_bytes());
         zend::slot_stringl(o, target_slot, target);
         zend::slot_str_or_null(o, authority_slot, req.authority.as_deref());
-        zend::slot_stringl(o, protocol_slot, protocol_php(&req.protocol).as_bytes());
+        zend::slot_stringl(o, protocol_slot, protocol_php(req.protocol).as_bytes());
         zend::slot_init(o, headers_slot, &headers);
         match &st.body {
             BodyState::Raw(v) => zend::slot_stringl(o, body_slot, v),

@@ -11,7 +11,7 @@ fn base_req() -> Request {
         target: None,
         authority: None,
         https: false,
-        protocol: String::new(),
+        protocol: "HTTP/1.1",
         remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server_name: String::new(),
@@ -150,7 +150,7 @@ fn empty_non_eos_chunk_commits_nothing() {
 fn view_normalizes_protocol_and_empty_unix_path() {
     let mut req = base_req();
     req.remote = Addr::Unix(Some(PathBuf::new()));
-    assert_eq!(protocol_php("HTTP/3.0"), "HTTP/3");
+    assert_eq!(protocol_php("HTTP/2.0"), "HTTP/2");
     assert!(matches!(
         RequestView::new(&req).remote,
         AddrOwned::Unix(None)

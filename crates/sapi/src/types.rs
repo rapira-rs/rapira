@@ -115,7 +115,7 @@ pub struct Request {
     pub authority: Option<Vec<u8>>,
     pub https: bool,
     /// Wire/CGI spelling ("HTTP/2.0"); mapped to the contract spelling at the exchange view.
-    pub protocol: String,
+    pub protocol: &'static str,
     pub remote: Addr,
     pub server: Addr,
     /// Configured CGI SERVER_NAME/SERVER_PORT, also the $uri synthesis fallback.
@@ -361,7 +361,7 @@ mod tests {
                 target: None,
                 authority: None,
                 https: false,
-                protocol: String::new(),
+                protocol: "HTTP/1.1",
                 remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
                 server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
                 server_name: String::new(),

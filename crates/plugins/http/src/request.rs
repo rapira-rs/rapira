@@ -12,10 +12,11 @@ pub fn build(
     peer: Peer,
     cfg: &Config,
 ) -> Request {
+    // hyper's HTTP/1 server parses only HTTP/1.0 and HTTP/1.1; HTTP/2 is planned.
     let protocol = match parts.version {
-        http::Version::HTTP_11 => "HTTP/1.1".to_owned(),
-        http::Version::HTTP_10 => "HTTP/1.0".to_owned(),
-        v => format!("{v:?}"),
+        http::Version::HTTP_10 => "HTTP/1.0",
+        http::Version::HTTP_2 => "HTTP/2.0",
+        _ => "HTTP/1.1",
     };
     let headers = std::mem::take(&mut parts.headers);
     Request {
