@@ -280,7 +280,9 @@ fn receive_while_unfinalized_throws() -> anyhow::Result<()> {
     let StatusBody { status, body } = verbs_probe("/?probe=busy")?;
     assert_eq!(status, 200);
     assert!(
-        body.contains("busy:receive() while a Rapira\\Http\\Exchange is unfinalized"),
+        body.contains(
+            "busy:this worker holds one unit at a time, and its Rapira\\Http\\Exchange is unfinalized"
+        ),
         "single-flight error must surface: {body:?}"
     );
     Ok(())

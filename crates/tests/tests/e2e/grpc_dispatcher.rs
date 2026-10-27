@@ -309,7 +309,7 @@ const OUTCOME_CASES: &[OutcomeCase] = &[
         }],
         log: Some(AppResult {
             message: "busy",
-            text: "receive() while a Rapira\\Grpc\\UnaryCall is unfinalized",
+            text: "this worker holds one unit at a time, and its Rapira\\Grpc\\UnaryCall is unfinalized",
         }),
     },
     OutcomeCase {

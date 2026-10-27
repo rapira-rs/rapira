@@ -64,7 +64,7 @@ pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {
     dispatcher: || unsafe { rapira_ce_internal_http_dispatcher },
     info: || unsafe { rapira_ce_internal_http_dispatcher_info },
     unit: || unsafe { rapira_ce_internal_http_exchange },
-    busy: c"receive() while a Rapira\\Http\\Exchange is unfinalized; finalize it first",
+    busy: c"this worker holds one unit at a time, and its Rapira\\Http\\Exchange is unfinalized; finalize it first",
 };
 
 /// The head locks on the first head or body write: a body chunk commits an implicit 200 first.

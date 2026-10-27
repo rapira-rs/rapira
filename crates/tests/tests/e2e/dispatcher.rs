@@ -22,6 +22,7 @@ fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
     for line in [
         "class: Rapira\\Exception\\NoDispatcherError",
         "rapira: yes",
+        "message: Dispatcher is only available in Mode::Dispatcher\n",
         "timeout-as-runtime: yes",
         "done",
     ] {

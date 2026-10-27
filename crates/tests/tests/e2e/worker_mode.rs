@@ -60,6 +60,7 @@ fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
     for line in [
         "class: Rapira\\Exception\\NotInWorkerModeError",
         "rapira: yes",
+        "message: Requests are only handed out in Mode::Worker\n",
         "type-error",
         "done",
     ] {
