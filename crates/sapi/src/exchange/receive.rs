@@ -54,7 +54,8 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                         continue;
                     }
                     if unit.cancelled() {
-                        sb_update(Event::Handled(true));
+                        // Counted like a shed unit: the app never served it, so the max_requests quota does not tick.
+                        sb_update(Event::Shed);
                         continue;
                     }
                     // SAFETY: plain zend timer bookkeeping; no bailout path.

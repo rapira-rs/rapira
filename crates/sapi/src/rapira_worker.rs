@@ -226,7 +226,8 @@ fn next_unit() -> Option<Context> {
                     continue;
                 }
                 if unit.cancelled() {
-                    sb_update(scoreboard::Event::Handled(true));
+                    // Counted like a shed unit: the app never served it, so the max_requests quota does not tick.
+                    sb_update(scoreboard::Event::Shed);
                     continue;
                 }
                 crate::exchange::RECEIVED.set(true);

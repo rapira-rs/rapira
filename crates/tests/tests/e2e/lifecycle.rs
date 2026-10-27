@@ -1,7 +1,8 @@
 use crate::harness::*;
 use rapira_sapi::plugin::Mode;
 use std::time::Duration;
-use tests::{StatusBody, poll};
+use tests::wire::submit;
+use tests::{StatusBody, drain_resp, poll, req, server_log};
 
 #[test]
 fn retained_spl_tempfile_survives_next_request() {
@@ -253,6 +254,57 @@ fn killed_master_leaves_workers_to_drain() {
             diagnostics(&srv)
         );
     }
+}
+
+/// max_requests = 2 is a quota of 3. A served unit uses the quota, but a queued unit whose client left does not: after A and two such units, the count probe still reaches the app instance that served A.
+#[test]
+fn queued_clients_gone_do_not_use_the_max_requests_quota() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        mode: Mode,
+        fixture: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "dispatcher mode",
+            mode: Mode::Dispatcher,
+            fixture: "dispatcher/held-worker.php",
+        },
+        Case {
+            name: "worker mode",
+            mode: Mode::Worker,
+            fixture: "worker/held-worker.php",
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(case.mode, tests::fixture(case.fixture))
+            .http_pool("max_requests = 2")
+            .json_log()
+            .spawn();
+        let release = srv.log_file().with_file_name("release");
+        let path = format!("/?release={}", release.display());
+
+        let rx_a = submit(srv.addr, req(&path))?;
+        server_log::wait_app_record(&srv.log_file(), "held");
+        let rx_b = submit(srv.addr, req(&path))?;
+        let rx_c = submit(srv.addr, req(&path))?;
+        // No signal shows that B and C are queued or that the server saw their close. A holds the worker until the release file exists, so each wait can be long.
+        std::thread::sleep(Duration::from_secs(1));
+        drop((rx_b, rx_c));
+        std::thread::sleep(Duration::from_secs(1));
+        std::fs::write(&release, "")?;
+        assert_eq!(drain_resp(rx_a).body_string(), "done", "{}", case.name);
+
+        let resp = drain_resp(submit(srv.addr, req("/?probe=count"))?);
+        assert_eq!(
+            resp.body_string(),
+            "runs=1",
+            "{}: the app instance that served A answers\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+    }
+    Ok(())
 }
 
 /// max_requests = 2 is a quota of 3, so the storm restarts the app many times. Each restart boots the app again in the same process, and no request fails.
