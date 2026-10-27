@@ -974,6 +974,49 @@ fn head_keeps_the_declared_content_length() {
     }
 }
 
+/// The method token is case-sensitive, so `head` is an extension method, not HEAD: the app's body reaches the client.
+/// RFC 9110 §9.1: https://www.rfc-editor.org/rfc/rfc9110#section-9.1
+#[test]
+fn lowercase_head_is_not_head() {
+    struct Case {
+        name: &'static str,
+        fixture: &'static str,
+        config: &'static str,
+        body: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "dispatcher writeBody",
+            fixture: "lifecycle/fidelity-worker.php",
+            config: "",
+            body: "ok",
+        },
+        Case {
+            name: "classic echo",
+            fixture: "lifecycle/head-length-classic.php",
+            config: "mode = \"classic\"\n",
+            body: "hello world",
+        },
+    ];
+    for case in cases {
+        let srv = spawn_with_config(case.fixture, 1, case.config);
+        let raw = http_raw_bytes(
+            srv.addr,
+            b"head / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+            Duration::from_secs(10),
+        )
+        .unwrap_or_else(|e| panic!("{}: head: {e}\n{}", case.name, diagnostics(&srv)));
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.starts_with("HTTP/1.1 200") && text.ends_with(&format!("\r\n\r\n{}", case.body)),
+            "{}: want the {:?} body: {text:?}\n{}",
+            case.name,
+            case.body,
+            diagnostics(&srv)
+        );
+    }
+}
+
 /// RFC 9112 §3.2.2: for an absolute-form target the origin server must ignore Host and use the target's host information.
 /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
 #[test]

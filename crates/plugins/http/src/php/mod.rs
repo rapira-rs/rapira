@@ -235,7 +235,7 @@ impl ExchangeState {
                     .collect(),
             },
         };
-        let bodiless = ctx.req.method.eq_ignore_ascii_case("HEAD");
+        let bodiless = ctx.req.method == "HEAD";
 
         Self {
             ctx,
