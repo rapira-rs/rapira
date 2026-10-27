@@ -1,7 +1,8 @@
 use crate::harness::*;
 use rapira_sapi::plugin::Mode;
 use std::time::Duration;
-use tests::{StatusBody, poll};
+use tests::wire::submit;
+use tests::{StatusBody, drain_resp, poll, req, server_log};
 
 #[test]
 fn retained_spl_tempfile_survives_next_request() {
@@ -255,6 +256,57 @@ fn killed_master_leaves_workers_to_drain() {
     }
 }
 
+/// max_requests = 2 is a quota of 3. A served unit uses the quota, but a queued unit whose client left does not: after A and two such units, the count probe still reaches the app instance that served A.
+#[test]
+fn queued_clients_gone_do_not_use_the_max_requests_quota() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        mode: Mode,
+        fixture: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "dispatcher mode",
+            mode: Mode::Dispatcher,
+            fixture: "dispatcher/held-worker.php",
+        },
+        Case {
+            name: "worker mode",
+            mode: Mode::Worker,
+            fixture: "worker/held-worker.php",
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(case.mode, tests::fixture(case.fixture))
+            .http_pool("max_requests = 2")
+            .json_log()
+            .spawn();
+        let release = srv.log_file().with_file_name("release");
+        let path = format!("/?release={}", release.display());
+
+        let rx_a = submit(srv.addr, req(&path))?;
+        server_log::wait_app_record(&srv.log_file(), "held");
+        let rx_b = submit(srv.addr, req(&path))?;
+        let rx_c = submit(srv.addr, req(&path))?;
+        // No signal shows that B and C are queued or that the server saw their close. A holds the worker until the release file exists, so each wait can be long.
+        std::thread::sleep(Duration::from_secs(1));
+        drop((rx_b, rx_c));
+        std::thread::sleep(Duration::from_secs(1));
+        std::fs::write(&release, "")?;
+        assert_eq!(drain_resp(rx_a).body_string(), "done", "{}", case.name);
+
+        let resp = drain_resp(submit(srv.addr, req("/?probe=count"))?);
+        assert_eq!(
+            resp.body_string(),
+            "runs=1",
+            "{}: the app instance that served A answers\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+    }
+    Ok(())
+}
+
 /// max_requests = 2 is a quota of 3, so the storm restarts the app many times. Each restart boots the app again in the same process, and no request fails.
 #[test]
 fn max_requests_restarts_the_app_without_losing_requests() {
@@ -471,7 +523,7 @@ fn worker_survives_client_leaving() {
     assert_eq!(body, b"ok", "\n{}", diagnostics(&srv));
 }
 
-/// An unfinalized exchange whose client left is discarded by the next `receive()`, and the discard is logged.
+/// An unfinalized exchange whose client left is finalized, so `activeCount()` no longer counts it. The next `receive()` discards it, and the discard is logged.
 #[test]
 fn cancelled_exchange_is_discarded_by_next_receive() {
     let srv = spawn_without_rust_log(
@@ -506,7 +558,7 @@ fn cancelled_exchange_is_discarded_by_next_receive() {
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     assert_eq!(
         body,
-        format!("{pid}:2:cancelled").into_bytes(),
+        format!("{pid}:2:cancelled active=0").into_bytes(),
         "the next request must preserve the worker and script cycle\n{}",
         diagnostics(&srv)
     );
@@ -917,6 +969,49 @@ fn head_keeps_the_declared_content_length() {
             text.ends_with("\r\n\r\n"),
             "{}: no body bytes on a HEAD response: {text:?}\n{}",
             case.name,
+            diagnostics(&srv)
+        );
+    }
+}
+
+/// The method token is case-sensitive, so `head` is an extension method, not HEAD: the app's body reaches the client.
+/// RFC 9110 §9.1: https://www.rfc-editor.org/rfc/rfc9110#section-9.1
+#[test]
+fn lowercase_head_is_not_head() {
+    struct Case {
+        name: &'static str,
+        fixture: &'static str,
+        config: &'static str,
+        body: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "dispatcher writeBody",
+            fixture: "lifecycle/fidelity-worker.php",
+            config: "",
+            body: "ok",
+        },
+        Case {
+            name: "classic echo",
+            fixture: "lifecycle/head-length-classic.php",
+            config: "mode = \"classic\"\n",
+            body: "hello world",
+        },
+    ];
+    for case in cases {
+        let srv = spawn_with_config(case.fixture, 1, case.config);
+        let raw = http_raw_bytes(
+            srv.addr,
+            b"head / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+            Duration::from_secs(10),
+        )
+        .unwrap_or_else(|e| panic!("{}: head: {e}\n{}", case.name, diagnostics(&srv)));
+        let text = String::from_utf8_lossy(&raw);
+        assert!(
+            text.starts_with("HTTP/1.1 200") && text.ends_with(&format!("\r\n\r\n{}", case.body)),
+            "{}: want the {:?} body: {text:?}\n{}",
+            case.name,
+            case.body,
             diagnostics(&srv)
         );
     }

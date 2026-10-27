@@ -54,7 +54,8 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                         continue;
                     }
                     if unit.cancelled() {
-                        sb_update(Event::Handled(true));
+                        // Counted like a shed unit: the app never served it, so the max_requests quota does not tick.
+                        sb_update(Event::Shed);
                         continue;
                     }
                     // SAFETY: plain zend timer bookkeeping; no bailout path.
@@ -125,7 +126,7 @@ pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> b
         let _ = object_init_ex(return_value, (classes().info)());
         let info = info_from((*return_value).value.obj);
         (*info).pending = pending_depth() as i64;
-        (*info).active = i64::from(UNIT.get().is_some_and(|p| !(*p).finalized()));
+        (*info).active = i64::from(UNIT.get().is_some_and(|p| !(*p).is_finalized()));
         true
     })
 }
@@ -142,7 +143,7 @@ pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bo
         if crate::rapira_mode != RAPIRA_MODE_DISPATCHER as c_int {
             zend::throw_exception(
                 rapira_ce_no_dispatcher_error,
-                c"nothing dispatches work to this process outside dispatcher mode",
+                c"Dispatcher is only available in Mode::Dispatcher",
             );
             return false;
         }

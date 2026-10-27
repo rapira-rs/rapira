@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: f180c212bfcae309577eb6639e8dc561bfcfa9ac */
+ * Stub hash: e42af5aaf5acd25345acdd874b96d61e64a35319 */
 
 static zend_class_entry *register_class_Rapira_Exception_RapiraThrowable(zend_class_entry *class_entry_Throwable)
 {

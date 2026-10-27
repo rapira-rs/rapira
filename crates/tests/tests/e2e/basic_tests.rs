@@ -58,6 +58,61 @@ fn fibers_stress_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// The host releases a pending exception after the unit, and the destructor of that exception fatals. The bailout stays inside the C helper: the unit keeps its reply, the app instance recycles, and the same worker serves the next request.
+#[test]
+fn worker_survives_a_fatal_in_a_released_exception() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        query: &'static str,
+        status: u16,
+        /// The start of the body: display_errors appends the fatal text when the output is still open.
+        body: fn(u32) -> String,
+    }
+    let cases = [
+        Case {
+            name: "a shutdown function of the unit throws it",
+            query: "/?boom=shutdown",
+            // With display_errors on, php_error_cb keeps the 200 (main/main.c), and the flush commits that head.
+            status: 200,
+            body: |pid| format!("ok counter=2 pid={pid}"),
+        },
+        Case {
+            name: "an output callback throws it at teardown, after the reply is sealed",
+            query: "/?boom=teardown",
+            status: 200,
+            body: |_| "buffered".to_owned(),
+        },
+    ];
+    let srv = Spawn::http(Mode::Worker, fixture("shared/release-fatal-worker.php")).spawn();
+    let baseline = drain(submit(srv.addr, req("/"))?);
+    assert_eq!(baseline.status, 200, "baseline: {baseline:?}");
+    let pid: u32 = baseline
+        .body
+        .rsplit_once("pid=")
+        .and_then(|(_, pid)| pid.parse().ok())
+        .unwrap_or_else(|| panic!("no pid in {:?}", baseline.body));
+
+    for case in cases {
+        let StatusBody { status, body } = drain(submit(srv.addr, req(case.query))?);
+        assert_eq!(status, case.status, "{}: status (body {body:?})", case.name);
+        assert!(
+            body.starts_with(&(case.body)(pid)),
+            "{}: want {:?} first, got {body:?}",
+            case.name,
+            (case.body)(pid)
+        );
+
+        let next = drain(submit(srv.addr, req("/"))?);
+        assert_eq!(
+            (next.status, next.body.as_str()),
+            (200, baseline.body.as_str()),
+            "{}: the same worker serves a new app instance",
+            case.name
+        );
+    }
+    Ok(())
+}
+
 struct TeardownBailout {
     name: &'static str,
     query: &'static str,

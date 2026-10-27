@@ -68,6 +68,8 @@ impl Plugin for Server {
     }
 
     fn prepare(&mut self) -> Result<()> {
+        // Before the fork: the PHP thread of a worker can read the identity at boot, before serve() runs.
+        php::set_server_identity(self.config.server_name.clone(), self.config.server_port);
         if let Some(uploads) = &self.config.uploads {
             multipart::sweep_spool_dirs(&uploads.dir);
         }
@@ -83,7 +85,6 @@ impl Plugin for Server {
             return Err(anyhow!("http listener was not prepared"));
         };
         php::set_sendfile_root(config.sendfile_root.clone());
-        php::set_server_identity(config.server_name.clone(), config.server_port);
         serve::serve(worker.sink.clone(), config, prepared, worker)
     }
 }

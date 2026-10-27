@@ -86,7 +86,7 @@ pub struct DispatcherClasses {
     pub dispatcher: unsafe fn() -> *mut zend_class_entry,
     pub info: unsafe fn() -> *mut zend_class_entry,
     pub unit: unsafe fn() -> *mut zend_class_entry,
-    /// The receive() error while a unit is unfinalized.
+    /// The error of receive() and tryReceive() while a unit is unfinalized.
     pub busy: &'static CStr,
 }
 

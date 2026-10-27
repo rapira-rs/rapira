@@ -294,7 +294,7 @@ impl Context {
         let body = std::mem::take(&mut self.body);
         if let Some(head) = self.head.take() {
             let no_content = matches!(head.status, 204 | 304) || (100..200).contains(&head.status);
-            let bodiless = no_content || self.req.method.eq_ignore_ascii_case("HEAD");
+            let bodiless = no_content || self.req.method == "HEAD";
             let content_length = if no_content {
                 None
             } else if bodiless {

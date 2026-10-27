@@ -59,7 +59,7 @@
     // zend_string_init is inline-only; the exported interner fn-pointer covers startup-time strings
     "zend_hash_str_update", "zend_string_init_interned",
     "php_default_post_reader", "php_default_treat_data", "php_default_input_filter",
-    "zend_unset_timeout", "php_handle_auth_data",
+    "zend_unset_timeout",
     "SAPI_HEADER_SENT_SUCCESSFULLY", "SAPI_HEADER_SEND_FAILED", "IS_UNDEF", "IS_STRING",
     "E_WARNING", "E_CORE_WARNING", "E_COMPILE_WARNING", "E_USER_WARNING",
     "E_NOTICE", "E_USER_NOTICE", "E_DEPRECATED", "E_USER_DEPRECATED",

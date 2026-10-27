@@ -51,7 +51,7 @@ ZEND_FUNCTION(Rapira_handle_request) {
     if (rapira_mode != RAPIRA_MODE_WORKER) {
         zend_throw_exception(
             rapira_ce_not_in_worker_mode_error,
-            "no host hands units to this process outside worker mode", 0);
+            "Requests are only handed out in Mode::Worker", 0);
         RETURN_THROWS();
     }
     if (rapira_in_handle_request) {
