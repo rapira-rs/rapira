@@ -223,7 +223,7 @@ impl Drop for Rapira {
 fn worker_main(mode: Mode, entrypoint: PathBuf, rx: UnitRx, classes: DispatcherClasses) {
     UNIT_RX.with_borrow_mut(|slot| *slot = Some(rx));
     if mode == Mode::Dispatcher {
-        crate::dispatcher::set_classes(classes);
+        crate::exchange::set_classes(classes);
     }
     loop {
         unsafe {

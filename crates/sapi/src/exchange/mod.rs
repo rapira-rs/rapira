@@ -1,0 +1,186 @@
+pub(crate) use std::{
+    cell::Cell,
+    ffi::{c_char, c_int},
+    path::Path,
+    time::Duration,
+};
+use std::{
+    fmt::NumBuffer,
+    net::{IpAddr, Ipv4Addr},
+    sync::OnceLock,
+};
+
+pub(crate) use crate::work::{DispatcherClasses, Held, release};
+pub(crate) use crate::{
+    IS_NULL, RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
+    callbacks::guard,
+    object_init_ex, rapira_array_init, rapira_ce_closed_exception, rapira_ce_inet_address,
+    rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
+    rapira_dispatcher_info_obj, rapira_receive_timed, rapira_receive_untimed,
+    scoreboard::{Event, sb_update},
+    start::{Pulled, pending_depth, pull_unit_try, pull_unit_wait},
+    types::Addr,
+    zend, zval, zval_add_ref, zval_ptr_dtor,
+};
+
+mod receive;
+
+thread_local! {
+    /// The dispatcher classes of the plugin this PHP thread serves; None outside dispatcher mode.
+    static CLASSES: Cell<Option<DispatcherClasses>> = const { Cell::new(None) };
+}
+
+pub(crate) fn set_classes(classes: DispatcherClasses) {
+    CLASSES.set(Some(classes));
+}
+
+fn classes() -> DispatcherClasses {
+    CLASSES
+        .get()
+        .expect("a dispatcher-mode worker started with no DispatcherClasses")
+}
+
+thread_local! {
+    /// The Box pointer of the unit handed out last, so paths where free_obj never runs (bailout) can still reclaim it.
+    pub(crate) static UNIT: Cell<Option<*mut dyn Held>> = const { Cell::new(None) };
+    pub(crate) static CLOSED_SEEN: Cell<bool> = const { Cell::new(false) };
+    /// A unit was handed out this cycle: a fatal after that is an app failure, not a boot failure.
+    pub(crate) static RECEIVED: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Clears the cycle slot if it still points at `ptr`.
+pub(crate) fn forget_held(ptr: *const ()) {
+    if UNIT.get().is_some_and(|u| std::ptr::addr_eq(u, ptr)) {
+        UNIT.set(None);
+    }
+}
+
+pub(crate) fn cycle_reset() {
+    reclaim_current();
+    UNIT.set(None);
+    CLOSED_SEEN.set(false);
+    RECEIVED.set(false);
+    // A bailout in RSHUTDOWN skips rapira_rs_dispatcher_release(). The request shutdown freed the object, so drop the zval without a dtor.
+    receive::DISPATCHER.set(None);
+}
+
+/// Reclaim a unit free_obj never saw (shutdown bailout / allocation bailout).
+pub(crate) fn reclaim_current() {
+    if let Some(ptr) = UNIT.get() {
+        // SAFETY: the pointer came from Box::into_raw in receive, and rapira_rs_exchange_drop clears the unit before it reclaims.
+        drop(unsafe { release(ptr) });
+    }
+}
+
+#[derive(Debug, PartialEq, Eq)]
+pub enum AddrOwned {
+    Inet {
+        ip: String,
+        port: u16,
+    },
+    /// None = unnamed endpoint.
+    Unix(Option<Vec<u8>>),
+}
+
+pub fn path_bytes(p: &Path) -> Vec<u8> {
+    use std::os::unix::ffi::OsStrExt;
+    p.as_os_str().as_bytes().to_vec()
+}
+
+/// Appends the dotted form of `ip`, the same bytes as its `Display`.
+pub fn push_ipv4(out: &mut String, ip: Ipv4Addr) {
+    for (i, octet) in ip.octets().into_iter().enumerate() {
+        if i > 0 {
+            out.push('.');
+        }
+        out.push_str(octet.format_into(&mut NumBuffer::new()));
+    }
+}
+
+impl AddrOwned {
+    pub fn new(a: &Addr) -> Self {
+        match a {
+            Addr::Inet(sa) => Self::Inet {
+                ip: match sa.ip() {
+                    IpAddr::V4(v4) => {
+                        let mut ip = String::with_capacity(15);
+                        push_ipv4(&mut ip, v4);
+                        ip
+                    }
+                    v6 @ IpAddr::V6(_) => v6.to_string(),
+                },
+                port: sa.port(),
+            },
+            Addr::Unix(p) => Self::Unix(p.as_deref().map(path_bytes).filter(|b| !b.is_empty())),
+        }
+    }
+}
+
+/// add_assoc_zval_ex moves the list ref in: the hash-update family never addrefs.
+/// # Safety
+/// `dst` a live array; engine active on this thread.
+pub unsafe fn add_list<'v>(
+    dst: *mut zval,
+    key: *const c_char,
+    key_len: usize,
+    values: impl Iterator<Item = &'v [u8]>,
+) {
+    unsafe {
+        let mut list: zval = std::mem::zeroed();
+        rapira_array_init(&mut list, values.size_hint().0 as u32);
+        for v in values {
+            crate::add_next_index_stringl(&mut list, zend::ptr_or_empty(v), v.len());
+        }
+        add_assoc_zval_ex(dst, key, key_len, &mut list);
+    }
+}
+
+/// The key pointer of a header name for add_assoc_zval_ex.
+/// The symtable prefilter in add_assoc_zval_ex reads the byte after a leading `-`. For the name "-" that byte is past the name, so a NUL-terminated copy replaces it.
+pub fn header_key(name: &str) -> *const c_char {
+    if name == "-" {
+        c"-".as_ptr()
+    } else {
+        name.as_ptr().cast()
+    }
+}
+
+/// Slot offsets of `InetAddress` (ip, port) and `UnixAddress` (path); the classes are fixed after MINIT.
+static INET_SLOTS: OnceLock<[u32; 2]> = OnceLock::new();
+static UNIX_SLOT: OnceLock<u32> = OnceLock::new();
+
+/// # Safety
+/// `dst` writable; engine active on this thread.
+pub unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
+    unsafe {
+        match addr {
+            AddrOwned::Inet { ip, port } => {
+                let ce = rapira_ce_inet_address;
+                let [ip_slot, port_slot] =
+                    *INET_SLOTS.get_or_init(|| [c"ip", c"port"].map(|n| zend::prop_offset(ce, n)));
+                let _ = object_init_ex(dst, ce);
+                let o = (*dst).value.obj;
+                zend::slot_stringl(o, ip_slot, ip.as_bytes());
+                zend::slot_long(o, port_slot, i64::from(*port));
+            }
+            AddrOwned::Unix(path) => {
+                let ce = rapira_ce_unix_address;
+                let path_slot = *UNIX_SLOT.get_or_init(|| zend::prop_offset(ce, c"path"));
+                let _ = object_init_ex(dst, ce);
+                zend::slot_str_or_null((*dst).value.obj, path_slot, path.as_deref());
+            }
+        }
+    }
+}
+
+/// `fn $name(obj) -> *mut $t` recovers the enclosing C struct: the C fields sit before `std` (the layouts in rapira_sapi.h and the plugin headers).
+#[macro_export]
+macro_rules! container_of {
+    ($vis:vis $name:ident, $t:ty) => {
+        $vis unsafe fn $name(obj: *mut $crate::zend_object) -> *mut $t {
+            unsafe { obj.byte_sub(std::mem::offset_of!($t, std)).cast() }
+        }
+    };
+}
+
+container_of!(info_from, rapira_dispatcher_info_obj);

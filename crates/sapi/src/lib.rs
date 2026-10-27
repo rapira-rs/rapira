@@ -4,7 +4,7 @@ pub mod callbacks;
 mod classic_worker;
 mod context;
 mod diagnostics;
-mod dispatcher;
+pub mod exchange;
 mod log;
 mod module;
 pub mod plugin;

@@ -34,7 +34,7 @@ pub trait Held {
 /// # Safety
 /// `ptr` came from `Box::into_raw` in receive and was not reclaimed before.
 pub unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
-    crate::dispatcher::forget_held(ptr.cast::<()>());
+    crate::exchange::forget_held(ptr.cast::<()>());
     let st = unsafe { Box::from_raw(ptr) };
     if !st.settled() {
         sb_update(Event::Handled(true));
