@@ -1,15 +1,13 @@
 use std::cell::RefCell;
-use std::sync::atomic::{AtomicU8, Ordering::SeqCst};
+use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
 
 use tracing::info;
 
 use crate::plugin::Stopper;
 use crate::scoreboard::{Event, sb_update};
 
-pub const STOP_UNHEALTHY: u8 = 1;
-
-/// Why the worker stops: 0 = no stop requested.
-pub static STOP_REASON: AtomicU8 = AtomicU8::new(0);
+/// The worker stops because PHP keeps failing to boot.
+pub static UNHEALTHY: AtomicBool = AtomicBool::new(false);
 
 /// The units the current app instance may take: it takes no more once `served` reaches `max`.
 #[derive(Default)]
@@ -38,14 +36,6 @@ pub(crate) fn install(max_requests: u64, stopper: Stopper) {
     });
 }
 
-/// Drains and stops the plugin once per raise of the reason. fetch_max returns the previous reason, so a repeat is a no-op.
-fn stop(reason: u8, stopper: &Stopper) {
-    if STOP_REASON.fetch_max(reason, SeqCst) < reason {
-        sb_update(Event::Draining);
-        stopper.stop();
-    }
-}
-
 pub(crate) fn tick() {
     Q.with_borrow_mut(|q| {
         q.served += 1;
@@ -70,6 +60,10 @@ pub(crate) fn renew() {
     Q.with_borrow_mut(|q| q.served = 0);
 }
 
+/// Drains and stops the plugin once; a repeat is a no-op.
 pub(crate) fn fire_unhealthy() {
-    Q.with_borrow(|q| stop(STOP_UNHEALTHY, &q.stopper));
+    if !UNHEALTHY.swap(true, SeqCst) {
+        sb_update(Event::Draining);
+        Q.with_borrow(|q| q.stopper.stop());
+    }
 }

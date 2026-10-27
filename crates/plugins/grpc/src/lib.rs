@@ -94,6 +94,6 @@ impl Plugin for Server {
         let Some(prepared) = prepared else {
             return Err(anyhow!("grpc listener was not prepared"));
         };
-        serve::serve(worker.sink.clone(), config, prepared, worker)
+        serve::serve(config, prepared, worker)
     }
 }

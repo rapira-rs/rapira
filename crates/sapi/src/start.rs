@@ -11,7 +11,7 @@ use tracing::{error, info, trace};
 use crate::quota;
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
-use crate::work::{DispatcherClasses, Sink, Work};
+use crate::work::{DispatcherClasses, Entry, Intake, Work};
 use crate::{
     classic_worker::classic_worker,
     plugin::{Mode, Stopper},
@@ -23,7 +23,7 @@ thread_local! {
 }
 
 struct UnitRx {
-    rx: Receiver<Box<dyn Work>>,
+    rx: Receiver<Entry>,
     /// The `pending` field of this worker's scoreboard slot.
     pending: &'static AtomicU64,
 }
@@ -32,7 +32,18 @@ struct UnitRx {
 const IDLE_PURGE_AFTER: Duration = Duration::from_secs(2);
 
 impl UnitRx {
-    /// Waits for one unit, with no time limit when `timeout` is None. A pulled unit leaves `pending`.
+    /// A pulled unit leaves `pending` and gives back its body bytes.
+    fn pulled(&self, entry: Entry) -> Pulled {
+        match entry {
+            Entry::Unit { unit, .. } => {
+                self.pending.fetch_sub(1, Ordering::Relaxed);
+                Pulled::Unit(unit)
+            }
+            Entry::RestartApp => Pulled::RestartApp,
+        }
+    }
+
+    /// Waits for one entry, with no time limit when `timeout` is None.
     fn recv(&self, timeout: Option<Duration>) -> Pulled {
         let first = timeout.map_or(IDLE_PURGE_AFTER, |t| t.min(IDLE_PURGE_AFTER));
         let mut got = self.rx.recv_timeout(first);
@@ -45,10 +56,7 @@ impl UnitRx {
             };
         }
         match got {
-            Ok(unit) => {
-                self.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Unit(unit)
-            }
+            Ok(entry) => self.pulled(entry),
             Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
             Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
         }
@@ -78,8 +86,8 @@ pub struct Rapira {
 /// The PHP thread of one worker and its intake.
 pub struct StartedWorker {
     pub rapira: Rapira,
-    /// The intake of this worker. The PHP thread sees the intake closed once every clone of the Sink is dropped.
-    pub sink: Sink,
+    /// The intake of this worker. The PHP thread sees it closed once every clone is dropped.
+    pub intake: Intake,
 }
 
 /// Zend structs are bound by bindgen at build time, so a libphp from another PHP minor is an ABI mismatch (`sapi_startup` handed a differently shaped struct), not a load error.
@@ -149,11 +157,11 @@ impl Rapira {
         classes: DispatcherClasses,
     ) -> StartedWorker {
         let pending: &'static AtomicU64 = &slot.pending;
-        let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
-        let sink = Sink::new(intake_tx, slot);
+        let (intake_tx, intake_rx) = sync_channel::<Entry>(1024);
+        let intake = Intake::new(intake_tx, slot);
 
         crate::context::set_script(&entrypoint);
-        // SAFETY: safe, trust me, I'm a developer
+        // SAFETY: written once, before the PHP thread that reads it exists.
         unsafe {
             crate::rapira_mode = match mode {
                 Mode::Classic => RAPIRA_MODE_CLASSIC,
@@ -185,7 +193,7 @@ impl Rapira {
             rapira: Self {
                 worker: Some(worker),
             },
-            sink,
+            intake,
         }
     }
 }
@@ -197,7 +205,7 @@ impl Drop for Rapira {
             return;
         };
 
-        // The PHP thread ends once every Sink clone is dropped. The caller drops the Sink, or the plugin that holds it, before Rapira.
+        // The PHP thread ends once every Intake clone is dropped. The caller drops the Intake, or the plugin that holds it, before Rapira.
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
         while std::time::Instant::now() < deadline && !worker.is_finished() {
             std::thread::sleep(std::time::Duration::from_millis(20));
@@ -258,6 +266,8 @@ pub(crate) fn pull_unit() -> Option<Box<dyn Work>> {
 
 pub(crate) enum Pulled {
     Unit(Box<dyn Work>),
+    /// A reload: the app instance takes no more units.
+    RestartApp,
     Timeout,
     Empty,
     Closed,
@@ -294,10 +304,7 @@ pub(crate) fn pull_unit_try() -> Pulled {
         let got = unit_r.rx.try_recv();
         sb_update(Event::Active);
         match got {
-            Ok(unit) => {
-                unit_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Unit(unit)
-            }
+            Ok(entry) => unit_r.pulled(entry),
             Err(TryRecvError::Empty) => Pulled::Empty,
             Err(TryRecvError::Disconnected) => Pulled::Closed,
         }

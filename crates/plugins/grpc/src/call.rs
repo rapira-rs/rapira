@@ -78,8 +78,8 @@ impl Work for Call {
         ptr
     }
 
-    fn into_cgi(self: Box<Self>) -> Option<rapira_sapi::types::Context> {
-        None
+    fn into_cgi(self: Box<Self>) -> rapira_sapi::types::Context {
+        unreachable!("the root refuses a grpc pool outside dispatcher mode at boot")
     }
 
     fn shed(self: Box<Self>) {

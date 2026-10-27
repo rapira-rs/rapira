@@ -8,8 +8,8 @@ unsafe fn emit_headers(dst: *mut zval, g: &Grouped) {
         for (name, values) in &g.0 {
             add_list(
                 dst,
-                name.as_ptr(),
-                name.count_bytes(),
+                header_key(name),
+                name.len(),
                 values.iter().map(Vec::as_slice),
             );
         }
@@ -172,7 +172,7 @@ unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> b
         }
         let ce: *mut zend_class_entry = rapira_ce_http_request;
         let st = &mut *(*ex).unit.cast::<ExchangeState>();
-        let req = &st.ctx.req;
+        let req = &st.req;
         let view = st.view.get_or_insert_with(|| RequestView::new(req));
 
         let mut headers: zval = std::mem::zeroed();

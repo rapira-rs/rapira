@@ -267,17 +267,14 @@ pub unsafe extern "C" fn rapira_rs_raw_body(body: *mut *const c_char) -> usize {
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_authorization() -> *const c_char {
     with_ctx(null(), |ctx| {
-        ctx.c
-            .as_ref()
-            .and_then(|c| c.authorization.as_ref())
-            .map_or(null(), |a| a.as_ptr())
+        ctx.c.authorization.as_ref().map_or(null(), |a| a.as_ptr())
     })
 }
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
     with_ctx(null_mut(), |ctx| {
         ctx.c
+            .cookie
             .as_ref()
-            .and_then(|c| c.cookie.as_ref())
             .map_or(null_mut(), |c| c.as_ptr() as *mut c_char)
     })
 }
@@ -303,7 +300,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         return;
     }
     with_ctx((), |ctx| {
-        let Some(reqc) = ctx.c.as_ref() else { return };
+        let reqc = &ctx.c;
         // One allocation for the whole array: the names below, one HTTP_* name per field, and the entries php_register_server_variables adds after this callback.
         let size = SERVER_VARS_MAX + ctx.req.headers.keys_len() as u32;
         unsafe { zend_hash_extend((*track_vars_array).value.arr, size, false) };

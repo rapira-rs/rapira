@@ -6,7 +6,7 @@ use rapira_scoreboard::{
 };
 
 thread_local! {
-    pub static SB: Cell<Option<&'static SharedSlot>> = const { Cell::new(None) };
+    static SB: Cell<Option<&'static SharedSlot>> = const { Cell::new(None) };
     static DRAINING: Cell<bool> = const { Cell::new(false) };
 }
 
@@ -14,7 +14,6 @@ pub enum Event {
     Handled(bool),
     Shed,
     Recycled,
-    Unhealthy,
     Idle,
     Active,
     Draining,
@@ -22,7 +21,7 @@ pub enum Event {
     BootFailed,
 }
 
-pub fn sb_set(slot: &'static SharedSlot) {
+pub(crate) fn sb_set(slot: &'static SharedSlot) {
     SB.set(Some(slot));
 }
 
@@ -47,7 +46,6 @@ pub fn sb_update(event: Event) {
         Event::Recycled => {
             s.recycles.fetch_add(1, Relaxed);
         }
-        Event::Unhealthy => crate::quota::fire_unhealthy(),
         Event::Idle => s.state.store(draining_or(SLOT_IDLE), Release),
         Event::Active => {
             s.last_activity_ms.store(now_millis(), Relaxed);

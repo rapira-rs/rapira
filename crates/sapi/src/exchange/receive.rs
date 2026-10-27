@@ -14,14 +14,14 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
         let classes = classes();
         if let Some(ptr) = UNIT.get()
-            && !(*ptr).finalized()
-            && (*ptr).client_closed()
+            && !(*ptr).settled()
+            && (*ptr).cancelled()
         {
             tracing::debug!(target: "rapira", "receive() discarded an unfinalized unit whose client left");
             (*ptr).discard();
         }
         if let Some(ptr) = UNIT.get()
-            && !(*ptr).finalized()
+            && !(*ptr).settled()
         {
             zend::throw_error(classes.busy);
             return false;
@@ -48,11 +48,11 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                 RecvMode::Wait(t) => pull_unit_wait(Some(Duration::from_micros(t as u64))),
             };
             match pulled {
+                Pulled::RestartApp => {
+                    crate::quota::exhaust();
+                    continue;
+                }
                 Pulled::Unit(unit) => {
-                    if unit.restarts_app() {
-                        crate::quota::exhaust();
-                        continue;
-                    }
                     if unit.cancelled() {
                         // Counted like a shed unit: the app never served it, so the max_requests quota does not tick.
                         sb_update(Event::Shed);

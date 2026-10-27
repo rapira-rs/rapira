@@ -19,14 +19,14 @@ const BODY_BUDGET: usize = 64 << 20;
 /// The cycle bookkeeping view of a unit that receive() handed out.
 pub trait Held {
     /// The worker committed the outcome, or discarded the unit.
-    fn finalized(&self) -> bool;
+    fn settled(&self) -> bool;
     /// The unit takes no outcome: the client left, or the plugin closed the unit. Work::isCancelled().
-    fn client_closed(&self) -> bool;
+    fn cancelled(&self) -> bool;
     fn discard(&mut self);
 
     /// Work::isFinalized().
     fn is_finalized(&self) -> bool {
-        self.finalized() || self.client_closed()
+        self.settled() || self.cancelled()
     }
 }
 
@@ -36,7 +36,7 @@ pub trait Held {
 pub unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
     crate::exchange::forget_held(ptr.cast::<()>());
     let st = unsafe { Box::from_raw(ptr) };
-    if !st.finalized() {
+    if !st.settled() {
         sb_update(Event::Handled(true));
     }
     st
@@ -50,34 +50,21 @@ pub trait Work: Send + 'static {
     /// # Safety
     /// `obj` is a live object of that class on the PHP thread.
     unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held;
-    /// The classic and worker modes. None: this unit cannot run there.
-    fn into_cgi(self: Box<Self>) -> Option<crate::types::Context>;
+    /// The classic and worker modes.
+    fn into_cgi(self: Box<Self>) -> crate::types::Context;
     /// A worker that cannot serve: the plugin's refusal, 503 or UNAVAILABLE.
     fn shed(self: Box<Self>);
-    /// A reload: the app instance takes no more units, and the next one takes the rest.
-    fn restarts_app(&self) -> bool {
-        false
-    }
 }
 
-/// The reload request. It goes through the intake, so it also wakes a PHP thread that waits for work.
-pub(crate) struct RestartApp;
-
-impl Work for RestartApp {
-    fn cancelled(&self) -> bool {
-        false
-    }
-    unsafe fn attach(self: Box<Self>, _: *mut zend_object) -> *mut dyn Held {
-        unreachable!("the pull loops take a restart entry before attach")
-    }
-    fn into_cgi(self: Box<Self>) -> Option<crate::types::Context> {
-        None
-    }
-    // The boot-failure wait skips restart entries, so nothing sheds this one.
-    fn shed(self: Box<Self>) {}
-    fn restarts_app(&self) -> bool {
-        true
-    }
+/// One entry of the intake.
+pub(crate) enum Entry {
+    /// A unit and its body bytes in the budget. The pull drops the permit, and the bytes go back.
+    Unit {
+        unit: Box<dyn Work>,
+        _bytes: OwnedSemaphorePermit,
+    },
+    /// A reload: the app instance takes no more units, and the next one takes the rest.
+    RestartApp,
 }
 
 /// The class entries of one plugin's dispatcher surface. Set once per worker.
@@ -122,36 +109,12 @@ pub fn now_unix_f64() -> f64 {
 
 /// The queue from a plugin thread to the PHP thread. Clone per plugin task.
 #[derive(Clone)]
-pub struct Sink {
-    tx: SyncSender<Box<dyn Work>>,
+pub struct Intake {
+    tx: SyncSender<Entry>,
     /// The scoreboard slot of this worker.
     slot: &'static SharedSlot,
     /// The body bytes of the units between submit and the PHP thread. All clones share it.
     budget: Arc<Semaphore>,
-}
-
-/// A unit and its body bytes in the budget. PHP takes, skips or sheds the unit, and the bytes go back.
-struct Budgeted {
-    unit: Box<dyn Work>,
-    _bytes: OwnedSemaphorePermit,
-}
-
-impl Work for Budgeted {
-    fn cancelled(&self) -> bool {
-        self.unit.cancelled()
-    }
-    unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held {
-        unsafe { self.unit.attach(obj) }
-    }
-    fn into_cgi(self: Box<Self>) -> Option<crate::types::Context> {
-        self.unit.into_cgi()
-    }
-    fn shed(self: Box<Self>) {
-        self.unit.shed()
-    }
-    fn restarts_app(&self) -> bool {
-        self.unit.restarts_app()
-    }
 }
 
 /// Keeps one unit in `pending` during the hand-off. A drop before `disarm` subtracts the unit from `pending`. If the unit found the queue full, the drop also adds 1 to `failed_on_full_queue`.
@@ -185,8 +148,8 @@ impl Drop for PendingGuard {
     }
 }
 
-impl Sink {
-    pub(crate) fn new(tx: SyncSender<Box<dyn Work>>, slot: &'static SharedSlot) -> Self {
+impl Intake {
+    pub(crate) fn new(tx: SyncSender<Entry>, slot: &'static SharedSlot) -> Self {
         Self {
             tx,
             slot,
@@ -204,15 +167,15 @@ impl Sink {
             count_shed(self.slot);
             return Err(Refused::OverBudget);
         };
-        let mut unit: Box<dyn Work> = Box::new(Budgeted { unit, _bytes: held });
+        let mut entry = Entry::Unit { unit, _bytes: held };
         let mut pending = PendingGuard::arm(self.slot);
         loop {
-            match self.tx.try_send(unit) {
+            match self.tx.try_send(entry) {
                 Ok(()) => {
                     pending.disarm();
                     return Ok(());
                 }
-                Err(TrySendError::Full(u)) => {
+                Err(TrySendError::Full(e)) => {
                     let deadline = *pending
                         .deadline
                         .get_or_insert_with(|| Instant::now() + INTAKE_WAIT);
@@ -225,7 +188,23 @@ impl Sink {
                         count_shed(self.slot);
                         return Err(Refused::Saturated);
                     }
-                    unit = u;
+                    entry = e;
+                    tokio::time::sleep(Duration::from_millis(1)).await;
+                }
+                Err(TrySendError::Disconnected(_)) => return Err(Refused::Stopped),
+            }
+        }
+    }
+
+    /// Sends the reload signal through the intake, so it also wakes a PHP thread that waits for work.
+    /// It is no unit: it takes no budget, no counter sees it, and it waits for room with no deadline.
+    pub(crate) async fn restart_app(&self) -> Result<(), Refused> {
+        let mut entry = Entry::RestartApp;
+        loop {
+            match self.tx.try_send(entry) {
+                Ok(()) => return Ok(()),
+                Err(TrySendError::Full(e)) => {
+                    entry = e;
                     tokio::time::sleep(Duration::from_millis(1)).await;
                 }
                 Err(TrySendError::Disconnected(_)) => return Err(Refused::Stopped),
@@ -248,25 +227,25 @@ mod tests {
         unsafe fn attach(self: Box<Self>, _: *mut zend_object) -> *mut dyn Held {
             unreachable!()
         }
-        fn into_cgi(self: Box<Self>) -> Option<crate::types::Context> {
-            None
+        fn into_cgi(self: Box<Self>) -> crate::types::Context {
+            unreachable!()
         }
         fn shed(self: Box<Self>) {}
     }
 
-    /// A sink on slot 0 of a board in memory.
-    fn sink(tx: SyncSender<Box<dyn Work>>) -> Sink {
-        Sink::new(tx, &rapira_scoreboard::create(1).unwrap()[0])
+    /// An intake on slot 0 of a board in memory.
+    fn intake(tx: SyncSender<Entry>) -> Intake {
+        Intake::new(tx, &rapira_scoreboard::create(1).unwrap()[0])
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn intake_reports_stopped_after_the_receiver_is_gone() {
         let (tx, rx) = sync_channel(1);
-        let sink = sink(tx);
-        let slot = sink.slot;
+        let intake = intake(tx);
+        let slot = intake.slot;
         drop(rx);
         assert_eq!(
-            sink.submit(Box::new(Probe), 0).await.unwrap_err(),
+            intake.submit(Box::new(Probe), 0).await.unwrap_err(),
             Refused::Stopped
         );
         assert_eq!(
@@ -279,7 +258,31 @@ mod tests {
         );
     }
 
-    /// Each case fills a queue of one before the sink takes the sender, so `pending` does not count that unit and the submit finds the queue full. The paused clock moves to the next timer at once, so the waits take no real time.
+    /// A reload waits for room in a full intake with no deadline. It is a signal, not a unit: after it enters, only the unit that filled the queue counts as pending, and nothing counts as failed or shed.
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn a_reload_waits_for_room_without_a_deadline() {
+        let (tx, rx) = sync_channel(1);
+        let intake = intake(tx);
+        let slot = intake.slot;
+        intake.submit(Box::new(Probe), 0).await.unwrap();
+        let (sent, _) = tokio::join!(intake.restart_app(), async {
+            tokio::time::sleep(INTAKE_WAIT * 2).await;
+            rx.try_recv().unwrap()
+        });
+        assert_eq!(sent, Ok(()), "the reload enters once there is room");
+        assert_eq!(
+            (
+                slot.handled.load(Ordering::Relaxed),
+                slot.errors.load(Ordering::Relaxed),
+                slot.failed_on_full_queue.load(Ordering::Relaxed),
+                slot.pending.load(Ordering::Relaxed),
+            ),
+            (0, 0, 0, 1),
+            "handled, errors, failed_on_full_queue, pending"
+        );
+    }
+
+    /// Each case fills a queue of one with a reload entry before the intake takes the sender, so `pending` does not count it and the submit finds the queue full. The paused clock moves to the next timer at once, so the waits take no real time.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_full_intake_counts_each_unit_that_never_enters() {
         enum During {
@@ -351,11 +354,11 @@ mod tests {
             },
         ];
         for case in cases {
-            let (tx, rx) = sync_channel::<Box<dyn Work>>(1);
-            tx.send(Box::new(Probe)).unwrap();
-            let sink = sink(tx);
-            let slot = sink.slot;
-            let submit = sink.submit(Box::new(Probe), 0);
+            let (tx, rx) = sync_channel::<Entry>(1);
+            tx.send(Entry::RestartApp).unwrap();
+            let intake = intake(tx);
+            let slot = intake.slot;
+            let submit = intake.submit(Box::new(Probe), 0);
             let result = match case.during {
                 During::Nothing => Some(submit.await),
                 During::ClientLeaves => tokio::time::timeout(ACTION_DELAY, submit).await.ok(),

@@ -10,7 +10,7 @@ use connectrpc::{
     MethodDescriptor, Payload, Protocol, RequestContext, http,
 };
 use rapira_sapi::Addr;
-use rapira_sapi::work::{Sink, now_unix_f64};
+use rapira_sapi::work::{Intake, now_unix_f64};
 use tokio::sync::oneshot;
 
 use crate::schema::Schema;
@@ -19,7 +19,7 @@ use crate::{Call, RpcStatus, UnaryCall};
 /// Routes the unary methods of the configured services to PHP.
 pub(crate) struct PhpDispatcher {
     pub(crate) schema: Arc<Schema>,
-    pub(crate) intake: Sink,
+    pub(crate) intake: Intake,
 }
 
 impl Dispatcher for PhpDispatcher {
@@ -80,7 +80,7 @@ fn streaming() -> ConnectError {
 
 async fn unary(
     schema: &Schema,
-    intake: &Sink,
+    intake: &Intake,
     path: String,
     mut ctx: RequestContext,
     request: Payload,

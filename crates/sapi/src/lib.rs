@@ -1,17 +1,17 @@
 pub mod bindings;
 
 pub mod callbacks;
-pub mod classic_worker;
-pub mod context;
-pub mod diagnostics;
-pub mod dispatcher;
+mod classic_worker;
+mod context;
+mod diagnostics;
 pub mod exchange;
-pub mod module;
+mod log;
+mod module;
 pub mod plugin;
 pub mod quota;
-pub mod rapira_worker;
+mod rapira_worker;
 pub mod scoreboard;
-pub mod start;
+mod start;
 pub mod types;
 pub mod values;
 pub mod work;

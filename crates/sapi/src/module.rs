@@ -1,5 +1,4 @@
 use crate::*;
-use callbacks;
 use std::{
     os::raw::c_char,
     ptr::{null, null_mut},

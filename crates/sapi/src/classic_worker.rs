@@ -9,9 +9,7 @@ use crate::{
 
 pub(crate) fn classic_worker() {
     while let Some(unit) = pull_unit() {
-        let Some(mut ctx) = unit.into_cgi() else {
-            unreachable!("a unit with no CGI form goes to dispatcher-mode workers only");
-        };
+        let mut ctx = unit.into_cgi();
         let Executed { event, truncated } = classic_executor(&mut ctx);
         sb_update(event);
         ctx.finish(truncated);

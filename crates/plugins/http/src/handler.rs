@@ -8,7 +8,8 @@ use std::time::Duration;
 use http::header::CONTENT_TYPE;
 use http_body_util::BodyExt;
 use hyper::body::{Body, Bytes, Incoming, SizeHint};
-use rapira_sapi::work::{Refused, Sink};
+use rapira_sapi::types::ResponseHead;
+use rapira_sapi::work::{Intake, Refused};
 use rapira_sapi::{Addr, Frame, Request};
 use tower::{Service as _, ServiceExt as _};
 
@@ -19,7 +20,7 @@ use crate::{Config, Exchange, bridge, multipart, request};
 
 pub(crate) struct Shared {
     pub cfg: Config,
-    pub intake: Sink,
+    pub intake: Intake,
     pub inflight: Arc<AtomicUsize>,
     /// The worker drains: every response closes its connection, so the client sends its next request to another worker.
     pub closing: AtomicBool,
@@ -332,6 +333,13 @@ impl Conn {
     }
 }
 
+/// The fields of the reply's `Frame::Head`.
+struct ReplyHead {
+    head: ResponseHead,
+    content_length: Option<u64>,
+    bodiless: bool,
+}
+
 async fn serve_php<B>(
     shared: &Shared,
     closed: &tokio::sync::watch::Receiver<bridge::ConnectionState>,
@@ -388,7 +396,11 @@ where
         }
     };
 
-    let (status, headers, content_length, bodiless) = loop {
+    let ReplyHead {
+        head: ResponseHead { status, headers },
+        content_length,
+        bodiless,
+    } = loop {
         match reply.recv().await {
             None => {
                 tracing::error!(target: "http", "php worker died before a response head");
@@ -401,7 +413,13 @@ where
                 head,
                 content_length,
                 bodiless,
-            }) => break (head.status, head.headers, content_length, bodiless),
+            }) => {
+                break ReplyHead {
+                    head,
+                    content_length,
+                    bodiless,
+                };
+            }
             Some(Frame::End { .. }) => {
                 tracing::error!(target: "http", "php produced no response head");
                 return refused(http::StatusCode::BAD_GATEWAY, guard);

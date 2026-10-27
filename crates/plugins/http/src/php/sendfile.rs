@@ -71,7 +71,7 @@ pub(super) unsafe fn send_file_core(
     length: Option<u64>,
     eos: bool,
 ) -> Verb {
-    if st.client_closed() {
+    if st.cancelled() {
         discard_unit(st);
         return Verb::Discarded;
     }

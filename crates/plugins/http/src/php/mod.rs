@@ -1,5 +1,5 @@
 use std::{
-    ffi::{CStr, CString, c_char, c_void},
+    ffi::{CStr, c_char, c_void},
     fmt::NumBuffer,
     net::SocketAddr,
     time::Instant,
@@ -12,9 +12,7 @@ use rapira_sapi::exchange::{
     AddrOwned, add_list, build_address, header_key, path_bytes, push_ipv4,
 };
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::types::{
-    Addr, Body, Context, FormField, Frame, Request, ResponseHead, Tls, UploadedFile,
-};
+use rapira_sapi::types::{Addr, Body, FormField, Frame, Request, ResponseHead, Tls, UploadedFile};
 use rapira_sapi::work::{DispatcherClasses, Held, release};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, executor_globals, object_init_ex,
@@ -111,23 +109,19 @@ struct FilePart {
     headers: Grouped,
 }
 
-/// Multipart part headers, one entry per name. Keys are CStrings: the symtable prefilter in add_assoc_zval_ex reads one byte past a leading `-`, which the terminator covers.
-struct Grouped(Vec<(CString, Vec<Vec<u8>>)>);
+/// Multipart part headers, one entry per name.
+struct Grouped(Vec<(String, Vec<Vec<u8>>)>);
 
 impl Grouped {
     fn new(headers: &[(String, Vec<u8>)]) -> Self {
-        let mut out: Vec<(CString, Vec<Vec<u8>>)> = Vec::new();
+        let mut out: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
         for (name, value) in headers {
-            let nb = name.as_bytes();
-            if nb.is_empty() {
+            if name.is_empty() {
                 continue;
             }
-            match out.iter_mut().find(|(n, _)| n.as_bytes() == nb) {
+            match out.iter_mut().find(|(n, _)| n == name) {
                 Some((_, values)) => values.push(value.clone()),
-                None => {
-                    let Ok(key) = CString::new(nb) else { continue };
-                    out.push((key, vec![value.clone()]));
-                }
+                None => out.push((name.clone(), vec![value.clone()])),
             }
         }
         Self(out)
@@ -188,9 +182,10 @@ impl RequestView {
 }
 
 pub struct ExchangeState {
-    // body above ctx: declaration drop order unlinks the spool files before the frame sender closes
+    // body above sender: declaration drop order unlinks the spool files before the frame sender closes
     body: BodyState,
-    ctx: Context,
+    req: Request,
+    sender: Option<Sender<Frame>>,
     /// Filled by the first `getRequest()`.
     view: Option<RequestView>,
     stage: Stage,
@@ -207,12 +202,8 @@ pub struct ExchangeState {
 }
 
 impl ExchangeState {
-    pub(crate) fn new(req: Request, tx: Sender<Frame>) -> Self {
-        let mut ctx = Context::new(req, tx, false);
-        let taken = std::mem::replace(
-            &mut ctx.req.body,
-            Body::Raw(std::io::Cursor::new(Vec::new())),
-        );
+    pub(crate) fn new(mut req: Request, tx: Sender<Frame>) -> Self {
+        let taken = std::mem::replace(&mut req.body, Body::Raw(std::io::Cursor::new(Vec::new())));
         let body = match taken {
             Body::Raw(cursor) => BodyState::Raw(cursor.into_inner()),
             Body::Multipart(mb) => BodyState::Multipart {
@@ -235,11 +226,12 @@ impl ExchangeState {
                     .collect(),
             },
         };
-        let bodiless = ctx.req.method == "HEAD";
+        let bodiless = req.method == "HEAD";
 
         Self {
-            ctx,
             body,
+            req,
+            sender: Some(tx),
             view: None,
             stage: Stage::Open,
             head_sent: false,
@@ -254,14 +246,14 @@ impl ExchangeState {
 }
 
 impl Held for ExchangeState {
-    fn finalized(&self) -> bool {
+    fn settled(&self) -> bool {
         self.stage == Stage::Finalized
     }
 
-    fn client_closed(&self) -> bool {
+    fn cancelled(&self) -> bool {
         self.discarded
             || (self.stage != Stage::Finalized
-                && self.ctx.sender.as_ref().is_some_and(Sender::is_closed))
+                && self.sender.as_ref().is_some_and(Sender::is_closed))
     }
 
     fn discard(&mut self) {
