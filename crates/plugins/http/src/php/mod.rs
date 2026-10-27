@@ -165,7 +165,7 @@ impl RequestView {
                 }
                 Addr::Inet(sa) => uri_abs.push_str(&sa.to_string()),
                 Addr::Unix(_) => {
-                    uri_abs.push_str(&req.server_name);
+                    uri_abs.push_str(req.server_name);
                     uri_abs.push(':');
                     uri_abs.push_str(req.server_port.format_into(&mut NumBuffer::new()));
                 }

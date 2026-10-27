@@ -41,7 +41,7 @@ pub fn build(
         protocol,
         remote: peer.remote,
         server: peer.server,
-        server_name: cfg.server_name.clone(),
+        server_name: cfg.server_name,
         server_port: cfg.server_port,
         tls: None,
         received_at: peer.received_at,
@@ -63,7 +63,7 @@ mod tests {
     fn config() -> Config {
         Config {
             listen: rapira_net::ListenAddr::Tcp(([127, 0, 0, 1], 8000).into()),
-            server_name: "localhost".to_owned(),
+            server_name: "localhost",
             server_port: 8000,
             max_body_size: 0,
             unsafe_field_names: crate::UnsafeFieldNames::Drop,

@@ -23,7 +23,7 @@ const SERVER: &str = "127.0.0.1:8000";
 
 static CONFIG: LazyLock<Config> = LazyLock::new(|| Config {
     listen: ListenAddr::Tcp(SERVER.parse().unwrap()),
-    server_name: "localhost".to_owned(),
+    server_name: "localhost",
     server_port: 8000,
     max_body_size: MAX_BODY,
     unsafe_field_names: UnsafeFieldNames::Drop,

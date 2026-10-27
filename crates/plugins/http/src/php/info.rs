@@ -5,14 +5,14 @@ use rapira_sapi::rapira_zval_stringl;
 use super::*;
 
 struct ServerIdentity {
-    name: String,
+    name: &'static str,
     port: u16,
 }
 
 static SERVER: OnceLock<ServerIdentity> = OnceLock::new();
 
 /// The first call sets the server name and port for the process; a later call changes nothing.
-pub(crate) fn set_server_identity(name: String, port: u16) {
+pub(crate) fn set_server_identity(name: &'static str, port: u16) {
     let _ = SERVER.set(ServerIdentity { name, port });
 }
 

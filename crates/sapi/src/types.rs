@@ -119,7 +119,7 @@ pub struct Request {
     pub remote: Addr,
     pub server: Addr,
     /// Configured CGI SERVER_NAME/SERVER_PORT, also the $uri synthesis fallback.
-    pub server_name: String,
+    pub server_name: &'static str,
     pub server_port: u16,
     pub headers: HeaderMap,
     /// First content-type field line, raw bytes.
@@ -364,7 +364,7 @@ mod tests {
                 protocol: "HTTP/1.1",
                 remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
                 server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-                server_name: String::new(),
+                server_name: "",
                 server_port: 8080,
                 headers: HeaderMap::new(),
                 content_type: None,

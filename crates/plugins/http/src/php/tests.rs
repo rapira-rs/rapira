@@ -14,7 +14,7 @@ fn base_req() -> Request {
         protocol: "HTTP/1.1",
         remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-        server_name: String::new(),
+        server_name: "",
         server_port: 8080,
         headers: HeaderMap::new(),
         content_type: None,
@@ -302,7 +302,7 @@ fn view_spells_uri_and_addresses() {
         req.uri = c.uri.into();
         req.server = c.server;
         req.remote = c.remote;
-        req.server_name = "localhost".into();
+        req.server_name = "localhost";
         req.server_port = 80;
         let view = RequestView::new(&req);
         assert_eq!(view.uri_abs, c.want_uri, "{}", c.name);

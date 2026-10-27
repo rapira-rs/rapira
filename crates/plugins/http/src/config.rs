@@ -288,7 +288,8 @@ impl Server {
         Self {
             config: Config {
                 listen: settings.listen,
-                server_name: settings.server_name,
+                // Leaked once at boot: every request borrows it until the process exits.
+                server_name: Box::leak(settings.server_name.into_boxed_str()),
                 server_port: settings.server_port,
                 max_body_size: settings.max_body_size,
                 write_timeout: settings.write_timeout,
