@@ -1,17 +1,19 @@
 use std::ffi::CStr;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::{SyncSender, TrySendError};
+use std::sync::mpsc::Sender;
 use std::time::Duration;
 
 use rapira_scoreboard::SharedSlot;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
-use tokio::time::Instant;
 
 use crate::scoreboard::{Event, count_shed, sb_update};
 use crate::{zend_class_entry, zend_object};
 
 pub(crate) const INTAKE_WAIT: Duration = Duration::from_secs(30);
+
+/// The units one worker holds for PHP.
+pub(crate) const INTAKE_SLOTS: usize = 1024;
 
 /// The body bytes that one worker holds for the units that PHP has not taken yet.
 const BODY_BUDGET: usize = 64 << 20;
@@ -58,10 +60,11 @@ pub trait Work: Send + 'static {
 
 /// One entry of the intake.
 pub(crate) enum Entry {
-    /// A unit and its body bytes in the budget. The pull drops the permit, and the bytes go back.
+    /// A unit, its body bytes in the budget and its slot. The pull drops both permits: the bytes go back, and the oldest waiting submit gets the slot.
     Unit {
         unit: Box<dyn Work>,
         _bytes: OwnedSemaphorePermit,
+        _slot: OwnedSemaphorePermit,
     },
     /// A reload: the app instance takes no more units, and the next one takes the rest.
     RestartApp,
@@ -110,18 +113,20 @@ pub fn now_unix_f64() -> f64 {
 /// The queue from a plugin thread to the PHP thread. Clone per plugin task.
 #[derive(Clone)]
 pub struct Intake {
-    tx: SyncSender<Entry>,
+    tx: Sender<Entry>,
     /// The scoreboard slot of this worker.
     slot: &'static SharedSlot,
     /// The body bytes of the units between submit and the PHP thread. All clones share it.
     budget: Arc<Semaphore>,
+    /// The units between submit and the PHP thread, at most INTAKE_SLOTS. A submit that finds no slot waits without a poll; the semaphore wakes the waiters in arrival order.
+    slots: Arc<Semaphore>,
 }
 
 /// Keeps one unit in `pending` during the hand-off. A drop before `disarm` subtracts the unit from `pending`. If the unit found the queue full, the drop also adds 1 to `failed_on_full_queue`.
 struct PendingGuard {
     slot: Option<&'static SharedSlot>,
-    /// The time to shed the unit. It is set when the unit first finds the queue full, so the common send needs no clock read.
-    deadline: Option<Instant>,
+    /// The unit found every slot taken.
+    found_full: bool,
 }
 
 impl PendingGuard {
@@ -129,7 +134,7 @@ impl PendingGuard {
         slot.pending.fetch_add(1, Ordering::Relaxed);
         Self {
             slot: Some(slot),
-            deadline: None,
+            found_full: false,
         }
     }
     fn disarm(mut self) {
@@ -141,7 +146,7 @@ impl Drop for PendingGuard {
     fn drop(&mut self) {
         if let Some(slot) = self.slot.take() {
             slot.pending.fetch_sub(1, Ordering::Relaxed);
-            if self.deadline.is_some() {
+            if self.found_full {
                 slot.failed_on_full_queue.fetch_add(1, Ordering::Relaxed);
             }
         }
@@ -149,11 +154,12 @@ impl Drop for PendingGuard {
 }
 
 impl Intake {
-    pub(crate) fn new(tx: SyncSender<Entry>, slot: &'static SharedSlot) -> Self {
+    pub(crate) fn new(tx: Sender<Entry>, slot: &'static SharedSlot) -> Self {
         Self {
             tx,
             slot,
             budget: Arc::new(Semaphore::new(BODY_BUDGET)),
+            slots: Arc::new(Semaphore::new(INTAKE_SLOTS)),
         }
     }
 
@@ -167,55 +173,48 @@ impl Intake {
             count_shed(self.slot);
             return Err(Refused::OverBudget);
         };
-        let mut entry = Entry::Unit { unit, _bytes: held };
         let mut pending = PendingGuard::arm(self.slot);
-        loop {
-            match self.tx.try_send(entry) {
-                Ok(()) => {
-                    pending.disarm();
-                    return Ok(());
-                }
-                Err(TrySendError::Full(e)) => {
-                    let deadline = *pending
-                        .deadline
-                        .get_or_insert_with(|| Instant::now() + INTAKE_WAIT);
-                    if Instant::now() > deadline {
-                        tracing::warn!(
-                            target: "rapira",
-                            "intake full for {INTAKE_WAIT:?} ({} pending); shedding the request",
-                            self.slot.pending.load(Ordering::Relaxed)
-                        );
-                        count_shed(self.slot);
-                        return Err(Refused::Saturated);
-                    }
-                    entry = e;
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                Err(TrySendError::Disconnected(_)) => return Err(Refused::Stopped),
+        let slot = match Arc::clone(&self.slots).try_acquire_owned() {
+            Ok(slot) => slot,
+            Err(_) => {
+                pending.found_full = true;
+                let wait = Arc::clone(&self.slots).acquire_owned();
+                let Ok(slot) = tokio::time::timeout(INTAKE_WAIT, wait).await else {
+                    tracing::warn!(
+                        target: "rapira",
+                        "intake full for {INTAKE_WAIT:?} ({} pending); shedding the request",
+                        self.slot.pending.load(Ordering::Relaxed)
+                    );
+                    count_shed(self.slot);
+                    return Err(Refused::Saturated);
+                };
+                slot.expect("the intake never closes its slot semaphore")
             }
+        };
+        let entry = Entry::Unit {
+            unit,
+            _bytes: held,
+            _slot: slot,
+        };
+        if self.tx.send(entry).is_err() {
+            return Err(Refused::Stopped);
         }
+        pending.disarm();
+        Ok(())
     }
 
     /// Sends the reload signal through the intake, so it also wakes a PHP thread that waits for work.
-    /// It is no unit: it takes no budget, no counter sees it, and it waits for room with no deadline.
+    /// It is no unit: it takes no slot and no budget, and no counter sees it, so it enters a full intake at once.
     pub(crate) async fn restart_app(&self) -> Result<(), Refused> {
-        let mut entry = Entry::RestartApp;
-        loop {
-            match self.tx.try_send(entry) {
-                Ok(()) => return Ok(()),
-                Err(TrySendError::Full(e)) => {
-                    entry = e;
-                    tokio::time::sleep(Duration::from_millis(1)).await;
-                }
-                Err(TrySendError::Disconnected(_)) => return Err(Refused::Stopped),
-            }
-        }
+        self.tx
+            .send(Entry::RestartApp)
+            .map_err(|_| Refused::Stopped)
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::sync_channel;
+    use std::sync::mpsc::channel;
 
     use super::*;
 
@@ -234,13 +233,13 @@ mod tests {
     }
 
     /// An intake on slot 0 of a board in memory.
-    fn intake(tx: SyncSender<Entry>) -> Intake {
+    fn intake(tx: Sender<Entry>) -> Intake {
         Intake::new(tx, &rapira_scoreboard::create(1).unwrap()[0])
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn intake_reports_stopped_after_the_receiver_is_gone() {
-        let (tx, rx) = sync_channel(1);
+        let (tx, rx) = channel();
         let intake = intake(tx);
         let slot = intake.slot;
         drop(rx);
@@ -258,18 +257,17 @@ mod tests {
         );
     }
 
-    /// A reload waits for room in a full intake with no deadline. It is a signal, not a unit: after it enters, only the unit that filled the queue counts as pending, and nothing counts as failed or shed.
+    /// A reload enters a full intake at once: it is a signal, not a unit, so it never waits for a unit to leave and no counter sees it.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
-    async fn a_reload_waits_for_room_without_a_deadline() {
-        let (tx, rx) = sync_channel(1);
+    async fn a_reload_enters_a_full_intake_at_once() {
+        let (tx, _rx) = channel();
         let intake = intake(tx);
         let slot = intake.slot;
-        intake.submit(Box::new(Probe), 0).await.unwrap();
-        let (sent, _) = tokio::join!(intake.restart_app(), async {
-            tokio::time::sleep(INTAKE_WAIT * 2).await;
-            rx.try_recv().unwrap()
-        });
-        assert_eq!(sent, Ok(()), "the reload enters once there is room");
+        for _ in 0..INTAKE_SLOTS {
+            intake.submit(Box::new(Probe), 0).await.unwrap();
+        }
+        let entered = tokio::time::timeout(Duration::ZERO, intake.restart_app()).await;
+        assert_eq!(entered, Ok(Ok(())), "the reload enters without a wait");
         assert_eq!(
             (
                 slot.handled.load(Ordering::Relaxed),
@@ -277,12 +275,12 @@ mod tests {
                 slot.failed_on_full_queue.load(Ordering::Relaxed),
                 slot.pending.load(Ordering::Relaxed),
             ),
-            (0, 0, 0, 1),
+            (0, 0, 0, INTAKE_SLOTS as u64),
             "handled, errors, failed_on_full_queue, pending"
         );
     }
 
-    /// Each case fills a queue of one with a reload entry before the intake takes the sender, so `pending` does not count it and the submit finds the queue full. The paused clock moves to the next timer at once, so the waits take no real time.
+    /// Each case fills all INTAKE_SLOTS slots first, so the submit under test finds the intake full. The paused clock moves to the next timer at once, so the waits take no real time.
     #[tokio::test(flavor = "current_thread", start_paused = true)]
     async fn a_full_intake_counts_each_unit_that_never_enters() {
         enum During {
@@ -295,6 +293,7 @@ mod tests {
             handled: u64,
             errors: u64,
             failed_on_full_queue: u64,
+            /// Beyond the INTAKE_SLOTS units that fill the intake.
             pending: u64,
         }
         struct Case {
@@ -354,10 +353,12 @@ mod tests {
             },
         ];
         for case in cases {
-            let (tx, rx) = sync_channel::<Entry>(1);
-            tx.send(Entry::RestartApp).unwrap();
+            let (tx, rx) = channel::<Entry>();
             let intake = intake(tx);
             let slot = intake.slot;
+            for _ in 0..INTAKE_SLOTS {
+                intake.submit(Box::new(Probe), 0).await.unwrap();
+            }
             let submit = intake.submit(Box::new(Probe), 0);
             let result = match case.during {
                 During::Nothing => Some(submit.await),
@@ -370,9 +371,10 @@ mod tests {
                     Some(result)
                 }
                 During::RoomFrees => {
-                    let (result, _) = tokio::join!(submit, async {
+                    let (result, ()) = tokio::join!(submit, async {
                         tokio::time::sleep(ACTION_DELAY).await;
-                        rx.try_recv().unwrap()
+                        // The pull drops the entry, and its slot goes to the waiting submit.
+                        drop(rx.try_recv().unwrap());
                     });
                     Some(result)
                 }
@@ -389,7 +391,7 @@ mod tests {
                     case.want.handled,
                     case.want.errors,
                     case.want.failed_on_full_queue,
-                    case.want.pending,
+                    case.want.pending + INTAKE_SLOTS as u64,
                 ),
                 "{}: handled, errors, failed_on_full_queue, pending",
                 case.name

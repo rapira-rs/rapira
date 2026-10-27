@@ -2,7 +2,7 @@ use std::cell::RefCell;
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, channel};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::Duration;
@@ -157,7 +157,7 @@ impl Rapira {
         classes: DispatcherClasses,
     ) -> StartedWorker {
         let pending: &'static AtomicU64 = &slot.pending;
-        let (intake_tx, intake_rx) = sync_channel::<Entry>(1024);
+        let (intake_tx, intake_rx) = channel::<Entry>();
         let intake = Intake::new(intake_tx, slot);
 
         crate::context::set_script(&entrypoint);
