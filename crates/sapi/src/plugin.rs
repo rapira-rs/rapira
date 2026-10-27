@@ -5,7 +5,7 @@ use std::time::{Duration, Instant};
 use anyhow::anyhow;
 use tokio::sync::watch;
 
-use crate::work::{DispatcherClasses, RestartApp, Sink};
+use crate::work::{DispatcherClasses, Sink};
 
 pub use rapira_config::Mode;
 
@@ -157,7 +157,7 @@ pub fn run_plugin(
     rt.spawn(async move {
         loop {
             restart.notified().await;
-            if let Err(e) = restart_sink.submit(Box::new(RestartApp), 0).await {
+            if let Err(e) = restart_sink.restart_app().await {
                 tracing::warn!(target: "rapira", "reload skipped: {e}");
             }
         }

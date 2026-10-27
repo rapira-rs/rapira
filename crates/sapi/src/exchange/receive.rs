@@ -48,11 +48,11 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                 RecvMode::Wait(t) => pull_unit_wait(Some(Duration::from_micros(t as u64))),
             };
             match pulled {
+                Pulled::RestartApp => {
+                    crate::quota::exhaust();
+                    continue;
+                }
                 Pulled::Unit(unit) => {
-                    if unit.restarts_app() {
-                        crate::quota::exhaust();
-                        continue;
-                    }
                     if unit.cancelled() {
                         // Counted like a shed unit: the app never served it, so the max_requests quota does not tick.
                         sb_update(Event::Shed);

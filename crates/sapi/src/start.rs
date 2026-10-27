@@ -11,7 +11,7 @@ use tracing::{error, info, trace};
 use crate::quota;
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
-use crate::work::{DispatcherClasses, Sink, Work};
+use crate::work::{DispatcherClasses, Entry, Sink, Work};
 use crate::{
     classic_worker::classic_worker,
     plugin::{Mode, Stopper},
@@ -23,7 +23,7 @@ thread_local! {
 }
 
 struct UnitRx {
-    rx: Receiver<Box<dyn Work>>,
+    rx: Receiver<Entry>,
     /// The `pending` field of this worker's scoreboard slot.
     pending: &'static AtomicU64,
 }
@@ -32,7 +32,18 @@ struct UnitRx {
 const IDLE_PURGE_AFTER: Duration = Duration::from_secs(2);
 
 impl UnitRx {
-    /// Waits for one unit, with no time limit when `timeout` is None. A pulled unit leaves `pending`.
+    /// A pulled unit leaves `pending` and gives back its body bytes.
+    fn pulled(&self, entry: Entry) -> Pulled {
+        match entry {
+            Entry::Unit { unit, .. } => {
+                self.pending.fetch_sub(1, Ordering::Relaxed);
+                Pulled::Unit(unit)
+            }
+            Entry::RestartApp => Pulled::RestartApp,
+        }
+    }
+
+    /// Waits for one entry, with no time limit when `timeout` is None.
     fn recv(&self, timeout: Option<Duration>) -> Pulled {
         let first = timeout.map_or(IDLE_PURGE_AFTER, |t| t.min(IDLE_PURGE_AFTER));
         let mut got = self.rx.recv_timeout(first);
@@ -45,10 +56,7 @@ impl UnitRx {
             };
         }
         match got {
-            Ok(unit) => {
-                self.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Unit(unit)
-            }
+            Ok(entry) => self.pulled(entry),
             Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
             Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
         }
@@ -149,7 +157,7 @@ impl Rapira {
         classes: DispatcherClasses,
     ) -> StartedWorker {
         let pending: &'static AtomicU64 = &slot.pending;
-        let (intake_tx, intake_rx) = sync_channel::<Box<dyn Work>>(1024);
+        let (intake_tx, intake_rx) = sync_channel::<Entry>(1024);
         let sink = Sink::new(intake_tx, slot);
 
         crate::context::set_script(&entrypoint);
@@ -258,6 +266,8 @@ pub(crate) fn pull_unit() -> Option<Box<dyn Work>> {
 
 pub(crate) enum Pulled {
     Unit(Box<dyn Work>),
+    /// A reload: the app instance takes no more units.
+    RestartApp,
     Timeout,
     Empty,
     Closed,
@@ -294,10 +304,7 @@ pub(crate) fn pull_unit_try() -> Pulled {
         let got = unit_r.rx.try_recv();
         sb_update(Event::Active);
         match got {
-            Ok(unit) => {
-                unit_r.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Unit(unit)
-            }
+            Ok(entry) => unit_r.pulled(entry),
             Err(TryRecvError::Empty) => Pulled::Empty,
             Err(TryRecvError::Disconnected) => Pulled::Closed,
         }

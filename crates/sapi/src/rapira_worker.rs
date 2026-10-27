@@ -4,7 +4,7 @@ use crate::{
     callbacks::*,
     diagnostics::{Severity, error_type_to_level},
     scoreboard::sb_update,
-    start::{Pulled, pull_unit, pull_unit_to_shed, run_script},
+    start::{Pulled, pull_unit_to_shed, pull_unit_wait, run_script},
 };
 use std::{
     cell::Cell,
@@ -126,7 +126,7 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                 match pull_unit_to_shed(BOOT_RETRY) {
                     Pulled::Closed => break WorkerExit::Closed,
                     // A reload during a failed boot: the next boot starts at once.
-                    Pulled::Unit(unit) if unit.restarts_app() => {}
+                    Pulled::RestartApp => {}
                     Pulled::Unit(unit) => {
                         unit.shed();
                         sb_update(scoreboard::Event::Shed);
@@ -219,12 +219,9 @@ fn next_unit() -> Option<Context> {
         if crate::quota::exhausted() {
             return None;
         }
-        match pull_unit() {
-            Some(unit) => {
-                if unit.restarts_app() {
-                    crate::quota::exhaust();
-                    continue;
-                }
+        match pull_unit_wait(None) {
+            Pulled::RestartApp => crate::quota::exhaust(),
+            Pulled::Unit(unit) => {
                 if unit.cancelled() {
                     // Counted like a shed unit: the app never served it, so the max_requests quota does not tick.
                     sb_update(scoreboard::Event::Shed);
@@ -236,7 +233,8 @@ fn next_unit() -> Option<Context> {
                 };
                 return Some(ctx);
             }
-            None => {
+            // With no timeout the wait ends only with an entry or the closed intake.
+            Pulled::Closed | Pulled::Timeout | Pulled::Empty => {
                 crate::exchange::CLOSED_SEEN.set(true);
                 return None;
             }
