@@ -13,7 +13,8 @@ use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::{
-    Server, Spawn, parse_status_and_body, scratch_dir, slot_line, wait_log_contains,
+    Server, Spawn, parse_status_and_body, scratch_dir, slot_line, spawn_with_config,
+    wait_log_contains,
 };
 
 /// Read budget of a raw socket exchange.
@@ -1006,6 +1007,40 @@ fn get_info_reports_the_server_identity() -> anyhow::Result<()> {
             case.name
         );
     }
+    Ok(())
+}
+
+/// Every worker reads the server identity at boot, before its first `receive()`: the first boot of each worker sees the configured values, and no boot fails on them.
+#[test]
+fn get_info_reports_the_server_identity_at_boot() -> anyhow::Result<()> {
+    const WORKERS: usize = 16;
+    let mut srv = spawn_with_config(
+        "lifecycle/boot-identity-worker.php",
+        WORKERS,
+        "mode = \"dispatcher\"\n[log]\nformat = \"json\"",
+    );
+    let want = format!("name=localhost port={}", srv.addr.port());
+    // A failed boot retries after 5 s, so a worker whose first boot failed still logs a record in this window.
+    let booted = poll(Duration::from_secs(15), || {
+        let results = server_log::app_results(&srv.log_file(), "boot-identity");
+        (results.len() >= WORKERS).then_some(results)
+    });
+    srv.stop();
+    let failed: Vec<String> = server_log::app_records(&srv.log_file())
+        .php_messages
+        .into_iter()
+        .filter(|m| m.contains("serverName failed"))
+        .collect();
+    assert_eq!(
+        failed,
+        Vec::<String>::new(),
+        "boots that failed on serverName()"
+    );
+    let booted = booted.context("every worker logs its boot identity")?;
+    assert!(
+        booted.iter().all(|r| *r == want),
+        "want {want:?} from every boot, got {booted:?}"
+    );
     Ok(())
 }
 
