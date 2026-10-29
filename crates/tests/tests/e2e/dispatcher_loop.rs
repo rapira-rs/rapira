@@ -688,6 +688,7 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
 }
 
 /// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, a file part in a body over 256 KiB (parsed on the blocking pool) reaches PHP, an empty name is a 400, and a field over the limit after a file part is a 413.
+/// Part header names keep the case that the client sent, and the values of one name keep their line order (contract FormField and UploadedFile `$headers`).
 /// No spool file outlives its request, also when a later part rejects the body after a file part was spooled.
 #[test]
 fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
@@ -769,6 +770,30 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
             ],
             status: 413,
             lines: &[],
+        },
+        Case {
+            name: "two spellings of one part header name stay two keys",
+            parts: vec![Part {
+                headers: "content-disposition: form-data; name=\"f\"; filename=\"a.txt\"\r\n\
+                          Content-Type: a/b\r\n\
+                          content-type: c/d",
+                content: "z",
+            }],
+            status: 200,
+            lines: &[r#""Content-Type":["a/b"],"content-type":["c/d"]"#],
+        },
+        Case {
+            name: "three lines of one part header keep their order",
+            parts: vec![Part {
+                headers: "content-disposition: form-data; name=\"v\"\r\n\
+                          x-a: 3\r\n\
+                          x-b: z\r\n\
+                          x-a: 1\r\n\
+                          x-a: 2",
+                content: "w",
+            }],
+            status: 200,
+            lines: &[r#""x-a":["3","1","2"],"x-b":["z"]"#],
         },
     ];
 

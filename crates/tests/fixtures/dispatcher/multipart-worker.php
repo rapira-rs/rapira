@@ -20,12 +20,14 @@ try {
         foreach ($b->fields as $i => $f) {
             $lines[] = "field$i=" . $f->name . '=' . $f->value;
             $lines[] = "field$i-cd=" . var_export(isset($f->headers['content-disposition']), true);
+            $lines[] = "field$i-h=" . json_encode($f->headers, JSON_UNESCAPED_SLASHES);
         }
         foreach ($b->files as $i => $u) {
             $lines[] = "file$i=" . $u->name . ':' . $u->clientFilename . ':' . $u->size
                 . ':' . file_get_contents($u->tmpPath);
             $lines[] = "file$i-type=" . var_export($u->clientMediaType, true);
             $lines[] = "file$i-cd=" . var_export(isset($u->headers['content-disposition']), true);
+            $lines[] = "file$i-h=" . json_encode($u->headers, JSON_UNESCAPED_SLASHES);
         }
         $ex->writeBody(implode("\n", $lines));
     }
