@@ -43,7 +43,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             for piece in v.split(|&b| b == b',') {
                 // RFC 9110 OWS around a list element: https://www.rfc-editor.org/rfc/rfc9110#section-5.6.1
                 let piece = piece.trim_ascii();
-                // #190: rapira also accepts a padding that is shorter than the canonical one, https://github.com/rapira-rs/rapira/issues/190
+                // rapira also accepts a padding that is shorter than the canonical one: BIN_DECODE uses DecodePaddingMode::Indifferent.
                 let end = piece.iter().rposition(|&b| b != b'=').map_or(0, |i| i + 1);
                 let (b64, padding) = piece.split_at(end);
                 if padding.len() > (4 - b64.len() % 4) % 4 {
