@@ -71,11 +71,6 @@ try {
                 $out[] = 'shape';
             }
             try {
-                $ex->writeHead(200, [123 => ['v']]);
-            } catch (\ValueError) {
-                $out[] = 'intkey';
-            }
-            try {
                 $ex->writeHead(200, ['x-a' => [123]]);
             } catch (\ValueError) {
                 $out[] = 'item';
@@ -147,6 +142,27 @@ try {
             $h['x-ref'] = &$ref;
             $ex->writeHead(200, $h);
             $ex->writeBody('done');
+            continue;
+        }
+        if ($probe === 'decimal-echo') {
+            $h = $req->headers; // "123" arrives as the int key 123
+            unset($h['host']);
+            $ex->writeHead(200, $h);
+            $ex->writeBody('ok');
+            continue;
+        }
+        if ($probe === 'decimal-literal') {
+            $ex->writeHead(200, ['123' => ['v']]);
+            $ex->writeBody('ok');
+            continue;
+        }
+        if ($probe === 'decimal-trailer') {
+            $ex->writeBody('x', eos: false);
+            try {
+                $ex->writeTrailers([123 => ['v']]);
+            } catch (\ValueError) {
+                $ex->writeBody('threw');
+            }
             continue;
         }
         if ($probe === 'info') {

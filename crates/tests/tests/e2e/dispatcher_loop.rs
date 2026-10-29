@@ -10,7 +10,10 @@ use http::{HeaderValue, Method, Version};
 use rapira_net::ListenAddr;
 use rapira_sapi::{Frame, plugin::Mode};
 use tests::wire::submit;
-use tests::{StatusBody, drain, drain_resp, drain_resp_deadline, fixture, poll, req, server_log};
+use tests::{
+    Fields, StatusBody, drain, drain_resp, drain_resp_deadline, fields, fixture, poll, req,
+    server_log,
+};
 
 use crate::harness::{
     Server, Spawn, mkfifo, parse_status_and_body, scratch_dir, slot_line, spawn_with_config,
@@ -167,7 +170,7 @@ fn status_range_and_header_shape_value_errors() -> anyhow::Result<()> {
     let StatusBody { status, body } = verbs_probe("/?probe=value-errors")?;
     assert_eq!(
         (status, body.as_str()),
-        (200, "range:99;range:600;name;value;shape;intkey;item")
+        (200, "range:99;range:600;name;value;shape;item")
     );
     Ok(())
 }
@@ -272,6 +275,68 @@ fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
     assert_eq!(multi, ["a", "b"], "one field line per list value, in order");
     assert_eq!(resp.header("x-ref").as_deref(), Some("r1"));
     assert_eq!(resp.header("x-vref").as_deref(), Some("c1"));
+    Ok(())
+}
+
+/// PHP stores a canonical decimal name such as `123` as an int key. `writeHead()` and `writeTrailers()` send an int key as its decimal text, so `writeHead()` accepts the `Request::$headers` array as it arrives.
+/// A field name is a token, and a token may hold digits and `-`.
+/// https://www.rfc-editor.org/rfc/rfc9110#section-5.1
+/// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2
+#[test]
+fn decimal_field_names_reach_the_wire() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        target: &'static str,
+        /// Request fields beside `host`.
+        request: Fields,
+        body: &'static str,
+        response: Fields,
+    }
+    let cases = [
+        Case {
+            name: "echo request headers",
+            target: "/?probe=decimal-echo",
+            request: &[("123", "a"), ("-1", "b")],
+            body: "ok",
+            response: &[("123", "a"), ("-1", "b")],
+        },
+        Case {
+            name: "literal key",
+            target: "/?probe=decimal-literal",
+            request: &[],
+            body: "ok",
+            response: &[("123", "v")],
+        },
+        // Rapira does not send response trailers; a ValueError would append "threw".
+        Case {
+            name: "trailer key",
+            target: "/?probe=decimal-trailer",
+            request: &[],
+            body: "x",
+            response: &[],
+        },
+    ];
+
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php")).spawn();
+    for case in cases {
+        let mut rq = req(case.target);
+        rq.headers_mut().extend(fields(case.request));
+        let resp = drain_resp(submit(srv.addr, rq)?);
+        assert_eq!(
+            (resp.status(), resp.body_string().as_str()),
+            (200, case.body),
+            "{}",
+            case.name
+        );
+        for &(name, value) in case.response {
+            assert_eq!(
+                resp.header(name).as_deref(),
+                Some(value),
+                "{}: field {name}",
+                case.name
+            );
+        }
+    }
     Ok(())
 }
 

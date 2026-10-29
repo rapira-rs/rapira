@@ -14,7 +14,7 @@ namespace Rapira\Http {
     {
         public string $name;
         public string $value;
-        /** @var array<string, list<string>> */
+        /** @var array<int|string, list<string>> */
         public array $headers;
 
         public function __construct(string $name, string $value, array $headers) {}
@@ -32,7 +32,7 @@ namespace Rapira\Http {
         public string $name;
         public string $clientFilename;
         public ?string $clientMediaType;
-        /** @var array<string, list<string>> */
+        /** @var array<int|string, list<string>> */
         public array $headers;
         public string $tmpPath;
         public int $size;
@@ -76,7 +76,7 @@ namespace Rapira\Http {
         public string $target;
         public ?string $authority;
         public string $protocol;
-        /** @var array<string, list<string>> */
+        /** @var array<int|string, list<string>> */
         public array $headers;
         public string|Multipart $body;
         public \Rapira\InetAddress|\Rapira\UnixAddress $remote;
@@ -115,7 +115,7 @@ namespace Rapira\Http {
         public function getRequest(): Request;
 
         /**
-         * $headers is array<string, list<string>>: one entry per value.
+         * $headers is array<int|string, list<string>>: one entry per value. An int key goes out as its decimal text.
          *
          * @throws Exception\HeadAlreadyWrittenError
          * @throws \Rapira\Exception\WorkDiscardedException
