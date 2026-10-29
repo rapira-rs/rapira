@@ -799,6 +799,95 @@ fn cached_entries_answer_until_they_go_stale() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
+/// httpdate formats only the years 1970 to 9999, so the middleware serves a file with an mtime
+/// outside that range as a file without a modification time. One hour before the epoch is the
+/// mtime of `touch -d 1970-01-01` in UTC+1.
+#[test]
+fn a_static_file_with_a_pre_epoch_mtime_is_served_without_validators() {
+    let big = "x".repeat(300_000);
+    let root = static_root(&[("old.txt", "old"), ("big.bin", &big)]);
+    for name in ["old.txt", "big.bin"] {
+        std::fs::File::options()
+            .write(true)
+            .open(root.join(name))
+            .expect("open for mtime")
+            .set_modified(SystemTime::UNIX_EPOCH - Duration::from_secs(3600))
+            .expect("set mtime");
+    }
+    let srv = spawn_echo_loop(&root, None);
+
+    struct Case<'a> {
+        name: &'static str,
+        method: &'static str,
+        path: &'static str,
+        body: &'a [u8],
+        length: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "GET of a file under the cache cap",
+            method: "GET",
+            path: "/old.txt",
+            body: b"old",
+            length: "3",
+        },
+        Case {
+            name: "HEAD of a file under the cache cap",
+            method: "HEAD",
+            path: "/old.txt",
+            body: b"",
+            length: "3",
+        },
+        Case {
+            name: "GET of a file streamed from disk",
+            method: "GET",
+            path: "/big.bin",
+            body: big.as_bytes(),
+            length: "300000",
+        },
+        Case {
+            name: "HEAD of a file above the cache cap",
+            method: "HEAD",
+            path: "/big.bin",
+            body: b"",
+            length: "300000",
+        },
+    ];
+    for case in &cases {
+        let req = format!(
+            "{} {} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+            case.method, case.path
+        );
+        let raw = http_raw_bytes(srv.addr, req.as_bytes(), T).expect(case.name);
+        assert!(
+            !raw.is_empty(),
+            "{}: empty reply\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        assert_eq!(
+            split_response(&raw),
+            StatusBody {
+                status: 200,
+                body: case.body
+            },
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            head_field(&raw, "content-length"),
+            case.length,
+            "{}",
+            case.name
+        );
+        assert_eq!(head_field(&raw, "last-modified"), "", "{}", case.name);
+        assert_eq!(head_field(&raw, "etag"), "", "{}", case.name);
+        assert_eq!(head_field(&raw, "x-rapira-target"), "", "{}", case.name);
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A 000 directory passes a stat of its own path and a 0400 directory lists but cannot resolve child paths, so the boot probe must resolve inside the root.
 #[test]
 fn a_bad_static_root_refuses_to_boot() {
