@@ -252,11 +252,10 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
                 match v.get(k) {
                     None => return Err(bad("unterminated quoted-string in content-disposition")),
                     Some(b'"') => break (out, k + 1),
-                    Some(b'\\') => {
-                        let Some(&esc) = v.get(k + 1) else {
-                            return Err(bad("unterminated quoted-string in content-disposition"));
-                        };
-                        out.push(esc);
+                    // php-src unescapes only \\ and \" and keeps every other '\': https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L495
+                    // A '\' at the end of a value escapes the closing quote, as in php-src.
+                    Some(b'\\') if matches!(v.get(k + 1), Some(b'\\' | b'"')) => {
+                        out.push(v[k + 1]);
                         k += 2;
                     }
                     Some(&byte) => {

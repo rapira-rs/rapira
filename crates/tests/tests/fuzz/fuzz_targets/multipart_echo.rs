@@ -51,14 +51,19 @@ const BCHARS: &[u8] =
 
 /// Name and filename bytes. The WHATWG encoder escapes LF, CR and `"`, so a name has none of them: https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#multipart/form-data-encoding-algorithm
 fn name_bytes(raw: &[u8]) -> Vec<u8> {
-    raw.iter()
+    let mut v: Vec<u8> = raw
+        .iter()
         .copied()
         .filter(|&b| b != b'"')
-        // #165: the parser reads a backslash as a quoted-pair, https://github.com/rapira-rs/rapira/issues/165
-        .filter(|&b| b != b'\\')
         // The parser rejects a control byte other than HTAB, as RFC 9110 field-value does: https://www.rfc-editor.org/rfc/rfc9110#section-5.5
         .filter(|&b| b == b'\t' || (b >= 0x20 && b != 0x7f))
-        .collect()
+        .collect();
+    // The parser unescapes \\ and \" as php-src does, and the encoder sends '\' raw. They agree when no '\' follows a '\' and no '\' ends the value.
+    v.dedup_by(|a, b| *a == b'\\' && *b == b'\\');
+    if v.last() == Some(&b'\\') {
+        v.pop();
+    }
+    v
 }
 
 /// RFC 9110 field-value bytes without leading or trailing whitespace: https://www.rfc-editor.org/rfc/rfc9110#section-5.5
