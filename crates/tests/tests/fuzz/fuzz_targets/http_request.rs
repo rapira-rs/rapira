@@ -154,7 +154,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         .filter(|(n, _)| keep_all || safe_name(n))
         .map(|(n, v)| (n.clone(), v.clone()))
         .collect();
-    // #193: an absolute-form target rewrites the Host field of Request::$headers, https://github.com/rapira-rs/rapira/issues/193
+    // For an absolute-form target, the Host field carries the target authority: https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
     if let (Some(_), Some(a)) = (uri.authority(), want_authority) {
         want_fields.insert(HOST, HeaderValue::from_bytes(a).unwrap());
     }
@@ -167,14 +167,14 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         received_at: 0.0,
     };
     let built = build(&mut parts, authority.clone(), Vec::new(), peer, &CONFIG);
-    // #183: http::Uri drops a fragment, https://github.com/rapira-rs/rapira/issues/183
+    // http::Uri drops a fragment, so $target has none.
     let raw = target.split('#').next().unwrap_or_default();
     let (want_uri, want_target) = if raw == "*" || raw.starts_with('/') {
         (raw.to_owned(), None)
     } else if let Some(scheme) = uri.scheme_str() {
         let rest = &raw[scheme.len() + 3..];
         let end = rest.find(['/', '?']).unwrap_or(rest.len());
-        // #183: http::Uri writes an empty path as "/" and the http and https schemes in lower case, https://github.com/rapira-rs/rapira/issues/183
+        // http::Uri writes the RFC 9110 normal form: an empty path as "/" and the http and https schemes in lower case: https://www.rfc-editor.org/rfc/rfc9110#section-4.2.3
         let path = if rest[end..].starts_with('/') {
             rest[end..].to_owned()
         } else {
