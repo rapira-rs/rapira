@@ -30,6 +30,11 @@ try {
             } catch (HeadAlreadyWrittenError $e) {
                 $out[] = 'double-head:' . $e::class;
             }
+            try {
+                $ex->writeHead(103, ['link' => ['</a.css>; rel=preload']]);
+            } catch (HeadAlreadyWrittenError $e) {
+                $out[] = 'interim-after-final:' . $e::class;
+            }
             $ex->writeBody(implode(';', $out));
             continue;
         }

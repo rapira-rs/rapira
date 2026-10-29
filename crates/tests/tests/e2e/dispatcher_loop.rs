@@ -148,14 +148,15 @@ fn double_finalize_throws_already_finalized() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A second `writeHead()` after the final head throws `HeadAlreadyWrittenError`; the first head stands.
+/// A second final `writeHead()` and an interim `writeHead(103)` after the final head throw `HeadAlreadyWrittenError`; the first head stands.
 #[test]
 fn double_head_throws_head_already_written() -> anyhow::Result<()> {
     let StatusBody { status, body } = verbs_probe("/?probe=double-head")?;
     assert_eq!(status, 201, "the first head must stand");
     assert_eq!(
         body,
-        "double-head:Rapira\\Http\\Exception\\HeadAlreadyWrittenError"
+        "double-head:Rapira\\Http\\Exception\\HeadAlreadyWrittenError;\
+         interim-after-final:Rapira\\Http\\Exception\\HeadAlreadyWrittenError"
     );
     Ok(())
 }
@@ -448,18 +449,22 @@ fn exit_after_serving_recycles_the_worker() -> anyhow::Result<()> {
 }
 
 /// HEAD answers with the GET status, and a 204 head stays 204 when PHP writes a body after it. HTTP framing keeps both bodies empty on the wire.
+/// The host computes no content-length from the dropped bytes.
 /// https://www.rfc-editor.org/rfc/rfc9112#section-6.3
+/// https://www.rfc-editor.org/rfc/rfc9110#section-8.6
 #[test]
 fn head_and_204_drop_the_body() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php")).spawn();
 
     let mut head_rq = req("/");
     *head_rq.method_mut() = Method::HEAD;
-    let status = drain(submit(srv.addr, head_rq)?).status;
-    assert_eq!(status, 200, "HEAD keeps the GET head");
+    let resp = drain_resp(submit(srv.addr, head_rq)?);
+    assert_eq!(resp.status(), 200, "HEAD keeps the GET head");
+    assert_eq!(resp.content_length, None, "HEAD gets no computed length");
 
-    let status = drain(submit(srv.addr, req("/?probe=head204"))?).status;
-    assert_eq!(status, 204);
+    let resp = drain_resp(submit(srv.addr, req("/?probe=head204"))?);
+    assert_eq!(resp.status(), 204);
+    assert_eq!(resp.content_length, None, "a 204 has no content-length");
     Ok(())
 }
 
@@ -1140,27 +1145,60 @@ fn streamed_chunks_arrive_in_order() -> anyhow::Result<()> {
 }
 
 /// The prefix rule on an exceeded content-length: the fitting bytes are sent, the response completes per its declaration, the write throws.
+/// HEAD drops the bytes but counts them toward the declared length, so the write throws as on GET.
 #[test]
 fn content_length_exceeded_sends_the_fitting_prefix() -> anyhow::Result<()> {
-    let StreamProbe { srv, frames: rx } = stream_probe("/?probe=cl-exceeded")?;
-    let resp = drain_resp(rx);
+    struct Case {
+        name: &'static str,
+        method: Method,
+        body: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "get",
+            method: Method::GET,
+            body: "01234",
+        },
+        Case {
+            name: "head",
+            method: Method::HEAD,
+            body: "",
+        },
+    ];
 
-    assert_eq!(resp.status(), 200);
-    assert_eq!(
-        resp.content_length,
-        Some(5),
-        "the declared length is honoured"
-    );
-    assert_eq!(resp.body_string(), "01234", "the surplus is not sent");
-    assert!(
-        resp.ended && !resp.truncated,
-        "complete per its declaration; keepalive survives"
-    );
-    let ctx = server_log::wait_app_record(&srv.log_file(), "cl-exceeded");
-    assert!(
-        ctx.contains(r#"ContentLengthExceededError"#),
-        "wrong class in {ctx}"
-    );
+    for case in cases {
+        let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/stream-worker.php"))
+            .json_log()
+            .spawn();
+        let mut rq = req("/?probe=cl-exceeded");
+        *rq.method_mut() = case.method;
+        let resp = drain_resp(submit(srv.addr, rq)?);
+
+        assert_eq!(resp.status(), 200, "{}", case.name);
+        assert_eq!(
+            resp.content_length,
+            Some(5),
+            "{}: the declared length is honoured",
+            case.name
+        );
+        assert_eq!(
+            resp.body_string(),
+            case.body,
+            "{}: the surplus is not sent",
+            case.name
+        );
+        assert!(
+            resp.ended && !resp.truncated,
+            "{}: complete per its declaration; keepalive survives",
+            case.name
+        );
+        let ctx = server_log::wait_app_record(&srv.log_file(), "cl-exceeded");
+        assert!(
+            ctx.contains(r#"ContentLengthExceededError"#),
+            "{}: wrong class in {ctx}",
+            case.name
+        );
+    }
     Ok(())
 }
 
