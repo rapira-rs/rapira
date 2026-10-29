@@ -1,17 +1,22 @@
 //! The rapira_grpc server over the wire, with `grpc/wire-worker.php` in the role of the application: the three protocols, statuses and metadata, what PHP sees, deadlines, the plugin routes, and the drain.
 
+use std::convert::Infallible;
 use std::io::{self, Read, Write};
 use std::net::TcpStream;
 use std::path::PathBuf;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use http::Method;
 use http_body_util::BodyExt;
+use hyper::body::{Body, Bytes, Frame};
+use hyper_util::rt::{TokioExecutor, TokioIo};
 use rapira_net::ListenAddr;
 use serde_json::{Value, json};
 use tests::grpc::{
-    Conn, ECHO_PATH, ERROR_INFO, Fields, HI, HI_FRAME, Wire, envelope, fields, status_bytes,
-    status_details, web_trailers,
+    Conn, ECHO_PATH, ERROR_INFO, Fields, HI, HI_FRAME, Response, Wire, envelope, fields,
+    status_bytes, status_details, web_trailers,
 };
 use tests::{fixture, server_log};
 
@@ -935,22 +940,48 @@ async fn a_passed_deadline_drops_the_call() {
     stop(srv).await;
 }
 
-/// A request that announces a message and sends no byte of it ends at the configured deadline. Sources: the plugin README (`default_timeout_secs` is the timeout of a call that has none, `max_timeout_secs` reduces a longer client timeout to its value) and the Connect protocol (`deadline_exceeded` is HTTP 504).
-#[test]
-fn configured_timeouts_bound_a_stalled_request() {
+/// A request that announces a message and sends no byte of it ends at the configured deadline, on Connect over HTTP/1.1 and on gRPC over h2. Sources: the plugin README (`default_timeout_secs` is the timeout of a call that has none, `max_timeout_secs` reduces a longer client timeout to its value), the Connect protocol (`deadline_exceeded` is HTTP 504) and PROTOCOL-HTTP2 (status 4 is DEADLINE_EXCEEDED).
+#[tokio::test]
+async fn configured_timeouts_bound_a_stalled_request() {
+    /// An h2 request body that sends no frame and does not end.
+    struct Stalled;
+    impl Body for Stalled {
+        type Data = Bytes;
+        type Error = Infallible;
+        fn poll_frame(
+            self: Pin<&mut Self>,
+            _: &mut Context<'_>,
+        ) -> Poll<Option<Result<Frame<Bytes>, Infallible>>> {
+            Poll::Pending
+        }
+    }
     struct Case {
         name: &'static str,
-        /// A request field line with its CRLF, or nothing.
-        timeout: &'static str,
+        /// Http1 sends a Connect request, H2 a gRPC request.
+        wire: Wire,
+        /// The client timeout field.
+        timeout: Option<(&'static str, &'static str)>,
     }
     let cases = [
         Case {
-            name: "no client timeout",
-            timeout: "",
+            name: "connect, no client timeout",
+            wire: Wire::Http1,
+            timeout: None,
         },
         Case {
-            name: "client timeout above max_timeout_secs",
-            timeout: "connect-timeout-ms: 60000\r\n",
+            name: "connect, client timeout above max_timeout_secs",
+            wire: Wire::Http1,
+            timeout: Some(("connect-timeout-ms", "60000")),
+        },
+        Case {
+            name: "grpc, no client timeout",
+            wire: Wire::H2,
+            timeout: None,
+        },
+        Case {
+            name: "grpc, client timeout above max_timeout_secs",
+            wire: Wire::H2,
+            timeout: Some(("grpc-timeout", "60S")),
         },
     ];
 
@@ -962,28 +993,65 @@ fn configured_timeouts_bound_a_stalled_request() {
         panic!("the grpc listener of Spawn::grpc is tcp");
     };
     for case in &cases {
-        let request = format!(
-            "POST {ECHO_PATH} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\nContent-Type: application/proto\r\nContent-Length: 10\r\n{}\r\n",
-            case.timeout
-        );
         let started = Instant::now();
-        let got = http_raw(addr, request.as_bytes(), Duration::from_secs(10))
-            .unwrap_or_else(|e| panic!("{}: {e}", case.name));
+        match case.wire {
+            Wire::Http1 => {
+                let field = case
+                    .timeout
+                    .map_or(String::new(), |(k, v)| format!("{k}: {v}\r\n"));
+                let request = format!(
+                    "POST {ECHO_PATH} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\nContent-Type: application/proto\r\nContent-Length: 10\r\n{field}\r\n"
+                );
+                let got = http_raw(addr, request.as_bytes(), Duration::from_secs(10))
+                    .unwrap_or_else(|e| panic!("{}: {e}", case.name));
+                assert_eq!(got.status, 504, "{}", case.name);
+                let body = String::from_utf8_lossy(&got.body);
+                assert!(
+                    body.contains(r#""code":"deadline_exceeded""#),
+                    "{}: {body}",
+                    case.name
+                );
+            }
+            Wire::H2 => {
+                let tcp = tokio::net::TcpStream::connect(addr).await.expect("connect");
+                let (mut send, conn) =
+                    hyper::client::conn::http2::handshake(TokioExecutor::new(), TokioIo::new(tcp))
+                        .await
+                        .expect("h2 handshake");
+                tokio::spawn(conn);
+                let mut req = http::Request::post(format!("http://localhost{ECHO_PATH}"))
+                    .header("content-type", "application/grpc")
+                    .header("te", "trailers");
+                if let Some((k, v)) = case.timeout {
+                    req = req.header(k, v);
+                }
+                let req = req.body(Stalled).expect("request");
+                let got = tokio::time::timeout(Duration::from_secs(10), async {
+                    let (parts, body) = send.send_request(req).await?.into_parts();
+                    let collected = body.collect().await?;
+                    anyhow::Ok(Response {
+                        status: parts.status.as_u16(),
+                        headers: parts.headers,
+                        trailers: collected.trailers().cloned().unwrap_or_default(),
+                        body: collected.to_bytes(),
+                    })
+                })
+                .await
+                .unwrap_or_else(|_| panic!("{}: no reply in 10 s", case.name))
+                .unwrap_or_else(|e| panic!("{}: {e}", case.name));
+                assert_eq!(got.grpc_status(), Some("4"), "{}: {got:?}", case.name);
+            }
+        }
         let elapsed = started.elapsed();
-        assert_eq!(got.status, 504, "{}", case.name);
-        let body = String::from_utf8_lossy(&got.body);
+        // The deadline is 1 s. 5 s leaves time for a slow CI runner.
         assert!(
-            body.contains(r#""code":"deadline_exceeded""#),
-            "{}: {body}",
-            case.name
-        );
-        assert!(
-            (Duration::from_millis(900)..Duration::from_secs(10)).contains(&elapsed),
+            (Duration::from_millis(900)..Duration::from_secs(5)).contains(&elapsed),
             "{}: took {elapsed:?}",
             case.name
         );
     }
     assert_eq!(calls(&srv), Vec::<Value>::new(), "no call reaches PHP");
+    stop(srv).await;
 }
 
 /// Sources: `grpc/health/v1/health.proto` (`HealthCheckRequest.service` and `HealthCheckResponse.status` are field 1, SERVING is 1), `grpc/reflection/v1/reflection.proto` (`list_services` is field 7), and PROTOCOL-HTTP2 (12 for an unknown method).
