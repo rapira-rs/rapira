@@ -69,7 +69,7 @@ dependencies = [
  "regex",
  "rustc-hash",
  "shlex",
- "syn 2.0.119",
+ "syn 3.0.6",
 ]
 
 [[package]]
@@ -164,7 +164,7 @@ dependencies = [
 [[package]]
 name = "connectrpc"
 version = "0.9.0"
-source = "git+https://github.com/connectrpc/connect-rust?rev=0bb21af9736dac7b82065a4252405a8eb65f27ee#0bb21af9736dac7b82065a4252405a8eb65f27ee"
+source = "git+https://github.com/connectrpc/connect-rust?rev=bd2ab674786971ca10cc2c23e4808c8d56b6a458#bd2ab674786971ca10cc2c23e4808c8d56b6a458"
 dependencies = [
  "async-trait",
  "base64 0.22.1",
@@ -196,7 +196,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-health"
 version = "0.9.0"
-source = "git+https://github.com/connectrpc/connect-rust?rev=0bb21af9736dac7b82065a4252405a8eb65f27ee#0bb21af9736dac7b82065a4252405a8eb65f27ee"
+source = "git+https://github.com/connectrpc/connect-rust?rev=bd2ab674786971ca10cc2c23e4808c8d56b6a458#bd2ab674786971ca10cc2c23e4808c8d56b6a458"
 dependencies = [
  "buffa",
  "connectrpc",
@@ -211,7 +211,7 @@ dependencies = [
 [[package]]
 name = "connectrpc-reflection"
 version = "0.9.0"
-source = "git+https://github.com/connectrpc/connect-rust?rev=0bb21af9736dac7b82065a4252405a8eb65f27ee#0bb21af9736dac7b82065a4252405a8eb65f27ee"
+source = "git+https://github.com/connectrpc/connect-rust?rev=bd2ab674786971ca10cc2c23e4808c8d56b6a458#bd2ab674786971ca10cc2c23e4808c8d56b6a458"
 dependencies = [
  "buffa",
  "buffa-descriptor",
