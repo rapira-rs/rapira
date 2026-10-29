@@ -658,22 +658,34 @@ fn reject_policy_answers_400_for_an_alias_name() {
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 }
 
-/// More than one `Host` line is a 400; the h1 parser hands the repeated field through intact, so the rejection is this plugin's own.
+/// More than one `Host` line, or a `Host` value that is not uri-host [ ":" port ], is a 400 before dispatch.
+/// The h1 parser hands these fields through intact, so the rejection is this plugin's own.
 /// RFC 9112 §3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 #[test]
-fn a_second_host_field_line_answers_400() {
+fn an_invalid_host_answers_400() {
+    struct Case {
+        name: &'static str,
+        request: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "second Host field line",
+            request: "GET / HTTP/1.1\r\nHost: e2e\r\nHost: evil.example\r\nConnection: close\r\n\r\n",
+        },
+        Case {
+            name: "path delimiter",
+            request: "GET /public HTTP/1.1\r\nHost: x/admin?\r\nConnection: close\r\n\r\n",
+        },
+    ];
     let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
-    let code = http_get_with_headers(
-        srv.addr,
-        "/",
-        &[("Host", "evil.example")],
-        Duration::from_secs(10),
-    )
-    .expect("GET / with two Host field lines")
-    .status;
-    assert_eq!(code, 400, "\n{}", diagnostics(&srv));
+    for case in &cases {
+        let code = http_raw(srv.addr, case.request.as_bytes(), Duration::from_secs(10))
+            .expect(case.name)
+            .status;
+        assert_eq!(code, 400, "{}\n{}", case.name, diagnostics(&srv));
+    }
 }
 
 /// CONNECT answers 501 before dispatch: a PHP-authored 2xx would turn the connection into a tunnel, and a 405 would owe an Allow list (RFC 9110 §15.5.6).

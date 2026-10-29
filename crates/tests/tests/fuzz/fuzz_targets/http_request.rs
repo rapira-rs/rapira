@@ -105,15 +105,47 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         .iter()
         .map(HeaderValue::as_bytes)
         .collect();
+    // RFC 9112 section 3.2.2: the authority is the target authority without userinfo, https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
+    let want_authority = match uri.authority() {
+        Some(a) => Some(
+            a.as_str()
+                .rsplit_once('@')
+                .map_or(a.as_str(), |(_, hp)| hp)
+                .as_bytes(),
+        ),
+        None => hosts.first().copied().filter(|h| !h.is_empty()),
+    };
+    // RFC 9110 section 7.2 Host = uri-host [ ":" port ]: https://www.rfc-editor.org/rfc/rfc9110#section-7.2
+    // The host is a non-empty reg-name of unreserved, sub-delims and '%', or a non-empty bracketed literal of these and ':'. The port is digits: https://www.rfc-editor.org/rfc/rfc3986#section-3.2.2
+    let reg_name = |b: u8| b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=%".contains(&b);
+    let uri_host_port = |v: &[u8]| {
+        let (host, port) = match v.iter().rposition(|&b| b == b':') {
+            Some(i) if !v[i..].contains(&b']') => (&v[..i], &v[i + 1..]),
+            _ => (v, &v[v.len()..]),
+        };
+        port.iter().all(u8::is_ascii_digit)
+            && match host {
+                [b'[', literal @ .., b']'] => {
+                    !literal.is_empty() && literal.iter().all(|&b| reg_name(b) || b == b':')
+                }
+                _ => !host.is_empty() && host.iter().all(|&b| reg_name(b)),
+            }
+    };
     let mut allowed = Vec::new();
     if method == Method::CONNECT {
         allowed.push(501);
     }
     // RFC 9112 section 3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2
-    // #169: a Host value that is not uri-host [ ":" port ] is accepted, https://github.com/rapira-rs/rapira/issues/169
     if hosts.len() > 1
         || (version == Version::HTTP_11 && hosts.first().is_none_or(|h| h.is_empty()))
+        || hosts
+            .first()
+            .is_some_and(|h| !h.is_empty() && !uri_host_port(h))
     {
+        allowed.push(400);
+    }
+    // The target authority replaces Host, so it follows the same rule.
+    if uri.authority().is_some() && want_authority.is_some_and(|a| !uri_host_port(a)) {
         allowed.push(400);
     }
     if policy == UnsafeFieldNames::Reject && !sent.keys().all(safe_name) {
@@ -136,16 +168,6 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         }
     };
 
-    // RFC 9112 section 3.2.2: the authority is the target authority without userinfo, https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
-    let want_authority = match uri.authority() {
-        Some(a) => Some(
-            a.as_str()
-                .rsplit_once('@')
-                .map_or(a.as_str(), |(_, hp)| hp)
-                .as_bytes(),
-        ),
-        None => hosts.first().copied().filter(|h| !h.is_empty()),
-    };
     assert_eq!(authority.as_deref(), want_authority, "authority");
     // The fields as received, without the names that the policy drops.
     let keep_all = policy == UnsafeFieldNames::Drop && !superglobals;
@@ -195,7 +217,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // Request::$uri: the listener scheme, the authority or else the listener address, and the path. OPTIONS * gives the root.
     let view = RequestView::new(&built);
     let a = authority.as_deref().unwrap_or(SERVER.as_bytes());
-    // #169: rapira puts any Host value into $uri, so $uri is checked only for an authority that http::Uri accepts, https://github.com/rapira-rs/rapira/issues/169
+    // http::Uri rejects some valid authorities, such as the pct-encoded reg-name a%41, so $uri is checked only for an authority that http::Uri accepts.
     if http::uri::Authority::try_from(a).is_ok() {
         let u = Uri::try_from(view.uri_abs.as_str())
             .unwrap_or_else(|e| panic!("$uri {}: {e}", view.uri_abs));

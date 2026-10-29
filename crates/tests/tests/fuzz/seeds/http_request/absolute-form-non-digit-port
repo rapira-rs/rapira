@@ -1,0 +1,3 @@
+GET http://b:xyz/public HTTP/1.1
+Host: ok.example
+

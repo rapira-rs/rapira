@@ -84,8 +84,8 @@ To add a built-in middleware:
 
 - The request body is buffered before dispatch and capped by `max_body_size_mb`: a declared `Content-Length` over the cap answers 413 before the body is read, an over-long streamed body answers 413 when the cap is crossed.
 - `Expect: 100-continue` is honored by hyper: the interim 100 goes out when the body is first read and is skipped entirely when the request is refused first.
-- `Host` rules per RFC 9112 §3.2: a repeated, missing or empty `Host` on HTTP/1.1 answers 400. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
-- Absolute-form request-targets are accepted. The authority of the target replaces `Host`, without the userinfo part. PHP sees the origin-form path and query; the request target keeps the full form. https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
+- `Host` rules per RFC 9112 §3.2: a repeated `Host`, a missing or empty `Host` on HTTP/1.1, and a `Host` value that is not `uri-host [ ":" port ]` (RFC 9110 §7.2) answer 400. The check accepts a reg-name, a bracketed IP literal and a port of digits only, so a value such as `x/admin?` or `user@host` answers 400. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
+- Absolute-form request-targets are accepted. The authority of the target replaces `Host`, without the userinfo part. That authority follows the same `Host` rule, so `http://b:xyz/` answers 400. PHP sees the origin-form path and query; the request target keeps the full form. https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
 - `CONNECT` answers 501. The plugin implements no tunnels.
 - A request body that makes no read progress for `keepalive_timeout_secs` answers 408 and closes the connection.
 - `unsafe_field_names` guards the CGI variable mapping of the classic and worker modes: a field name with `_` or `.` lands on the `$_SERVER` entry a `-` name owns, so such names are dropped (default) or the request answers 400 (`"reject"`).

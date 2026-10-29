@@ -255,16 +255,6 @@ fn view_spells_uri_and_addresses() {
             want_remote: inet("127.0.0.1"),
         },
         Case {
-            name: "invalid utf-8 authority is replaced",
-            https: false,
-            authority: Some(b"h\xff"),
-            uri: "/",
-            server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-            remote: Addr::Inet(([127, 0, 0, 1], 0).into()),
-            want_uri: "http://h\u{fffd}/",
-            want_remote: inet("127.0.0.1"),
-        },
-        Case {
             name: "asterisk-form target collapses to the root",
             https: false,
             authority: Some(b"h"),
