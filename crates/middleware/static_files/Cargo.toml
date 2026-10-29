@@ -16,6 +16,7 @@ serde = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
+libc = { workspace = true }
 tracing = { workspace = true }
 percent-encoding = "2"
 tokio = { workspace = true, features = ["fs", "rt"] }

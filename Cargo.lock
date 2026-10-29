@@ -972,6 +972,7 @@ dependencies = [
  "bytes",
  "http",
  "http-body-util",
+ "libc",
  "percent-encoding",
  "rapira_config",
  "serde",

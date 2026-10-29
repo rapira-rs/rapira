@@ -1,6 +1,7 @@
 use crate::harness::{
     Conn, Exited, Head, Server, Spawn, diagnostics, http_get, http_get_raw, http_post,
-    http_raw_bytes, parse_status_and_body, scratch_dir, spawn_boot_failure, spawn_with_http_extra,
+    http_raw_bytes, mkfifo, parse_status_and_body, scratch_dir, spawn_boot_failure,
+    spawn_with_http_extra,
 };
 use rapira_sapi::plugin::Mode;
 use std::path::Path;
@@ -257,6 +258,8 @@ fn static_files_route_each_request_over_the_wire() {
     ]);
     // A symlink loop fails with ELOOP, which is not a miss.
     std::os::unix::fs::symlink("loop.css", root.join("loop.css")).expect("symlink loop");
+    // A path that is not a regular file and not a directory is a miss.
+    mkfifo(&root.join("fifo"));
     let srv = spawn_echo_loop(&root, None);
 
     struct ToPhp {
@@ -337,6 +340,10 @@ fn static_files_route_each_request_over_the_wire() {
             name: "NUL byte",
             path: "/a%00.css".into(),
         },
+        ToPhp {
+            name: "FIFO",
+            path: "/fifo".into(),
+        },
     ];
     for case in &to_php {
         let raw = http_get_raw(srv.addr, &case.path, &[], T).expect(case.name);
@@ -396,6 +403,20 @@ fn static_files_route_each_request_over_the_wire() {
     );
     assert_eq!(head_field(&raw, "x-rapira-target"), "/a%00.css");
     assert_eq!(head_field(&raw, "content-type"), "text/plain");
+
+    let raw = http_raw_bytes(
+        srv.addr,
+        b"HEAD /fifo HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+        T,
+    )
+    .expect("HEAD /fifo");
+    assert_eq!(
+        split_response(&raw).status,
+        200,
+        "{}",
+        String::from_utf8_lossy(&raw)
+    );
+    assert_eq!(head_field(&raw, "x-rapira-target"), "/fifo");
 
     // The probe carries only the head. A lost request extension answers 500 in the http plugin.
     let raw = http_raw_bytes(

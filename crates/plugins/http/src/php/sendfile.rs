@@ -31,6 +31,7 @@ fn open_send_file(
     length: Option<u64>,
 ) -> Result<FileSlice, &'static CStr> {
     use std::os::unix::ffi::OsStrExt;
+    use std::os::unix::fs::OpenOptionsExt;
     let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
     let canonical = std::fs::canonicalize(path).map_err(|_| c"no readable file at the path")?;
     let Some(root) = SENDFILE_ROOT.get() else {
@@ -39,7 +40,14 @@ fn open_send_file(
     if !canonical.starts_with(root) {
         return Err(c"the path is outside the configured sendfile root");
     }
-    let file = std::fs::File::open(&canonical).map_err(|_| c"no readable file at the path")?;
+    // A blocking open of a FIFO waits for a writer. O_NONBLOCK returns at once, and the type
+    // check below rejects the FIFO. The flag has no effect on a regular file.
+    // https://man7.org/linux/man-pages/man2/open.2.html
+    let file = std::fs::File::options()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK)
+        .open(&canonical)
+        .map_err(|_| c"no readable file at the path")?;
     let meta = file
         .metadata()
         .map_err(|_| c"no readable file at the path")?;

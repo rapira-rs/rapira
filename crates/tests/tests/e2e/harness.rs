@@ -1060,6 +1060,22 @@ pub fn scratch_dir() -> PathBuf {
     dir
 }
 
+/// Creates a FIFO at `path`. A blocking open of a FIFO for reading waits for a writer.
+/// https://man7.org/linux/man-pages/man7/fifo.7.html
+pub fn mkfifo(path: &Path) {
+    use std::os::unix::ffi::OsStrExt;
+    let c_path = std::ffi::CString::new(path.as_os_str().as_bytes()).expect("path without NUL");
+    // SAFETY: `c_path` is a NUL-terminated string that lives for the call.
+    let rc = unsafe { libc::mkfifo(c_path.as_ptr(), 0o600) };
+    assert_eq!(
+        rc,
+        0,
+        "mkfifo {}: {}",
+        path.display(),
+        io::Error::last_os_error()
+    );
+}
+
 pub fn fixture_path(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("tests/e2e/fixtures")
