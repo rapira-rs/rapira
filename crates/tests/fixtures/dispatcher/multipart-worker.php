@@ -1,6 +1,6 @@
 <?php
 
-// Echoes the parsed Multipart shape; seal unlinks the spool file, so the test asserts it is gone by the response frame.
+// Echoes the parsed Multipart shape; seal unlinks the spool file when the exchange finalizes, so the test waits until it is gone.
 
 $d = \Rapira\get_dispatcher();
 try {

@@ -603,7 +603,7 @@ fn uri_synthesis_covers_asterisk_form() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A plugin-parsed Multipart reaches PHP as the object graph, and seal() unlinks the spool before the response frame is sent.
+/// A plugin-parsed Multipart reaches PHP as the object graph, and seal() unlinks the spool when the exchange finalizes.
 #[test]
 fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
     let srv = uploads_server("dispatcher/multipart-worker.php");
