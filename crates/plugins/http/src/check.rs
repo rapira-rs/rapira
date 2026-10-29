@@ -132,6 +132,12 @@ pub fn check_request(
             "CONNECT is not supported",
         ));
     }
+    if rapira_sapi::types::unsupported_transfer_coding(&parts.headers) {
+        return Err(Rejection::new(
+            http::StatusCode::NOT_IMPLEMENTED,
+            "Transfer-Encoding is not one chunked coding",
+        ));
+    }
     let authority = authority(&parts.headers, parts.version == Version::HTTP_11)
         .map_err(|reason| Rejection::new(http::StatusCode::BAD_REQUEST, reason))?;
 
@@ -409,6 +415,66 @@ mod tests {
             .err()
             .unwrap();
         assert_eq!(err.status, http::StatusCode::NOT_IMPLEMENTED);
+    }
+
+    /// RFC 9112 §6.1: a server SHOULD answer 501 to a transfer coding that it does not understand. Only one `chunked` is undone.
+    /// Coding names are case-insensitive (RFC 9112 §7). The field lines form one list, and an empty list element does not count (RFC 9110 §5.6.1.2).
+    /// https://www.rfc-editor.org/rfc/rfc9112#section-6.1
+    #[test]
+    fn transfer_codings_other_than_chunked_are_refused() {
+        struct Case {
+            name: &'static str,
+            /// The Transfer-Encoding field lines.
+            te: &'static [&'static str],
+            /// None: the request passes.
+            want: Option<http::StatusCode>,
+        }
+        let cases = [
+            Case {
+                name: "chunked",
+                te: &["chunked"],
+                want: None,
+            },
+            Case {
+                name: "chunked in mixed case",
+                te: &["Chunked"],
+                want: None,
+            },
+            Case {
+                name: "empty list element",
+                te: &[", chunked"],
+                want: None,
+            },
+            Case {
+                name: "gzip before chunked",
+                te: &["gzip, chunked"],
+                want: Some(http::StatusCode::NOT_IMPLEMENTED),
+            },
+            Case {
+                name: "unknown coding",
+                te: &["foo, chunked"],
+                want: Some(http::StatusCode::NOT_IMPLEMENTED),
+            },
+            Case {
+                name: "codings on two field lines",
+                te: &["gzip", "chunked"],
+                want: Some(http::StatusCode::NOT_IMPLEMENTED),
+            },
+            Case {
+                name: "chunked twice",
+                te: &["chunked, chunked"],
+                want: Some(http::StatusCode::NOT_IMPLEMENTED),
+            },
+        ];
+        for case in &cases {
+            let mut fields = vec![("host", "e2e")];
+            fields.extend(case.te.iter().map(|v| ("transfer-encoding", *v)));
+            let mut p = parts(Method::POST, Version::HTTP_11, &fields);
+            let got = check_request(&mut p, UnsafeFieldNames::Drop, true, 1024)
+                .err()
+                .map(|r| r.status);
+            assert_eq!(got, case.want, "{}", case.name);
+        }
     }
 
     /// RFC 9112 §3.2.2: the absolute-form target authority replaces Host. Userinfo is stripped.

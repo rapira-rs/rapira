@@ -53,6 +53,7 @@ connect-rust handles the framing, the compression, the timeout headers and the e
 - A streaming method, a method of a service the pool does not serve, and an unknown method answer UNIMPLEMENTED. A Connect unary request (`application/proto` or `application/json`) gets the HTTP status 404. A Connect streaming request (`application/connect+proto` or `application/connect+json`) gets the HTTP status 200 with the error in the end-of-stream message.
 - A method with `option idempotency_level = NO_SIDE_EFFECTS;` also accepts a Connect GET request. A GET to any other method answers 405.
 - A request can use gzip compression. A request with a different message encoding answers UNIMPLEMENTED.
+- An HTTP/1.1 request with a `Transfer-Encoding` coding other than one `chunked` gets the HTTP status 501 before connect-rust reads it, and PHP does not see the call. https://www.rfc-editor.org/rfc/rfc9112#section-6.1
 - A reply from PHP of 1 KiB or more uses gzip when the client accepts gzip. A gRPC or gRPC-Web reply from PHP uses gzip only when its request did. A successful Connect reply from PHP carries `Vary: Accept-Encoding`. Health and reflection replies use the connect-rust default: gzip from 1 KiB when the client accepts gzip.
 
 ## Remote address

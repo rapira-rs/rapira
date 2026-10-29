@@ -39,7 +39,7 @@ The client gets 503 when the intake of the worker stays full for 30 seconds, and
 - `src/serve.rs`: the accept loop, one hyper connection per accepted socket, and the drain.
 - `src/handler.rs`: the admission checks, the middleware chain, the body read, the submit to the intake and the response head.
 - `src/middleware.rs`: the chain types `Body`, `Request`, `Response`, `Service`, `Layer`, and `Peer`.
-- `src/check.rs`: the admission checks: `Host`, `CONNECT`, field names, declared length.
+- `src/check.rs`: the admission checks: `Host`, `CONNECT`, `Transfer-Encoding`, field names, declared length.
 - `src/request.rs`: builds the SAPI `Request` from the HTTP request and the `Peer`.
 - `src/response.rs`: the response fields and the error responses.
 - `src/bridge.rs`: the reply body that streams the PHP frames and the `sendFile` slices, and the write timeout.
@@ -87,6 +87,7 @@ To add a built-in middleware:
 - `Host` rules per RFC 9112 §3.2: a repeated `Host`, a missing or empty `Host` on HTTP/1.1, and a `Host` value that is not `uri-host [ ":" port ]` (RFC 9110 §7.2) answer 400. The check accepts a reg-name, a bracketed IP literal and a port of digits only, so a value such as `x/admin?` or `user@host` answers 400. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 - Absolute-form request-targets are accepted. The authority of the target replaces `Host`, without the userinfo part. That authority follows the same `Host` rule, so `http://b:xyz/` answers 400. PHP sees the origin-form path and query; the request target keeps the full form. https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
 - `CONNECT` answers 501. The plugin implements no tunnels.
+- A `Transfer-Encoding` with a coding other than one `chunked`, such as `gzip, chunked` or `chunked, chunked`, answers 501. hyper undoes only `chunked`. https://www.rfc-editor.org/rfc/rfc9112#section-6.1
 - A request body that makes no read progress for `keepalive_timeout_secs` answers 408 and closes the connection.
 - `unsafe_field_names` guards the CGI variable mapping of the classic and worker modes: a field name with `_` or `.` lands on the `$_SERVER` entry a `-` name owns, so such names are dropped (default) or the request answers 400 (`"reject"`).
 - Header field names reach PHP lowercased, one entry per field line, values in wire order per name.

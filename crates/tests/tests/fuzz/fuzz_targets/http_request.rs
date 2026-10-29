@@ -83,12 +83,9 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         };
         sent.append(name, value);
     }
-    // hyper answers 400 to a Content-Length that is not 1*DIGIT and to two different values. Transfer-Encoding changes the framing, which is out of scope here.
+    // hyper answers 400 to a Content-Length that is not 1*DIGIT and to two different values.
     let lengths: Vec<Option<u64>> = sent.get_all(CONTENT_LENGTH).iter().map(length).collect();
-    if sent.contains_key(TRANSFER_ENCODING)
-        || lengths.iter().any(Option::is_none)
-        || lengths.windows(2).any(|w| w[0] != w[1])
-    {
+    if lengths.iter().any(Option::is_none) || lengths.windows(2).any(|w| w[0] != w[1]) {
         return;
     }
     let declared = lengths.first().copied().flatten();
@@ -133,6 +130,23 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     };
     let mut allowed = Vec::new();
     if method == Method::CONNECT {
+        allowed.push(501);
+    }
+    // RFC 9112 section 6.1: 501 for a transfer coding other than one chunked: https://www.rfc-editor.org/rfc/rfc9112#section-6.1
+    // The field lines join into one list with commas (RFC 9110 section 5.3), and empty elements do not count (RFC 9110 section 5.6.1.2). Coding names are case-insensitive (RFC 9112 section 7).
+    let te = sent
+        .get_all(TRANSFER_ENCODING)
+        .iter()
+        .map(HeaderValue::as_bytes)
+        .collect::<Vec<_>>()
+        .join(&b',');
+    let te = String::from_utf8_lossy(&te).to_ascii_lowercase();
+    let codings: Vec<&str> = te
+        .split(',')
+        .map(|c| c.trim_matches([' ', '\t']))
+        .filter(|c| !c.is_empty())
+        .collect();
+    if !codings.is_empty() && codings != ["chunked"] {
         allowed.push(501);
     }
     // RFC 9112 section 3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2

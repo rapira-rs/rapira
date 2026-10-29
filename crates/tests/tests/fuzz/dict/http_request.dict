@@ -31,3 +31,6 @@
 ":8o"
 "%41"
 "x/admin?"
+"chunked"
+"gzip, chunked"
+"chunked, chunked"
