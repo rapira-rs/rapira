@@ -27,7 +27,7 @@ fn runtime() -> tokio::runtime::Runtime {
         .expect("client runtime")
 }
 
-/// The two paths that only real PHP behind the real listener proves: the deadline reaches PHP as a cancel, and metadata crosses the edge both ways. Sources: the contract gRPC README (the host enforces `Call\Context::$deadline`) and RFC 4648: 00 ff is `AP8`.
+/// The two paths that only real PHP behind the real listener proves: the deadline reaches PHP as a cancel, and metadata crosses the edge both ways. Sources: the contract gRPC README (the host enforces `Call\Context::$deadline`), RFC 4648: 00 ff is `AP8`, and the contract `Grpc\Metadata` with the PHP key casts (https://www.php.net/manual/en/language.types.array.php#language.types.array.key-casts): a canonical decimal key is an int, and `01` stays a string.
 #[test]
 fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
     struct Case {
@@ -47,12 +47,19 @@ fn php_outcomes_reach_the_client() -> anyhow::Result<()> {
         Case {
             name: "metadata crosses the edge",
             text: "meta",
-            metadata: &[("x-echo", "a"), ("x-echo-bin", "AP8")],
+            metadata: &[
+                ("x-echo", "a"),
+                ("x-echo-bin", "AP8"),
+                ("123", "n"),
+                ("-1", "n"),
+                ("0", "n"),
+                ("01", "n"),
+            ],
             grpc_status: "0",
             headers: &[("x-echo", "a")],
             trailers: &[("x-echo-bin", "AP8")],
             log_message: "meta",
-            log_context: r#"{"keys":["x-echo","x-echo-bin"]}"#,
+            log_context: r#"{"keys":["x-echo","x-echo-bin",123,-1,0,"01"]}"#,
         },
         Case {
             name: "the deadline cancels the php call",
