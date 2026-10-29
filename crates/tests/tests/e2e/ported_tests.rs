@@ -1,10 +1,10 @@
-use std::{ops::Deref, path::Path};
+use std::{ops::Deref, path::Path, time::Duration};
 
 use http::Method;
 use http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderValue, SET_COOKIE};
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
-use tests::{Resp, StatusBody, drain, drain_resp, fixture, req, server_log};
+use tests::{Resp, StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::Spawn;
 
@@ -544,8 +544,13 @@ fn assert_upload_and_cleanup(status: u16, body: &str) {
         content, "bar",
         "tmp file must hold the uploaded bytes (got: {body:?})"
     );
+    // In worker mode the client can get the response before sapi_deactivate() deletes the tmp file.
     assert!(
-        !tmp.is_empty() && !Path::new(tmp).exists(),
+        !tmp.is_empty()
+            && poll(Duration::from_secs(5), || {
+                (!Path::new(tmp).exists()).then_some(())
+            })
+            .is_some(),
         "upload tmp file must be deleted after the request (path: {tmp:?})"
     );
 }

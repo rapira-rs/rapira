@@ -56,7 +56,7 @@ fn name_bytes(raw: &[u8]) -> Vec<u8> {
         .filter(|&b| b != b'"')
         // #165: the parser reads a backslash as a quoted-pair, https://github.com/rapira-rs/rapira/issues/165
         .filter(|&b| b != b'\\')
-        // #181: the parser rejects a control byte other than HTAB, https://github.com/rapira-rs/rapira/issues/181
+        // The parser rejects a control byte other than HTAB, as RFC 9110 field-value does: https://www.rfc-editor.org/rfc/rfc9110#section-5.5
         .filter(|&b| b == b'\t' || (b >= 0x20 && b != 0x7f))
         .collect()
 }

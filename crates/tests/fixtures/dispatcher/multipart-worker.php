@@ -1,6 +1,6 @@
 <?php
 
-// Echoes the parsed Multipart shape; seal unlinks the spool file, so the test asserts it is gone by the response frame.
+// Echoes the parsed Multipart shape; seal unlinks the spool file when the exchange finalizes, so the test waits until it is gone.
 
 $d = \Rapira\get_dispatcher();
 try {
@@ -20,12 +20,14 @@ try {
         foreach ($b->fields as $i => $f) {
             $lines[] = "field$i=" . $f->name . '=' . $f->value;
             $lines[] = "field$i-cd=" . var_export(isset($f->headers['content-disposition']), true);
+            $lines[] = "field$i-h=" . json_encode($f->headers, JSON_UNESCAPED_SLASHES);
         }
         foreach ($b->files as $i => $u) {
             $lines[] = "file$i=" . $u->name . ':' . $u->clientFilename . ':' . $u->size
                 . ':' . file_get_contents($u->tmpPath);
             $lines[] = "file$i-type=" . var_export($u->clientMediaType, true);
             $lines[] = "file$i-cd=" . var_export(isset($u->headers['content-disposition']), true);
+            $lines[] = "file$i-h=" . json_encode($u->headers, JSON_UNESCAPED_SLASHES);
         }
         $ex->writeBody(implode("\n", $lines));
     }
