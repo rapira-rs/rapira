@@ -46,6 +46,8 @@ unsafe fn add_prop(
         let mut copy: zval = *src;
         zval_add_ref(&mut copy);
         add_assoc_zval_ex(dst, name.as_ptr(), name.count_bytes(), &mut copy);
+        // The caller owns a __get or hook result in rv. In every other case rv stays IS_UNDEF, and the release does nothing.
+        zval_ptr_dtor(&mut rv);
     }
 }
 
