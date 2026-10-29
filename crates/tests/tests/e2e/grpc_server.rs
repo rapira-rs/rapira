@@ -16,7 +16,7 @@ use tests::grpc::{
 use tests::{fixture, server_log};
 
 use crate::harness::{
-    Server, Spawn, calls, exited, listen, logged_remote, scratch_dir, signal, stop,
+    Server, Spawn, calls, exited, http_raw, listen, logged_remote, scratch_dir, signal, stop,
 };
 
 /// Logs a `call` record for each call and answers as the request metadata asks.
@@ -933,6 +933,57 @@ async fn a_passed_deadline_drops_the_call() {
         "the call must be dropped: {cancel}"
     );
     stop(srv).await;
+}
+
+/// A request that announces a message and sends no byte of it ends at the configured deadline. Sources: the plugin README (`default_timeout_secs` is the timeout of a call that has none, `max_timeout_secs` reduces a longer client timeout to its value) and the Connect protocol (`deadline_exceeded` is HTTP 504).
+#[test]
+fn configured_timeouts_bound_a_stalled_request() {
+    struct Case {
+        name: &'static str,
+        /// A request field line with its CRLF, or nothing.
+        timeout: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "no client timeout",
+            timeout: "",
+        },
+        Case {
+            name: "client timeout above max_timeout_secs",
+            timeout: "connect-timeout-ms: 60000\r\n",
+        },
+    ];
+
+    let srv = Spawn::grpc(wire_worker())
+        .grpc_extra("default_timeout_secs = 1\nmax_timeout_secs = 1")
+        .json_log()
+        .spawn();
+    let ListenAddr::Tcp(addr) = listen(&srv) else {
+        panic!("the grpc listener of Spawn::grpc is tcp");
+    };
+    for case in &cases {
+        let request = format!(
+            "POST {ECHO_PATH} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\nContent-Type: application/proto\r\nContent-Length: 10\r\n{}\r\n",
+            case.timeout
+        );
+        let started = Instant::now();
+        let got = http_raw(addr, request.as_bytes(), Duration::from_secs(10))
+            .unwrap_or_else(|e| panic!("{}: {e}", case.name));
+        let elapsed = started.elapsed();
+        assert_eq!(got.status, 504, "{}", case.name);
+        let body = String::from_utf8_lossy(&got.body);
+        assert!(
+            body.contains(r#""code":"deadline_exceeded""#),
+            "{}: {body}",
+            case.name
+        );
+        assert!(
+            (Duration::from_millis(900)..Duration::from_secs(10)).contains(&elapsed),
+            "{}: took {elapsed:?}",
+            case.name
+        );
+    }
+    assert_eq!(calls(&srv), Vec::<Value>::new(), "no call reaches PHP");
 }
 
 /// Sources: `grpc/health/v1/health.proto` (`HealthCheckRequest.service` and `HealthCheckResponse.status` are field 1, SERVING is 1), `grpc/reflection/v1/reflection.proto` (`list_services` is field 7), and PROTOCOL-HTTP2 (12 for an unknown method).
