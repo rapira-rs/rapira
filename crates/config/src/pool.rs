@@ -15,6 +15,8 @@ pub struct PoolSettings {
     pub mode: Mode,
     /// Requests a worker serves before recycling itself (with jitter); 0 = unlimited.
     pub max_requests: u64,
+    /// RSS of one worker in MiB above which the master drains the worker and forks a new one; 0 = unlimited.
+    pub max_memory_mb: u64,
     /// Wall-clock bound on a single request; zero = disabled.
     pub request_terminate_timeout: Duration,
 }
@@ -46,6 +48,7 @@ pub struct PoolSection {
     processes: Option<NonZero<usize>>,
     mode: Option<Mode>,
     max_requests: Option<u64>,
+    max_memory_mb: Option<u64>,
     request_terminate_timeout_secs: Option<u64>,
 }
 
@@ -72,6 +75,7 @@ pub fn resolve_pool(section: PoolSection, table: &str, dir: &Path) -> anyhow::Re
         processes,
         mode,
         max_requests: section.max_requests.unwrap_or(0),
+        max_memory_mb: section.max_memory_mb.unwrap_or(0),
         request_terminate_timeout: capped_timeout(
             table,
             "request_terminate_timeout_secs",
@@ -117,6 +121,7 @@ mod tests {
             processes: 4,
             mode: Mode::Dispatcher,
             max_requests: 0,
+            max_memory_mb: 0,
             request_terminate_timeout: Duration::ZERO,
         }
     }
@@ -157,6 +162,14 @@ mod tests {
                 toml: "entrypoint = \"a.php\"\nprocesses = 4\nmax_requests = 500\n",
                 want: PoolSettings {
                     max_requests: 500,
+                    ..base()
+                },
+            },
+            Case {
+                name: "max memory",
+                toml: "entrypoint = \"a.php\"\nprocesses = 4\nmax_memory_mb = 512\n",
+                want: PoolSettings {
+                    max_memory_mb: 512,
                     ..base()
                 },
             },

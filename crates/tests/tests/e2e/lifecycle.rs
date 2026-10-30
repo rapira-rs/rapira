@@ -399,6 +399,45 @@ fn request_timeout_kills_and_replaces_worker() {
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 }
 
+/// A worker whose RSS goes above max_memory_mb drains, and the master forks a new one. The drain starts while the request that grew the memory still runs, and that request completes. The new worker stays under the limit.
+#[test]
+fn a_worker_above_max_memory_is_replaced() {
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/memory-growth-worker.php"),
+    )
+    .http_pool("max_memory_mb = 128")
+    .spawn();
+    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    let code = http_get(srv.addr, "/?grow=160", Duration::from_secs(10))
+        .expect("GET /?grow=160")
+        .status;
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    let next = wait_workers(
+        &srv,
+        Duration::from_secs(10),
+        "worker replaced above the memory limit",
+        |p| p.len() == 1 && p[0] != pid,
+    )[0];
+    assert!(
+        wait_log_contains(&srv, "http.pool.max_memory_mb", Duration::from_secs(5)),
+        "the master logs why it drained the worker\n{}",
+        diagnostics(&srv)
+    );
+    let code = http_get(srv.addr, "/", Duration::from_secs(10))
+        .expect("GET / after the replacement")
+        .status;
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    // Three master ticks: a new worker under the limit is not drained.
+    std::thread::sleep(Duration::from_secs(3));
+    assert_eq!(
+        worker_pids(srv.pid()),
+        vec![next],
+        "the new worker stays\n{}",
+        diagnostics(&srv)
+    );
+}
+
 /// A top-level `[pool]` table is a parse error: the pool belongs under `[http.pool]`.
 #[test]
 fn a_top_level_pool_table_refuses_to_boot() {
