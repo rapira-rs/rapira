@@ -31,6 +31,8 @@ pub struct PoolConfig {
     pub processes: usize,
     /// Wall-clock bound on one request: the worker is TERM-killed, then KILLed, and replaced. Zero disables.
     pub request_terminate_timeout: Duration,
+    /// RSS of one worker in MiB: above it the worker is QUIT-drained and replaced. Zero disables.
+    pub max_memory_mb: u64,
 }
 
 pub struct MasterConfig {
@@ -124,6 +126,7 @@ mod tests {
             name,
             processes,
             request_terminate_timeout: Duration::ZERO,
+            max_memory_mb: 0,
         }
     }
 

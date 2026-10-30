@@ -19,6 +19,8 @@ pub(crate) struct WorkerProc {
     pub spawned_at: Instant,
     /// The request watchdog sent SIGTERM: a SIGTERM or SIGKILL exit is a timeout kill, not a crash.
     pub timeout_kill: bool,
+    /// The memory limit sent SIGQUIT: the worker drains, so the limit does not signal it again.
+    pub memory_drain: bool,
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -128,6 +130,27 @@ pub(crate) fn reap_all(pools: &mut [Pool], stopping: bool) -> Vec<Buried> {
         }
     }
     buried
+}
+
+/// The resident set of `pid` in bytes: the second field of `/proc/<pid>/statm`, in pages. https://man7.org/linux/man-pages/man5/proc_pid_statm.5.html
+#[cfg(target_os = "linux")]
+pub(crate) fn rss(pid: libc::pid_t) -> Option<u64> {
+    let statm = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
+    let pages: u64 = statm.split_whitespace().nth(1)?.parse().ok()?;
+    // SAFETY: sysconf takes no pointers.
+    let page = unsafe { libc::sysconf(libc::_SC_PAGESIZE) };
+    Some(pages * page as u64)
+}
+/// The resident set of `pid` in bytes, from `proc_pidinfo(PROC_PIDTASKINFO)`.
+#[cfg(target_os = "macos")]
+pub(crate) fn rss(pid: libc::pid_t) -> Option<u64> {
+    // SAFETY: proc_taskinfo is plain integers, so all zeroes is a valid value.
+    let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+    let size = std::mem::size_of::<libc::proc_taskinfo>() as c_int;
+    // SAFETY: info is a live proc_taskinfo of `size` bytes.
+    let n =
+        unsafe { libc::proc_pidinfo(pid, libc::PROC_PIDTASKINFO, 0, (&raw mut info).cast(), size) };
+    (n == size).then_some(info.pti_resident_size)
 }
 
 pub(crate) fn kill(pid: libc::pid_t, sig: c_int) {

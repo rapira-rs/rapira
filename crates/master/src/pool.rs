@@ -5,7 +5,7 @@ use libc::c_int;
 use rapira_scoreboard::{SLOT_ACTIVE, SLOT_FREE, SLOT_IDLE, SharedSlot, now_millis};
 
 use crate::PoolConfig;
-use crate::process::{ExitVerdict, Forker, SlotState, WorkerProc, kill};
+use crate::process::{ExitVerdict, Forker, SlotState, WorkerProc, kill, rss};
 
 /// One plugin's workers.
 pub(crate) struct Pool {
@@ -58,6 +58,7 @@ impl Pool {
                     slot,
                     spawned_at: now,
                     timeout_kill: false,
+                    memory_drain: false,
                 });
             }
             Err(e) => {
@@ -166,6 +167,33 @@ impl Pool {
         }
     }
 
+    /// Sends SIGQUIT once to a worker whose RSS is above the limit. The worker drains, and `on_child_exit` forks a new one at once.
+    fn memory_tick(&mut self) {
+        let limit_mb = self.cfg.max_memory_mb;
+        if limit_mb == 0 {
+            return;
+        }
+        for p in self.procs.iter_mut().filter(|p| !p.memory_drain) {
+            let Some(bytes) = rss(p.pid) else {
+                continue;
+            };
+            if bytes <= limit_mb.saturating_mul(1 << 20) {
+                continue;
+            }
+            tracing::warn!(
+                target: "master",
+                "{} pool: worker {} uses {} MiB, above {}.pool.max_memory_mb ({}); draining",
+                self.cfg.name,
+                p.pid,
+                bytes >> 20,
+                self.cfg.name,
+                limit_mb
+            );
+            kill(p.pid, libc::SIGQUIT);
+            p.memory_drain = true;
+        }
+    }
+
     /// Nothing runs while the master stops; the stop escalation bounds every worker.
     pub(crate) fn maintenance_tick(
         &mut self,
@@ -177,6 +205,7 @@ impl Pool {
             return;
         }
         self.watchdog_tick();
+        self.memory_tick();
         self.refill(now, spawner);
     }
 
@@ -260,6 +289,7 @@ mod tests {
             name: "http",
             processes,
             request_terminate_timeout: Duration::ZERO,
+            max_memory_mb: 0,
         };
         Pool::new(0, cfg, board)
     }
@@ -273,12 +303,14 @@ mod tests {
             slot: 0,
             spawned_at: at,
             timeout_kill: false,
+            memory_drain: false,
         });
         pools[1].procs.push(WorkerProc {
             pid: 2_000_000_002,
             slot: 1,
             spawned_at: at,
             timeout_kill: false,
+            memory_drain: false,
         });
 
         assert!(bury(&mut pools, 2_000_000_009, 0).is_none());

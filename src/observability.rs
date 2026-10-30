@@ -18,6 +18,7 @@ pub fn pool_run(settings: rapira_observability::config::Settings) -> anyhow::Res
         name: "observability",
         processes: 1,
         request_terminate_timeout: Duration::ZERO,
+        max_memory_mb: 0,
     };
     Ok(PoolRunRes {
         pr: PoolRun::Observability { server },

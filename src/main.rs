@@ -106,6 +106,7 @@ fn pool_run(mut plugin: Box<dyn Plugin>, pool: PoolSettings) -> anyhow::Result<P
         name,
         processes: pool.processes,
         request_terminate_timeout: pool.request_terminate_timeout,
+        max_memory_mb: pool.max_memory_mb,
     };
     Ok(PoolRunRes {
         pr: PoolRun::Php { plugin, pool },
