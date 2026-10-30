@@ -27,7 +27,6 @@
 use std::collections::HashMap;
 use std::future::{Ready, ready};
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
-use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -262,13 +261,7 @@ impl CachingBackend {
             return Ok(entry.meta);
         }
         let meta = match std::fs::metadata(path) {
-            Ok(meta) if meta.is_file() || meta.is_dir() => CachedMeta::new(&meta),
-            // A special file, such as a FIFO, is a miss. A HEAD reads only this stat and does
-            // not open the file.
-            Ok(_) => {
-                self.lock().take(path);
-                return Err(io::Error::from(io::ErrorKind::NotFound));
-            }
+            Ok(meta) => CachedMeta::new(&meta),
             Err(err) => {
                 self.lock().take(path);
                 return Err(err);
@@ -295,35 +288,22 @@ impl CachingBackend {
     }
 
     async fn fill(self, path: PathBuf) -> io::Result<CachedFile> {
-        // A blocking open of a FIFO waits for a writer and blocks this runtime thread.
-        // O_NONBLOCK returns at once, and the type check below rejects the FIFO. The flag has
-        // no effect on a regular file.
-        // https://man7.org/linux/man-pages/man2/open.2.html
-        let file = match std::fs::File::options()
-            .read(true)
-            .custom_flags(libc::O_NONBLOCK)
-            .open(&path)
-        {
+        let file = match std::fs::File::open(&path) {
             Ok(file) => file,
             Err(err) => {
                 self.lock().take(&path);
                 return Err(err);
             }
         };
-        let meta = file.metadata()?;
+        let meta = CachedMeta::new(&file.metadata()?);
 
         // The path became a directory between the stat and the open. `open` on a directory
         // succeeds on Unix, and the read then fails. The backend must therefore report an
         // error before `ServeDir` writes a head.
         // https://man7.org/linux/man-pages/man2/open.2.html
-        if meta.is_dir() {
+        if meta.is_dir {
             return Err(io::Error::from(io::ErrorKind::IsADirectory));
         }
-        // A special file is a miss, as in `stat`.
-        if !meta.is_file() {
-            return Err(io::Error::from(io::ErrorKind::NotFound));
-        }
-        let meta = CachedMeta::new(&meta);
 
         // `ServeDir` streams a file that the cache cannot store.
         if meta.len > MAX_FILE || !self.lock().make_room(&path, meta.len, Instant::now()) {

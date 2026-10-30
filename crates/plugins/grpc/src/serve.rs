@@ -93,21 +93,9 @@ impl Serving {
         let http1 = Arc::new(AtomicBool::new(false));
         let (mark, close) = (Arc::clone(&http1), Arc::clone(&http1));
         let inflight = Arc::clone(&self.inflight);
-        let connectrpc = self.service.clone();
-        // Only HTTP/1.1 requests carry Transfer-Encoding: h2 refuses the field. The http plugin answers the same 501.
-        let service = tower::service_fn(move |req: http::Request<_>| {
-            let connectrpc = connectrpc.clone();
-            async move {
-                if rapira_sapi::types::unsupported_transfer_coding(req.headers()) {
-                    let mut response =
-                        http::Response::new(ConnectRpcBody::Full(Default::default()));
-                    *response.status_mut() = http::StatusCode::NOT_IMPLEMENTED;
-                    return Ok(response);
-                }
-                connectrpc.oneshot(req).await
-            }
-        });
-        let service = service
+        let service = self
+            .service
+            .clone()
             .map_request(move |req: http::Request<_>| {
                 mark.store(req.version() < http::Version::HTTP_2, Relaxed);
                 req

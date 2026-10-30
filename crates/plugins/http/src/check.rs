@@ -29,30 +29,6 @@ pub(crate) fn is_safe_field_name(name: &str) -> bool {
     name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-/// RFC 9110 §7.2: Host = uri-host [ ":" port ]. The host is a reg-name or a bracketed IP literal (RFC 3986 §3.2.2).
-/// The check uses character classes and does not parse the IP literal grammar. https://www.rfc-editor.org/rfc/rfc3986#section-3.2.2
-fn is_valid_host(v: &[u8]) -> bool {
-    // unreserved, sub-delims and the '%' of pct-encoded
-    let reg_name = |b: &u8| b.is_ascii_alphanumeric() || b"-._~!$&'()*+,;=%".contains(b);
-    let host_len = match v.strip_prefix(b"[") {
-        // IPv6address and IPvFuture also use ':'.
-        Some(rest) => match rest.iter().position(|&b| b == b']') {
-            Some(end) if end > 0 && rest[..end].iter().all(|b| reg_name(b) || *b == b':') => {
-                end + 2
-            }
-            _ => return false,
-        },
-        None => v.iter().take_while(|b| reg_name(b)).count(),
-    };
-    // RFC 9110 §4.2.1: an empty host is invalid. RFC 3986 §3.2.3: port = *DIGIT.
-    host_len > 0
-        && match &v[host_len..] {
-            [] => true,
-            [b':', port @ ..] => port.iter().all(u8::is_ascii_digit),
-            _ => false,
-        }
-}
-
 pub(crate) fn authority(
     headers: &HeaderMap,
     http11: bool,
@@ -63,10 +39,7 @@ pub(crate) fn authority(
         return Err("request carries more than one Host field line");
     }
     match first {
-        Some(v) if is_valid_host(v.as_bytes()) => Ok(Some(v.as_bytes().to_vec())),
-        Some(v) if !v.as_bytes().is_empty() => {
-            Err("Host field value is not uri-host [ \":\" port ]")
-        }
+        Some(v) if !v.as_bytes().is_empty() => Ok(Some(v.as_bytes().to_vec())),
         Some(_) if http11 => Err("HTTP/1.1 request with an empty Host field value"),
         None if http11 => Err("HTTP/1.1 request without a Host field"),
         _ => Ok(None),
@@ -132,12 +105,6 @@ pub fn check_request(
             "CONNECT is not supported",
         ));
     }
-    if rapira_sapi::types::unsupported_transfer_coding(&parts.headers) {
-        return Err(Rejection::new(
-            http::StatusCode::NOT_IMPLEMENTED,
-            "Transfer-Encoding is not one chunked coding",
-        ));
-    }
     let authority = authority(&parts.headers, parts.version == Version::HTTP_11)
         .map_err(|reason| Rejection::new(http::StatusCode::BAD_REQUEST, reason))?;
 
@@ -145,12 +112,6 @@ pub fn check_request(
         Some(a) => {
             let a = a.as_str();
             let host_port = a.rsplit_once('@').map_or(a, |(_, hp)| hp);
-            if !is_valid_host(host_port.as_bytes()) {
-                return Err(Rejection::new(
-                    http::StatusCode::BAD_REQUEST,
-                    "request-target authority is not uri-host [ \":\" port ]",
-                ));
-            }
             // Rewrite Host to the effective authority, so HTTP_HOST cannot disagree.
             // https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
             let v = http::HeaderValue::from_str(host_port)
@@ -193,159 +154,20 @@ mod tests {
         m
     }
 
-    /// RFC 9112 §3.2: a repeated or invalid Host, or a missing or empty Host on 1.1, is a 400; a bare 1.0 request named no authority.
-    /// A valid value is uri-host [ ":" port ] (RFC 9110 §7.2), with RFC 3986 §3.2.2 host and §3.2.3 port = *DIGIT.
-    /// RFC 9110 §4.2.1: an empty host is invalid. https://www.rfc-editor.org/rfc/rfc9110#section-7.2
+    /// RFC 9112 §3.2: repeated/missing/empty Host on 1.1 is a 400; a bare 1.0 request named no authority.
     #[test]
     fn authority_follows_the_host_rules() {
-        struct Case {
-            name: &'static str,
-            fields: &'static [&'static [u8]],
-            http11: bool,
-            /// Err(()) is a rejection; the reason text is not compared.
-            want: Result<Option<&'static [u8]>, ()>,
-        }
-        let cases = [
-            Case {
-                name: "reg-name",
-                fields: &[b"a.example"],
-                http11: true,
-                want: Ok(Some(b"a.example")),
-            },
-            Case {
-                name: "missing on 1.1",
-                fields: &[],
-                http11: true,
-                want: Err(()),
-            },
-            Case {
-                name: "empty on 1.1",
-                fields: &[b""],
-                http11: true,
-                want: Err(()),
-            },
-            Case {
-                name: "repeated on 1.0",
-                fields: &[b"a", b"b"],
-                http11: false,
-                want: Err(()),
-            },
-            Case {
-                name: "missing on 1.0",
-                fields: &[],
-                http11: false,
-                want: Ok(None),
-            },
-            Case {
-                name: "empty on 1.0",
-                fields: &[b""],
-                http11: false,
-                want: Ok(None),
-            },
-            Case {
-                name: "reg-name with port",
-                fields: &[b"good.example:8080"],
-                http11: true,
-                want: Ok(Some(b"good.example:8080")),
-            },
-            Case {
-                name: "ipv4 with port on 1.0",
-                fields: &[b"127.0.0.1:8080"],
-                http11: false,
-                want: Ok(Some(b"127.0.0.1:8080")),
-            },
-            Case {
-                name: "ipv6 literal with port",
-                fields: &[b"[::1]:8080"],
-                http11: true,
-                want: Ok(Some(b"[::1]:8080")),
-            },
-            Case {
-                name: "empty port",
-                fields: &[b"h:"],
-                http11: true,
-                want: Ok(Some(b"h:")),
-            },
-            Case {
-                name: "pct-encoded reg-name",
-                fields: &[b"a%41"],
-                http11: true,
-                want: Ok(Some(b"a%41")),
-            },
-            Case {
-                name: "path and query delimiters on 1.0",
-                fields: &[b"x/admin?"],
-                http11: false,
-                want: Err(()),
-            },
-            Case {
-                name: "path and query delimiters on 1.1",
-                fields: &[b"x/admin?"],
-                http11: true,
-                want: Err(()),
-            },
-            Case {
-                name: "userinfo",
-                fields: &[b"a@b"],
-                http11: false,
-                want: Err(()),
-            },
-            Case {
-                name: "fragment delimiter",
-                fields: &[b"x#"],
-                http11: true,
-                want: Err(()),
-            },
-            Case {
-                name: "backslash",
-                fields: &[b"x\\admin"],
-                http11: true,
-                want: Err(()),
-            },
-            Case {
-                name: "space",
-                fields: &[b"a b"],
-                http11: true,
-                want: Err(()),
-            },
-            Case {
-                name: "non-digit port",
-                fields: &[b"h:8o"],
-                http11: true,
-                want: Err(()),
-            },
-            Case {
-                name: "empty host with port",
-                fields: &[b":80"],
-                http11: true,
-                want: Err(()),
-            },
-            Case {
-                name: "unclosed ipv6 literal",
-                fields: &[b"[::1"],
-                http11: true,
-                want: Err(()),
-            },
-            Case {
-                name: "obs-text byte",
-                fields: &[b"h\x80"],
-                http11: true,
-                want: Err(()),
-            },
-        ];
-        for case in &cases {
-            let mut headers = HeaderMap::new();
-            for v in case.fields {
-                headers.append(HOST, http::HeaderValue::from_bytes(v).unwrap());
-            }
-            let got = authority(&headers, case.http11);
-            assert_eq!(
-                got.as_ref().map(Option::as_deref).map_err(|_| ()),
-                case.want,
-                "{}",
-                case.name
-            );
-        }
+        assert_eq!(
+            authority(&map(&[("host", "a.example")]), true)
+                .unwrap()
+                .as_deref(),
+            Some(&b"a.example"[..])
+        );
+        assert!(authority(&map(&[]), true).is_err());
+        assert!(authority(&map(&[("host", "")]), true).is_err());
+        assert!(authority(&map(&[("host", "a"), ("host", "b")]), false).is_err());
+        assert_eq!(authority(&map(&[]), false).unwrap(), None);
+        assert_eq!(authority(&map(&[("host", "")]), false).unwrap(), None);
     }
 
     /// Field names surviving `policy`, in map order.
@@ -417,66 +239,6 @@ mod tests {
         assert_eq!(err.status, http::StatusCode::NOT_IMPLEMENTED);
     }
 
-    /// RFC 9112 §6.1: a server SHOULD answer 501 to a transfer coding that it does not understand. Only one `chunked` is undone.
-    /// Coding names are case-insensitive (RFC 9112 §7). The field lines form one list, and an empty list element does not count (RFC 9110 §5.6.1.2).
-    /// https://www.rfc-editor.org/rfc/rfc9112#section-6.1
-    #[test]
-    fn transfer_codings_other_than_chunked_are_refused() {
-        struct Case {
-            name: &'static str,
-            /// The Transfer-Encoding field lines.
-            te: &'static [&'static str],
-            /// None: the request passes.
-            want: Option<http::StatusCode>,
-        }
-        let cases = [
-            Case {
-                name: "chunked",
-                te: &["chunked"],
-                want: None,
-            },
-            Case {
-                name: "chunked in mixed case",
-                te: &["Chunked"],
-                want: None,
-            },
-            Case {
-                name: "empty list element",
-                te: &[", chunked"],
-                want: None,
-            },
-            Case {
-                name: "gzip before chunked",
-                te: &["gzip, chunked"],
-                want: Some(http::StatusCode::NOT_IMPLEMENTED),
-            },
-            Case {
-                name: "unknown coding",
-                te: &["foo, chunked"],
-                want: Some(http::StatusCode::NOT_IMPLEMENTED),
-            },
-            Case {
-                name: "codings on two field lines",
-                te: &["gzip", "chunked"],
-                want: Some(http::StatusCode::NOT_IMPLEMENTED),
-            },
-            Case {
-                name: "chunked twice",
-                te: &["chunked, chunked"],
-                want: Some(http::StatusCode::NOT_IMPLEMENTED),
-            },
-        ];
-        for case in &cases {
-            let mut fields = vec![("host", "e2e")];
-            fields.extend(case.te.iter().map(|v| ("transfer-encoding", *v)));
-            let mut p = parts(Method::POST, Version::HTTP_11, &fields);
-            let got = check_request(&mut p, UnsafeFieldNames::Drop, true, 1024)
-                .err()
-                .map(|r| r.status);
-            assert_eq!(got, case.want, "{}", case.name);
-        }
-    }
-
     /// RFC 9112 §3.2.2: the absolute-form target authority replaces Host. Userinfo is stripped.
     /// The Host field line is rewritten too, so HTTP_HOST agrees with the authority.
     /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
@@ -504,43 +266,14 @@ mod tests {
     }
 
     /// RFC 9112 §3.2: the Host 400 rules stay in force for an absolute-form target.
-    /// The target authority replaces Host, so it follows the Host rule uri-host [ ":" port ] too (RFC 9110 §7.2).
     #[test]
     fn absolute_form_keeps_the_host_rules() {
-        struct Case {
-            name: &'static str,
-            fields: &'static [(&'static str, &'static str)],
-            target: &'static str,
-        }
-        let cases = [
-            Case {
-                name: "missing Host",
-                fields: &[],
-                target: "http://target.example/",
-            },
-            Case {
-                name: "invalid Host",
-                fields: &[("host", "x/admin?")],
-                target: "http://ok.example/public",
-            },
-            Case {
-                name: "non-digit port in the target",
-                fields: &[("host", "ok.example")],
-                target: "http://b:xyz/public",
-            },
-        ];
-        for case in &cases {
-            let mut p = parts(Method::GET, Version::HTTP_11, case.fields);
-            p.uri = case.target.parse().unwrap();
-            let status =
-                check_request(&mut p, UnsafeFieldNames::Drop, true, 1024).map_err(|r| r.status);
-            assert_eq!(
-                status.err(),
-                Some(http::StatusCode::BAD_REQUEST),
-                "{}",
-                case.name
-            );
-        }
+        let mut p = parts(Method::GET, Version::HTTP_11, &[]);
+        p.uri = "http://target.example/".parse().unwrap();
+        let err = check_request(&mut p, UnsafeFieldNames::Drop, true, 1024)
+            .err()
+            .unwrap();
+        assert_eq!(err.status, http::StatusCode::BAD_REQUEST);
     }
 
     #[test]

@@ -90,12 +90,10 @@ pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<HeaderMap, &'
     }
     unsafe {
         for zend::Entry { key, val: list } in zend::entries(ht) {
-            let name = match key {
-                zend::Key::Str(s) => HeaderName::from_bytes(zend::zstr_bytes(s)),
-                // A canonical decimal name such as "123" is an int key in a PHP array.
-                zend::Key::Index(n) => HeaderName::from_bytes((n as i64).to_string().as_bytes()),
+            let zend::Key::Str(str_key) = key else {
+                return Err(c"header name is not representable on the wire");
             };
-            let Ok(name) = name else {
+            let Ok(name) = HeaderName::from_bytes(zend::zstr_bytes(str_key)) else {
                 return Err(c"header name is not representable on the wire");
             };
             if zend::zval_type(list) != IS_ARRAY {

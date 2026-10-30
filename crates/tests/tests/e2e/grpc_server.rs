@@ -43,7 +43,7 @@ enum On {
     Unix,
 }
 
-/// Sources: PROTOCOL-HTTP2 (envelope, `grpc-status`, 12 for an unknown method or encoding), PROTOCOL-WEB (the 0x80 trailer frame), the Connect protocol (unary request, GET for no-side-effects methods, 404 for an unknown procedure), proto3 JSON, RFC 9112 section 6.1 (501 for a transfer coding that the server does not understand), and the plugin README (gzip requests, 8 for a message over 4 MiB).
+/// Sources: PROTOCOL-HTTP2 (envelope, `grpc-status`, 12 for an unknown method or encoding), PROTOCOL-WEB (the 0x80 trailer frame), the Connect protocol (unary request, GET for no-side-effects methods, 404 for an unknown procedure), proto3 JSON, and the plugin README (gzip requests, 8 for a message over 4 MiB).
 #[tokio::test]
 async fn each_protocol_reaches_php_over_the_wire() {
     struct Case<'a> {
@@ -120,23 +120,6 @@ async fn each_protocol_reaches_php_over_the_wire() {
             content_type: Some("application/proto"),
             reply: Some(HI),
             php: true,
-        },
-        Case {
-            name: "connect proto with a transfer coding other than chunked",
-            on: On::Tcp,
-            wire: Wire::Http1,
-            method: Method::POST,
-            path: ECHO_PATH,
-            headers: &[
-                ("content-type", "application/proto"),
-                ("transfer-encoding", "gzip, chunked"),
-            ],
-            body: HI,
-            status: 501,
-            grpc_status: None,
-            content_type: None,
-            reply: None,
-            php: false,
         },
         Case {
             name: "connect json",

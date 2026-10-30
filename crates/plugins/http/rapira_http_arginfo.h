@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 41710514b0685eb01d6c55abb258ef26328d6d4b */
+ * Stub hash: 00bfb384696f82f34b973a68e4f3c9d3bfeb4b6e */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_FormField___construct, 0, 0, 3)
 	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)

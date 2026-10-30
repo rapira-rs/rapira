@@ -2,7 +2,7 @@ use std::io::{Read, Write};
 use std::net::TcpStream;
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::Duration;
 
 use anyhow::Context;
 use http::header::{CONTENT_TYPE, HOST};
@@ -10,13 +10,10 @@ use http::{HeaderValue, Method, Version};
 use rapira_net::ListenAddr;
 use rapira_sapi::{Frame, plugin::Mode};
 use tests::wire::submit;
-use tests::{
-    Fields, StatusBody, drain, drain_resp, drain_resp_deadline, fields, fixture, poll, req,
-    server_log,
-};
+use tests::{StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::{
-    Server, Spawn, mkfifo, parse_status_and_body, scratch_dir, slot_line, spawn_with_config,
+    Server, Spawn, parse_status_and_body, scratch_dir, slot_line, spawn_with_config,
     wait_log_contains,
 };
 
@@ -170,7 +167,7 @@ fn status_range_and_header_shape_value_errors() -> anyhow::Result<()> {
     let StatusBody { status, body } = verbs_probe("/?probe=value-errors")?;
     assert_eq!(
         (status, body.as_str()),
-        (200, "range:99;range:600;name;value;shape;item")
+        (200, "range:99;range:600;name;value;shape;intkey;item")
     );
     Ok(())
 }
@@ -275,68 +272,6 @@ fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
     assert_eq!(multi, ["a", "b"], "one field line per list value, in order");
     assert_eq!(resp.header("x-ref").as_deref(), Some("r1"));
     assert_eq!(resp.header("x-vref").as_deref(), Some("c1"));
-    Ok(())
-}
-
-/// PHP stores a canonical decimal name such as `123` as an int key. `writeHead()` and `writeTrailers()` send an int key as its decimal text, so `writeHead()` accepts the `Request::$headers` array as it arrives.
-/// A field name is a token, and a token may hold digits and `-`.
-/// https://www.rfc-editor.org/rfc/rfc9110#section-5.1
-/// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2
-#[test]
-fn decimal_field_names_reach_the_wire() -> anyhow::Result<()> {
-    struct Case {
-        name: &'static str,
-        target: &'static str,
-        /// Request fields beside `host`.
-        request: Fields,
-        body: &'static str,
-        response: Fields,
-    }
-    let cases = [
-        Case {
-            name: "echo request headers",
-            target: "/?probe=decimal-echo",
-            request: &[("123", "a"), ("-1", "b")],
-            body: "ok",
-            response: &[("123", "a"), ("-1", "b")],
-        },
-        Case {
-            name: "literal key",
-            target: "/?probe=decimal-literal",
-            request: &[],
-            body: "ok",
-            response: &[("123", "v")],
-        },
-        // Rapira does not send response trailers; a ValueError would append "threw".
-        Case {
-            name: "trailer key",
-            target: "/?probe=decimal-trailer",
-            request: &[],
-            body: "x",
-            response: &[],
-        },
-    ];
-
-    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php")).spawn();
-    for case in cases {
-        let mut rq = req(case.target);
-        rq.headers_mut().extend(fields(case.request));
-        let resp = drain_resp(submit(srv.addr, rq)?);
-        assert_eq!(
-            (resp.status(), resp.body_string().as_str()),
-            (200, case.body),
-            "{}",
-            case.name
-        );
-        for &(name, value) in case.response {
-            assert_eq!(
-                resp.header(name).as_deref(),
-                Some(value),
-                "{}: field {name}",
-                case.name
-            );
-        }
-    }
     Ok(())
 }
 
@@ -1453,7 +1388,7 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// sendFile rejects a directory, a FIFO, an offset or a slice past the end of the file, and a symlink out of the root before anything is written, so the handler answers 403.
+/// sendFile rejects a directory, an offset or a slice past the end of the file, and a symlink out of the root before anything is written, so the handler answers 403.
 /// A symlink inside the root stays sendable, and a slice longer than two 256 KiB plugin reads keeps its offset across the reads.
 #[test]
 fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
@@ -1474,19 +1409,10 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
     std::os::unix::fs::symlink(&payload, &link_in)?;
     let link_out = srv.dir.join("link-out");
     std::os::unix::fs::symlink("/etc/hosts", &link_out)?;
-    let fifo = srv.dir.join("fifo");
-    mkfifo(&fifo);
     let cases = [
         Case {
             name: "directory",
             path: srv.dir.clone(),
-            query: "",
-            status: 403,
-            body: b"denied".to_vec(),
-        },
-        Case {
-            name: "fifo",
-            path: fifo,
             query: "",
             status: 403,
             body: b"denied".to_vec(),
@@ -1530,8 +1456,7 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
 
     for case in cases {
         let target = format!("/?probe=sendfile-range{}", case.query);
-        let mut rx = submit(srv.addr, with_path_header(&target, &case.path))?;
-        let resp = drain_resp_deadline(&mut rx, Instant::now() + READ).expect(case.name);
+        let resp = drain_resp(submit(srv.addr, with_path_header(&target, &case.path))?);
         assert_eq!(resp.status(), case.status, "{}", case.name);
         assert!(
             resp.body == case.body,

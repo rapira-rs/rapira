@@ -1,7 +1,5 @@
 use bytes::Bytes;
-use http::header::{
-    AUTHORIZATION, CONTENT_LENGTH, COOKIE, HeaderMap, HeaderName, TRANSFER_ENCODING,
-};
+use http::header::{AUTHORIZATION, CONTENT_LENGTH, COOKIE, HeaderMap, HeaderName};
 use std::ffi::CString;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -132,23 +130,6 @@ pub struct Request {
     /// Unix seconds.
     pub received_at: f64,
     pub tls: Option<Tls>,
-}
-
-/// True when Transfer-Encoding lists a coding other than one `chunked`, the only coding that hyper undoes.
-/// RFC 9112 §6.1: a server SHOULD answer 501 to a transfer coding that it does not understand. https://www.rfc-editor.org/rfc/rfc9112#section-6.1
-/// The field lines form one list, and an empty list element does not count: https://www.rfc-editor.org/rfc/rfc9110#section-5.6.1.2
-pub fn unsupported_transfer_coding(headers: &HeaderMap) -> bool {
-    let mut codings = headers
-        .get_all(TRANSFER_ENCODING)
-        .iter()
-        .flat_map(|v| v.as_bytes().split(|&b| b == b','))
-        .map(<[u8]>::trim_ascii)
-        .filter(|c| !c.is_empty());
-    // Coding names are case-insensitive: https://www.rfc-editor.org/rfc/rfc9112#section-7
-    codings
-        .next()
-        .is_some_and(|c| !c.eq_ignore_ascii_case(b"chunked"))
-        || codings.next().is_some()
 }
 
 #[derive(Debug)]
