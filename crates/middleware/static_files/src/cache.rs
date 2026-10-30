@@ -31,7 +31,7 @@ use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::task::{Context, Poll};
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use bytes::Bytes;
 use tokio::io::{AsyncRead, AsyncSeek, ReadBuf};
@@ -80,10 +80,15 @@ impl Metadata for CachedMeta {
     }
 
     /// `ServeDir` calls `.ok()` on this result. An absent mtime gives no ETag and no
-    /// `Last-Modified`. This result is `Err` only when `std::fs::Metadata::modified` is also
-    /// `Err` for the same file.
+    /// `Last-Modified`. httpdate panics on a time outside the years 1970 to 9999, so such an
+    /// mtime is also absent here.
+    /// https://docs.rs/httpdate/1.0.3/src/httpdate/date.rs.html#47-57
     fn modified(&self) -> io::Result<SystemTime> {
         self.modified
+            .filter(|t| {
+                t.duration_since(UNIX_EPOCH)
+                    .is_ok_and(|d| d.as_secs() < 253_402_300_800)
+            })
             .ok_or_else(|| io::Error::other("modification time is not available"))
     }
 
@@ -352,5 +357,57 @@ impl Backend for CachingBackend {
             return Box::pin(ready(Ok(file)));
         }
         Box::pin(self.clone().fill(path))
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// httpdate formats a time from the epoch up to the end of year 9999 and panics outside
+    /// that range. https://docs.rs/httpdate/1.0.3/src/httpdate/date.rs.html#47-57
+    #[test]
+    fn modified_gives_only_a_time_that_an_http_date_holds() {
+        struct Case {
+            name: &'static str,
+            modified: Option<SystemTime>,
+            served: Option<SystemTime>,
+        }
+        let last_second_of_9999 = UNIX_EPOCH + Duration::from_secs(253_402_300_799);
+        let cases = [
+            Case {
+                name: "epoch",
+                modified: Some(UNIX_EPOCH),
+                served: Some(UNIX_EPOCH),
+            },
+            Case {
+                name: "last second of 9999",
+                modified: Some(last_second_of_9999),
+                served: Some(last_second_of_9999),
+            },
+            Case {
+                name: "year 10000",
+                modified: Some(UNIX_EPOCH + Duration::from_secs(253_402_300_800)),
+                served: None,
+            },
+            Case {
+                name: "one second before epoch",
+                modified: Some(UNIX_EPOCH - Duration::from_secs(1)),
+                served: None,
+            },
+            Case {
+                name: "absent",
+                modified: None,
+                served: None,
+            },
+        ];
+        for case in cases {
+            let meta = CachedMeta {
+                is_dir: false,
+                modified: case.modified,
+                len: 1,
+            };
+            assert_eq!(meta.modified().ok(), case.served, "{}", case.name);
+        }
     }
 }

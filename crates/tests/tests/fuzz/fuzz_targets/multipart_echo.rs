@@ -24,6 +24,12 @@ struct EchoForm<'a> {
     parts: Vec<EchoPart<'a>>,
 }
 
+/// A name or filename: the bytes between the quotes on the wire, and the value that the parser must return.
+struct Quoted {
+    wire: Vec<u8>,
+    value: Vec<u8>,
+}
+
 /// One generated part as the client encodes it.
 struct Sent<'a> {
     name: Vec<u8>,
@@ -49,16 +55,34 @@ static LIMITS: LazyLock<Limits> = LazyLock::new(|| Limits {
 const BCHARS: &[u8] =
     b"0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz'()+_,-./:=? ";
 
-/// Name and filename bytes. The WHATWG encoder escapes LF, CR and `"`, so a name has none of them: https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#multipart/form-data-encoding-algorithm
-fn name_bytes(raw: &[u8]) -> Vec<u8> {
-    raw.iter()
+/// A browser writes `"` as %22 and sends `\` raw: https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#multipart/form-data-encoding-algorithm
+/// So a value with a `"` stands for a client that escapes `\` and `"`, as Go does: https://github.com/golang/go/blob/go1.27.3/src/mime/multipart/writer.go#L128
+fn quoted(raw: &[u8]) -> Quoted {
+    let mut value: Vec<u8> = raw
+        .iter()
         .copied()
-        .filter(|&b| b != b'"')
-        // #165: the parser reads a backslash as a quoted-pair, https://github.com/rapira-rs/rapira/issues/165
-        .filter(|&b| b != b'\\')
         // The parser rejects a control byte other than HTAB, as RFC 9110 field-value does: https://www.rfc-editor.org/rfc/rfc9110#section-5.5
         .filter(|&b| b == b'\t' || (b >= 0x20 && b != 0x7f))
-        .collect()
+        .collect();
+    if value.contains(&b'"') {
+        let wire = value
+            .iter()
+            .flat_map(|&b| match b {
+                b'\\' | b'"' => vec![b'\\', b],
+                _ => vec![b],
+            })
+            .collect();
+        return Quoted { wire, value };
+    }
+    // The parser unescapes \\ and \" as php-src does, and a browser sends '\' raw. They agree when no '\' follows a '\' and no '\' ends the value.
+    value.dedup_by(|a, b| *a == b'\\' && *b == b'\\');
+    if value.last() == Some(&b'\\') {
+        value.pop();
+    }
+    Quoted {
+        wire: value.clone(),
+        value,
+    }
 }
 
 /// RFC 9110 field-value bytes without leading or trailing whitespace: https://www.rfc-editor.org/rfc/rfc9110#section-5.5
@@ -112,15 +136,18 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     let mut body = delim.clone();
     let mut sent = Vec::new();
     for p in form.parts.iter().take(MAX_PARTS) {
-        let mut name = name_bytes(p.name);
-        if name.is_empty() {
-            name.push(b'n');
+        let mut name = quoted(p.name);
+        if name.value.is_empty() {
+            name = Quoted {
+                wire: b"n".to_vec(),
+                value: b"n".to_vec(),
+            };
         }
-        let filename = p.filename.map(name_bytes);
-        let mut disposition = [b"form-data; name=\"", &name[..], b"\""].concat();
+        let filename = p.filename.map(quoted);
+        let mut disposition = [b"form-data; name=\"", &name.wire[..], b"\""].concat();
         if let Some(f) = &filename {
             disposition.extend_from_slice(b"; filename=\"");
-            disposition.extend_from_slice(f);
+            disposition.extend_from_slice(&f.wire);
             disposition.push(b'"');
         }
         let mut headers = vec![("Content-Disposition".to_owned(), disposition)];
@@ -159,8 +186,8 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         body.extend_from_slice(b"\r\n");
         body.extend_from_slice(&delim);
         sent.push(Sent {
-            name,
-            filename,
+            name: name.value,
+            filename: filename.map(|f| f.value),
             headers,
             data: p.data,
         });

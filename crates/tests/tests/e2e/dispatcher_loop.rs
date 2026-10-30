@@ -795,6 +795,44 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
             status: 200,
             lines: &[r#""x-a":["3","1","2"],"x-b":["z"]"#],
         },
+        // A browser sends '\' raw, https://html.spec.whatwg.org/multipage/form-control-infrastructure.html#multipart/form-data-encoding-algorithm
+        // php-src unescapes only \\ and \", https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L495
+        Case {
+            name: "backslash inside filename",
+            parts: vec![Part {
+                headers: r#"content-disposition: form-data; name="f"; filename="a\b.txt""#,
+                content: "x",
+            }],
+            status: 200,
+            lines: &["counts=0/1", r"file0=f:a\b.txt:1:x"],
+        },
+        Case {
+            name: "backslash inside name",
+            parts: vec![Part {
+                headers: r#"content-disposition: form-data; name="a\b""#,
+                content: "v",
+            }],
+            status: 200,
+            lines: &["counts=1/0", r"field0=a\b=v"],
+        },
+        Case {
+            name: "escaped backslash inside filename",
+            parts: vec![Part {
+                headers: r#"content-disposition: form-data; name="f"; filename="a\\b.txt""#,
+                content: "x",
+            }],
+            status: 200,
+            lines: &["counts=0/1", r"file0=f:a\b.txt:1:x"],
+        },
+        Case {
+            name: "escaped quote inside filename",
+            parts: vec![Part {
+                headers: r#"content-disposition: form-data; name="f"; filename="a\"b.txt""#,
+                content: "x",
+            }],
+            status: 200,
+            lines: &["counts=0/1", r#"file0=f:a"b.txt:1:x"#],
+        },
     ];
 
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/multipart-worker.php"))

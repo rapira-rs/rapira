@@ -110,7 +110,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         allowed.push(501);
     }
     // RFC 9112 section 3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2
-    // #169: a Host value that is not uri-host [ ":" port ] is accepted, https://github.com/rapira-rs/rapira/issues/169
+    // rapira does not check the syntax of a Host value.
     if hosts.len() > 1
         || (version == Version::HTTP_11 && hosts.first().is_none_or(|h| h.is_empty()))
     {
@@ -195,7 +195,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // Request::$uri: the listener scheme, the authority or else the listener address, and the path. OPTIONS * gives the root.
     let view = RequestView::new(&built);
     let a = authority.as_deref().unwrap_or(SERVER.as_bytes());
-    // #169: rapira puts any Host value into $uri, so $uri is checked only for an authority that http::Uri accepts, https://github.com/rapira-rs/rapira/issues/169
+    // rapira puts any Host value into $uri, so $uri is checked only for an authority that http::Uri accepts.
     if http::uri::Authority::try_from(a).is_ok() {
         let u = Uri::try_from(view.uri_abs.as_str())
             .unwrap_or_else(|e| panic!("$uri {}: {e}", view.uri_abs));

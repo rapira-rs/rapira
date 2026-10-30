@@ -25,7 +25,6 @@ RUN set -eux; \
     rm -rf /var/lib/apt/lists/* /tmp/igbinary.tgz /tmp/redis.tgz
 
 FROM php-extensions AS builder
-ARG PHP_BASE
 
 COPY --from=rust /usr/local/rustup /usr/local/rustup
 COPY --from=rust /usr/local/cargo /usr/local/cargo
@@ -44,7 +43,6 @@ COPY . .
 ENV RUSTFLAGS="-C link-arg=-Wl,-rpath,/usr/local/lib"
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    --mount=type=cache,target=/src/target,id=rapira-target-${PHP_BASE},sharing=locked \
     set -eux; \
     cargo build --release --locked --bin rapira; \
     cp target/release/rapira /usr/local/bin/rapira; \
