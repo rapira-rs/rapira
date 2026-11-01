@@ -21,7 +21,6 @@ fn base_req() -> Request {
         content_length: 0,
         body: Body::Raw(std::io::Cursor::new(Vec::new())),
         received_at: 0.0,
-        tls: None,
     }
 }
 

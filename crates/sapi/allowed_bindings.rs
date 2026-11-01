@@ -39,8 +39,6 @@
     "zend_update_property_long", "zend_update_property_double", "zend_update_property_null",
     // array_init_size is a macro -> rapira_array_init shim in wrapper.c
     "rapira_array_init",
-    // zend_symtable_str_find is inline -> rapira_symtable_str_find shim in wrapper.c
-    "rapira_symtable_str_find",
     // zend_array_is_list is inline -> rapira_array_is_list shim in wrapper.c
     "rapira_array_is_list",
     // ZVAL_OBJ_COPY is a macro -> rapira_zval_enum_case shim in wrapper.c

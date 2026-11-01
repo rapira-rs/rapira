@@ -54,6 +54,21 @@ $cases = [
     ['name' => 'values() is case-insensitive and ordered', 'run' => fn () => json_encode($sample()->values('X-A'))],
     ['name' => 'values() of an absent key', 'run' => fn () => json_encode($sample()->values('x-c'))],
     ['name' => 'values() finds a numeric key', 'run' => fn () => json_encode((new Metadata(['123' => ['a']]))->values('123'))],
+    ['name' => 'values() finds a negative numeric key', 'run' => fn () => json_encode((new Metadata(['-123' => ['a']]))->values('-123'))],
+    ['name' => 'values() keeps a leading-zero key', 'run' => fn () => json_encode((new Metadata(['01' => ['a'], 1 => ['b']]))->values('01'))],
+    ['name' => 'values() accepts an empty lookup', 'run' => fn () => json_encode($sample()->values(''))],
+    ['name' => 'values() finds a dash key', 'run' => fn () => json_encode((new Metadata(['-' => ['a']]))->values('-'))],
+    ['name' => 'values() keeps an embedded NUL in a key', 'run' => fn () => json_encode((new Metadata(["x\0a" => ['a'], 'x' => ['b']]))->values("X\0A"))],
+    [
+        'name' => 'values() returns a list by value',
+        'run' => static function (): string {
+            $values = ['a'];
+            $metadata = new Metadata(['x-a' => &$values]);
+            $result = $metadata->values('x-a');
+            $result[] = 'b';
+            return json_encode([$result, $values]);
+        },
+    ],
     ['name' => 'count() counts keys', 'run' => fn () => (string) count($sample())],
     ['name' => 'getIterator() walks the entries', 'run' => fn () => implode(',', array_keys(iterator_to_array($sample())))],
     [

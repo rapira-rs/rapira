@@ -45,7 +45,6 @@ pub fn build(
         server: peer.server,
         server_name: cfg.server_name,
         server_port: cfg.server_port,
-        tls: None,
         received_at: peer.received_at,
         content_type: headers
             .get(http::header::CONTENT_TYPE)

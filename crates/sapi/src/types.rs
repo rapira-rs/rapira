@@ -11,24 +11,6 @@ pub enum Addr {
     Unix(Option<PathBuf>),
 }
 
-#[derive(Debug, Clone)]
-pub struct ClientCert {
-    pub serial: String,
-    pub organization: Option<String>,
-    pub fingerprint: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct Tls {
-    pub version: String,
-    pub cipher: String,
-    /// PHP `Tls::$negotiatedProtocol`.
-    pub alpn: Option<String>,
-    /// PHP `Tls::$requestedServerName`.
-    pub server_name: Option<String>,
-    pub cert: Option<ClientCert>,
-}
-
 /// A well-formed response stream is `Head? (Chunk|File)* End?`; a channel closing without `End` means the producer died.
 pub enum Frame {
     Head {
@@ -127,7 +109,6 @@ pub struct Request {
     pub body: Body,
     /// Unix seconds.
     pub received_at: f64,
-    pub tls: Option<Tls>,
 }
 
 #[derive(Debug)]
@@ -369,7 +350,6 @@ mod tests {
                 content_length: -1,
                 body: Body::Raw(std::io::Cursor::new(Vec::new())),
                 received_at: 0.0,
-                tls: None,
             },
             c: ReqC {
                 method: CString::default(),

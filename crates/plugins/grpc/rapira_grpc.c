@@ -1,16 +1,14 @@
 #include "rapira_grpc.h"
 #include "ext/spl/spl_array.h"
 
-// rust glue (src/php/values.rs): the constructors and metadata_values return
-// false with a PHP exception pending; kind_streams returns the answer
+// Rust glue: constructors return false with a PHP exception pending.
+// kind_streams returns the answer.
 extern bool rapira_rs_ctor_grpc_error_detail(zend_object *obj,
                                              zend_string *type_url,
                                              zend_string *value);
 extern bool rapira_rs_ctor_grpc_status(zend_object *obj, zval *code,
                                        zend_string *message, zval *details);
 extern bool rapira_rs_ctor_grpc_metadata(zend_object *obj, zval *entries);
-extern bool rapira_rs_grpc_metadata_values(HashTable *entries, const char *name,
-                                           size_t len, zval *rv);
 extern bool rapira_rs_ctor_grpc_method_info(zend_object *obj, zend_string *name,
                                             zend_string *input_type,
                                             zend_string *output_type,
@@ -122,10 +120,13 @@ ZEND_METHOD(Rapira_Grpc_Metadata, values) {
     ZEND_PARSE_PARAMETERS_END();
 
     zval *entries = rapira_grpc_metadata_entries(Z_OBJ_P(ZEND_THIS));
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_grpc_metadata_values(Z_ARRVAL_P(entries), ZSTR_VAL(name),
-                                       ZSTR_LEN(name), return_value),
-        "Metadata::values");
+    zend_string *key = zend_string_tolower(name);
+    zval *found = zend_symtable_find(Z_ARRVAL_P(entries), key);
+    zend_string_release(key);
+    if (found) {
+        RETURN_COPY_DEREF(found);
+    }
+    RETURN_EMPTY_ARRAY();
 }
 
 ZEND_METHOD(Rapira_Grpc_Metadata, count) {
