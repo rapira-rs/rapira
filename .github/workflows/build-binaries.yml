@@ -374,7 +374,7 @@ jobs:
                   done
                   for rpm in dist/*.x86_64.rpm dist/*.aarch64.rpm; do
                     case "$rpm" in *.aarch64.rpm) p=linux/arm64 ;; *) p=linux/amd64 ;; esac
-                    docker run --rm --platform "$p" -v "$PWD/dist:/dist:ro" rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f \
+                    docker run --rm --platform "$p" -v "$PWD/dist:/dist:ro" rockylinux/rockylinux:9 \
                       bash -ec "dnf install -yq /dist/$(basename "$rpm") && rapira --help"
                   done
 
