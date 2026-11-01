@@ -1,3 +1,5 @@
+//! One pool: its workers, the respawn with backoff, the request watchdog, the memory limit and the status log.
+
 use std::sync::atomic::Ordering::{Acquire, Relaxed};
 use std::time::{Duration, Instant};
 
@@ -9,13 +11,15 @@ use crate::process::{ExitVerdict, Forker, SlotState, WorkerProc, kill, rss};
 
 /// One plugin's workers.
 pub(crate) struct Pool {
-    pub index: usize,
+    /// Index into `MasterConfig::pools`; the fork passes it as `WorkerEnv::pool`.
+    index: usize,
     pub cfg: PoolConfig,
     /// Sub-view of the shared board; every slot index in this struct is local to it.
-    pub board: &'static [SharedSlot],
+    board: &'static [SharedSlot],
+    /// The live workers, one per forked pid, until the reap.
     pub procs: Vec<WorkerProc>,
     /// Respawn state per slot, local indices as in `board`.
-    pub slot_states: Vec<SlotState>,
+    slot_states: Vec<SlotState>,
 }
 
 impl Pool {
@@ -31,24 +35,16 @@ impl Pool {
 
     /// Requests completed without error: Acquire pairs with the worker's Release on `handled` (stored after `errors`) so a shed 503 never counts as a success.
     fn total_successful(&self) -> u64 {
-        self.board
-            .iter()
-            .map(|s| {
-                let handled = s.handled.load(Acquire);
-                let errors = s.errors.load(Relaxed);
-                handled.saturating_sub(errors)
-            })
-            .sum()
+        let mut total: u64 = 0;
+        for s in self.board {
+            let handled = s.handled.load(Acquire);
+            let errors = s.errors.load(Relaxed);
+            total += handled.saturating_sub(errors);
+        }
+        total
     }
 
-    fn find_spawn_slot(&self) -> Option<usize> {
-        (0..self.slot_states.len()).find(|&i| {
-            self.board[i].state.load(Relaxed) == SLOT_FREE
-                && self.slot_states[i].respawn_at.is_none()
-        })
-    }
-
-    fn spawn_into(&mut self, slot: usize, now: Instant, spawner: &mut Forker<'_>) {
+    fn spawn_into(&mut self, slot: usize, now: Instant, spawner: &mut Forker) {
         self.board[slot].set_starting();
         match spawner.spawn(self.index, &self.board[slot]) {
             Ok(pid) => {
@@ -73,15 +69,14 @@ impl Pool {
         }
     }
 
-    fn spawn_up_to(&mut self, n: usize, now: Instant, spawner: &mut Forker<'_>) {
-        for _ in 0..n {
-            let Some(slot) = self.find_spawn_slot() else {
-                return;
-            };
+    /// Forks a worker into every slot. Runs once at the start, while every slot is free.
+    pub(crate) fn spawn_all(&mut self, now: Instant, spawner: &mut Forker) {
+        for slot in 0..self.board.len() {
             self.spawn_into(slot, now, spawner);
         }
     }
 
+    /// Sends SIGQUIT to every worker and cancels every scheduled respawn: no worker starts during a stop.
     pub(crate) fn begin_stop(&mut self) {
         self.signal_all(libc::SIGQUIT);
         for s in &mut self.slot_states {
@@ -95,7 +90,7 @@ impl Pool {
         }
     }
 
-    /// Failboot only for a pool that never served and has no serving worker: a worker that never boots must not take down a pool that booted.
+    /// A boot failure only for a pool that never served and has no serving worker: a worker that never boots must not take down a pool that booted.
     pub(crate) fn on_child_exit(
         &mut self,
         w: WorkerProc,
@@ -111,7 +106,7 @@ impl Pool {
         if stopping {
             return Ok(());
         }
-        // A recycle shows that an app of the pool booted once, so a later boot failure comes from a reload.
+        // A recycle shows that an app of the pool booted once, so a later boot failure is not a pool boot failure.
         if verdict == ExitVerdict::Unhealthy
             && self.total_successful() == 0
             && !self.board.iter().any(SharedSlot::serving)
@@ -167,7 +162,7 @@ impl Pool {
         }
     }
 
-    /// Sends SIGQUIT once to a worker whose RSS is above the limit. The worker drains, and `on_child_exit` forks a new one at once.
+    /// Sends SIGQUIT once to a worker whose RSS is above the limit. The worker drains, and `on_child_exit` schedules the replacement without backoff.
     fn memory_tick(&mut self) {
         let limit_mb = self.cfg.max_memory_mb;
         if limit_mb == 0 {
@@ -185,7 +180,7 @@ impl Pool {
                 "{} pool: worker {} uses {} MiB, above {}.pool.max_memory_mb ({}); draining",
                 self.cfg.name,
                 p.pid,
-                bytes >> 20,
+                bytes.div_ceil(1 << 20),
                 self.cfg.name,
                 limit_mb
             );
@@ -194,32 +189,12 @@ impl Pool {
         }
     }
 
-    /// Nothing runs while the master stops; the stop escalation bounds every worker.
-    pub(crate) fn maintenance_tick(
-        &mut self,
-        now: Instant,
-        stopping: bool,
-        spawner: &mut Forker<'_>,
-    ) {
-        if stopping {
-            return;
-        }
+    pub(crate) fn maintenance_tick(&mut self) {
         self.watchdog_tick();
         self.memory_tick();
-        self.refill(now, spawner);
     }
 
-    /// Spawns workers until the running workers plus the scheduled respawns reach `processes`. At start both counts are 0, so this call forks the initial workers.
-    pub(crate) fn refill(&mut self, now: Instant, spawner: &mut Forker<'_>) {
-        let running = self.procs.len();
-        let pending = (0..self.slot_states.len())
-            .filter(|&i| self.slot_states[i].respawn_at.is_some())
-            .count();
-        let committed = running + pending;
-        self.spawn_up_to(self.cfg.processes.saturating_sub(committed), now, spawner);
-    }
-
-    pub(crate) fn fire_due(&mut self, now: Instant, spawner: &mut Forker<'_>) {
+    pub(crate) fn fire_due(&mut self, now: Instant, spawner: &mut Forker) {
         for slot in 0..self.slot_states.len() {
             if let Some(t) = self.slot_states[slot].respawn_at
                 && now >= t
@@ -234,6 +209,7 @@ impl Pool {
         self.slot_states.iter().filter_map(|s| s.respawn_at).min()
     }
 
+    /// Logs the pool counts and every used slot at info level, on USR1.
     pub(crate) fn log_status(&self) {
         let idle = self
             .board
@@ -249,10 +225,10 @@ impl Pool {
         );
         for (i, s) in self.board.iter().enumerate() {
             let state = s.state.load(Relaxed);
-            let pid = s.pid.load(Relaxed);
-            if state == SLOT_FREE && pid == 0 {
+            if state == SLOT_FREE {
                 continue;
             }
+            let pid = s.pid.load(Relaxed);
             tracing::info!(
                 target: "master",
                 "  slot {} pid {} state {} handled {} errors {} recycles {}",
@@ -284,7 +260,7 @@ mod tests {
     use crate::process::bury;
 
     fn test_pool(processes: usize) -> Pool {
-        let board = rapira_scoreboard::create(processes * 2).unwrap();
+        let board = rapira_scoreboard::create(processes).unwrap();
         let cfg = PoolConfig {
             name: "http",
             processes,
@@ -307,7 +283,7 @@ mod tests {
         });
         pools[1].procs.push(WorkerProc {
             pid: 2_000_000_002,
-            slot: 1,
+            slot: 0,
             spawned_at: at,
             timeout_kill: false,
             memory_drain: false,
@@ -319,7 +295,7 @@ mod tests {
             bury(&mut pools, 2_000_000_002, 89 << 8).expect("the second pool owns the pid");
 
         assert_eq!(buried.pool, 1);
-        assert_eq!(buried.worker.slot, 1);
+        assert_eq!(buried.worker.pid, 2_000_000_002);
         assert_eq!(buried.verdict, ExitVerdict::Unhealthy);
         assert_eq!(pools[0].procs.len(), 1, "the other pool is untouched");
         assert!(pools[1].procs.is_empty());

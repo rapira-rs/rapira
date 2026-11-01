@@ -37,9 +37,7 @@ const _: () = assert!(size_of::<SharedSlot>() == 128 && align_of::<SharedSlot>()
 pub struct PoolRegion {
     /// The config table of the pool ("http").
     pub name: &'static str,
-    /// The worker count of the pool.
-    pub processes: usize,
-    /// The indices of the pool's slots on the whole board.
+    /// The indices of the pool's slots on the whole board, one per worker.
     pub slots: Range<usize>,
 }
 

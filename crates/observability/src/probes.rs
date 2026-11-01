@@ -19,12 +19,10 @@ mod tests {
 
     const HTTP: PoolRegion = PoolRegion {
         name: "http",
-        processes: 2,
         slots: 0..4,
     };
     const GRPC: PoolRegion = PoolRegion {
         name: "grpc",
-        processes: 2,
         slots: 4..8,
     };
 

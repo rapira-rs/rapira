@@ -3,7 +3,7 @@ use std::sync::atomic::Ordering::SeqCst;
 use std::time::Duration;
 
 use rapira_config::PoolSettings;
-use rapira_master::{WORKER_EXIT_UNHEALTHY, WorkerEnv};
+use rapira_master::{WORKER_EXIT_DRAINED, WORKER_EXIT_UNHEALTHY, WorkerEnv};
 use rapira_sapi::plugin::{Mode, Plugin, Stopper, run_plugin};
 use rapira_sapi::quota::UNHEALTHY;
 use rapira_sapi::{Rapira, StartedWorker};
@@ -97,7 +97,7 @@ pub fn worker_body(
     } else if outcome.is_err() {
         1
     } else {
-        0
+        WORKER_EXIT_DRAINED
     }
 }
 

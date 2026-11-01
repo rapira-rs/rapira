@@ -2,28 +2,19 @@ use std::sync::atomic::Ordering::Release;
 use std::time::Duration;
 
 use anyhow::Context;
-use rapira_master::{PoolConfig, WorkerEnv};
+use rapira_master::{WORKER_EXIT_DRAINED, WorkerEnv};
 
-use crate::{PoolRun, PoolRunRes};
+use crate::PoolRun;
 
-/// The observability pool: one process without PHP and without a request timeout. The listener is bound here, before the fork.
-pub fn pool_run(settings: rapira_observability::config::Settings) -> anyhow::Result<PoolRunRes> {
+/// Binds the observability listener and packs what the master forks with.
+pub fn pool_run(settings: rapira_observability::config::Settings) -> anyhow::Result<PoolRun> {
     let build = rapira_observability::Build {
         version: env!("CARGO_PKG_VERSION"),
         php_version: rapira_sapi::linked_php_version(),
     };
     let server = rapira_observability::Server::new(settings, build)
         .context("observability: prepare failed")?;
-    let pool = PoolConfig {
-        name: "observability",
-        processes: 1,
-        request_terminate_timeout: Duration::ZERO,
-        max_memory_mb: 0,
-    };
-    Ok(PoolRunRes {
-        pr: PoolRun::Observability { server },
-        pc: pool,
-    })
+    Ok(PoolRun::Observability { server })
 }
 
 /// Returns the process exit code for the master's fork bracket. The process runs no PHP.
@@ -53,7 +44,7 @@ pub fn observability_body(
     );
     // main.rs puts the observability pool first, so the other pools follow it.
     match server.serve(env.board, &env.regions[1..], stop_rx, drain_grace) {
-        Ok(()) => 0,
+        Ok(()) => WORKER_EXIT_DRAINED,
         Err(e) => {
             tracing::error!(target: "observability", "{e:#}");
             1

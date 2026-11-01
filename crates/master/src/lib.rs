@@ -1,4 +1,5 @@
-use std::os::fd::OwnedFd;
+//! The pre-fork supervisor: the worker contract, the config and [`run`], which forks the pools and supervises them until a stop.
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -16,9 +17,9 @@ mod signals;
 pub use lifeline::spawn_lifeline_watch;
 pub use signals::{block_early_signals, wait_signal};
 
-/// Worker exit-code protocol: the worker emits, the master consumes; any other code is a crash.
+/// Exit 0: the worker drained. Outside a stop the master forks a replacement at once, without backoff. The worker emits these codes and the master consumes them; any other code is a crash.
 pub const WORKER_EXIT_DRAINED: i32 = 0;
-/// Self-reported unhealthy: respawn with backoff; before the pool served a request or recycled an app, it is a boot failure.
+/// Self-reported unhealthy: respawn with backoff. While the pool has no serving worker, no handled request and no recycle, it is a boot failure.
 pub const WORKER_EXIT_UNHEALTHY: i32 = 89;
 /// Exit code the caller uses when [`run`] returns a boot-failure error.
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
@@ -35,38 +36,38 @@ pub struct PoolConfig {
     pub max_memory_mb: u64,
 }
 
+/// The pools of one boot. [`run`] forks their workers and supervises them.
 pub struct MasterConfig {
+    /// One entry per pool, in the order that `WorkerEnv::pool` indexes.
     pub pools: Vec<PoolConfig>,
     /// Stop QUIT to TERM escalation grace.
     pub process_control_timeout: Duration,
+    /// Written at start, removed when [`run`] returns.
     pub pidfile: Option<PathBuf>,
 }
 
 impl MasterConfig {
     /// One slot per worker; pools contiguous in `pools` order. Names the pool that pushes the total past the cap.
     fn regions(&self) -> anyhow::Result<Vec<PoolRegion>> {
+        let mut regions: Vec<PoolRegion> = Vec::with_capacity(self.pools.len());
         let mut base: usize = 0;
-        self.pools
-            .iter()
-            .map(|p| {
-                let end = base.saturating_add(p.processes);
-                anyhow::ensure!(
-                    end <= SB_MAX_SLOTS,
-                    "{}.pool.processes ({}) raises the worker total to {}, above the supported maximum ({})",
-                    p.name,
-                    p.processes,
-                    end,
-                    SB_MAX_SLOTS
-                );
-                let slots = base..end;
-                base = end;
-                Ok(PoolRegion {
-                    name: p.name,
-                    processes: p.processes,
-                    slots,
-                })
-            })
-            .collect()
+        for p in &self.pools {
+            let end = base + p.processes;
+            anyhow::ensure!(
+                end <= SB_MAX_SLOTS,
+                "{}.pool.processes ({}) raises the worker total to {}, above the supported maximum ({})",
+                p.name,
+                p.processes,
+                end,
+                SB_MAX_SLOTS
+            );
+            regions.push(PoolRegion {
+                name: p.name,
+                slots: base..end,
+            });
+            base = end;
+        }
+        Ok(regions)
     }
 }
 
@@ -75,7 +76,8 @@ pub struct WorkerEnv {
     /// Index of the pool this worker belongs to, into `MasterConfig::pools`.
     pub pool: usize,
     /// Read end of the master lifeline: EOF means the master died, so drain.
-    pub lifeline: OwnedFd,
+    pub lifeline: std::io::PipeReader,
+    /// The slot of this worker on the board.
     pub slot_view: &'static SharedSlot,
     /// The whole board: the slots of every pool.
     pub board: &'static [SharedSlot],
@@ -83,16 +85,20 @@ pub struct WorkerEnv {
     pub regions: &'static [PoolRegion],
 }
 
+/// Why [`run`] returned; the caller picks the exit status from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-    /// All workers drained cleanly: the caller tears down PHP and exits 0.
+    /// No worker is left: each one drained or the stop escalation ended it. The caller tears down PHP and exits 0.
     Drained,
     /// TERM or INT while stopping: the caller exits 130 without PHP teardown.
     Forced,
 }
 
-/// Returns in the parent on a clean or forced stop; in a forked child it never returns: the worker closure runs and the child `_exit`s.
-pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::Result<StopReason> {
+/// Returns in the parent on a clean or forced stop, or with an error when `poll` fails or a worker of a pool that never served exits unhealthy. In a forked child it never returns: the worker closure runs and the child `_exit`s.
+pub fn run(
+    cfg: MasterConfig,
+    worker: impl FnMut(WorkerEnv) -> i32 + 'static,
+) -> anyhow::Result<StopReason> {
     let regions = cfg.regions()?;
     let board = rapira_scoreboard::create(regions.last().map_or(0, |r| r.slots.end))
         .context("scoreboard mmap failed")?;
@@ -100,8 +106,11 @@ pub fn run(cfg: MasterConfig, worker: impl FnMut(WorkerEnv) -> i32) -> anyhow::R
     let regions: &'static [PoolRegion] = regions.leak();
     let self_pipe: signals::SelfPipe = signals::install_master_signals()?;
     let (lifeline_rd, lifeline_wr) = std::io::pipe().context("lifeline pipe")?;
+    // A named binding keeps the pidfile until run returns. With let _, Drop removes the file at once.
     let _pidfile: Option<pidfile::PidFile> = match &cfg.pidfile {
-        Some(p) => Some(pidfile::PidFile::write(p)?),
+        Some(p) => {
+            Some(pidfile::PidFile::write(p).with_context(|| format!("pidfile {}", p.display()))?)
+        }
         None => None,
     };
 
@@ -144,15 +153,13 @@ mod tests {
             .regions()
             .unwrap_err()
             .to_string();
-        assert!(e.contains("grpc.pool.processes (1)"), "{e}");
-        assert!(!e.contains("http.pool"), "{e}");
-        assert!(
-            e.contains(&format!(
-                "raises the worker total to {}, above the supported maximum ({})",
+        assert_eq!(
+            e,
+            format!(
+                "grpc.pool.processes (1) raises the worker total to {}, above the supported maximum ({})",
                 SB_MAX_SLOTS + 1,
                 SB_MAX_SLOTS
-            )),
-            "{e}"
+            )
         );
     }
 
@@ -170,17 +177,14 @@ mod tests {
                 want: vec![
                     PoolRegion {
                         name: "observability",
-                        processes: 1,
                         slots: 0..1,
                     },
                     PoolRegion {
                         name: "http",
-                        processes: 3,
                         slots: 1..4,
                     },
                     PoolRegion {
                         name: "grpc",
-                        processes: 2,
                         slots: 4..6,
                     },
                 ],
@@ -190,7 +194,6 @@ mod tests {
                 pools: vec![pool("http", SB_MAX_SLOTS)],
                 want: vec![PoolRegion {
                     name: "http",
-                    processes: SB_MAX_SLOTS,
                     slots: 0..SB_MAX_SLOTS,
                 }],
             },
