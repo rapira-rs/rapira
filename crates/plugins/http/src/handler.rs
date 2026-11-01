@@ -7,6 +7,7 @@ use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use http::header::CONTENT_TYPE;
 use http_body_util::BodyExt;
 use hyper::body::{Body, Bytes, Incoming, SizeHint};
 use rapira_sapi::types::ResponseHead;
@@ -506,6 +507,15 @@ async fn parse_multipart(
     };
     if raw.get_ref().is_empty() {
         return Ok(req);
+    }
+    // Content-Type is a singleton field: with repeated lines, the plugin and a PHP consumer could split the body on different boundaries. https://www.rfc-editor.org/rfc/rfc9110#section-8.3
+    let lines = req.headers.get_all(CONTENT_TYPE);
+    if lines.iter().nth(1).is_some() && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
+    {
+        return Err(Rejection {
+            status: http::StatusCode::BAD_REQUEST,
+            reason: "repeated content-type field lines with a multipart body".into(),
+        });
     }
     let Some(content_type) = req.content_type.as_deref() else {
         return Ok(req);

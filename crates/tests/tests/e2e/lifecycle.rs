@@ -811,6 +811,23 @@ fn final_interim_status_becomes_502() {
     );
 }
 
+/// More than one Host line is a 400 in every HTTP version. hyper hands the repeated field through, so the rejection is the plugin's own. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
+#[test]
+fn a_second_host_field_line_answers_400() {
+    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
+    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+
+    let code = http_get_with_headers(
+        srv.addr,
+        "/",
+        &[("Host", "evil.example")],
+        Duration::from_secs(10),
+    )
+    .expect("GET / with two Host field lines")
+    .status;
+    assert_eq!(code, 400, "\n{}", diagnostics(&srv));
+}
+
 /// `header("Status: 404")` must become the response code, not a literal field on a 200: php-src's sapi_header_op passes it through verbatim and the origin server converts it (RFC 3875 §6.2.1).
 #[test]
 fn status_field_sets_the_code_and_never_reaches_the_client() {

@@ -101,8 +101,10 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         .collect();
     let mut allowed = Vec::new();
     // RFC 9112 section 3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2
-    // Only a missing or empty first Host value on HTTP/1.1 is a 400.
-    if version == Version::HTTP_11 && hosts.first().is_none_or(|h| h.is_empty()) {
+    // A second Host line, or a missing or empty Host value on HTTP/1.1, is a 400.
+    if hosts.len() > 1
+        || (version == Version::HTTP_11 && hosts.first().is_none_or(|h| h.is_empty()))
+    {
         allowed.push(400);
     }
     if declared.is_some_and(|l| l > MAX_BODY as u64) {
@@ -122,7 +124,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         }
     };
 
-    // The authority is the first Host value when it is not empty, also for an absolute-form target.
+    // The authority is the Host value when it is not empty, also for an absolute-form target.
     let want_authority = hosts.first().copied().filter(|h| !h.is_empty());
     assert_eq!(authority.as_deref(), want_authority, "authority");
     // The fields as received. The superglobals drop the names that alias a CGI variable.

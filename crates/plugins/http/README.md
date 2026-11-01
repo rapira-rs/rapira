@@ -84,7 +84,8 @@ To add a built-in middleware:
 
 - The request body is buffered before dispatch and capped by `max_body_size_mb`: a declared `Content-Length` over the cap answers 413 before the body is read, an over-long streamed body answers 413 when the cap is crossed.
 - `Expect: 100-continue` is honored by hyper: the interim 100 goes out when the body is first read and is skipped entirely when the request is refused first.
-- A missing or empty `Host` on HTTP/1.1 answers 400 (RFC 9112 §3.2); the first `Host` value is the authority. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
+- A missing or empty `Host` on HTTP/1.1, and more than one `Host` line in any version, answer 400 (RFC 9112 §3.2); the `Host` value is the authority. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
+- In dispatcher mode, a multipart request with more than one `Content-Type` line answers 400: the plugin and a PHP consumer could split the body on different boundaries (RFC 9110 §8.3). https://www.rfc-editor.org/rfc/rfc9110#section-8.3
 - An absolute-form request-target is accepted as it is: the authority comes from `Host`, PHP sees the origin-form path and query in `uri` and the full form in `target`.
 - A request body that makes no read progress for `keepalive_timeout_secs` answers 408 and closes the connection.
 - In the classic and worker modes a field name with a byte outside `A-Z`, `a-z`, `0-9` and `-` is dropped before dispatch: the CGI mapping rewrites `_` and `.` to `_`, so such a name would land on the `$_SERVER` entry of a `-` name. nginx does the same by default.

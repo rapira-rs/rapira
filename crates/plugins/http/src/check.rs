@@ -30,9 +30,14 @@ pub(crate) fn is_safe_field_name(name: &str) -> bool {
     name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-/// The authority of the request: the first Host value; an empty one counts as missing. HTTP/1.1 requires one. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
+/// The authority of the request: the one Host value; an empty one counts as missing. HTTP/1.1 requires one, and a second Host line is a 400 in every version. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 fn authority(headers: &HeaderMap, http11: bool) -> Result<Option<Vec<u8>>, &'static str> {
-    match headers.get(HOST).filter(|v| !v.is_empty()) {
+    let mut lines = headers.get_all(HOST).iter();
+    let first = lines.next();
+    if lines.next().is_some() {
+        return Err("request carries more than one Host field line");
+    }
+    match first.filter(|v| !v.is_empty()) {
         Some(v) => Ok(Some(v.as_bytes().to_vec())),
         None if http11 => Err("HTTP/1.1 request without a Host field"),
         None => Ok(None),
@@ -92,7 +97,7 @@ mod tests {
         m
     }
 
-    /// RFC 9112 §3.2 requires a Host on HTTP/1.1; the plugin reads the first non-empty value.
+    /// RFC 9112 §3.2 requires one Host on HTTP/1.1; a second Host line is a 400 in every version.
     #[test]
     fn authority_follows_the_host_rules() {
         struct Case {
@@ -134,10 +139,16 @@ mod tests {
                 want: Some(None),
             },
             Case {
-                name: "the first of two Host lines wins",
+                name: "two Host lines on HTTP/1.1",
                 headers: &[("host", "a"), ("host", "b")],
                 http11: true,
-                want: Some(Some(b"a")),
+                want: None,
+            },
+            Case {
+                name: "two Host lines on HTTP/1.0",
+                headers: &[("host", "a"), ("host", "b")],
+                http11: false,
+                want: None,
             },
         ];
         for case in cases {
@@ -260,6 +271,14 @@ mod tests {
                 name: "HTTP/1.1 without a Host is 400",
                 version: Version::HTTP_11,
                 headers: &[],
+                superglobals: true,
+                want_status: Some(400),
+                want_names: &[],
+            },
+            Case {
+                name: "two Host lines are 400",
+                version: Version::HTTP_11,
+                headers: &[("host", "a"), ("host", "b")],
                 superglobals: true,
                 want_status: Some(400),
                 want_names: &[],
