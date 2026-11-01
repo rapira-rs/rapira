@@ -975,6 +975,13 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
             status: None,
         },
         Case {
+            name: "empty body with a repeated multipart line",
+            method: "POST",
+            content_type: &["text/plain", EVIL],
+            body: Vec::new(),
+            status: Some(400),
+        },
+        Case {
             name: "plain line before a repeated multipart line",
             method: "POST",
             content_type: &["text/plain", EVIL],

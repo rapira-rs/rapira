@@ -502,12 +502,6 @@ async fn parse_multipart(
     let Some(limits) = limits else {
         return Ok(req);
     };
-    let rapira_sapi::types::Body::Raw(raw) = &mut req.body else {
-        return Ok(req);
-    };
-    if raw.get_ref().is_empty() {
-        return Ok(req);
-    }
     // Content-Type is a singleton field: with repeated lines, the plugin and a PHP consumer could split the body on different boundaries. https://www.rfc-editor.org/rfc/rfc9110#section-8.3
     let lines = req.headers.get_all(CONTENT_TYPE);
     if lines.iter().nth(1).is_some() && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
@@ -516,6 +510,12 @@ async fn parse_multipart(
             status: http::StatusCode::BAD_REQUEST,
             reason: "repeated content-type field lines with a multipart body".into(),
         });
+    }
+    let rapira_sapi::types::Body::Raw(raw) = &mut req.body else {
+        return Ok(req);
+    };
+    if raw.get_ref().is_empty() {
+        return Ok(req);
     }
     let Some(content_type) = req.content_type.as_deref() else {
         return Ok(req);

@@ -126,7 +126,7 @@ struct DelimHit {
     close: bool,
 }
 
-/// A delimiter must start a line; a line merely beginning with the boundary bytes is content, so the scan continues past it.
+/// A delimiter must start a line; a line merely beginning with the boundary bytes is content, so the scan continues at the next line. The scan is linear in the body: a run of boundary bytes inside a line is skipped in one step.
 fn next_delimiter(
     body: &[u8],
     mut from: usize,
@@ -173,7 +173,7 @@ fn next_delimiter(
                 _ => {}
             }
         }
-        from = i + 1;
+        from = i + memchr::memchr(b'\n', &body[i..])? + 1;
     }
     None
 }
