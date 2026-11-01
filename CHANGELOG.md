@@ -1,5 +1,45 @@
 # Changelog
 
+## [0.9.2](https://github.com/rapira-rs/rapira/compare/v0.9.1...v0.9.2) (2026-11-01)
+
+### ⚠️ Breaking Changes
+
+- 🧹 **HTTP Configuration**: Removed `[http].unsafe_field_names`; configurations that contain it fail at startup. Classic and worker modes always drop header names that can conflict in the CGI variables, [#253](https://github.com/rapira-rs/rapira/pull/253).
+- 🧹 **gRPC Protocol**: Removed `Rapira\Grpc\Call\Protocol::Rest`. The supported cases are `Grpc`, `GrpcWeb`, and `Connect`, [#253](https://github.com/rapira-rs/rapira/pull/253).
+- 🧹 **PHP Body Memory**: Raw and URL-encoded request bodies now count toward PHP `memory_limit` in classic and worker modes. Check the limit for apps that accept large bodies, [#227](https://github.com/rapira-rs/rapira/pull/227).
+
+### 🎯 Core
+
+- ✨ **App Recycling**: App recycling preserves connections and queued requests at `max_requests` or on SIGHUP or SIGUSR2 to the master. Classic mode ignores these triggers, [#238](https://github.com/rapira-rs/rapira/pull/238), [#240](https://github.com/rapira-rs/rapira/pull/240).
+- 🧹 **Reload Scope**: Reloads restart the apps with the current configuration and gRPC descriptors. Restart Rapira to load changed configuration or descriptor files, [#240](https://github.com/rapira-rs/rapira/pull/240).
+- ✨ **Worker Memory Limits**: Added `max_memory_mb` to `[http.pool]` and `[grpc.pool]` as an RSS threshold in MiB. The master checks RSS once per second and replaces workers above the threshold after they drain, FR [#110](https://github.com/rapira-rs/rapira/issues/110).
+- 🐛 **Request Failures**: PHP `max_execution_time` timeouts keep the worker process alive. In worker mode, a client disconnect ends the current request without recycling the app, [#225](https://github.com/rapira-rs/rapira/pull/225).
+- 🐛 **Dispatcher Counts**: Cancelled units no longer count as active. Cancelled queued units do not consume `max_requests`, [#245](https://github.com/rapira-rs/rapira/pull/245).
+- ⚡ **Request Processing**: Reduced body copies and waits, and added a budget for request bodies waiting for PHP. Idle workers release unused allocator memory after two seconds, [#226](https://github.com/rapira-rs/rapira/pull/226), [#227](https://github.com/rapira-rs/rapira/pull/227).
+
+### 📦 `http` plugin
+
+- ✨ **Server Identity**: Added `serverName()` and `serverPort()` to `HttpDispatcherInfo`. Both are available when the app starts, [#245](https://github.com/rapira-rs/rapira/pull/245).
+- 🐛 **Connection Drain**: Stopping workers answer the next request on existing HTTP/1.1 connections with `Connection: close`, within the drain timeout, BUG [#236](https://github.com/rapira-rs/rapira/issues/236).
+- 🐛 **Classic Responses**: Fixed incomplete streamed responses after `exit()` in exception handlers, including Yii2 error pages, BUG [#200](https://github.com/rapira-rs/rapira/issues/200).
+- 🐛 **Uploads and File Responses**: Fixed upload spool retention, quoted multipart values, `sendFile()` length checks, and HEAD response lengths, [#226](https://github.com/rapira-rs/rapira/pull/226), [#251](https://github.com/rapira-rs/rapira/pull/251).
+- ⚡ **Body and File Processing**: Multipart parsing uses a linear scan and sends bodies above 256 KiB to the blocking thread pool. `sendFile()` reads 256 KiB blocks, [#227](https://github.com/rapira-rs/rapira/pull/227), [#253](https://github.com/rapira-rs/rapira/pull/253).
+
+### 📦 `grpc` plugin
+
+- 🐛 **Connection Drain**: Connect and gRPC-Web calls on existing HTTP/1.1 connections receive a response before closure, within the drain timeout. HTTP/2 connections keep graceful GOAWAY, [#242](https://github.com/rapira-rs/rapira/pull/242).
+- 🐛 **PHP Values**: `Status` and `Metadata` objects created without their constructors raise `ReflectionException` instead of crashing a worker, [#226](https://github.com/rapira-rs/rapira/pull/226).
+- ⚡ **Response Compression**: gRPC and gRPC-Web responses use gzip only when the request used gzip. Connect responses can use gzip when the client accepts it, [#227](https://github.com/rapira-rs/rapira/pull/227).
+
+### 📦 `static_files` middleware
+
+- 🐛 **File Responses**: Fixed `If-Range` handling and serve the complete file for multi-range requests. Files with timestamps outside the HTTP date range remain available, [#226](https://github.com/rapira-rs/rapira/pull/226), [#251](https://github.com/rapira-rs/rapira/pull/251).
+
+### 📦 PHP Packages
+
+- ✨ **Sodium**: Added the Sodium extension to release builds and Docker images, FR [#220](https://github.com/rapira-rs/rapira/issues/220).
+- 🐛 **Linux Archives**: Included the required shared libraries of `libphp.so`, BUG [#207](https://github.com/rapira-rs/rapira/issues/207).
+
 ## [0.9.1](https://github.com/rapira-rs/rapira/compare/v0.9.0...v0.9.1) (2026-10-07)
 
 ### 🎯 Core

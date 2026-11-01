@@ -1,6 +1,6 @@
 [package]
 name = "rapira_static_files"
-version = "0.9.1"
+version = "0.9.2"
 edition.workspace = true
 publish = false
 license = "MIT"
