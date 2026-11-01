@@ -1,3 +1,5 @@
+//! The descriptor set: the method routes, the JSON transcoding and the service list of `getServices()`.
+
 use std::collections::{HashMap, HashSet};
 use std::path::Path;
 use std::sync::{Arc, OnceLock};
@@ -15,14 +17,12 @@ pub struct Schema {
 }
 
 /// A configured service with every method it declares.
-#[derive(Debug, Clone)]
 pub(crate) struct ServiceInfo {
     pub name: String,
     pub methods: Vec<MethodInfo>,
 }
 
 /// A method with fully qualified message type names.
-#[derive(Debug, Clone)]
 pub(crate) struct MethodInfo {
     pub name: String,
     pub input_type: String,
@@ -31,19 +31,17 @@ pub(crate) struct MethodInfo {
     pub server_streaming: bool,
 }
 
-/// The services that `getServices()` reports. The master sets them in `prepare`, before the fork, so every worker inherits them.
-static SERVICES: OnceLock<Vec<ServiceInfo>> = OnceLock::new();
+/// The schema whose services `getServices()` reports. The master sets it in `prepare`, before the fork, so every worker inherits it.
+static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
 
-/// Sets the services that `getServices()` reports. A second call is an error.
-pub(crate) fn set_services(services: Vec<ServiceInfo>) -> anyhow::Result<()> {
-    SERVICES
-        .set(services)
-        .map_err(|_| anyhow!("the grpc services are already set"))
+/// The first call sets the schema; a later call changes nothing.
+pub(crate) fn set_schema(schema: Arc<Schema>) {
+    let _ = SCHEMA.set(schema);
 }
 
-/// The services that `getServices()` reports; empty before `set_services`.
+/// The services that `getServices()` reports; empty before `set_schema`.
 pub(crate) fn services() -> &'static [ServiceInfo] {
-    SERVICES.get().map_or(&[], Vec::as_slice)
+    SCHEMA.get().map_or(&[], |s| s.services())
 }
 
 /// A unary method that rapira routes to PHP.
@@ -74,7 +72,7 @@ impl Schema {
                 path.display()
             )
         })?;
-        // The pool resolves types only, so a missing import that supplies only options still decodes. A reflection client needs every import. An edition 2024 `import option` goes to `option_dependency` and may be absent.
+        // The pool resolves types only, so a missing import that supplies only options still decodes. A reflection client needs every import. An edition 2024 import option goes to option_dependency and may be absent.
         for file in pool.files() {
             if let Some(import) = file
                 .dependency
@@ -119,27 +117,26 @@ impl Schema {
             }
             None => {
                 // A file that another file imports is a dependency, such as google/longrunning/operations.proto.
-                let imported: HashSet<&str> = pool
-                    .files()
-                    .iter()
-                    .flat_map(|f| f.dependency.iter().map(String::as_str))
-                    .collect();
-                let selected: Vec<_> = pool
-                    .services()
-                    .iter()
-                    .filter(|s| {
-                        pool.file_containing_symbol(s.full_name()).is_some_and(|f| {
-                            !imported.contains(f.name.as_deref().unwrap_or_default())
-                        })
-                    })
-                    .filter(|s| {
-                        let own = PLUGIN_SERVICES.contains(&s.full_name());
-                        if own {
-                            tracing::debug!(target: "grpc", "{} is the plugin's own service; not routed to PHP", s.full_name());
-                        }
-                        !own
-                    })
-                    .collect();
+                let mut imported = HashSet::new();
+                for f in pool.files() {
+                    for name in &f.dependency {
+                        imported.insert(name.as_str());
+                    }
+                }
+                let mut selected = Vec::new();
+                for s in pool.services() {
+                    let Some(file) = pool.file_containing_symbol(s.full_name()) else {
+                        continue;
+                    };
+                    if imported.contains(file.name.as_deref().unwrap_or_default()) {
+                        continue;
+                    }
+                    if PLUGIN_SERVICES.contains(&s.full_name()) {
+                        tracing::debug!(target: "grpc", "{} is the plugin's own service; not routed to PHP", s.full_name());
+                        continue;
+                    }
+                    selected.push(s);
+                }
                 if selected.is_empty() {
                     return Err(anyhow!(
                         "grpc.descriptor_set {} declares no service to serve",
@@ -151,10 +148,10 @@ impl Schema {
         };
 
         let mut methods = HashMap::new();
-        let listed = selected
-            .iter()
-            .map(|service| service_info(&pool, service, &mut methods))
-            .collect();
+        let mut listed = Vec::with_capacity(selected.len());
+        for service in &selected {
+            listed.push(service_info(&pool, service, &mut methods));
+        }
 
         Ok(Schema {
             pool: Arc::new(pool),
@@ -186,7 +183,7 @@ impl Schema {
     }
 
     pub fn proto_to_json(&self, m: &Method, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-        // The application produces the reply, so the element memory limit for untrusted input does not apply. `to_json` decodes an `Any` payload again under the default limit.
+        // The application produces the reply, so the element memory limit for untrusted input does not apply. to_json decodes an Any payload again under the default limit.
         let opts = buffa::DecodeOptions::new().with_element_memory_limit(usize::MAX);
         let msg =
             DynamicMessage::decode_with_options(Arc::clone(&self.pool), m.output, bytes, &opts)?;

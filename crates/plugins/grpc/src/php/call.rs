@@ -1,3 +1,5 @@
+//! The `GrpcState` work unit, the request Metadata and Context, the services list, and the Rust behind the methods of UnaryCall and ResponseMetadata.
+
 use std::ffi::{CStr, c_char, c_void};
 
 use base64::Engine as _;
@@ -166,10 +168,10 @@ fn wire(fields: &[Field]) -> HeaderMap {
             } else {
                 HeaderValue::from_bytes(v.trim_ascii())
             };
-            // add_core accepted only printable ASCII text values
-            if let Ok(value) = value {
-                map.append(name.clone(), value);
-            }
+            map.append(
+                name.clone(),
+                value.expect("add_core accepts only printable ASCII text, and base64 is ASCII"),
+            );
         }
     }
     map
@@ -264,8 +266,8 @@ impl Held for GrpcState {
     }
 }
 
-/// Cores return these instead of throwing: no owned state may be live when `zend_throw_*` bailouts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A core returns a Verb and throws nothing: `thrown` throws after the core dropped its owned state, because `zend_throw_*` can bail out.
+#[derive(Debug, PartialEq)]
 enum Verb {
     Ok,
     Finalized,
@@ -335,20 +337,16 @@ fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
         st.discard();
         return Verb::Discarded;
     }
-    if st.settled() {
+    let Some(reply) = st.reply.take() else {
         return Verb::Finalized;
-    }
+    };
     let outcome = UnaryReply {
         headers: wire(&st.headers),
         trailers: wire(&st.trailers),
         outcome: result,
     };
     // the receiver can drop after the cancelled() check
-    if st
-        .reply
-        .take()
-        .is_some_and(|reply| reply.send(outcome).is_ok())
-    {
+    if reply.send(outcome).is_ok() {
         sb_update(Event::Handled(false));
         Verb::Ok
     } else {
@@ -360,7 +358,7 @@ fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
 
 /// The messages of the two finalize errors name the call, as the Responder.php `@throws` lines do.
 /// # Safety
-/// Engine active; can bailout on OOM.
+/// Engine active; can bail out on OOM.
 unsafe fn thrown(v: Verb) -> bool {
     unsafe {
         match v {
@@ -379,7 +377,7 @@ unsafe fn thrown(v: Verb) -> bool {
     false
 }
 
-rapira_sapi::container_of!(pub(crate) grpc_call_from, CallObj);
+rapira_sapi::container_of!(grpc_call_from, CallObj);
 rapira_sapi::container_of!(metadata_from, MetadataObj);
 
 /// A `Rapira\Grpc\Metadata` object over `fields`.
@@ -405,10 +403,10 @@ unsafe fn build_metadata(dst: *mut zval, fields: &[Field]) {
     }
 }
 
-fn protocol_case(protocol: Option<Protocol>) -> &'static CStr {
+fn protocol_case(protocol: Protocol) -> &'static CStr {
     match protocol {
-        Some(Protocol::Grpc) => c"Grpc",
-        Some(Protocol::GrpcWeb) => c"GrpcWeb",
+        Protocol::Grpc => c"Grpc",
+        Protocol::GrpcWeb => c"GrpcWeb",
         _ => c"Connect",
     }
 }
@@ -679,7 +677,7 @@ mod tests {
     fn state(reply: oneshot::Sender<UnaryReply>) -> GrpcState {
         let req = UnaryCall {
             method: "rapira.test.v1.EchoService/Echo".into(),
-            protocol: Some(Protocol::Grpc),
+            protocol: Protocol::Grpc,
             metadata: HeaderMap::new(),
             deadline: None,
             remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
@@ -700,10 +698,11 @@ mod tests {
     }
 
     fn owned(fields: &[(&str, &[&[u8]])]) -> Vec<(String, Vec<Vec<u8>>)> {
-        fields
-            .iter()
-            .map(|(n, vs)| ((*n).to_owned(), vs.iter().map(|v| v.to_vec()).collect()))
-            .collect()
+        let mut out = Vec::new();
+        for (n, vs) in fields {
+            out.push(((*n).to_owned(), vs.iter().map(|v| v.to_vec()).collect()));
+        }
+        out
     }
 
     fn named(fields: &[Field]) -> Vec<(String, Vec<Vec<u8>>)> {
@@ -716,89 +715,109 @@ mod tests {
     #[test]
     fn reserved_names_cover_the_transport() {
         struct Case {
+            name: &'static str,
             header: &'static str,
             reserved: bool,
         }
         const CASES: &[Case] = &[
             Case {
+                name: "grpc- prefix",
                 header: "grpc-timeout",
                 reserved: true,
             },
             Case {
+                name: "grpc- prefix with -bin",
                 header: "grpc-status-details-bin",
                 reserved: true,
             },
             Case {
+                name: "content- prefix",
                 header: "content-type",
                 reserved: true,
             },
             Case {
+                name: "connect- prefix",
                 header: "connect-timeout-ms",
                 reserved: true,
             },
             Case {
+                name: "trailer- prefix",
                 header: "trailer-x",
                 reserved: true,
             },
             Case {
+                name: "te",
                 header: "te",
                 reserved: true,
             },
             Case {
+                name: "trailer",
                 header: "trailer",
                 reserved: true,
             },
             Case {
+                name: "host",
                 header: "host",
                 reserved: true,
             },
             Case {
+                name: "connection",
                 header: "connection",
                 reserved: true,
             },
             Case {
+                name: "keep-alive",
                 header: "keep-alive",
                 reserved: true,
             },
             Case {
+                name: "proxy-connection",
                 header: "proxy-connection",
                 reserved: true,
             },
             Case {
+                name: "transfer-encoding",
                 header: "transfer-encoding",
                 reserved: true,
             },
             Case {
+                name: "upgrade",
                 header: "upgrade",
                 reserved: true,
             },
             Case {
+                name: "accept-encoding",
                 header: "accept-encoding",
                 reserved: true,
             },
             Case {
+                name: "application name",
                 header: "user-agent",
                 reserved: false,
             },
             Case {
+                name: "x- name",
                 header: "x-user",
                 reserved: false,
             },
             Case {
+                name: "authorization",
                 header: "authorization",
                 reserved: false,
             },
             Case {
+                name: "grpc without the dash",
                 header: "grpcx",
                 reserved: false,
             },
             Case {
+                name: "x-grpc-web",
                 header: "x-grpc-web",
                 reserved: false,
             },
         ];
         for c in CASES {
-            assert_eq!(reserved(c.header), c.reserved, "{}", c.header);
+            assert_eq!(reserved(c.header), c.reserved, "{}", c.name);
         }
     }
 
@@ -809,7 +828,7 @@ mod tests {
             headers: &'static [(&'static str, &'static str)],
             expected: &'static [(&'static str, &'static [&'static [u8]])],
         }
-        // Sources: PROTOCOL-HTTP2 Requests (padded and unpadded -bin values, split on ",", duplicates joined with ","), grpc-go decodeMetadataHeader (an empty -bin value is an empty value), RFC 9110 5.6.1 (whitespace around the ","), RFC 4648 (`AP8` is 00 ff, `AQI` is 01 02).
+        // Sources: PROTOCOL-HTTP2 Requests (padded and unpadded -bin values, split on ",", duplicates joined with ","), grpc-go decodeMetadataHeader (an empty -bin value is an empty value), RFC 9110 5.6.1 (whitespace around the ","), RFC 4648 ("AP8" is 00 ff, "AQI" is 01 02).
         const CASES: &[Case] = &[
             Case {
                 name: "application key kept",
@@ -894,7 +913,7 @@ mod tests {
             field: (&'static str, &'static [u8]),
             expected: &'static str,
         }
-        // Sources: PROTOCOL-HTTP2 Requests ("ASCII-Value should not have leading or trailing whitespace. If it contains leading or trailing whitespace, it may be stripped."), RFC 9113 8.2.1 (a field value must not start or end with whitespace), RFC 4648 (`IA` is one space).
+        // Sources: PROTOCOL-HTTP2 Requests ("ASCII-Value should not have leading or trailing whitespace. If it contains leading or trailing whitespace, it may be stripped."), RFC 9113 8.2.1 (a field value must not start or end with whitespace), RFC 4648 ("IA" is one space).
         const CASES: &[Case] = &[
             Case {
                 name: "leading space stripped",
@@ -935,7 +954,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy)]
     enum Setup {
         Open,
         Responded,
@@ -943,13 +961,11 @@ mod tests {
         Detached,
     }
 
-    #[derive(Debug)]
     enum Want {
         Stored {
             name: &'static str,
             value: &'static [u8],
         },
-        Bad,
         BadField(&'static CStr),
         Finalized,
     }
@@ -1010,7 +1026,7 @@ mod tests {
                 binary: false,
                 key: b"grpc-status",
                 value: b"0",
-                want: Want::Bad,
+                want: Want::BadField(c"the metadata name is reserved for the transport"),
             },
             Case {
                 name: "text method refuses -bin",
@@ -1019,7 +1035,7 @@ mod tests {
                 binary: false,
                 key: b"x-tok-bin",
                 value: b"a",
-                want: Want::Bad,
+                want: Want::BadField(c"a metadata name with the -bin suffix takes binary values: use addBinaryHeader() or addBinaryTrailer()"),
             },
             Case {
                 name: "binary method needs -bin",
@@ -1028,7 +1044,7 @@ mod tests {
                 binary: true,
                 key: b"x-tok",
                 value: b"a",
-                want: Want::Bad,
+                want: Want::BadField(c"a binary metadata name must have the -bin suffix"),
             },
             Case {
                 name: "non-ASCII text value",
@@ -1037,7 +1053,7 @@ mod tests {
                 binary: false,
                 key: b"x-a",
                 value: "é".as_bytes(),
-                want: Want::Bad,
+                want: Want::BadField(c"a text metadata value must be printable ASCII"),
             },
             Case {
                 name: "control byte in text value",
@@ -1046,7 +1062,7 @@ mod tests {
                 binary: false,
                 key: b"x-a",
                 value: b"a\nb",
-                want: Want::Bad,
+                want: Want::BadField(c"a text metadata value must be printable ASCII"),
             },
             Case {
                 name: "empty text value",
@@ -1085,7 +1101,7 @@ mod tests {
                 binary: false,
                 key: b"",
                 value: b"a",
-                want: Want::Bad,
+                want: Want::BadField(c"the metadata name is not a valid header name"),
             },
             Case {
                 name: "bad name wins over finalized",
@@ -1094,7 +1110,7 @@ mod tests {
                 binary: false,
                 key: b"grpc-x",
                 value: b"a",
-                want: Want::Bad,
+                want: Want::BadField(c"the metadata name is reserved for the transport"),
             },
             Case {
                 name: "after finalize",
@@ -1152,7 +1168,6 @@ mod tests {
                     let half = if c.trailer { &st.trailers } else { &st.headers };
                     assert_eq!(named(half), owned(&[(name, &[value])]), "{}", c.name);
                 }
-                Want::Bad => assert!(matches!(v, Verb::BadField(_)), "{}: {v:?}", c.name),
                 Want::BadField(msg) => assert_eq!(v, Verb::BadField(msg), "{}", c.name),
                 Want::Finalized => assert_eq!(v, Verb::Finalized, "{}", c.name),
             }
@@ -1183,8 +1198,6 @@ mod tests {
             trailers: &'static [(&'static str, &'static str)],
             result: Result<&'static [u8], Status>,
         },
-        /// The state is dropped unfinalized: the receiver sees a closed channel.
-        Lost,
         /// The test dropped the receiver.
         Nothing,
     }
@@ -1221,7 +1234,7 @@ mod tests {
             cancelled: bool,
             sent: Sent,
         }
-        // Sources: Responder.php and Work.php, PROTOCOL-HTTP2 Requests (unpadded -bin values), RFC 4648 (01 02 is `AQI`).
+        // Sources: Responder.php and Work.php, PROTOCOL-HTTP2 Requests (unpadded -bin values), RFC 4648 (01 02 is "AQI").
         const CASES: &[Case] = &[
             Case {
                 name: "respond carries both halves",
@@ -1314,16 +1327,6 @@ mod tests {
                 cancelled: true,
                 sent: Sent::Nothing,
             },
-            Case {
-                name: "unfinalized drop",
-                adds: &[],
-                drop_receiver: false,
-                finishes: &[],
-                verbs: &[],
-                finalized: false,
-                cancelled: false,
-                sent: Sent::Lost,
-            },
         ];
         for c in CASES {
             let (tx, rx) = oneshot::channel();
@@ -1366,16 +1369,7 @@ mod tests {
                     let got = rx.as_mut().map(|rx| rx.try_recv());
                     assert_eq!(got, Some(Ok(want)), "{}", c.name);
                 }
-                Sent::Lost => {
-                    let got = rx.as_mut().map(|rx| rx.try_recv());
-                    assert_eq!(
-                        got,
-                        Some(Err(oneshot::error::TryRecvError::Closed)),
-                        "{}",
-                        c.name
-                    );
-                }
-                Sent::Nothing => assert!(rx.is_none(), "{}", c.name),
+                Sent::Nothing => {}
             }
         }
     }

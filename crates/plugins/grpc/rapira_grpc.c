@@ -1,7 +1,8 @@
 #include "rapira_grpc.h"
 #include "ext/spl/spl_array.h"
 
-// rust glue (src/php/values.rs): false means a PHP exception is pending
+// rust glue (src/php/values.rs): the constructors and metadata_values return
+// false with a PHP exception pending; kind_streams returns the answer
 extern bool rapira_rs_ctor_grpc_error_detail(zend_object *obj,
                                              zend_string *type_url,
                                              zend_string *value);
@@ -25,7 +26,8 @@ extern bool rapira_rs_ctor_grpc_exception(zend_object *obj, zval *code,
 extern bool rapira_rs_grpc_kind_streams(const char *value, size_t len,
                                         bool request);
 
-// rust glue (src/php/call.rs): false means a PHP exception is pending
+// rust glue (src/php/call.rs): is_finalized, is_cancelled and message return
+// plain values; the others return false with a PHP exception pending
 extern bool rapira_rs_grpc_services(zval *rv);
 extern bool rapira_rs_grpc_is_finalized(const void *state);
 extern bool rapira_rs_grpc_is_cancelled(const void *state);
@@ -80,7 +82,9 @@ static void grpc_status_ctor(INTERNAL_FUNCTION_PARAMETERS,
                              const char *what) {
     zval *code;
     zend_string *message = ZSTR_EMPTY_ALLOC();
-    zval *details = NULL;
+    zval empty;
+    ZVAL_EMPTY_ARRAY(&empty);
+    zval *details = &empty;
     ZEND_PARSE_PARAMETERS_START(1, 3)
     Z_PARAM_OBJECT_OF_CLASS(code, rapira_ce_grpc_status_code)
     Z_PARAM_OPTIONAL
@@ -88,32 +92,24 @@ static void grpc_status_ctor(INTERNAL_FUNCTION_PARAMETERS,
     Z_PARAM_ARRAY(details)
     ZEND_PARSE_PARAMETERS_END();
 
-    zval empty;
-    if (details == NULL) {
-        ZVAL_EMPTY_ARRAY(&empty);
-        details = &empty;
-    }
     RAPIRA_RETURN_THROWS_UNLESS(
         ctor(Z_OBJ_P(ZEND_THIS), code, message, details), what);
 }
 
 ZEND_METHOD(Rapira_Grpc_Status, __construct) {
-    grpc_status_ctor(INTERNAL_FUNCTION_PARAM_PASSTHRU, rapira_rs_ctor_grpc_status,
-                     "Status construction");
+    grpc_status_ctor(INTERNAL_FUNCTION_PARAM_PASSTHRU,
+                     rapira_rs_ctor_grpc_status, "Status construction");
 }
 
 ZEND_METHOD(Rapira_Grpc_Metadata, __construct) {
-    zval *entries = NULL;
+    zval empty;
+    ZVAL_EMPTY_ARRAY(&empty);
+    zval *entries = &empty;
     ZEND_PARSE_PARAMETERS_START(0, 1)
     Z_PARAM_OPTIONAL
     Z_PARAM_ARRAY(entries)
     ZEND_PARSE_PARAMETERS_END();
 
-    zval empty;
-    if (entries == NULL) {
-        ZVAL_EMPTY_ARRAY(&empty);
-        entries = &empty;
-    }
     RAPIRA_RETURN_THROWS_UNLESS(
         rapira_rs_ctor_grpc_metadata(Z_OBJ_P(ZEND_THIS), entries),
         "Metadata construction");
@@ -233,7 +229,8 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, isCancelled) {
     RETURN_BOOL(rapira_rs_grpc_is_cancelled(grpc_call_state(ZEND_THIS)));
 }
 
-// One zend_string for the life of the call object: every call shares it.
+// getMessage() copies the message into one zend_string on its first call.
+// Later calls return the same zend_string.
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getMessage) {
     ZEND_PARSE_PARAMETERS_NONE();
     rapira_grpc_call_obj *call = rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS));

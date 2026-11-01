@@ -1,3 +1,5 @@
+//! The grpc plugin: unary RPCs of the configured services over gRPC, gRPC-Web and Connect on one listener, answered from PHP in dispatcher mode. The plugin answers health and reflection without PHP.
+
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -18,9 +20,8 @@ mod serve;
 
 use call::{RpcStatus, StatusDetail, UnaryCall, UnaryReply};
 pub use php::rapira_grpc_register_classes;
-use schema::{MethodInfo, Schema, set_services};
+use schema::{MethodInfo, Schema, set_schema};
 
-#[derive(Clone)]
 pub(crate) struct Config {
     pub listen: ListenAddr,
     pub schema: Arc<Schema>,
@@ -30,8 +31,9 @@ pub(crate) struct Config {
     pub default_timeout: Option<Duration>,
     /// The longest timeout that a client can set.
     pub max_timeout: Option<Duration>,
-    /// HTTP/2 PING cadence and the wait for its ACK. A peer that is gone without a FIN sends no ACK, so its connection closes within the sum and does not hold a later drain.
+    /// Idle time before the listener sends an HTTP/2 PING.
     pub keepalive_interval: Duration,
+    /// Wait for the PING ACK. A peer that is gone without a FIN sends no ACK, so its connection closes within the sum of both values and does not hold a later drain.
     pub keepalive_timeout: Duration,
     /// `[grpc].interceptors` in list order, the first listed outermost.
     pub interceptors: Vec<Arc<dyn connectrpc::Interceptor>>,
@@ -63,7 +65,7 @@ impl Plugin for Server {
     }
 
     fn prepare(&mut self) -> Result<()> {
-        set_services(self.config.schema.services().to_vec())?;
+        set_schema(Arc::clone(&self.config.schema));
         let listener = rapira_net::bind(&self.config.listen)?;
         tracing::info!(target: "grpc", "prepared listener on {}", listener.addr());
 

@@ -1,3 +1,5 @@
+//! The `PhpDispatcher`: one unary call through the intake to PHP, the JSON transcoding, and the PHP reply or status as a connectrpc response or error.
+
 use std::sync::Arc;
 use std::time::Instant;
 
@@ -87,11 +89,7 @@ async fn unary(
     request: Payload,
     format: CodecFormat,
 ) -> Result<EncodedResponse, ConnectError> {
-    let Some(method) = schema.method(&path) else {
-        return Err(ConnectError::unimplemented(format!(
-            "method not found: {path}"
-        )));
-    };
+    let method = schema.method(&path).expect("lookup found the route");
     let body = request.encoded()?;
     let message = match format {
         CodecFormat::Proto => body,
@@ -105,9 +103,9 @@ async fn unary(
             )));
         }
     };
-    let protocol = ctx.protocol();
+    let protocol = ctx.protocol().unwrap_or(Protocol::Connect);
     // Most gRPC clients accept gzip on every call. As in grpc-go, a gRPC reply uses gzip only when the request did: https://github.com/grpc/grpc-go/blob/v1.84.0/server.go#L1408-L1421
-    let plain_reply = matches!(protocol, Some(Protocol::Grpc | Protocol::GrpcWeb))
+    let plain_reply = matches!(protocol, Protocol::Grpc | Protocol::GrpcWeb)
         && ctx.header("grpc-encoding").is_none_or(|v| v == "identity");
     let bytes = message.len();
     let call = UnaryCall {
@@ -120,7 +118,7 @@ async fn unary(
         remote: ctx
             .extensions_mut()
             .remove::<Addr>()
-            .unwrap_or(Addr::Unix(None)),
+            .expect("serve puts an Addr on every connection"),
         message,
     };
     let (tx, reply) = oneshot::channel();
@@ -159,7 +157,7 @@ async fn unary(
         response.compress = Some(false);
     }
     // A Connect reply is compressed when the client accepts it, so a cache keys a Connect GET reply on Accept-Encoding: https://www.rfc-editor.org/rfc/rfc9110#section-12.5.5
-    if protocol == Some(Protocol::Connect) {
+    if protocol == Protocol::Connect {
         response.headers.append(
             http::header::VARY,
             http::HeaderValue::from_static("accept-encoding"),
@@ -169,8 +167,8 @@ async fn unary(
 }
 
 /// A Connect error detail carries the bare type name. gRPC and gRPC-Web keep the `google.protobuf.Any` type URL whole, because connectrpc adds `type.googleapis.com/` only to a name without a `/`.
-fn status_error(status: RpcStatus, protocol: Option<Protocol>) -> ConnectError {
-    let whole_url = matches!(protocol, Some(Protocol::Grpc | Protocol::GrpcWeb));
+fn status_error(status: RpcStatus, protocol: Protocol) -> ConnectError {
+    let whole_url = matches!(protocol, Protocol::Grpc | Protocol::GrpcWeb);
     let code = ErrorCode::from_grpc_code(status.code).unwrap_or(ErrorCode::Unknown);
     let mut err = ConnectError::new(code, status.message);
     err.details = status

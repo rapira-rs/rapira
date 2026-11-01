@@ -1,3 +1,5 @@
+//! The constructors of the value classes ErrorDetail, Status, Metadata, MethodInfo, ServiceInfo, Context and GrpcException, the body of `Metadata::values()` and the `MethodKind` streaming checks.
+
 use std::ffi::{c_char, c_double, c_int};
 
 use rapira_sapi::callbacks::guard;

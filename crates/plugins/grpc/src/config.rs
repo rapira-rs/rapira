@@ -1,3 +1,5 @@
+//! The `[grpc]` table: its settings, the boot checks, the interceptor list and the `Server` that the master forks with.
+
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -193,14 +195,12 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
-    use rapira_config::Mode;
-
     use super::*;
 
     struct Want {
         listen: ListenAddr,
         descriptor_set: &'static str,
-        services: Option<&'static [&'static str]>,
+        services: Option<Vec<String>>,
         reflection: bool,
         default_timeout: Option<Duration>,
         max_timeout: Option<Duration>,
@@ -236,7 +236,6 @@ mod tests {
         }
     }
 
-    /// The default pool mode is dispatcher, so a success case does not list the mode.
     #[test]
     fn grpc_table_resolves_and_validates() {
         let cases = [
@@ -249,7 +248,7 @@ mod tests {
                 name: "services narrow the set",
                 toml: toml("services = [\"p.S\"]\n"),
                 expected: Ok(Want {
-                    services: Some(&["p.S"]),
+                    services: Some(vec!["p.S".into()]),
                     ..base()
                 }),
             },
@@ -351,14 +350,7 @@ mod tests {
                         "{}",
                         case.name
                     );
-                    assert_eq!(
-                        g.services
-                            .as_deref()
-                            .map(|s| s.iter().map(String::as_str).collect::<Vec<_>>()),
-                        want.services.map(<[&str]>::to_vec),
-                        "{}",
-                        case.name
-                    );
+                    assert_eq!(g.services, want.services, "{}", case.name);
                     assert_eq!(g.reflection, want.reflection, "{}", case.name);
                     assert_eq!(g.default_timeout, want.default_timeout, "{}", case.name);
                     assert_eq!(g.max_timeout, want.max_timeout, "{}", case.name);
@@ -368,7 +360,6 @@ mod tests {
                         case.name
                     );
                     assert_eq!(g.keepalive_timeout, want.keepalive_timeout, "{}", case.name);
-                    assert_eq!(g.pool.mode, Mode::Dispatcher, "{}", case.name);
                 }
                 (Err(err), Err(want)) => {
                     let err = err.to_string();

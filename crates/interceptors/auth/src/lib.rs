@@ -1,3 +1,5 @@
+//! The auth interceptor of the grpc plugin: a call needs one authorization value with a configured bearer token, and the health service needs none.
+
 mod config;
 
 pub use config::{Section, Settings, resolve};
@@ -33,10 +35,7 @@ impl Auth {
         let Some(token) = bearer_token(value.as_bytes()) else {
             return false;
         };
-        // Every token is compared, so the time does not show which token matched.
-        self.tokens
-            .iter()
-            .fold(false, |found, t| found | same(t.as_bytes(), token))
+        self.tokens.iter().any(|t| same(t.as_bytes(), token))
     }
 }
 
@@ -56,24 +55,23 @@ impl Interceptor for Auth {
     }
 }
 
-/// The token of `Bearer 1*SP b64token`. https://www.rfc-editor.org/rfc/rfc6750#section-2.1
+/// The text after `Bearer 1*SP`. `parse` checks the b64token grammar of the configured tokens, so a value with other characters matches none. https://www.rfc-editor.org/rfc/rfc6750#section-2.1
 fn bearer_token(value: &[u8]) -> Option<&[u8]> {
     let (scheme, rest) = value.split_at_checked(6)?;
     if !scheme.eq_ignore_ascii_case(b"Bearer") {
         return None;
     }
     let spaces = rest.iter().take_while(|&&b| b == b' ').count();
-    let token = &rest[spaces..];
-    (spaces > 0 && is_b64token(token)).then_some(token)
+    (spaces > 0).then_some(&rest[spaces..])
 }
 
 /// `1*( ALPHA / DIGIT / "-" / "." / "_" / "~" / "+" / "/" ) *"="`. https://www.rfc-editor.org/rfc/rfc6750#section-2.1
-fn is_b64token(token: &[u8]) -> bool {
-    let body = token.len() - token.iter().rev().take_while(|&&b| b == b'=').count();
-    body > 0
-        && token[..body]
-            .iter()
-            .all(|&b| b.is_ascii_alphanumeric() || b"-._~+/".contains(&b))
+fn is_b64token(token: &str) -> bool {
+    let body = token.trim_end_matches('=');
+    !body.is_empty()
+        && body
+            .bytes()
+            .all(|b| b.is_ascii_alphanumeric() || b"-._~+/".contains(&b))
 }
 
 /// Compares every byte when the lengths are equal.
@@ -89,7 +87,7 @@ fn parse(text: &str) -> anyhow::Result<Vec<String>> {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if !is_b64token(line.as_bytes()) {
+        if !is_b64token(line) {
             bail!("line {} is not a valid bearer token", i + 1);
         }
         tokens.push(line.to_owned());

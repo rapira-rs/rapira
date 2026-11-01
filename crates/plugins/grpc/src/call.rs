@@ -1,12 +1,13 @@
+//! The unary call that the plugin hands to PHP, its reply and the google.rpc.Status of a failed call.
+
 use connectrpc::http::HeaderMap;
 use rapira_sapi::types::Addr;
 
 /// One unary RPC. `message` is the binary protobuf encoding of the method's input message.
-#[derive(Debug)]
 pub(crate) struct UnaryCall {
     /// `package.Service/Method`, without a leading slash.
     pub method: String,
-    pub protocol: Option<connectrpc::Protocol>,
+    pub protocol: connectrpc::Protocol,
     /// The request headers as received. `getContext()` drops the transport names and decodes `-bin` values when it builds `Context::$metadata`.
     pub metadata: HeaderMap,
     /// Unix seconds.
@@ -25,7 +26,7 @@ pub(crate) struct UnaryReply {
 }
 
 /// `google.rpc.Status`. `code` is 1..=16. https://github.com/googleapis/googleapis/blob/master/google/rpc/status.proto
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct RpcStatus {
     pub code: u32,
     pub message: String,
@@ -33,7 +34,7 @@ pub(crate) struct RpcStatus {
 }
 
 /// One `google.protobuf.Any` detail of a status. `value` is the packed message.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, PartialEq)]
 pub(crate) struct StatusDetail {
     pub type_url: String,
     pub value: bytes::Bytes,

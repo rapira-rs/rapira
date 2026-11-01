@@ -30,7 +30,6 @@ static void rapira_grpc_call_free(zend_object *std) {
     }
     if (obj->state != NULL) {
         rapira_rs_grpc_drop(obj->state);
-        obj->state = NULL;
     }
     // no-op on IS_UNDEF
     zval_ptr_dtor(&obj->message);
