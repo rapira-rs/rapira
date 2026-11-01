@@ -50,7 +50,7 @@ rapira_observability = { path = "crates/observability" }
 rapira_scoreboard = { path = "crates/scoreboard" }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
-tokio = { version = "1", features = ["sync"] }
+tokio = { version = "1", features = ["sync", "io-uring"] }
 bytes = "1"
 http = "1"
 http-body-util = "0.1"

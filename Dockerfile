@@ -40,7 +40,7 @@ RUN set -eux; \
 WORKDIR /src
 COPY . .
 
-ENV RUSTFLAGS="-C link-arg=-Wl,-rpath,/usr/local/lib"
+ENV RUSTFLAGS="--cfg tokio_unstable -C link-arg=-Wl,-rpath,/usr/local/lib"
 
 RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     set -eux; \
