@@ -1,3 +1,5 @@
+//! The `[grpc.auth]` table and its settings.
+
 use std::path::{Path, PathBuf};
 
 use anyhow::bail;

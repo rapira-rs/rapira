@@ -234,7 +234,7 @@ fn worker_main(mode: Mode, entrypoint: PathBuf, rx: UnitRx, classes: DispatcherC
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker | Mode::Dispatcher => rapira_worker(entrypoint.clone()),
+            Mode::Worker | Mode::Dispatcher => rapira_worker(&entrypoint),
         };
         if matches!(exit, WorkerExit::Closed) {
             break;

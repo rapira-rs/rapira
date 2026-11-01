@@ -56,7 +56,7 @@ jobs:
                   mkdir -p "$RUNNER_TEMP/phplib"
                   ln -sf "$LIBPHP" "$RUNNER_TEMP/phplib/libphp.so"
                   echo "LD_LIBRARY_PATH=$RUNNER_TEMP/phplib:/usr/lib" >> "$GITHUB_ENV"
-                  echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
+                  echo "RUSTFLAGS=--cfg tokio_unstable -L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
 
             - name: Resolve the PHP ABI (Linux)
               if: runner.os == 'Linux'
@@ -172,7 +172,7 @@ jobs:
                   echo "PHP_CONFIG=$PHP_PREFIX/bin/php-config" >> "$GITHUB_ENV"
                   echo "$PHP_PREFIX/bin" >> "$GITHUB_PATH"
                   echo "DYLD_LIBRARY_PATH=$PHP_PREFIX/lib" >> "$GITHUB_ENV"
-                  echo "RUSTFLAGS=-L native=$PHP_PREFIX/lib" >> "$GITHUB_ENV"
+                  echo "RUSTFLAGS=--cfg tokio_unstable -L native=$PHP_PREFIX/lib" >> "$GITHUB_ENV"
 
             - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
               with: { components: clippy }

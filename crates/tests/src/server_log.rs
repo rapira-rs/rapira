@@ -62,25 +62,22 @@ pub struct AppLog {
 
 /// The `app` records of `log` and the messages of its `php` records.
 pub fn app_records(log: &Path) -> AppLog {
-    let all = records(log);
-    let app = all
-        .iter()
-        .filter(|c| c.target == "app")
-        .map(|c| AppRecord {
-            level: c.level,
-            message: c.message.clone(),
-            context: c.context.clone(),
-        })
-        .collect();
-    let php = all
-        .into_iter()
-        .filter(|c| c.target == "php")
-        .map(|c| c.message)
-        .collect();
-    AppLog {
-        records: app,
-        php_messages: php,
+    let mut out = AppLog {
+        records: Vec::new(),
+        php_messages: Vec::new(),
+    };
+    for record in records(log) {
+        match record.target.as_str() {
+            "app" => out.records.push(AppRecord {
+                level: record.level,
+                message: record.message,
+                context: record.context,
+            }),
+            "php" => out.php_messages.push(record.message),
+            _ => {}
+        }
     }
+    out
 }
 
 /// The contexts of the `app` records of `log` named `message`, in log order.

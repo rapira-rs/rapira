@@ -1,6 +1,5 @@
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let php = rapira_php_build::discover()?;
-    let sapi_include = std::env::var("DEP_RAPIRA_SAPI_INCLUDE")?;
     rapira_php_build::compile(
         "rapira_http_php",
         &[
@@ -9,8 +8,11 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             "rapira_exchange.c",
         ],
         &php,
-        &[&sapi_include],
     );
-    rapira_php_build::rerun_if_changed(&["rapira_http.h", "rapira_http_arginfo.h"]);
+    rapira_php_build::rerun_if_changed(&[
+        "rapira_http.h",
+        "rapira_http_arginfo.h",
+        "../../sapi/rapira_sapi.h",
+    ]);
     Ok(())
 }

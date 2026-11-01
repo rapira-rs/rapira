@@ -34,7 +34,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         println!("cargo:rustc-cfg=php87");
     }
 
-    rapira_php_build::compile("rapira_sapi", C_FILES, &php, &[]);
+    rapira_php_build::compile("rapira_sapi", C_FILES, &php);
 
     let mut bindings = bindgen::Builder::default()
         .header("rapira_sapi.h")
@@ -52,9 +52,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     bindings
         .generate()?
         .write_to_file(PathBuf::from(env::var("OUT_DIR")?).join("bindings.rs"))?;
-
-    // A plugin's build script reads it as DEP_RAPIRA_SAPI_INCLUDE and finds rapira_sapi.h there.
-    println!("cargo:include={}", env::var("CARGO_MANIFEST_DIR")?);
 
     let inputs: &[&str] = &[
         "rapira_sapi.h",

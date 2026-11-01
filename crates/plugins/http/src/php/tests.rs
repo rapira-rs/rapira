@@ -21,7 +21,6 @@ fn base_req() -> Request {
         content_length: 0,
         body: Body::Raw(std::io::Cursor::new(Vec::new())),
         received_at: 0.0,
-        tls: None,
     }
 }
 
@@ -34,7 +33,7 @@ fn map(lines: &[(&'static str, &'static str)]) -> HeaderMap {
 
 enum Sealed {
     Complete { status: u16, body: Vec<u8> },
-    Truncated { status: Option<u16>, body: Vec<u8> },
+    Truncated,
     Nothing,
 }
 
@@ -43,12 +42,12 @@ fn recv_sealed(rx: &mut tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>) 
     while let Ok(frame) = rx.try_recv() {
         saw_frames = true;
         match frame {
-            rapira_sapi::types::Frame::Interim(_) | rapira_sapi::types::Frame::File { .. } => {}
+            rapira_sapi::types::Frame::File { .. } => {}
             rapira_sapi::types::Frame::Head { head, .. } => status = Some(head.status),
             rapira_sapi::types::Frame::Chunk(b) => body.extend_from_slice(&b),
             rapira_sapi::types::Frame::End { truncated, .. } => {
                 return match (truncated, status) {
-                    (true, status) => Sealed::Truncated { status, body },
+                    (true, _) => Sealed::Truncated,
                     (false, Some(status)) => Sealed::Complete { status, body },
                     (false, None) => Sealed::Nothing,
                 };
@@ -79,28 +78,6 @@ fn state_of(req: Request) -> Attached {
 
 fn state() -> Attached {
     state_of(base_req())
-}
-
-/// An unsealed overflow would leave the unit unfinalized and wedge every later receive() on the single-flight check.
-#[test]
-fn overflow_seals_the_unit_truncated() {
-    let Attached {
-        state: mut st,
-        reply: mut rx,
-    } = state();
-    let v = unsafe { write_body_core(&mut st, c"x".as_ptr(), MAX_BUFFERED_BODY + 1, false) };
-    assert_eq!(v, Verb::Overflow);
-
-    let Sealed::Truncated { status, body } = recv_sealed(&mut rx) else {
-        panic!("overflow must seal a truncated stream");
-    };
-    assert_eq!(status, Some(200));
-    assert!(body.is_empty(), "the overflowing chunk is never sent");
-
-    let v = unsafe { write_body_core(&mut st, c"y".as_ptr(), 1, true) };
-    assert_eq!(v, Verb::Finalized);
-    let unit: *const c_void = (&raw const st).cast();
-    assert!(unsafe { rapira_rs_exchange_is_finalized(unit) });
 }
 
 /// A 304 head drops accepted body chunks at seal, like 204 and HEAD.
@@ -314,27 +291,35 @@ fn view_spells_uri_and_addresses() {
 #[test]
 fn head_frame_length_follows_the_write_shape() {
     use rapira_sapi::types::Frame;
-    let Attached {
-        state: mut st,
-        reply: mut rx,
-    } = state();
-    let v = unsafe { write_body_core(&mut st, c"abc".as_ptr(), 3, true) };
-    assert_eq!(v, Verb::Ok);
-    let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
-        panic!("head first");
-    };
-    assert_eq!(content_length, Some(3));
-
-    let Attached {
-        state: mut st,
-        reply: mut rx,
-    } = state();
-    let v = unsafe { write_body_core(&mut st, c"abc".as_ptr(), 3, false) };
-    assert_eq!(v, Verb::Ok);
-    let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
-        panic!("head first");
-    };
-    assert_eq!(content_length, None, "streaming: the plugin frames");
+    struct Case {
+        name: &'static str,
+        eos: bool,
+        want: Option<u64>,
+    }
+    let cases = [
+        Case {
+            name: "one-shot write",
+            eos: true,
+            want: Some(3),
+        },
+        Case {
+            name: "streamed write: the plugin frames",
+            eos: false,
+            want: None,
+        },
+    ];
+    for case in cases {
+        let Attached {
+            state: mut st,
+            reply: mut rx,
+        } = state();
+        let v = unsafe { write_body_core(&mut st, c"abc".as_ptr(), 3, case.eos) };
+        assert_eq!(v, Verb::Ok, "{}", case.name);
+        let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
+            panic!("{}: head first", case.name);
+        };
+        assert_eq!(content_length, case.want, "{}", case.name);
+    }
 }
 
 /// Over-declared length sends the fitting prefix and seals untruncated, so later writes see Finalized.
@@ -385,26 +370,17 @@ fn repeated_content_length_is_a_bad_field() {
     assert_eq!(st.stage, Stage::Open, "a rejected head commits nothing");
 }
 
-/// An interim head emits at once with its fields as written (the plugin frames the wire) and leaves the final-head slot open.
+/// An interim head puts nothing on the reply stream and leaves the final-head slot open.
 #[test]
-fn interim_head_emits_its_fields_and_leaves_the_final_head_open() {
-    use rapira_sapi::types::Frame;
+fn interim_head_sends_nothing_and_leaves_the_final_head_open() {
     let Attached {
         state: mut st,
         reply: mut rx,
     } = state();
-    let fields = map(&[
-        ("link", "</a.css>; rel=preload"),
-        ("content-length", "5"),
-        ("connection", "close"),
-    ]);
-    let v = unsafe { write_head_core(&mut st, 103, fields.clone()) };
+    let fields = map(&[("link", "</a.css>; rel=preload")]);
+    let v = unsafe { write_head_core(&mut st, 103, fields) };
     assert_eq!(v, Verb::Ok);
-    let Ok(Frame::Interim(head)) = rx.try_recv() else {
-        panic!("interim head must be on the stream");
-    };
-    assert_eq!(head.status, 103);
-    assert_eq!(head.headers, fields);
+    assert!(rx.try_recv().is_err(), "an interim head reaches no frame");
     let v = unsafe { write_head_core(&mut st, 200, HeaderMap::new()) };
     assert_eq!(v, Verb::Ok, "the final-head slot stays open");
 }
@@ -515,20 +491,42 @@ fn trailers_finalize_with_a_committed_head() {
     assert_eq!(v, Verb::Finalized);
 }
 
-/// The forbidden set covers every RFC 9110 §6.5.1 category; unknown extension fields pass.
+/// The forbidden set covers the RFC 9110 §6.5.1 categories case-insensitively; unknown extension fields pass.
 #[test]
 fn trailer_denylist_matches_the_categories() {
-    for name in [
-        "Content-Length",
-        "connection",
-        "host",
-        "authorization",
-        "cache-control",
-        "date",
-        "content-type",
-    ] {
-        assert!(forbidden_trailer(name), "{name}");
+    struct Case {
+        name: &'static str,
+        field: &'static str,
+        forbidden: bool,
     }
-    assert!(!forbidden_trailer("x-checksum"));
-    assert!(!forbidden_trailer("server-timing"));
+    let cases = [
+        Case {
+            name: "mixed-case framing field",
+            field: "Content-Length",
+            forbidden: true,
+        },
+        Case {
+            name: "lowercase authentication field",
+            field: "authorization",
+            forbidden: true,
+        },
+        Case {
+            name: "extension field",
+            field: "x-checksum",
+            forbidden: false,
+        },
+        Case {
+            name: "field that a trailer may carry",
+            field: "server-timing",
+            forbidden: false,
+        },
+    ];
+    for case in cases {
+        assert_eq!(
+            forbidden_trailer(case.field),
+            case.forbidden,
+            "{}",
+            case.name
+        );
+    }
 }

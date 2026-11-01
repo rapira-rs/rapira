@@ -2,6 +2,8 @@ use crate::harness::*;
 use rapira_sapi::plugin::Mode;
 use std::time::Duration;
 use tests::poll;
+use tests::server_log;
+use tracing::Level;
 
 /// `[log] format = "json"` shapes every record while `RUST_LOG` still owns the filter.
 #[test]
@@ -210,4 +212,61 @@ fn json_record_shape() {
     assert_eq!(&ts[19..20], ".", "{ts}");
     assert!(ts.ends_with('Z'), "{ts}");
     assert!(v.get("span").is_none() && v.get("spans").is_none(), "{v}");
+}
+
+/// A filtered app record does not call a context serializer.
+#[test]
+fn filtered_log_context_does_not_call_the_serializer() {
+    struct Case {
+        name: &'static str,
+        targets: &'static str,
+        body: &'static str,
+        records: &'static [(Level, &'static str, &'static str)],
+    }
+    let cases = [
+        Case {
+            name: "global level filters the context",
+            targets: "",
+            body: "skipped",
+            records: &[],
+        },
+        Case {
+            name: "another target enables debug",
+            targets: "http = \"debug\"",
+            body: "skipped",
+            records: &[],
+        },
+        Case {
+            name: "app target enables info",
+            targets: "app = \"info\"",
+            body: "serialized",
+            records: &[(Level::INFO, "context-filter", r#"{"item":"value"}"#)],
+        },
+    ];
+    for case in cases {
+        let mut srv = spawn_without_rust_log(
+            "logging/context-worker.php",
+            1,
+            &format!(
+                "[log]\nlevel = \"warn\"\nformat = \"json\"\n[log.targets]\n{}\n",
+                case.targets
+            ),
+        );
+        let response = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
+        srv.stop();
+        assert_eq!(response.status, 200, "{}\n{}", case.name, diagnostics(&srv));
+        assert_eq!(response.body, case.body.as_bytes(), "{}", case.name);
+        let records = server_log::app_records(&srv.log_file()).records;
+        let got: Vec<(Level, &str, &str)> = records
+            .iter()
+            .map(|record| {
+                (
+                    record.level,
+                    record.message.as_str(),
+                    record.context.as_str(),
+                )
+            })
+            .collect();
+        assert_eq!(got, case.records, "{}", case.name);
+    }
 }

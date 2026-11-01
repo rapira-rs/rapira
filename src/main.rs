@@ -51,6 +51,26 @@ enum PoolRun {
     },
 }
 
+impl PoolRun {
+    /// The master's settings for the pool. The observability pool runs no PHP and has no pool table: one process, no request timeout, no memory limit.
+    fn config(&self) -> PoolConfig {
+        match self {
+            PoolRun::Php { plugin, pool } => PoolConfig {
+                name: plugin.name(),
+                processes: pool.processes,
+                request_terminate_timeout: pool.request_terminate_timeout,
+                max_memory_mb: pool.max_memory_mb,
+            },
+            PoolRun::Observability { .. } => PoolConfig {
+                name: "observability",
+                processes: 1,
+                request_terminate_timeout: Duration::ZERO,
+                max_memory_mb: 0,
+            },
+        }
+    }
+}
+
 /// Signals are blocked first: USR1/USR2/HUP terminate by default until the master installs its handlers.
 fn main() -> anyhow::Result<()> {
     rapira_master::block_early_signals();
@@ -89,29 +109,15 @@ fn check_mode(name: &str, served: &[Mode], mode: Mode) -> anyhow::Result<()> {
     )
 }
 
-pub struct PoolRunRes {
-    pr: PoolRun,
-    pc: PoolConfig,
-}
-
 /// Checks the pool mode, binds the pool's listeners and packs what the master forks with.
-fn pool_run(mut plugin: Box<dyn Plugin>, pool: PoolSettings) -> anyhow::Result<PoolRunRes> {
+fn pool_run(mut plugin: Box<dyn Plugin>, pool: PoolSettings) -> anyhow::Result<PoolRun> {
     let name: &'static str = plugin.name();
     check_mode(name, plugin.modes(), pool.mode)?;
     // An address that an earlier pool bound fails here: that pool keeps its listener open.
     plugin
         .prepare()
         .with_context(|| format!("plugin {name}: prepare failed"))?;
-    let cfg = PoolConfig {
-        name,
-        processes: pool.processes,
-        request_terminate_timeout: pool.request_terminate_timeout,
-        max_memory_mb: pool.max_memory_mb,
-    };
-    Ok(PoolRunRes {
-        pr: PoolRun::Php { plugin, pool },
-        pc: cfg,
-    })
+    Ok(PoolRun::Php { plugin, pool })
 }
 
 fn serve(args: ServeArgs) -> anyhow::Result<()> {
@@ -120,24 +126,28 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     logging::init(&settings.log);
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
 
-    // `WorkerEnv::pool` indexes both lists, so they keep one order. The observability pool goes first, so the slot cap error of the master always names a PHP pool.
-    let mut runs: Vec<PoolRunRes> = Vec::new();
+    // The observability pool goes first: observability_body gives regions[1..] to the metrics and /readyz, and the slot cap error of the master always names a PHP pool.
+    let mut pools: Vec<PoolRun> = Vec::new();
     if let Some(observability) = settings.observability {
-        runs.push(observability::pool_run(observability)?);
+        pools.push(observability::pool_run(observability)?);
     }
+    // http pool-------
     if let Some(http) = settings.http {
         let pool: PoolSettings = http.pool.clone();
         let plugin = rapira_http::Server::from_settings(http);
-        runs.push(pool_run(Box::new(plugin), pool)?);
+        pools.push(pool_run(Box::new(plugin), pool)?);
     }
+    // ---------------
+    //
+    // grpc pool -----
     if let Some(grpc) = settings.grpc {
         let pool: PoolSettings = grpc.pool.clone();
         let plugin = rapira_grpc::Server::from_settings(grpc)?;
-        runs.push(pool_run(Box::new(plugin), pool)?);
+        pools.push(pool_run(Box::new(plugin), pool)?);
     }
+    // --------------
 
-    let (mut pools, pool_cfgs): (Vec<PoolRun>, Vec<PoolConfig>) =
-        runs.into_iter().map(|r| (r.pr, r.pc)).unzip();
+    let pool_cfgs: Vec<PoolConfig> = pools.iter().map(PoolRun::config).collect();
 
     // MINIT once, after every pool bound its listeners. Every linked plugin registers its classes, whatever pools are configured.
     let module: rapira_sapi::PhpModule = rapira_sapi::boot_master(&[
@@ -153,6 +163,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
         process_control_timeout: settings.supervisor.process_control_timeout,
         pidfile: settings.supervisor.pidfile,
     };
+    // ------------------------------------------------------------------------
 
     let stop: Result<rapira_master::StopReason, anyhow::Error> =
         rapira_master::run(cfg, move |env: rapira_master::WorkerEnv| {

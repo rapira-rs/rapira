@@ -1,3 +1,5 @@
+//! The master pidfile: written at start, removed on drop.
+
 use std::io;
 use std::path::{Path, PathBuf};
 

@@ -1,3 +1,5 @@
+//! The master loop: a poll on the self-pipe, the signal routing, the reap and the deadlines.
+
 use std::io::Read as _;
 use std::os::fd::AsRawFd as _;
 use std::time::{Duration, Instant};
@@ -6,43 +8,38 @@ use libc::c_int;
 
 use crate::pctl::{Pctl, SignalAction};
 use crate::pool::Pool;
-use crate::process::{Buried, Forker, reap_all};
-use crate::signals::errno_get;
+use crate::process::{Forker, reap_all};
 use crate::{MasterConfig, StopReason, WORKER_EXIT_DRAINED};
 
-/// Milliseconds until `next`, rounded up so a sub-millisecond remainder never busy-spins `poll` with a 0 timeout.
+/// Milliseconds until `next`, rounded up so a sub-millisecond remainder never busy-spins `poll` with a 0 timeout. At most 1000: `next` is never later than the 1 s tick.
 fn poll_timeout_ms(next: Instant, now: Instant) -> c_int {
     let d = next.saturating_duration_since(now);
-    let ms = d.as_nanos().div_ceil(1_000_000);
-    ms.min(i32::MAX as u128) as c_int
+    d.as_nanos().div_ceil(1_000_000) as c_int
 }
 
-/// The global half: signals, the stop escalation, and routing to the pools. Every per-pool decision lives in [`Pool`].
-pub(crate) struct Master<'w> {
+/// The master-wide part: signals, the stop escalation and the routing to the pools. Every per-pool decision lives in [`Pool`].
+pub(crate) struct Master {
     pools: Vec<Pool>,
-    spawner: Forker<'w>,
+    spawner: Forker,
     pctl: Pctl,
     control_timeout: Duration,
     next_tick: Instant,
 }
 
-impl<'w> Master<'w> {
+impl Master {
     /// Gives each pool the slots of its region.
-    pub(crate) fn new(cfg: MasterConfig, spawner: Forker<'w>) -> Master<'w> {
+    pub(crate) fn new(cfg: MasterConfig, spawner: Forker) -> Master {
         let now = Instant::now();
-        let control_timeout = cfg.process_control_timeout;
-        let pools: Vec<Pool> = cfg
-            .pools
-            .into_iter()
-            .zip(spawner.regions)
-            .enumerate()
-            .map(|(i, (p, region))| Pool::new(i, p, &spawner.board[region.slots.clone()]))
-            .collect();
+        let mut pools: Vec<Pool> = Vec::with_capacity(cfg.pools.len());
+        for (i, p) in cfg.pools.into_iter().enumerate() {
+            let slots = spawner.regions[i].slots.clone();
+            pools.push(Pool::new(i, p, &spawner.board[slots]));
+        }
         Master {
             pools,
             spawner,
             pctl: Pctl::default(),
-            control_timeout,
+            control_timeout: cfg.process_control_timeout,
             next_tick: now + Duration::from_secs(1),
         }
     }
@@ -80,6 +77,7 @@ impl<'w> Master<'w> {
         }
         // No worker starts after this point. The old closure drops and closes the listeners of the master, so new clients get a refused connection.
         self.spawner.worker = Box::new(|_| WORKER_EXIT_DRAINED);
+        // With no live worker no SIGCHLD comes, so only this check ends the stop.
         if self.drained() {
             return Some(StopReason::Drained);
         }
@@ -88,20 +86,6 @@ impl<'w> Master<'w> {
 
     fn drained(&self) -> bool {
         self.pools.iter().all(|p| p.procs.is_empty())
-    }
-
-    fn reap(&mut self, now: Instant) -> anyhow::Result<()> {
-        let stopping = self.pctl.is_stopping();
-        let buried = reap_all(&mut self.pools, stopping);
-        for Buried {
-            pool,
-            worker: w,
-            verdict,
-        } in buried
-        {
-            self.pools[pool].on_child_exit(w, verdict, now, stopping)?;
-        }
-        Ok(())
     }
 
     fn fire_due_deadlines(&mut self, now: Instant) {
@@ -116,22 +100,24 @@ impl<'w> Master<'w> {
         }
         if now >= self.next_tick {
             self.next_tick = now + Duration::from_secs(1);
-            let stopping = self.pctl.is_stopping();
-            for p in &mut self.pools {
-                p.maintenance_tick(now, stopping, &mut self.spawner);
+            // Nothing runs while the master stops: the stop escalation bounds every worker.
+            if !self.pctl.is_stopping() {
+                for p in &mut self.pools {
+                    p.maintenance_tick();
+                }
             }
         }
     }
 
     fn next_deadline(&self) -> Instant {
         let mut next = self.next_tick;
-        for d in self
-            .pools
-            .iter()
-            .filter_map(|p| p.next_deadline())
-            .chain(self.pctl.stop_deadline())
-        {
-            next = next.min(d);
+        for p in &self.pools {
+            if let Some(t) = p.next_deadline() {
+                next = next.min(t);
+            }
+        }
+        if let Some(t) = self.pctl.stop_deadline() {
+            next = next.min(t);
         }
         next
     }
@@ -139,7 +125,7 @@ impl<'w> Master<'w> {
     pub(crate) fn run_loop(&mut self) -> anyhow::Result<StopReason> {
         let start = Instant::now();
         for p in &mut self.pools {
-            p.refill(start, &mut self.spawner);
+            p.spawn_all(start, &mut self.spawner);
         }
         loop {
             let mut pfd = libc::pollfd {
@@ -152,17 +138,18 @@ impl<'w> Master<'w> {
             // SAFETY: pfd is a live pollfd; timeout is a valid millisecond count.
             let n = unsafe { libc::poll(&mut pfd, 1, timeout) };
             if n < 0 {
-                if errno_get() == libc::EINTR {
+                let e = std::io::Error::last_os_error();
+                if e.kind() == std::io::ErrorKind::Interrupted {
                     continue;
                 }
-                anyhow::bail!("poll: {}", std::io::Error::last_os_error());
+                anyhow::bail!("poll: {e}");
             }
-            let now = Instant::now();
 
+            let now = Instant::now();
             let mut got_chld: bool = false;
             if n > 0 && (pfd.revents & libc::POLLIN) != 0 {
                 let mut buf = [0u8; 64];
-                // Drain the nonblocking self-pipe: WouldBlock (empty), EOF or an error ends the loop.
+                // Drain the nonblocking self-pipe: WouldBlock (empty) or an error ends the loop.
                 while let Ok(len @ 1..) = (&self.spawner.self_pipe.rd).read(&mut buf) {
                     for &b in &buf[..len] {
                         if b == libc::SIGCHLD as u8 {
@@ -175,7 +162,7 @@ impl<'w> Master<'w> {
             }
 
             if got_chld {
-                self.reap(now)?;
+                reap_all(&mut self.pools, now, self.pctl.is_stopping())?;
                 if self.pctl.is_stopping() && self.drained() {
                     return Ok(StopReason::Drained);
                 }
@@ -192,10 +179,46 @@ mod tests {
 
     #[test]
     fn poll_timeout_rounds_up_never_to_zero_before_deadline() {
+        struct Case {
+            name: &'static str,
+            next_after_now: Duration,
+            now_after_next: Duration,
+            want: c_int,
+        }
+        let cases = [
+            Case {
+                name: "1.5 ms rounds up to 2",
+                next_after_now: Duration::from_micros(1500),
+                now_after_next: Duration::ZERO,
+                want: 2,
+            },
+            Case {
+                name: "1 ns rounds up to 1",
+                next_after_now: Duration::from_nanos(1),
+                now_after_next: Duration::ZERO,
+                want: 1,
+            },
+            Case {
+                name: "a whole 3 ms stays 3",
+                next_after_now: Duration::from_millis(3),
+                now_after_next: Duration::ZERO,
+                want: 3,
+            },
+            Case {
+                name: "a past deadline gives 0",
+                next_after_now: Duration::ZERO,
+                now_after_next: Duration::from_millis(5),
+                want: 0,
+            },
+        ];
         let base = Instant::now();
-        assert_eq!(poll_timeout_ms(base + Duration::from_micros(1500), base), 2);
-        assert_eq!(poll_timeout_ms(base + Duration::from_nanos(1), base), 1);
-        assert_eq!(poll_timeout_ms(base + Duration::from_millis(3), base), 3);
-        assert_eq!(poll_timeout_ms(base, base + Duration::from_millis(5)), 0);
+        for case in cases {
+            assert_eq!(
+                poll_timeout_ms(base + case.next_after_now, base + case.now_after_next),
+                case.want,
+                "{}",
+                case.name
+            );
+        }
     }
 }

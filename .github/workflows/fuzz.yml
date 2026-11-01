@@ -42,7 +42,7 @@ jobs:
               run: |
                   mkdir -p "$RUNNER_TEMP/phplib"
                   ln -sf /usr/lib/libphp8.5.so "$RUNNER_TEMP/phplib/libphp.so"
-                  echo "RUSTFLAGS=-L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
+                  echo "RUSTFLAGS=--cfg tokio_unstable -L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
 
             - &toolchain
               uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable

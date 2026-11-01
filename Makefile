@@ -32,10 +32,11 @@ test:
 
 test_nts:
 	@$(LOCATE_PHP); \
-	CARGO_TARGET_DIR=target/nts $(PHP_ENV) cargo test --workspace
+	RUSTFLAGS="$$RUSTFLAGS --cfg tokio_unstable" CARGO_TARGET_DIR=target/nts $(PHP_ENV) cargo test --workspace
 
 test_e2e:
 	@$(LOCATE_PHP); \
+	export RUSTFLAGS="$$RUSTFLAGS --cfg tokio_unstable" && \
 	CARGO_TARGET_DIR=target/nts $(PHP_ENV) cargo build -p rapira_core --bin rapira && \
 	CARGO_TARGET_DIR=target/nts $(PHP_ENV) cargo test -p tests --test e2e --features e2e -- --test-threads=1
 
@@ -58,7 +59,7 @@ php:
 coverage:
 	@$(LOCATE_PHP); \
 	export CARGO_TARGET_DIR=target/coverage $(PHP_ENV) && \
-	export RUSTFLAGS="$$RUSTFLAGS -Cllvm-args=-runtime-counter-relocation" && \
+	export RUSTFLAGS="$$RUSTFLAGS --cfg tokio_unstable -Cllvm-args=-runtime-counter-relocation" && \
 	eval "$$(cargo llvm-cov show-env --export-prefix)" && \
 	export LLVM_PROFILE_FILE="$$CARGO_LLVM_COV_TARGET_DIR/rapira-%p%c.profraw" && \
 	cargo llvm-cov clean --workspace && \

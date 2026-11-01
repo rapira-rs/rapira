@@ -1,11 +1,13 @@
+//! getRequest(): builds the Rapira\Http\Request object once per exchange.
+
 use std::sync::OnceLock;
 
 use super::*;
 
-unsafe fn emit_headers(dst: *mut zval, g: &Grouped) {
+unsafe fn emit_headers(dst: *mut zval, headers: &[HeaderValues]) {
     unsafe {
-        rapira_array_init(dst, g.0.len() as u32);
-        for (name, values) in &g.0 {
+        rapira_array_init(dst, headers.len() as u32);
+        for HeaderValues { name, values } in headers {
             add_list(
                 dst,
                 header_key(name),
@@ -20,49 +22,20 @@ unsafe fn emit_headers(dst: *mut zval, g: &Grouped) {
 unsafe fn emit_header_map(dst: *mut zval, headers: &HeaderMap) {
     unsafe {
         rapira_array_init(dst, headers.keys_len() as u32);
-        for name in headers.keys() {
+        // shortcut: http 1.5.0 groups values by key reference, recheck on dependency upgrades.
+        // https://docs.rs/http/1.5.0/src/http/header/map.rs.html#2323-2356
+        let mut fields = headers.iter().peekable();
+        while let Some((name, first)) = fields.next() {
+            let rest = std::iter::from_fn(|| {
+                fields
+                    .next_if(|&(n, _)| std::ptr::eq(n, name))
+                    .map(|(_, v)| v)
+            });
+            let values = std::iter::once(first)
+                .chain(rest)
+                .map(HeaderValue::as_bytes);
             let key = name.as_str();
-            let values = headers.get_all(name).iter().map(HeaderValue::as_bytes);
             add_list(dst, header_key(key), key.len(), values);
-        }
-    }
-}
-
-unsafe fn build_tls(dst: *mut zval, t: &Tls) {
-    unsafe {
-        let ce = rapira_ce_tls;
-        let _ = object_init_ex(dst, ce);
-        let o = (*dst).value.obj;
-        zend::prop_stringl(ce, o, c"version", t.version.as_bytes());
-        zend::prop_stringl(ce, o, c"cipher", t.cipher.as_bytes());
-        zend::prop_str_or_null(
-            ce,
-            o,
-            c"negotiatedProtocol",
-            t.alpn.as_deref().map(str::as_bytes),
-        );
-        zend::prop_str_or_null(
-            ce,
-            o,
-            c"requestedServerName",
-            t.server_name.as_deref().map(str::as_bytes),
-        );
-        match t.cert.as_ref() {
-            Some(cert) => {
-                zend::prop_stringl(ce, o, c"certSerial", cert.serial.as_bytes());
-                zend::prop_str_or_null(
-                    ce,
-                    o,
-                    c"certOrganization",
-                    cert.organization.as_deref().map(str::as_bytes),
-                );
-                zend::prop_stringl(ce, o, c"certFingerprint", cert.fingerprint.as_bytes());
-            }
-            None => {
-                zend::prop_null(ce, o, c"certSerial");
-                zend::prop_null(ce, o, c"certOrganization");
-                zend::prop_null(ce, o, c"certFingerprint");
-            }
         }
     }
 }
@@ -89,12 +62,8 @@ unsafe fn build_file(dst: *mut zval, p: &FilePart) {
     }
 }
 
-/// Returns false on a pending exception: property writes must not run with a throw in flight, so the partial graph is released.
-unsafe fn build_multipart(
-    dst: *mut zval,
-    field_parts: &[FieldPart],
-    file_parts: &[FilePart],
-) -> bool {
+/// A property write on a fresh object of a plugin class with a matching type throws nothing; a Zend OOM is a bailout.
+unsafe fn build_multipart(dst: *mut zval, field_parts: &[FieldPart], file_parts: &[FilePart]) {
     unsafe {
         let mut fields: zval = std::mem::zeroed();
         rapira_array_init(&mut fields, field_parts.len() as u32);
@@ -112,24 +81,12 @@ unsafe fn build_multipart(
             emit_headers(&mut headers, &p.headers);
             zend::prop_zval(ce, o, c"headers", &mut headers);
             zval_ptr_dtor(&mut headers);
-            if zend::exception_pending() {
-                zval_ptr_dtor(&mut part);
-                zval_ptr_dtor(&mut fields);
-                zval_ptr_dtor(&mut files);
-                return false;
-            }
             let _ = add_next_index_object(&mut fields, o);
         }
 
         for p in file_parts {
             let mut part: zval = std::mem::zeroed();
             build_file(&mut part, p);
-            if zend::exception_pending() {
-                zval_ptr_dtor(&mut part);
-                zval_ptr_dtor(&mut fields);
-                zval_ptr_dtor(&mut files);
-                return false;
-            }
             let _ = add_next_index_object(&mut files, part.value.obj);
         }
 
@@ -140,11 +97,6 @@ unsafe fn build_multipart(
         zend::prop_zval(ce, o, c"files", &mut files);
         zval_ptr_dtor(&mut fields);
         zval_ptr_dtor(&mut files);
-        if zend::exception_pending() {
-            zval_ptr_dtor(dst);
-            return false;
-        }
-        true
     }
 }
 
@@ -162,7 +114,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_build_request(
 /// Slot offsets of the `Request` properties in declaration order; the class is fixed after MINIT.
 static REQUEST_SLOTS: OnceLock<[u32; 11]> = OnceLock::new();
 
-/// A throw while the property values are built releases them and leaves the memo unset. The slot writes do not throw.
+/// No write here throws. A Zend OOM bails out through this frame, so `RequestView` keeps the owned values in the state.
 unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> bool {
     unsafe {
         if !zend::is_undef(&(*ex).request) {
@@ -181,27 +133,9 @@ unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> b
         build_address(&mut remote, &view.remote);
         let mut server: zval = std::mem::zeroed();
         build_address(&mut server, &view.server);
-        let mut tls: zval = std::mem::zeroed();
-        if let Some(t) = req.tls.as_ref() {
-            build_tls(&mut tls, t);
-        }
         let mut mp: zval = std::mem::zeroed();
-        if let BodyState::Multipart { fields, files } = &st.body
-            && !build_multipart(&mut mp, fields, files)
-        {
-            zval_ptr_dtor(&mut headers);
-            zval_ptr_dtor(&mut remote);
-            zval_ptr_dtor(&mut server);
-            zval_ptr_dtor(&mut tls);
-            return false;
-        }
-        if zend::exception_pending() {
-            zval_ptr_dtor(&mut headers);
-            zval_ptr_dtor(&mut remote);
-            zval_ptr_dtor(&mut server);
-            zval_ptr_dtor(&mut tls);
-            zval_ptr_dtor(&mut mp);
-            return false;
+        if let BodyState::Multipart { fields, files } = &st.body {
+            build_multipart(&mut mp, fields, files);
         }
 
         let [
@@ -248,11 +182,7 @@ unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> b
         }
         zend::slot_init(o, remote_slot, &remote);
         zend::slot_init(o, server_slot, &server);
-        if req.tls.is_some() {
-            zend::slot_init(o, tls_slot, &tls);
-        } else {
-            zend::slot_null(o, tls_slot);
-        }
+        zend::slot_null(o, tls_slot);
         zend::slot_double(o, received_at_slot, req.received_at);
 
         (*ex).request = reqz;

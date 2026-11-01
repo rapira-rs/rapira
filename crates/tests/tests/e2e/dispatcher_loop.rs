@@ -954,20 +954,6 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
             status: Some(413),
         },
         Case {
-            name: "plain line before a repeated multipart line",
-            method: "POST",
-            content_type: &["text/plain", EVIL],
-            body: smuggled.clone(),
-            status: Some(400),
-        },
-        Case {
-            name: "multipart line before a repeated plain line",
-            method: "POST",
-            content_type: &[EVIL, "text/plain"],
-            body: smuggled,
-            status: Some(400),
-        },
-        Case {
             name: "empty multipart body",
             method: "POST",
             content_type: &[MULTIPART],
@@ -987,6 +973,27 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
             content_type: &[],
             body: Vec::new(),
             status: None,
+        },
+        Case {
+            name: "empty body with a repeated multipart line",
+            method: "POST",
+            content_type: &["text/plain", EVIL],
+            body: Vec::new(),
+            status: Some(400),
+        },
+        Case {
+            name: "plain line before a repeated multipart line",
+            method: "POST",
+            content_type: &["text/plain", EVIL],
+            body: smuggled.clone(),
+            status: Some(400),
+        },
+        Case {
+            name: "multipart line before a repeated plain line",
+            method: "POST",
+            content_type: &[EVIL, "text/plain"],
+            body: smuggled,
+            status: Some(400),
         },
     ];
 
@@ -1669,4 +1676,47 @@ fn dechunk(mut raw: &[u8]) -> anyhow::Result<Dechunked> {
         data,
         last_chunk: false,
     })
+}
+
+#[test]
+fn request_header_iterator_keeps_values() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        headers: &'static str,
+        expected: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "empty values and interleaved mixed case names",
+            headers: "x-probe:\r\nx-other: unused\r\nX-Probe: middle\r\nx-probe:\r\n",
+            expected: "x-probe=|middle|",
+        },
+        Case {
+            name: "nine values in one list",
+            headers: "x-probe: one\r\nx-probe: two\r\nx-probe: three\r\nx-probe: four\r\nx-probe: five\r\nx-probe: six\r\nx-probe: seven\r\nx-probe: eight\r\nx-probe: nine\r\n",
+            expected: "x-probe=one|two|three|four|five|six|seven|eight|nine",
+        },
+    ];
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php")).spawn();
+    for case in cases {
+        let stream = TcpStream::connect(srv.addr)?;
+        stream.set_read_timeout(Some(READ))?;
+        let request = format!(
+            "GET / HTTP/1.1\r\nHost: e2e\r\n{}Connection: close\r\n\r\n",
+            case.headers
+        );
+        let StatusBody { status, body } = raw_exchange(stream, request.as_bytes())?;
+        assert_eq!(status, 200, "{}: {body:?}", case.name);
+        assert!(
+            body.lines().any(|line| line == case.expected),
+            "{}: {body:?}",
+            case.name
+        );
+        assert!(
+            body.lines().any(|line| line == "memo-same=true"),
+            "{}: {body:?}",
+            case.name
+        );
+    }
+    Ok(())
 }

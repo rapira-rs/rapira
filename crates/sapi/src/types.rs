@@ -11,33 +11,13 @@ pub enum Addr {
     Unix(Option<PathBuf>),
 }
 
-#[derive(Debug, Clone)]
-pub struct ClientCert {
-    pub serial: String,
-    pub organization: Option<String>,
-    pub fingerprint: String,
-}
-
-#[derive(Debug, Clone)]
-pub struct Tls {
-    pub version: String,
-    pub cipher: String,
-    /// PHP `Tls::$negotiatedProtocol`.
-    pub alpn: Option<String>,
-    /// PHP `Tls::$requestedServerName`.
-    pub server_name: Option<String>,
-    pub cert: Option<ClientCert>,
-}
-
-/// A well-formed response stream is `Interim* Head? (Chunk|File)* End?`; a channel closing without `End` means the producer died.
+/// A well-formed response stream is `Head? (Chunk|File)* End?`; a channel closing without `End` means the producer died.
 pub enum Frame {
-    /// Advisory interim head (100-199, never 101).
-    Interim(ResponseHead),
     Head {
         head: ResponseHead,
         /// Some: the framing the consumer must apply; None: the consumer chooses (chunked on HTTP/1.1).
         content_length: Option<u64>,
-        /// 204, 304, 1xx or a HEAD request: no body bytes and no framing fields on the wire.
+        /// 204, 304, 101 or a HEAD request: no body bytes and no framing fields on the wire.
         bodiless: bool,
     },
     Chunk(Bytes),
@@ -53,7 +33,7 @@ pub enum Frame {
     },
 }
 
-/// `unlink` is the one remover: seal calls it at finalize, Drop is the abnormal-path net.
+/// `unlink` is the one remover: seal calls it at finalize; Drop removes a file that a bailout (fatal or timeout) leaves behind.
 pub struct SpooledFile {
     pub path: PathBuf,
 }
@@ -129,7 +109,6 @@ pub struct Request {
     pub body: Body,
     /// Unix seconds.
     pub received_at: f64,
-    pub tls: Option<Tls>,
 }
 
 #[derive(Debug)]
@@ -371,7 +350,6 @@ mod tests {
                 content_length: -1,
                 body: Body::Raw(std::io::Cursor::new(Vec::new())),
                 received_at: 0.0,
-                tls: None,
             },
             c: ReqC {
                 method: CString::default(),

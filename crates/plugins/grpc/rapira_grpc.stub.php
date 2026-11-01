@@ -80,7 +80,7 @@ namespace Rapira\Grpc {
      */
     final readonly class Metadata implements \Countable, \IteratorAggregate
     {
-        /** @var array<string, list<string>> */
+        /** @var array<int|string, list<string>> */
         public array $entries;
 
         /**
@@ -246,7 +246,6 @@ namespace Rapira\Grpc\Call {
         case Grpc = 'grpc';
         case GrpcWeb = 'grpc-web';
         case Connect = 'connect';
-        case Rest = 'rest';
     }
 
     /**

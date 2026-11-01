@@ -1,38 +1,19 @@
+//! The stop state of the master: the signal precedence and the TERM then KILL escalation after the QUIT.
+
 use std::time::{Duration, Instant};
 
 use libc::c_int;
-
-/// Escalation phase: the signal already sent; the next deadline advances it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum KillPhase {
-    Quit,
-    Term,
-    Kill,
-}
-
-impl KillPhase {
-    pub(crate) fn advance(&mut self) -> c_int {
-        match self {
-            KillPhase::Quit => {
-                *self = KillPhase::Term;
-                libc::SIGTERM
-            }
-            KillPhase::Term => {
-                *self = KillPhase::Kill;
-                libc::SIGKILL
-            }
-            KillPhase::Kill => libc::SIGKILL,
-        }
-    }
-}
 
 /// Master-wide control state.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum Pctl {
     #[default]
     Normal,
-    /// `deadline` is when the next escalation fires.
-    Stopping { phase: KillPhase, deadline: Instant },
+    Stopping {
+        /// The signal the escalation sends at `deadline`: TERM once, then KILL.
+        next: c_int,
+        deadline: Instant,
+    },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,8 +30,7 @@ impl Pctl {
         matches!(self, Pctl::Stopping { .. })
     }
 
-    /// `stop_deadline` arms the first escalation when this signal starts a stop.
-    /// Override precedence: normal < stopping; only TERM/INT overrides stopping (forced), while a retried QUIT stays graceful.
+    /// TERM, INT or QUIT in Normal starts a graceful stop and arms the first escalation at `stop_deadline`. While stopping, TERM or INT forces the stop and QUIT is ignored.
     pub fn on_signal(&mut self, signo: c_int, stop_deadline: Instant) -> SignalAction {
         match signo {
             libc::SIGTERM | libc::SIGINT | libc::SIGQUIT => match *self {
@@ -58,7 +38,7 @@ impl Pctl {
                 Pctl::Stopping { .. } => SignalAction::Forced,
                 Pctl::Normal => {
                     *self = Pctl::Stopping {
-                        phase: KillPhase::Quit,
+                        next: libc::SIGTERM,
                         deadline: stop_deadline,
                     };
                     SignalAction::Stop
@@ -80,13 +60,13 @@ impl Pctl {
         }
     }
 
-    /// Runs only at the stop deadline: re-arms it one second out and returns the next signal for every worker of every pool.
+    /// Runs only at the stop deadline: sets the next deadline one second after `now` and returns the signal for every worker of every pool.
     pub fn escalate(&mut self, now: Instant) -> c_int {
-        let Pctl::Stopping { phase, deadline } = self else {
+        let Pctl::Stopping { next, deadline } = self else {
             unreachable!("stop escalation outside a stop");
         };
         *deadline = now + Duration::from_secs(1);
-        phase.advance()
+        std::mem::replace(next, libc::SIGKILL)
     }
 }
 
@@ -95,17 +75,42 @@ mod tests {
     use super::*;
 
     #[test]
-    fn normal_stop_signals_enter_stopping() {
+    fn a_stop_signal_in_normal_enters_stopping() {
+        struct Case {
+            name: &'static str,
+            signo: c_int,
+        }
+        let cases = [
+            Case {
+                name: "TERM",
+                signo: libc::SIGTERM,
+            },
+            Case {
+                name: "INT",
+                signo: libc::SIGINT,
+            },
+            Case {
+                name: "QUIT",
+                signo: libc::SIGQUIT,
+            },
+        ];
         let t0 = Instant::now();
-        for signo in [libc::SIGTERM, libc::SIGINT, libc::SIGQUIT] {
+        for case in cases {
             let mut p = Pctl::default();
-            assert_eq!(p.on_signal(signo, t0), SignalAction::Stop);
+            assert_eq!(
+                p.on_signal(case.signo, t0),
+                SignalAction::Stop,
+                "{}",
+                case.name
+            );
             assert_eq!(
                 p,
                 Pctl::Stopping {
-                    phase: KillPhase::Quit,
+                    next: libc::SIGTERM,
                     deadline: t0
-                }
+                },
+                "{}",
+                case.name
             );
         }
     }
@@ -130,12 +135,31 @@ mod tests {
     }
 
     #[test]
-    fn reload_from_normal_only() {
+    fn a_reload_signal_in_normal_reloads() {
+        struct Case {
+            name: &'static str,
+            signo: c_int,
+        }
+        let cases = [
+            Case {
+                name: "USR2",
+                signo: libc::SIGUSR2,
+            },
+            Case {
+                name: "HUP",
+                signo: libc::SIGHUP,
+            },
+        ];
         let t0 = Instant::now();
-        for signo in [libc::SIGUSR2, libc::SIGHUP] {
+        for case in cases {
             let mut p = Pctl::default();
-            assert_eq!(p.on_signal(signo, t0), SignalAction::Reload);
-            assert_eq!(p, Pctl::Normal);
+            assert_eq!(
+                p.on_signal(case.signo, t0),
+                SignalAction::Reload,
+                "{}",
+                case.name
+            );
+            assert_eq!(p, Pctl::Normal, "{}", case.name);
         }
     }
 
@@ -160,11 +184,12 @@ mod tests {
     }
 
     #[test]
-    fn stopping_escalation_phase_progression() {
+    fn stop_escalation_sends_term_then_kill() {
         let t0 = Instant::now();
         let mut p = Pctl::default();
         p.on_signal(libc::SIGTERM, t0);
         assert_eq!(p.escalate(t0), libc::SIGTERM);
+        assert_eq!(p.stop_deadline(), Some(t0 + Duration::from_secs(1)));
         assert_eq!(p.escalate(t0), libc::SIGKILL);
         assert_eq!(p.escalate(t0), libc::SIGKILL);
     }

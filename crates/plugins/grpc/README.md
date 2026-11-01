@@ -11,33 +11,33 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `dispatcher()` returns `DISPATCHER_CLASSES`, the dispatcher classes.
 - The crate exports `rapira_grpc_register_classes`. MINIT calls it after the base classes to register the `Rapira\Grpc` classes.
 - `prepare()` runs in the master before the fork, with no runtime. It sets the service list that `getServices()` returns, binds the listener with `rapira_net::bind`, and builds the routes that the plugin answers without PHP: health, and reflection when it is on.
-- `serve()` runs in the worker on the plugin thread `rapira-grpc`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the sink to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
+- `serve()` runs in the worker on the plugin thread `rapira-grpc`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the `Intake` to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
 
-`serve()` takes the worker's `Sink`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. `PhpDispatcher` routes each unary method of a configured service to PHP: it builds a `Call` and submits it to the intake. PHP finalizes the call with `respond()` or `fail()`, and the plugin sends the outcome to the client.
+`serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. `PhpDispatcher` routes each unary method of a configured service to PHP: it builds a `GrpcState` and submits it to the intake. PHP finalizes the call with `respond()` or `fail()`, and the plugin sends the outcome to the client.
 
-`Call` is the work unit. It implements `rapira_sapi::work::Work`:
+`GrpcState` in `src/php/call.rs` is the work unit. It implements `rapira_sapi::work::Work`:
 
 - `cancelled()` returns true when the call is closed: the client cancelled it, closed the connection, or the deadline passed. `receive()` skips such a unit.
 - `attach()` connects the unit to the `Rapira\Grpc\UnaryCall` object that `receive()` returns.
-- `into_cgi()` returns None: a grpc unit cannot run in the classic or worker mode.
+- `into_cgi()` is unreachable: the root refuses a grpc pool outside dispatcher mode at boot.
 - `shed()` answers UNAVAILABLE when the PHP boot of the worker failed.
 
 ## Crate layout
 
 - `Cargo.toml`: depends on `rapira_sapi`, `rapira_net`, `rapira_config`, `rapira_grpc_auth` and the connect-rust crates. `rapira_php_build` is a build dependency.
-- `build.rs`: compiles the C files with `rapira_php_build::compile`, against the PHP headers and the `rapira_sapi.h` directory from `DEP_RAPIRA_SAPI_INCLUDE`.
+- `build.rs`: compiles the C files with `rapira_php_build::compile` against the PHP headers. `rapira_grpc.h` includes `rapira_sapi.h` by its path in `crates/sapi`.
 - `rapira_grpc.stub.php`: the PHP stub of the `Rapira\Grpc` and `Rapira\Internal\Grpc` classes.
 - `rapira_grpc_arginfo.h`: generated from the stub by `make stubs`. Do not edit it.
 - `rapira_grpc.h`: the C layouts of the call object and the response metadata object, and the class entries.
-- `rapira_grpc_classes.c`: `rapira_grpc_register_classes`, the object handlers, the constructors of the internal classes, and the shells of `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters. MINIT calls `rapira_grpc_register_classes` after the base classes.
-- `rapira_grpc.c`: the other method shells: the value classes, `name()` and `getServices()` of the dispatcher, the call and the response metadata.
+- `rapira_grpc_classes.c`: `rapira_grpc_register_classes` and the object handlers of the call and the response metadata. MINIT calls `rapira_grpc_register_classes` after the base classes. The stub aliases the constructors of the internal classes, `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters to the shared shells in `crates/sapi/rapira_dispatcher.c`.
+- `rapira_grpc.c`: the method shells of the value classes, `name()` and `getServices()` of the dispatcher, the call and the response metadata.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set and builds the interceptors.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
-- `src/call.rs`: the `Call` unit and its `Work` impl, and the `UnaryCall`, `UnaryReply` and `RpcStatus` types.
-- `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES` and the declaration of `rapira_grpc_register_classes` (`mod.rs`), the call and its metadata (`call.rs`), and the value class constructors (`values.rs`).
+- `src/call.rs`: the `UnaryCall`, `UnaryReply` and `RpcStatus` types.
+- `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES` and the declaration of `rapira_grpc_register_classes` (`mod.rs`), the `GrpcState` unit with its `Work` impl, the call and its metadata (`call.rs`), and the value class constructors (`values.rs`).
 
 ## Protocols
 
@@ -61,7 +61,7 @@ The remote address is in the request extensions as `rapira_sapi::Addr`. PHP gets
 
 ## Interceptors
 
-`[grpc].interceptors` lists the interceptor names in chain order. The master builds one `connectrpc::Interceptor` for each name before the fork. Each worker registers them on its `ConnectRpcService` with `with_interceptor_arc`, the first listed outermost. Without interceptors, connect-rust only checks that its chain is empty.
+`[grpc].interceptors` lists the interceptor names in chain order. The only supported name is `"auth"`. The master builds each interceptor before the fork. Each worker adds them to its `ConnectRpcService` with `with_interceptor_arc`, in the configured order. The first listed interceptor runs first.
 
 The chain covers every GET and POST request to the listener: the PHP methods, health, reflection, and paths that match no method. A request with another HTTP method gets 405 or 404 from connect-rust before any interceptor runs, and never reaches PHP. connect-rust runs the `intercept_head` of each interceptor before it reads the request body. A rejection in `intercept_head` reaches the client in the format of its protocol, and PHP does not see the call. An interceptor that must change the metadata that PHP sees uses `intercept_unary`, because `intercept_head` can read the headers but not change them.
 
@@ -73,11 +73,11 @@ To add a built-in interceptor:
 - In the root `Cargo.toml`, add the crate to the workspace `members` and to `[workspace.dependencies]`.
 - Add the crate to the dependencies in `crates/plugins/grpc/Cargo.toml`.
 - In `src/config.rs`, add its table to `Section`, as `auth` is for `[grpc.auth]`.
-- Resolve the table in `settings`, and give the result to `resolve_interceptors` as a new argument.
+- Resolve the table in `settings` and pass its settings to `resolve_interceptors`.
 - Add a variant with its settings to `config::Interceptor`.
-- In `resolve_interceptors`, match its name, add the name to the known names of the unknown-name error, and refuse a configured table that the list does not name.
+- In `resolve_interceptors`, match its name and add it to the list. Add its name to the unknown-name error. Reject a configured table if the list does not name it.
 - Build it in `Server::from_settings`.
-- In the `src/config.rs` tests, add an arm to the match in `interceptor_list_and_tables_must_agree`, and add cases for the new name.
+- In the `src/config.rs` tests, add an arm to the match in `interceptor_list_and_tables_must_agree`. Add cases for the new name and its position in the list.
 - Add an e2e test in `crates/tests/tests/e2e/` that starts `rapira` with the new `[grpc.<name>]` table through `Spawn::grpc_extra`, and add its `mod` line to `main.rs`.
 - Add a commented example of the table to `examples/rapira.toml`, next to `[grpc.auth]`.
 - Add its boot errors to the error list in the Config section.
@@ -154,7 +154,7 @@ grpcurl -plaintext 127.0.0.1:50051 list
 
 ## Shutdown
 
-On the stop signal the accept loop ends, health reports NOT_SERVING, and open `Watch` streams end. Calls in flight drain within the drain window (see Config). Connections that are open after the drain window are cut, and the shutdown reports an error. An open reflection stream, for example an Evans REPL session (https://github.com/ktr0731/evans), holds its connection until the drain window ends.
+On the stop signal the accept loop ends, health reports NOT_SERVING, and open `Watch` streams end. Calls in flight drain within the drain window (see Config). Connections that are open after the drain window are cut. The shutdown reports an error only when a call is still in flight at the end of the window. An open reflection stream, for example an Evans REPL session (https://github.com/ktr0731/evans), holds its connection until the drain window ends.
 
 The listener sends an HTTP/2 keepalive PING to a connection that sends no request, no request data and no PING answer for `keepalive_interval_secs`, and closes the connection when the peer does not answer within `keepalive_timeout_secs`. Both keys are 10 seconds by default. An HTTP/2 peer that is gone without a FIN keeps its connection open for at most the sum of both keys after its last frame. HTTP/1.1 has no PING, so these keys do not apply to a gRPC-Web or Connect client on HTTP/1.1.
 
@@ -179,7 +179,7 @@ The `[grpc]` table. Unknown keys fail the boot.
 - `keepalive_interval_secs`: the time without a new request, request data or a PING answer after which the listener sends an HTTP/2 keepalive PING. Default `10`. It must be at least 1.
 - `keepalive_timeout_secs`: the time the listener waits for the PING answer before it closes the connection. Default `10`. It must be at least 1.
 - `interceptors`: the interceptor names, in chain order. Default: empty. The only name is `"auth"`.
-- `[grpc.auth]`: the `auth` interceptor. `tokens_file`: the file of bearer tokens, relative to the directory of `rapira.toml`. Required. One token per line. Blank lines and lines that start with `#` are skipped.
+- `[grpc.auth]`: the `auth` interceptor. `tokens_file`: the file of bearer tokens, relative to the directory of `rapira.toml`. Required. One token per line. Blank lines and lines that start with `#` are skipped. Rapira removes the whitespace at the start and end of each line.
 - `[grpc.pool]`: the worker pool. It takes the keys of `[http.pool]`, and its `mode` must be `"dispatcher"`.
 
 The drain window is not a key of this table. It is `[supervisor].process_control_timeout_secs` minus 5 seconds, or minus half of it when it is below 10 seconds. The drain therefore ends before the master sends SIGTERM.

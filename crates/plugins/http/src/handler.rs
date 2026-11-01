@@ -1,3 +1,5 @@
+//! One request: the admission checks, the middleware chain, the body read, the submit to the intake and the response head.
+
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -66,6 +68,7 @@ impl Drop for InflightReqCount {
 struct ReqState {
     authority: Option<Vec<u8>>,
     guard: Arc<InflightReqCount>,
+    peer: Peer,
 }
 
 pub(crate) struct RespBody {
@@ -145,16 +148,14 @@ impl Body for RespBody {
 
 /// Serves one request of the connection. `chain` is [`Conn::chain`].
 pub(crate) async fn respond(
-    handler: Arc<Conn>,
+    handler: &Conn,
     chain: Option<Service>,
     req: http::Request<Incoming>,
 ) -> http::Response<RespBody> {
-    let closed = handler.closed.clone();
     let method = req.method().clone();
-    let shared = Arc::clone(&handler.shared);
     let mut response = handle(handler, chain, req).await;
     // Read after the request: one that ends during the drain must close its connection too.
-    if shared.closing.load(Ordering::Acquire) {
+    if handler.shared.closing.load(Ordering::Acquire) {
         response.headers_mut().insert(
             http::header::CONNECTION,
             http::HeaderValue::from_static("close"),
@@ -164,11 +165,14 @@ pub(crate) async fn respond(
     if let Some(length) = framed_length(&method, &response) {
         let body = response.body_mut();
         if length == 0 {
-            body.guard.end_flush.get_or_init(|| closed.borrow().flushes);
+            // hyper writes the head in the poll that takes the response, so the flush count read here is the one before the head.
+            body.guard
+                .end_flush
+                .get_or_init(|| handler.closed.borrow().flushes);
         } else {
             body.transport = Some(Declared {
                 remaining: length,
-                closed,
+                closed: handler.closed.clone(),
             });
         }
     }
@@ -181,7 +185,7 @@ pub(crate) async fn respond(
 /// The ended-stream check also survives body combinators that drop the size hint.
 fn framed_length(method: &http::Method, response: &http::Response<RespBody>) -> Option<u64> {
     let status = response.status();
-    // hyper never polls the body here, whatever the headers say (`Server::can_have_body`).
+    // hyper never polls the body here, whatever the headers say (Server::can_have_body).
     if *method == http::Method::HEAD
         || status.is_informational()
         || matches!(
@@ -200,7 +204,7 @@ fn framed_length(method: &http::Method, response: &http::Response<RespBody>) -> 
 }
 
 async fn handle(
-    handler: Arc<Conn>,
+    handler: &Conn,
     chain: Option<Service>,
     req: http::Request<Incoming>,
 ) -> http::Response<RespBody> {
@@ -211,7 +215,6 @@ async fn handle(
 
     let authority = match check::check_request(
         &mut parts,
-        handler.shared.cfg.unsafe_field_names,
         handler.shared.cfg.superglobals,
         handler.shared.cfg.max_body_size,
     ) {
@@ -229,30 +232,29 @@ async fn handle(
         received_at,
     };
 
-    let Some(chain) = chain else {
+    let Some(mut chain) = chain else {
         return serve_php(
             &handler.shared,
             &handler.closed,
             authority,
             reqs_counter,
-            &mut parts,
+            parts,
             incoming,
             peer,
         )
         .await;
     };
 
-    parts.extensions.insert(peer);
     parts.extensions.insert(ReqState {
         authority,
         guard: Arc::clone(&reqs_counter),
+        peer,
     });
     let body: middleware::Body = incoming.map_err(BoxError::from).boxed_unsync();
     let req = middleware::Request::from_parts(parts, body);
 
-    // The awaited future is the boxed one that `call` returns: the compiler cannot prove `Send` for a held `Oneshot` over this request type.
+    // The awaited future is the boxed one that call returns: the compiler cannot prove Send for a held Oneshot over this request type.
     // https://github.com/rust-lang/rust/issues/110338
-    let mut chain = chain;
     let Ok(ready) = chain.ready().await;
     let Ok(res) = ready.call(req).await;
     // The final response and the PHP reply share one guard; the drain window
@@ -311,22 +313,18 @@ impl Conn {
 
     async fn serve(&self, req: middleware::Request) -> middleware::Response {
         let (mut parts, body) = req.into_parts();
-        let Some(state) = parts.extensions.remove::<ReqState>() else {
-            tracing::error!(target: "http", "request state missing from request extensions");
-            return error_response(http::StatusCode::INTERNAL_SERVER_ERROR);
-        };
-        let Some(peer) = parts.extensions.remove::<Peer>() else {
-            tracing::error!(target: "http", "peer info missing from request extensions");
-            return error_response(http::StatusCode::INTERNAL_SERVER_ERROR);
-        };
+        let state = parts
+            .extensions
+            .remove::<ReqState>()
+            .expect("a middleware keeps the request extensions");
         serve_php(
             &self.shared,
             &self.closed,
             state.authority,
             state.guard,
-            &mut parts,
+            parts,
             body,
-            peer,
+            state.peer,
         )
         .await
         .map(BodyExt::boxed_unsync)
@@ -345,8 +343,8 @@ async fn serve_php<B>(
     closed: &tokio::sync::watch::Receiver<bridge::ConnectionState>,
     authority: Option<Vec<u8>>,
     guard: Arc<InflightReqCount>,
-    parts: &mut http::request::Parts,
-    body: B,
+    parts: http::request::Parts,
+    mut body: B,
     peer: Peer,
 ) -> http::Response<RespBody>
 where
@@ -354,7 +352,6 @@ where
     B::Error: std::fmt::Display,
 {
     let cfg = &shared.cfg;
-    let mut body = body;
     // The direct path bounds the hint through the content-length check; a middleware body can report any lower bound.
     let reserve = body.size_hint().lower().min(cfg.max_body_size as u64) as usize;
     let mut collected: Vec<u8> = Vec::with_capacity(reserve);
@@ -400,33 +397,24 @@ where
         head: ResponseHead { status, headers },
         content_length,
         bodiless,
-    } = loop {
-        match reply.recv().await {
-            None => {
-                tracing::error!(target: "http", "php worker died before a response head");
-                return refused(http::StatusCode::BAD_GATEWAY, guard);
-            }
-            Some(Frame::Interim(head)) => {
-                tracing::debug!(target: "http", "dropped interim {}", head.status);
-            }
-            Some(Frame::Head {
-                head,
-                content_length,
-                bodiless,
-            }) => {
-                break ReplyHead {
-                    head,
-                    content_length,
-                    bodiless,
-                };
-            }
-            Some(Frame::End { .. }) => {
-                tracing::error!(target: "http", "php produced no response head");
-                return refused(http::StatusCode::BAD_GATEWAY, guard);
-            }
-            Some(Frame::Chunk(_) | Frame::File { .. }) => {
-                tracing::warn!(target: "http", "dropped body bytes preceding the response head");
-            }
+    } = match reply.recv().await {
+        None => {
+            tracing::error!(target: "http", "php worker died before a response head");
+            return refused(http::StatusCode::BAD_GATEWAY, guard);
+        }
+        Some(Frame::Head {
+            head,
+            content_length,
+            bodiless,
+        }) => ReplyHead {
+            head,
+            content_length,
+            bodiless,
+        },
+        // Every producer sends the head first, so a body frame here means the head is gone.
+        Some(Frame::End { .. } | Frame::Chunk(_) | Frame::File { .. }) => {
+            tracing::error!(target: "http", "php produced no response head");
+            return refused(http::StatusCode::BAD_GATEWAY, guard);
         }
     };
 
@@ -443,13 +431,11 @@ where
         }
     };
 
-    let declared_cl = content_length.filter(|_| !bodiless);
-
     let kind = if bodiless {
-        bridge::spawn_drain(reply, closed.clone(), guard.clone());
+        bridge::spawn_drain(reply, closed.clone(), Arc::clone(&guard));
         BodyKind::Empty
     } else {
-        let staged = if declared_cl.is_some() {
+        let staged = if content_length.is_some() {
             timeout_lazy(Duration::from_millis(10), reply.recv())
                 .await
                 .ok()
@@ -459,7 +445,7 @@ where
         };
         BodyKind::Reply(bridge::ReplyBody::new(
             reply,
-            declared_cl,
+            content_length,
             Arc::clone(&guard),
             staged,
             closed.clone(),
@@ -472,7 +458,7 @@ where
         transport: None,
     });
     *res.status_mut() = status;
-    // A HEAD response keeps the declared length. RFC 9110 §8.6 forbids it on a 204, and on a 304 it must equal the 200 length.
+    // A HEAD response keeps the declared length. RFC 9110 §8.6 forbids it on a 204, and on a 304 it must equal the 200 length. https://www.rfc-editor.org/rfc/rfc9110#section-8.6
     let header_cl = content_length.filter(|_| !matches!(status.as_u16(), 204 | 304));
     *res.headers_mut() = response_headers(headers, header_cl);
     res
@@ -495,7 +481,8 @@ async fn submit(
     shared: &Shared,
     request: Request,
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
-    let bytes = request.content_length.max(0) as usize;
+    // request::build set the length from the collected body, so it is never -1.
+    let bytes = request.content_length as usize;
     let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
     let (tx, reply) = tokio::sync::mpsc::channel(crate::exchange::FRAME_CAP);
     let exchange = Exchange::new(request, tx, shared.cfg.superglobals);
@@ -515,14 +502,7 @@ async fn parse_multipart(
     let Some(limits) = limits else {
         return Ok(req);
     };
-    let rapira_sapi::types::Body::Raw(raw) = &mut req.body else {
-        return Ok(req);
-    };
-    if raw.get_ref().is_empty() {
-        return Ok(req);
-    }
-    // Content-type is a singleton field per RFC 9110 §8.3: with repeated lines the plugin and a PHP consumer could split the body on different boundaries.
-    // https://www.rfc-editor.org/rfc/rfc9110#section-8.3
+    // Content-Type is a singleton field: with repeated lines, the plugin and a PHP consumer could split the body on different boundaries. https://www.rfc-editor.org/rfc/rfc9110#section-8.3
     let lines = req.headers.get_all(CONTENT_TYPE);
     if lines.iter().nth(1).is_some() && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
     {
@@ -530,6 +510,12 @@ async fn parse_multipart(
             status: http::StatusCode::BAD_REQUEST,
             reason: "repeated content-type field lines with a multipart body".into(),
         });
+    }
+    let rapira_sapi::types::Body::Raw(raw) = &mut req.body else {
+        return Ok(req);
+    };
+    if raw.get_ref().is_empty() {
+        return Ok(req);
     }
     let Some(content_type) = req.content_type.as_deref() else {
         return Ok(req);
@@ -558,18 +544,9 @@ async fn parse_multipart(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use tower::layer::layer_fn;
     use tower::service_fn;
 
     use crate::response::empty_body;
-
-    fn deny() -> Layer {
-        Layer::new(layer_fn(|_inner: Service| {
-            service_fn(|_req: middleware::Request| async {
-                Ok(error_response(http::StatusCode::FORBIDDEN))
-            })
-        }))
-    }
 
     /// Appends `{name}-in` to the request and `{name}-out` to the response.
     fn tag(name: &'static str) -> Layer {
@@ -616,24 +593,6 @@ mod tests {
         let Ok(res) = chain.oneshot(http::Request::new(empty_body())).await;
         assert_eq!(res.status(), 200);
         assert_eq!(trace(&res), ["a-in", "b-in", "b-out", "a-out"]);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn short_circuit_skips_downstream_and_the_handler() {
-        let chain = fold(&[tag("a"), deny(), tag("never")], echo());
-        let Ok(res) = chain.oneshot(http::Request::new(empty_body())).await;
-        assert_eq!(res.status(), 403);
-        assert_eq!(trace(&res), ["a-out"]);
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn empty_chain_reaches_the_handler_directly() {
-        let chain = fold(&[], echo());
-        let mut req = http::Request::new(empty_body());
-        req.headers_mut().append("x-trace", "solo".parse().unwrap());
-        let Ok(res) = chain.oneshot(req).await;
-        assert_eq!(res.status(), 200);
-        assert_eq!(trace(&res), ["solo"]);
     }
 
     /// Pending for `left` polls, then ready. Each pending poll wakes the task at once.

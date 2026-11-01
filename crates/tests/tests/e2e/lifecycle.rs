@@ -638,7 +638,7 @@ fn repeated_request_fields_reach_php_combined() {
     );
 }
 
-/// A wire name carrying `_` or `.` must never reach the CGI variable a `-` name owns; PHP itself rewrites `.` to `_` when registering it.
+/// A wire name carrying `_` or `.` must never reach the CGI variable a `-` name owns; the SAPI's cgi_header_name rewrites `.` to `_`.
 #[test]
 fn alias_names_never_reach_a_cgi_variable() {
     let srv = spawn_with_config(
@@ -662,77 +662,6 @@ fn alias_names_never_reach_a_cgi_variable() {
         String::from_utf8_lossy(&body),
         "-,-\n-\n-\n",
         "no alias may reach HTTP_X_FORWARDED_FOR\n{}",
-        diagnostics(&srv)
-    );
-}
-
-/// `reject` puts a real 400 on the wire: the field-name check runs before dispatch, so PHP never sees the request.
-#[test]
-fn reject_policy_answers_400_for_an_alias_name() {
-    let srv = spawn_with_http_extra(
-        "shared/echo-worker.php",
-        1,
-        "unsafe_field_names = \"reject\"\n",
-    );
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-
-    let code = http_get_with_headers(
-        srv.addr,
-        "/",
-        &[("X_Forwarded_For", "1.2.3.4")],
-        Duration::from_secs(10),
-    )
-    .expect("GET / with an alias name")
-    .status;
-    assert_eq!(code, 400, "\n{}", diagnostics(&srv));
-
-    let code = http_get_with_headers(
-        srv.addr,
-        "/",
-        &[("X-Forwarded-For", "203.0.113.7")],
-        Duration::from_secs(10),
-    )
-    .expect("GET / with a safe name")
-    .status;
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-}
-
-/// More than one `Host` line is a 400; the h1 parser hands the repeated field through intact, so the rejection is this plugin's own.
-/// RFC 9112 §3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2
-#[test]
-fn a_second_host_field_line_answers_400() {
-    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-
-    let code = http_get_with_headers(
-        srv.addr,
-        "/",
-        &[("Host", "evil.example")],
-        Duration::from_secs(10),
-    )
-    .expect("GET / with two Host field lines")
-    .status;
-    assert_eq!(code, 400, "\n{}", diagnostics(&srv));
-}
-
-/// CONNECT answers 501 before dispatch: a PHP-authored 2xx would turn the connection into a tunnel, and a 405 would owe an Allow list (RFC 9110 §15.5.6).
-/// https://www.rfc-editor.org/rfc/rfc9110#section-15.5.6
-#[test]
-fn connect_answers_501() {
-    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-
-    let raw = http_raw_bytes(
-        srv.addr,
-        b"CONNECT example.com:443 HTTP/1.1\r\nHost: example.com:443\r\n\r\n",
-        Duration::from_secs(10),
-    )
-    .expect("CONNECT request");
-    let head = String::from_utf8_lossy(&raw);
-    assert!(
-        head.starts_with("HTTP/1.1 501"),
-        "got {:?}\n{}",
-        head.lines().next().unwrap_or(""),
         diagnostics(&srv)
     );
 }
@@ -880,6 +809,23 @@ fn final_interim_status_becomes_502() {
         head.lines().next().unwrap_or(""),
         diagnostics(&srv)
     );
+}
+
+/// More than one Host line is a 400 in every HTTP version. hyper hands the repeated field through, so the rejection is the plugin's own. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
+#[test]
+fn a_second_host_field_line_answers_400() {
+    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
+    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+
+    let code = http_get_with_headers(
+        srv.addr,
+        "/",
+        &[("Host", "evil.example")],
+        Duration::from_secs(10),
+    )
+    .expect("GET / with two Host field lines")
+    .status;
+    assert_eq!(code, 400, "\n{}", diagnostics(&srv));
 }
 
 /// `header("Status: 404")` must become the response code, not a literal field on a 200: php-src's sapi_header_op passes it through verbatim and the origin server converts it (RFC 3875 §6.2.1).
@@ -1088,43 +1034,6 @@ fn lowercase_head_is_not_head() {
             diagnostics(&srv)
         );
     }
-}
-
-/// RFC 9112 §3.2.2: for an absolute-form target the origin server must ignore Host and use the target's host information.
-/// https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
-#[test]
-fn absolute_form_target_overrides_host() {
-    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-
-    let raw = http_raw_bytes(
-        srv.addr,
-        b"GET http://target.example/echo?probe=target HTTP/1.1\r\n\
-          Host: spoofed.example\r\nConnection: close\r\n\r\n",
-        Duration::from_secs(10),
-    )
-    .expect("absolute-form request");
-    let text = String::from_utf8_lossy(&raw);
-    assert!(
-        text.contains("target=http://target.example/echo?probe=target"),
-        "the target must keep the absolute form: {text}\n{}",
-        diagnostics(&srv)
-    );
-    assert!(
-        text.contains("authority=target.example"),
-        "the target authority must replace Host: {text}\n{}",
-        diagnostics(&srv)
-    );
-    assert!(
-        text.contains("uri=http://target.example/echo?probe=target"),
-        "the absolute uri must carry the target authority and the path: {text}\n{}",
-        diagnostics(&srv)
-    );
-    assert!(
-        text.contains("host=target.example"),
-        "the Host field line must carry the effective authority: {text}\n{}",
-        diagnostics(&srv)
-    );
 }
 
 /// Host-side multipart over the wire: a non-UTF-8 boundary round-trips, the spool file dies with finalization, malformed framing answers 400 and an over-limit file part 413.

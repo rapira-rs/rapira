@@ -1,3 +1,5 @@
+//! The `GrpcState` work unit, the request Metadata and Context, the services list, and the Rust behind the methods of UnaryCall and ResponseMetadata.
+
 use std::ffi::{CStr, c_char, c_void};
 
 use base64::Engine as _;
@@ -79,10 +81,12 @@ pub unsafe extern "C" fn rapira_rs_grpc_services(rv: *mut zval) -> bool {
     })
 }
 
-/// One metadata name with its values in arrival order (request) or add order (response). `-bin` values are raw bytes.
-type Field = (HeaderName, Vec<Vec<u8>>);
-/// In order of the first value of each name.
-type Fields = Vec<Field>;
+/// One metadata name with values in arrival or add order. `-bin` values are raw bytes.
+#[derive(Debug, PartialEq)]
+pub struct MetadataField {
+    pub name: HeaderName,
+    pub values: Vec<Vec<u8>>,
+}
 
 /// Request `-bin` values use the standard alphabet with or without padding. Implementations "MUST accept padded and un-padded values": https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
 const BIN_DECODE: GeneralPurpose = GeneralPurpose::new(
@@ -120,8 +124,8 @@ pub(crate) fn is_binary(name: &[u8]) -> bool {
 /// `Context::$metadata`: the application keys, with `-bin` values decoded. A text value that is not printable or an undecodable `-bin` value is dropped, and a key with no values left is absent.
 /// A `-bin` value is split on "," first: "Implementations must split Binary-Headers on "," before decoding the Base64-encoded values." https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
 /// The optional whitespace around "," follows the HTTP list rule. https://www.rfc-editor.org/rfc/rfc9110#section-5.6.1
-pub fn context_metadata(headers: &HeaderMap) -> Fields {
-    let mut out = Fields::new();
+pub fn context_metadata(headers: &HeaderMap) -> Vec<MetadataField> {
+    let mut out = Vec::new();
     for name in headers.keys() {
         if reserved(name.as_str()) {
             continue;
@@ -148,7 +152,10 @@ pub fn context_metadata(headers: &HeaderMap) -> Fields {
             }
         }
         if !values.is_empty() {
-            out.push((name.clone(), values));
+            out.push(MetadataField {
+                name: name.clone(),
+                values,
+            });
         }
     }
     out
@@ -156,9 +163,9 @@ pub fn context_metadata(headers: &HeaderMap) -> Fields {
 
 /// Response metadata in wire form. `-bin` values are base64 without padding: implementations "should emit un-padded values" (PROTOCOL-HTTP2 Requests).
 /// A text value loses its edge spaces: an HTTP/2 field value "MUST NOT start or end with an ASCII whitespace character" (https://www.rfc-editor.org/rfc/rfc9113#section-8.2.1), and for gRPC "it may be stripped" (PROTOCOL-HTTP2 Requests).
-fn wire(fields: &[Field]) -> HeaderMap {
+fn wire(fields: &[MetadataField]) -> HeaderMap {
     let mut map = HeaderMap::new();
-    for (name, values) in fields {
+    for MetadataField { name, values } in fields {
         let binary = is_binary(name.as_str().as_bytes());
         for v in values {
             let value = if binary {
@@ -166,10 +173,10 @@ fn wire(fields: &[Field]) -> HeaderMap {
             } else {
                 HeaderValue::from_bytes(v.trim_ascii())
             };
-            // add_core accepted only printable ASCII text values
-            if let Ok(value) = value {
-                map.append(name.clone(), value);
-            }
+            map.append(
+                name.clone(),
+                value.expect("add_core accepts only printable ASCII text, and base64 is ASCII"),
+            );
         }
     }
     map
@@ -178,7 +185,7 @@ fn wire(fields: &[Field]) -> HeaderMap {
 /// Owned values of the Context object. The state keeps them because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
 struct ContextView {
     remote: AddrOwned,
-    metadata: Fields,
+    metadata: Vec<MetadataField>,
 }
 
 pub(crate) struct GrpcState {
@@ -187,8 +194,8 @@ pub(crate) struct GrpcState {
     /// None after the outcome went out or the call was discarded: the call is then finalized.
     reply: Option<oneshot::Sender<UnaryReply>>,
     discarded: bool,
-    headers: Fields,
-    trailers: Fields,
+    headers: Vec<MetadataField>,
+    trailers: Vec<MetadataField>,
     /// Filled by the first `getContext()`.
     view: Option<ContextView>,
 }
@@ -201,8 +208,8 @@ impl GrpcState {
             received_at: now_unix_f64(),
             reply: Some(reply),
             discarded: false,
-            headers: Fields::new(),
-            trailers: Fields::new(),
+            headers: Vec::new(),
+            trailers: Vec::new(),
             view: None,
         }
     }
@@ -260,12 +267,12 @@ impl Held for GrpcState {
         }
         self.discarded = true;
         self.reply = None;
-        sb_update(Event::Handled(true));
+        sb_update(Event::Handled { errored: true });
     }
 }
 
-/// Cores return these instead of throwing: no owned state may be live when `zend_throw_*` bailouts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A core returns a Verb and throws nothing: `thrown` throws after the core dropped its owned state, because `zend_throw_*` can bail out.
+#[derive(Debug, PartialEq)]
 enum Verb {
     Ok,
     Finalized,
@@ -322,9 +329,12 @@ fn add_core(
     } else {
         &mut st.headers
     };
-    match half.iter_mut().find(|(n, _)| *n == name) {
-        Some((_, values)) => values.push(value.to_vec()),
-        None => half.push((name, vec![value.to_vec()])),
+    match half.iter_mut().find(|field| field.name == name) {
+        Some(field) => field.values.push(value.to_vec()),
+        None => half.push(MetadataField {
+            name,
+            values: vec![value.to_vec()],
+        }),
     }
     Verb::Ok
 }
@@ -335,32 +345,28 @@ fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
         st.discard();
         return Verb::Discarded;
     }
-    if st.settled() {
+    let Some(reply) = st.reply.take() else {
         return Verb::Finalized;
-    }
+    };
     let outcome = UnaryReply {
         headers: wire(&st.headers),
         trailers: wire(&st.trailers),
         outcome: result,
     };
     // the receiver can drop after the cancelled() check
-    if st
-        .reply
-        .take()
-        .is_some_and(|reply| reply.send(outcome).is_ok())
-    {
-        sb_update(Event::Handled(false));
+    if reply.send(outcome).is_ok() {
+        sb_update(Event::Handled { errored: false });
         Verb::Ok
     } else {
         st.discarded = true;
-        sb_update(Event::Handled(true));
+        sb_update(Event::Handled { errored: true });
         Verb::Discarded
     }
 }
 
 /// The messages of the two finalize errors name the call, as the Responder.php `@throws` lines do.
 /// # Safety
-/// Engine active; can bailout on OOM.
+/// Engine active; can bail out on OOM.
 unsafe fn thrown(v: Verb) -> bool {
     unsafe {
         match v {
@@ -379,17 +385,17 @@ unsafe fn thrown(v: Verb) -> bool {
     false
 }
 
-rapira_sapi::container_of!(pub(crate) grpc_call_from, CallObj);
+rapira_sapi::container_of!(grpc_call_from, CallObj);
 rapira_sapi::container_of!(metadata_from, MetadataObj);
 
 /// A `Rapira\Grpc\Metadata` object over `fields`.
 /// # Safety
 /// `dst` writable; engine active on this thread.
-unsafe fn build_metadata(dst: *mut zval, fields: &[Field]) {
+unsafe fn build_metadata(dst: *mut zval, fields: &[MetadataField]) {
     unsafe {
         let mut entries: zval = std::mem::zeroed();
         rapira_array_init(&mut entries, fields.len() as u32);
-        for (name, values) in fields {
+        for MetadataField { name, values } in fields {
             let key = name.as_str();
             add_list(
                 &mut entries,
@@ -405,10 +411,10 @@ unsafe fn build_metadata(dst: *mut zval, fields: &[Field]) {
     }
 }
 
-fn protocol_case(protocol: Option<Protocol>) -> &'static CStr {
+fn protocol_case(protocol: Protocol) -> &'static CStr {
     match protocol {
-        Some(Protocol::Grpc) => c"Grpc",
-        Some(Protocol::GrpcWeb) => c"GrpcWeb",
+        Protocol::Grpc => c"Grpc",
+        Protocol::GrpcWeb => c"GrpcWeb",
         _ => c"Connect",
     }
 }
@@ -679,7 +685,7 @@ mod tests {
     fn state(reply: oneshot::Sender<UnaryReply>) -> GrpcState {
         let req = UnaryCall {
             method: "rapira.test.v1.EchoService/Echo".into(),
-            protocol: Some(Protocol::Grpc),
+            protocol: Protocol::Grpc,
             metadata: HeaderMap::new(),
             deadline: None,
             remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
@@ -699,106 +705,123 @@ mod tests {
             .collect()
     }
 
-    fn owned(fields: &[(&str, &[&[u8]])]) -> Vec<(String, Vec<Vec<u8>>)> {
-        fields
-            .iter()
-            .map(|(n, vs)| ((*n).to_owned(), vs.iter().map(|v| v.to_vec()).collect()))
-            .collect()
-    }
-
-    fn named(fields: &[Field]) -> Vec<(String, Vec<Vec<u8>>)> {
-        fields
-            .iter()
-            .map(|(n, vs)| (n.as_str().to_owned(), vs.clone()))
-            .collect()
+    fn owned(fields: &[(&str, &[&[u8]])]) -> Vec<MetadataField> {
+        let mut out = Vec::new();
+        for (name, values) in fields {
+            out.push(MetadataField {
+                name: HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                values: values.iter().map(|value| value.to_vec()).collect(),
+            });
+        }
+        out
     }
 
     #[test]
     fn reserved_names_cover_the_transport() {
         struct Case {
+            name: &'static str,
             header: &'static str,
             reserved: bool,
         }
         const CASES: &[Case] = &[
             Case {
+                name: "grpc- prefix",
                 header: "grpc-timeout",
                 reserved: true,
             },
             Case {
+                name: "grpc- prefix with -bin",
                 header: "grpc-status-details-bin",
                 reserved: true,
             },
             Case {
+                name: "content- prefix",
                 header: "content-type",
                 reserved: true,
             },
             Case {
+                name: "connect- prefix",
                 header: "connect-timeout-ms",
                 reserved: true,
             },
             Case {
+                name: "trailer- prefix",
                 header: "trailer-x",
                 reserved: true,
             },
             Case {
+                name: "te",
                 header: "te",
                 reserved: true,
             },
             Case {
+                name: "trailer",
                 header: "trailer",
                 reserved: true,
             },
             Case {
+                name: "host",
                 header: "host",
                 reserved: true,
             },
             Case {
+                name: "connection",
                 header: "connection",
                 reserved: true,
             },
             Case {
+                name: "keep-alive",
                 header: "keep-alive",
                 reserved: true,
             },
             Case {
+                name: "proxy-connection",
                 header: "proxy-connection",
                 reserved: true,
             },
             Case {
+                name: "transfer-encoding",
                 header: "transfer-encoding",
                 reserved: true,
             },
             Case {
+                name: "upgrade",
                 header: "upgrade",
                 reserved: true,
             },
             Case {
+                name: "accept-encoding",
                 header: "accept-encoding",
                 reserved: true,
             },
             Case {
+                name: "application name",
                 header: "user-agent",
                 reserved: false,
             },
             Case {
+                name: "x- name",
                 header: "x-user",
                 reserved: false,
             },
             Case {
+                name: "authorization",
                 header: "authorization",
                 reserved: false,
             },
             Case {
+                name: "grpc without the dash",
                 header: "grpcx",
                 reserved: false,
             },
             Case {
+                name: "x-grpc-web",
                 header: "x-grpc-web",
                 reserved: false,
             },
         ];
         for c in CASES {
-            assert_eq!(reserved(c.header), c.reserved, "{}", c.header);
+            assert_eq!(reserved(c.header), c.reserved, "{}", c.name);
         }
     }
 
@@ -809,7 +832,7 @@ mod tests {
             headers: &'static [(&'static str, &'static str)],
             expected: &'static [(&'static str, &'static [&'static [u8]])],
         }
-        // Sources: PROTOCOL-HTTP2 Requests (padded and unpadded -bin values, split on ",", duplicates joined with ","), grpc-go decodeMetadataHeader (an empty -bin value is an empty value), RFC 9110 5.6.1 (whitespace around the ","), RFC 4648 (`AP8` is 00 ff, `AQI` is 01 02).
+        // Sources: PROTOCOL-HTTP2 Requests (padded and unpadded -bin values, split on ",", duplicates joined with ","), grpc-go decodeMetadataHeader (an empty -bin value is an empty value), RFC 9110 5.6.1 (whitespace around the ","), RFC 4648 ("AP8" is 00 ff, "AQI" is 01 02).
         const CASES: &[Case] = &[
             Case {
                 name: "application key kept",
@@ -879,7 +902,7 @@ mod tests {
         ];
         for c in CASES {
             assert_eq!(
-                named(&context_metadata(&map(c.headers))),
+                context_metadata(&map(c.headers)),
                 owned(c.expected),
                 "{}",
                 c.name
@@ -894,7 +917,7 @@ mod tests {
             field: (&'static str, &'static [u8]),
             expected: &'static str,
         }
-        // Sources: PROTOCOL-HTTP2 Requests ("ASCII-Value should not have leading or trailing whitespace. If it contains leading or trailing whitespace, it may be stripped."), RFC 9113 8.2.1 (a field value must not start or end with whitespace), RFC 4648 (`IA` is one space).
+        // Sources: PROTOCOL-HTTP2 Requests ("ASCII-Value should not have leading or trailing whitespace. If it contains leading or trailing whitespace, it may be stripped."), RFC 9113 8.2.1 (a field value must not start or end with whitespace), RFC 4648 ("IA" is one space).
         const CASES: &[Case] = &[
             Case {
                 name: "leading space stripped",
@@ -924,7 +947,10 @@ mod tests {
         ];
         for c in CASES {
             let (name, value) = c.field;
-            let fields = vec![(HeaderName::from_static(name), vec![value.to_vec()])];
+            let fields = [MetadataField {
+                name: HeaderName::from_static(name),
+                values: vec![value.to_vec()],
+            }];
             let map = wire(&fields);
             assert_eq!(
                 map.get(name).map(HeaderValue::as_bytes),
@@ -935,7 +961,6 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy)]
     enum Setup {
         Open,
         Responded,
@@ -943,13 +968,11 @@ mod tests {
         Detached,
     }
 
-    #[derive(Debug)]
     enum Want {
         Stored {
             name: &'static str,
             value: &'static [u8],
         },
-        Bad,
         BadField(&'static CStr),
         Finalized,
     }
@@ -1010,7 +1033,7 @@ mod tests {
                 binary: false,
                 key: b"grpc-status",
                 value: b"0",
-                want: Want::Bad,
+                want: Want::BadField(c"the metadata name is reserved for the transport"),
             },
             Case {
                 name: "text method refuses -bin",
@@ -1019,7 +1042,7 @@ mod tests {
                 binary: false,
                 key: b"x-tok-bin",
                 value: b"a",
-                want: Want::Bad,
+                want: Want::BadField(c"a metadata name with the -bin suffix takes binary values: use addBinaryHeader() or addBinaryTrailer()"),
             },
             Case {
                 name: "binary method needs -bin",
@@ -1028,7 +1051,7 @@ mod tests {
                 binary: true,
                 key: b"x-tok",
                 value: b"a",
-                want: Want::Bad,
+                want: Want::BadField(c"a binary metadata name must have the -bin suffix"),
             },
             Case {
                 name: "non-ASCII text value",
@@ -1037,7 +1060,7 @@ mod tests {
                 binary: false,
                 key: b"x-a",
                 value: "é".as_bytes(),
-                want: Want::Bad,
+                want: Want::BadField(c"a text metadata value must be printable ASCII"),
             },
             Case {
                 name: "control byte in text value",
@@ -1046,7 +1069,7 @@ mod tests {
                 binary: false,
                 key: b"x-a",
                 value: b"a\nb",
-                want: Want::Bad,
+                want: Want::BadField(c"a text metadata value must be printable ASCII"),
             },
             Case {
                 name: "empty text value",
@@ -1085,7 +1108,7 @@ mod tests {
                 binary: false,
                 key: b"",
                 value: b"a",
-                want: Want::Bad,
+                want: Want::BadField(c"the metadata name is not a valid header name"),
             },
             Case {
                 name: "bad name wins over finalized",
@@ -1094,7 +1117,7 @@ mod tests {
                 binary: false,
                 key: b"grpc-x",
                 value: b"a",
-                want: Want::Bad,
+                want: Want::BadField(c"the metadata name is reserved for the transport"),
             },
             Case {
                 name: "after finalize",
@@ -1150,9 +1173,8 @@ mod tests {
                 Want::Stored { name, value } => {
                     assert_eq!(v, Verb::Ok, "{}", c.name);
                     let half = if c.trailer { &st.trailers } else { &st.headers };
-                    assert_eq!(named(half), owned(&[(name, &[value])]), "{}", c.name);
+                    assert_eq!(*half, owned(&[(name, &[value])]), "{}", c.name);
                 }
-                Want::Bad => assert!(matches!(v, Verb::BadField(_)), "{}: {v:?}", c.name),
                 Want::BadField(msg) => assert_eq!(v, Verb::BadField(msg), "{}", c.name),
                 Want::Finalized => assert_eq!(v, Verb::Finalized, "{}", c.name),
             }
@@ -1183,8 +1205,6 @@ mod tests {
             trailers: &'static [(&'static str, &'static str)],
             result: Result<&'static [u8], Status>,
         },
-        /// The state is dropped unfinalized: the receiver sees a closed channel.
-        Lost,
         /// The test dropped the receiver.
         Nothing,
     }
@@ -1221,7 +1241,7 @@ mod tests {
             cancelled: bool,
             sent: Sent,
         }
-        // Sources: Responder.php and Work.php, PROTOCOL-HTTP2 Requests (unpadded -bin values), RFC 4648 (01 02 is `AQI`).
+        // Sources: Responder.php and Work.php, PROTOCOL-HTTP2 Requests (unpadded -bin values), RFC 4648 (01 02 is "AQI").
         const CASES: &[Case] = &[
             Case {
                 name: "respond carries both halves",
@@ -1314,16 +1334,6 @@ mod tests {
                 cancelled: true,
                 sent: Sent::Nothing,
             },
-            Case {
-                name: "unfinalized drop",
-                adds: &[],
-                drop_receiver: false,
-                finishes: &[],
-                verbs: &[],
-                finalized: false,
-                cancelled: false,
-                sent: Sent::Lost,
-            },
         ];
         for c in CASES {
             let (tx, rx) = oneshot::channel();
@@ -1366,16 +1376,7 @@ mod tests {
                     let got = rx.as_mut().map(|rx| rx.try_recv());
                     assert_eq!(got, Some(Ok(want)), "{}", c.name);
                 }
-                Sent::Lost => {
-                    let got = rx.as_mut().map(|rx| rx.try_recv());
-                    assert_eq!(
-                        got,
-                        Some(Err(oneshot::error::TryRecvError::Closed)),
-                        "{}",
-                        c.name
-                    );
-                }
-                Sent::Nothing => assert!(rx.is_none(), "{}", c.name),
+                Sent::Nothing => {}
             }
         }
     }

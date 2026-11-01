@@ -1,3 +1,5 @@
+//! The Rust behind the PHP classes of the http plugin: the class entries, the exchange state and the request view.
+
 use std::{
     ffi::{CStr, c_char, c_void},
     fmt::NumBuffer,
@@ -7,18 +9,18 @@ use std::{
 
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::body::Bytes;
-use rapira_sapi::callbacks::{MAX_BUFFERED_BODY, guard};
+use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{
     AddrOwned, add_list, build_address, header_key, path_bytes, push_ipv4,
 };
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::types::{Addr, Body, FormField, Frame, Request, ResponseHead, Tls, UploadedFile};
+use rapira_sapi::types::{Addr, Body, FormField, Frame, Request, ResponseHead, UploadedFile};
 use rapira_sapi::work::{DispatcherClasses, Held, release};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, executor_globals, object_init_ex,
-    rapira_array_init, rapira_ce_already_finalized_error, rapira_ce_tls,
-    rapira_ce_work_discarded_exception, zend, zend_class_entry, zend_object, zend_set_timeout,
-    zend_unset_timeout, zval, zval_add_ref, zval_ptr_dtor,
+    rapira_array_init, rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, zend,
+    zend_class_entry, zend_object, zend_set_timeout, zend_unset_timeout, zval, zval_add_ref,
+    zval_ptr_dtor,
 };
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 
@@ -73,15 +75,9 @@ enum Stage {
     Finalized,
 }
 
-/// A committed head, not yet on the wire: the bytes leave with the first body-touching verb.
-struct PendingHead {
-    status: u16,
-    headers: HeaderMap,
-}
-
 enum BodyState {
     Raw(Vec<u8>),
-    /// Spool files unlink at seal(); Drop is the abnormal-path net.
+    /// seal(), discard_unit() and exchange_drop unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
     Multipart {
         fields: Vec<FieldPart>,
         files: Vec<FilePart>,
@@ -100,32 +96,33 @@ impl BodyState {
 
 struct FieldPart {
     field: FormField,
-    headers: Grouped,
+    headers: Vec<HeaderValues>,
 }
 
 struct FilePart {
     upload: UploadedFile,
     path: Vec<u8>,
-    headers: Grouped,
+    headers: Vec<HeaderValues>,
 }
 
 /// Multipart part headers, one entry per name.
-struct Grouped(Vec<(String, Vec<Vec<u8>>)>);
+struct HeaderValues {
+    name: String,
+    values: Vec<Vec<u8>>,
+}
 
-impl Grouped {
-    fn new(headers: &[(String, Vec<u8>)]) -> Self {
-        let mut out: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
-        for (name, value) in headers {
-            if name.is_empty() {
-                continue;
-            }
-            match out.iter_mut().find(|(n, _)| n == name) {
-                Some((_, values)) => values.push(value.clone()),
-                None => out.push((name.clone(), vec![value.clone()])),
-            }
+fn group_headers(headers: Vec<(String, Vec<u8>)>) -> Vec<HeaderValues> {
+    let mut out: Vec<HeaderValues> = Vec::new();
+    for (name, value) in headers {
+        match out.iter_mut().find(|header| header.name == name) {
+            Some(header) => header.values.push(value),
+            None => out.push(HeaderValues {
+                name,
+                values: vec![value],
+            }),
         }
-        Self(out)
     }
+    out
 }
 
 /// Contract spelling for `Request::$protocol`: HTTP/2, not the CGI HTTP/2.0.
@@ -189,7 +186,7 @@ pub struct ExchangeState {
     view: Option<RequestView>,
     stage: Stage,
     head_sent: bool,
-    pending: Option<PendingHead>,
+    pending: Option<ResponseHead>,
     declared_cl: Option<u64>,
     /// Bytes accepted toward `declared_cl`: bodiless units count too, so a HEAD handler hits the same errors.
     sent_body: u64,
@@ -205,25 +202,24 @@ impl ExchangeState {
         let taken = std::mem::replace(&mut req.body, Body::Raw(std::io::Cursor::new(Vec::new())));
         let body = match taken {
             Body::Raw(cursor) => BodyState::Raw(cursor.into_inner()),
-            Body::Multipart(mb) => BodyState::Multipart {
-                fields: mb
-                    .fields
-                    .into_iter()
-                    .map(|f| FieldPart {
-                        headers: Grouped::new(&f.headers),
-                        field: f,
-                    })
-                    .collect(),
-                files: mb
-                    .files
-                    .into_iter()
-                    .map(|f| FilePart {
-                        path: path_bytes(&f.file.path),
-                        headers: Grouped::new(&f.headers),
-                        upload: f,
-                    })
-                    .collect(),
-            },
+            Body::Multipart(mb) => {
+                let mut fields = Vec::with_capacity(mb.fields.len());
+                for mut field in mb.fields {
+                    fields.push(FieldPart {
+                        headers: group_headers(std::mem::take(&mut field.headers)),
+                        field,
+                    });
+                }
+                let mut files = Vec::with_capacity(mb.files.len());
+                for mut upload in mb.files {
+                    files.push(FilePart {
+                        path: path_bytes(&upload.file.path),
+                        headers: group_headers(std::mem::take(&mut upload.headers)),
+                        upload,
+                    });
+                }
+                BodyState::Multipart { fields, files }
+            }
         };
         let bodiless = req.method == "HEAD";
 
@@ -249,10 +245,9 @@ impl Held for ExchangeState {
         self.stage == Stage::Finalized
     }
 
+    /// A finalized unit holds no sender, so only an open one can see the client go.
     fn cancelled(&self) -> bool {
-        self.discarded
-            || (self.stage != Stage::Finalized
-                && self.sender.as_ref().is_some_and(Sender::is_closed))
+        self.discarded || self.sender.as_ref().is_some_and(Sender::is_closed)
     }
 
     fn discard(&mut self) {

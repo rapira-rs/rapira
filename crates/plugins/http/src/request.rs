@@ -1,12 +1,14 @@
+//! Builds the SAPI Request from the HTTP request and the Peer.
+
 use rapira_sapi::Request;
 use rapira_sapi::types::Body;
 
 use crate::Config;
 use crate::middleware::Peer;
 
-/// Moves the header map out of `parts`. The body stays raw: the handler parses multipart.
+/// The body stays raw: the handler parses multipart.
 pub fn build(
-    parts: &mut http::request::Parts,
+    parts: http::request::Parts,
     authority: Option<Vec<u8>>,
     body: Vec<u8>,
     peer: Peer,
@@ -18,20 +20,20 @@ pub fn build(
         http::Version::HTTP_2 => "HTTP/2.0",
         _ => "HTTP/1.1",
     };
-    let headers = std::mem::take(&mut parts.headers);
+    let headers = parts.headers;
     Request {
         method: parts.method.as_str().to_owned(),
         // Origin-form view for every target form. Display restores the leading slash
         // that an authority-only absolute-form omits ("http://h?q" -> "/?q"). It keeps
         // "*" unchanged.
-        // https://docs.rs/http/1/http/uri/struct.PathAndQuery.html
+        // https://github.com/hyperium/http/blob/v1.5.0/src/uri/path.rs#L277-L291
         uri: parts
             .uri
             .path_and_query()
             .map(|pq| pq.to_string())
             .unwrap_or_else(|| "/".to_owned()),
         // Reconstructed request-target for the absolute and authority forms. hyper hands out only the parsed Uri, not the raw bytes.
-        // For the origin and asterisk forms the target equals `uri`, which PHP uses when this is None.
+        // For the origin and asterisk forms the target equals uri, which PHP uses when this is None.
         target: parts
             .uri
             .authority()
@@ -43,7 +45,6 @@ pub fn build(
         server: peer.server,
         server_name: cfg.server_name,
         server_port: cfg.server_port,
-        tls: None,
         received_at: peer.received_at,
         content_type: headers
             .get(http::header::CONTENT_TYPE)
@@ -66,7 +67,6 @@ mod tests {
             server_name: "localhost",
             server_port: 8000,
             max_body_size: 0,
-            unsafe_field_names: crate::UnsafeFieldNames::Drop,
             superglobals: true,
             write_timeout: std::time::Duration::ZERO,
             keepalive_timeout: std::time::Duration::ZERO,
@@ -95,57 +95,65 @@ mod tests {
             .header("x-probe", "two")
             .body(())
             .unwrap();
-        let (mut parts, ()) = req.into_parts();
-        let built = build(
-            &mut parts,
-            Some(b"e2e".to_vec()),
-            Vec::new(),
-            peer(),
-            &config(),
-        );
+        let (parts, ()) = req.into_parts();
+        let built = build(parts, Some(b"e2e".to_vec()), Vec::new(), peer(), &config());
         let probes: Vec<_> = built.headers.get_all("x-probe").iter().collect();
         assert_eq!(probes, ["one", "two"]);
-        assert_eq!(built.uri, "/a/b?x=1");
-        assert_eq!(built.target, None);
         assert_eq!(built.protocol, "HTTP/1.1");
         assert_eq!(built.authority.as_deref(), Some(&b"e2e"[..]));
         assert_eq!(built.received_at, 1.5);
     }
 
-    fn built(uri: &str, method: &str) -> Request {
-        let req = http::Request::builder()
-            .method(method)
-            .uri(uri)
-            .body(())
-            .unwrap();
-        let (mut parts, ()) = req.into_parts();
-        build(&mut parts, None, Vec::new(), peer(), &config())
-    }
-
-    /// RFC 9112 §3.2.2 absolute-form: PHP gets the origin-form view; the target keeps the full form.
-    /// https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
+    /// PHP gets the origin-form view in `uri`; `target` keeps the absolute form and is None for the other forms. https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
     #[test]
-    fn absolute_form_yields_an_origin_form_uri() {
-        let b = built("http://h.example/admin?x=1", "GET");
-        assert_eq!(b.uri, "/admin?x=1");
-        assert_eq!(
-            b.target.as_deref(),
-            Some(&b"http://h.example/admin?x=1"[..])
-        );
-    }
-
-    /// An absolute-form target with no path still yields a rooted uri.
-    #[test]
-    fn empty_path_absolute_form_roots_the_uri() {
-        let b = built("http://h.example?x=1", "GET");
-        assert_eq!(b.uri, "/?x=1");
-    }
-
-    /// Asterisk-form passes through unchanged (server-wide OPTIONS).
-    #[test]
-    fn asterisk_form_is_preserved() {
-        let b = built("*", "OPTIONS");
-        assert_eq!(b.uri, "*");
-        assert_eq!(b.target, None);
+    fn the_target_forms_map_to_uri_and_target() {
+        struct Case {
+            name: &'static str,
+            method: &'static str,
+            uri: &'static str,
+            want_uri: &'static str,
+            want_target: Option<&'static [u8]>,
+        }
+        let cases = [
+            Case {
+                name: "origin-form keeps the uri and has no target",
+                method: "GET",
+                uri: "/a/b?x=1",
+                want_uri: "/a/b?x=1",
+                want_target: None,
+            },
+            Case {
+                name: "absolute-form yields an origin-form uri",
+                method: "GET",
+                uri: "http://h.example/admin?x=1",
+                want_uri: "/admin?x=1",
+                want_target: Some(b"http://h.example/admin?x=1"),
+            },
+            Case {
+                name: "absolute-form without a path roots the uri",
+                method: "GET",
+                uri: "http://h.example?x=1",
+                want_uri: "/?x=1",
+                want_target: Some(b"http://h.example/?x=1"),
+            },
+            Case {
+                name: "asterisk-form passes through",
+                method: "OPTIONS",
+                uri: "*",
+                want_uri: "*",
+                want_target: None,
+            },
+        ];
+        for case in cases {
+            let req = http::Request::builder()
+                .method(case.method)
+                .uri(case.uri)
+                .body(())
+                .unwrap();
+            let (parts, ()) = req.into_parts();
+            let built = build(parts, None, Vec::new(), peer(), &config());
+            assert_eq!(built.uri, case.want_uri, "{}", case.name);
+            assert_eq!(built.target.as_deref(), case.want_target, "{}", case.name);
+        }
     }
 }

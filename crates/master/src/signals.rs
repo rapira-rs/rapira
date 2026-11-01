@@ -1,4 +1,5 @@
-use std::io;
+//! The master signal path: the early block, the self-pipe handler and the sigwait helper of the workers.
+
 use std::os::fd::AsRawFd;
 use std::os::unix::net::UnixStream;
 use std::sync::atomic::{AtomicI32, Ordering};
@@ -43,13 +44,13 @@ fn errno_location() -> *mut c_int {
     unsafe { libc::__error() }
 }
 
-pub(crate) fn errno_get() -> c_int {
+fn errno_get() -> c_int {
     // SAFETY: reading the thread-local errno slot.
     unsafe { *errno_location() }
 }
 
 fn errno_set(v: c_int) {
-    // SAFETY: writing the thread-local errno slot we just read.
+    // SAFETY: writing the thread-local errno slot.
     unsafe { *errno_location() = v }
 }
 
@@ -79,11 +80,11 @@ pub(crate) fn sigset(sigs: &[c_int]) -> libc::sigset_t {
     set
 }
 
-/// Blocks until one of `signals` (already blocked) is delivered. https://man7.org/linux/man-pages/man3/sigwait.3.html
+/// Waits until one of `signals` (blocked in every thread) is pending and accepts it, so no handler runs. https://man7.org/linux/man-pages/man3/sigwait.3.html
 pub fn wait_signal(signals: &[c_int]) -> c_int {
     let set = sigset(signals);
     let mut sig: c_int = 0;
-    // SAFETY: `set` and `sig` are stack values live for the whole call.
+    // SAFETY: set and sig are stack values live for the whole call.
     unsafe { libc::sigwait(&set, &mut sig) };
     sig
 }
@@ -93,20 +94,16 @@ fn sigprocmask(how: c_int, set: &libc::sigset_t) {
     unsafe { libc::sigprocmask(how, set, std::ptr::null_mut()) };
 }
 
-/// Blocks the terminate-by-default signals before any handler exists; as pid 1 the stop trio joins them because a SIGNAL_UNKILLABLE init drops signals still on SIG_DFL instead of applying the default action. https://man7.org/linux/man-pages/man7/signal.7.html
-/// USR1 and USR2 also get SIG_IGN: PHP MINIT saves this action, and each PHP request startup in a worker sets it again. https://github.com/php/php-src/blob/PHP-8.5/Zend/zend_signal.c
+/// Blocks USR1, USR2 and HUP until the master handlers exist: their default action ends the process. As pid 1 the same for TERM, INT and QUIT: the kernel drops a signal to an init process whose action is SIG_DFL, and a blocked signal stays pending instead. https://man7.org/linux/man-pages/man2/kill.2.html#NOTES
+/// USR1 also gets SIG_IGN: PHP MINIT saves the current action of every signal, and a worker's Zend handler forwards USR1 to that saved action from its second request on. https://github.com/php/php-src/blob/PHP-8.5/Zend/zend_signal.c
 pub fn block_early_signals() {
     sigprocmask(
         libc::SIG_BLOCK,
-        &sigset(&[libc::SIGUSR1, libc::SIGUSR2, libc::SIGCHLD, libc::SIGHUP]),
+        &sigset(&[libc::SIGUSR1, libc::SIGUSR2, libc::SIGHUP]),
     );
-    // SAFETY: SIG_IGN takes no handler code; a null old-action pointer discards the previous action.
-    unsafe {
-        let mut ign: libc::sigaction = std::mem::zeroed();
-        ign.sa_sigaction = libc::SIG_IGN;
-        libc::sigaction(libc::SIGUSR1, &ign, std::ptr::null_mut());
-        libc::sigaction(libc::SIGUSR2, &ign, std::ptr::null_mut());
-    }
+    // signal is portable for SIG_IGN and SIG_DFL. https://man7.org/linux/man-pages/man2/signal.2.html#VERSIONS
+    // SAFETY: SIG_IGN installs no handler code.
+    unsafe { libc::signal(libc::SIGUSR1, libc::SIG_IGN) };
     // SAFETY: getpid is always safe.
     if unsafe { libc::getpid() } == 1 {
         sigprocmask(
@@ -116,9 +113,8 @@ pub fn block_early_signals() {
     }
 }
 
-/// Must run in the master after PHP MINIT; Zend leaves these dispositions alone because the master never calls `php_request_startup`.
+/// Must run after PHP MINIT: it saves the action of every signal, and a worker's Zend handler forwards TERM, HUP and USR1 to that saved action from its second request on. Installed earlier, the master handler would be in that table and run inside a worker.
 pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
-    // Both ends are CLOEXEC.
     let (rd, wr) = UnixStream::pair().context("self-pipe socketpair")?;
     rd.set_nonblocking(true)?;
     wr.set_nonblocking(true)?;
@@ -129,20 +125,11 @@ pub(crate) fn install_master_signals() -> anyhow::Result<SelfPipe> {
         let mut act: libc::sigaction = std::mem::zeroed();
         act.sa_sigaction = master_sig_handler as *const () as usize;
         libc::sigfillset(&mut act.sa_mask);
-        act.sa_flags = 0;
         for sig in MASTER_SIGNALS {
-            anyhow::ensure!(
-                libc::sigaction(sig, &act, std::ptr::null_mut()) == 0,
-                "sigaction({sig}): {}",
-                io::Error::last_os_error()
-            );
+            libc::sigaction(sig, &act, std::ptr::null_mut());
         }
     }
-
-    let mut all: libc::sigset_t = sigset(&[]);
-    // SAFETY: all is a live sigset_t.
-    unsafe { libc::sigfillset(&mut all) };
-    sigprocmask(libc::SIG_UNBLOCK, &all);
+    sigprocmask(libc::SIG_SETMASK, &sigset(&[]));
 
     Ok(SelfPipe { rd, wr })
 }

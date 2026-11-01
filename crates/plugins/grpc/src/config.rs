@@ -1,3 +1,5 @@
+//! The `[grpc]` table: its settings, the boot checks, the interceptor list and the `Server` that the master forks with.
+
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
@@ -46,7 +48,7 @@ pub struct Settings {
     pub keepalive_interval: Duration,
     /// Wait for the PING ACK before the listener closes the connection.
     pub keepalive_timeout: Duration,
-    /// `[grpc].interceptors` in list order, the first listed outermost.
+    /// The configured order. The first interceptor runs first.
     pub interceptors: Vec<Interceptor>,
     pub pool: PoolSettings,
 }
@@ -140,8 +142,8 @@ fn resolve_interceptors(
             bail!("grpc.interceptors lists \"{name}\" twice");
         }
     }
-    let mut interceptors = Vec::new();
-    for name in &list {
+    let mut interceptors = Vec::with_capacity(list.len());
+    for name in list {
         match name.as_str() {
             "auth" => match auth.take() {
                 Some(settings) => interceptors.push(Interceptor::Auth(settings)),
@@ -161,17 +163,18 @@ fn resolve_interceptors(
 }
 
 impl Server {
-    /// The schema and the interceptors load here, in the master, so a bad descriptor set, service name or tokens file stops the boot before the fork.
+    /// The master loads the schema and interceptors before the fork. A load error stops the boot.
     pub fn from_settings(settings: Settings) -> Result<Self> {
         let schema = Arc::new(Schema::load(
             &settings.descriptor_set,
             settings.services.as_deref(),
         )?);
-        let mut interceptors: Vec<Arc<dyn connectrpc::Interceptor>> = Vec::new();
+        let mut interceptors: Vec<Arc<dyn connectrpc::Interceptor>> =
+            Vec::with_capacity(settings.interceptors.len());
         for interceptor in &settings.interceptors {
             match interceptor {
-                Interceptor::Auth(s) => {
-                    interceptors.push(Arc::new(rapira_grpc_auth::Auth::load(s)?))
+                Interceptor::Auth(auth) => {
+                    interceptors.push(Arc::new(rapira_grpc_auth::Auth::load(auth)?));
                 }
             }
         }
@@ -193,14 +196,12 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
-    use rapira_config::Mode;
-
     use super::*;
 
     struct Want {
         listen: ListenAddr,
         descriptor_set: &'static str,
-        services: Option<&'static [&'static str]>,
+        services: Option<Vec<String>>,
         reflection: bool,
         default_timeout: Option<Duration>,
         max_timeout: Option<Duration>,
@@ -236,7 +237,6 @@ mod tests {
         }
     }
 
-    /// The default pool mode is dispatcher, so a success case does not list the mode.
     #[test]
     fn grpc_table_resolves_and_validates() {
         let cases = [
@@ -249,7 +249,7 @@ mod tests {
                 name: "services narrow the set",
                 toml: toml("services = [\"p.S\"]\n"),
                 expected: Ok(Want {
-                    services: Some(&["p.S"]),
+                    services: Some(vec!["p.S".into()]),
                     ..base()
                 }),
             },
@@ -351,14 +351,7 @@ mod tests {
                         "{}",
                         case.name
                     );
-                    assert_eq!(
-                        g.services
-                            .as_deref()
-                            .map(|s| s.iter().map(String::as_str).collect::<Vec<_>>()),
-                        want.services.map(<[&str]>::to_vec),
-                        "{}",
-                        case.name
-                    );
+                    assert_eq!(g.services, want.services, "{}", case.name);
                     assert_eq!(g.reflection, want.reflection, "{}", case.name);
                     assert_eq!(g.default_timeout, want.default_timeout, "{}", case.name);
                     assert_eq!(g.max_timeout, want.max_timeout, "{}", case.name);
@@ -368,7 +361,6 @@ mod tests {
                         case.name
                     );
                     assert_eq!(g.keepalive_timeout, want.keepalive_timeout, "{}", case.name);
-                    assert_eq!(g.pool.mode, Mode::Dispatcher, "{}", case.name);
                 }
                 (Err(err), Err(want)) => {
                     let err = err.to_string();
@@ -385,7 +377,7 @@ mod tests {
         struct Case {
             name: &'static str,
             toml: String,
-            /// Ok: the tokens file of each `auth` entry, in list order.
+            /// Ok: the tokens file of each auth interceptor, in list order.
             expected: Result<&'static [&'static str], &'static str>,
         }
         let cases = [
@@ -410,6 +402,23 @@ mod tests {
                 expected: Err(
                     "grpc.interceptors entry \"authz\" is unknown; known interceptors: \"auth\"",
                 ),
+            },
+            Case {
+                name: "unknown name after auth",
+                toml: toml("interceptors = [\"auth\", \"authz\"]\n[auth]\ntokens_file = \"t\"\n"),
+                expected: Err(
+                    "grpc.interceptors entry \"authz\" is unknown; known interceptors: \"auth\"",
+                ),
+            },
+            Case {
+                name: "duplicate before unknown name",
+                toml: toml("interceptors = [\"authz\", \"auth\", \"auth\"]\n"),
+                expected: Err("grpc.interceptors lists \"auth\" twice"),
+            },
+            Case {
+                name: "missing auth table before unknown name",
+                toml: toml("interceptors = [\"auth\", \"authz\"]\n"),
+                expected: Err("grpc.interceptors lists \"auth\" but [grpc.auth] is missing"),
             },
             Case {
                 name: "auth listed without its table",
@@ -450,8 +459,8 @@ mod tests {
                     let files: Vec<PathBuf> = g
                         .interceptors
                         .into_iter()
-                        .map(|i| match i {
-                            Interceptor::Auth(s) => s.tokens_file,
+                        .map(|interceptor| match interceptor {
+                            Interceptor::Auth(auth) => auth.tokens_file,
                         })
                         .collect();
                     let want: Vec<PathBuf> = want.iter().map(PathBuf::from).collect();

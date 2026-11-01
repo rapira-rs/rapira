@@ -1,3 +1,5 @@
+//! The Rust behind the PHP classes of the grpc plugin: the class entries, the object layouts and `DISPATCHER_CLASSES`.
+
 use std::ffi::c_void;
 
 use rapira_sapi::work::DispatcherClasses;

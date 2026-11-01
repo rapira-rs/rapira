@@ -1,11 +1,13 @@
+//! The constructors of the value classes ErrorDetail, Status, Metadata, MethodInfo, ServiceInfo, Context and GrpcException, and the `MethodKind` streaming checks.
+
 use std::ffi::{c_char, c_double, c_int};
 
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::values::address_arg;
 use rapira_sapi::{
-    HashTable, IS_ARRAY, IS_STRING, object_init_ex, rapira_array_init, rapira_array_is_list,
-    rapira_symtable_str_find, zend, zend_get_exception_base, zend_object, zend_string,
-    zend_type_error, zend_value_error, zval, zval_add_ref, zval_ptr_dtor,
+    HashTable, IS_ARRAY, IS_STRING, object_init_ex, rapira_array_is_list, zend,
+    zend_get_exception_base, zend_object, zend_string, zend_type_error, zend_value_error, zval,
+    zval_ptr_dtor,
 };
 
 use super::{rapira_ce_grpc_exception, rapira_ce_grpc_status};
@@ -126,35 +128,6 @@ pub unsafe extern "C" fn rapira_rs_ctor_grpc_metadata(
         }
         zend::prop_zval((*obj).ce, obj, c"entries", entries);
         !zend::exception_pending()
-    })
-}
-
-/// Copies the values of the lower-cased `name` into `rv`, or an empty array when the key is absent.
-/// The symtable lookup finds an int key such as 123 by its decimal text.
-/// # Safety
-/// `entries` the live `$entries` array; `name` points to `len` readable bytes; `rv` the return slot.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_grpc_metadata_values(
-    entries: *mut HashTable,
-    name: *const c_char,
-    len: usize,
-    rv: *mut zval,
-) -> bool {
-    guard(false, || unsafe {
-        // the key buffer is freed before the calls that can bail out
-        let found = {
-            let mut key = std::slice::from_raw_parts(name.cast::<u8>(), len).to_ascii_lowercase();
-            // the numeric-key check of the symtable reads the byte after a leading '-' before it checks the length
-            key.push(0);
-            rapira_symtable_str_find(entries, key.as_ptr().cast(), len)
-        };
-        if found.is_null() {
-            rapira_array_init(rv, 0);
-        } else {
-            *rv = *zend::deref(found);
-            zval_add_ref(rv);
-        }
-        true
     })
 }
 

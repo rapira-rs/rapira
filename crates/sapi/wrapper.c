@@ -10,10 +10,6 @@ void rapira_smart_str_free(smart_str *s) {
     smart_str_free(s);
 }
 
-zval *rapira_symtable_str_find(HashTable *ht, const char *str, size_t len) {
-    return zend_symtable_str_find(ht, str, len);
-}
-
 bool rapira_array_is_list(HashTable *ht) {
     return zend_array_is_list(ht);
 }

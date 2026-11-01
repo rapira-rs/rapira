@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 0dd6e41ce1d1fec11a0dc577c51683215a233fc0 */
+ * Stub hash: 8b155d1f0188f693c6b6ff2507cda6370d4736ee */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Grpc_MethodKind_isStreamingRequest, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
@@ -708,11 +708,6 @@ static zend_class_entry *register_class_Rapira_Grpc_Call_Protocol(void)
 	zend_string *enum_case_Connect_value_str = zend_string_init("connect", strlen("connect"), 1);
 	ZVAL_STR(&enum_case_Connect_value, enum_case_Connect_value_str);
 	zend_enum_add_case_cstr(class_entry, "Connect", &enum_case_Connect_value);
-
-	zval enum_case_Rest_value;
-	zend_string *enum_case_Rest_value_str = zend_string_init("rest", strlen("rest"), 1);
-	ZVAL_STR(&enum_case_Rest_value, enum_case_Rest_value_str);
-	zend_enum_add_case_cstr(class_entry, "Rest", &enum_case_Rest_value);
 
 	return class_entry;
 }

@@ -1,11 +1,10 @@
-//! Request headers through the field name policy to the `$_SERVER` variables of the classic and worker modes. The first byte selects the content length, and the rest is one `name:value` field per line.
+//! Request headers through the unsafe field name drop to the `$_SERVER` variables of the classic and worker modes. The first byte selects the content length, and the rest is one `name:value` field per line.
 
 #![no_main]
 
 use http::header::COOKIE;
 use rapira_fuzz::safe_name;
-use rapira_http::UnsafeFieldNames;
-use rapira_http::check::apply_field_name_policy;
+use rapira_http::check::drop_unsafe_field_names;
 use rapira_sapi::callbacks::cgi_header_vars;
 
 /// Fields that do not combine into a list, so the first line gives the value: https://www.rfc-editor.org/rfc/rfc9110#section-5.3
@@ -29,7 +28,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     };
     let sent = rapira_fuzz::header_map(rest);
     let mut headers = sent.clone();
-    apply_field_name_policy(&mut headers, UnsafeFieldNames::Drop, true).expect("the Drop policy");
+    drop_unsafe_field_names(&mut headers);
 
     let mut want = Vec::new();
     if content_length >= 0 {

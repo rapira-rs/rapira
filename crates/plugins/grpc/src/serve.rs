@@ -1,3 +1,5 @@
+//! The accept loop, one connectrpc connection per socket, and the drain at the stop.
+
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
 use std::time::Duration;
@@ -67,7 +69,7 @@ impl Serving {
             // The default registry offers every codec that the build compiles, zstd included.
             // The default policy compresses a reply of 1 KiB or more for a client that accepts gzip. The dispatcher turns it off per reply.
             .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
-        // The interceptors cover GET and POST requests to every route: PHP methods, health, reflection and unknown paths.
+        // Interceptors cover GET and POST requests to every route: PHP, health, reflection and unknown paths.
         for interceptor in &config.interceptors {
             service = service.with_interceptor_arc(Arc::clone(interceptor));
         }
@@ -126,7 +128,7 @@ impl Serving {
             }
         });
         tokio::spawn(async move {
-            // The shutdown future drops its receiver when shutdown starts, and the calls in flight continue after that. `open` keeps `closed()` pending until the connection ends.
+            // The shutdown future drops its receiver when shutdown starts, and the calls in flight continue after that. open keeps closed() pending until the connection ends.
             let closed = connection.await;
             drop(open);
             tracing::debug!(target: "grpc", "connection closed: {:?}", closed.reason());
@@ -135,7 +137,7 @@ impl Serving {
 
     /// Waits out the connections in flight. The acceptor is already gone.
     async fn drain(self, fatal: Option<anyhow::Error>, grace: Duration) -> Result<()> {
-        // `StaticChecker::shutdown` only sets NOT_SERVING. A `Watch` stream ends only when its service is removed, and an open stream holds its connection until the grace ends.
+        // StaticChecker::shutdown only sets NOT_SERVING. A Watch stream ends only when its service is removed, and an open stream holds its connection until the grace ends.
         self.health.shutdown();
         for name in self.health.services() {
             self.health.remove_service(&name);

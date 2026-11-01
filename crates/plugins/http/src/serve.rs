@@ -1,3 +1,5 @@
+//! The accept loop, one hyper connection per socket, and the drain at the stop.
+
 use std::convert::Infallible;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
@@ -61,11 +63,11 @@ impl Serving {
             closed_tx.clone(),
         );
         let chain = handler.chain();
-        // `BoxCloneService` polls and calls through `&mut`, so each request takes its own clone.
+        // BoxCloneService polls and calls through &mut, so each request takes its own clone.
         let service = hyper::service::service_fn(move |req| {
             let handler = Arc::clone(&handler);
             let chain = chain.clone();
-            async move { Ok::<_, Infallible>(respond(handler, chain, req).await) }
+            async move { Ok::<_, Infallible>(respond(&handler, chain, req).await) }
         });
         let watched = self
             .graceful
@@ -79,7 +81,7 @@ impl Serving {
     }
 
     /// Waits out the connections in flight. The acceptor is already gone.
-    /// A connection closes after its next response, so a request on an idle keep-alive connection still gets an answer.
+    /// A connection closes after its next response, so a request on an idle keep-alive connection still gets an answer. An idle connection that gets no request is held until the window ends: an LB keep-alive pool makes every stop last the whole window.
     async fn drain(self, fatal: Option<anyhow::Error>, grace: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + grace;
         self.shared.closing.store(true, Ordering::Release);
@@ -91,15 +93,7 @@ impl Serving {
         while self.graceful.count() > 0 && tokio::time::Instant::now() < deadline {
             tokio::time::sleep(Duration::from_millis(50)).await;
         }
-        if tokio::time::timeout_at(deadline, self.graceful.shutdown())
-            .await
-            .is_err()
-        {
-            tracing::warn!(
-                target: "http",
-                "graceful connection shutdown did not finish within {grace:?}"
-            );
-        }
+        let _ = tokio::time::timeout_at(deadline, self.graceful.shutdown()).await;
         while self.shared.inflight.load(Ordering::Acquire) > 0
             && tokio::time::Instant::now() < deadline
         {
@@ -130,9 +124,8 @@ impl Serve for Serving {
     fn spawn_tcp(&self, stream: tokio::net::TcpStream, peer: std::net::SocketAddr) {
         let server = stream
             .local_addr()
-            .map(Addr::Inet)
-            .unwrap_or_else(|_| listen_addr(&self.shared.cfg.listen));
-        self.spawn_conn(stream, Addr::Inet(peer), server);
+            .expect("an accepted inet socket has a local address");
+        self.spawn_conn(stream, Addr::Inet(peer), Addr::Inet(server));
     }
 
     fn spawn_unix(&self, stream: tokio::net::UnixStream, peer: Option<&std::path::Path>) {

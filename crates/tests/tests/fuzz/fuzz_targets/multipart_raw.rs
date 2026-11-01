@@ -37,8 +37,8 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         Ok(b) => b,
         Err(e) => return rejected(e, &[400]),
     };
-    // RFC 2046 boundary: 1 to 70 characters, https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
-    assert!((1..=70).contains(&b.len()), "boundary length {}", b.len());
+    // A boundary has 1 or more characters, as in php-src.
+    assert!(!b.is_empty(), "empty boundary");
     if body.is_empty() {
         return;
     }

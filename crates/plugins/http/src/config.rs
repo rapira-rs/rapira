@@ -1,3 +1,5 @@
+//! The [http] table: its settings, the boot checks and the Server that the master forks with.
+
 use std::fs::{OpenOptions, remove_file};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZero;
@@ -12,7 +14,7 @@ use rapira_config::{
 use serde::Deserialize;
 
 use crate::multipart::Limits;
-use crate::{Config, Server, UnsafeFieldNames};
+use crate::{Config, Server};
 
 /// The `[http]` table.
 #[derive(Debug, Deserialize)]
@@ -24,7 +26,6 @@ pub struct Section {
     pub max_body_size_mb: Option<NonZero<usize>>,
     pub write_timeout_secs: Option<u64>,
     pub keepalive_timeout_secs: Option<u64>,
-    pub unsafe_field_names: Option<UnsafeFieldNames>,
     pub uploads: Option<UploadsSection>,
     #[serde(default)]
     pub sendfile: SendfileSection,
@@ -62,32 +63,20 @@ pub struct Settings {
     pub max_body_size: usize,
     pub write_timeout: Duration,
     pub keepalive_timeout: Duration,
-    pub unsafe_field_names: UnsafeFieldNames,
     /// The multipart limits of a dispatcher pool. None in the other modes.
     pub uploads: Option<Limits>,
     /// sendFile() containment root; falls back to the entrypoint directory.
     pub sendfile_root: PathBuf,
-    // [http].middleware list order
-    pub middleware: Vec<Middleware>,
+    pub static_files: Option<rapira_static_files::Settings>,
     pub pool: PoolSettings,
 }
 
-// ------------ middleware stuff ---------------
-// add new middleware here, with settings if needed
-#[derive(Debug)]
-pub enum Middleware {
-    Static(rapira_static_files::Settings),
-}
-// ---------------------------------------------
-
-/// Boot checks run here: entrypoint file, uploads dir, static root, middleware names.
+/// Boot checks run here: entrypoint file, uploads dir, static root.
 pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
     let settings = settings(section, dir)?;
     check_entrypoint("http.pool", &settings.pool.entrypoint)?;
-    for mw in &settings.middleware {
-        match mw {
-            Middleware::Static(st) => check_static_root(&st.root)?,
-        }
+    if let Some(st) = &settings.static_files {
+        check_static_root(&st.root)?;
     }
     if let Some(uploads) = &settings.uploads {
         check_uploads_dir(&uploads.dir)?;
@@ -152,7 +141,7 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         .r#static
         .map(|s| rapira_static_files::resolve(s, dir))
         .transpose()?;
-    let middleware = resolve_middleware(section.middleware, static_files)?;
+    check_middleware(&section.middleware, static_files.is_some())?;
 
     Ok(Settings {
         listen,
@@ -163,50 +152,37 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         max_body_size,
         write_timeout,
         keepalive_timeout,
-        unsafe_field_names: section.unsafe_field_names.unwrap_or_default(),
         uploads,
         sendfile_root,
-        middleware,
+        static_files,
         pool,
     })
 }
 
-// resolve all existing vs requested middlewares
-// TODO: think about some container, like endure in RR
-fn resolve_middleware(
-    list: Vec<String>,
-    mut static_files: Option<rapira_static_files::Settings>,
-) -> Result<Vec<Middleware>> {
+fn check_middleware(list: &[String], static_configured: bool) -> Result<()> {
     for (i, name) in list.iter().enumerate() {
         if list[..i].contains(name) {
             bail!("http.middleware lists \"{name}\" twice")
         }
     }
 
-    let mut middleware: Vec<Middleware> = Vec::new();
-    for name in &list {
+    for name in list {
         match name.as_str() {
-            // check new middleware here
-            "static" => match static_files.take() {
-                Some(settings) => middleware.push(Middleware::Static(settings)),
-                None => {
-                    bail!("http.middleware lists \"static\" but [http.static] is missing")
-                }
-            },
+            "static" if !static_configured => {
+                bail!("http.middleware lists \"static\" but [http.static] is missing")
+            }
+            "static" => {}
             other => {
                 bail!("http.middleware entry \"{other}\" is unknown; known middleware: \"static\"")
             }
         }
     }
 
-    // check for the configured, but not listed
-    // TODO: worth double checking
-    // some people requested some kind of enabled=false/true
-    if static_files.is_some() {
+    if list.is_empty() && static_configured {
         bail!("[http.static] is configured but http.middleware does not list \"static\"");
     }
 
-    Ok(middleware)
+    Ok(())
 }
 
 fn resolve_uploads(section: UploadsSection, config_dir: &Path) -> Result<Limits> {
@@ -241,7 +217,7 @@ fn check_static_root(root: &Path) -> Result<()> {
         "http.static.root {} is not a directory",
         root.display()
     );
-    // Serving needs search permission, not read; resolving `.` inside the root proves it.
+    // Serving needs search permission, not read; resolving the dot entry inside the root proves it.
     std::fs::metadata(root.join("."))
         .map_err(|e| anyhow!("http.static.root {} is not accessible: {e}", root.display()))?;
     Ok(())
@@ -263,26 +239,12 @@ fn check_uploads_dir(dir: &Path) -> Result<()> {
 }
 
 impl Server {
-    /// Builds the middleware layers in list order. Runs in the master after the logger starts, so the diagnostics here reach the log.
+    /// Runs in the master after the logger starts.
     pub fn from_settings(settings: Settings) -> Self {
         let mut middleware: Vec<crate::middleware::Layer> = Vec::new();
-        for mw in settings.middleware {
-            match mw {
-                Middleware::Static(st) => {
-                    tracing::info!(target: "rapira", "static files from {}, forbid {:?}", st.root.display(), st.forbid);
-                    middleware
-                        .push(rapira_static_files::StaticFiles::new(st.root, st.forbid).layer());
-                }
-            }
-        }
-
-        // sendFile() root: a boot-time diagnostic so a bad path is caught before the first request.
-        if let Err(e) = std::fs::metadata(&settings.sendfile_root) {
-            tracing::warn!(
-                target: "rapira",
-                "http.sendfile.root {} is not accessible: {e}; sendFile() will reject every path",
-                settings.sendfile_root.display()
-            );
+        if let Some(st) = settings.static_files {
+            tracing::info!(target: "rapira", "static files from {}, forbid {:?}", st.root.display(), st.forbid);
+            middleware.push(rapira_static_files::StaticFiles::new(st.root, st.forbid).layer());
         }
 
         Self {
@@ -293,7 +255,6 @@ impl Server {
                 server_port: settings.server_port,
                 max_body_size: settings.max_body_size,
                 write_timeout: settings.write_timeout,
-                unsafe_field_names: settings.unsafe_field_names,
                 superglobals: settings.pool.mode != Mode::Dispatcher,
                 keepalive_timeout: settings.keepalive_timeout,
                 middleware,
@@ -344,23 +305,37 @@ mod tests {
                 toml: "middleware = [\"static\", \"static\"]\n[static]\nroot = \".\"\n[pool]\nentrypoint = \"w.php\"",
                 error: "http.middleware lists \"static\" twice",
             },
+            Case {
+                name: "duplicate precedes missing table",
+                toml: "middleware = [\"static\", \"static\"]\n[pool]\nentrypoint = \"w.php\"",
+                error: "http.middleware lists \"static\" twice",
+            },
+            Case {
+                name: "duplicate precedes unknown name",
+                toml: "middleware = [\"unknown\", \"static\", \"static\"]\n[pool]\nentrypoint = \"w.php\"",
+                error: "http.middleware lists \"static\" twice",
+            },
+            Case {
+                name: "missing table precedes later unknown name",
+                toml: "middleware = [\"static\", \"unknown\"]\n[pool]\nentrypoint = \"w.php\"",
+                error: "http.middleware lists \"static\" but [http.static] is missing",
+            },
+            Case {
+                name: "unknown name precedes later missing table",
+                toml: "middleware = [\"unknown\", \"static\"]\n[pool]\nentrypoint = \"w.php\"",
+                error: "http.middleware entry \"unknown\" is unknown; known middleware: \"static\"",
+            },
         ];
         for case in cases {
-            let section: Section = toml::from_str(case.toml).unwrap();
-            let err = resolve(section, Path::new("/w")).unwrap_err().to_string();
+            let err = settings_of(case.toml).expect_err(case.name).to_string();
             assert!(err.contains(case.error), "{}: {err}", case.name);
         }
     }
 
-    /// `allow` is rejected: there is no off-switch, so asking for one must fail loudly.
+    /// Each refusal names the key or the value it refuses, so the operator can find it in the file.
     #[test]
     fn section_errors_name_the_key() {
         let cases = [
-            Case {
-                name: "allow is no unsafe_field_names value",
-                toml: "unsafe_field_names = \"allow\"\n[pool]\nentrypoint = \"a.php\"\n",
-                error: "unknown variant `allow`",
-            },
             Case {
                 name: "max body size overflows",
                 toml: "max_body_size_mb = 17592186044416\n[pool]\nentrypoint = \"a.php\"\n",
@@ -442,7 +417,6 @@ mod tests {
         listen: &'static str,
         server_port: u16,
         max_body_size: usize,
-        unsafe_field_names: UnsafeFieldNames,
         sendfile_root: &'static str,
     }
 
@@ -452,7 +426,6 @@ mod tests {
             listen: "127.0.0.1:8000",
             server_port: 8000,
             max_body_size: 8 * 1024 * 1024,
-            unsafe_field_names: UnsafeFieldNames::Drop,
             sendfile_root: "/w",
         }
     }
@@ -507,19 +480,6 @@ mod tests {
                 },
             },
             ResolveCase {
-                name: "drop unsafe field names",
-                toml: "unsafe_field_names = \"drop\"\n[pool]\nentrypoint = \"a.php\"\n",
-                want: base(),
-            },
-            ResolveCase {
-                name: "reject unsafe field names",
-                toml: "unsafe_field_names = \"reject\"\n[pool]\nentrypoint = \"a.php\"\n",
-                want: Want {
-                    unsafe_field_names: UnsafeFieldNames::Reject,
-                    ..base()
-                },
-            },
-            ResolveCase {
                 name: "sendfile root follows the entrypoint",
                 toml: "[pool]\nentrypoint = \"public/index.php\"\n",
                 want: Want {
@@ -541,11 +501,6 @@ mod tests {
             assert_eq!(got.listen.to_string(), case.want.listen, "{}", case.name);
             assert_eq!(got.server_port, case.want.server_port, "{}", case.name);
             assert_eq!(got.max_body_size, case.want.max_body_size, "{}", case.name);
-            assert_eq!(
-                got.unsafe_field_names, case.want.unsafe_field_names,
-                "{}",
-                case.name
-            );
             assert_eq!(
                 got.sendfile_root,
                 Path::new(case.want.sendfile_root),
@@ -670,19 +625,12 @@ mod tests {
             },
         ];
         for case in cases {
-            let got = settings_of(case.toml).unwrap_or_else(|e| panic!("{}: {e}", case.name));
-            let got: Vec<StaticSettings> = got
-                .middleware
-                .into_iter()
-                .map(|mw| match mw {
-                    Middleware::Static(st) => StaticSettings {
-                        root: st.root,
-                        forbid: st.forbid,
-                    },
-                })
-                .collect();
-            let want: Vec<StaticSettings> = case.want.into_iter().collect();
-            assert_eq!(got, want, "{}", case.name);
+            let settings = settings_of(case.toml).unwrap_or_else(|e| panic!("{}: {e}", case.name));
+            let got = settings.static_files.map(|st| StaticSettings {
+                root: st.root,
+                forbid: st.forbid,
+            });
+            assert_eq!(got, case.want, "{}", case.name);
         }
     }
 

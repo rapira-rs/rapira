@@ -1,6 +1,6 @@
 use std::ffi::{CStr, c_char, c_int};
 
-use tracing::{Level, level_filters::LevelFilter};
+use tracing::Level;
 
 use crate::{
     HashTable, IS_OBJECT, PHP_JSON_PARTIAL_OUTPUT_ON_ERROR, add_assoc_stringl_ex,
@@ -8,16 +8,6 @@ use crate::{
     smart_str, zend, zend_ce_throwable, zend_class_entry, zend_get_exception_base,
     zend_hash_index_update, zend_object, zend_string, zval, zval_add_ref, zval_ptr_dtor,
 };
-
-fn emit(level: Level, message: &[u8], context: &[u8]) {
-    let message = String::from_utf8_lossy(message);
-    let context = String::from_utf8_lossy(context);
-    if context.is_empty() {
-        crate::diagnostics::event_at!("app", level, "{message}");
-    } else {
-        crate::diagnostics::event_at!("app", level, context = %context, "{message}");
-    }
-}
 
 /// An enum case's name is its first property slot (`zend_enum_fetch_case_name`, Zend/zend_enum.h).
 unsafe fn level_from_case(level: *mut zend_object) -> Level {
@@ -142,15 +132,26 @@ pub unsafe extern "C" fn rapira_rs_log_call(
         } else {
             level_from_case(level)
         };
-        // A level above every enabled level skips the context encode and any user jsonSerialize().
-        if lvl > LevelFilter::current() {
-            return;
-        }
-        let json = if context.is_null() || (*context).nNumOfElements == 0 {
-            Vec::new()
+        if context.is_null() || (*context).nNumOfElements == 0 {
+            crate::diagnostics::event_at!(
+                "app",
+                lvl,
+                "{}",
+                String::from_utf8_lossy(zend::zstr_bytes(message))
+            );
         } else {
-            context_json(context)
-        };
-        emit(lvl, zend::zstr_bytes(message), &json);
+            let json;
+            crate::diagnostics::event_at!(
+                "app",
+                lvl,
+                message = %{
+                    // A Zend bailout must not skip an owned message buffer.
+                    json = context_json(context);
+                    String::from_utf8_lossy(zend::zstr_bytes(message))
+                },
+                context = (!json.is_empty())
+                    .then(|| tracing::field::display(String::from_utf8_lossy(&json)))
+            );
+        }
     })
 }

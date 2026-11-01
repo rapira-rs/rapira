@@ -1,4 +1,4 @@
-// https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
+//! The multipart/form-data parser of dispatcher mode and the spool dirs of the workers. https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -18,15 +18,10 @@ pub struct Limits {
     pub max_part_headers: usize,
 }
 
-/// The spool dir of this worker process under `base`. The master sweeps the dirs whose process is gone.
-fn worker_spool_dir(base: &Path) -> PathBuf {
-    base.join(format!("rapira-spool-{}", std::process::id()))
-}
-
-/// Creates the spool dir of this worker process under `base`, owner-only.
+/// Creates the spool dir of this worker process under `base`, owner-only. The master sweeps the dirs whose process is gone.
 pub(crate) fn create_worker_spool_dir(base: &Path) -> anyhow::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
-    let dir = worker_spool_dir(base);
+    let dir = base.join(format!("rapira-spool-{}", std::process::id()));
     // A dir with this pid is left by a killed worker that had the same pid.
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::DirBuilder::new()
@@ -96,7 +91,7 @@ pub fn is_multipart(content_type: &[u8]) -> bool {
         .eq_ignore_ascii_case(b"multipart/form-data")
 }
 
-/// Case-insensitive, quoted form unquoted, unquoted form terminated by `,` (php-src rfc1867.c:707-751), capped at the RFC 2046 §5.1.1 70 characters.
+/// Case-insensitive, quoted form unquoted, unquoted form terminated by `,`, as php-src does: https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L707-L751
 pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
     for seg in content_type.split(|&b| b == b';').skip(1) {
         let Some(eq) = memchr::memchr(b'=', seg) else {
@@ -120,9 +115,6 @@ pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
         if val.is_empty() {
             return Err(bad("empty boundary parameter"));
         }
-        if val.len() > 70 {
-            return Err(bad("boundary parameter longer than 70 characters"));
-        }
         return Ok(val.to_vec());
     }
     Err(bad("multipart/form-data without a boundary parameter"))
@@ -134,7 +126,7 @@ struct DelimHit {
     close: bool,
 }
 
-/// A delimiter must start a line; a line merely beginning with the boundary bytes is content, so the scan continues past it.
+/// A delimiter must start a line; a line merely beginning with the boundary bytes is content, so the scan continues at the next line. The scan is linear in the body: a run of boundary bytes inside a line is skipped in one step.
 fn next_delimiter(
     body: &[u8],
     mut from: usize,
@@ -181,7 +173,7 @@ fn next_delimiter(
                 _ => {}
             }
         }
-        from = i + 1;
+        from = i + memchr::memchr(b'\n', &body[i..])? + 1;
     }
     None
 }
@@ -231,7 +223,7 @@ struct Disposition {
     filename: Option<Vec<u8>>,
 }
 
-/// The disposition type token is not enforced: php-src rfc1867.c reads the parameters regardless.
+/// Reads the name and filename parameters whatever the disposition type says, as php-src does: https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L804-L815
 fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
     let mut name: Option<Vec<u8>> = None;
     let mut filename: Option<Vec<u8>> = None;
@@ -352,10 +344,8 @@ fn parse_part(
             "content-disposition without a non-empty name parameter",
         ));
     };
-    let client_media_type = media_type
-        .map(<[u8]>::trim_ascii)
-        .filter(|v| !v.is_empty())
-        .map(<[u8]>::to_vec);
+    // httparse trims the value already.
+    let client_media_type = media_type.filter(|v| !v.is_empty()).map(<[u8]>::to_vec);
 
     match filename {
         Some(client_filename) => {
@@ -454,89 +444,187 @@ mod tests {
 
     #[test]
     fn close_delimiter_padding_and_epilogue_forms_stay_accepted() {
+        struct Case {
+            name: &'static str,
+            close: &'static [u8],
+        }
+        let cases = [
+            Case {
+                name: "padding at the end of the body",
+                close: b"--B-- \t",
+            },
+            Case {
+                name: "line ending and epilogue",
+                close: b"--B--\r\nepilogue",
+            },
+            Case {
+                name: "padding, line ending and epilogue",
+                close: b"--B-- \t\r\nepilogue",
+            },
+        ];
         let field = b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\n";
-        for close in [
-            &b"--B-- \t"[..],
-            b"--B--\r\nepilogue",
-            b"--B-- \t\r\nepilogue",
-        ] {
-            let body = [field.as_slice(), close].concat();
+        for case in cases {
+            let body = [field.as_slice(), case.close].concat();
             let mb = ok(&body);
-            assert_eq!(mb.fields[0].value, b"v", "close form: {close:?}");
+            assert_eq!(mb.fields[0].value, b"v", "{}", case.name);
         }
     }
 
     #[test]
     fn malformed_bodies_reject_with_400() {
-        let l = limits();
-        for body in [
-            &b"no boundary anywhere"[..],
-            b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nunclosed",
-            b"--B\r\nno-disposition: here\r\n\r\nv\r\n--B--",
-            b"--B\r\ncontent-disposition: form-data; name=a\r\ncontent-disposition: form-data; name=b\r\n\r\nv\r\n--B--",
-            b"--B\r\ncontent-disposition: form-data; name=a; name=b\r\n\r\nv\r\n--B--",
-            b"--B\r\nheaderwithoutseparator",
-        ] {
-            assert_eq!(rejected(body, &l), 400, "body: {body:?}");
+        struct Case {
+            name: &'static str,
+            body: &'static [u8],
         }
-        assert!(matches!(
-            boundary(b"multipart/form-data"),
-            Err(Rejection { status, .. }) if status == 400
-        ));
-        assert!(matches!(
-            boundary(b"multipart/form-data; boundary="),
-            Err(Rejection { status, .. }) if status == 400
-        ));
+        let cases = [
+            Case {
+                name: "no opening boundary line",
+                body: b"no boundary anywhere",
+            },
+            Case {
+                name: "no closing boundary line",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nunclosed",
+            },
+            Case {
+                name: "part without content-disposition",
+                body: b"--B\r\nno-disposition: here\r\n\r\nv\r\n--B--",
+            },
+            Case {
+                name: "duplicated content-disposition",
+                body: b"--B\r\ncontent-disposition: form-data; name=a\r\ncontent-disposition: form-data; name=b\r\n\r\nv\r\n--B--",
+            },
+            Case {
+                name: "duplicated name parameter",
+                body: b"--B\r\ncontent-disposition: form-data; name=a; name=b\r\n\r\nv\r\n--B--",
+            },
+            Case {
+                name: "part without a header/body separator",
+                body: b"--B\r\nheaderwithoutseparator",
+            },
+        ];
+        let l = limits();
+        for case in cases {
+            assert_eq!(rejected(case.body, &l), 400, "{}", case.name);
+        }
+    }
+
+    #[test]
+    fn missing_or_empty_boundary_rejects_with_400() {
+        struct Case {
+            name: &'static str,
+            content_type: &'static [u8],
+        }
+        let cases = [
+            Case {
+                name: "no boundary parameter",
+                content_type: b"multipart/form-data",
+            },
+            Case {
+                name: "empty boundary parameter",
+                content_type: b"multipart/form-data; boundary=",
+            },
+        ];
+        for case in cases {
+            let status = boundary(case.content_type)
+                .map(|_| ())
+                .map_err(|r| r.status.as_u16());
+            assert_eq!(status, Err(400), "{}", case.name);
+        }
     }
 
     #[test]
     fn limits_reject_with_413() {
-        let mut l = limits();
-        l.max_field_size = 2;
-        assert_eq!(
-            rejected(
-                b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\ntoolong\r\n--B--",
-                &l
-            ),
-            413
-        );
-        let mut l = limits();
-        l.max_file_size = 2;
-        assert_eq!(
-            rejected(
-                b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\ntoolong\r\n--B--",
-                &l
-            ),
-            413
-        );
-        let mut l = limits();
-        l.max_parts = 1;
-        assert_eq!(
-            rejected(
-                b"--B\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--B\r\ncontent-disposition: form-data; name=b\r\n\r\n2\r\n--B--",
-                &l
-            ),
-            413
-        );
-        let mut l = limits();
-        l.max_files = 0;
-        assert_eq!(
-            rejected(
-                b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\nx\r\n--B--",
-                &l
-            ),
-            413
-        );
+        struct Case {
+            name: &'static str,
+            limits: Limits,
+            body: &'static [u8],
+        }
+        let cases = [
+            Case {
+                name: "field part over max_field_size",
+                limits: Limits {
+                    max_field_size: 2,
+                    ..limits()
+                },
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\ntoolong\r\n--B--",
+            },
+            Case {
+                name: "file part over max_file_size",
+                limits: Limits {
+                    max_file_size: 2,
+                    ..limits()
+                },
+                body: b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\ntoolong\r\n--B--",
+            },
+            Case {
+                name: "part count over max_parts",
+                limits: Limits {
+                    max_parts: 1,
+                    ..limits()
+                },
+                body: b"--B\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--B\r\ncontent-disposition: form-data; name=b\r\n\r\n2\r\n--B--",
+            },
+            Case {
+                name: "file parts over max_files",
+                limits: Limits {
+                    max_files: 1,
+                    ..limits()
+                },
+                body: b"--B\r\ncontent-disposition: form-data; name=f; filename=a\r\n\r\nx\r\n--B\r\ncontent-disposition: form-data; name=g; filename=b\r\n\r\ny\r\n--B--",
+            },
+        ];
+        for case in cases {
+            assert_eq!(rejected(case.body, &case.limits), 413, "{}", case.name);
+        }
     }
 
     #[test]
     fn the_multipart_trigger_is_exact() {
-        assert!(is_multipart(b"multipart/form-data"));
-        assert!(is_multipart(b"MULTIPART/FORM-DATA"));
-        assert!(is_multipart(b"multipart/form-data ; boundary=x"));
-        assert!(!is_multipart(b"multipart/form-data-foo"));
-        assert!(!is_multipart(b"multipart/mixed; boundary=x"));
-        assert!(!is_multipart(b"text/plain"));
+        struct Case {
+            name: &'static str,
+            content_type: &'static [u8],
+            multipart: bool,
+        }
+        let cases = [
+            Case {
+                name: "exact media type",
+                content_type: b"multipart/form-data",
+                multipart: true,
+            },
+            Case {
+                name: "upper case",
+                content_type: b"MULTIPART/FORM-DATA",
+                multipart: true,
+            },
+            Case {
+                name: "space before the parameters",
+                content_type: b"multipart/form-data ; boundary=x",
+                multipart: true,
+            },
+            Case {
+                name: "longer subtype",
+                content_type: b"multipart/form-data-foo",
+                multipart: false,
+            },
+            Case {
+                name: "other multipart subtype",
+                content_type: b"multipart/mixed; boundary=x",
+                multipart: false,
+            },
+            Case {
+                name: "other media type",
+                content_type: b"text/plain",
+                multipart: false,
+            },
+        ];
+        for case in cases {
+            assert_eq!(
+                is_multipart(case.content_type),
+                case.multipart,
+                "{}",
+                case.name
+            );
+        }
     }
 
     #[test]

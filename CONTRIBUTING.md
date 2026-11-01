@@ -49,8 +49,11 @@ macOS notes and building PHP from source - including the exact configure line us
 ## Build
 
 ```sh
+export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--cfg tokio_unstable"
 cargo build --release
 ```
+
+The Tokio file reader uses io_uring on Linux when the kernel permits it. Keep `--cfg tokio_unstable` when you set custom Rust flags. The Makefile, CI, and release builds include it.
 
 PHP is discovered through `php-config`; point at a specific one with `PHP_CONFIG=/path/to/php-config`. The `make` targets run on Fedora: they find `libphp.so` under the prefix of `php-config` and put its directory on `LD_LIBRARY_PATH`. Debian/Ubuntu ship only a versioned `libphpX.Y.so`, and a direct `cargo build` needs a plain `libphp.so` next to it: `sudo ln -s /usr/lib/libphp8.4.so /usr/lib/libphp.so` (CI creates that symlink itself).
 

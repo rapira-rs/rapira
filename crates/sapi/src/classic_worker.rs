@@ -33,7 +33,7 @@ fn classic_executor(ctx: &mut Context) -> Executed {
             rapira_request_shutdown();
             unbind_server_context();
             return Executed {
-                event: Event::Handled(true),
+                event: Event::Handled { errored: true },
                 truncated: false,
             };
         }
@@ -50,7 +50,9 @@ fn classic_executor(ctx: &mut Context) -> Executed {
 
     unbind_server_context();
     Executed {
-        event: Event::Handled(is_errored),
+        event: Event::Handled {
+            errored: is_errored,
+        },
         truncated,
     }
 }

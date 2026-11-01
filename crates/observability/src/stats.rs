@@ -71,7 +71,7 @@ pub(crate) fn board_stats(board: &[SharedSlot], pools: &[PoolRegion]) -> Vec<Poo
 fn pool_stats(board: &[SharedSlot], region: &PoolRegion) -> PoolStats {
     let mut stats = PoolStats {
         name: region.name,
-        configured: region.processes,
+        configured: region.slots.len(),
         ..Default::default()
     };
     for (index, s) in board[region.slots.clone()].iter().enumerate() {
@@ -109,7 +109,7 @@ fn pool_stats(board: &[SharedSlot], region: &PoolRegion) -> PoolStats {
 mod tests {
     use super::*;
 
-    /// Slots 0 to 3 belong to an http pool of 2 workers, and slots 4 to 7 to a grpc pool of 2 workers. Each pair of states has different counts in at least one pool, and each grpc exit reason has its own count, so a swap of two states or two exit reasons fails the test.
+    /// Slots 0 to 3 belong to an http pool of 4 workers, and slots 4 to 7 to a grpc pool of 4 workers. Each pair of states has different counts in at least one pool, and each grpc exit reason has its own count, so a swap of two states or two exit reasons fails the test.
     #[test]
     fn board_stats_sums_each_pool() {
         let board = rapira_scoreboard::create(8).unwrap();
@@ -148,12 +148,10 @@ mod tests {
         let pools = [
             PoolRegion {
                 name: "http",
-                processes: 2,
                 slots: 0..4,
             },
             PoolRegion {
                 name: "grpc",
-                processes: 2,
                 slots: 4..8,
             },
         ];
@@ -165,7 +163,7 @@ mod tests {
             vec![
                 PoolStats {
                     name: "http",
-                    configured: 2,
+                    configured: 4,
                     states: [0, 1, 1, 0],
                     requests: 22,
                     failed: 3,
@@ -188,7 +186,7 @@ mod tests {
                 },
                 PoolStats {
                     name: "grpc",
-                    configured: 2,
+                    configured: 4,
                     states: [1, 0, 1, 2],
                     requests: 0,
                     failed: 0,

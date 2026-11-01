@@ -39,7 +39,7 @@ pub unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
     crate::exchange::forget_held(ptr.cast::<()>());
     let st = unsafe { Box::from_raw(ptr) };
     if !st.settled() {
-        sb_update(Event::Handled(true));
+        sb_update(Event::Handled { errored: true });
     }
     st
 }
@@ -205,7 +205,7 @@ impl Intake {
 
     /// Sends the reload signal through the intake, so it also wakes a PHP thread that waits for work.
     /// It is no unit: it takes no slot and no budget, and no counter sees it, so it enters a full intake at once.
-    pub(crate) async fn restart_app(&self) -> Result<(), Refused> {
+    pub(crate) fn restart_app(&self) -> Result<(), Refused> {
         self.tx
             .send(Entry::RestartApp)
             .map_err(|_| Refused::Stopped)
@@ -258,7 +258,7 @@ mod tests {
     }
 
     /// A reload enters a full intake at once: it is a signal, not a unit, so it never waits for a unit to leave and no counter sees it.
-    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    #[tokio::test(flavor = "current_thread")]
     async fn a_reload_enters_a_full_intake_at_once() {
         let (tx, _rx) = channel();
         let intake = intake(tx);
@@ -266,8 +266,11 @@ mod tests {
         for _ in 0..INTAKE_SLOTS {
             intake.submit(Box::new(Probe), 0).await.unwrap();
         }
-        let entered = tokio::time::timeout(Duration::ZERO, intake.restart_app()).await;
-        assert_eq!(entered, Ok(Ok(())), "the reload enters without a wait");
+        assert_eq!(
+            intake.restart_app(),
+            Ok(()),
+            "the reload enters without a wait"
+        );
         assert_eq!(
             (
                 slot.handled.load(Ordering::Relaxed),
