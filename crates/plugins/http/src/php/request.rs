@@ -1,3 +1,5 @@
+//! getRequest(): builds the Rapira\Http\Request object once per exchange.
+
 use std::sync::OnceLock;
 
 use super::*;
@@ -89,12 +91,8 @@ unsafe fn build_file(dst: *mut zval, p: &FilePart) {
     }
 }
 
-/// Returns false on a pending exception: property writes must not run with a throw in flight, so the partial graph is released.
-unsafe fn build_multipart(
-    dst: *mut zval,
-    field_parts: &[FieldPart],
-    file_parts: &[FilePart],
-) -> bool {
+/// A property write on a fresh object of a plugin class with a matching type throws nothing; a Zend OOM is a bailout.
+unsafe fn build_multipart(dst: *mut zval, field_parts: &[FieldPart], file_parts: &[FilePart]) {
     unsafe {
         let mut fields: zval = std::mem::zeroed();
         rapira_array_init(&mut fields, field_parts.len() as u32);
@@ -112,24 +110,12 @@ unsafe fn build_multipart(
             emit_headers(&mut headers, &p.headers);
             zend::prop_zval(ce, o, c"headers", &mut headers);
             zval_ptr_dtor(&mut headers);
-            if zend::exception_pending() {
-                zval_ptr_dtor(&mut part);
-                zval_ptr_dtor(&mut fields);
-                zval_ptr_dtor(&mut files);
-                return false;
-            }
             let _ = add_next_index_object(&mut fields, o);
         }
 
         for p in file_parts {
             let mut part: zval = std::mem::zeroed();
             build_file(&mut part, p);
-            if zend::exception_pending() {
-                zval_ptr_dtor(&mut part);
-                zval_ptr_dtor(&mut fields);
-                zval_ptr_dtor(&mut files);
-                return false;
-            }
             let _ = add_next_index_object(&mut files, part.value.obj);
         }
 
@@ -140,11 +126,6 @@ unsafe fn build_multipart(
         zend::prop_zval(ce, o, c"files", &mut files);
         zval_ptr_dtor(&mut fields);
         zval_ptr_dtor(&mut files);
-        if zend::exception_pending() {
-            zval_ptr_dtor(dst);
-            return false;
-        }
-        true
     }
 }
 
@@ -162,7 +143,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_build_request(
 /// Slot offsets of the `Request` properties in declaration order; the class is fixed after MINIT.
 static REQUEST_SLOTS: OnceLock<[u32; 11]> = OnceLock::new();
 
-/// A throw while the property values are built releases them and leaves the memo unset. The slot writes do not throw.
+/// No write here throws. A Zend OOM bails out through this frame, so `RequestView` keeps the owned values in the state.
 unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> bool {
     unsafe {
         if !zend::is_undef(&(*ex).request) {
@@ -186,22 +167,8 @@ unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> b
             build_tls(&mut tls, t);
         }
         let mut mp: zval = std::mem::zeroed();
-        if let BodyState::Multipart { fields, files } = &st.body
-            && !build_multipart(&mut mp, fields, files)
-        {
-            zval_ptr_dtor(&mut headers);
-            zval_ptr_dtor(&mut remote);
-            zval_ptr_dtor(&mut server);
-            zval_ptr_dtor(&mut tls);
-            return false;
-        }
-        if zend::exception_pending() {
-            zval_ptr_dtor(&mut headers);
-            zval_ptr_dtor(&mut remote);
-            zval_ptr_dtor(&mut server);
-            zval_ptr_dtor(&mut tls);
-            zval_ptr_dtor(&mut mp);
-            return false;
+        if let BodyState::Multipart { fields, files } = &st.body {
+            build_multipart(&mut mp, fields, files);
         }
 
         let [

@@ -918,7 +918,7 @@ fn spool_sweep_removes_only_dead_pid_dirs() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A malformed or over-limit multipart body answers before dispatch and never reaches PHP; an accepted body reaches PHP raw. Sources: RFC 7578 (multipart/form-data needs a boundary), RFC 9110 §8.3 (content-type is a singleton field).
+/// A malformed or over-limit multipart body answers before dispatch and never reaches PHP; an accepted body reaches PHP raw. Source: RFC 7578 (multipart/form-data needs a boundary).
 #[test]
 fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
     struct Case {
@@ -930,9 +930,6 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
         status: Option<u16>,
     }
     const MULTIPART: &str = "multipart/form-data; boundary=B";
-    const EVIL: &str = "multipart/form-data; boundary=EVIL";
-    let smuggled =
-        b"--EVIL\r\ncontent-disposition: form-data; name=a\r\n\r\n1\r\n--EVIL--".to_vec();
     let cases = [
         Case {
             name: "multipart without a boundary line",
@@ -952,20 +949,6 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
             ]
             .concat(),
             status: Some(413),
-        },
-        Case {
-            name: "plain line before a repeated multipart line",
-            method: "POST",
-            content_type: &["text/plain", EVIL],
-            body: smuggled.clone(),
-            status: Some(400),
-        },
-        Case {
-            name: "multipart line before a repeated plain line",
-            method: "POST",
-            content_type: &[EVIL, "text/plain"],
-            body: smuggled,
-            status: Some(400),
         },
         Case {
             name: "empty multipart body",

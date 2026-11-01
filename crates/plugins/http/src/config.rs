@@ -1,3 +1,5 @@
+//! The [http] table: its settings, the boot checks and the Server that the master forks with.
+
 use std::fs::{OpenOptions, remove_file};
 use std::net::{Ipv4Addr, SocketAddr};
 use std::num::NonZero;
@@ -12,7 +14,7 @@ use rapira_config::{
 use serde::Deserialize;
 
 use crate::multipart::Limits;
-use crate::{Config, Server, UnsafeFieldNames};
+use crate::{Config, Server};
 
 /// The `[http]` table.
 #[derive(Debug, Deserialize)]
@@ -24,7 +26,6 @@ pub struct Section {
     pub max_body_size_mb: Option<NonZero<usize>>,
     pub write_timeout_secs: Option<u64>,
     pub keepalive_timeout_secs: Option<u64>,
-    pub unsafe_field_names: Option<UnsafeFieldNames>,
     pub uploads: Option<UploadsSection>,
     #[serde(default)]
     pub sendfile: SendfileSection,
@@ -62,7 +63,6 @@ pub struct Settings {
     pub max_body_size: usize,
     pub write_timeout: Duration,
     pub keepalive_timeout: Duration,
-    pub unsafe_field_names: UnsafeFieldNames,
     /// The multipart limits of a dispatcher pool. None in the other modes.
     pub uploads: Option<Limits>,
     /// sendFile() containment root; falls back to the entrypoint directory.
@@ -80,7 +80,7 @@ pub enum Middleware {
 }
 // ---------------------------------------------
 
-/// Boot checks run here: entrypoint file, uploads dir, static root, middleware names.
+/// Boot checks run here: entrypoint file, uploads dir, static root.
 pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
     let settings = settings(section, dir)?;
     check_entrypoint("http.pool", &settings.pool.entrypoint)?;
@@ -163,7 +163,6 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         max_body_size,
         write_timeout,
         keepalive_timeout,
-        unsafe_field_names: section.unsafe_field_names.unwrap_or_default(),
         uploads,
         sendfile_root,
         middleware,
@@ -241,7 +240,7 @@ fn check_static_root(root: &Path) -> Result<()> {
         "http.static.root {} is not a directory",
         root.display()
     );
-    // Serving needs search permission, not read; resolving `.` inside the root proves it.
+    // Serving needs search permission, not read; resolving the dot entry inside the root proves it.
     std::fs::metadata(root.join("."))
         .map_err(|e| anyhow!("http.static.root {} is not accessible: {e}", root.display()))?;
     Ok(())
@@ -276,15 +275,6 @@ impl Server {
             }
         }
 
-        // sendFile() root: a boot-time diagnostic so a bad path is caught before the first request.
-        if let Err(e) = std::fs::metadata(&settings.sendfile_root) {
-            tracing::warn!(
-                target: "rapira",
-                "http.sendfile.root {} is not accessible: {e}; sendFile() will reject every path",
-                settings.sendfile_root.display()
-            );
-        }
-
         Self {
             config: Config {
                 listen: settings.listen,
@@ -293,7 +283,6 @@ impl Server {
                 server_port: settings.server_port,
                 max_body_size: settings.max_body_size,
                 write_timeout: settings.write_timeout,
-                unsafe_field_names: settings.unsafe_field_names,
                 superglobals: settings.pool.mode != Mode::Dispatcher,
                 keepalive_timeout: settings.keepalive_timeout,
                 middleware,
@@ -346,21 +335,15 @@ mod tests {
             },
         ];
         for case in cases {
-            let section: Section = toml::from_str(case.toml).unwrap();
-            let err = resolve(section, Path::new("/w")).unwrap_err().to_string();
+            let err = settings_of(case.toml).expect_err(case.name).to_string();
             assert!(err.contains(case.error), "{}: {err}", case.name);
         }
     }
 
-    /// `allow` is rejected: there is no off-switch, so asking for one must fail loudly.
+    /// Each refusal names the key or the value it refuses, so the operator can find it in the file.
     #[test]
     fn section_errors_name_the_key() {
         let cases = [
-            Case {
-                name: "allow is no unsafe_field_names value",
-                toml: "unsafe_field_names = \"allow\"\n[pool]\nentrypoint = \"a.php\"\n",
-                error: "unknown variant `allow`",
-            },
             Case {
                 name: "max body size overflows",
                 toml: "max_body_size_mb = 17592186044416\n[pool]\nentrypoint = \"a.php\"\n",
@@ -442,7 +425,6 @@ mod tests {
         listen: &'static str,
         server_port: u16,
         max_body_size: usize,
-        unsafe_field_names: UnsafeFieldNames,
         sendfile_root: &'static str,
     }
 
@@ -452,7 +434,6 @@ mod tests {
             listen: "127.0.0.1:8000",
             server_port: 8000,
             max_body_size: 8 * 1024 * 1024,
-            unsafe_field_names: UnsafeFieldNames::Drop,
             sendfile_root: "/w",
         }
     }
@@ -507,19 +488,6 @@ mod tests {
                 },
             },
             ResolveCase {
-                name: "drop unsafe field names",
-                toml: "unsafe_field_names = \"drop\"\n[pool]\nentrypoint = \"a.php\"\n",
-                want: base(),
-            },
-            ResolveCase {
-                name: "reject unsafe field names",
-                toml: "unsafe_field_names = \"reject\"\n[pool]\nentrypoint = \"a.php\"\n",
-                want: Want {
-                    unsafe_field_names: UnsafeFieldNames::Reject,
-                    ..base()
-                },
-            },
-            ResolveCase {
                 name: "sendfile root follows the entrypoint",
                 toml: "[pool]\nentrypoint = \"public/index.php\"\n",
                 want: Want {
@@ -541,11 +509,6 @@ mod tests {
             assert_eq!(got.listen.to_string(), case.want.listen, "{}", case.name);
             assert_eq!(got.server_port, case.want.server_port, "{}", case.name);
             assert_eq!(got.max_body_size, case.want.max_body_size, "{}", case.name);
-            assert_eq!(
-                got.unsafe_field_names, case.want.unsafe_field_names,
-                "{}",
-                case.name
-            );
             assert_eq!(
                 got.sendfile_root,
                 Path::new(case.want.sendfile_root),
@@ -670,17 +633,15 @@ mod tests {
             },
         ];
         for case in cases {
-            let got = settings_of(case.toml).unwrap_or_else(|e| panic!("{}: {e}", case.name));
-            let got: Vec<StaticSettings> = got
-                .middleware
-                .into_iter()
-                .map(|mw| match mw {
-                    Middleware::Static(st) => StaticSettings {
-                        root: st.root,
-                        forbid: st.forbid,
-                    },
-                })
-                .collect();
+            let settings = settings_of(case.toml).unwrap_or_else(|e| panic!("{}: {e}", case.name));
+            let mut got: Vec<StaticSettings> = Vec::new();
+            for mw in settings.middleware {
+                let Middleware::Static(st) = mw;
+                got.push(StaticSettings {
+                    root: st.root,
+                    forbid: st.forbid,
+                });
+            }
             let want: Vec<StaticSettings> = case.want.into_iter().collect();
             assert_eq!(got, want, "{}", case.name);
         }

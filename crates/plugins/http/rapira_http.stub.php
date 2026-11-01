@@ -48,7 +48,7 @@ namespace Rapira\Http {
     }
 
     /**
-     * A multipart/form-data body the host parsed as the upload streamed in.
+     * A multipart/form-data body the host parsed before dispatch.
      *
      * @strict-properties
      * @not-serializable

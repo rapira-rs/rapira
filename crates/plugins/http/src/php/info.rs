@@ -1,3 +1,5 @@
+//! The server identity that HttpDispatcherInfo returns.
+
 use std::sync::OnceLock;
 
 use rapira_sapi::rapira_zval_stringl;

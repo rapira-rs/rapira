@@ -1,3 +1,5 @@
+//! The Exchange work unit: one HTTP request on the intake and its Work impl.
+
 use tokio::sync::mpsc::Sender;
 
 use rapira_sapi::callbacks::send_error_head;
@@ -7,7 +9,7 @@ use rapira_sapi::zend_object;
 
 use crate::php::{ExchangeState, exchange_from};
 
-// cap 16 lets a buffered Head+Chunk+End trio, plus a stray interim head, queue without parking the PHP thread, and keeps a 1 MiB body in 64 KiB writes to about one park; tokio allocates one 32-slot block for any cap up to 32
+/// Cap 16 lets a buffered Head+Chunk+End trio queue without parking the PHP thread and keeps a 1 MiB body in 64 KiB writes to about one park; tokio allocates one 32-slot block for any cap up to 32.
 pub(crate) const FRAME_CAP: usize = 16;
 
 /// One HTTP request on the intake.

@@ -1,3 +1,5 @@
+//! The Rust behind the PHP classes of the http plugin: the class entries, the exchange state and the request view.
+
 use std::{
     ffi::{CStr, c_char, c_void},
     fmt::NumBuffer,
@@ -7,7 +9,7 @@ use std::{
 
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::body::Bytes;
-use rapira_sapi::callbacks::{MAX_BUFFERED_BODY, guard};
+use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{
     AddrOwned, add_list, build_address, header_key, path_bytes, push_ipv4,
 };
@@ -81,7 +83,7 @@ struct PendingHead {
 
 enum BodyState {
     Raw(Vec<u8>),
-    /// Spool files unlink at seal(); Drop is the abnormal-path net.
+    /// seal(), discard_unit() and exchange_drop unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
     Multipart {
         fields: Vec<FieldPart>,
         files: Vec<FilePart>,
@@ -116,9 +118,6 @@ impl Grouped {
     fn new(headers: &[(String, Vec<u8>)]) -> Self {
         let mut out: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
         for (name, value) in headers {
-            if name.is_empty() {
-                continue;
-            }
             match out.iter_mut().find(|(n, _)| n == name) {
                 Some((_, values)) => values.push(value.clone()),
                 None => out.push((name.clone(), vec![value.clone()])),
@@ -205,25 +204,24 @@ impl ExchangeState {
         let taken = std::mem::replace(&mut req.body, Body::Raw(std::io::Cursor::new(Vec::new())));
         let body = match taken {
             Body::Raw(cursor) => BodyState::Raw(cursor.into_inner()),
-            Body::Multipart(mb) => BodyState::Multipart {
-                fields: mb
-                    .fields
-                    .into_iter()
-                    .map(|f| FieldPart {
-                        headers: Grouped::new(&f.headers),
-                        field: f,
-                    })
-                    .collect(),
-                files: mb
-                    .files
-                    .into_iter()
-                    .map(|f| FilePart {
-                        path: path_bytes(&f.file.path),
-                        headers: Grouped::new(&f.headers),
-                        upload: f,
-                    })
-                    .collect(),
-            },
+            Body::Multipart(mb) => {
+                let mut fields = Vec::with_capacity(mb.fields.len());
+                for field in mb.fields {
+                    fields.push(FieldPart {
+                        headers: Grouped::new(&field.headers),
+                        field,
+                    });
+                }
+                let mut files = Vec::with_capacity(mb.files.len());
+                for upload in mb.files {
+                    files.push(FilePart {
+                        path: path_bytes(&upload.file.path),
+                        headers: Grouped::new(&upload.headers),
+                        upload,
+                    });
+                }
+                BodyState::Multipart { fields, files }
+            }
         };
         let bodiless = req.method == "HEAD";
 
@@ -249,10 +247,9 @@ impl Held for ExchangeState {
         self.stage == Stage::Finalized
     }
 
+    /// A finalized unit holds no sender, so only an open one can see the client go.
     fn cancelled(&self) -> bool {
-        self.discarded
-            || (self.stage != Stage::Finalized
-                && self.sender.as_ref().is_some_and(Sender::is_closed))
+        self.discarded || self.sender.as_ref().is_some_and(Sender::is_closed)
     }
 
     fn discard(&mut self) {

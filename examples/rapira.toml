@@ -8,7 +8,6 @@ listen = "127.0.0.1:8000"    # host:port, ":port" (all interfaces), or "unix:/pa
 # max_body_size_mb = 8       # larger request bodies answer 413
 # write_timeout_secs = 30    # closes the connection when a response write stalls this long
 # keepalive_timeout_secs = 60 # closes a keepalive connection idle past the limit; also caps one head or body-frame read
-# unsafe_field_names = "drop" # or "reject": 400 for header names aliasing a CGI variable
 # middleware = ["static"]    # applied in list order; each configured middleware must be listed
 
 # Multipart limits of the http plugin - dispatcher mode only (classic/worker parse in PHP,

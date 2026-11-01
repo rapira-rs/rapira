@@ -1,5 +1,5 @@
 //! An HTTP/1 request head through the admission checks, the request build and the `$uri` of the dispatcher mode.
-//! The first byte selects the field name policy, the superglobals and the scheme. The rest is the request head.
+//! The first byte selects the superglobals and the scheme. The rest is the request head.
 
 #![no_main]
 
@@ -10,11 +10,11 @@ use std::time::Duration;
 use http::header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri, Version};
 use rapira_fuzz::safe_name;
+use rapira_http::Config;
 use rapira_http::check::check_request;
 use rapira_http::middleware::Peer;
 use rapira_http::php::RequestView;
 use rapira_http::request::build;
-use rapira_http::{Config, UnsafeFieldNames};
 use rapira_net::ListenAddr;
 use rapira_sapi::Addr;
 
@@ -26,7 +26,6 @@ static CONFIG: LazyLock<Config> = LazyLock::new(|| Config {
     server_name: "localhost",
     server_port: 8000,
     max_body_size: MAX_BODY,
-    unsafe_field_names: UnsafeFieldNames::Drop,
     superglobals: true,
     write_timeout: Duration::ZERO,
     keepalive_timeout: Duration::ZERO,
@@ -46,11 +45,6 @@ fn length(v: &HeaderValue) -> Option<u64> {
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     let Some((&flags, head)) = data.split_first() else {
         return;
-    };
-    let policy = if flags & 1 == 0 {
-        UnsafeFieldNames::Drop
-    } else {
-        UnsafeFieldNames::Reject
     };
     let superglobals = flags & 2 != 0;
     let https = flags & 4 != 0;
@@ -94,7 +88,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     let declared = lengths.first().copied().flatten();
 
     let mut parts = http::Request::new(()).into_parts().0;
-    parts.method = method.clone();
+    parts.method = method;
     parts.uri = uri.clone();
     parts.version = version;
     parts.headers = sent.clone();
@@ -106,23 +100,15 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         .map(HeaderValue::as_bytes)
         .collect();
     let mut allowed = Vec::new();
-    if method == Method::CONNECT {
-        allowed.push(501);
-    }
     // RFC 9112 section 3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2
-    // rapira does not check the syntax of a Host value.
-    if hosts.len() > 1
-        || (version == Version::HTTP_11 && hosts.first().is_none_or(|h| h.is_empty()))
-    {
-        allowed.push(400);
-    }
-    if policy == UnsafeFieldNames::Reject && !sent.keys().all(safe_name) {
+    // Only a missing or empty first Host value on HTTP/1.1 is a 400.
+    if version == Version::HTTP_11 && hosts.first().is_none_or(|h| h.is_empty()) {
         allowed.push(400);
     }
     if declared.is_some_and(|l| l > MAX_BODY as u64) {
         allowed.push(413);
     }
-    let authority = match check_request(&mut parts, policy, superglobals, MAX_BODY) {
+    let authority = match check_request(&mut parts, superglobals, MAX_BODY) {
         Ok(authority) => {
             assert!(allowed.is_empty(), "accepted, but allowed {allowed:?}");
             authority
@@ -136,28 +122,15 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         }
     };
 
-    // RFC 9112 section 3.2.2: the authority is the target authority without userinfo, https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
-    let want_authority = match uri.authority() {
-        Some(a) => Some(
-            a.as_str()
-                .rsplit_once('@')
-                .map_or(a.as_str(), |(_, hp)| hp)
-                .as_bytes(),
-        ),
-        None => hosts.first().copied().filter(|h| !h.is_empty()),
-    };
+    // The authority is the first Host value when it is not empty, also for an absolute-form target.
+    let want_authority = hosts.first().copied().filter(|h| !h.is_empty());
     assert_eq!(authority.as_deref(), want_authority, "authority");
-    // The fields as received, without the names that the policy drops.
-    let keep_all = policy == UnsafeFieldNames::Drop && !superglobals;
-    let mut want_fields: HeaderMap = sent
+    // The fields as received. The superglobals drop the names that alias a CGI variable.
+    let want_fields: HeaderMap = sent
         .iter()
-        .filter(|(n, _)| keep_all || safe_name(n))
+        .filter(|(n, _)| !superglobals || safe_name(n))
         .map(|(n, v)| (n.clone(), v.clone()))
         .collect();
-    // For an absolute-form target, the Host field carries the target authority: https://www.rfc-editor.org/rfc/rfc9112#section-3.2.2
-    if let (Some(_), Some(a)) = (uri.authority(), want_authority) {
-        want_fields.insert(HOST, HeaderValue::from_bytes(a).unwrap());
-    }
     assert_eq!(parts.headers, want_fields, "fields");
 
     let peer = Peer {

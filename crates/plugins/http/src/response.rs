@@ -1,3 +1,5 @@
+//! The response fields that reach the wire and the refusal responses.
+
 use http::header::{
     CACHE_CONTROL, CONNECTION, CONTENT_LENGTH, HeaderMap, HeaderName, HeaderValue, TE, TRAILER,
     TRANSFER_ENCODING, UPGRADE,
@@ -12,6 +14,7 @@ pub(crate) fn empty_body() -> Body {
         .boxed_unsync()
 }
 
+/// hyper closes the connection after a refusal with an unread body but announces nothing, and an ingress with a catch-all cache rule would store the refusal.
 pub(crate) fn error_response(status: http::StatusCode) -> Response {
     let mut res = http::Response::new(empty_body());
     *res.status_mut() = status;
@@ -34,16 +37,18 @@ static HOP_BY_HOP: [HeaderName; 8] = [
     HeaderName::from_static("proxy-connection"),
 ];
 
-/// Removes the hop-by-hop fields and the fields that a Connection value names, then sets the declared content-length.
+/// Removes the hop-by-hop fields and the fields that a Connection value names, then sets the declared content-length. https://www.rfc-editor.org/rfc/rfc9110#section-7.6.1
 pub(crate) fn response_headers(mut headers: HeaderMap, content_length: Option<u64>) -> HeaderMap {
     // Connection is in HOP_BY_HOP, so a map without a hop-by-hop key has nothing to remove.
     if headers.keys().any(|k| HOP_BY_HOP.contains(k)) {
-        let named: Vec<HeaderName> = headers
-            .get_all(CONNECTION)
-            .iter()
-            .flat_map(|v| v.as_bytes().split(|&b| b == b','))
-            .filter_map(|token| HeaderName::from_bytes(token.trim_ascii()).ok())
-            .collect();
+        let mut named: Vec<HeaderName> = Vec::new();
+        for value in headers.get_all(CONNECTION) {
+            for token in value.as_bytes().split(|&b| b == b',') {
+                if let Ok(name) = HeaderName::from_bytes(token.trim_ascii()) {
+                    named.push(name);
+                }
+            }
+        }
         for name in named.iter().chain(&HOP_BY_HOP) {
             headers.remove(name);
         }
@@ -59,49 +64,18 @@ mod tests {
     use super::*;
 
     fn hdrs(pairs: &[(&str, &str)]) -> HeaderMap {
-        pairs
-            .iter()
-            .map(|(k, v)| {
-                (
-                    HeaderName::from_bytes(k.as_bytes()).unwrap(),
-                    HeaderValue::from_str(v).unwrap(),
-                )
-            })
-            .collect()
+        let mut map = HeaderMap::new();
+        for (k, v) in pairs {
+            map.append(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        map
     }
 
     #[test]
-    fn connection_value_cannot_strip_framing() {
-        let map = response_headers(
-            hdrs(&[
-                ("cOnNeCtIoN", "  Content-Length, ,X-Drop\t,  "),
-                ("X-DROP", "1"),
-                ("X-Keep", "2"),
-                ("PROXY-CONNECTION", "legacy"),
-                ("Content-Type", "text/plain"),
-            ]),
-            Some(7),
-        );
-        assert_eq!(map.get("content-length").unwrap().as_bytes(), b"7");
-        assert!(map.get("x-drop").is_none());
-        assert_eq!(map.get("x-keep").unwrap().as_bytes(), b"2");
-        assert!(map.get("proxy-connection").is_none());
-        assert_eq!(map.get("content-type").unwrap().as_bytes(), b"text/plain");
-        assert!(map.get("connection").is_none());
-    }
-
-    #[test]
-    fn php_framing_headers_never_reach_the_wire() {
-        let map = response_headers(
-            hdrs(&[("Content-Length", "999"), ("Transfer-Encoding", "chunked")]),
-            Some(4),
-        );
-        assert_eq!(map.get("content-length").unwrap().as_bytes(), b"4");
-        assert!(map.get("transfer-encoding").is_none());
-    }
-
-    #[test]
-    fn map_without_hop_by_hop_keeps_every_field() {
+    fn response_headers_strip_the_framing_and_set_the_length() {
         struct Case {
             name: &'static str,
             input: &'static [(&'static str, &'static str)],
@@ -126,6 +100,28 @@ mod tests {
                 input: &[],
                 content_length: Some(0),
                 want: &[("content-length", "0")],
+            },
+            Case {
+                name: "php framing fields never reach the wire",
+                input: &[("Content-Length", "999"), ("Transfer-Encoding", "chunked")],
+                content_length: Some(4),
+                want: &[("content-length", "4")],
+            },
+            Case {
+                name: "a connection value names fields to drop but cannot strip the framing",
+                input: &[
+                    ("cOnNeCtIoN", "  Content-Length, ,X-Drop\t,  "),
+                    ("X-DROP", "1"),
+                    ("X-Keep", "2"),
+                    ("PROXY-CONNECTION", "legacy"),
+                    ("Content-Type", "text/plain"),
+                ],
+                content_length: Some(7),
+                want: &[
+                    ("x-keep", "2"),
+                    ("content-type", "text/plain"),
+                    ("content-length", "7"),
+                ],
             },
         ];
         for c in &cases {

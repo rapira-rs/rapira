@@ -1,3 +1,5 @@
+//! The head table walk, the content-length split and the trailer denylist.
+
 use super::*;
 
 /// Fields that may not travel in a trailer section per RFC 9110 §6.5.1; unknown fields pass.
@@ -72,7 +74,7 @@ pub(super) fn split_framing(mut headers: HeaderMap) -> Result<SplitHead, &'stati
 
 pub(super) fn parse_content_length(v: &[u8]) -> Option<u64> {
     let s = std::str::from_utf8(v).ok()?.trim();
-    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+    if !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
     }
     s.parse().ok()

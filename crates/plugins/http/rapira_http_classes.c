@@ -16,12 +16,13 @@ zend_class_entry *rapira_ce_http_file_not_sendable_exception;
 // own copy: std_object_handlers is shared engine state
 static zend_object_handlers rapira_exchange_handlers;
 
-// unit is a Rust Box; free_obj hands it back to Rust to drop
+// unit is a Rust Box; free_obj hands it back to Rust to drop. receive() allocates
+// the object before the pull, so unit is NULL when no unit came: a timeout, an
+// empty tryReceive(), a closed source or a spent quota.
 static void rapira_exchange_free(zend_object *std) {
     rapira_exchange_obj *obj = rapira_exchange_from(std);
     if (obj->unit != NULL) {
         rapira_rs_exchange_drop(obj->unit);
-        obj->unit = NULL;
     }
     // no-op on IS_UNDEF (getRequest never called)
     zval_ptr_dtor(&obj->request);

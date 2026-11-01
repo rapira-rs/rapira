@@ -1,13 +1,14 @@
+//! writeHead(), writeBody(), writeTrailers(), flush() and the frames they send.
+
 use super::headers::{forbidden_trailer, split_framing, walk_head_table};
 use super::*;
 
-/// Cores return these instead of throwing: no owned state may be live when `zend_throw_*` bailouts.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// A core returns a Verb and throws nothing: `throw_verb` throws after the core dropped its owned state, because `zend_throw_*` can bail out.
+#[derive(Debug, PartialEq)]
 pub(super) enum Verb {
     Ok,
     Finalized,
     HeadWritten,
-    Overflow,
     Discarded,
     ContentLengthExceeded,
     BadField(&'static CStr),
@@ -30,7 +31,6 @@ pub(super) unsafe fn throw_verb(v: Verb) -> bool {
                 rapira_ce_http_head_already_written_error,
                 c"the final head has already been written",
             ),
-            Verb::Overflow => zend::throw_error(c"response chunk exceeds the host buffer cap"),
             Verb::Discarded => zend::throw_exception(
                 rapira_ce_work_discarded_exception,
                 c"the host closed the exchange first",
@@ -58,33 +58,28 @@ pub(super) struct Closed;
 /// # Safety
 /// Engine active on this thread.
 pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
-    let (result, parked) = {
-        let Some(tx) = st.sender.as_ref() else {
-            return Err(Closed);
-        };
-        match tx.try_send(frame) {
-            Ok(()) => (Ok(()), false),
-            Err(TrySendError::Closed(_)) => (Err(Closed), false),
-            Err(TrySendError::Full(frame)) => unsafe {
-                let consumed = st.armed_at.elapsed();
-                let saved = executor_globals.timeout_seconds;
-                if saved > 0 {
-                    zend_unset_timeout();
-                }
-                // Only `Closed` ends the park: a slow consumer is backpressure, not cancellation.
-                let r = tx.blocking_send(frame).map_err(|_| Closed);
-                if saved > 0 {
-                    let remaining = (saved as u64).saturating_sub(consumed.as_secs()).max(1);
-                    zend_set_timeout(remaining as rapira_sapi::zend_long, false);
-                }
-                (r, saved > 0)
-            },
-        }
+    let Some(tx) = st.sender.as_ref() else {
+        return Err(Closed);
     };
-    if parked {
-        st.armed_at = Instant::now();
+    match tx.try_send(frame) {
+        Ok(()) => Ok(()),
+        Err(TrySendError::Closed(_)) => Err(Closed),
+        Err(TrySendError::Full(frame)) => unsafe {
+            let consumed = st.armed_at.elapsed();
+            let saved = executor_globals.timeout_seconds;
+            if saved > 0 {
+                zend_unset_timeout();
+            }
+            // Only Closed ends the park: a slow consumer is backpressure, not cancellation.
+            let r = tx.blocking_send(frame).map_err(|_| Closed);
+            if saved > 0 {
+                let remaining = (saved as u64).saturating_sub(consumed.as_secs()).max(1);
+                zend_set_timeout(remaining as rapira_sapi::zend_long, false);
+                st.armed_at = Instant::now();
+            }
+            r
+        },
     }
-    result
 }
 
 /// `finalizing_len` is the one-shot body length used only when nothing streamed before: a declared content-length wins, and a bodiless response gets none.
@@ -97,10 +92,10 @@ pub(super) unsafe fn emit_head(
     if st.head_sent {
         return Ok(());
     }
-    let (status, headers) = match st.pending.take() {
-        Some(p) => (p.status, p.headers),
-        None => (200, HeaderMap::new()),
-    };
+    let PendingHead { status, headers } = st.pending.take().unwrap_or(PendingHead {
+        status: 200,
+        headers: HeaderMap::new(),
+    });
     if st.stage == Stage::Open {
         st.stage = Stage::HeadCommitted;
     }
@@ -131,12 +126,8 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
     st.stage = Stage::Finalized;
     st.body.unlink_spools();
     sb_update(Event::Handled(true));
-    if let Some(tx) = st.sender.take() {
-        let _ = tx.try_send(Frame::End {
-            trailers: HeaderMap::new(),
-            truncated: true,
-        });
-    }
+    // Every caller saw the channel closed first, so no frame can reach the plugin.
+    st.sender = None;
 }
 
 /// # Safety
@@ -177,10 +168,8 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
     guard(false, || unsafe {
         let map = match walk_head_table(trailers) {
             Ok(map) => map,
-            Err(_) => {
-                zend::throw_value_error(
-                    c"a trailer name or value is not representable on the wire",
-                );
+            Err(msg) => {
+                zend::throw_value_error(msg);
                 return false;
             }
         };
@@ -210,15 +199,9 @@ pub(super) unsafe fn write_head_core(
     if st.stage != Stage::Open {
         return Verb::HeadWritten;
     }
+    // The contract calls an interim head advisory, and HTTP/1.1 from PHP carries none: the plugin drops it here.
     if status != 101 && (100..200).contains(&status) {
-        let head = ResponseHead { status, headers };
-        return match unsafe { send_frame(st, Frame::Interim(head)) } {
-            Ok(()) => Verb::Ok,
-            Err(Closed) => {
-                discard_unit(st);
-                Verb::Discarded
-            }
-        };
+        return Verb::Ok;
     }
     let split = match split_framing(headers) {
         Ok(split) => split,
@@ -229,7 +212,7 @@ pub(super) unsafe fn write_head_core(
         status,
         headers: split.headers,
     });
-    // 1xx carries no body either (RFC 9112 §6.3), so a committed 101 drops chunks like 204/304.
+    // 1xx carries no body either (RFC 9112 §6.3), so a committed 101 drops chunks like 204/304. https://www.rfc-editor.org/rfc/rfc9112#section-6.3
     if matches!(status, 204 | 304 | 101) {
         st.bodiless = true;
     }
@@ -282,17 +265,6 @@ pub(super) unsafe fn write_body_core(
     }
     if len == 0 && !eos {
         return Verb::Ok;
-    }
-    if len > MAX_BUFFERED_BODY {
-        tracing::error!(
-            target: "rapira",
-            "response chunk exceeds the host buffer cap ({len} > {MAX_BUFFERED_BODY} bytes); sealing truncated"
-        );
-        let _ = unsafe { emit_head(st, None) };
-        unsafe {
-            seal(st, /*truncated=*/ true, HeaderMap::new())
-        };
-        return Verb::Overflow;
     }
     unsafe {
         send_body(st, len as u64, eos, |n| {

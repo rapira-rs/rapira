@@ -1,3 +1,5 @@
+//! sendFile(): the root check and the file slice frame.
+
 use std::path::PathBuf;
 use std::sync::OnceLock;
 
@@ -6,7 +8,7 @@ use super::*;
 
 static SENDFILE_ROOT: OnceLock<PathBuf> = OnceLock::new();
 
-/// The first call sets the root for the process; a later call changes nothing.
+/// Runs once in the master before the fork; the workers inherit the value. A later call changes nothing.
 pub(crate) fn set_sendfile_root(root: PathBuf) {
     let canonical = std::fs::canonicalize(&root).unwrap_or_else(|e| {
         tracing::warn!(
@@ -33,9 +35,7 @@ fn open_send_file(
     use std::os::unix::ffi::OsStrExt;
     let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
     let canonical = std::fs::canonicalize(path).map_err(|_| c"no readable file at the path")?;
-    let Some(root) = SENDFILE_ROOT.get() else {
-        return Err(c"no sendfile root is configured");
-    };
+    let root = SENDFILE_ROOT.get().expect("set in Plugin::prepare");
     if !canonical.starts_with(root) {
         return Err(c"the path is outside the configured sendfile root");
     }

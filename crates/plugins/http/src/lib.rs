@@ -1,3 +1,5 @@
+//! The http plugin: HTTP/1.1 on the configured listener, every request answered from PHP.
+
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -22,13 +24,12 @@ mod serve;
 
 pub use php::rapira_http_register_classes;
 
-#[derive(Clone)]
 pub struct Config {
     pub listen: ListenAddr,
     pub server_name: &'static str,
     pub server_port: u16,
     pub max_body_size: usize,
-    pub unsafe_field_names: UnsafeFieldNames,
+    /// The classic and worker modes build the CGI view, so they drop the field names that alias a CGI variable.
     pub superglobals: bool,
     pub write_timeout: Duration,
     pub keepalive_timeout: Duration,
@@ -38,15 +39,6 @@ pub struct Config {
     pub uploads: Option<multipart::Limits>,
     /// sendFile() containment root.
     pub sendfile_root: PathBuf,
-}
-
-/// The `HTTP_*` mapping rewrites `-` to `_` and PHP rewrites `.` to `_`, so `X_Forwarded_For` and `X.Forwarded.For` both land on `HTTP_X_FORWARDED_FOR`.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum UnsafeFieldNames {
-    #[default]
-    Drop,
-    Reject,
 }
 
 pub struct Server {
@@ -70,6 +62,7 @@ impl Plugin for Server {
     fn prepare(&mut self) -> Result<()> {
         // Before the fork: the PHP thread of a worker can read the identity at boot, before serve() runs.
         php::set_server_identity(self.config.server_name, self.config.server_port);
+        php::set_sendfile_root(self.config.sendfile_root.clone());
         if let Some(uploads) = &self.config.uploads {
             multipart::sweep_spool_dirs(&uploads.dir);
         }
@@ -84,7 +77,6 @@ impl Plugin for Server {
         let Some(prepared) = prepared else {
             return Err(anyhow!("http listener was not prepared"));
         };
-        php::set_sendfile_root(config.sendfile_root.clone());
         serve::serve(config, prepared, worker)
     }
 }
