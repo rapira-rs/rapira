@@ -1,7 +1,7 @@
 #ifndef RAPIRA_GRPC_H
 #define RAPIRA_GRPC_H
 
-#include "rapira_sapi.h"
+#include "../../sapi/rapira_sapi.h"
 
 // rust glue
 extern void rapira_rs_grpc_drop(void *state);
@@ -29,7 +29,6 @@ extern zend_class_entry *rapira_ce_grpc_protocol;
 extern zend_class_entry *rapira_ce_grpc_status;
 extern zend_class_entry *rapira_ce_grpc_metadata;
 
-// the register function of the grpc plugin
 void rapira_grpc_register_classes(void);
 
 static zend_always_inline rapira_grpc_call_obj *

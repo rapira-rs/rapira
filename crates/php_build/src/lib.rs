@@ -32,15 +32,14 @@ pub fn discover() -> anyhow::Result<Php> {
     })
 }
 
-/// Compiles `files` with cc into a static library named `name`, with the PHP include dirs and `extra_includes`, and defines RAPIRA_VERSION from CARGO_PKG_VERSION. Emits rerun-if-changed for `files`.
-pub fn compile(name: &str, files: &[&str], php: &Php, extra_includes: &[&str]) {
+/// Compiles `files` with cc into a static library named `name`, with the PHP include dirs, and defines RAPIRA_VERSION from CARGO_PKG_VERSION. Emits rerun-if-changed for `files`.
+pub fn compile(name: &str, files: &[&str], php: &Php) {
     let version = env::var("CARGO_PKG_VERSION").expect("cargo sets CARGO_PKG_VERSION");
     let mut c = cc::Build::new();
     c.flag_if_supported("-Wno-unused-parameter");
     c.define("RAPIRA_VERSION", format!("\"{version}\"").as_str());
     c.files(files);
     c.includes(&php.includes);
-    c.includes(extra_includes);
     c.compile(name);
     for f in files {
         println!("cargo:rerun-if-changed={f}");
