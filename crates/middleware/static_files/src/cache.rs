@@ -161,6 +161,8 @@ struct Entry {
 struct Store {
     map: HashMap<PathBuf, Entry>,
     bytes: usize,
+    /// No resident entry can expire before this time.
+    next_expiry: Option<Instant>,
 }
 
 impl Store {
@@ -193,14 +195,17 @@ impl Store {
     /// Removes every entry that no stat or fill confirmed in the last second.
     fn drop_expired(&mut self, now: Instant) {
         let mut freed = 0;
+        let mut oldest = now;
         self.map.retain(|path, entry| {
             if now.duration_since(entry.checked) < TTL {
+                oldest = oldest.min(entry.checked);
                 return true;
             }
             freed += Self::footprint(path, entry.body.len());
             false
         });
         self.bytes -= freed;
+        self.next_expiry = Some(oldest + TTL);
     }
 
     /// A full cache still serves its entries. It removes the stale entries before it refuses
@@ -210,6 +215,9 @@ impl Store {
         if self.fits(path, body) {
             return true;
         }
+        if self.next_expiry.is_some_and(|expiry| now < expiry) {
+            return false;
+        }
         self.drop_expired(now);
         self.fits(path, body)
     }
@@ -218,7 +226,10 @@ impl Store {
     /// A path with no entry stays out of the map until `fill` has a body for it.
     fn revalidate(&mut self, path: &Path, meta: &CachedMeta, now: Instant) {
         match self.map.get_mut(path) {
-            Some(entry) if entry.meta.same_file(meta) => entry.checked = now,
+            Some(entry) if entry.meta.same_file(meta) => {
+                entry.checked = now;
+                self.next_expiry = self.next_expiry.map(|expiry| expiry.min(now + TTL));
+            }
             Some(_) => self.take(path),
             None => {}
         }
@@ -363,6 +374,158 @@ impl Backend for CachingBackend {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_cache_uses_the_first_possible_expiry() {
+        struct Case {
+            name: &'static str,
+            revalidate_ms: Option<i64>,
+            replace: bool,
+            attempt_ms: u64,
+            fits: bool,
+            first_present: bool,
+            next_expiry_ms: u64,
+        }
+        let cases = [
+            Case {
+                name: "full cache before first expiry",
+                revalidate_ms: None,
+                replace: false,
+                attempt_ms: 999,
+                fits: false,
+                first_present: true,
+                next_expiry_ms: 1000,
+            },
+            Case {
+                name: "first expiry permits admission and keeps later entries",
+                revalidate_ms: None,
+                replace: false,
+                attempt_ms: 1000,
+                fits: true,
+                first_present: false,
+                next_expiry_ms: 1500,
+            },
+            Case {
+                name: "revalidation extends the first entry freshness",
+                revalidate_ms: Some(900),
+                replace: false,
+                attempt_ms: 1000,
+                fits: false,
+                first_present: true,
+                next_expiry_ms: 1500,
+            },
+            Case {
+                name: "a delayed stat can lower the first expiry",
+                revalidate_ms: Some(-200),
+                replace: false,
+                attempt_ms: 800,
+                fits: true,
+                first_present: false,
+                next_expiry_ms: 1500,
+            },
+            Case {
+                name: "same size replacement keeps the capacity accounting",
+                revalidate_ms: None,
+                replace: true,
+                attempt_ms: 1000,
+                fits: false,
+                first_present: true,
+                next_expiry_ms: 1500,
+            },
+        ];
+        let anchor = Instant::now() + TTL;
+        let body = Bytes::from(vec![b'a'; MAX_FILE as usize]);
+        let replacement = Bytes::from(vec![b'b'; MAX_FILE as usize]);
+        let meta = CachedMeta {
+            is_dir: false,
+            modified: Some(UNIX_EPOCH),
+            len: MAX_FILE,
+        };
+        for case in cases {
+            let mut store = Store::default();
+            for index in 0..63 {
+                let checked = if index == 0 {
+                    anchor
+                } else {
+                    anchor + Duration::from_millis(500)
+                };
+                store.put(
+                    PathBuf::from(format!("f{index:02}.bin")),
+                    body.clone(),
+                    meta,
+                    checked,
+                );
+            }
+            let first = Path::new("f00.bin");
+            let other = Path::new("f01.bin");
+            let incoming = Path::new("next.bin");
+            assert!(
+                !store.make_room(incoming, MAX_FILE, anchor + Duration::from_millis(700)),
+                "{}",
+                case.name
+            );
+            assert_eq!(store.next_expiry, Some(anchor + TTL), "{}", case.name);
+            if let Some(offset) = case.revalidate_ms {
+                let checked = if offset < 0 {
+                    anchor - Duration::from_millis(offset.unsigned_abs())
+                } else {
+                    anchor + Duration::from_millis(offset as u64)
+                };
+                store.revalidate(first, &meta, checked);
+            }
+            if case.replace {
+                store.put(
+                    first.to_path_buf(),
+                    replacement.clone(),
+                    meta,
+                    anchor + Duration::from_millis(800),
+                );
+            }
+            let now = anchor + Duration::from_millis(case.attempt_ms);
+            assert_eq!(
+                store.make_room(incoming, MAX_FILE, now),
+                case.fits,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                store.map.contains_key(first),
+                case.first_present,
+                "{}",
+                case.name
+            );
+            assert_eq!(store.map[other].body, body, "{}", case.name);
+            assert_eq!(
+                store.next_expiry,
+                Some(anchor + Duration::from_millis(case.next_expiry_ms)),
+                "{}",
+                case.name
+            );
+            if case.first_present {
+                assert_eq!(
+                    &store.map[first].body,
+                    if case.replace { &replacement } else { &body },
+                    "{}",
+                    case.name
+                );
+            }
+            if case.fits {
+                store.put(incoming.to_path_buf(), body.clone(), meta, now);
+                assert_eq!(store.map[incoming].body, body, "{}", case.name);
+            }
+            assert!(store.bytes <= MAX_TOTAL, "{}", case.name);
+            assert_eq!(
+                store.bytes,
+                store
+                    .map
+                    .iter()
+                    .map(|(path, entry)| Store::footprint(path, entry.body.len()))
+                    .sum::<usize>(),
+                "{}",
+                case.name
+            );
+        }
+    }
 
     /// httpdate formats a time from the epoch up to the end of year 9999 and panics outside
     /// that range. https://docs.rs/httpdate/1.0.3/src/httpdate/date.rs.html#47-57
