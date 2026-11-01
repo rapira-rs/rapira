@@ -4,10 +4,10 @@ use std::sync::OnceLock;
 
 use super::*;
 
-unsafe fn emit_headers(dst: *mut zval, g: &Grouped) {
+unsafe fn emit_headers(dst: *mut zval, headers: &[HeaderValues]) {
     unsafe {
-        rapira_array_init(dst, g.0.len() as u32);
-        for (name, values) in &g.0 {
+        rapira_array_init(dst, headers.len() as u32);
+        for HeaderValues { name, values } in headers {
             add_list(
                 dst,
                 header_key(name),

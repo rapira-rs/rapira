@@ -141,7 +141,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         https,
         received_at: 0.0,
     };
-    let built = build(&mut parts, authority.clone(), Vec::new(), peer, &CONFIG);
+    let built = build(parts, authority.clone(), Vec::new(), peer, &CONFIG);
     // http::Uri drops a fragment, so $target has none.
     let raw = target.split('#').next().unwrap_or_default();
     let (want_uri, want_target) = if raw == "*" || raw.starts_with('/') {

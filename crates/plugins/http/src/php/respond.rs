@@ -92,7 +92,7 @@ pub(super) unsafe fn emit_head(
     if st.head_sent {
         return Ok(());
     }
-    let PendingHead { status, headers } = st.pending.take().unwrap_or(PendingHead {
+    let head = st.pending.take().unwrap_or(ResponseHead {
         status: 200,
         headers: HeaderMap::new(),
     });
@@ -109,7 +109,7 @@ pub(super) unsafe fn emit_head(
         send_frame(
             st,
             Frame::Head {
-                head: ResponseHead { status, headers },
+                head,
                 content_length,
                 bodiless: st.bodiless,
             },
@@ -125,7 +125,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
     st.discarded = true;
     st.stage = Stage::Finalized;
     st.body.unlink_spools();
-    sb_update(Event::Handled(true));
+    sb_update(Event::Handled { errored: true });
     // Every caller saw the channel closed first, so no frame can reach the plugin.
     st.sender = None;
 }
@@ -208,7 +208,7 @@ pub(super) unsafe fn write_head_core(
         Err(msg) => return Verb::BadField(msg),
     };
     st.declared_cl = split.declared_cl;
-    st.pending = Some(PendingHead {
+    st.pending = Some(ResponseHead {
         status,
         headers: split.headers,
     });
@@ -336,7 +336,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
 pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: HeaderMap) {
     st.body.unlink_spools();
     st.stage = Stage::Finalized;
-    sb_update(Event::Handled(truncated));
+    sb_update(Event::Handled { errored: truncated });
     let _ = unsafe {
         send_frame(
             st,

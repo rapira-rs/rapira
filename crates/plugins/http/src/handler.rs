@@ -238,7 +238,7 @@ async fn handle(
             &handler.closed,
             authority,
             reqs_counter,
-            &mut parts,
+            parts,
             incoming,
             peer,
         )
@@ -322,7 +322,7 @@ impl Conn {
             &self.closed,
             state.authority,
             state.guard,
-            &mut parts,
+            parts,
             body,
             state.peer,
         )
@@ -343,7 +343,7 @@ async fn serve_php<B>(
     closed: &tokio::sync::watch::Receiver<bridge::ConnectionState>,
     authority: Option<Vec<u8>>,
     guard: Arc<InflightReqCount>,
-    parts: &mut http::request::Parts,
+    parts: http::request::Parts,
     mut body: B,
     peer: Peer,
 ) -> http::Response<RespBody>

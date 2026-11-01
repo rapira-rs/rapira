@@ -81,10 +81,12 @@ pub unsafe extern "C" fn rapira_rs_grpc_services(rv: *mut zval) -> bool {
     })
 }
 
-/// One metadata name with its values in arrival order (request) or add order (response). `-bin` values are raw bytes.
-type Field = (HeaderName, Vec<Vec<u8>>);
-/// In order of the first value of each name.
-type Fields = Vec<Field>;
+/// One metadata name with values in arrival or add order. `-bin` values are raw bytes.
+#[derive(Debug, PartialEq)]
+pub struct MetadataField {
+    pub name: HeaderName,
+    pub values: Vec<Vec<u8>>,
+}
 
 /// Request `-bin` values use the standard alphabet with or without padding. Implementations "MUST accept padded and un-padded values": https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
 const BIN_DECODE: GeneralPurpose = GeneralPurpose::new(
@@ -122,8 +124,8 @@ pub(crate) fn is_binary(name: &[u8]) -> bool {
 /// `Context::$metadata`: the application keys, with `-bin` values decoded. A text value that is not printable or an undecodable `-bin` value is dropped, and a key with no values left is absent.
 /// A `-bin` value is split on "," first: "Implementations must split Binary-Headers on "," before decoding the Base64-encoded values." https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
 /// The optional whitespace around "," follows the HTTP list rule. https://www.rfc-editor.org/rfc/rfc9110#section-5.6.1
-pub fn context_metadata(headers: &HeaderMap) -> Fields {
-    let mut out = Fields::new();
+pub fn context_metadata(headers: &HeaderMap) -> Vec<MetadataField> {
+    let mut out = Vec::new();
     for name in headers.keys() {
         if reserved(name.as_str()) {
             continue;
@@ -150,7 +152,10 @@ pub fn context_metadata(headers: &HeaderMap) -> Fields {
             }
         }
         if !values.is_empty() {
-            out.push((name.clone(), values));
+            out.push(MetadataField {
+                name: name.clone(),
+                values,
+            });
         }
     }
     out
@@ -158,9 +163,9 @@ pub fn context_metadata(headers: &HeaderMap) -> Fields {
 
 /// Response metadata in wire form. `-bin` values are base64 without padding: implementations "should emit un-padded values" (PROTOCOL-HTTP2 Requests).
 /// A text value loses its edge spaces: an HTTP/2 field value "MUST NOT start or end with an ASCII whitespace character" (https://www.rfc-editor.org/rfc/rfc9113#section-8.2.1), and for gRPC "it may be stripped" (PROTOCOL-HTTP2 Requests).
-fn wire(fields: &[Field]) -> HeaderMap {
+fn wire(fields: &[MetadataField]) -> HeaderMap {
     let mut map = HeaderMap::new();
-    for (name, values) in fields {
+    for MetadataField { name, values } in fields {
         let binary = is_binary(name.as_str().as_bytes());
         for v in values {
             let value = if binary {
@@ -180,7 +185,7 @@ fn wire(fields: &[Field]) -> HeaderMap {
 /// Owned values of the Context object. The state keeps them because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
 struct ContextView {
     remote: AddrOwned,
-    metadata: Fields,
+    metadata: Vec<MetadataField>,
 }
 
 pub(crate) struct GrpcState {
@@ -189,8 +194,8 @@ pub(crate) struct GrpcState {
     /// None after the outcome went out or the call was discarded: the call is then finalized.
     reply: Option<oneshot::Sender<UnaryReply>>,
     discarded: bool,
-    headers: Fields,
-    trailers: Fields,
+    headers: Vec<MetadataField>,
+    trailers: Vec<MetadataField>,
     /// Filled by the first `getContext()`.
     view: Option<ContextView>,
 }
@@ -203,8 +208,8 @@ impl GrpcState {
             received_at: now_unix_f64(),
             reply: Some(reply),
             discarded: false,
-            headers: Fields::new(),
-            trailers: Fields::new(),
+            headers: Vec::new(),
+            trailers: Vec::new(),
             view: None,
         }
     }
@@ -262,7 +267,7 @@ impl Held for GrpcState {
         }
         self.discarded = true;
         self.reply = None;
-        sb_update(Event::Handled(true));
+        sb_update(Event::Handled { errored: true });
     }
 }
 
@@ -324,9 +329,12 @@ fn add_core(
     } else {
         &mut st.headers
     };
-    match half.iter_mut().find(|(n, _)| *n == name) {
-        Some((_, values)) => values.push(value.to_vec()),
-        None => half.push((name, vec![value.to_vec()])),
+    match half.iter_mut().find(|field| field.name == name) {
+        Some(field) => field.values.push(value.to_vec()),
+        None => half.push(MetadataField {
+            name,
+            values: vec![value.to_vec()],
+        }),
     }
     Verb::Ok
 }
@@ -347,11 +355,11 @@ fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
     };
     // the receiver can drop after the cancelled() check
     if reply.send(outcome).is_ok() {
-        sb_update(Event::Handled(false));
+        sb_update(Event::Handled { errored: false });
         Verb::Ok
     } else {
         st.discarded = true;
-        sb_update(Event::Handled(true));
+        sb_update(Event::Handled { errored: true });
         Verb::Discarded
     }
 }
@@ -383,11 +391,11 @@ rapira_sapi::container_of!(metadata_from, MetadataObj);
 /// A `Rapira\Grpc\Metadata` object over `fields`.
 /// # Safety
 /// `dst` writable; engine active on this thread.
-unsafe fn build_metadata(dst: *mut zval, fields: &[Field]) {
+unsafe fn build_metadata(dst: *mut zval, fields: &[MetadataField]) {
     unsafe {
         let mut entries: zval = std::mem::zeroed();
         rapira_array_init(&mut entries, fields.len() as u32);
-        for (name, values) in fields {
+        for MetadataField { name, values } in fields {
             let key = name.as_str();
             add_list(
                 &mut entries,
@@ -697,19 +705,15 @@ mod tests {
             .collect()
     }
 
-    fn owned(fields: &[(&str, &[&[u8]])]) -> Vec<(String, Vec<Vec<u8>>)> {
+    fn owned(fields: &[(&str, &[&[u8]])]) -> Vec<MetadataField> {
         let mut out = Vec::new();
-        for (n, vs) in fields {
-            out.push(((*n).to_owned(), vs.iter().map(|v| v.to_vec()).collect()));
+        for (name, values) in fields {
+            out.push(MetadataField {
+                name: HeaderName::from_bytes(name.as_bytes()).unwrap(),
+                values: values.iter().map(|value| value.to_vec()).collect(),
+            });
         }
         out
-    }
-
-    fn named(fields: &[Field]) -> Vec<(String, Vec<Vec<u8>>)> {
-        fields
-            .iter()
-            .map(|(n, vs)| (n.as_str().to_owned(), vs.clone()))
-            .collect()
     }
 
     #[test]
@@ -898,7 +902,7 @@ mod tests {
         ];
         for c in CASES {
             assert_eq!(
-                named(&context_metadata(&map(c.headers))),
+                context_metadata(&map(c.headers)),
                 owned(c.expected),
                 "{}",
                 c.name
@@ -943,7 +947,10 @@ mod tests {
         ];
         for c in CASES {
             let (name, value) = c.field;
-            let fields = vec![(HeaderName::from_static(name), vec![value.to_vec()])];
+            let fields = [MetadataField {
+                name: HeaderName::from_static(name),
+                values: vec![value.to_vec()],
+            }];
             let map = wire(&fields);
             assert_eq!(
                 map.get(name).map(HeaderValue::as_bytes),
@@ -1166,7 +1173,7 @@ mod tests {
                 Want::Stored { name, value } => {
                     assert_eq!(v, Verb::Ok, "{}", c.name);
                     let half = if c.trailer { &st.trailers } else { &st.headers };
-                    assert_eq!(named(half), owned(&[(name, &[value])]), "{}", c.name);
+                    assert_eq!(*half, owned(&[(name, &[value])]), "{}", c.name);
                 }
                 Want::BadField(msg) => assert_eq!(v, Verb::BadField(msg), "{}", c.name),
                 Want::Finalized => assert_eq!(v, Verb::Finalized, "{}", c.name),

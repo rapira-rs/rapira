@@ -5,15 +5,14 @@ pub use config::{Section, Settings, resolve};
 
 use std::convert::Infallible;
 use std::path::PathBuf;
-use std::pin::Pin;
 use std::sync::Arc;
 
 use bytes::Bytes;
 use http::{Method, StatusCode, header};
 use http_body_util::combinators::UnsyncBoxBody;
 use http_body_util::{BodyExt, Empty};
-use tower::ServiceExt as _;
 use tower::util::{BoxCloneService, BoxCloneServiceLayer};
+use tower::{Service as _, ServiceExt as _};
 use tower_http::services::ServeDir;
 use tower_http::services::fs::DefaultServeDirFallback;
 
@@ -159,12 +158,9 @@ fn probe(req: &http::Request<Body>) -> http::Request<Empty<Bytes>> {
 }
 
 /// Hands a miss to the inner service.
-/// The `Oneshot` is boxed as `Send` before the await: the compiler cannot prove `Send` for a held `Oneshot` over this request type.
-/// https://github.com/rust-lang/rust/issues/110338
-async fn forward(inner: Inner, req: http::Request<Body>) -> http::Response<Body> {
-    let call: Pin<Box<dyn Future<Output = Result<http::Response<Body>, Infallible>> + Send>> =
-        Box::pin(inner.oneshot(req));
-    let Ok(res) = call.await;
+async fn forward(mut inner: Inner, req: http::Request<Body>) -> http::Response<Body> {
+    let Ok(ready) = inner.ready().await;
+    let Ok(res) = ready.call(req).await;
     res
 }
 

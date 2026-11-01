@@ -6,9 +6,9 @@ use rapira_sapi::types::Body;
 use crate::Config;
 use crate::middleware::Peer;
 
-/// Moves the header map out of `parts`. The body stays raw: the handler parses multipart.
+/// The body stays raw: the handler parses multipart.
 pub fn build(
-    parts: &mut http::request::Parts,
+    parts: http::request::Parts,
     authority: Option<Vec<u8>>,
     body: Vec<u8>,
     peer: Peer,
@@ -20,7 +20,7 @@ pub fn build(
         http::Version::HTTP_2 => "HTTP/2.0",
         _ => "HTTP/1.1",
     };
-    let headers = std::mem::take(&mut parts.headers);
+    let headers = parts.headers;
     Request {
         method: parts.method.as_str().to_owned(),
         // Origin-form view for every target form. Display restores the leading slash
@@ -95,14 +95,8 @@ mod tests {
             .header("x-probe", "two")
             .body(())
             .unwrap();
-        let (mut parts, ()) = req.into_parts();
-        let built = build(
-            &mut parts,
-            Some(b"e2e".to_vec()),
-            Vec::new(),
-            peer(),
-            &config(),
-        );
+        let (parts, ()) = req.into_parts();
+        let built = build(parts, Some(b"e2e".to_vec()), Vec::new(), peer(), &config());
         let probes: Vec<_> = built.headers.get_all("x-probe").iter().collect();
         assert_eq!(probes, ["one", "two"]);
         assert_eq!(built.protocol, "HTTP/1.1");
@@ -156,8 +150,8 @@ mod tests {
                 .uri(case.uri)
                 .body(())
                 .unwrap();
-            let (mut parts, ()) = req.into_parts();
-            let built = build(&mut parts, None, Vec::new(), peer(), &config());
+            let (parts, ()) = req.into_parts();
+            let built = build(parts, None, Vec::new(), peer(), &config());
             assert_eq!(built.uri, case.want_uri, "{}", case.name);
             assert_eq!(built.target.as_deref(), case.want_target, "{}", case.name);
         }

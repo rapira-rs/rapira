@@ -157,7 +157,7 @@ pub fn run_plugin(
     rt.spawn(async move {
         loop {
             restart.notified().await;
-            if let Err(e) = restart_intake.restart_app().await {
+            if let Err(e) = restart_intake.restart_app() {
                 tracing::warn!(target: "rapira", "reload skipped: {e}");
             }
         }

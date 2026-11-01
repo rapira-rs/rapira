@@ -35,8 +35,7 @@ pub(crate) struct Config {
     pub keepalive_interval: Duration,
     /// Wait for the PING ACK. A peer that is gone without a FIN sends no ACK, so its connection closes within the sum of both values and does not hold a later drain.
     pub keepalive_timeout: Duration,
-    /// `[grpc].interceptors` in list order, the first listed outermost.
-    pub interceptors: Vec<Arc<dyn connectrpc::Interceptor>>,
+    pub auth: Option<Arc<rapira_grpc_auth::Auth>>,
 }
 
 pub struct Server {

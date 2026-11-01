@@ -75,12 +75,6 @@ enum Stage {
     Finalized,
 }
 
-/// A committed head, not yet on the wire: the bytes leave with the first body-touching verb.
-struct PendingHead {
-    status: u16,
-    headers: HeaderMap,
-}
-
 enum BodyState {
     Raw(Vec<u8>),
     /// seal(), discard_unit() and exchange_drop unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
@@ -102,29 +96,33 @@ impl BodyState {
 
 struct FieldPart {
     field: FormField,
-    headers: Grouped,
+    headers: Vec<HeaderValues>,
 }
 
 struct FilePart {
     upload: UploadedFile,
     path: Vec<u8>,
-    headers: Grouped,
+    headers: Vec<HeaderValues>,
 }
 
 /// Multipart part headers, one entry per name.
-struct Grouped(Vec<(String, Vec<Vec<u8>>)>);
+struct HeaderValues {
+    name: String,
+    values: Vec<Vec<u8>>,
+}
 
-impl Grouped {
-    fn new(headers: &[(String, Vec<u8>)]) -> Self {
-        let mut out: Vec<(String, Vec<Vec<u8>>)> = Vec::new();
-        for (name, value) in headers {
-            match out.iter_mut().find(|(n, _)| n == name) {
-                Some((_, values)) => values.push(value.clone()),
-                None => out.push((name.clone(), vec![value.clone()])),
-            }
+fn group_headers(headers: Vec<(String, Vec<u8>)>) -> Vec<HeaderValues> {
+    let mut out: Vec<HeaderValues> = Vec::new();
+    for (name, value) in headers {
+        match out.iter_mut().find(|header| header.name == name) {
+            Some(header) => header.values.push(value),
+            None => out.push(HeaderValues {
+                name,
+                values: vec![value],
+            }),
         }
-        Self(out)
     }
+    out
 }
 
 /// Contract spelling for `Request::$protocol`: HTTP/2, not the CGI HTTP/2.0.
@@ -188,7 +186,7 @@ pub struct ExchangeState {
     view: Option<RequestView>,
     stage: Stage,
     head_sent: bool,
-    pending: Option<PendingHead>,
+    pending: Option<ResponseHead>,
     declared_cl: Option<u64>,
     /// Bytes accepted toward `declared_cl`: bodiless units count too, so a HEAD handler hits the same errors.
     sent_body: u64,
@@ -206,17 +204,17 @@ impl ExchangeState {
             Body::Raw(cursor) => BodyState::Raw(cursor.into_inner()),
             Body::Multipart(mb) => {
                 let mut fields = Vec::with_capacity(mb.fields.len());
-                for field in mb.fields {
+                for mut field in mb.fields {
                     fields.push(FieldPart {
-                        headers: Grouped::new(&field.headers),
+                        headers: group_headers(std::mem::take(&mut field.headers)),
                         field,
                     });
                 }
                 let mut files = Vec::with_capacity(mb.files.len());
-                for upload in mb.files {
+                for mut upload in mb.files {
                     files.push(FilePart {
                         path: path_bytes(&upload.file.path),
-                        headers: Grouped::new(&upload.headers),
+                        headers: group_headers(std::mem::take(&mut upload.headers)),
                         upload,
                     });
                 }

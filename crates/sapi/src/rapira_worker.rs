@@ -6,14 +6,7 @@ use crate::{
     scoreboard::sb_update,
     start::{Pulled, pull_unit_to_shed, pull_unit_wait, run_script},
 };
-use std::{
-    cell::Cell,
-    ffi::CString,
-    os::raw::c_int,
-    path::{Path, PathBuf},
-    ptr::null_mut,
-    time::Duration,
-};
+use std::{cell::Cell, ffi::CString, os::raw::c_int, path::Path, ptr::null_mut, time::Duration};
 
 use crate::{
     callbacks::guard,
@@ -103,10 +96,10 @@ fn run_cycle(script: &Path) -> Cycle {
     }
 }
 
-pub fn rapira_worker(script: PathBuf) -> WorkerExit {
+pub fn rapira_worker(script: &Path) -> WorkerExit {
     let mut failures: u32 = 0;
     let exit = loop {
-        match run_cycle(&script) {
+        match run_cycle(script) {
             Cycle::Stop => break WorkerExit::Closed,
             Cycle::Restart => break WorkerExit::Restart,
             Cycle::Recycle => {
@@ -116,7 +109,6 @@ pub fn rapira_worker(script: PathBuf) -> WorkerExit {
                 failures = 0;
             }
             Cycle::Failed => {
-                // we should probably adopt here circuit breaker algorithm
                 failures += 1;
                 if failures == UNHEALTHY_AFTER {
                     error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
@@ -190,7 +182,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     let truncated: bool = finalize_response(&mut ctx, errored);
 
     log_and_clear_last_error();
-    sb_update(scoreboard::Event::Handled(errored));
+    sb_update(scoreboard::Event::Handled { errored });
     if recycle {
         RECYCLE.set(true);
     }

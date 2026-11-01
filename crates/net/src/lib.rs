@@ -85,16 +85,14 @@ impl Acceptor {
     /// listener failure, if any. The listener is closed when this returns.
     #[cfg(target_os = "linux")]
     pub fn run(self, rt: &Handle, serve: &impl Serve) -> Option<anyhow::Error> {
-        let mut fatal: Option<anyhow::Error> = None;
         // tokio::spawn and from_std reach the runtime the connections run on.
         let _guard = rt.enter();
         loop {
             match accept_blocking(&self.socket, serve) {
                 Ok(true) => {}
-                Ok(false) => break,
+                Ok(false) => break None,
                 Err(e) if is_fatal_accept(&e) => {
-                    fatal = Some(anyhow!("listener failed: {e}"));
-                    break;
+                    break Some(anyhow!("listener failed: {e}"));
                 }
                 Err(e) if is_skipped_accept(&e) => {
                     tracing::debug!(target: "net", "accept skipped on {}: {e}", self.addr);
@@ -105,7 +103,6 @@ impl Acceptor {
                 }
             }
         }
-        fatal
     }
 
     /// Runs the accept loop on rt until the stop flag is set. Returns the listener
@@ -117,17 +114,15 @@ impl Acceptor {
             addr,
             mut stop,
         } = self;
-        let mut fatal: Option<anyhow::Error> = None;
         rt.block_on(async {
             loop {
                 tokio::select! {
                     biased;
-                    _ = stop.wait_for(|stop| *stop) => break,
+                    _ = stop.wait_for(|stop| *stop) => break None,
                     res = accept_connection(&socket, serve) => match res {
                         Ok(()) => {}
                         Err(e) if is_fatal_accept(&e) => {
-                            fatal = Some(anyhow!("listener failed: {e}"));
-                            break;
+                            break Some(anyhow!("listener failed: {e}"));
                         }
                         Err(e) if is_skipped_accept(&e) => {
                             tracing::debug!(target: "net", "accept skipped on {addr}: {e}");
@@ -139,8 +134,7 @@ impl Acceptor {
                     }
                 }
             }
-        });
-        fatal
+        })
     }
 }
 

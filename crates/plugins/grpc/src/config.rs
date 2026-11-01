@@ -48,15 +48,8 @@ pub struct Settings {
     pub keepalive_interval: Duration,
     /// Wait for the PING ACK before the listener closes the connection.
     pub keepalive_timeout: Duration,
-    /// `[grpc].interceptors` in list order, the first listed outermost.
-    pub interceptors: Vec<Interceptor>,
+    pub auth: Option<rapira_grpc_auth::Settings>,
     pub pool: PoolSettings,
-}
-
-/// A built-in interceptor and its settings.
-#[derive(Debug)]
-pub enum Interceptor {
-    Auth(rapira_grpc_auth::Settings),
 }
 
 /// Boot checks run here: entrypoint file.
@@ -109,7 +102,7 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         .auth
         .map(|s| rapira_grpc_auth::resolve(s, dir))
         .transpose()?;
-    let interceptors = resolve_interceptors(section.interceptors, auth)?;
+    check_interceptors(&section.interceptors, auth.is_some())?;
 
     let pool = resolve_pool(section.pool, "grpc.pool", dir)?;
 
@@ -122,7 +115,7 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         max_timeout,
         keepalive_interval,
         keepalive_timeout,
-        interceptors,
+        auth,
         pool,
     })
 }
@@ -133,22 +126,16 @@ fn optional_timeout(key: &str, secs: Option<u64>) -> Result<Option<Duration>> {
 }
 
 /// Each listed name needs its table, and each table needs its name.
-fn resolve_interceptors(
-    list: Vec<String>,
-    mut auth: Option<rapira_grpc_auth::Settings>,
-) -> Result<Vec<Interceptor>> {
+fn check_interceptors(list: &[String], auth_configured: bool) -> Result<()> {
     for (i, name) in list.iter().enumerate() {
         if list[..i].contains(name) {
             bail!("grpc.interceptors lists \"{name}\" twice");
         }
     }
-    let mut interceptors = Vec::new();
-    for name in &list {
+    for name in list {
         match name.as_str() {
-            "auth" => match auth.take() {
-                Some(settings) => interceptors.push(Interceptor::Auth(settings)),
-                None => bail!("grpc.interceptors lists \"auth\" but [grpc.auth] is missing"),
-            },
+            "auth" if auth_configured => {}
+            "auth" => bail!("grpc.interceptors lists \"auth\" but [grpc.auth] is missing"),
             other => {
                 bail!(
                     "grpc.interceptors entry \"{other}\" is unknown; known interceptors: \"auth\""
@@ -156,27 +143,25 @@ fn resolve_interceptors(
             }
         }
     }
-    if auth.is_some() {
+    if auth_configured && list.is_empty() {
         bail!("[grpc.auth] is configured but grpc.interceptors does not list \"auth\"");
     }
-    Ok(interceptors)
+    Ok(())
 }
 
 impl Server {
-    /// The schema and the interceptors load here, in the master, so a bad descriptor set, service name or tokens file stops the boot before the fork.
+    /// The master loads the schema and auth before the fork. A bad descriptor set, service name or tokens file stops the boot.
     pub fn from_settings(settings: Settings) -> Result<Self> {
         let schema = Arc::new(Schema::load(
             &settings.descriptor_set,
             settings.services.as_deref(),
         )?);
-        let mut interceptors: Vec<Arc<dyn connectrpc::Interceptor>> = Vec::new();
-        for interceptor in &settings.interceptors {
-            match interceptor {
-                Interceptor::Auth(s) => {
-                    interceptors.push(Arc::new(rapira_grpc_auth::Auth::load(s)?))
-                }
-            }
-        }
+        let auth = settings
+            .auth
+            .as_ref()
+            .map(rapira_grpc_auth::Auth::load)
+            .transpose()?
+            .map(Arc::new);
         Ok(Self {
             config: Config {
                 listen: settings.listen,
@@ -186,7 +171,7 @@ impl Server {
                 max_timeout: settings.max_timeout,
                 keepalive_interval: settings.keepalive_interval,
                 keepalive_timeout: settings.keepalive_timeout,
-                interceptors,
+                auth,
             },
             prepared: None,
         })
@@ -376,19 +361,19 @@ mod tests {
         struct Case {
             name: &'static str,
             toml: String,
-            /// Ok: the tokens file of each `auth` entry, in list order.
-            expected: Result<&'static [&'static str], &'static str>,
+            /// Ok: the tokens file of the auth interceptor, if configured.
+            expected: Result<Option<&'static str>, &'static str>,
         }
         let cases = [
             Case {
                 name: "no interceptors",
                 toml: toml(""),
-                expected: Ok(&[]),
+                expected: Ok(None),
             },
             Case {
                 name: "auth with its table",
                 toml: toml("interceptors = [\"auth\"]\n[auth]\ntokens_file = \"t\"\n"),
-                expected: Ok(&["/w/t"]),
+                expected: Ok(Some("/w/t")),
             },
             Case {
                 name: "auth listed twice",
@@ -401,6 +386,23 @@ mod tests {
                 expected: Err(
                     "grpc.interceptors entry \"authz\" is unknown; known interceptors: \"auth\"",
                 ),
+            },
+            Case {
+                name: "unknown name after auth",
+                toml: toml("interceptors = [\"auth\", \"authz\"]\n[auth]\ntokens_file = \"t\"\n"),
+                expected: Err(
+                    "grpc.interceptors entry \"authz\" is unknown; known interceptors: \"auth\"",
+                ),
+            },
+            Case {
+                name: "duplicate before unknown name",
+                toml: toml("interceptors = [\"authz\", \"auth\", \"auth\"]\n"),
+                expected: Err("grpc.interceptors lists \"auth\" twice"),
+            },
+            Case {
+                name: "missing auth table before unknown name",
+                toml: toml("interceptors = [\"auth\", \"authz\"]\n"),
+                expected: Err("grpc.interceptors lists \"auth\" but [grpc.auth] is missing"),
             },
             Case {
                 name: "auth listed without its table",
@@ -438,15 +440,8 @@ mod tests {
                 .and_then(|section| settings(section, Path::new("/w")));
             match (got, case.expected) {
                 (Ok(g), Ok(want)) => {
-                    let files: Vec<PathBuf> = g
-                        .interceptors
-                        .into_iter()
-                        .map(|i| match i {
-                            Interceptor::Auth(s) => s.tokens_file,
-                        })
-                        .collect();
-                    let want: Vec<PathBuf> = want.iter().map(PathBuf::from).collect();
-                    assert_eq!(files, want, "{}", case.name);
+                    let file = g.auth.map(|auth| auth.tokens_file);
+                    assert_eq!(file, want.map(PathBuf::from), "{}", case.name);
                 }
                 (Err(e), Err(want)) => {
                     assert!(format!("{e:#}").contains(want), "{}: {e:#}", case.name)

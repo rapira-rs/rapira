@@ -32,7 +32,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `rapira_grpc_classes.c`: `rapira_grpc_register_classes` and the object handlers of the call and the response metadata. MINIT calls `rapira_grpc_register_classes` after the base classes. The stub aliases the constructors of the internal classes, `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters to the shared shells in `crates/sapi/rapira_dispatcher.c`.
 - `rapira_grpc.c`: the method shells of the value classes, `name()` and `getServices()` of the dispatcher, the call and the response metadata.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
-- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set and builds the interceptors.
+- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, `check_interceptors`, and `Server::from_settings`, which loads the descriptor set and auth tokens.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
@@ -61,7 +61,7 @@ The remote address is in the request extensions as `rapira_sapi::Addr`. PHP gets
 
 ## Interceptors
 
-`[grpc].interceptors` lists the interceptor names in chain order. The master builds one `connectrpc::Interceptor` for each name before the fork. Each worker registers them on its `ConnectRpcService` with `with_interceptor_arc`, the first listed outermost. Without interceptors, connect-rust only checks that its chain is empty.
+`[grpc].interceptors` selects the interceptors. The only supported name is `"auth"`. The master loads the auth tokens before the fork. Each worker adds the auth interceptor to its `ConnectRpcService` with `with_interceptor_arc`.
 
 The chain covers every GET and POST request to the listener: the PHP methods, health, reflection, and paths that match no method. A request with another HTTP method gets 405 or 404 from connect-rust before any interceptor runs, and never reaches PHP. connect-rust runs the `intercept_head` of each interceptor before it reads the request body. A rejection in `intercept_head` reaches the client in the format of its protocol, and PHP does not see the call. An interceptor that must change the metadata that PHP sees uses `intercept_unary`, because `intercept_head` can read the headers but not change them.
 
@@ -73,11 +73,11 @@ To add a built-in interceptor:
 - In the root `Cargo.toml`, add the crate to the workspace `members` and to `[workspace.dependencies]`.
 - Add the crate to the dependencies in `crates/plugins/grpc/Cargo.toml`.
 - In `src/config.rs`, add its table to `Section`, as `auth` is for `[grpc.auth]`.
-- Resolve the table in `settings`, and give the result to `resolve_interceptors` as a new argument.
-- Add a variant with its settings to `config::Interceptor`.
-- In `resolve_interceptors`, match its name, add the name to the known names of the unknown-name error, and refuse a configured table that the list does not name.
+- Resolve the table in `settings` and add its settings to `Settings`.
+- In `check_interceptors`, check its name and table. Add its name to the unknown-name error.
 - Build it in `Server::from_settings`.
-- In the `src/config.rs` tests, add an arm to the match in `interceptor_list_and_tables_must_agree`, and add cases for the new name.
+- Add it to `Config` and register it in `Serving::start`. Keep the configured interceptor order.
+- In the `src/config.rs` tests, add cases for the new name to `interceptor_list_and_tables_must_agree`.
 - Add an e2e test in `crates/tests/tests/e2e/` that starts `rapira` with the new `[grpc.<name>]` table through `Spawn::grpc_extra`, and add its `mod` line to `main.rs`.
 - Add a commented example of the table to `examples/rapira.toml`, next to `[grpc.auth]`.
 - Add its boot errors to the error list in the Config section.
