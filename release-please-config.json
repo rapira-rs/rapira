@@ -7,8 +7,6 @@
   "force-tag-creation": true,
   "pull-request-header": "Release pull request. Merge it to tag the release and to publish the artifacts.",
   "packages": {
-    ".": {
-      "release-as": "0.9.2"
-    }
+    ".": {}
   }
 }
