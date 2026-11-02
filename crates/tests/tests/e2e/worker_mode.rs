@@ -204,6 +204,32 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Classic mode also discards a queued unit whose client left: the script runs for A only, and B counts like a shed unit.
+#[test]
+fn classic_queued_client_gone_is_discarded_before_the_script_runs() -> anyhow::Result<()> {
+    let srv = Spawn::http(Mode::Classic, fixture("worker/held-classic.php"))
+        .json_log()
+        .spawn();
+    let release = srv.log_file().with_file_name("release");
+    let path = format!("/?release={}", release.display());
+
+    let rx_a = submit(srv.addr, req(&path))?;
+    server_log::wait_app_record(&srv.log_file(), "held");
+    let rx_b = submit(srv.addr, req(&path))?;
+    // No signal shows that B is queued or that the server saw its close. A holds the worker until the release file exists, so each wait can be long.
+    std::thread::sleep(Duration::from_secs(1));
+    drop(rx_b);
+    std::thread::sleep(Duration::from_secs(1));
+    std::fs::write(&release, "")?;
+    assert_eq!(drain_resp(rx_a).body_string(), "done");
+
+    // A unit discarded at handout counts as handled with an error.
+    slot_line(&srv, "handled 2 errors 1 ");
+    let runs = server_log::app_contexts(&srv.log_file(), "held").len();
+    assert_eq!(runs, 1, "the script ran for B");
+    Ok(())
+}
+
 /// The bodies of the units that wait for PHP share a 64 MiB budget per worker. A body that does not fit gets 503 at once, before the 30 s intake wait.
 #[test]
 fn waiting_bodies_share_a_byte_budget() -> anyhow::Result<()> {

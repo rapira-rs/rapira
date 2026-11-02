@@ -37,6 +37,67 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Pins the budget around a write that parks on a full frame channel. The budget counts CPU time, so a sleep before the park uses none of it, and the park keeps the time that the timer had left.
+/// The budget is 3 s. The client reads nothing for 1.5 s after the sleep, so the stream parks.
+#[test]
+fn parked_write_keeps_the_unused_budget() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        target: &'static str,
+        wait: Duration,
+        killed: bool,
+    }
+    let cases = [
+        Case {
+            name: "a 3.5 s sleep before the park leaves the budget for 1.8 s of CPU",
+            target: "/?wait=3500&burn=1800",
+            wait: Duration::from_millis(3500),
+            killed: false,
+        },
+        Case {
+            name: "the timer runs again after the park and kills a 4 s burn",
+            target: "/?wait=0&burn=4000",
+            wait: Duration::ZERO,
+            killed: true,
+        },
+    ];
+
+    let ini = format!("{}\nmax_execution_time = 3\n", timeout_ini());
+    for c in cases {
+        let srv = Spawn::http(
+            Mode::Dispatcher,
+            fixture("timeout_tests/park-dispatcher.php"),
+        )
+        .php_ini(&ini)
+        .json_log()
+        .spawn();
+
+        let mut client = std::net::TcpStream::connect(srv.addr)?;
+        client.set_read_timeout(Some(Duration::from_secs(20)))?;
+        write!(
+            client,
+            "GET {} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+            c.target
+        )?;
+        std::thread::sleep(c.wait + Duration::from_millis(1500));
+        let mut resp = Vec::new();
+        // A killed unit ends the stream early, and the read can end with a reset. The bytes read before it stay in resp.
+        let _ = std::io::Read::read_to_end(&mut client, &mut resp);
+
+        let completed = resp.ends_with(b"4\r\ndone\r\n0\r\n\r\n");
+        let fatal = server_log::records(&srv.log_file())
+            .iter()
+            .any(|e| e.target == "php" && e.message.contains("Maximum execution time"));
+        assert_eq!(
+            (completed, fatal),
+            (!c.killed, c.killed),
+            "{}: (response completed, timeout fatal logged)",
+            c.name
+        );
+    }
+    Ok(())
+}
+
 /// Pins that the budget re-armed at unit handout still fires: a spinning unit is killed before its response head, the plugin answers it 502, and the recycled worker keeps serving.
 #[test]
 fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {

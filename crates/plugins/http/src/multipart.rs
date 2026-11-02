@@ -18,7 +18,7 @@ pub struct Limits {
     pub max_part_headers: usize,
 }
 
-/// Creates the spool dir of this worker process under `base`, owner-only. The master sweeps the dirs whose process is gone.
+/// Creates the spool dir of this worker process under `base`, owner-only. The master at boot and each worker at its start sweep the dirs whose process is gone.
 pub(crate) fn create_worker_spool_dir(base: &Path) -> anyhow::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
     let dir = base.join(format!("rapira-spool-{}", std::process::id()));

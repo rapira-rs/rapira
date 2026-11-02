@@ -20,8 +20,6 @@
     "rapira_ce_no_dispatcher_error",
     "zend_argument_value_error", "zend_argument_type_error",
     "rapira_ce_work_discarded_exception",
-    // re-arms the execution timer the send-park guard disarms around a full-channel wait
-    "zend_set_timeout",
     // the FOREACH macros are header-only, so the array walk uses the exported position API
     "zend_hash_internal_pointer_reset_ex", "zend_hash_get_current_key_ex",
     "zend_hash_get_current_data_ex", "zend_hash_move_forward_ex", "HashPosition",
@@ -57,7 +55,6 @@
     // zend_string_init is inline-only; the exported interner fn-pointer covers startup-time strings
     "zend_hash_str_update", "zend_string_init_interned",
     "php_default_post_reader", "php_default_treat_data", "php_default_input_filter",
-    "zend_unset_timeout",
     "SAPI_HEADER_SENT_SUCCESSFULLY", "SAPI_HEADER_SEND_FAILED", "IS_UNDEF", "IS_STRING",
     "E_WARNING", "E_CORE_WARNING", "E_COMPILE_WARNING", "E_USER_WARNING",
     "E_NOTICE", "E_USER_NOTICE", "E_DEPRECATED", "E_USER_DEPRECATED",
