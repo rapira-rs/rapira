@@ -15,6 +15,10 @@
 #ifdef ZTS
 #error "rapira is NTS-only, but these PHP headers are from a thread-safe (ZTS) build. Rebuild PHP without --enable-zts, or point PHP_CONFIG at an NTS php-config."
 #endif
+// The http write park pauses the setitimer() execution timer (respond.rs). This option replaces that timer with a POSIX timer: https://github.com/php/php-src/blob/php-8.5.12/Zend/Zend.m4#L446-L455
+#ifdef ZEND_MAX_EXECUTION_TIMERS
+#error "rapira needs the setitimer() execution timer, but these PHP headers enable ZEND_MAX_EXECUTION_TIMERS. Rebuild PHP without --enable-zend-max-execution-timers."
+#endif
 
 #ifdef HAVE_PHP_SESSION
 #include <ext/session/php_session.h>
