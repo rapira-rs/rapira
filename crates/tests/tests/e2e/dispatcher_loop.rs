@@ -13,8 +13,8 @@ use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::{
-    Server, Spawn, parse_status_and_body, scratch_dir, slot_line, spawn_with_config,
-    wait_log_contains,
+    Server, Spawn, diagnostics, parse_status_and_body, scratch_dir, signal, slot_line,
+    spawn_with_config, wait_log_contains, worker_pids,
 };
 
 /// Read budget of a raw socket exchange.
@@ -915,6 +915,43 @@ fn spool_sweep_removes_only_dead_pid_dirs() -> anyhow::Result<()> {
             case.name
         );
     }
+    Ok(())
+}
+
+/// A worker killed while it holds a spooled file part skips its own cleanup. The worker that replaces it removes the dead spool dir when it starts.
+#[test]
+fn killed_worker_spool_dir_goes_when_its_replacement_starts() -> anyhow::Result<()> {
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/held-worker.php"))
+        .http_extra("[http.uploads]\ndir = \"uploads\"")
+        .json_log()
+        .spawn();
+    let release = srv.log_file().with_file_name("release");
+    let rq = multipart(
+        &format!("/?release={}", release.display()),
+        &[Part {
+            headers: "content-disposition: form-data; name=\"f\"; filename=\"a.bin\"",
+            content: "PAYLOAD",
+        }],
+    );
+    let rx = submit(srv.addr, rq)?;
+    server_log::wait_app_record(&srv.log_file(), "held");
+    let pid = worker_pids(srv.pid())[0];
+    let dir = srv.dir.join("uploads").join(format!("rapira-spool-{pid}"));
+    assert_eq!(
+        std::fs::read_dir(&dir)?.count(),
+        1,
+        "the held unit spools its file part"
+    );
+
+    signal(pid, libc::SIGKILL);
+    drop(rx);
+    let gone = poll(Duration::from_secs(20), || (!dir.exists()).then_some(()));
+    assert!(
+        gone.is_some(),
+        "{} outlived its worker\n{}",
+        dir.display(),
+        diagnostics(&srv)
+    );
     Ok(())
 }
 

@@ -143,8 +143,9 @@ pub(crate) fn serve(mut config: Config, prepared: PreparedListener, worker: Work
         drain_grace,
     } = worker;
     let acceptor = Acceptor::adopt(prepared, stop, &handle)?;
-    // Each worker spools in its own dir under the configured one.
+    // Each worker spools in its own dir under the configured one. The sweep removes the dir of a killed worker that this worker replaces.
     if let Some(limits) = &mut config.uploads {
+        multipart::sweep_spool_dirs(&limits.dir);
         limits.dir = multipart::create_worker_spool_dir(&limits.dir)?;
     }
     let spool_dir = config.uploads.as_ref().map(|limits| limits.dir.clone());
