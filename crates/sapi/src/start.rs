@@ -258,9 +258,13 @@ pub(crate) unsafe fn run_script(script: &Path) -> bool {
 }
 
 pub(crate) fn pull_unit() -> Option<Box<dyn Work>> {
-    match pull_unit_wait(None) {
-        Pulled::Unit(unit) => Some(unit),
-        _ => None,
+    loop {
+        match pull_unit_wait(None) {
+            // Counted like a shed unit: the app never served it.
+            Pulled::Unit(unit) if unit.cancelled() => sb_update(Event::Shed),
+            Pulled::Unit(unit) => return Some(unit),
+            _ => return None,
+        }
     }
 }
 
