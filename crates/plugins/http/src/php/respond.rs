@@ -54,7 +54,13 @@ pub(super) unsafe fn throw_verb(v: Verb) -> bool {
 
 pub(super) struct Closed;
 
-/// On a full channel, park with the execution timer disarmed: a parked thread never reaches an opcode boundary, and on NTS a second expiry would `_exit(124)`; the re-arm grants the remaining budget (floor 1s).
+/// The timer of zend_set_timeout on NTS: ITIMER_REAL on Apple Silicon, ITIMER_PROF (process CPU time) elsewhere. https://github.com/php/php-src/blob/php-8.5.12/Zend/zend_execute_API.c#L1647-L1655
+#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+const ZEND_TIMER: libc::c_int = libc::ITIMER_REAL;
+#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+const ZEND_TIMER: libc::c_int = libc::ITIMER_PROF;
+
+/// On a full channel, park with the execution timer paused: a parked thread never reaches an opcode boundary, and on NTS a second expiry would `_exit(124)`. The resume restores the time that the timer had left.
 /// # Safety
 /// Engine active on this thread.
 pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
@@ -65,17 +71,15 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
         Ok(()) => Ok(()),
         Err(TrySendError::Closed(_)) => Err(Closed),
         Err(TrySendError::Full(frame)) => unsafe {
-            let consumed = st.armed_at.elapsed();
-            let saved = executor_globals.timeout_seconds;
-            if saved > 0 {
-                zend_unset_timeout();
-            }
+            let paused: libc::itimerval = std::mem::zeroed();
+            let mut left: libc::itimerval = std::mem::zeroed();
+            // SAFETY: both pointers are live itimerval values. https://man7.org/linux/man-pages/man2/setitimer.2.html
+            libc::setitimer(ZEND_TIMER, &paused, &mut left);
             // Only Closed ends the park: a slow consumer is backpressure, not cancellation.
             let r = tx.blocking_send(frame).map_err(|_| Closed);
-            if saved > 0 {
-                let remaining = (saved as u64).saturating_sub(consumed.as_secs()).max(1);
-                zend_set_timeout(remaining as rapira_sapi::zend_long, false);
-                st.armed_at = Instant::now();
+            // A zero value is a timer that was off or that expired: an expired timer already set EG(timed_out).
+            if left.it_value.tv_sec != 0 || left.it_value.tv_usec != 0 {
+                libc::setitimer(ZEND_TIMER, &left, std::ptr::null_mut());
             }
             r
         },
