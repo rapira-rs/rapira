@@ -17,8 +17,7 @@ pub(crate) use crate::{
     object_init_ex, rapira_array_init, rapira_ce_closed_exception, rapira_ce_inet_address,
     rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
     rapira_dispatcher_info_obj, rapira_receive_timed, rapira_receive_untimed,
-    scoreboard::{Event, sb_update},
-    start::{Pulled, pending_depth, pull_unit_try, pull_unit_wait},
+    start::{Pull, Wait, pending_depth, pull},
     types::Addr,
     zend, zval, zval_add_ref, zval_ptr_dtor,
 };
@@ -43,9 +42,6 @@ fn classes() -> DispatcherClasses {
 thread_local! {
     /// The Box pointer of the unit handed out last, so paths where free_obj never runs (bailout) can still reclaim it.
     pub(crate) static UNIT: Cell<Option<*mut dyn Held>> = const { Cell::new(None) };
-    pub(crate) static CLOSED_SEEN: Cell<bool> = const { Cell::new(false) };
-    /// A unit was handed out this cycle: a fatal after that is an app failure, not a boot failure.
-    pub(crate) static RECEIVED: Cell<bool> = const { Cell::new(false) };
 }
 
 /// Clears the cycle slot if it still points at `ptr`.
@@ -58,8 +54,8 @@ pub(crate) fn forget_held(ptr: *const ()) {
 pub(crate) fn cycle_reset() {
     reclaim_current();
     UNIT.set(None);
-    CLOSED_SEEN.set(false);
-    RECEIVED.set(false);
+    crate::start::CLOSED_SEEN.set(false);
+    crate::start::RECEIVED.set(false);
     // A bailout in RSHUTDOWN skips rapira_rs_dispatcher_release(). The request shutdown freed the object, so drop the zval without a dtor.
     receive::DISPATCHER.set(None);
 }

@@ -35,35 +35,19 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
             rapira_receive_untimed();
         }
         loop {
-            // The app instance took its last unit: it sees the source closed, and the worker stays.
-            if crate::quota::exhausted() {
-                zval_ptr_dtor(&mut obj);
-                zend::throw_exception(rapira_ce_closed_exception, CLOSED);
-                return false;
-            }
-            let pulled = match mode {
-                RecvMode::Wait(_) if armed => pull_unit_try(),
-                RecvMode::Try | RecvMode::Wait(0) => pull_unit_try(),
-                RecvMode::Wait(-1) => pull_unit_wait(None),
-                RecvMode::Wait(t) => pull_unit_wait(Some(Duration::from_micros(t as u64))),
+            let wait = match mode {
+                RecvMode::Wait(_) if armed => Wait::Never,
+                RecvMode::Try | RecvMode::Wait(0) => Wait::Never,
+                RecvMode::Wait(-1) => Wait::Forever,
+                RecvMode::Wait(t) => Wait::For(Duration::from_micros(t as u64)),
             };
-            match pulled {
-                Pulled::RestartApp => {
-                    crate::quota::exhaust();
-                    continue;
-                }
-                Pulled::Unit(unit) => {
-                    if unit.cancelled() {
-                        // Counted like a shed unit: the app never served it, so the max_requests quota does not tick.
-                        sb_update(Event::Shed);
-                        continue;
-                    }
+            match pull(wait) {
+                Pull::Unit(unit) => {
                     // SAFETY: plain zend timer bookkeeping; no bailout path.
                     rapira_receive_timed();
                     // SAFETY: obj is a live object of classes.unit, allocated above on this thread.
                     let ptr: *mut dyn Held = unit.attach(obj.value.obj);
                     UNIT.set(Some(ptr));
-                    RECEIVED.set(true);
                     *return_value = obj;
                     return true;
                 }
@@ -72,18 +56,18 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                     // SAFETY: plain zend timer bookkeeping; no bailout path.
                     rapira_receive_untimed();
                 }
-                Pulled::Closed => {
-                    CLOSED_SEEN.set(true);
+                // The app instance takes no more units: it sees the source closed, and the worker stays.
+                Pull::Closed => {
                     zval_ptr_dtor(&mut obj);
                     zend::throw_exception(rapira_ce_closed_exception, CLOSED);
                     return false;
                 }
-                Pulled::Empty if matches!(mode, RecvMode::Try) => {
+                Pull::NoUnit if matches!(mode, RecvMode::Try) => {
                     zval_ptr_dtor(&mut obj);
                     (*return_value).u1.type_info = IS_NULL;
                     return true;
                 }
-                Pulled::Timeout | Pulled::Empty => {
+                Pull::NoUnit => {
                     zval_ptr_dtor(&mut obj);
                     zend::throw_exception(
                         rapira_ce_timeout_exception,

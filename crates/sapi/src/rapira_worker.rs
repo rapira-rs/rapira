@@ -4,7 +4,7 @@ use crate::{
     callbacks::*,
     diagnostics::{Severity, error_type_to_level},
     scoreboard::sb_update,
-    start::{Pulled, pull_unit_to_shed, pull_unit_wait, run_script},
+    start::{Pull, Wait, pull, pull_unit_to_shed, run_script},
 };
 use std::{cell::Cell, ffi::CString, os::raw::c_int, path::Path, ptr::null_mut, time::Duration};
 
@@ -87,9 +87,9 @@ fn run_cycle(script: &Path) -> Cycle {
         return Cycle::Restart;
     }
 
-    if crate::exchange::CLOSED_SEEN.get() {
+    if crate::start::CLOSED_SEEN.get() {
         Cycle::Stop
-    } else if recycle || crate::quota::exhausted() || crate::exchange::RECEIVED.get() {
+    } else if recycle || crate::quota::exhausted() || crate::start::RECEIVED.get() {
         Cycle::Recycle
     } else {
         Cycle::Failed
@@ -116,14 +116,13 @@ pub fn rapira_worker(script: &Path) -> WorkerExit {
                 }
                 sb_update(scoreboard::Event::BootFailed);
                 match pull_unit_to_shed(BOOT_RETRY) {
-                    Pulled::Closed => break WorkerExit::Closed,
-                    // A reload during a failed boot: the next boot starts at once.
-                    Pulled::RestartApp => {}
-                    Pulled::Unit(unit) => {
+                    Pull::Closed => break WorkerExit::Closed,
+                    Pull::Unit(unit) => {
                         unit.shed();
                         sb_update(scoreboard::Event::Shed);
                     }
-                    Pulled::Timeout | Pulled::Empty => {}
+                    // The retry time passed, or a reload arrived: the next boot starts.
+                    Pull::NoUnit => {}
                 }
             }
         }
@@ -206,28 +205,10 @@ fn next_unit() -> Option<Context> {
         unsafe { rapira_stash_boot_shutdown_functions() };
     }
     log_and_clear_last_error();
-    loop {
-        // The app instance took its last unit: handle_request() returns false, and the worker stays.
-        if crate::quota::exhausted() {
-            return None;
-        }
-        match pull_unit_wait(None) {
-            Pulled::RestartApp => crate::quota::exhaust(),
-            Pulled::Unit(unit) => {
-                if unit.cancelled() {
-                    // Counted like a shed unit: the app never served it, so the max_requests quota does not tick.
-                    sb_update(scoreboard::Event::Shed);
-                    continue;
-                }
-                crate::exchange::RECEIVED.set(true);
-                return Some(unit.into_cgi());
-            }
-            // With no timeout the wait ends only with an entry or the closed intake.
-            Pulled::Closed | Pulled::Timeout | Pulled::Empty => {
-                crate::exchange::CLOSED_SEEN.set(true);
-                return None;
-            }
-        }
+    match pull(Wait::Forever) {
+        Pull::Unit(unit) => Some(unit.into_cgi()),
+        // The app instance takes no more units: handle_request() returns false, and the worker stays.
+        Pull::Closed | Pull::NoUnit => None,
     }
 }
 
