@@ -1,24 +1,10 @@
 use std::path::Path;
-use std::sync::atomic::Ordering::SeqCst;
 use std::time::Duration;
 
 use rapira_config::PoolSettings;
 use rapira_master::{WORKER_EXIT_DRAINED, WORKER_EXIT_UNHEALTHY, WorkerEnv};
-use rapira_sapi::plugin::{Mode, Plugin, Stopper, run_plugin};
-use rapira_sapi::quota::UNHEALTHY;
+use rapira_sapi::plugin::{Plugin, Stopper, run_plugin};
 use rapira_sapi::{Rapira, StartedWorker};
-
-/// Jitter avoids lockstep recycling. The hash mixes in the pid because every child inherits the same seed from the pre-fork master.
-fn effective_quota(max_requests: u64) -> u64 {
-    if max_requests == 0 {
-        return 0;
-    }
-    let grace = (max_requests / 2).max(1);
-    use std::hash::{BuildHasher, Hasher};
-    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
-    h.write_u32(std::process::id());
-    max_requests.saturating_add(1 + (h.finish() % grace))
-}
 
 /// Returns the process exit code for the master's fork bracket; never runs PHP module teardown, MSHUTDOWN stays with the master.
 pub fn worker_body(
@@ -49,28 +35,14 @@ pub fn worker_body(
         return WORKER_EXIT_UNHEALTHY;
     }
     let stopper = Stopper::default();
-    // Classic mode runs every request in a new request cycle, so max_requests has nothing to restart there.
-    let max_requests = if mode == Mode::Classic {
-        0
-    } else {
-        max_requests
-    };
     let StartedWorker { rapira, intake } = Rapira::start_worker(
         mode,
         entrypoint,
-        effective_quota(max_requests),
+        max_requests,
         env.slot_view,
         stopper.clone(),
         plugin.dispatcher(),
     );
-    // The max_execution_time timer sends SIGPROF to the process. Threads started from here inherit this block, so only the PHP thread gets the signal.
-    // SAFETY: set is a live sigset_t.
-    unsafe {
-        let mut set: libc::sigset_t = std::mem::zeroed();
-        libc::sigemptyset(&mut set);
-        libc::sigaddset(&mut set, libc::SIGPROF);
-        libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-    }
 
     rapira_master::spawn_lifeline_watch(env.lifeline);
 
@@ -84,9 +56,9 @@ pub fn worker_body(
     if let Err(e) = &outcome {
         tracing::error!(target: "rapira", "plugin {name}: {e:#}");
     }
-    drop(rapira);
+    let unhealthy = rapira.join();
 
-    if UNHEALTHY.load(SeqCst) {
+    if unhealthy {
         WORKER_EXIT_UNHEALTHY
     } else if outcome.is_err() {
         1

@@ -7,7 +7,7 @@ use crate::plugin::Stopper;
 use crate::scoreboard::{Event, sb_update};
 
 /// The worker stops because PHP keeps failing to boot.
-pub static UNHEALTHY: AtomicBool = AtomicBool::new(false);
+static UNHEALTHY: AtomicBool = AtomicBool::new(false);
 
 /// The units the current app instance may take: it takes no more once `served` reaches `max`.
 #[derive(Default)]
@@ -66,4 +66,8 @@ pub(crate) fn fire_unhealthy() {
         sb_update(Event::Draining);
         Q.with_borrow(|q| q.stopper.stop());
     }
+}
+
+pub(crate) fn unhealthy() -> bool {
+    UNHEALTHY.load(SeqCst)
 }

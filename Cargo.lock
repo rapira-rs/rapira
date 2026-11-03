@@ -960,6 +960,7 @@ dependencies = [
  "bindgen",
  "bytes",
  "http",
+ "libc",
  "libmimalloc-sys",
  "rapira_config",
  "rapira_php_build",

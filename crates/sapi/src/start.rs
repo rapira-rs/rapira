@@ -77,7 +77,19 @@ impl Drop for PhpModule {
 }
 
 pub struct Rapira {
-    worker: Option<JoinHandle<()>>,
+    worker: JoinHandle<()>,
+}
+
+/// Jitter avoids lockstep recycling. The hash mixes in the pid because every child inherits the same seed from the pre-fork master.
+fn effective_quota(max_requests: u64) -> u64 {
+    if max_requests == 0 {
+        return 0;
+    }
+    let grace = (max_requests / 2).max(1);
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u32(std::process::id());
+    max_requests.saturating_add(1 + (h.finish() % grace))
 }
 
 /// The PHP thread of one worker and its intake.
@@ -143,8 +155,9 @@ pub extern "C" fn rapira_rs_register_plugin_classes() {
 }
 
 impl Rapira {
-    /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `max_requests`: 0 = unlimited; jitter already applied by the caller.
+    /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `max_requests`: the configured value, 0 = unlimited; classic mode gets no quota, the other modes get a jitter.
     /// `slot`: the scoreboard slot this worker reports into. `stopper` stops the plugin when PHP turns unhealthy. `classes`: the dispatcher surface receive() serves in dispatcher mode.
+    /// On return, the calling thread blocks SIGPROF, and every thread it starts inherits the block.
     pub fn start_worker(
         mode: Mode,
         entrypoint: PathBuf,
@@ -153,6 +166,12 @@ impl Rapira {
         stopper: Stopper,
         classes: DispatcherClasses,
     ) -> StartedWorker {
+        // Classic mode runs every unit in a new cycle, so max_requests has nothing to restart there.
+        let max_requests = if mode == Mode::Classic {
+            0
+        } else {
+            effective_quota(max_requests)
+        };
         let pending: &'static AtomicU64 = &slot.pending;
         let (intake_tx, intake_rx) = channel::<Entry>();
         let intake = Intake::new(intake_tx, slot);
@@ -187,33 +206,34 @@ impl Rapira {
             })
             .expect("spawn the PHP thread");
 
+        // The max_execution_time timer sends SIGPROF to the process. The PHP thread exists and keeps the signal open; every thread started after this block inherits the block.
+        // SAFETY: set is a live sigset_t.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGPROF);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        }
+
         StartedWorker {
-            rapira: Self {
-                worker: Some(worker),
-            },
+            rapira: Self { worker },
             intake,
         }
     }
-}
 
-impl Drop for Rapira {
-    fn drop(&mut self) {
-        info!(target: "rapira", "shutting down, dropping");
-        let Some(worker) = self.worker.take() else {
-            return;
-        };
-
-        // The PHP thread ends once every Intake clone is dropped. The caller drops the Intake, or the plugin that holds it, before Rapira.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while std::time::Instant::now() < deadline && !worker.is_finished() {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+    /// Waits for the PHP thread after the plugin stopped. The thread ends once every Intake clone is dropped, and the plugin drops its clone with its runtime. Returns true when PHP turned unhealthy.
+    pub fn join(self) -> bool {
+        info!(target: "rapira", "shutting down, joining the PHP thread");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !self.worker.is_finished() {
+            thread::sleep(Duration::from_millis(20));
         }
-        if !worker.is_finished() {
+        if self.worker.is_finished() {
+            let _ = self.worker.join();
+        } else {
             error!(target: "rapira", "worker still running after grace; leaving it unjoined");
-            return;
         }
-
-        let _ = worker.join();
+        quota::unhealthy()
     }
 }
 
