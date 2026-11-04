@@ -12,7 +12,6 @@ use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::types::Context;
 use rapira_sapi::work::{Held, now_unix_f64, release};
 use rapira_sapi::{
     HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
@@ -229,10 +228,6 @@ impl rapira_sapi::work::Work for GrpcState {
         // SAFETY: the caller passes a live Rapira\Internal\Grpc\UnaryCall object.
         unsafe { (*grpc_call_from(obj)).state = ptr.cast() };
         ptr
-    }
-
-    fn into_cgi(self: Box<Self>) -> Context {
-        unreachable!("the root refuses a grpc pool outside dispatcher mode at boot")
     }
 
     fn shed(self: Box<Self>) {

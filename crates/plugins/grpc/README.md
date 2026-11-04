@@ -15,11 +15,10 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 
 `serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. `PhpDispatcher` routes each unary method of a configured service to PHP: it builds a `GrpcState` and submits it to the intake. PHP finalizes the call with `respond()` or `fail()`, and the plugin sends the outcome to the client.
 
-`GrpcState` in `src/php/call.rs` is the work unit. It implements `rapira_sapi::work::Work`:
+`GrpcState` in `src/php/call.rs` is the dispatcher-mode unit. It implements `rapira_sapi::work::Work`:
 
 - `cancelled()` returns true when the call is closed: the client cancelled it, closed the connection, or the deadline passed. `receive()` skips such a unit.
 - `attach()` connects the unit to the `Rapira\Grpc\UnaryCall` object that `receive()` returns.
-- `into_cgi()` is unreachable: the root refuses a grpc pool outside dispatcher mode at boot.
 - `shed()` answers UNAVAILABLE when the PHP boot of the worker failed.
 
 ## Crate layout

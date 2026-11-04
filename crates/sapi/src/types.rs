@@ -223,18 +223,22 @@ pub enum StreamState {
 }
 
 pub struct Context {
-    pub req: Request,
-    pub c: ReqC,
-    pub sender: Option<Sender<Frame>>,
-    pub head: Option<ResponseHead>,
-    pub body: Vec<u8>,
-    pub stream: StreamState,
-    pub tearing_down: bool,
-    pub errored: bool,
+    pub(crate) req: Request,
+    pub(crate) c: ReqC,
+    pub(crate) sender: Option<Sender<Frame>>,
+    pub(crate) head: Option<ResponseHead>,
+    pub(crate) body: Vec<u8>,
+    pub(crate) stream: StreamState,
+    /// The teardown flush runs: its output does not count as a streamed body.
+    pub(crate) tearing_down: bool,
+    /// The cycle's verdict before the C shutdown, read by the seal inside it.
+    pub(crate) errored: bool,
 }
 
 impl Context {
-    pub fn new(req: Request, sender: Sender<Frame>, c: ReqC) -> Self {
+    /// Builds the CGI view here: the http plugin calls it on the transport thread.
+    pub fn new(req: Request, sender: Sender<Frame>) -> Self {
+        let c = ReqC::build(&req);
         Self {
             req,
             c,
@@ -247,7 +251,24 @@ impl Context {
         }
     }
 
-    pub fn commit_head(&mut self, mut status: u16, mut headers: HeaderMap) {
+    /// The seal of a cycle: a failure gets a 500 head when none was sent, and a body cut mid-stream gets no content-length.
+    pub(crate) fn end(&mut self, errored: bool) {
+        let truncated = errored && self.stream == StreamState::BodyStreamed;
+        if errored && self.stream == StreamState::NotSent {
+            self.commit_head(500, HeaderMap::new());
+        }
+        self.finish(truncated);
+    }
+
+    /// The seal of a unit the worker does not serve: the status head, then End.
+    pub fn refuse(&mut self, status: u16) {
+        if self.stream == StreamState::NotSent {
+            self.commit_head(status, HeaderMap::new());
+        }
+        self.finish(false);
+    }
+
+    pub(crate) fn commit_head(&mut self, mut status: u16, mut headers: HeaderMap) {
         for value in headers.get_all(&STATUS) {
             match status_field_code(value.as_bytes()) {
                 Some(code) => status = code,
@@ -264,7 +285,7 @@ impl Context {
     }
 
     /// Seals the buffered response as Head+Chunk+End; a truncated body gets no content-length, so the client can detect the cut.
-    pub fn finish(&mut self, truncated: bool) {
+    pub(crate) fn finish(&mut self, truncated: bool) {
         let Some(tx) = self.sender.take() else {
             return;
         };
@@ -312,7 +333,7 @@ fn send(tx: &Sender<Frame>, frame: Frame) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -332,8 +353,9 @@ mod tests {
         assert_eq!(status_field_code(b"70000"), None);
     }
 
-    fn head_of(status: u16, headers: &[(&str, &str)]) -> ResponseHead {
-        let mut ctx = Context {
+    /// A GET with no reply sender; a test sets the sender it needs.
+    pub(crate) fn context() -> Context {
+        Context {
             req: Request {
                 method: String::new(),
                 uri: String::new(),
@@ -369,7 +391,11 @@ mod tests {
             stream: StreamState::NotSent,
             tearing_down: false,
             errored: false,
-        };
+        }
+    }
+
+    fn head_of(status: u16, headers: &[(&str, &str)]) -> ResponseHead {
+        let mut ctx = context();
         let headers = headers
             .iter()
             .map(|(k, v)| {
@@ -381,6 +407,144 @@ mod tests {
             .collect();
         ctx.commit_head(status, headers);
         ctx.head.expect("commit_head records a head")
+    }
+
+    /// One line per frame: the fields the plugin acts on.
+    pub(crate) fn describe(frame: Frame) -> String {
+        match frame {
+            Frame::Head {
+                head,
+                content_length,
+                bodiless,
+            } => format!(
+                "head {} cl={content_length:?} bodiless={bodiless}",
+                head.status
+            ),
+            Frame::Chunk(b) => format!("chunk {}", String::from_utf8_lossy(&b)),
+            Frame::File { .. } => "file".into(),
+            Frame::End { truncated, .. } => format!("end truncated={truncated}"),
+        }
+    }
+
+    /// The seal publishes the reply once: a failure gets a 500 head when none was sent, a body cut mid-stream gets no content-length, and a refusal gets its status head.
+    #[test]
+    fn the_seal_applies_the_verdict_once() {
+        struct Case {
+            name: &'static str,
+            method: &'static str,
+            /// The head the cycle committed before the seal.
+            head: Option<u16>,
+            body: &'static str,
+            stream: StreamState,
+            seal: fn(&mut Context),
+            want: &'static [&'static str],
+        }
+        let cases = [
+            Case {
+                name: "a buffered reply ends as head, chunk and end",
+                method: "GET",
+                head: Some(200),
+                body: "ok",
+                stream: StreamState::HeadSent,
+                seal: |c| c.end(false),
+                want: &[
+                    "head 200 cl=Some(2) bodiless=false",
+                    "chunk ok",
+                    "end truncated=false",
+                ],
+            },
+            Case {
+                name: "a failure before any head sends a 500",
+                method: "GET",
+                head: None,
+                body: "",
+                stream: StreamState::NotSent,
+                seal: |c| c.end(true),
+                want: &["head 500 cl=Some(0) bodiless=false", "end truncated=false"],
+            },
+            Case {
+                name: "a failure after the head keeps the head and the buffered body",
+                method: "GET",
+                head: Some(200),
+                body: "ok",
+                stream: StreamState::HeadSent,
+                seal: |c| c.end(true),
+                want: &[
+                    "head 200 cl=Some(2) bodiless=false",
+                    "chunk ok",
+                    "end truncated=false",
+                ],
+            },
+            Case {
+                name: "a failure after a streamed body ends truncated",
+                method: "GET",
+                head: None,
+                body: "",
+                stream: StreamState::BodyStreamed,
+                seal: |c| c.end(true),
+                want: &["end truncated=true"],
+            },
+            Case {
+                name: "a completed streamed body ends whole",
+                method: "GET",
+                head: None,
+                body: "",
+                stream: StreamState::BodyStreamed,
+                seal: |c| c.end(false),
+                want: &["end truncated=false"],
+            },
+            Case {
+                name: "a second seal sends nothing",
+                method: "GET",
+                head: Some(200),
+                body: "ok",
+                stream: StreamState::HeadSent,
+                seal: |c| {
+                    c.end(false);
+                    c.end(true);
+                },
+                want: &[
+                    "head 200 cl=Some(2) bodiless=false",
+                    "chunk ok",
+                    "end truncated=false",
+                ],
+            },
+            Case {
+                name: "a refusal sends the status head and end",
+                method: "GET",
+                head: None,
+                body: "",
+                stream: StreamState::NotSent,
+                seal: |c| c.refuse(503),
+                want: &["head 503 cl=Some(0) bodiless=false", "end truncated=false"],
+            },
+            Case {
+                name: "a refused HEAD request is bodiless",
+                method: "HEAD",
+                head: None,
+                body: "",
+                stream: StreamState::NotSent,
+                seal: |c| c.refuse(503),
+                want: &["head 503 cl=None bodiless=true", "end truncated=false"],
+            },
+        ];
+        for case in cases {
+            let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+            let mut ctx = context();
+            ctx.req.method = case.method.into();
+            ctx.sender = Some(tx);
+            if let Some(status) = case.head {
+                ctx.commit_head(status, HeaderMap::new());
+            }
+            ctx.body = case.body.into();
+            ctx.stream = case.stream;
+            (case.seal)(&mut ctx);
+            let mut got = Vec::new();
+            while let Ok(frame) = rx.try_recv() {
+                got.push(describe(frame));
+            }
+            assert_eq!(got, case.want, "{}", case.name);
+        }
     }
 
     /// The `Status:` field sets the code, never reaches the client, and matches case-insensitively since php-src passes the script's own spelling.

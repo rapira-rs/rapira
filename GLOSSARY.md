@@ -108,6 +108,10 @@ _Avoid_: startup, bootstrap, warm-up, init
 The host's refusal of a unit the worker cannot serve: 503 for http, UNAVAILABLE for grpc.
 _Avoid_: reject, drop, throttle, rate limit
 
+**Seal**:
+The host's one publication of a CGI unit's response to the plugin: Head, Chunk and End. A second seal of the same unit sends nothing.
+_Avoid_: flush (that is PHP's output step), finalize (the dispatcher-mode term)
+
 **Cancelled**:
 A unit whose result is no longer wanted: the client left, the deadline passed, or the host closed the unit.
 _Avoid_: aborted, gone, timed out (for the state)

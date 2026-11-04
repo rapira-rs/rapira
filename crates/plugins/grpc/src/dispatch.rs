@@ -12,7 +12,7 @@ use connectrpc::{
     MethodDescriptor, Payload, Protocol, RequestContext, http,
 };
 use rapira_sapi::Addr;
-use rapira_sapi::work::{Intake, now_unix_f64};
+use rapira_sapi::work::{Intake, Unit, now_unix_f64};
 use tokio::sync::oneshot;
 
 use crate::php::GrpcState;
@@ -124,7 +124,7 @@ async fn unary(
     let (tx, reply) = oneshot::channel();
     let call = GrpcState::new(call, tx);
     // A refusal before dispatch: PHP never saw the call.
-    if let Err(e) = intake.submit(Box::new(call), bytes).await {
+    if let Err(e) = intake.submit(Unit::Dispatcher(Box::new(call)), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));
     }
     // A closed channel means that PHP lost the call. Dropping this future closes the call for PHP.
