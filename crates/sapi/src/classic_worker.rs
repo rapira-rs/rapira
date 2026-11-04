@@ -2,13 +2,13 @@ use crate::{
     callbacks::{fatal_error_recorded, finalize_response, send_error_head},
     context::{bind_server_context, populate_request_context, unbind_server_context},
     scoreboard::{Event, sb_update},
-    start::{pull_unit, run_script},
+    start::{Pull, Wait, pull, run_script},
     types::Context,
     *,
 };
 
 pub(crate) fn classic_worker() {
-    while let Some(unit) = pull_unit() {
+    while let Pull::Unit(unit) = pull(Wait::Forever) {
         let mut ctx = unit.into_cgi();
         let Executed { event, truncated } = classic_executor(&mut ctx);
         sb_update(event);

@@ -1,12 +1,12 @@
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, channel};
 use std::thread;
 use std::thread::JoinHandle;
-use std::time::Duration;
-use tracing::{error, info, trace};
+use std::time::{Duration, Instant};
+use tracing::{debug, error, info, trace};
 
 use crate::quota;
 use crate::rapira_worker::{WorkerExit, rapira_worker};
@@ -20,31 +20,26 @@ use crate::{
 
 thread_local! {
     static UNIT_RX: RefCell<Option<UnitRx>> = const { RefCell::new(None) };
+    /// A pull of this cycle took a unit: a fatal error after that is an app failure, not a boot failure.
+    pub(crate) static RECEIVED: Cell<bool> = const { Cell::new(false) };
+    /// A pull of this cycle saw the intake closed.
+    pub(crate) static CLOSED_SEEN: Cell<bool> = const { Cell::new(false) };
 }
 
 struct UnitRx {
     rx: Receiver<Entry>,
     /// The `pending` field of this worker's scoreboard slot.
     pending: &'static AtomicU64,
+    /// Classic mode runs every unit in a new cycle, so a reload has no app instance to restart and the pull ignores it.
+    classic: bool,
 }
 
 /// The idle wait after which the PHP thread calls `mi_collect`. mimalloc purges freed arena slices only from a page free or a collect, so an idle worker keeps the slices of the last burst committed.
 const IDLE_PURGE_AFTER: Duration = Duration::from_secs(2);
 
 impl UnitRx {
-    /// A pulled unit leaves `pending` and gives back its body bytes.
-    fn pulled(&self, entry: Entry) -> Pulled {
-        match entry {
-            Entry::Unit { unit, .. } => {
-                self.pending.fetch_sub(1, Ordering::Relaxed);
-                Pulled::Unit(unit)
-            }
-            Entry::RestartApp => Pulled::RestartApp,
-        }
-    }
-
     /// Waits for one entry, with no time limit when `timeout` is None.
-    fn recv(&self, timeout: Option<Duration>) -> Pulled {
+    fn recv(&self, timeout: Option<Duration>) -> Result<Entry, RecvTimeoutError> {
         let first = timeout.map_or(IDLE_PURGE_AFTER, |t| t.min(IDLE_PURGE_AFTER));
         let mut got = self.rx.recv_timeout(first);
         if matches!(got, Err(RecvTimeoutError::Timeout)) && first == IDLE_PURGE_AFTER {
@@ -55,11 +50,13 @@ impl UnitRx {
                 Some(t) => self.rx.recv_timeout(t - first),
             };
         }
-        match got {
-            Ok(entry) => self.pulled(entry),
-            Err(RecvTimeoutError::Timeout) => Pulled::Timeout,
-            Err(RecvTimeoutError::Disconnected) => Pulled::Closed,
-        }
+        got
+    }
+
+    /// A pulled unit leaves `pending` and gives back its body bytes.
+    fn take(&self, unit: Box<dyn Work>) -> Box<dyn Work> {
+        self.pending.fetch_sub(1, Ordering::Relaxed);
+        unit
     }
 }
 
@@ -80,7 +77,19 @@ impl Drop for PhpModule {
 }
 
 pub struct Rapira {
-    worker: Option<JoinHandle<()>>,
+    worker: JoinHandle<()>,
+}
+
+/// Jitter avoids lockstep recycling. The hash mixes in the pid because every child inherits the same seed from the pre-fork master.
+fn effective_quota(max_requests: u64) -> u64 {
+    if max_requests == 0 {
+        return 0;
+    }
+    let grace = (max_requests / 2).max(1);
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u32(std::process::id());
+    max_requests.saturating_add(1 + (h.finish() % grace))
 }
 
 /// The PHP thread of one worker and its intake.
@@ -146,8 +155,9 @@ pub extern "C" fn rapira_rs_register_plugin_classes() {
 }
 
 impl Rapira {
-    /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `max_requests`: 0 = unlimited; jitter already applied by the caller.
+    /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `max_requests`: the configured value, 0 = unlimited; classic mode gets no quota, the other modes get a jitter.
     /// `slot`: the scoreboard slot this worker reports into. `stopper` stops the plugin when PHP turns unhealthy. `classes`: the dispatcher surface receive() serves in dispatcher mode.
+    /// On return, the calling thread blocks SIGPROF, and every thread it starts inherits the block.
     pub fn start_worker(
         mode: Mode,
         entrypoint: PathBuf,
@@ -156,6 +166,12 @@ impl Rapira {
         stopper: Stopper,
         classes: DispatcherClasses,
     ) -> StartedWorker {
+        // Classic mode runs every unit in a new cycle, so max_requests has nothing to restart there.
+        let max_requests = if mode == Mode::Classic {
+            0
+        } else {
+            effective_quota(max_requests)
+        };
         let pending: &'static AtomicU64 = &slot.pending;
         let (intake_tx, intake_rx) = channel::<Entry>();
         let intake = Intake::new(intake_tx, slot);
@@ -183,39 +199,41 @@ impl Rapira {
                     UnitRx {
                         rx: intake_rx,
                         pending,
+                        classic: mode == Mode::Classic,
                     },
                     classes,
                 )
             })
             .expect("spawn the PHP thread");
 
+        // The max_execution_time timer sends SIGPROF to the process. The PHP thread exists and keeps the signal open; every thread started after this block inherits the block.
+        // SAFETY: set is a live sigset_t.
+        unsafe {
+            let mut set: libc::sigset_t = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGPROF);
+            libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+        }
+
         StartedWorker {
-            rapira: Self {
-                worker: Some(worker),
-            },
+            rapira: Self { worker },
             intake,
         }
     }
-}
 
-impl Drop for Rapira {
-    fn drop(&mut self) {
-        info!(target: "rapira", "shutting down, dropping");
-        let Some(worker) = self.worker.take() else {
-            return;
-        };
-
-        // The PHP thread ends once every Intake clone is dropped. The caller drops the Intake, or the plugin that holds it, before Rapira.
-        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
-        while std::time::Instant::now() < deadline && !worker.is_finished() {
-            std::thread::sleep(std::time::Duration::from_millis(20));
+    /// Waits for the PHP thread after the plugin stopped. The thread ends once every Intake clone is dropped, and the plugin drops its clone with its runtime. Returns true when PHP turned unhealthy.
+    pub fn join(self) -> bool {
+        info!(target: "rapira", "shutting down, joining the PHP thread");
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while Instant::now() < deadline && !self.worker.is_finished() {
+            thread::sleep(Duration::from_millis(20));
         }
-        if !worker.is_finished() {
+        if self.worker.is_finished() {
+            let _ = self.worker.join();
+        } else {
             error!(target: "rapira", "worker still running after grace; leaving it unjoined");
-            return;
         }
-
-        let _ = worker.join();
+        quota::unhealthy()
     }
 }
 
@@ -257,60 +275,92 @@ pub(crate) unsafe fn run_script(script: &Path) -> bool {
     }
 }
 
-pub(crate) fn pull_unit() -> Option<Box<dyn Work>> {
-    loop {
-        match pull_unit_wait(None) {
-            // Counted like a shed unit: the app never served it.
-            Pulled::Unit(unit) if unit.cancelled() => sb_update(Event::Shed),
-            Pulled::Unit(unit) => return Some(unit),
-            _ => return None,
-        }
-    }
+/// How long a pull waits for a unit.
+#[derive(Clone, Copy)]
+pub(crate) enum Wait {
+    Forever,
+    For(Duration),
+    Never,
 }
 
-pub(crate) enum Pulled {
+/// The result of a pull.
+pub(crate) enum Pull {
     Unit(Box<dyn Work>),
-    /// A reload: the app instance takes no more units.
-    RestartApp,
-    Timeout,
-    Empty,
+    /// The app instance takes no more units: its quota is used up, or the intake closed.
     Closed,
+    /// No unit arrived within the wait.
+    NoUnit,
 }
 
-/// Idle covers only the park: control returns to PHP as Active on every arm, or the master watchdog skips a worker spinning after a no-unit return.
-pub(crate) fn pull_unit_wait(timeout: Option<Duration>) -> Pulled {
+/// The app pull of every mode. It applies the app rules: the quota, a reload, a cancelled unit and the cycle flags. A timed pull keeps one deadline across the entries it skips.
+/// Idle covers only the park: control returns to PHP as Active on every arm, or the master watchdog skips a worker spinning after a no-unit return. A polling worker must refresh last_activity_ms, or the watchdog TERMs it as a stuck request (`Pool::watchdog_tick`).
+pub(crate) fn pull(wait: Wait) -> Pull {
     UNIT_RX.with_borrow(|slot| {
         let Some(unit_r) = slot.as_ref() else {
-            return Pulled::Closed;
+            CLOSED_SEEN.set(true);
+            return Pull::Closed;
         };
-        sb_update(Event::Idle);
-        let pulled = unit_r.recv(timeout);
-        sb_update(Event::Active);
-        pulled
+        let deadline = match wait {
+            Wait::For(t) => Some(Instant::now() + t),
+            Wait::Forever | Wait::Never => None,
+        };
+        loop {
+            // The app instance took its last unit; the worker stays for the next one.
+            if quota::exhausted() {
+                return Pull::Closed;
+            }
+            sb_update(Event::Idle);
+            let got = match wait {
+                Wait::Never => unit_r.rx.try_recv().map_err(|e| match e {
+                    TryRecvError::Empty => RecvTimeoutError::Timeout,
+                    TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
+                }),
+                Wait::Forever => unit_r.recv(None),
+                Wait::For(_) => {
+                    unit_r.recv(deadline.map(|d| d.saturating_duration_since(Instant::now())))
+                }
+            };
+            sb_update(Event::Active);
+            match got {
+                Ok(Entry::Unit { unit, .. }) => {
+                    let unit = unit_r.take(unit);
+                    if unit.cancelled() {
+                        // Counted like a shed unit: the app never served it, so the max_requests quota does not tick.
+                        sb_update(Event::Shed);
+                        continue;
+                    }
+                    RECEIVED.set(true);
+                    return Pull::Unit(unit);
+                }
+                Ok(Entry::RestartApp) if unit_r.classic => {
+                    debug!(target: "rapira", "reload ignored: classic mode runs every unit in a new cycle");
+                }
+                // The current app instance takes no more units; the next one takes the rest.
+                Ok(Entry::RestartApp) => {
+                    info!(target: "rapira", "reload requested; restarting the app");
+                    quota::exhaust();
+                }
+                Err(RecvTimeoutError::Timeout) => return Pull::NoUnit,
+                Err(RecvTimeoutError::Disconnected) => {
+                    CLOSED_SEEN.set(true);
+                    return Pull::Closed;
+                }
+            }
+        }
     })
 }
 
-/// The host pulls a unit to shed it after a failed boot cycle, and waits at most `timeout`. Before this pull, the worker stored starting, or draining after the drain decision. The pull keeps the state.
-pub(crate) fn pull_unit_to_shed(timeout: Duration) -> Pulled {
-    UNIT_RX.with_borrow(|slot| match slot.as_ref() {
-        Some(unit_r) => unit_r.recv(Some(timeout)),
-        None => Pulled::Closed,
-    })
-}
-
-/// The Idle/Active pair still runs: a polling worker must refresh last_activity_ms or the master watchdog TERMs it as a stuck request (`Pool::watchdog_tick`).
-pub(crate) fn pull_unit_try() -> Pulled {
-    UNIT_RX.with_borrow_mut(|slot| {
-        let Some(unit_r) = slot.as_mut() else {
-            return Pulled::Closed;
+/// The host pulls a unit to shed it after a failed boot cycle, and waits at most `timeout`. Before this pull, the worker stored starting, or draining after the drain decision. The pull keeps the slot state and the quota.
+pub(crate) fn pull_unit_to_shed(timeout: Duration) -> Pull {
+    UNIT_RX.with_borrow(|slot| {
+        let Some(unit_r) = slot.as_ref() else {
+            return Pull::Closed;
         };
-        sb_update(Event::Idle);
-        let got = unit_r.rx.try_recv();
-        sb_update(Event::Active);
-        match got {
-            Ok(entry) => unit_r.pulled(entry),
-            Err(TryRecvError::Empty) => Pulled::Empty,
-            Err(TryRecvError::Disconnected) => Pulled::Closed,
+        match unit_r.recv(Some(timeout)) {
+            Ok(Entry::Unit { unit, .. }) => Pull::Unit(unit_r.take(unit)),
+            // A reload during a failed boot: the next boot starts at once.
+            Ok(Entry::RestartApp) | Err(RecvTimeoutError::Timeout) => Pull::NoUnit,
+            Err(RecvTimeoutError::Disconnected) => Pull::Closed,
         }
     })
 }
@@ -320,4 +370,325 @@ pub(crate) fn pending_depth() -> u64 {
         slot.as_ref()
             .map_or(0, |unit_r| unit_r.pending.load(Ordering::Relaxed))
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::atomic::Ordering::Relaxed;
+    use std::time::Instant;
+
+    use super::*;
+    use crate::scoreboard::sb_set;
+
+    /// A unit on the intake. `cancelled`: its client left.
+    struct Probe {
+        cancelled: bool,
+    }
+
+    impl Work for Probe {
+        fn cancelled(&self) -> bool {
+            self.cancelled
+        }
+        unsafe fn attach(self: Box<Self>, _: *mut zend_object) -> *mut dyn crate::work::Held {
+            unreachable!()
+        }
+        fn into_cgi(self: Box<Self>) -> crate::types::Context {
+            unreachable!()
+        }
+        fn shed(self: Box<Self>) {}
+    }
+
+    /// One worker on this thread: a slot on a board in memory, its quota and its intake.
+    struct TestWorker {
+        slot: &'static rapira_scoreboard::SharedSlot,
+        intake: Intake,
+    }
+
+    fn worker(max_requests: u64, classic: bool) -> TestWorker {
+        let slot = &rapira_scoreboard::create(1).unwrap()[0];
+        sb_set(slot);
+        quota::install(max_requests, Stopper::default());
+        RECEIVED.set(false);
+        CLOSED_SEEN.set(false);
+        let (tx, rx) = channel::<Entry>();
+        UNIT_RX.with_borrow_mut(|unit_rx| {
+            *unit_rx = Some(UnitRx {
+                rx,
+                pending: &slot.pending,
+                classic,
+            })
+        });
+        TestWorker {
+            slot,
+            intake: Intake::new(tx, slot),
+        }
+    }
+
+    fn kind(pull: &Pull) -> &'static str {
+        match pull {
+            Pull::Unit(_) => "unit",
+            Pull::Closed => "closed",
+            Pull::NoUnit => "no unit",
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn the_pull_applies_the_app_rules() {
+        /// What enters the intake before the pull, in order.
+        enum Feed {
+            Unit,
+            Cancelled,
+            Reload,
+            /// The app served one unit: the quota ticks.
+            Served,
+            /// Every intake clone is dropped.
+            Close,
+        }
+        struct Counts {
+            handled: u64,
+            errors: u64,
+            pending: u64,
+        }
+        struct Case {
+            name: &'static str,
+            max_requests: u64,
+            classic: bool,
+            feed: &'static [Feed],
+            wait: Wait,
+            want: &'static str,
+            received: bool,
+            closed_seen: bool,
+            exhausted: bool,
+            counts: Counts,
+            /// The pull returns within this time.
+            max_elapsed: Duration,
+        }
+        const NO_LIMIT: Duration = Duration::from_secs(5);
+        const TIMED: Duration = Duration::from_millis(400);
+        let cases = [
+            Case {
+                name: "a unit is pulled",
+                max_requests: 0,
+                classic: false,
+                feed: &[Feed::Unit],
+                wait: Wait::Never,
+                want: "unit",
+                received: true,
+                closed_seen: false,
+                exhausted: false,
+                counts: Counts {
+                    handled: 0,
+                    errors: 0,
+                    pending: 0,
+                },
+                max_elapsed: NO_LIMIT,
+            },
+            Case {
+                name: "a cancelled unit is skipped and counted as shed",
+                max_requests: 0,
+                classic: false,
+                feed: &[Feed::Cancelled, Feed::Unit],
+                wait: Wait::Never,
+                want: "unit",
+                received: true,
+                closed_seen: false,
+                exhausted: false,
+                counts: Counts {
+                    handled: 1,
+                    errors: 1,
+                    pending: 0,
+                },
+                max_elapsed: NO_LIMIT,
+            },
+            Case {
+                name: "a cancelled unit alone gives no unit",
+                max_requests: 0,
+                classic: false,
+                feed: &[Feed::Cancelled],
+                wait: Wait::Never,
+                want: "no unit",
+                received: false,
+                closed_seen: false,
+                exhausted: false,
+                counts: Counts {
+                    handled: 1,
+                    errors: 1,
+                    pending: 0,
+                },
+                max_elapsed: NO_LIMIT,
+            },
+            Case {
+                name: "a cancelled unit does not use the quota",
+                max_requests: 1,
+                classic: false,
+                feed: &[Feed::Cancelled, Feed::Unit],
+                wait: Wait::Never,
+                want: "unit",
+                received: true,
+                closed_seen: false,
+                exhausted: false,
+                counts: Counts {
+                    handled: 1,
+                    errors: 1,
+                    pending: 0,
+                },
+                max_elapsed: NO_LIMIT,
+            },
+            Case {
+                name: "a reload closes the app instance and leaves the unit to the next one",
+                max_requests: 10,
+                classic: false,
+                feed: &[Feed::Reload, Feed::Unit],
+                wait: Wait::Never,
+                want: "closed",
+                received: false,
+                closed_seen: false,
+                exhausted: true,
+                counts: Counts {
+                    handled: 0,
+                    errors: 0,
+                    pending: 1,
+                },
+                max_elapsed: NO_LIMIT,
+            },
+            Case {
+                name: "classic mode ignores a reload",
+                max_requests: 0,
+                classic: true,
+                feed: &[Feed::Reload, Feed::Unit],
+                wait: Wait::Never,
+                want: "unit",
+                received: true,
+                closed_seen: false,
+                exhausted: false,
+                counts: Counts {
+                    handled: 0,
+                    errors: 0,
+                    pending: 0,
+                },
+                max_elapsed: NO_LIMIT,
+            },
+            Case {
+                name: "an exhausted quota pulls nothing",
+                max_requests: 1,
+                classic: false,
+                feed: &[Feed::Served, Feed::Unit],
+                wait: Wait::Never,
+                want: "closed",
+                received: false,
+                closed_seen: false,
+                exhausted: true,
+                counts: Counts {
+                    handled: 0,
+                    errors: 0,
+                    pending: 1,
+                },
+                max_elapsed: NO_LIMIT,
+            },
+            Case {
+                name: "a closed intake",
+                max_requests: 0,
+                classic: false,
+                feed: &[Feed::Close],
+                wait: Wait::Forever,
+                want: "closed",
+                received: false,
+                closed_seen: true,
+                exhausted: false,
+                counts: Counts {
+                    handled: 0,
+                    errors: 0,
+                    pending: 0,
+                },
+                max_elapsed: NO_LIMIT,
+            },
+            Case {
+                name: "an empty intake ends a timed pull",
+                max_requests: 0,
+                classic: false,
+                feed: &[],
+                wait: Wait::For(TIMED),
+                want: "no unit",
+                received: false,
+                closed_seen: false,
+                exhausted: false,
+                counts: Counts {
+                    handled: 0,
+                    errors: 0,
+                    pending: 0,
+                },
+                max_elapsed: TIMED + TIMED / 2,
+            },
+            Case {
+                name: "a timed pull keeps one deadline across a skipped unit",
+                max_requests: 0,
+                classic: false,
+                feed: &[Feed::Cancelled],
+                wait: Wait::For(TIMED),
+                want: "no unit",
+                received: false,
+                closed_seen: false,
+                exhausted: false,
+                counts: Counts {
+                    handled: 1,
+                    errors: 1,
+                    pending: 0,
+                },
+                max_elapsed: TIMED + TIMED / 2,
+            },
+        ];
+        for case in cases {
+            let TestWorker { slot, intake } = worker(case.max_requests, case.classic);
+            let mut intake = Some(intake);
+            for feed in case.feed {
+                match feed {
+                    Feed::Unit | Feed::Cancelled => {
+                        let cancelled = matches!(feed, Feed::Cancelled);
+                        intake
+                            .as_ref()
+                            .unwrap()
+                            .submit(Box::new(Probe { cancelled }), 0)
+                            .await
+                            .unwrap();
+                    }
+                    Feed::Reload => intake.as_ref().unwrap().restart_app().unwrap(),
+                    Feed::Served => quota::tick(),
+                    Feed::Close => drop(intake.take()),
+                }
+            }
+            let started = Instant::now();
+            let got = pull(case.wait);
+            let elapsed = started.elapsed();
+            assert_eq!(kind(&got), case.want, "{}", case.name);
+            if let Wait::For(wait) = case.wait {
+                assert!(
+                    elapsed >= wait,
+                    "{}: {elapsed:?} is below the wait",
+                    case.name
+                );
+            }
+            assert!(
+                elapsed < case.max_elapsed,
+                "{}: {elapsed:?} is not below {:?}",
+                case.name,
+                case.max_elapsed
+            );
+            assert_eq!(
+                (RECEIVED.get(), CLOSED_SEEN.get(), quota::exhausted()),
+                (case.received, case.closed_seen, case.exhausted),
+                "{}: received, closed seen, exhausted",
+                case.name
+            );
+            assert_eq!(
+                (
+                    slot.handled.load(Relaxed),
+                    slot.errors.load(Relaxed),
+                    slot.pending.load(Relaxed),
+                ),
+                (case.counts.handled, case.counts.errors, case.counts.pending),
+                "{}: handled, errors, pending",
+                case.name
+            );
+        }
+    }
 }
