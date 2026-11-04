@@ -236,7 +236,9 @@ pub struct Context {
 }
 
 impl Context {
-    pub fn new(req: Request, sender: Sender<Frame>, c: ReqC) -> Self {
+    /// Builds the CGI view here: the http plugin calls it on the transport thread.
+    pub fn new(req: Request, sender: Sender<Frame>) -> Self {
+        let c = ReqC::build(&req);
         Self {
             req,
             c,
@@ -331,7 +333,7 @@ fn send(tx: &Sender<Frame>, frame: Frame) {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     #[test]
@@ -352,7 +354,7 @@ mod tests {
     }
 
     /// A GET with no reply sender; a test sets the sender it needs.
-    fn context() -> Context {
+    pub(crate) fn context() -> Context {
         Context {
             req: Request {
                 method: String::new(),
@@ -408,7 +410,7 @@ mod tests {
     }
 
     /// One line per frame: the fields the plugin acts on.
-    fn describe(frame: Frame) -> String {
+    pub(crate) fn describe(frame: Frame) -> String {
         match frame {
             Frame::Head {
                 head,

@@ -190,7 +190,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 }
 
 /// The first call tears down the bootstrap request php_request_startup() left behind, before any unit is served.
-fn next_unit() -> Option<Context> {
+fn next_unit() -> Option<Box<Context>> {
     if FIRST_CALL.take() {
         if unsafe { rapira_request_teardown() } == RAPIRA_BAILOUT as c_int {
             error!(target: "rapira", "rapira_request_teardown() bailed on first call; recycling");

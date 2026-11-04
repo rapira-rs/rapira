@@ -1,8 +1,8 @@
-//! The Exchange work unit: one HTTP request on the intake and its Work impl.
+//! The Exchange work unit: one HTTP request on a dispatcher-mode intake and its Work impl.
 
 use tokio::sync::mpsc::Sender;
 
-use rapira_sapi::types::{Context, Frame, ReqC, Request};
+use rapira_sapi::types::{Context, Frame, Request};
 use rapira_sapi::work::{Held, Work};
 use rapira_sapi::zend_object;
 
@@ -11,20 +11,16 @@ use crate::php::{ExchangeState, exchange_from};
 /// Cap 16 lets a buffered Head+Chunk+End trio queue without parking the PHP thread and keeps a 1 MiB body in 64 KiB writes to about one park; tokio allocates one 32-slot block for any cap up to 32.
 pub(crate) const FRAME_CAP: usize = 16;
 
-/// One HTTP request on the intake.
+/// One HTTP request on a dispatcher-mode intake.
 pub(crate) struct Exchange {
     req: Request,
     /// Sends the reply the transport reads.
     tx: Sender<Frame>,
-    /// The CGI view, built on the transport thread in the classic and worker modes.
-    cgi: Option<ReqC>,
 }
 
 impl Exchange {
-    /// `superglobals` builds the CGI view here, on the transport thread: true in the classic and worker modes.
-    pub(crate) fn new(req: Request, tx: Sender<Frame>, superglobals: bool) -> Self {
-        let cgi = superglobals.then(|| ReqC::build(&req));
-        Self { req, tx, cgi }
+    pub(crate) fn new(req: Request, tx: Sender<Frame>) -> Self {
+        Self { req, tx }
     }
 }
 
@@ -40,14 +36,9 @@ impl Work for Exchange {
         ptr
     }
 
-    fn into_cgi(self: Box<Self>) -> Context {
-        let Self { req, tx, cgi } = *self;
-        let cgi = cgi.unwrap_or_else(|| ReqC::build(&req));
-        Context::new(req, tx, cgi)
-    }
-
-    /// A dispatcher-mode unit has no CGI view yet; the shed after a failed boot builds one to write the 503.
+    /// The 503 of a failed boot goes out through the CGI seal.
     fn shed(self: Box<Self>) {
-        self.into_cgi().refuse(503);
+        let Self { req, tx } = *self;
+        Context::new(req, tx).refuse(503);
     }
 }

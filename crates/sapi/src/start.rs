@@ -11,7 +11,7 @@ use tracing::{debug, error, info, trace};
 use crate::quota;
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
-use crate::work::{DispatcherClasses, Entry, Intake, Work};
+use crate::work::{DispatcherClasses, Entry, Intake, Unit};
 use crate::{
     classic_worker::classic_worker,
     plugin::{Mode, Stopper},
@@ -54,7 +54,7 @@ impl UnitRx {
     }
 
     /// A pulled unit leaves `pending` and gives back its body bytes.
-    fn take(&self, unit: Box<dyn Work>) -> Box<dyn Work> {
+    fn take(&self, unit: Unit) -> Unit {
         self.pending.fetch_sub(1, Ordering::Relaxed);
         unit
     }
@@ -285,7 +285,7 @@ pub(crate) enum Wait {
 
 /// The result of a pull.
 pub(crate) enum Pull {
-    Unit(Box<dyn Work>),
+    Unit(Unit),
     /// The app instance takes no more units: its quota is used up, or the intake closed.
     Closed,
     /// No unit arrived within the wait.
@@ -379,6 +379,7 @@ mod tests {
 
     use super::*;
     use crate::scoreboard::sb_set;
+    use crate::work::Work;
 
     /// A unit on the intake. `cancelled`: its client left.
     struct Probe {
@@ -390,9 +391,6 @@ mod tests {
             self.cancelled
         }
         unsafe fn attach(self: Box<Self>, _: *mut zend_object) -> *mut dyn crate::work::Held {
-            unreachable!()
-        }
-        fn into_cgi(self: Box<Self>) -> crate::types::Context {
             unreachable!()
         }
         fn shed(self: Box<Self>) {}
@@ -438,6 +436,10 @@ mod tests {
         enum Feed {
             Unit,
             Cancelled,
+            /// A CGI unit whose client waits.
+            Cgi,
+            /// A CGI unit whose client left.
+            CgiGone,
             Reload,
             /// The app served one unit: the quota ticks.
             Served,
@@ -488,6 +490,40 @@ mod tests {
                 max_requests: 0,
                 classic: false,
                 feed: &[Feed::Cancelled, Feed::Unit],
+                wait: Wait::Never,
+                want: "unit",
+                received: true,
+                closed_seen: false,
+                exhausted: false,
+                counts: Counts {
+                    handled: 1,
+                    errors: 1,
+                    pending: 0,
+                },
+                max_elapsed: NO_LIMIT,
+            },
+            Case {
+                name: "a CGI unit is pulled",
+                max_requests: 0,
+                classic: true,
+                feed: &[Feed::Cgi],
+                wait: Wait::Never,
+                want: "unit",
+                received: true,
+                closed_seen: false,
+                exhausted: false,
+                counts: Counts {
+                    handled: 0,
+                    errors: 0,
+                    pending: 0,
+                },
+                max_elapsed: NO_LIMIT,
+            },
+            Case {
+                name: "a CGI unit whose client left is skipped and counted as shed",
+                max_requests: 0,
+                classic: true,
+                feed: &[Feed::CgiGone, Feed::Cgi],
                 wait: Wait::Never,
                 want: "unit",
                 received: true,
@@ -640,6 +676,8 @@ mod tests {
         for case in cases {
             let TestWorker { slot, intake } = worker(case.max_requests, case.classic);
             let mut intake = Some(intake);
+            // The clients of the CGI units that wait.
+            let mut clients = Vec::new();
             for feed in case.feed {
                 match feed {
                     Feed::Unit | Feed::Cancelled => {
@@ -647,7 +685,21 @@ mod tests {
                         intake
                             .as_ref()
                             .unwrap()
-                            .submit(Box::new(Probe { cancelled }), 0)
+                            .submit(Unit::Dispatcher(Box::new(Probe { cancelled })), 0)
+                            .await
+                            .unwrap();
+                    }
+                    Feed::Cgi | Feed::CgiGone => {
+                        let (tx, rx) = tokio::sync::mpsc::channel(8);
+                        if matches!(feed, Feed::Cgi) {
+                            clients.push(rx);
+                        }
+                        let mut ctx = crate::types::tests::context();
+                        ctx.sender = Some(tx);
+                        intake
+                            .as_ref()
+                            .unwrap()
+                            .submit(Unit::Cgi(Box::new(ctx)), 0)
                             .await
                             .unwrap();
                     }

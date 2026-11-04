@@ -8,6 +8,7 @@ use rapira_scoreboard::SharedSlot;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::scoreboard::{Event, count_shed, sb_update};
+use crate::types::Context;
 use crate::{zend_class_entry, zend_object};
 
 pub(crate) const INTAKE_WAIT: Duration = Duration::from_secs(30);
@@ -44,25 +45,65 @@ pub unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
     st
 }
 
-/// One unit of work on the intake. The PHP thread sees only this trait.
+/// A dispatcher-mode unit on the intake: the plugin state behind the object receive() hands to PHP.
 pub trait Work: Send + 'static {
-    /// The client left while the unit was queued: receive() skips it.
+    /// The client left while the unit was queued: the pull skips it.
     fn cancelled(&self) -> bool;
-    /// Dispatcher mode: attaches the unit to the object receive() allocated from `DispatcherClasses::unit`.
+    /// Attaches the unit to the object receive() allocated from `DispatcherClasses::unit`.
     /// # Safety
     /// `obj` is a live object of that class on the PHP thread.
     unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held;
-    /// The classic and worker modes.
-    fn into_cgi(self: Box<Self>) -> crate::types::Context;
     /// A worker that cannot serve: the plugin's refusal, 503 or UNAVAILABLE.
     fn shed(self: Box<Self>);
+}
+
+/// One unit on the intake: the CGI reply of the classic and worker modes, or a dispatcher-mode unit.
+pub enum Unit {
+    Cgi(Box<Context>),
+    Dispatcher(Box<dyn Work>),
+}
+
+impl Unit {
+    /// The client left while the unit was queued: the pull skips it.
+    pub(crate) fn cancelled(&self) -> bool {
+        match self {
+            Self::Cgi(ctx) => ctx.sender.as_ref().is_none_or(|tx| tx.is_closed()),
+            Self::Dispatcher(work) => work.cancelled(),
+        }
+    }
+
+    /// A worker that cannot serve: 503 for a CGI unit, the plugin's refusal for a dispatcher unit.
+    pub(crate) fn shed(self) {
+        match self {
+            Self::Cgi(mut ctx) => ctx.refuse(503),
+            Self::Dispatcher(work) => work.shed(),
+        }
+    }
+
+    /// The classic and worker modes take the CGI reply.
+    pub(crate) fn into_cgi(self) -> Box<Context> {
+        match self {
+            Self::Cgi(ctx) => ctx,
+            Self::Dispatcher(_) => unreachable!("a dispatcher unit on a classic or worker intake"),
+        }
+    }
+
+    /// Dispatcher mode: `Work::attach`.
+    /// # Safety
+    /// `obj` is a live object of `DispatcherClasses::unit` on the PHP thread.
+    pub(crate) unsafe fn attach(self, obj: *mut zend_object) -> *mut dyn Held {
+        match self {
+            Self::Dispatcher(work) => unsafe { work.attach(obj) },
+            Self::Cgi(_) => unreachable!("a CGI unit on a dispatcher intake"),
+        }
+    }
 }
 
 /// One entry of the intake.
 pub(crate) enum Entry {
     /// A unit, its body bytes in the budget and its slot. The pull drops both permits: the bytes go back, and the oldest waiting submit gets the slot.
     Unit {
-        unit: Box<dyn Work>,
+        unit: Unit,
         _bytes: OwnedSemaphorePermit,
         _slot: OwnedSemaphorePermit,
     },
@@ -165,7 +206,7 @@ impl Intake {
 
     /// `bytes` is the body size of the unit. A multipart body that the plugin parsed keeps its file parts in spool files and its other parts in memory. submit refuses a body that does not fit the free budget immediately, because the body stays in memory or in the spool dir while it waits. A spool dir on tmpfs is also memory.
     /// pending is incremented before the send: the consumer decrements as soon as it wakes, so the reverse order could wrap the counter below zero.
-    pub async fn submit(&self, unit: Box<dyn Work>, bytes: usize) -> Result<(), Refused> {
+    pub async fn submit(&self, unit: Unit, bytes: usize) -> Result<(), Refused> {
         // A body larger than the budget takes all of it.
         let Ok(held) =
             Arc::clone(&self.budget).try_acquire_many_owned(bytes.min(BODY_BUDGET) as u32)
@@ -226,10 +267,28 @@ mod tests {
         unsafe fn attach(self: Box<Self>, _: *mut zend_object) -> *mut dyn Held {
             unreachable!()
         }
-        fn into_cgi(self: Box<Self>) -> crate::types::Context {
-            unreachable!()
-        }
         fn shed(self: Box<Self>) {}
+    }
+
+    fn probe() -> Unit {
+        Unit::Dispatcher(Box::new(Probe))
+    }
+
+    /// The shed of a CGI unit is the 503 seal.
+    #[test]
+    fn a_cgi_shed_refuses_with_503() {
+        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let mut ctx = crate::types::tests::context();
+        ctx.sender = Some(tx);
+        Unit::Cgi(Box::new(ctx)).shed();
+        let mut got = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            got.push(crate::types::tests::describe(frame));
+        }
+        assert_eq!(
+            got,
+            ["head 503 cl=Some(0) bodiless=false", "end truncated=false"]
+        );
     }
 
     /// An intake on slot 0 of a board in memory.
@@ -244,7 +303,7 @@ mod tests {
         let slot = intake.slot;
         drop(rx);
         assert_eq!(
-            intake.submit(Box::new(Probe), 0).await.unwrap_err(),
+            intake.submit(probe(), 0).await.unwrap_err(),
             Refused::Stopped
         );
         assert_eq!(
@@ -264,7 +323,7 @@ mod tests {
         let intake = intake(tx);
         let slot = intake.slot;
         for _ in 0..INTAKE_SLOTS {
-            intake.submit(Box::new(Probe), 0).await.unwrap();
+            intake.submit(probe(), 0).await.unwrap();
         }
         assert_eq!(
             intake.restart_app(),
@@ -360,9 +419,9 @@ mod tests {
             let intake = intake(tx);
             let slot = intake.slot;
             for _ in 0..INTAKE_SLOTS {
-                intake.submit(Box::new(Probe), 0).await.unwrap();
+                intake.submit(probe(), 0).await.unwrap();
             }
-            let submit = intake.submit(Box::new(Probe), 0);
+            let submit = intake.submit(probe(), 0);
             let result = match case.during {
                 During::Nothing => Some(submit.await),
                 During::ClientLeaves => tokio::time::timeout(ACTION_DELAY, submit).await.ok(),

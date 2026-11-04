@@ -11,7 +11,7 @@ use http::header::CONTENT_TYPE;
 use http_body_util::BodyExt;
 use hyper::body::{Body, Bytes, Incoming, SizeHint};
 use rapira_sapi::types::ResponseHead;
-use rapira_sapi::work::{Intake, Refused};
+use rapira_sapi::work::{Intake, Refused, Unit};
 use rapira_sapi::{Addr, Frame, Request};
 use tower::{Service as _, ServiceExt as _};
 
@@ -485,8 +485,13 @@ async fn submit(
     let bytes = request.content_length as usize;
     let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
     let (tx, reply) = tokio::sync::mpsc::channel(crate::exchange::FRAME_CAP);
-    let exchange = Exchange::new(request, tx, shared.cfg.superglobals);
-    shared.intake.submit(Box::new(exchange), bytes).await?;
+    // The classic and worker modes get their CGI view built here, on the transport thread.
+    let unit = if shared.cfg.superglobals {
+        Unit::Cgi(Box::new(rapira_sapi::types::Context::new(request, tx)))
+    } else {
+        Unit::Dispatcher(Box::new(Exchange::new(request, tx)))
+    };
+    shared.intake.submit(unit, bytes).await?;
     Ok(reply)
 }
 

@@ -13,13 +13,12 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 - `prepare()` runs in the master before the fork, with no runtime. It sets the server identity and the `sendFile()` root that the workers inherit, removes the spool dirs of dead workers and binds the listener with `rapira_net::bind`.
 - `serve()` runs in the worker on the plugin thread `rapira-http`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the `Intake` to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
 
-`serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. hyper's http1 builder serves each connection on the runtime. Each request goes through the admission checks, the middleware chain and the inner service. The inner service reads the body, builds an `Exchange` and submits it to the intake. PHP writes the reply as frames (`Head`, `Chunk`, `File`, `End`), and the plugin writes them to the socket as they arrive.
+`serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. hyper's http1 builder serves each connection on the runtime. Each request goes through the admission checks, the middleware chain and the inner service. The inner service reads the body and submits the unit to the intake: a `Context` with the CGI view in the classic and worker modes, an `Exchange` in dispatcher mode. PHP writes the reply as frames (`Head`, `Chunk`, `File`, `End`), and the plugin writes them to the socket as they arrive.
 
-`Exchange` is the work unit. It implements `rapira_sapi::work::Work`:
+`Exchange` is the dispatcher-mode unit. It implements `rapira_sapi::work::Work`:
 
 - `cancelled()` returns true when the client is gone. `receive()` skips such a unit.
 - `attach()` connects the unit to the `Rapira\Http\Exchange` object that `receive()` returns in dispatcher mode.
-- `into_cgi()` gives the CGI request that the classic and worker modes run.
 - `shed()` answers 503 when the PHP boot of the worker failed.
 
 The client gets 503 when the intake of the worker stays full for 30 seconds or when the waiting request bodies use the 64 MiB body budget of the worker, and 500 when the PHP thread of the worker has stopped. PHP does not see these requests.
