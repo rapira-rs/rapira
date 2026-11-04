@@ -2,7 +2,6 @@
 
 use tokio::sync::mpsc::Sender;
 
-use rapira_sapi::callbacks::send_error_head;
 use rapira_sapi::types::{Context, Frame, ReqC, Request};
 use rapira_sapi::work::{Held, Work};
 use rapira_sapi::zend_object;
@@ -49,8 +48,6 @@ impl Work for Exchange {
 
     /// A dispatcher-mode unit has no CGI view yet; the shed after a failed boot builds one to write the 503.
     fn shed(self: Box<Self>) {
-        let mut ctx = self.into_cgi();
-        send_error_head(&mut ctx, 503);
-        ctx.finish(false);
+        self.into_cgi().refuse(503);
     }
 }

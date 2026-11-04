@@ -178,15 +178,11 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
 
     let recycle: bool = [outcome, flushed, teardown].contains(&(RAPIRA_BAILOUT as c_int));
     let errored: bool = recycle || outcome == RAPIRA_THROW as c_int;
-    let truncated: bool = finalize_response(&mut ctx, errored);
 
     log_and_clear_last_error();
     sb_update(scoreboard::Event::Handled { errored });
     if recycle {
         RECYCLE.set(true);
-    }
-    ctx.finish(truncated);
-    if recycle {
         RAPIRA_HANDLE_RECYCLE
     } else {
         RAPIRA_HANDLE_CONTINUE
@@ -220,8 +216,7 @@ pub extern "C" fn rapira_rs_finish_response() {
         if let Some(c) = ctx() {
             // shutdown functions, destructors and the teardown flush run after ctx.errored is set
             let errored = c.errored || fatal_error_recorded();
-            let truncated = finalize_response(c, errored);
-            c.finish(truncated);
+            c.end(errored);
         }
     });
 }

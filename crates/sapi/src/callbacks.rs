@@ -1,6 +1,6 @@
 use crate::context::{ctx, with_ctx};
 use crate::diagnostics::syslog_to_level;
-use crate::types::{Context, StreamState};
+use crate::types::StreamState;
 use crate::*;
 use ::http::header::{
     AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, FROM, HeaderMap, HeaderName, HeaderValue,
@@ -388,13 +388,6 @@ pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type:
         crate::diagnostics::event_at!("php", syslog_to_level(syslog_type), "{s}");
     })
 }
-pub fn send_error_head(c: &mut Context, status: u16) {
-    if c.stream != StreamState::NotSent {
-        return;
-    }
-    c.commit_head(status, HeaderMap::new());
-}
-
 /// php_error_cb records each fatal error before its bailout. A bailout with no such record is a normal end, such as exit(), or a client abort. The record holds only the last diagnostic.
 /// https://github.com/php/php-src/blob/php-8.5.11/main/main.c#L1393-L1540
 pub(crate) fn fatal_error_recorded() -> bool {
@@ -402,14 +395,6 @@ pub(crate) fn fatal_error_recorded() -> bool {
         !core_globals.last_error_message.is_null()
             && core_globals.last_error_type & E_FATAL_ERRORS as c_int != 0
     }
-}
-
-pub(crate) fn finalize_response(c: &mut Context, errored: bool) -> bool {
-    let truncated = errored && c.stream == StreamState::BodyStreamed;
-    if errored {
-        send_error_head(c, 500);
-    }
-    truncated
 }
 
 #[cfg(test)]
