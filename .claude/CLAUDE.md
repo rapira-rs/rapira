@@ -5,7 +5,7 @@
 - MINIT runs once in the master pre-fork so opcache SHM is inherited. Workers exit rather than tear the module down.
 - Foreground only, no daemonize. Pidfile stays.
 - Allocator is mimalloc v3, without THP.
-- New host logic in Rust via ZEND_API if that is reasonable. C only for ZPP shells, longjmp isolation, macro shims.
+- New host logic in Rust via ZEND_API if that is reasonable: parsing, protocol state and what is cleaner in Rust. C for ZPP shells, longjmp isolation, macro shims and glue that needs no Rust, such as the zval memo check and copy in a getter.
 - Pre 1.0 - do not preserve backwards compatibility.
 
 ## PHP contract

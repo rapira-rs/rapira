@@ -18,7 +18,7 @@ use rapira_sapi::work::{DispatcherClasses, Held, HeldPtr};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, zend, zend_class_entry,
-    zend_object, zval, zval_add_ref, zval_ptr_dtor,
+    zval, zval_ptr_dtor,
 };
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 
@@ -48,14 +48,6 @@ unsafe extern "C" {
     pub static mut rapira_ce_internal_http_dispatcher_info: *mut zend_class_entry;
     pub static mut rapira_ce_internal_http_exchange: *mut zend_class_entry;
     pub fn rapira_http_register_classes();
-}
-
-/// Mirrors `rapira_exchange_obj` in rapira_http.h. The C fields sit before `std`.
-#[repr(C)]
-pub struct ExchangeObj {
-    pub held: HeldPtr,
-    pub request: zval,
-    pub std: zend_object,
 }
 
 pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {

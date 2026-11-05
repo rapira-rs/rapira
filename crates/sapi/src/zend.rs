@@ -2,7 +2,7 @@ use std::ffi::{CStr, c_char};
 
 use crate::{
     HashPosition, HashTable, IS_DOUBLE, IS_LONG, IS_NULL, IS_PROP_REINITABLE, IS_PROP_UNINIT,
-    IS_REFERENCE, IS_UNDEF, executor_globals, rapira_zval_stringl, zend_class_entry,
+    IS_REFERENCE, executor_globals, rapira_zval_stringl, zend_class_entry,
     zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object,
     zend_property_info, zend_read_property, zend_string, zend_throw_error, zend_throw_exception,
@@ -16,12 +16,6 @@ pub fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
     } else {
         bytes.as_ptr().cast()
     }
-}
-
-/// # Safety
-/// `zv` readable.
-pub unsafe fn is_undef(zv: *const zval) -> bool {
-    unsafe { u32::from((*zv).u1.v.type_) == IS_UNDEF }
 }
 
 /// # Safety

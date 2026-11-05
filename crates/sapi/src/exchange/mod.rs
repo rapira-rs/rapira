@@ -170,14 +170,10 @@ pub unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
     }
 }
 
-/// `fn $name(obj) -> *mut $t` recovers the enclosing C struct: the C fields sit before `std` (the layouts in rapira_sapi.h and the plugin headers).
-#[macro_export]
-macro_rules! container_of {
-    ($vis:vis $name:ident, $t:ty) => {
-        $vis unsafe fn $name(obj: *mut $crate::zend_object) -> *mut $t {
-            unsafe { obj.byte_sub(std::mem::offset_of!($t, std)).cast() }
-        }
-    };
+/// The enclosing C struct of a DispatcherInfo object: the C fields sit before `std` (the layout in rapira_sapi.h).
+unsafe fn info_from(obj: *mut crate::zend_object) -> *mut rapira_dispatcher_info_obj {
+    unsafe {
+        obj.byte_sub(std::mem::offset_of!(rapira_dispatcher_info_obj, std))
+            .cast()
+    }
 }
-
-container_of!(info_from, rapira_dispatcher_info_obj);

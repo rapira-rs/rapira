@@ -1,8 +1,8 @@
 #include "rapira_http.h"
 
 // rust glue; the verbs throw from Rust and report false with the throw pending
-extern bool rapira_rs_exchange_build_request(rapira_exchange_obj *ex,
-                                             zval *return_value);
+extern bool rapira_rs_exchange_build_request(const rapira_held *held,
+                                             zval *memo);
 extern bool rapira_rs_exchange_write_head(const rapira_held *held,
                                           int64_t status, HashTable *headers);
 extern bool rapira_rs_exchange_write_body(const rapira_held *held,
@@ -90,10 +90,14 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
     RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_exchange_flush(held), "flush");
 }
 
-// the request graph builder lives in Rust (src/php/); this shell owns the macro layer
+// the request graph builder lives in Rust (src/php/); this shell owns the memo
 ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest) {
     ZEND_PARSE_PARAMETERS_NONE();
     rapira_exchange_obj *ex = rapira_exchange_from(Z_OBJ_P(ZEND_THIS));
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_exchange_build_request(ex, return_value), "getRequest");
+    if (Z_ISUNDEF(ex->request)) {
+        RAPIRA_RETURN_THROWS_UNLESS(
+            rapira_rs_exchange_build_request(&ex->held, &ex->request),
+            "getRequest");
+    }
+    RETURN_COPY(&ex->request);
 }

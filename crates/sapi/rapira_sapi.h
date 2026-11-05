@@ -68,6 +68,8 @@ enum { RAPIRA_OK = 0, RAPIRA_BAILOUT = 1, RAPIRA_THROW = 3 };
 
 // rust glue
 extern void rapira_rs_dispatcher_release(void);
+// the seal of the current CGI reply (rapira_worker.rs)
+extern void rapira_rs_finish_response(void);
 // free_obj of a unit class: hands the unit back to Rust (work.rs)
 extern void rapira_rs_held_drop(zend_object *obj);
 

@@ -2,8 +2,6 @@
 
 #include <main/php_content_types.h>
 
-extern void rapira_rs_finish_response(void);
-
 // True while rapira_run_handler runs the handler and its shutdown functions.
 static bool rapira_in_handler = false;
 

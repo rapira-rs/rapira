@@ -60,7 +60,7 @@ fn recv_sealed(rx: &mut tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>) 
     Sealed::Nothing
 }
 
-/// An exchange state as `Exchange::attach` makes it.
+/// An exchange state as `Exchange::into_held` makes it.
 struct Attached {
     state: ExchangeState,
     /// The reply that `state` sends to.

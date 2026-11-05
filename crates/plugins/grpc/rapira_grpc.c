@@ -28,9 +28,9 @@ extern bool rapira_rs_grpc_kind_streams(const char *value, size_t len,
 // return false with a PHP exception pending
 extern bool rapira_rs_grpc_services(zval *rv);
 extern const char *rapira_rs_grpc_message(const rapira_held *held, size_t *len);
-extern bool rapira_rs_grpc_context(rapira_grpc_call_obj *call, zval *rv);
-extern bool rapira_rs_grpc_response_metadata(rapira_grpc_call_obj *call,
-                                             zval *rv);
+extern bool rapira_rs_grpc_context(const rapira_held *held, zval *memo);
+extern bool rapira_rs_grpc_response_metadata(const rapira_held *held,
+                                             zval *memo);
 extern bool rapira_rs_grpc_respond(const rapira_held *held, const char *message,
                                    size_t len);
 extern bool rapira_rs_grpc_fail(const rapira_held *held, zend_object *status);
@@ -232,18 +232,23 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getMessage) {
 
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getContext) {
     ZEND_PARSE_PARAMETERS_NONE();
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_grpc_context(rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS)),
-                               return_value),
-        "getContext");
+    rapira_grpc_call_obj *call = rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS));
+    if (Z_ISUNDEF(call->context)) {
+        RAPIRA_RETURN_THROWS_UNLESS(
+            rapira_rs_grpc_context(&call->held, &call->context), "getContext");
+    }
+    RETURN_COPY(&call->context);
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getResponseMetadata) {
     ZEND_PARSE_PARAMETERS_NONE();
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_grpc_response_metadata(
-            rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS)), return_value),
-        "getResponseMetadata");
+    rapira_grpc_call_obj *call = rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS));
+    if (Z_ISUNDEF(call->metadata)) {
+        RAPIRA_RETURN_THROWS_UNLESS(
+            rapira_rs_grpc_response_metadata(&call->held, &call->metadata),
+            "getResponseMetadata");
+    }
+    RETURN_COPY(&call->metadata);
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, respond) {

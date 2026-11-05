@@ -143,8 +143,6 @@ PHP_MINIT_FUNCTION(rapira) {
     return SUCCESS;
 }
 
-extern void rapira_rs_finish_response(void);
-
 // Runs after the shutdown functions
 PHP_RSHUTDOWN_FUNCTION(rapira) {
     php_header();
