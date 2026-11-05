@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 21ea1e00ab8a8f1047b6fe11238d21b19960fe8c */
+ * Stub hash: 00d2f454f0fb1356fb3706ea4310b1f6e1b71684 */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_FormField___construct, 0, 0, 3)
 	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
@@ -132,8 +132,8 @@ ZEND_FUNCTION(rapira_sapi_pending_count);
 ZEND_FUNCTION(rapira_sapi_active_count);
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverName);
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverPort);
-ZEND_METHOD(Rapira_Internal_Http_Exchange, isFinalized);
-ZEND_METHOD(Rapira_Internal_Http_Exchange, isCancelled);
+ZEND_FUNCTION(rapira_sapi_is_finalized);
+ZEND_FUNCTION(rapira_sapi_is_cancelled);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, writeHead);
 ZEND_METHOD(Rapira_Internal_Http_Exchange, writeBody);
@@ -204,8 +204,8 @@ static const zend_function_entry class_Rapira_Internal_Http_DispatcherInfo_metho
 
 static const zend_function_entry class_Rapira_Internal_Http_Exchange_methods[] = {
 	ZEND_RAW_FENTRY("__construct", zif_rapira_sapi_host_created, arginfo_class_Rapira_Internal_Http_Exchange___construct, ZEND_ACC_PRIVATE, NULL, NULL)
-	ZEND_ME(Rapira_Internal_Http_Exchange, isFinalized, arginfo_class_Rapira_Internal_Http_Exchange_isFinalized, ZEND_ACC_PUBLIC)
-	ZEND_ME(Rapira_Internal_Http_Exchange, isCancelled, arginfo_class_Rapira_Internal_Http_Exchange_isCancelled, ZEND_ACC_PUBLIC)
+	ZEND_RAW_FENTRY("isFinalized", zif_rapira_sapi_is_finalized, arginfo_class_Rapira_Internal_Http_Exchange_isFinalized, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("isCancelled", zif_rapira_sapi_is_cancelled, arginfo_class_Rapira_Internal_Http_Exchange_isCancelled, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_ME(Rapira_Internal_Http_Exchange, getRequest, arginfo_class_Rapira_Internal_Http_Exchange_getRequest, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Http_Exchange, writeHead, arginfo_class_Rapira_Internal_Http_Exchange_writeHead, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Http_Exchange, writeBody, arginfo_class_Rapira_Internal_Http_Exchange_writeBody, ZEND_ACC_PUBLIC)

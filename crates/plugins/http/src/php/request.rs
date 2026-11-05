@@ -102,7 +102,7 @@ unsafe fn build_multipart(dst: *mut zval, field_parts: &[FieldPart], file_parts:
 
 /// False means a throw is pending; a caught panic returns false without one and the C shell throws instead.
 /// # Safety
-/// `ex` is a live exchange with a non-null unit; `return_value` is writable.
+/// `ex` is a live exchange that receive() attached; `return_value` is writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_build_request(
     ex: *mut ExchangeObj,
@@ -123,7 +123,7 @@ unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> b
             return true;
         }
         let ce: *mut zend_class_entry = rapira_ce_http_request;
-        let st = &mut *(*ex).unit.cast::<ExchangeState>();
+        let st = &mut *(*ex).held.state::<ExchangeState>();
         let req = &st.req;
         let view = st.view.get_or_insert_with(|| RequestView::new(req));
 

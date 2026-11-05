@@ -1,4 +1,6 @@
 use std::ffi::CStr;
+use std::mem::MaybeUninit;
+use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc::Sender;
@@ -7,6 +9,7 @@ use std::time::Duration;
 use rapira_scoreboard::SharedSlot;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
+use crate::callbacks::guard;
 use crate::scoreboard::{Event, count_shed, sb_update};
 use crate::types::Context;
 use crate::{zend_class_entry, zend_object};
@@ -26,6 +29,8 @@ pub trait Held {
     /// The unit takes no outcome: the client left, or the plugin closed the unit. Work::isCancelled().
     fn cancelled(&self) -> bool;
     fn discard(&mut self);
+    /// The object of an unsettled unit is gone: what the client gets in place of the outcome. The drop shell skips it when the cycle died.
+    fn lost(&mut self);
 
     /// Work::isFinalized().
     fn is_finalized(&self) -> bool {
@@ -33,10 +38,10 @@ pub trait Held {
     }
 }
 
-/// Reclaims the Box that receive() handed out: clears the cycle slot if it still points here, and counts an unfinalized unit as handled.
+/// Reclaims the Box that receive() handed out: clears the cycle slot if it still points here, and counts an unsettled unit as handled.
 /// # Safety
-/// `ptr` came from `Box::into_raw` in receive and was not reclaimed before.
-pub unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
+/// `ptr` came from `Box::leak` in receive and was not reclaimed before.
+pub(crate) unsafe fn release(ptr: *mut dyn Held) -> Box<dyn Held> {
     crate::exchange::forget_held(ptr.cast::<()>());
     let st = unsafe { Box::from_raw(ptr) };
     if !st.settled() {
@@ -45,14 +50,84 @@ pub unsafe fn release<T: Held + ?Sized>(ptr: *mut T) -> Box<T> {
     st
 }
 
+/// The unit behind a Work object: the first field of the C prefix of every unit class (rapira_held in rapira_sapi.h). zend_object_alloc zeroes the prefix, so a fresh object holds None.
+#[repr(transparent)]
+pub struct HeldPtr(pub(crate) Option<NonNull<dyn Held>>);
+
+// rapira_held mirrors the two words of the fat pointer, and the zeroed prefix is None.
+const _: () = assert!(
+    size_of::<HeldPtr>() == 2 * size_of::<*const ()>()
+        && align_of::<HeldPtr>() == align_of::<*const ()>()
+);
+const _: () = assert!(
+    unsafe { MaybeUninit::<HeldPtr>::zeroed().assume_init() }
+        .0
+        .is_none()
+);
+
+impl HeldPtr {
+    /// The slot of a unit object. The prefix starts `handlers.offset` bytes before the object, where zend_objects_store_del frees the allocation: https://github.com/php/php-src/blob/php-8.5.12/Zend/zend_objects_API.c#L196-L200
+    /// # Safety
+    /// `obj` is a live object of a class whose C prefix starts with a rapira_held.
+    pub(crate) unsafe fn of(obj: *mut zend_object) -> *mut Self {
+        unsafe { obj.byte_sub((*(*obj).handlers).offset as usize).cast() }
+    }
+
+    fn get(&self) -> NonNull<dyn Held> {
+        self.0.expect("a unit object that receive() never attached")
+    }
+
+    /// The plugin state that receive() attached.
+    /// # Safety
+    /// receive() attached a `T` to this slot, and the object is live.
+    pub unsafe fn state<T>(&self) -> *mut T {
+        self.get().cast::<T>().as_ptr()
+    }
+}
+
+/// Work::isFinalized().
+/// # Safety
+/// `obj` is a live unit object that receive() attached.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_held_is_finalized(obj: *mut zend_object) -> bool {
+    guard(false, || unsafe {
+        (*HeldPtr::of(obj)).get().as_ref().is_finalized()
+    })
+}
+
+/// Work::isCancelled().
+/// # Safety
+/// As `rapira_rs_held_is_finalized`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_held_is_cancelled(obj: *mut zend_object) -> bool {
+    guard(false, || unsafe {
+        (*HeldPtr::of(obj)).get().as_ref().cancelled()
+    })
+}
+
+/// The free_obj of a unit class: reclaims the unit, and an unsettled unit sends its lost outcome. A cycle that died (a fatal error, a timeout) skips the outcome: the plugin reports the worker death when the sender drops.
+/// # Safety
+/// `obj` is the object that free_obj got; engine active on this thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_held_drop(obj: *mut zend_object) {
+    guard((), || unsafe {
+        // receive() allocates the object before the pull: a timeout, an empty tryReceive() or a closed source frees an object with no unit.
+        let Some(ptr) = (*HeldPtr::of(obj)).0.take() else {
+            return;
+        };
+        let mut held = release(ptr.as_ptr());
+        if !held.settled() && !crate::compiler_globals.unclean_shutdown {
+            held.lost();
+        }
+    })
+}
+
 /// A dispatcher-mode unit on the intake: the plugin state behind the object receive() hands to PHP.
 pub trait Work: Send + 'static {
     /// The client left while the unit was queued: the pull skips it.
     fn cancelled(&self) -> bool;
-    /// Attaches the unit to the object receive() allocated from `DispatcherClasses::unit`.
-    /// # Safety
-    /// `obj` is a live object of that class on the PHP thread.
-    unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held;
+    /// The state behind the object receive() hands to PHP.
+    fn into_held(self: Box<Self>) -> Box<dyn Held>;
     /// A worker that cannot serve: the plugin's refusal, 503 or UNAVAILABLE.
     fn shed(self: Box<Self>);
 }
@@ -88,12 +163,10 @@ impl Unit {
         }
     }
 
-    /// Dispatcher mode: `Work::attach`.
-    /// # Safety
-    /// `obj` is a live object of `DispatcherClasses::unit` on the PHP thread.
-    pub(crate) unsafe fn attach(self, obj: *mut zend_object) -> *mut dyn Held {
+    /// Dispatcher mode: `Work::into_held`.
+    pub(crate) fn into_held(self) -> Box<dyn Held> {
         match self {
-            Self::Dispatcher(work) => unsafe { work.attach(obj) },
+            Self::Dispatcher(work) => work.into_held(),
             Self::Cgi(_) => unreachable!("a CGI unit on a dispatcher intake"),
         }
     }
@@ -264,7 +337,7 @@ mod tests {
         fn cancelled(&self) -> bool {
             false
         }
-        unsafe fn attach(self: Box<Self>, _: *mut zend_object) -> *mut dyn Held {
+        fn into_held(self: Box<Self>) -> Box<dyn Held> {
             unreachable!()
         }
         fn shed(self: Box<Self>) {}

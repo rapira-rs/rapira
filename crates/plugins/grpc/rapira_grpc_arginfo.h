@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 8b155d1f0188f693c6b6ff2507cda6370d4736ee */
+ * Stub hash: eab844176c2ad2abf2fdcb582e01f43e54fb33ec */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Grpc_MethodKind_isStreamingRequest, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
@@ -191,8 +191,8 @@ ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, getServices);
 ZEND_FUNCTION(rapira_sapi_host_created);
 ZEND_FUNCTION(rapira_sapi_pending_count);
 ZEND_FUNCTION(rapira_sapi_active_count);
-ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, isFinalized);
-ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, isCancelled);
+ZEND_FUNCTION(rapira_sapi_is_finalized);
+ZEND_FUNCTION(rapira_sapi_is_cancelled);
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getContext);
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getMessage);
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getResponseMetadata);
@@ -324,8 +324,8 @@ static const zend_function_entry class_Rapira_Internal_Grpc_DispatcherInfo_metho
 
 static const zend_function_entry class_Rapira_Internal_Grpc_UnaryCall_methods[] = {
 	ZEND_RAW_FENTRY("__construct", zif_rapira_sapi_host_created, arginfo_class_Rapira_Internal_Grpc_UnaryCall___construct, ZEND_ACC_PRIVATE, NULL, NULL)
-	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, isFinalized, arginfo_class_Rapira_Internal_Grpc_UnaryCall_isFinalized, ZEND_ACC_PUBLIC)
-	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, isCancelled, arginfo_class_Rapira_Internal_Grpc_UnaryCall_isCancelled, ZEND_ACC_PUBLIC)
+	ZEND_RAW_FENTRY("isFinalized", zif_rapira_sapi_is_finalized, arginfo_class_Rapira_Internal_Grpc_UnaryCall_isFinalized, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("isCancelled", zif_rapira_sapi_is_cancelled, arginfo_class_Rapira_Internal_Grpc_UnaryCall_isCancelled, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, getContext, arginfo_class_Rapira_Internal_Grpc_UnaryCall_getContext, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, getMessage, arginfo_class_Rapira_Internal_Grpc_UnaryCall_getMessage, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, getResponseMetadata, arginfo_class_Rapira_Internal_Grpc_UnaryCall_getResponseMetadata, ZEND_ACC_PUBLIC)

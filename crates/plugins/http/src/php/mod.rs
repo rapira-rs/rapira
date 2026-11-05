@@ -1,7 +1,7 @@
 //! The Rust behind the PHP classes of the http plugin: the class entries, the exchange state and the request view.
 
 use std::{
-    ffi::{CStr, c_char, c_void},
+    ffi::{CStr, c_char},
     fmt::NumBuffer,
     net::SocketAddr,
 };
@@ -14,7 +14,7 @@ use rapira_sapi::exchange::{
 };
 use rapira_sapi::scoreboard::{Event, sb_update};
 use rapira_sapi::types::{Addr, Body, FormField, Frame, Request, ResponseHead, UploadedFile};
-use rapira_sapi::work::{DispatcherClasses, Held, release};
+use rapira_sapi::work::{DispatcherClasses, Held, HeldPtr};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, zend, zend_class_entry,
@@ -53,7 +53,7 @@ unsafe extern "C" {
 /// Mirrors `rapira_exchange_obj` in rapira_http.h. The C fields sit before `std`.
 #[repr(C)]
 pub struct ExchangeObj {
-    pub unit: *mut c_void,
+    pub held: HeldPtr,
     pub request: zval,
     pub std: zend_object,
 }
@@ -75,7 +75,7 @@ enum Stage {
 
 enum BodyState {
     Raw(Vec<u8>),
-    /// seal(), discard_unit() and exchange_drop unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
+    /// seal(), discard_unit() and lost() unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
     Multipart {
         fields: Vec<FieldPart>,
         files: Vec<FilePart>,
@@ -248,6 +248,33 @@ impl Held for ExchangeState {
     fn discard(&mut self) {
         respond::discard_unit(self);
     }
-}
 
-rapira_sapi::container_of!(pub(crate) exchange_from, ExchangeObj);
+    /// A 500 head and an End when no head was sent, else a truncated End.
+    fn lost(&mut self) {
+        self.body.unlink_spools();
+        let Some(tx) = self.sender.take() else {
+            return;
+        };
+        if self.head_sent {
+            let _ = tx.try_send(Frame::End {
+                trailers: HeaderMap::new(),
+                truncated: true,
+            });
+        } else if tx
+            .try_send(Frame::Head {
+                head: ResponseHead {
+                    status: 500,
+                    headers: HeaderMap::new(),
+                },
+                content_length: (!self.bodiless).then_some(0),
+                bodiless: self.bodiless,
+            })
+            .is_ok()
+        {
+            let _ = tx.try_send(Frame::End {
+                trailers: HeaderMap::new(),
+                truncated: false,
+            });
+        }
+    }
+}

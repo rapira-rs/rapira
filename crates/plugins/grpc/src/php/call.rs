@@ -12,7 +12,7 @@ use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::work::{Held, now_unix_f64, release};
+use rapira_sapi::work::{Held, HeldPtr, now_unix_f64};
 use rapira_sapi::{
     HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_zval_enum_case,
@@ -223,11 +223,8 @@ impl rapira_sapi::work::Work for GrpcState {
         Held::cancelled(self)
     }
 
-    unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held {
-        let ptr = Box::into_raw(self);
-        // SAFETY: the caller passes a live Rapira\Internal\Grpc\UnaryCall object.
-        unsafe { (*grpc_call_from(obj)).state = ptr.cast() };
-        ptr
+    fn into_held(self: Box<Self>) -> Box<dyn Held> {
+        self
     }
 
     fn shed(self: Box<Self>) {
@@ -255,7 +252,7 @@ impl Held for GrpcState {
         self.discarded || self.reply.as_ref().is_some_and(oneshot::Sender::is_closed)
     }
 
-    /// Dropping `reply` finalizes the call, so `rapira_rs_grpc_drop`/`reclaim_current` do not count it a second time.
+    /// Dropping `reply` finalizes the call, so `release()` does not count it a second time.
     fn discard(&mut self) {
         if self.settled() {
             return;
@@ -264,6 +261,9 @@ impl Held for GrpcState {
         self.reply = None;
         sb_update(Event::Handled { errored: true });
     }
+
+    /// The drop of `reply` reports the lost call as INTERNAL.
+    fn lost(&mut self) {}
 }
 
 /// A core returns a Verb and throws nothing: `thrown` throws after the core dropped its owned state, because `zend_throw_*` can bail out.
@@ -380,7 +380,6 @@ unsafe fn thrown(v: Verb) -> bool {
     false
 }
 
-rapira_sapi::container_of!(grpc_call_from, CallObj);
 rapira_sapi::container_of!(metadata_from, MetadataObj);
 
 /// A `Rapira\Grpc\Metadata` object over `fields`.
@@ -492,34 +491,16 @@ unsafe fn read_details(details: *mut HashTable) -> Result<Vec<StatusDetail>, *mu
     }
 }
 
-/// # Safety
-/// `state` from receive.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_grpc_is_finalized(state: *const c_void) -> bool {
-    guard(false, || unsafe {
-        (*state.cast::<GrpcState>()).is_finalized()
-    })
-}
-
-/// # Safety
-/// `state` from receive.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_grpc_is_cancelled(state: *const c_void) -> bool {
-    guard(false, || unsafe {
-        (*state.cast::<GrpcState>()).cancelled()
-    })
-}
-
 /// The state keeps the message; the C shell copies it once per call object.
 /// # Safety
-/// `state` from receive; `len` writable.
+/// `held` the slot of a live call; `len` writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_message(
-    state: *const c_void,
+    held: *const HeldPtr,
     len: *mut usize,
 ) -> *const c_char {
     guard(c"".as_ptr(), || unsafe {
-        let message = &(*state.cast::<GrpcState>()).req.message;
+        let message = &(*(*held).state::<GrpcState>()).req.message;
         *len = message.len();
         zend::ptr_or_empty(message)
     })
@@ -527,14 +508,14 @@ pub unsafe extern "C" fn rapira_rs_grpc_message(
 
 /// Builds the Context on the first call and returns the same object after that.
 /// # Safety
-/// `call` a live call object with a state; `rv` writable; engine active.
+/// `call` a live call object that receive() attached; `rv` writable; engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_context(call: *mut CallObj, rv: *mut zval) -> bool {
     guard(false, || unsafe {
         if zend::is_undef(&(*call).context) {
             build_context(
                 &mut (*call).context,
-                &mut *(*call).state.cast::<GrpcState>(),
+                &mut *(*call).held.state::<GrpcState>(),
             );
         }
         *rv = (*call).context;
@@ -557,7 +538,8 @@ pub unsafe extern "C" fn rapira_rs_grpc_response_metadata(
                 &mut (*call).metadata,
                 rapira_ce_internal_grpc_response_metadata,
             );
-            (*metadata_from((*call).metadata.value.obj)).state = (*call).state;
+            (*metadata_from((*call).metadata.value.obj)).state =
+                (*call).held.state::<GrpcState>().cast();
         }
         *rv = (*call).metadata;
         zval_add_ref(rv);
@@ -566,24 +548,27 @@ pub unsafe extern "C" fn rapira_rs_grpc_response_metadata(
 }
 
 /// # Safety
-/// `state` from receive; `message` points at `len` readable bytes; engine active.
+/// `held` the slot of a live call; `message` points at `len` readable bytes; engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_respond(
-    state: *mut c_void,
+    held: *const HeldPtr,
     message: *const c_char,
     len: usize,
 ) -> bool {
     guard(false, || unsafe {
         let message = Bytes::copy_from_slice(std::slice::from_raw_parts(message.cast::<u8>(), len));
-        thrown(finish(&mut *state.cast::<GrpcState>(), Ok(message)))
+        thrown(finish(&mut *(*held).state::<GrpcState>(), Ok(message)))
     })
 }
 
 /// `status` is a `Rapira\Grpc\Status`; its constructor typed the three properties. A detail that is not an ErrorDetail gives a TypeError before any state change.
 /// # Safety
-/// `state` from receive; `status` a live object; engine active.
+/// `held` the slot of a live call; `status` a live object; engine active.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_grpc_fail(state: *mut c_void, status: *mut zend_object) -> bool {
+pub unsafe extern "C" fn rapira_rs_grpc_fail(
+    held: *const HeldPtr,
+    status: *mut zend_object,
+) -> bool {
     guard(false, || unsafe {
         let mut code_rv: zval = std::mem::zeroed();
         let mut value_rv: zval = std::mem::zeroed();
@@ -614,7 +599,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_fail(state: *mut c_void, status: *mut ze
             message: String::from_utf8_lossy(zend::zstr_bytes((*message).value.str_)).into_owned(),
             details,
         };
-        thrown(finish(&mut *state.cast::<GrpcState>(), Err(status)))
+        thrown(finish(&mut *(*held).state::<GrpcState>(), Err(status)))
     })
 }
 
@@ -661,14 +646,6 @@ pub unsafe extern "C" fn rapira_rs_grpc_snapshot(
         build_metadata(rv, fields);
         true
     })
-}
-
-/// Reclaims the Box on free_obj. An unfinalized call drops its reply sender, and the plugin reports the call as lost.
-/// # Safety
-/// `state` a non-null pointer from `Box::into_raw` in receive; free_obj checks for NULL before the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_grpc_drop(state: *mut c_void) {
-    guard((), || drop(unsafe { release(state.cast::<GrpcState>()) }))
 }
 
 #[cfg(test)]

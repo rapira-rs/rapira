@@ -7,6 +7,8 @@ extern bool rapira_rs_receive(int64_t timeout_us, zval *return_value);
 extern bool rapira_rs_try_receive(zval *return_value);
 extern bool rapira_rs_dispatcher_info(zval *return_value);
 extern bool rapira_rs_get_dispatcher(zval *return_value);
+extern bool rapira_rs_held_is_finalized(zend_object *obj);
+extern bool rapira_rs_held_is_cancelled(zend_object *obj);
 extern int rapira_rs_handle_request(zend_fcall_info *fci,
                                     zend_fcall_info_cache *fcc);
 
@@ -121,6 +123,16 @@ ZEND_FUNCTION(rapira_sapi_pending_count) {
 ZEND_FUNCTION(rapira_sapi_active_count) {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_LONG(rapira_dispatcher_info_from(Z_OBJ_P(ZEND_THIS))->active);
+}
+
+ZEND_FUNCTION(rapira_sapi_is_finalized) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_BOOL(rapira_rs_held_is_finalized(Z_OBJ_P(ZEND_THIS)));
+}
+
+ZEND_FUNCTION(rapira_sapi_is_cancelled) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_BOOL(rapira_rs_held_is_cancelled(Z_OBJ_P(ZEND_THIS)));
 }
 
 ZEND_FUNCTION(rapira_sapi_dispatcher_construct) {

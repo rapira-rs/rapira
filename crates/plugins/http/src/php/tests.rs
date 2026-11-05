@@ -398,9 +398,8 @@ fn gone_client_discards_once_and_stays_discarded() {
     let v = unsafe { write_body_core(&mut st, c"y".as_ptr(), 1, true) };
     assert_eq!(v, Verb::Discarded, "sticky across repeat writes");
 
-    let unit: *const c_void = (&raw const st).cast();
-    assert!(unsafe { rapira_rs_exchange_is_finalized(unit) });
-    assert!(unsafe { rapira_rs_exchange_is_cancelled(unit) });
+    assert!(st.is_finalized());
+    assert!(st.cancelled());
 }
 
 /// `flush()` emits the implicit 200 once; a repeat flush puts nothing new on the stream.
@@ -411,8 +410,7 @@ fn flush_emits_the_implicit_head_once() {
         state: mut st,
         reply: mut rx,
     } = state();
-    let unit: *mut c_void = (&raw mut st).cast();
-    assert!(unsafe { rapira_rs_exchange_flush(unit) });
+    assert_eq!(unsafe { flush_core(&mut st) }, Verb::Ok);
     let Ok(Frame::Head {
         head,
         content_length,
@@ -424,7 +422,7 @@ fn flush_emits_the_implicit_head_once() {
     assert_eq!(head.status, 200);
     assert!(head.headers.is_empty(), "implicit 200 has no fields");
     assert_eq!(content_length, None, "flush costs the computed length");
-    assert!(unsafe { rapira_rs_exchange_flush(unit) });
+    assert_eq!(unsafe { flush_core(&mut st) }, Verb::Ok);
     assert!(rx.try_recv().is_err(), "a repeat flush is a no-op");
 }
 
@@ -528,5 +526,91 @@ fn trailer_denylist_matches_the_categories() {
             "{}",
             case.name
         );
+    }
+}
+
+fn describe(frame: rapira_sapi::types::Frame) -> String {
+    use rapira_sapi::types::Frame;
+    match frame {
+        Frame::Head {
+            head,
+            content_length,
+            bodiless,
+        } => format!(
+            "head {} cl={content_length:?} bodiless={bodiless}",
+            head.status
+        ),
+        Frame::Chunk(b) => format!("chunk {}", String::from_utf8_lossy(&b)),
+        Frame::File { .. } => "file".into(),
+        Frame::End { truncated, .. } => format!("end truncated={truncated}"),
+    }
+}
+
+/// The frames of a lost unit, one whose object is gone before the response ended: a 500 head when none was sent, a truncated End after one was.
+#[test]
+fn a_lost_unit_fails_or_truncates_the_reply() {
+    enum Before {
+        Nothing,
+        /// writeHead(200) with no body: the head is committed, not sent.
+        HeadCommitted,
+        /// A streamed chunk: the head is sent.
+        HeadSent,
+    }
+    struct Case {
+        name: &'static str,
+        method: &'static str,
+        before: Before,
+        want: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            name: "nothing written",
+            method: "GET",
+            before: Before::Nothing,
+            want: &["head 500 cl=Some(0) bodiless=false", "end truncated=false"],
+        },
+        Case {
+            name: "head committed, not sent: the 500 replaces it",
+            method: "GET",
+            before: Before::HeadCommitted,
+            want: &["head 500 cl=Some(0) bodiless=false", "end truncated=false"],
+        },
+        Case {
+            name: "head sent: the stream is cut",
+            method: "GET",
+            before: Before::HeadSent,
+            want: &[
+                "head 200 cl=None bodiless=false",
+                "chunk abc",
+                "end truncated=true",
+            ],
+        },
+        Case {
+            name: "HEAD request: a bodiless 500",
+            method: "HEAD",
+            before: Before::Nothing,
+            want: &["head 500 cl=None bodiless=true", "end truncated=false"],
+        },
+    ];
+    for case in cases {
+        let mut req = base_req();
+        req.method = case.method.into();
+        let Attached {
+            state: mut st,
+            reply: mut rx,
+        } = state_of(req);
+        let before = match case.before {
+            Before::Nothing => Verb::Ok,
+            Before::HeadCommitted => unsafe { write_head_core(&mut st, 200, HeaderMap::new()) },
+            Before::HeadSent => unsafe { write_body_core(&mut st, c"abc".as_ptr(), 3, false) },
+        };
+        assert_eq!(before, Verb::Ok, "{}", case.name);
+        st.lost();
+        drop(st);
+        let mut got = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            got.push(describe(frame));
+        }
+        assert_eq!(got, case.want, "{}", case.name);
     }
 }

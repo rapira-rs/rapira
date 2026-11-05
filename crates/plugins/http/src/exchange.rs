@@ -4,9 +4,8 @@ use tokio::sync::mpsc::Sender;
 
 use rapira_sapi::types::{Context, Frame, Request};
 use rapira_sapi::work::{Held, Work};
-use rapira_sapi::zend_object;
 
-use crate::php::{ExchangeState, exchange_from};
+use crate::php::ExchangeState;
 
 /// Cap 16 lets a buffered Head+Chunk+End trio queue without parking the PHP thread and keeps a 1 MiB body in 64 KiB writes to about one park; tokio allocates one 32-slot block for any cap up to 32.
 pub(crate) const FRAME_CAP: usize = 16;
@@ -29,11 +28,8 @@ impl Work for Exchange {
         self.tx.is_closed()
     }
 
-    unsafe fn attach(self: Box<Self>, obj: *mut zend_object) -> *mut dyn Held {
-        let ptr = Box::into_raw(Box::new(ExchangeState::new(self.req, self.tx)));
-        // SAFETY: the caller passes a live Rapira\Internal\Http\Exchange object.
-        unsafe { (*exchange_from(obj)).unit = ptr.cast() };
-        ptr
+    fn into_held(self: Box<Self>) -> Box<dyn Held> {
+        Box::new(ExchangeState::new(self.req, self.tx))
     }
 
     /// The 503 of a failed boot goes out through the CGI seal.

@@ -68,6 +68,16 @@ enum { RAPIRA_OK = 0, RAPIRA_BAILOUT = 1, RAPIRA_THROW = 3 };
 
 // rust glue
 extern void rapira_rs_dispatcher_release(void);
+// free_obj of a unit class: hands the unit back to Rust (work.rs)
+extern void rapira_rs_held_drop(zend_object *obj);
+
+// The unit behind a Work object: the first field of the C prefix of every class
+// that receive() hands out. Rust owns the two words (HeldPtr in work.rs); C
+// passes the address and never reads them. zend_object_alloc zeroes the prefix,
+// so a fresh object holds no unit.
+typedef struct {
+    void *words[2];
+} rapira_held;
 
 // C data sits before zend_object std; declared here so bindgen gives Rust named fields instead of a hardcoded offset: https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
 typedef struct {
@@ -109,14 +119,17 @@ void rapira_register_classes(void);
 // PHP the buffered body (module.c)
 void rapira_register_post_reader(void);
 
-// The Dispatcher and DispatcherInfo methods that every plugin shares, and the
-// private constructors of its host-created classes. The plugin stubs name them
-// with @implementation-alias, so the plugin arginfo points at them directly.
+// The Dispatcher, DispatcherInfo and Work methods that every plugin shares, and
+// the private constructors of its host-created classes. The plugin stubs name
+// them with @implementation-alias, so the plugin arginfo points at them
+// directly.
 ZEND_FUNCTION(rapira_sapi_receive);
 ZEND_FUNCTION(rapira_sapi_try_receive);
 ZEND_FUNCTION(rapira_sapi_get_info);
 ZEND_FUNCTION(rapira_sapi_pending_count);
 ZEND_FUNCTION(rapira_sapi_active_count);
+ZEND_FUNCTION(rapira_sapi_is_finalized);
+ZEND_FUNCTION(rapira_sapi_is_cancelled);
 ZEND_FUNCTION(rapira_sapi_dispatcher_construct);
 ZEND_FUNCTION(rapira_sapi_host_created);
 
