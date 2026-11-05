@@ -15,7 +15,7 @@ mod process;
 mod signals;
 
 pub use lifeline::spawn_lifeline_watch;
-pub use signals::{block_early_signals, wait_signal};
+pub use signals::{block_early_signals, wait_worker_signal};
 
 /// Exit 0: the worker drained. Outside a stop the master forks a replacement at once, without backoff. The worker emits these codes and the master consumes them; any other code is a crash.
 pub const WORKER_EXIT_DRAINED: i32 = 0;

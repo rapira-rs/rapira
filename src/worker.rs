@@ -67,24 +67,23 @@ pub fn worker_body(
     }
 }
 
-/// Requires the fork bracket to have masked exactly {QUIT, INT, USR2} in the child: USR2 runs `restart`, the first QUIT or INT runs `stop`, a second force-exits 131.
+/// Accepts the worker signals that the fork bracket left blocked: USR2 runs `restart`, the first QUIT or INT runs `stop`, a second force-exits 131.
 pub fn spawn_signal_thread(
     stop: impl FnOnce() + Send + 'static,
     restart: impl Fn() + Send + 'static,
 ) {
-    const SIGNALS: [libc::c_int; 3] = [libc::SIGQUIT, libc::SIGINT, libc::SIGUSR2];
     std::thread::Builder::new()
         .name("rapira-worker-signal".into())
         .spawn(move || {
             let sig = loop {
-                match rapira_master::wait_signal(&SIGNALS) {
+                match rapira_master::wait_worker_signal() {
                     libc::SIGUSR2 => restart(),
                     sig => break sig,
                 }
             };
             tracing::info!(target: "rapira", "signal {sig} received; draining worker");
             stop();
-            while rapira_master::wait_signal(&SIGNALS) == libc::SIGUSR2 {}
+            while rapira_master::wait_worker_signal() == libc::SIGUSR2 {}
             tracing::warn!(target: "rapira", "second signal; forcing worker exit");
             std::process::exit(131);
         })
