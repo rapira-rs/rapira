@@ -18,7 +18,7 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 `Exchange` is the dispatcher-mode unit. It implements `rapira_sapi::work::Work`:
 
 - `cancelled()` returns true when the client is gone. `receive()` skips such a unit.
-- `attach()` connects the unit to the `Rapira\Http\Exchange` object that `receive()` returns in dispatcher mode.
+- `into_held()` gives the `ExchangeState` that the `Rapira\Http\Exchange` object from `receive()` holds in dispatcher mode. The SAPI keeps the state in the object, answers `isFinalized()` and `isCancelled()` from it, and reclaims it when the object is freed. When the object is freed before the unit is settled, the state's `lost()` sends a 500 head, or a truncated End after a sent head.
 - `shed()` answers 503 when the PHP boot of the worker failed.
 
 The client gets 503 when the intake of the worker stays full for 30 seconds or when the waiting request bodies use the 64 MiB body budget of the worker, and 500 when the PHP thread of the worker has stopped. PHP does not see these requests.

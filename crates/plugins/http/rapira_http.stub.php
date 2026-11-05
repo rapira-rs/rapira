@@ -254,8 +254,10 @@ namespace Rapira\Internal\Http {
          */
         private function __construct() {}
 
+        /** @implementation-alias rapira_sapi_is_finalized */
         public function isFinalized(): bool {}
 
+        /** @implementation-alias rapira_sapi_is_cancelled */
         public function isCancelled(): bool {}
 
         public function getRequest(): \Rapira\Http\Request {}

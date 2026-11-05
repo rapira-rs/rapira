@@ -3,12 +3,9 @@
 
 #include "../../sapi/rapira_sapi.h"
 
-// rust glue
-extern void rapira_rs_grpc_drop(void *state);
-
 // C data sits before zend_object std, as in rapira_sapi.h
 typedef struct {
-    void *state; // Box<GrpcState>, owned by Rust; NULL until receive() adopts a unit
+    rapira_held held; // the GrpcState, owned by Rust
     zval message; // memoized request message; IS_UNDEF until getMessage()
     zval context; // memoized Rapira\Grpc\Call\Context; IS_UNDEF until getContext()
     zval metadata; // memoized Rapira\Internal\Grpc\ResponseMetadata; IS_UNDEF until getResponseMetadata()

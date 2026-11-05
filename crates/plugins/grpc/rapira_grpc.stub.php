@@ -422,8 +422,10 @@ namespace Rapira\Internal\Grpc {
          */
         private function __construct() {}
 
+        /** @implementation-alias rapira_sapi_is_finalized */
         public function isFinalized(): bool {}
 
+        /** @implementation-alias rapira_sapi_is_cancelled */
         public function isCancelled(): bool {}
 
         public function getContext(): \Rapira\Grpc\Call\Context {}

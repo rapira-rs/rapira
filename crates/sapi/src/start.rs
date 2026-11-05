@@ -390,7 +390,7 @@ mod tests {
         fn cancelled(&self) -> bool {
             self.cancelled
         }
-        unsafe fn attach(self: Box<Self>, _: *mut zend_object) -> *mut dyn crate::work::Held {
+        fn into_held(self: Box<Self>) -> Box<dyn crate::work::Held> {
             unreachable!()
         }
         fn shed(self: Box<Self>) {}

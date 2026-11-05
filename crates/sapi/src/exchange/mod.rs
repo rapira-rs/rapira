@@ -2,6 +2,7 @@ pub(crate) use std::{
     cell::Cell,
     ffi::{c_char, c_int},
     path::Path,
+    ptr::NonNull,
     time::Duration,
 };
 use std::{
@@ -10,7 +11,7 @@ use std::{
     sync::OnceLock,
 };
 
-pub(crate) use crate::work::{DispatcherClasses, Held, release};
+pub(crate) use crate::work::{DispatcherClasses, Held, HeldPtr, release};
 pub(crate) use crate::{
     IS_NULL, RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
     callbacks::guard,
@@ -63,7 +64,7 @@ pub(crate) fn cycle_reset() {
 /// Reclaim a unit free_obj never saw (shutdown bailout / allocation bailout).
 pub(crate) fn reclaim_current() {
     if let Some(ptr) = UNIT.get() {
-        // SAFETY: the pointer came from Box::into_raw in receive, and rapira_rs_exchange_drop clears the unit before it reclaims.
+        // SAFETY: the pointer came from Box::leak in receive, and rapira_rs_held_drop clears the cycle slot before it reclaims.
         drop(unsafe { release(ptr) });
     }
 }

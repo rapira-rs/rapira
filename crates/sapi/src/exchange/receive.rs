@@ -45,9 +45,10 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                 Pull::Unit(unit) => {
                     // SAFETY: plain zend timer bookkeeping; no bailout path.
                     rapira_receive_timed();
+                    let ptr = NonNull::from(Box::leak(unit.into_held()));
                     // SAFETY: obj is a live object of classes.unit, allocated above on this thread.
-                    let ptr: *mut dyn Held = unit.attach(obj.value.obj);
-                    UNIT.set(Some(ptr));
+                    (*HeldPtr::of(obj.value.obj)).0 = Some(ptr);
+                    UNIT.set(Some(ptr.as_ptr()));
                     *return_value = obj;
                     return true;
                 }

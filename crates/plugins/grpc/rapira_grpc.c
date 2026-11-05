@@ -24,18 +24,16 @@ extern bool rapira_rs_ctor_grpc_exception(zend_object *obj, zval *code,
 extern bool rapira_rs_grpc_kind_streams(const char *value, size_t len,
                                         bool request);
 
-// rust glue (src/php/call.rs): is_finalized, is_cancelled and message return
-// plain values; the others return false with a PHP exception pending
+// rust glue (src/php/call.rs): message returns a plain value; the others
+// return false with a PHP exception pending
 extern bool rapira_rs_grpc_services(zval *rv);
-extern bool rapira_rs_grpc_is_finalized(const void *state);
-extern bool rapira_rs_grpc_is_cancelled(const void *state);
-extern const char *rapira_rs_grpc_message(const void *state, size_t *len);
+extern const char *rapira_rs_grpc_message(const rapira_held *held, size_t *len);
 extern bool rapira_rs_grpc_context(rapira_grpc_call_obj *call, zval *rv);
 extern bool rapira_rs_grpc_response_metadata(rapira_grpc_call_obj *call,
                                              zval *rv);
-extern bool rapira_rs_grpc_respond(void *state, const char *message,
+extern bool rapira_rs_grpc_respond(const rapira_held *held, const char *message,
                                    size_t len);
-extern bool rapira_rs_grpc_fail(void *state, zend_object *status);
+extern bool rapira_rs_grpc_fail(const rapira_held *held, zend_object *status);
 extern bool rapira_rs_grpc_add(void *state, bool trailer, bool binary,
                                const char *name, size_t name_len,
                                const char *value, size_t value_len);
@@ -213,21 +211,9 @@ ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, getServices) {
                                 "getServices");
 }
 
-// receive() sets state before PHP code can reach the object
-static void *grpc_call_state(zval *this_ptr) {
-    void *state = rapira_grpc_call_from(Z_OBJ_P(this_ptr))->state;
-    ZEND_ASSERT(state != NULL);
-    return state;
-}
-
-ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, isFinalized) {
-    ZEND_PARSE_PARAMETERS_NONE();
-    RETURN_BOOL(rapira_rs_grpc_is_finalized(grpc_call_state(ZEND_THIS)));
-}
-
-ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, isCancelled) {
-    ZEND_PARSE_PARAMETERS_NONE();
-    RETURN_BOOL(rapira_rs_grpc_is_cancelled(grpc_call_state(ZEND_THIS)));
+// receive() fills the slot before PHP code can reach the object
+static const rapira_held *grpc_call_held(zval *this_ptr) {
+    return &rapira_grpc_call_from(Z_OBJ_P(this_ptr))->held;
 }
 
 // getMessage() copies the message into one zend_string on its first call.
@@ -238,7 +224,7 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getMessage) {
     if (Z_ISUNDEF(call->message)) {
         size_t len = 0;
         const char *message =
-            rapira_rs_grpc_message(grpc_call_state(ZEND_THIS), &len);
+            rapira_rs_grpc_message(grpc_call_held(ZEND_THIS), &len);
         ZVAL_STRINGL(&call->message, message, len);
     }
     RETURN_COPY(&call->message);
@@ -267,7 +253,7 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, respond) {
     ZEND_PARSE_PARAMETERS_END();
 
     RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_grpc_respond(grpc_call_state(ZEND_THIS), ZSTR_VAL(message),
+        rapira_rs_grpc_respond(grpc_call_held(ZEND_THIS), ZSTR_VAL(message),
                                ZSTR_LEN(message)),
         "respond");
 }
@@ -279,7 +265,7 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, fail) {
     ZEND_PARSE_PARAMETERS_END();
 
     RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_grpc_fail(grpc_call_state(ZEND_THIS), Z_OBJ_P(status)),
+        rapira_rs_grpc_fail(grpc_call_held(ZEND_THIS), Z_OBJ_P(status)),
         "fail");
 }
 

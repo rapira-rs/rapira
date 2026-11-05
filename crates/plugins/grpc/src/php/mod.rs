@@ -2,7 +2,7 @@
 
 use std::ffi::c_void;
 
-use rapira_sapi::work::DispatcherClasses;
+use rapira_sapi::work::{DispatcherClasses, HeldPtr};
 use rapira_sapi::{zend_class_entry, zend_object, zval};
 
 pub mod call;
@@ -31,7 +31,7 @@ unsafe extern "C" {
 /// Mirrors `rapira_grpc_call_obj` in rapira_grpc.h. The C fields sit before `std`.
 #[repr(C)]
 pub struct CallObj {
-    pub state: *mut c_void,
+    pub held: HeldPtr,
     pub message: zval,
     pub context: zval,
     pub metadata: zval,

@@ -18,7 +18,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 `GrpcState` in `src/php/call.rs` is the dispatcher-mode unit. It implements `rapira_sapi::work::Work`:
 
 - `cancelled()` returns true when the call is closed: the client cancelled it, closed the connection, or the deadline passed. `receive()` skips such a unit.
-- `attach()` connects the unit to the `Rapira\Grpc\UnaryCall` object that `receive()` returns.
+- `into_held()` gives the `GrpcState` that the `Rapira\Grpc\UnaryCall` object from `receive()` holds. The SAPI keeps the state in the object, answers `isFinalized()` and `isCancelled()` from it, and reclaims it when the object is freed. When the object is freed before the call is settled, the drop of the reply reports INTERNAL to the client.
 - `shed()` answers UNAVAILABLE when the PHP boot of the worker failed.
 
 ## Crate layout

@@ -121,7 +121,7 @@ pub(super) unsafe fn emit_head(
     }
 }
 
-/// Setting `Stage::Finalized` here keeps `exchange_drop`/`reclaim_current` from counting the unit a second time.
+/// Setting `Stage::Finalized` here prevents a second count of the unit in `release()`.
 pub(super) fn discard_unit(st: &mut ExchangeState) {
     if st.stage == Stage::Finalized {
         return;
@@ -163,10 +163,10 @@ pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: Heade
 }
 
 /// # Safety
-/// `unit` from receive; `trailers` a live, ZPP-owned array; engine active.
+/// `held` the slot of a live exchange; `trailers` a live, ZPP-owned array; engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
-    unit: *mut c_void,
+    held: *const HeldPtr,
     trailers: *mut HashTable,
 ) -> bool {
     guard(false, || unsafe {
@@ -184,7 +184,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
             );
             return false;
         }
-        let st = &mut *unit.cast::<ExchangeState>();
+        let st = &mut *(*held).state::<ExchangeState>();
         throw_verb(write_trailers_core(st, map))
     })
 }
@@ -225,15 +225,15 @@ pub(super) unsafe fn write_head_core(
 }
 
 /// # Safety
-/// `unit` from receive; `headers` NULL or a live, ZPP-owned array.
+/// `held` the slot of a live exchange; `headers` NULL or a live, ZPP-owned array.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_write_head(
-    unit: *mut c_void,
+    held: *const HeldPtr,
     status: i64,
     headers: *mut HashTable,
 ) -> bool {
     guard(false, || unsafe {
-        let st = &mut *unit.cast::<ExchangeState>();
+        let st = &mut *(*held).state::<ExchangeState>();
         if !(100..=599).contains(&status) {
             rapira_sapi::zend_value_error(
                 c"status must be between 100 and 599, %lld given".as_ptr(),
@@ -321,16 +321,16 @@ pub(super) unsafe fn send_body(
 }
 
 /// # Safety
-/// `unit` from receive; `p` points at `len` readable bytes.
+/// `held` the slot of a live exchange; `p` points at `len` readable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_write_body(
-    unit: *mut c_void,
+    held: *const HeldPtr,
     p: *const c_char,
     len: usize,
     eos: bool,
 ) -> bool {
     guard(false, || unsafe {
-        let st = &mut *unit.cast::<ExchangeState>();
+        let st = &mut *(*held).state::<ExchangeState>();
         throw_verb(write_body_core(st, p, len, eos))
     })
 }
@@ -354,82 +354,30 @@ pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: Hea
 }
 
 /// # Safety
-/// `unit` from receive; engine active on this thread.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_exchange_flush(unit: *mut c_void) -> bool {
-    guard(false, || unsafe {
-        let st = &mut *unit.cast::<ExchangeState>();
-        let v = if st.cancelled() {
+/// As `send_frame`.
+pub(super) unsafe fn flush_core(st: &mut ExchangeState) -> Verb {
+    if st.cancelled() {
+        discard_unit(st);
+        return Verb::Discarded;
+    }
+    if st.stage == Stage::Finalized {
+        return Verb::Finalized;
+    }
+    match unsafe { emit_head(st, None) } {
+        Ok(()) => Verb::Ok,
+        Err(Closed) => {
             discard_unit(st);
             Verb::Discarded
-        } else if st.stage == Stage::Finalized {
-            Verb::Finalized
-        } else {
-            match emit_head(st, None) {
-                Ok(()) => Verb::Ok,
-                Err(Closed) => {
-                    discard_unit(st);
-                    Verb::Discarded
-                }
-            }
-        };
-        throw_verb(v)
-    })
-}
-
-/// # Safety
-/// `unit` from receive.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_exchange_is_finalized(unit: *const c_void) -> bool {
-    guard(false, || unsafe {
-        (*unit.cast::<ExchangeState>()).is_finalized()
-    })
-}
-
-/// # Safety
-/// `unit` from receive.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_exchange_is_cancelled(unit: *const c_void) -> bool {
-    guard(false, || unsafe {
-        let st = &*unit.cast::<ExchangeState>();
-        st.cancelled()
-    })
-}
-
-/// Reclaims the Box on free_obj; a unit lost to a bailout (fatal, timeout) skips the failure frames, so the plugin reports the worker death when the sender drops.
-/// # Safety
-/// `unit` is a non-null pointer produced by `Box::into_raw` in receive; free_obj checks for NULL before the call.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_exchange_drop(unit: *mut c_void) {
-    guard((), || {
-        let mut st = unsafe { release(unit.cast::<ExchangeState>()) };
-        let cycle_died = unsafe { rapira_sapi::compiler_globals.unclean_shutdown };
-        if st.stage != Stage::Finalized && !cycle_died {
-            st.body.unlink_spools();
-            if let Some(tx) = st.sender.take() {
-                if st.head_sent {
-                    let _ = tx.try_send(Frame::End {
-                        trailers: HeaderMap::new(),
-                        truncated: true,
-                    });
-                } else if tx
-                    .try_send(Frame::Head {
-                        head: ResponseHead {
-                            status: 500,
-                            headers: HeaderMap::new(),
-                        },
-                        content_length: (!st.bodiless).then_some(0),
-                        bodiless: st.bodiless,
-                    })
-                    .is_ok()
-                {
-                    let _ = tx.try_send(Frame::End {
-                        trailers: HeaderMap::new(),
-                        truncated: false,
-                    });
-                }
-            }
         }
-        drop(st);
+    }
+}
+
+/// # Safety
+/// `held` the slot of a live exchange; engine active on this thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_exchange_flush(held: *const HeldPtr) -> bool {
+    guard(false, || unsafe {
+        let st = &mut *(*held).state::<ExchangeState>();
+        throw_verb(flush_core(st))
     })
 }

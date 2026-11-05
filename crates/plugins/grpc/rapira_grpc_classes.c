@@ -20,17 +20,15 @@ zend_class_entry *rapira_ce_internal_grpc_response_metadata;
 static zend_object_handlers rapira_grpc_call_handlers;
 static zend_object_handlers rapira_grpc_metadata_handlers;
 
-// state is a Rust Box; free_obj hands it back to Rust to drop. receive()
-// allocates the object before the pull, so state is NULL when no call came.
+// free_obj hands the call back to Rust, which finds it through the handler
+// offset
 static void rapira_grpc_call_free(zend_object *std) {
     rapira_grpc_call_obj *obj = rapira_grpc_call_from(std);
     // a kept ResponseMetadata object must not reach the freed state
     if (Z_TYPE(obj->metadata) == IS_OBJECT) {
         rapira_grpc_metadata_from(Z_OBJ(obj->metadata))->state = NULL;
     }
-    if (obj->state != NULL) {
-        rapira_rs_grpc_drop(obj->state);
-    }
+    rapira_rs_held_drop(std);
     // no-op on IS_UNDEF
     zval_ptr_dtor(&obj->message);
     zval_ptr_dtor(&obj->context);
