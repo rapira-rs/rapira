@@ -2,8 +2,8 @@
 
 use std::convert::Infallible;
 use std::pin::Pin;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -15,10 +15,11 @@ use rapira_sapi::work::{Intake, Refused, Unit};
 use rapira_sapi::{Addr, Frame, Request};
 use tower::{Service as _, ServiceExt as _};
 
+use crate::bridge::{self, InflightRequest};
 use crate::check::{self, Rejection};
 use crate::middleware::{self, BoxError, Layer, Peer, Service};
 use crate::response::{error_response, response_headers};
-use crate::{Config, Exchange, bridge, multipart, request};
+use crate::{Config, Exchange, multipart, request};
 
 pub(crate) struct Shared {
     pub cfg: Config,
@@ -40,40 +41,17 @@ impl From<Refused> for Rejection {
     }
 }
 
-pub(crate) struct InflightReqCount {
-    counter: Arc<AtomicUsize>,
-    /// Connection flush count when the last response byte was handed to hyper.
-    /// It lives on the shared guard: the body records it and the drain task reads it.
-    pub(crate) end_flush: OnceLock<u64>,
-}
-
-impl InflightReqCount {
-    pub(crate) fn init(counter: &Arc<AtomicUsize>) -> Self {
-        counter.fetch_add(1, Ordering::AcqRel);
-        Self {
-            counter: Arc::clone(counter),
-            end_flush: OnceLock::new(),
-        }
-    }
-}
-
-impl Drop for InflightReqCount {
-    fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::AcqRel);
-    }
-}
-
 /// Per-request values that travel to [`Conn::serve`] through the request extensions.
 #[derive(Clone)]
 struct ReqState {
     authority: Option<Vec<u8>>,
-    guard: Arc<InflightReqCount>,
+    guard: Arc<InflightRequest>,
     peer: Peer,
 }
 
 pub(crate) struct RespBody {
     kind: BodyKind,
-    guard: Arc<InflightReqCount>,
+    guard: Arc<InflightRequest>,
     /// Armed by [`respond`] once every middleware has returned.
     transport: Option<Declared>,
 }
@@ -81,7 +59,7 @@ pub(crate) struct RespBody {
 struct Declared {
     /// Declared body bytes still to pass through.
     remaining: u64,
-    /// The connection state that holds the flush count.
+    /// The connection state, read when the last byte passes.
     closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
 }
 
@@ -95,7 +73,7 @@ enum BodyKind {
     Boxed(middleware::Body),
 }
 
-fn refused(status: http::StatusCode, req_count: Arc<InflightReqCount>) -> http::Response<RespBody> {
+fn refused(status: http::StatusCode, req_count: Arc<InflightRequest>) -> http::Response<RespBody> {
     error_response(status).map(|body| RespBody {
         kind: BodyKind::Boxed(body),
         guard: req_count,
@@ -123,7 +101,7 @@ impl Body for RespBody {
         {
             *remaining = remaining.saturating_sub(data.len() as u64);
             if *remaining == 0 {
-                this.guard.end_flush.get_or_init(|| closed.borrow().flushes);
+                this.guard.record(closed);
             }
         }
         poll
@@ -166,9 +144,7 @@ pub(crate) async fn respond(
         let body = response.body_mut();
         if length == 0 {
             // hyper writes the head in the poll that takes the response, so the flush count read here is the one before the head.
-            body.guard
-                .end_flush
-                .get_or_init(|| handler.closed.borrow().flushes);
+            body.guard.record(&handler.closed);
         } else {
             body.transport = Some(Declared {
                 remaining: length,
@@ -181,7 +157,7 @@ pub(crate) async fn respond(
 
 /// The body length hyper will frame, in the order hyper's h1 encoder (`proto/h1/role.rs`, `Server::encode`) decides it:
 /// zero when the method or status forbids a body, else the content-length header, else zero for an ended stream, else the exact size hint.
-/// `None` means chunked, which needs no watermark: a chunked PHP reply ends only after PHP sends End.
+/// `None` means chunked, which needs no record: a chunked PHP reply ends only after PHP sends End.
 /// The ended-stream check also survives body combinators that drop the size hint.
 fn framed_length(method: &http::Method, response: &http::Response<RespBody>) -> Option<u64> {
     let status = response.status();
@@ -208,8 +184,8 @@ async fn handle(
     chain: Option<Service>,
     req: http::Request<Incoming>,
 ) -> http::Response<RespBody> {
-    let reqs_counter: Arc<InflightReqCount> =
-        Arc::new(InflightReqCount::init(&handler.shared.inflight));
+    let reqs_counter: Arc<InflightRequest> =
+        Arc::new(InflightRequest::init(&handler.shared.inflight));
     let received_at: f64 = rapira_sapi::work::now_unix_f64();
     let (mut parts, incoming) = req.into_parts();
 
@@ -342,7 +318,7 @@ async fn serve_php<B>(
     shared: &Shared,
     closed: &tokio::sync::watch::Receiver<bridge::ConnectionState>,
     authority: Option<Vec<u8>>,
-    guard: Arc<InflightReqCount>,
+    guard: Arc<InflightRequest>,
     parts: http::request::Parts,
     mut body: B,
     peer: Peer,

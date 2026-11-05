@@ -1,8 +1,9 @@
-//! The reply body that streams the PHP frames and the sendFile slices, the drain that keeps a delivered reply from a cancel, and the write timeout.
+//! The reply body that streams the PHP frames and the sendFile slices, the request in flight with the flush record of its delivery, the drain that keeps a delivered reply from a cancel, and the write timeout.
 
 use std::future::Future;
 use std::pin::Pin;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, OnceLock};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -11,13 +12,51 @@ use rapira_sapi::Frame;
 use tokio::sync::mpsc::Receiver;
 use tokio::sync::watch;
 
-use crate::handler::InflightReqCount;
 use crate::middleware::BoxError;
 
 #[derive(Default)]
 pub(crate) struct ConnectionState {
     pub(crate) closed: bool,
-    pub(crate) flushes: u64,
+    /// Completed flushes of the connection, counted by [`TimedIo`].
+    flushes: u64,
+}
+
+/// One request in flight on the worker, shared by the response body, the PHP reply and the drain task.
+/// It counts the request until the last holder drops, and it holds the flush record of the delivery:
+/// a connection close cancels PHP only while the last response byte is not flushed to the socket.
+pub(crate) struct InflightRequest {
+    counter: Arc<AtomicUsize>,
+    /// Connection flush count when the last response byte was handed to hyper.
+    end_flush: OnceLock<u64>,
+}
+
+impl InflightRequest {
+    pub(crate) fn init(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::AcqRel);
+        Self {
+            counter: Arc::clone(counter),
+            end_flush: OnceLock::new(),
+        }
+    }
+
+    /// Records the current flush count of `conn` when the last response byte goes to hyper. The first record stays.
+    pub(crate) fn record(&self, conn: &watch::Receiver<ConnectionState>) {
+        self.end_flush.get_or_init(|| conn.borrow().flushes);
+    }
+
+    /// True once a flush after the record wrote the last response byte to the socket.
+    /// A flush counts only after hyper wrote its whole buffer (hyper proto/h1/io.rs, Buffered::poll_flush), so an idle flush cannot stand for a delivery.
+    fn delivered(&self, state: &ConnectionState) -> bool {
+        self.end_flush
+            .get()
+            .is_some_and(|&mark| state.flushes > mark)
+    }
+}
+
+impl Drop for InflightRequest {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::AcqRel);
+    }
 }
 
 pub(crate) struct ReplyBody {
@@ -28,7 +67,7 @@ pub(crate) struct ReplyBody {
     file: Option<FilePump>,
     err_armed: bool,
     closed: watch::Receiver<ConnectionState>,
-    guard: Arc<InflightReqCount>,
+    guard: Arc<InflightRequest>,
 }
 
 type FileRead = tokio::task::JoinHandle<SliceRead>;
@@ -70,7 +109,7 @@ impl ReplyBody {
     pub(crate) fn new(
         reply: Receiver<Frame>,
         declared_cl: Option<u64>,
-        guard: Arc<InflightReqCount>,
+        guard: Arc<InflightRequest>,
         staged: Option<Frame>,
         closed: watch::Receiver<ConnectionState>,
     ) -> Self {
@@ -219,13 +258,12 @@ impl Drop for ReplyBody {
     }
 }
 
-/// Consumes the reply to End. A connection close cancels the reply unless a flush past the guard's watermark has written the last response byte to the socket.
-/// After that flush the drain holds the reply until PHP sends End, so a delivered response never reports cancellation to PHP.
-/// A flush counts only after hyper wrote its whole buffer (hyper proto/h1/io.rs, Buffered::poll_flush), so an idle flush cannot stand for a delivery.
+/// Consumes the reply to End. A connection close cancels the reply unless the response was delivered by then.
+/// After the delivery the drain holds the reply until PHP sends End, so a delivered response never reports cancellation to PHP.
 pub(crate) fn spawn_drain(
     mut reply: Receiver<Frame>,
     mut closed: watch::Receiver<ConnectionState>,
-    guard: Arc<InflightReqCount>,
+    guard: Arc<InflightRequest>,
 ) {
     // A buffered reply usually queues End next, so consume it here. A classic or worker HEAD reply with output queues a Chunk first and takes the task.
     let mut cx = Context::from_waker(std::task::Waker::noop());
@@ -234,11 +272,10 @@ pub(crate) fn spawn_drain(
     }
     tokio::spawn(async move {
         // The flush count changes without a notification, so only the close wakes this wait.
-        let flushed = |s: &ConnectionState| guard.end_flush.get().is_some_and(|&f| s.flushes > f);
         tokio::select! {
             biased;
             state = closed.wait_for(|s| s.closed) => {
-                if !state.is_ok_and(|s| flushed(&s)) {
+                if !state.is_ok_and(|s| guard.delivered(&s)) {
                     return;
                 }
             }
@@ -363,8 +400,8 @@ impl<T: hyper::rt::Write + Unpin> hyper::rt::Write for TimedIo<T> {
 mod tests {
     use super::*;
     use http_body_util::BodyExt;
-    use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
-    use std::sync::{Arc, Weak};
+    use std::sync::Weak;
+    use std::sync::atomic::AtomicBool;
     use tokio::sync::mpsc;
 
     struct OpenReply {
@@ -401,8 +438,8 @@ mod tests {
         Frame::Chunk(Bytes::copy_from_slice(s.as_bytes()))
     }
 
-    fn guard() -> Arc<InflightReqCount> {
-        Arc::new(InflightReqCount::init(&Arc::new(AtomicUsize::new(0))))
+    fn guard() -> Arc<InflightRequest> {
+        Arc::new(InflightRequest::init(&Arc::new(AtomicUsize::new(0))))
     }
 
     fn body(events: Vec<Frame>, declared_cl: Option<u64>) -> ReplyBody {
@@ -548,23 +585,23 @@ mod tests {
     struct Drain {
         inflight: Arc<AtomicUsize>,
         /// Weak: the drain task stays the only owner of the request count.
-        guard: Weak<InflightReqCount>,
+        guard: Weak<InflightRequest>,
         events: mpsc::Sender<Frame>,
         state: watch::Sender<ConnectionState>,
     }
 
     impl Drain {
-        /// Records the watermark after the drain started, as `respond` does for a bodiless reply.
-        fn mark(&self, flush: u64) {
+        /// Records the current flush count after the drain started, as `respond` does for a bodiless reply.
+        fn mark(&self) {
             let guard = self.guard.upgrade().expect("the drain must hold the guard");
-            guard.end_flush.set(flush).unwrap();
+            guard.record(&self.state.subscribe());
         }
     }
 
     /// A drain parked on an empty reply after two chunks, with the request still counted.
     async fn parked_drain() -> Drain {
         let inflight = Arc::new(AtomicUsize::new(0));
-        let guard = Arc::new(InflightReqCount::init(&inflight));
+        let guard = Arc::new(InflightRequest::init(&inflight));
         let weak = Arc::downgrade(&guard);
         let OpenReply { reply, events } = open_reply(vec![chunk("queued")]);
         let (state, state_rx) = watch::channel(ConnectionState::default());
@@ -606,7 +643,7 @@ mod tests {
         assert_eq!(d.inflight.load(Ordering::Acquire), 0);
     }
 
-    /// Without a watermark, a client disconnect cancels the drain.
+    /// Without a record, a client disconnect cancels the drain.
     #[tokio::test]
     async fn drain_cancels_when_the_connection_closes() {
         let d = parked_drain().await;
@@ -617,11 +654,11 @@ mod tests {
         assert_eq!(d.inflight.load(Ordering::Acquire), 0);
     }
 
-    /// A flush past the watermark wrote the last byte to the socket: a later close must not cancel the reply.
+    /// A flush past the record wrote the last byte to the socket: a later close must not cancel the reply.
     #[tokio::test(start_paused = true)]
     async fn flushed_drain_survives_a_later_close() {
         let d = parked_drain().await;
-        d.mark(0);
+        d.mark();
         d.state.send_modify(|s| s.flushes = 1);
         d.state.send_modify(|s| s.closed = true);
         // The paused clock auto-advances once every task is idle, so the timeout proves the drain kept the reply.
@@ -639,12 +676,12 @@ mod tests {
         assert_eq!(d.inflight.load(Ordering::Acquire), 0);
     }
 
-    /// A flush at the watermark is not past it: a close then cancels the reply.
+    /// A flush at the record is not past it: a close then cancels the reply.
     #[tokio::test]
     async fn drain_cancels_when_the_close_beats_the_flush() {
         let d = parked_drain().await;
-        d.mark(1);
         d.state.send_modify(|s| s.flushes = 1);
+        d.mark();
         d.state.send_modify(|s| s.closed = true);
         tokio::time::timeout(Duration::from_secs(5), d.events.closed())
             .await
@@ -657,13 +694,13 @@ mod tests {
         open_reply(vec![chunk("abc")])
     }
 
-    /// A completed length-delimited body hands its reply to the drain once the watermark is set.
+    /// A completed length-delimited body hands its reply to the drain once a record exists.
     #[tokio::test]
     async fn completed_body_keeps_the_reply_for_the_drain() {
         let OpenReply { reply, events } = parked_source();
         let guard = guard();
-        guard.end_flush.set(0).unwrap();
         let (state, state_rx) = watch::channel(ConnectionState::default());
+        guard.record(&state_rx);
         let mut b = ReplyBody::new(reply, Some(3), guard, None, state_rx);
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "abc");
         drop(b);
@@ -678,15 +715,10 @@ mod tests {
     #[tokio::test]
     async fn queued_end_is_consumed_at_drop_without_a_task() {
         let guard = guard();
-        guard.end_flush.set(0).unwrap();
+        let state_rx = watch::channel(ConnectionState::default()).1;
+        guard.record(&state_rx);
         let OpenReply { reply, events } = open_reply(vec![chunk("hello"), end(false)]);
-        let mut b = ReplyBody::new(
-            reply,
-            Some(5),
-            guard,
-            None,
-            watch::channel(ConnectionState::default()).1,
-        );
+        let mut b = ReplyBody::new(reply, Some(5), guard, None, state_rx);
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "hello");
         drop(b);
         // On the current_thread runtime a spawned drain task would still hold the reply here.
@@ -709,9 +741,9 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn pending_reply_goes_to_the_drain_task() {
         let guard = guard();
-        guard.end_flush.set(0).unwrap();
         let OpenReply { reply, events } = open_reply(vec![chunk("abc")]);
         let (_state, state_rx) = watch::channel(ConnectionState::default());
+        guard.record(&state_rx);
         let mut b = ReplyBody::new(reply, Some(3), guard, None, state_rx);
         assert_eq!(data(&mut b).await.unwrap().unwrap(), "abc");
         drop(b);
@@ -728,9 +760,9 @@ mod tests {
             .expect("the drain task must consume End");
     }
 
-    /// Without the watermark the bytes never reached hyper: dropping the body cancels PHP at once.
+    /// Without a record the bytes never reached hyper: dropping the body cancels PHP at once.
     #[tokio::test]
-    async fn completed_body_without_a_watermark_cancels_php() {
+    async fn completed_body_without_a_record_cancels_php() {
         let OpenReply { reply, events } = parked_source();
         let mut b = ReplyBody::new(
             reply,
