@@ -44,8 +44,8 @@ jobs:
                 php: ["8.4", "8.5"]
                 arch: [amd64, arm64]
                 include:
-                    - { arch: amd64, runner: ubuntu-latest }
-                    - { arch: arm64, runner: ubuntu-24.04-arm }
+                    - { arch: amd64, runner: ubuntu-26.04 }
+                    - { arch: arm64, runner: ubuntu-26.04-arm }
                     - {
                           php: "8.4",
                           base: "php:8.4-cli-trixie@sha256:1d2cf2b7d715b5b3aa959f0150ccbcc7b71e0181b637e443abf40a7fb56bf79a",
@@ -77,7 +77,7 @@ jobs:
 
     merge:
         needs: build
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-26.04
         timeout-minutes: 15
         permissions:
             contents: read

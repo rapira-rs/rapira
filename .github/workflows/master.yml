@@ -14,7 +14,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                os: [ubuntu-latest, ubuntu-24.04-arm, macos-latest]
+                os: [ubuntu-26.04, ubuntu-26.04-arm, macos-latest]
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-master-debug
             RUST_BACKTRACE: "1"
@@ -33,6 +33,8 @@ jobs:
                     libclang-dev llvm-dev \
                     libssl-dev libcurl4-openssl-dev libxml2-dev libonig-dev \
                     libsqlite3-dev zlib1g-dev libffi-dev libicu-dev libpq-dev libsodium-dev
+                  # bindgen reads the include paths of the default clang and must load the libclang of the same version: the image has several, and clang-sys takes the newest one
+                  echo "LIBCLANG_PATH=$(dirname "$(dirname "$(clang -print-resource-dir)")")" >> "$GITHUB_ENV"
 
             - name: Install build deps (macOS)
               if: runner.os == 'macOS'

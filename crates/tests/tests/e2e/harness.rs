@@ -84,10 +84,13 @@ impl Drop for Server {
     }
 }
 
-/// The bin belongs to the root package, so CARGO_BIN_EXE is unset here: locate it beside the test binary, or via `RAPIRA_BIN`.
+/// The bin belongs to the root package, so CARGO_BIN_EXE is unset here: locate it beside the test binary, or via `RAPIRA_BIN`, a name on PATH or a path. A relative path becomes absolute, because the master starts in the scratch dir.
 fn rapira_bin() -> PathBuf {
     if let Ok(p) = std::env::var("RAPIRA_BIN") {
-        return PathBuf::from(p);
+        if !p.contains('/') {
+            return PathBuf::from(p);
+        }
+        return std::path::absolute(p).expect("absolute RAPIRA_BIN");
     }
     let exe = std::env::current_exe().expect("current_exe");
     let bin = exe
@@ -121,84 +124,17 @@ pub fn php_version() -> String {
     php_config("--version").expect("run php-config --version")
 }
 
-/// `extra_toml` is appended inside `[http.pool]`, bare keys first; a `[log]` or `[supervisor]` header may follow, and it must not open `[http]` or `[http.*]`.
-pub fn spawn_with_config(fixture: &str, processes: usize, extra_toml: &str) -> Server {
-    spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), None)
-}
-
-/// [`spawn_with_config`] for keys inside `[http]`: `http_extra` follows `listen` and may open `[http.static]` or `[http.uploads]`.
-pub fn spawn_with_http_extra(fixture: &str, processes: usize, http_extra: &str) -> Server {
-    spawn_with_extras(fixture, processes, http_extra, "", Some("info"), None)
-}
-
-/// [`spawn_with_config`] without the pinned `RUST_LOG`, so the `[log]` section owns the filter.
-pub fn spawn_without_rust_log(fixture: &str, processes: usize, extra_toml: &str) -> Server {
-    spawn_with_extras(fixture, processes, "", extra_toml, None, None)
-}
-
-/// A `php.ini` written into the directory the child runs from, optionally also pointed at by PHPRC.
-pub struct CwdIni<'a> {
-    pub contents: &'a str,
-    pub via_phprc: bool,
-}
-
-/// Pins that the SAPI does not read ini files from the cwd.
-pub fn spawn_in_cwd(fixture: &str, processes: usize, php_ini: &str) -> Server {
-    let ini = CwdIni {
-        contents: php_ini,
-        via_phprc: false,
-    };
-    spawn_with_extras(fixture, processes, "", "", Some("info"), Some(ini))
-}
-
-/// [`spawn_in_cwd`] with PHPRC pointing at the same directory; `extra_toml` is appended inside `[http.pool]`, bare keys first; a `[log]` or `[supervisor]` header may follow, and it must not open `[http]` or `[http.*]`.
-pub fn spawn_with_phprc_and_config(
-    fixture: &str,
-    processes: usize,
-    php_ini: &str,
-    extra_toml: &str,
-) -> Server {
-    let ini = CwdIni {
-        contents: php_ini,
-        via_phprc: true,
-    };
-    spawn_with_extras(fixture, processes, "", extra_toml, Some("info"), Some(ini))
-}
-
-fn spawn_with_extras(
-    fixture: &str,
-    processes: usize,
-    http_extra: &str,
-    extra_toml: &str,
-    rust_log: Option<&str>,
-    cwd_ini: Option<CwdIni<'_>>,
-) -> Server {
-    let Staged { dir, entrypoint } = stage_fixture(fixture);
-    if let Some(ini) = &cwd_ini {
-        std::fs::write(dir.join("php.ini"), ini.contents).expect("write php.ini");
-    }
-    let render = |port| render_config(&tcp(port), processes, &entrypoint, http_extra, extra_toml);
-    spawn_ready(dir, &render, None, rust_log, cwd_ini.as_ref(), &[])
-}
-
 /// The `listen` value of a TCP pool on `port`.
 fn tcp(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
-/// Spawns until a listener accepts a connection, on a fresh port each time: the port that `render` gets, or `unix` when no pool listens on TCP.
-fn spawn_ready(
-    dir: PathBuf,
-    render: &dyn Fn(u16) -> String,
-    unix: Option<&Path>,
-    rust_log: Option<&str>,
-    cwd_ini: Option<&CwdIni<'_>>,
-    env: &[(String, String)],
-) -> Server {
+/// Spawns until a listener accepts a connection, on a fresh port each time: the port that `render` gets, or the unix socket when no pool listens on TCP.
+fn spawn_ready(spawn: &Spawn, dir: PathBuf, render: &dyn Fn(u16) -> String) -> Server {
     let mut last_log = String::new();
     for _ in 0..3 {
-        let Attempt { mut child, addr } = spawn_attempt(&dir, render, rust_log, cwd_ini, env);
-        let ready = match unix {
+        let Attempt { mut child, addr } = spawn_attempt(spawn, &dir, render);
+        let ready = match spawn.unix_only() {
             Some(path) => ListenAddr::Unix(path.to_owned()),
             None => ListenAddr::Tcp(addr),
         };
@@ -218,25 +154,6 @@ fn spawn_ready(
     panic!("rapira never accepted a connection after 3 attempts\n{last_log}");
 }
 
-/// A scratch dir that holds a copy of a fixture.
-struct Staged {
-    dir: PathBuf,
-    /// The file name of the fixture, for the config.
-    entrypoint: String,
-}
-
-/// Copies `fixture` into a new scratch dir.
-fn stage_fixture(fixture: &str) -> Staged {
-    let dir = scratch_dir();
-    let name = Path::new(fixture)
-        .file_name()
-        .unwrap_or_else(|| panic!("fixture {fixture} has no file name"));
-    std::fs::copy(fixture_path(fixture), dir.join(name))
-        .unwrap_or_else(|e| panic!("copy fixture {fixture}: {e}"));
-    let entrypoint = name.to_str().expect("fixture name is utf-8").to_owned();
-    Staged { dir, entrypoint }
-}
-
 /// A master that one spawn started.
 struct Attempt {
     child: Child,
@@ -244,32 +161,25 @@ struct Attempt {
     addr: SocketAddr,
 }
 
-/// One spawn on a fresh port; `render` writes the config for that port, and the caller decides how to wait.
-fn spawn_attempt(
-    dir: &Path,
-    render: &dyn Fn(u16) -> String,
-    rust_log: Option<&str>,
-    cwd_ini: Option<&CwdIni<'_>>,
-    env: &[(String, String)],
-) -> Attempt {
+/// One spawn on a fresh port; `render` writes the config for that port, and the caller decides how to wait. The master starts in `dir`, next to the `php.ini`.
+fn spawn_attempt(spawn: &Spawn, dir: &Path, render: &dyn Fn(u16) -> String) -> Attempt {
     let port = free_port();
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
     std::fs::write(dir.join("rapira.toml"), render(port)).expect("write config");
     let log = File::create(dir.join("server.log")).expect("create server.log");
     let mut cmd = Command::new(rapira_bin());
     cmd.arg("serve").arg(dir.join("rapira.toml"));
-    cmd.env_remove("PHPRC");
-    if let Some(ini) = cwd_ini {
-        cmd.current_dir(dir);
-        if ini.via_phprc {
-            cmd.env("PHPRC", dir);
-        }
+    cmd.current_dir(dir);
+    if spawn.phprc {
+        cmd.env("PHPRC", dir);
+    } else {
+        cmd.env_remove("PHPRC");
     }
-    match rust_log {
+    match &spawn.rust_log {
         Some(v) => cmd.env("RUST_LOG", v),
         None => cmd.env_remove("RUST_LOG"),
     };
-    for (k, v) in env {
+    for (k, v) in &spawn.env {
         cmd.env(k, v);
     }
     let child = cmd
@@ -287,34 +197,9 @@ pub struct Exited {
     pub log: String,
 }
 
-/// Boots expecting a boot failure and waits for the exit.
-/// [`Exited::log`] holds the whole log, not the tail: with `RUST_BACKTRACE` set, the backtrace
-/// after the error line is longer than the tail window.
-pub fn spawn_boot_failure(fixture: &str, http_extra: &str) -> Exited {
-    let Staged { dir, entrypoint } = stage_fixture(fixture);
-    boot_failure(dir, &entrypoint, http_extra)
-}
-
-/// [`spawn_boot_failure`] with the entrypoint written into the config verbatim, so a path no
-/// fixture can stage reaches the boot check.
-pub fn spawn_boot_failure_with_entrypoint(entrypoint: &str) -> Exited {
-    boot_failure(scratch_dir(), entrypoint, "")
-}
-
-fn boot_failure(dir: PathBuf, entrypoint: &str, http_extra: &str) -> Exited {
-    let render = |port| render_config(&tcp(port), 1, entrypoint, http_extra, "");
-    exit_of(dir, &render, Some("info"), None, &[])
-}
-
-/// One spawn that must exit.
-fn exit_of(
-    dir: PathBuf,
-    render: &dyn Fn(u16) -> String,
-    rust_log: Option<&str>,
-    cwd_ini: Option<&CwdIni<'_>>,
-    env: &[(String, String)],
-) -> Exited {
-    let Attempt { child, addr } = spawn_attempt(&dir, render, rust_log, cwd_ini, env);
+/// One spawn that must exit. [`Exited::log`] holds the whole log, not the tail: with `RUST_BACKTRACE` set, the backtrace after the error line is longer than the tail window.
+fn exit_of(spawn: &Spawn, dir: PathBuf, render: &dyn Fn(u16) -> String) -> Exited {
+    let Attempt { child, addr } = spawn_attempt(spawn, &dir, render);
     let mut srv = Server {
         child,
         addr,
@@ -345,9 +230,10 @@ fn render_config(
 
 pub use tests::grpc::ECHO_SERVICE;
 
-/// A `[grpc]` pool over `entrypoint`. `listen`, `descriptor_set` and `extra` (keys inside `[grpc]`) go into the file verbatim; `services` becomes a TOML string array, and None leaves the key out.
+/// A `[grpc]` pool of `processes` workers over `entrypoint`. `listen`, `descriptor_set` and `extra` (keys inside `[grpc]`) go into the file verbatim; `services` becomes a TOML string array, and None leaves the key out.
 fn render_grpc(
     listen: &str,
+    processes: usize,
     entrypoint: &str,
     descriptor_set: &str,
     services: Option<&[String]>,
@@ -359,13 +245,13 @@ fn render_grpc(
     });
     format!(
         "[grpc]\nlisten = \"{listen}\"\ndescriptor_set = \"{descriptor_set}\"\n{services}{extra}\n\
-         [grpc.pool]\nprocesses = 1\nentrypoint = \"{entrypoint}\"\n"
+         [grpc.pool]\nprocesses = {processes}\nentrypoint = \"{entrypoint}\"\n"
     )
 }
 
-/// A master to spawn with one worker process per pool: [`Spawn::http`] or [`Spawn::grpc`] starts the config, and each setter adds to it.
-/// The directory of each pool's fixture is copied into `http/` or `grpc/` in the scratch dir, so a fixture can include its siblings.
-/// PHPRC names a `php.ini` in the scratch dir with the contents of `crates/tests/fixtures/ini/shared/php.ini`, unless [`Spawn::php_ini`] replaces them.
+/// A master to spawn: [`Spawn::http`] or [`Spawn::grpc`] starts the config, and each setter adds to it. Each pool runs one worker process unless [`Spawn::processes`] sets the count.
+/// The directory of each pool's fixture is copied into `http/` or `grpc/` in the scratch dir, so a fixture can include its siblings. The master starts in the scratch dir.
+/// PHPRC names a `php.ini` in the scratch dir with the contents of `crates/tests/fixtures/ini/shared/php.ini`, unless [`Spawn::php_ini`] replaces them or [`Spawn::no_phprc`] leaves PHPRC unset.
 pub struct Spawn {
     http: Option<HttpPool>,
     /// The listener of the `[http]` pool; None listens on a TCP port that the harness picks.
@@ -377,20 +263,33 @@ pub struct Spawn {
     services: Option<Vec<String>>,
     /// The `[grpc] descriptor_set`; None stages `echo.binpb`.
     descriptor_set: Option<PathBuf>,
+    /// Worker processes of every pool.
+    processes: usize,
     http_extra: String,
     /// Keys inside `[http.pool]`, after `mode`.
     http_pool: String,
     grpc_extra: String,
     toml: String,
     php_ini: String,
+    /// False leaves PHPRC unset, so PHP reads its compiled-in php.ini.
+    phprc: bool,
     env: Vec<(String, String)>,
-    rust_log: String,
+    /// The RUST_LOG filter; None removes RUST_LOG from the environment, so the `[log]` section owns the filter.
+    rust_log: Option<String>,
 }
 
 /// The `[http]` pool of a [`Spawn`].
 struct HttpPool {
     mode: Mode,
-    fixture: PathBuf,
+    entrypoint: Entrypoint,
+}
+
+/// The `entrypoint` of the `[http]` pool.
+enum Entrypoint {
+    /// A fixture whose directory the spawn copies into the scratch dir.
+    Fixture(PathBuf),
+    /// A path that goes into the config as given, with nothing staged.
+    Verbatim(String),
 }
 
 impl Spawn {
@@ -399,7 +298,18 @@ impl Spawn {
         Spawn {
             http: Some(HttpPool {
                 mode,
-                fixture: fixture.into(),
+                entrypoint: Entrypoint::Fixture(fixture.into()),
+            }),
+            ..Spawn::empty()
+        }
+    }
+
+    /// An `[http]` pool in `mode` whose `entrypoint` is `path` as given, with nothing staged, so a path that no fixture can stage reaches the boot check.
+    pub fn http_entrypoint(mode: Mode, path: &str) -> Spawn {
+        Spawn {
+            http: Some(HttpPool {
+                mode,
+                entrypoint: Entrypoint::Verbatim(path.to_owned()),
             }),
             ..Spawn::empty()
         }
@@ -422,14 +332,16 @@ impl Spawn {
             grpc_listen: None,
             services: Some(vec![ECHO_SERVICE.to_owned()]),
             descriptor_set: None,
+            processes: 1,
             http_extra: String::new(),
             http_pool: String::new(),
             grpc_extra: String::new(),
             toml: String::new(),
             php_ini: std::fs::read_to_string(&ini)
                 .unwrap_or_else(|e| panic!("read {}: {e}", ini.display())),
+            phprc: true,
             env: Vec::new(),
-            rust_log: "info".to_owned(),
+            rust_log: Some("info".to_owned()),
         }
     }
 
@@ -460,6 +372,12 @@ impl Spawn {
     /// The `[grpc] descriptor_set` in place of `echo.binpb`.
     pub fn descriptor_set(mut self, path: &Path) -> Spawn {
         self.descriptor_set = Some(path.to_owned());
+        self
+    }
+
+    /// Worker processes of every pool; one when not set.
+    pub fn processes(mut self, count: usize) -> Spawn {
+        self.processes = count;
         self
     }
 
@@ -496,9 +414,15 @@ impl Spawn {
         self.toml("[log]\nformat = \"json\"")
     }
 
-    /// The contents of the `php.ini` that PHPRC names.
+    /// The contents of the `php.ini` in the scratch dir.
     pub fn php_ini(mut self, contents: &str) -> Spawn {
         contents.clone_into(&mut self.php_ini);
+        self
+    }
+
+    /// Leaves PHPRC unset: PHP reads its compiled-in php.ini, and the `php.ini` in the scratch dir is only a file in the cwd of the master.
+    pub fn no_phprc(mut self) -> Spawn {
+        self.phprc = false;
         self
     }
 
@@ -510,7 +434,13 @@ impl Spawn {
 
     /// The RUST_LOG filter of the master and its workers; `info` when not set.
     pub fn rust_log(mut self, filter: &str) -> Spawn {
-        filter.clone_into(&mut self.rust_log);
+        self.rust_log = Some(filter.to_owned());
+        self
+    }
+
+    /// Removes RUST_LOG from the environment, so the `[log]` section owns the filter.
+    pub fn no_rust_log(mut self) -> Spawn {
+        self.rust_log = None;
         self
     }
 
@@ -519,15 +449,7 @@ impl Spawn {
         let grpc_port = Cell::new(0);
         let dir = scratch_dir();
         let render = self.stage(&dir, &grpc_port);
-        let ini = self.ini();
-        let mut srv = spawn_ready(
-            dir,
-            &render,
-            self.unix_only(),
-            Some(&self.rust_log),
-            Some(&ini),
-            &self.env,
-        );
+        let mut srv = spawn_ready(&self, dir, &render);
         if self.grpc.is_some() {
             srv.grpc = Some(match &self.grpc_listen {
                 Some(listen) => listen.clone(),
@@ -557,20 +479,7 @@ impl Spawn {
         let grpc_port = Cell::new(0);
         let dir = scratch_dir();
         let render = self.stage(&dir, &grpc_port);
-        exit_of(
-            dir,
-            &render,
-            Some(&self.rust_log),
-            Some(&self.ini()),
-            &self.env,
-        )
-    }
-
-    fn ini(&self) -> CwdIni<'_> {
-        CwdIni {
-            contents: &self.php_ini,
-            via_phprc: true,
-        }
+        exit_of(&self, dir, &render)
     }
 
     /// Fills the scratch dir `dir` and returns the config for a port; `grpc_port` gets the port of the `[grpc]` pool.
@@ -590,7 +499,10 @@ impl Spawn {
         std::fs::write(dir.join("php.ini"), &self.php_ini).expect("write php.ini");
         let http = self.http.as_ref().map(|pool| StagedHttp {
             mode: pool.mode,
-            entrypoint: stage_dir(dir, "http", &pool.fixture),
+            entrypoint: match &pool.entrypoint {
+                Entrypoint::Fixture(fixture) => stage_dir(dir, "http", fixture),
+                Entrypoint::Verbatim(path) => path.clone(),
+            },
         });
         let grpc = self.grpc.as_ref().map(|fixture| {
             let descriptor_set = match &self.descriptor_set {
@@ -616,7 +528,8 @@ impl Spawn {
                     None => tcp(port.take().unwrap_or_else(free_port)),
                 };
                 let pool = format!("mode = \"{mode}\"\n{}", self.http_pool);
-                config += &render_config(&listen, 1, entrypoint, &self.http_extra, &pool);
+                config +=
+                    &render_config(&listen, self.processes, entrypoint, &self.http_extra, &pool);
                 config.push('\n');
             }
             if let Some(StagedGrpc {
@@ -633,6 +546,7 @@ impl Spawn {
                 };
                 config += &render_grpc(
                     &listen,
+                    self.processes,
                     entrypoint,
                     descriptor_set,
                     self.services.as_deref(),

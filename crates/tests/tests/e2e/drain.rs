@@ -1,4 +1,5 @@
 use crate::harness::*;
+use rapira_sapi::plugin::Mode;
 use std::time::Duration;
 
 const READ: Duration = Duration::from_secs(10);
@@ -25,7 +26,7 @@ fn field<'a>(head: &'a Head, name: &str) -> Option<&'a str> {
 /// A stopping worker keeps the connections it holds: a request on each gets a complete response with `connection: close`, and the worker exits once they are closed.
 #[test]
 fn a_stopping_worker_answers_requests_on_the_connections_it_holds() {
-    let srv = spawn_with_config("shared/echo-worker.php", 1, "");
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php")).spawn();
     let pid = wait_workers(&srv, READ, "1 worker", |p| p.len() == 1)[0];
     let mut used: Vec<Conn> = (0..4)
         .map(|_| {

@@ -4,12 +4,12 @@ use std::collections::BTreeSet;
 use std::process::Command;
 use std::time::Duration;
 
+use rapira_sapi::plugin::Mode;
 use tests::StatusBody;
 
 use crate::harness::{
-    Server, assert_only_workers, diagnostics, fan_out, http_get, php_extension,
-    spawn_with_phprc_and_config, wait_file_contains_all, wait_log_contains, wait_workers,
-    worker_pids,
+    Server, Spawn, assert_only_workers, diagnostics, fan_out, fixture_path, http_get,
+    php_extension, wait_file_contains_all, wait_log_contains, wait_workers, worker_pids,
 };
 
 const REQ: Duration = Duration::from_secs(10);
@@ -18,7 +18,7 @@ const BOOT_POOL: Duration = Duration::from_secs(20);
 /// A pool with the agent loaded: the 40-char dummy license passes the length-only local validation, and `dont_launch = 3` stops every daemon fork.
 fn newrelic_srv(processes: usize, extra_toml: &str) -> Option<Server> {
     let so = php_extension("newrelic.so")?;
-    // the relative logfile resolves against the scratch dir: the harness starts the child there for a cwd ini
+    // the relative log files resolve against the scratch dir: the master starts there, and the agent opens its log once at MINIT
     let ini = format!(
         "extension = \"{}\"\n\
          newrelic.enabled = 1\n\
@@ -31,12 +31,13 @@ fn newrelic_srv(processes: usize, extra_toml: &str) -> Option<Server> {
          display_errors = Off\n",
         so.display()
     );
-    Some(spawn_with_phprc_and_config(
-        "apm/newrelic-worker.php",
-        processes,
-        &ini,
-        &format!("mode = \"worker\"\n{extra_toml}"),
-    ))
+    Some(
+        Spawn::http(Mode::Worker, fixture_path("apm/newrelic-worker.php"))
+            .processes(processes)
+            .php_ini(&ini)
+            .http_pool(extra_toml)
+            .spawn(),
+    )
 }
 
 fn probe(srv: &Server) -> String {
@@ -177,7 +178,7 @@ fn newrelic_uncaught_throw_path_is_unchanged() {
 /// max_requests = 2 is a quota of 3, so six probes cross an app restart: the agent keeps serving in the next request cycle of the same process.
 #[test]
 fn newrelic_survives_an_app_restart() {
-    let Some(srv) = newrelic_srv(1, "max_requests = 2\n") else {
+    let Some(srv) = newrelic_srv(1, "max_requests = 2") else {
         return;
     };
     wait_workers(&srv, BOOT_POOL, "1 worker", |p| p.len() == 1);
@@ -190,12 +191,12 @@ fn newrelic_survives_an_app_restart() {
 fn ddtrace_srv(processes: usize) -> Option<Server> {
     let so = php_extension("ddtrace.so")?;
     let ini = format!("extension = \"{}\"\ndisplay_errors = Off\n", so.display());
-    Some(spawn_with_phprc_and_config(
-        "apm/ddtrace-worker.php",
-        processes,
-        &ini,
-        "mode = \"worker\"\n",
-    ))
+    Some(
+        Spawn::http(Mode::Worker, fixture_path("apm/ddtrace-worker.php"))
+            .processes(processes)
+            .php_ini(&ini)
+            .spawn(),
+    )
 }
 
 fn dd_field<'a>(body: &'a str, key: &str) -> &'a str {

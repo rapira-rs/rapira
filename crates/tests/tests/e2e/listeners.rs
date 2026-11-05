@@ -13,7 +13,7 @@ use tests::{StatusBody, poll};
 
 use crate::harness::{
     BOOT, Exited, Server, Spawn, diagnostics, fixture_path, free_port, http_get,
-    parse_status_and_body, scratch_dir, signal, spawn_with_config, wait_workers,
+    parse_status_and_body, scratch_dir, signal, wait_workers,
 };
 
 const REQ: Duration = Duration::from_secs(10);
@@ -139,7 +139,7 @@ fn two_pools_on_one_address_fail_the_boot() {
 /// One worker takes every connection. The connections after the first wait in the backlog while the worker moves its listener entry to the tail of the wait queue after each accept, and no new connection arrives to wake it again.
 #[test]
 fn queued_connections_survive_each_accept() {
-    let srv = spawn_with_config(ECHO, 1, "");
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path(ECHO)).spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
     let mut clients: Vec<TcpStream> = (0..16)

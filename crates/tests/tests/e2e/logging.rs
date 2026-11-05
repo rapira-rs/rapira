@@ -8,7 +8,9 @@ use tracing::Level;
 /// `[log] format = "json"` shapes every record while `RUST_LOG` still owns the filter.
 #[test]
 fn json_format_shapes_the_log() {
-    let srv = spawn_with_config("shared/echo-worker.php", 1, "[log]\nformat = \"json\"\n");
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+        .json_log()
+        .spawn();
     let code = http_get(srv.addr, "/", Duration::from_secs(10))
         .expect("GET /")
         .status;
@@ -41,7 +43,7 @@ fn json_format_shapes_the_log() {
 /// Default `[log]` on a redirected (non-tty) stderr emits no ANSI escapes.
 #[test]
 fn plain_format_is_uncolored_when_redirected() {
-    let srv = spawn_with_config("shared/echo-worker.php", 1, "");
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php")).spawn();
     let code = http_get(srv.addr, "/", Duration::from_secs(10))
         .expect("GET /")
         .status;
@@ -63,7 +65,10 @@ fn plain_format_is_uncolored_when_redirected() {
 /// `[log.targets] php = "warn"` surfaces PHP diagnostics that `level = "error"` alone hides.
 #[test]
 fn log_targets_php_restores_php_diagnostics() {
-    let srv = spawn_without_rust_log("logging/warn-worker.php", 1, "[log]\nlevel = \"error\"\n");
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("logging/warn-worker.php"))
+        .toml("[log]\nlevel = \"error\"")
+        .no_rust_log()
+        .spawn();
     let code = http_get(srv.addr, "/", Duration::from_secs(10))
         .expect("GET /")
         .status;
@@ -76,11 +81,10 @@ fn log_targets_php_restores_php_diagnostics() {
     );
     drop(srv);
 
-    let srv = spawn_without_rust_log(
-        "logging/warn-worker.php",
-        1,
-        "[log]\nlevel = \"error\"\n[log.targets]\nphp = \"warn\"\n",
-    );
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("logging/warn-worker.php"))
+        .toml("[log]\nlevel = \"error\"\n[log.targets]\nphp = \"warn\"")
+        .no_rust_log()
+        .spawn();
     let code = http_get(srv.addr, "/", Duration::from_secs(10))
         .expect("GET /")
         .status;
@@ -95,7 +99,9 @@ fn log_targets_php_restores_php_diagnostics() {
 /// `RUST_LOG` replaces the configured filter wholesale, so `RUST_LOG=info` beats `level = "error"`.
 #[test]
 fn rust_log_replaces_the_config_filter() {
-    let srv = spawn_with_config("logging/warn-worker.php", 1, "[log]\nlevel = \"error\"\n");
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("logging/warn-worker.php"))
+        .toml("[log]\nlevel = \"error\"")
+        .spawn();
     let code = http_get(srv.addr, "/", Duration::from_secs(10))
         .expect("GET /")
         .status;
@@ -153,13 +159,12 @@ fn log_filter_source_and_target_prefix() {
         },
     ];
     for case in cases {
+        let spawn = Spawn::http(Mode::Dispatcher, fixture_path(MARKS)).toml(case.log);
         let mut srv = match case.rust_log {
-            None => spawn_without_rust_log(MARKS, 1, case.log),
-            Some(filter) => Spawn::http(Mode::Dispatcher, fixture_path(MARKS))
-                .toml(case.log)
-                .rust_log(filter)
-                .spawn(),
-        };
+            None => spawn.no_rust_log(),
+            Some(filter) => spawn.rust_log(filter),
+        }
+        .spawn();
         let code = http_get(srv.addr, "/", Duration::from_secs(10))
             .expect("GET /")
             .status;
@@ -244,14 +249,13 @@ fn filtered_log_context_does_not_call_the_serializer() {
         },
     ];
     for case in cases {
-        let mut srv = spawn_without_rust_log(
-            "logging/context-worker.php",
-            1,
-            &format!(
-                "[log]\nlevel = \"warn\"\nformat = \"json\"\n[log.targets]\n{}\n",
+        let mut srv = Spawn::http(Mode::Dispatcher, fixture_path("logging/context-worker.php"))
+            .toml(&format!(
+                "[log]\nlevel = \"warn\"\nformat = \"json\"\n[log.targets]\n{}",
                 case.targets
-            ),
-        );
+            ))
+            .no_rust_log()
+            .spawn();
         let response = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
         srv.stop();
         assert_eq!(response.status, 200, "{}\n{}", case.name, diagnostics(&srv));

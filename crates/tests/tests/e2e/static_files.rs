@@ -1,6 +1,6 @@
 use crate::harness::{
-    Conn, Exited, Head, Server, Spawn, diagnostics, http_get, http_get_raw, http_post,
-    http_raw_bytes, parse_status_and_body, scratch_dir, spawn_boot_failure, spawn_with_http_extra,
+    Conn, Exited, Head, Server, Spawn, diagnostics, fixture_path, http_get, http_get_raw,
+    http_post, http_raw_bytes, parse_status_and_body, scratch_dir,
 };
 use rapira_sapi::plugin::Mode;
 use std::path::Path;
@@ -45,14 +45,12 @@ fn static_files_serve_over_the_wire() {
         ("index.php", "<?php leak();"),
         (".env", "SECRET=1"),
     ]);
-    let srv = spawn_with_http_extra(
-        "shared/echo-worker.php",
-        1,
-        &format!(
-            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+        .http_extra(&format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"",
             root.display()
-        ),
-    );
+        ))
+        .spawn();
 
     let raw = http_get_raw(srv.addr, "/app.css", &[], T).expect("GET /app.css");
     let text = String::from_utf8_lossy(&raw);
@@ -104,14 +102,12 @@ fn static_files_serve_over_the_wire() {
 #[test]
 fn cached_static_files_revalidate_over_the_wire() {
     let root = static_root(&[("app.css", "body{color:red}")]);
-    let srv = spawn_with_http_extra(
-        "shared/echo-worker.php",
-        1,
-        &format!(
-            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+        .http_extra(&format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"",
             root.display()
-        ),
-    );
+        ))
+        .spawn();
 
     let first = http_get_raw(srv.addr, "/app.css", &[], T).expect("GET /app.css");
     let etag = head_field(&first, "etag");
@@ -187,14 +183,12 @@ fn cached_static_files_revalidate_over_the_wire() {
 #[test]
 fn the_chain_serves_sequential_requests_on_one_connection() {
     let root = static_root(&[("app.css", "body{}")]);
-    let srv = spawn_with_http_extra(
-        "shared/echo-worker.php",
-        1,
-        &format!(
-            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+        .http_extra(&format!(
+            "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"",
             root.display()
-        ),
-    );
+        ))
+        .spawn();
     let mut c = Conn::open(srv.addr, T).expect("connect");
 
     fn content_length(fields: &[(String, String)]) -> usize {
@@ -942,13 +936,13 @@ fn a_bad_static_root_refuses_to_boot() {
             let _ = std::fs::remove_dir_all(&dir);
             continue;
         }
-        let Exited { status, log } = spawn_boot_failure(
-            "shared/echo-worker.php",
-            &format!(
-                "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"\n",
-                root.display()
-            ),
-        );
+        let Exited { status, log } =
+            Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+                .http_extra(&format!(
+                    "middleware = [\"static\"]\n[http.static]\nroot = \"{}\"",
+                    root.display()
+                ))
+                .boot_failure();
         let _ = std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o755));
         let _ = std::fs::remove_dir_all(&dir);
         assert_eq!(status.code(), Some(1), "{}: {log}", case.name);

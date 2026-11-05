@@ -7,11 +7,13 @@ use tests::server_log::{app_contexts, wait_app_record};
 /// USR2 restarts the app inside every worker: the listener and the worker processes stay, and no request fails.
 #[test]
 fn usr2_reload_restarts_the_apps_while_serving() {
-    let srv = spawn_with_config(
-        "lifecycle/boot-log-worker.php",
-        3,
-        "[log]\nformat = \"json\"\n",
-    );
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/boot-log-worker.php"),
+    )
+    .processes(3)
+    .json_log()
+    .spawn();
     let mut pids = wait_workers(&srv, Duration::from_secs(20), "3 workers", |p| p.len() == 3);
     pids.sort();
     let storm = storm(srv.addr, 8);
@@ -77,7 +79,7 @@ fn usr2_restarts_an_idle_app() {
 /// Classic mode runs every request in a new request cycle, so a reload has nothing to restart and the worker keeps serving.
 #[test]
 fn a_reload_leaves_a_classic_pool_alone() {
-    let srv = spawn_with_config("classic/cwd.php", 1, "mode = \"classic\"\n");
+    let srv = Spawn::http(Mode::Classic, fixture_path("classic/cwd.php")).spawn();
     let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
     signal(srv.pid(), libc::SIGUSR2);
     // Nothing must happen, so the test waits a fixed time before it looks.
