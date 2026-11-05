@@ -57,7 +57,7 @@ env:
 
 jobs:
     prepare:
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-26.04
         timeout-minutes: 5
         outputs:
             php_84: ${{ steps.php.outputs.php_84 }}
@@ -106,7 +106,7 @@ jobs:
                 include:
                     - {
                           target: linux-x86_64,
-                          runner: ubuntu-latest,
+                          runner: ubuntu-26.04,
                           container: "rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f",
                           target_os: linux,
                           arch: x86_64,
@@ -114,7 +114,7 @@ jobs:
                       }
                     - {
                           target: linux-aarch64,
-                          runner: ubuntu-24.04-arm,
+                          runner: ubuntu-26.04-arm,
                           container: "rockylinux/rockylinux:9@sha256:8101994123cf3d0a8fee517bee7f39e555c7d92bd2d9eb3303cc988a0eeed00f",
                           target_os: linux,
                           arch: aarch64,
@@ -295,7 +295,7 @@ jobs:
 
     package:
         needs: build
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-26.04
         timeout-minutes: 30
         permissions:
             contents: write

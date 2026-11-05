@@ -16,7 +16,7 @@ concurrency:
 jobs:
     guard:
         if: (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') || (github.event.workflow_run.conclusion == 'success' && github.event.workflow_run.event == 'push')
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-26.04
         timeout-minutes: 5
         outputs:
             version: ${{ steps.v.outputs.version }}
@@ -54,7 +54,7 @@ jobs:
 
     cleanup:
         needs: [guard, images]
-        runs-on: ubuntu-latest
+        runs-on: ubuntu-26.04
         timeout-minutes: 10
         permissions:
             contents: read
