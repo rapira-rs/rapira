@@ -35,7 +35,10 @@ jobs:
 
             - &deps
               name: Build deps for bindgen/cc
-              run: sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
+              run: |
+                  sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
+                  # bindgen reads the include paths of the default clang and must load the libclang of the same version: the image has several, and clang-sys takes the newest one
+                  echo "LIBCLANG_PATH=$(dirname "$(dirname "$(clang -print-resource-dir)")")" >> "$GITHUB_ENV"
 
             - &libphp
               name: Expose the PHP embed lib

@@ -33,6 +33,8 @@ jobs:
                     libclang-dev llvm-dev \
                     libssl-dev libcurl4-openssl-dev libxml2-dev libonig-dev \
                     libsqlite3-dev zlib1g-dev libffi-dev libicu-dev libpq-dev libsodium-dev
+                  # bindgen reads the include paths of the default clang and must load the libclang of the same version: the image has several, and clang-sys takes the newest one
+                  echo "LIBCLANG_PATH=$(dirname "$(dirname "$(clang -print-resource-dir)")")" >> "$GITHUB_ENV"
 
             - name: Install build deps (macOS)
               if: runner.os == 'macOS'
