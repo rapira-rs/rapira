@@ -84,9 +84,12 @@ impl Drop for Server {
     }
 }
 
-/// The bin belongs to the root package, so CARGO_BIN_EXE is unset here: locate it beside the test binary, or via `RAPIRA_BIN`. A relative `RAPIRA_BIN` becomes absolute, because the master starts in the scratch dir.
+/// The bin belongs to the root package, so CARGO_BIN_EXE is unset here: locate it beside the test binary, or via `RAPIRA_BIN`, a name on PATH or a path. A relative path becomes absolute, because the master starts in the scratch dir.
 fn rapira_bin() -> PathBuf {
     if let Ok(p) = std::env::var("RAPIRA_BIN") {
+        if !p.contains('/') {
+            return PathBuf::from(p);
+        }
         return std::path::absolute(p).expect("absolute RAPIRA_BIN");
     }
     let exe = std::env::current_exe().expect("current_exe");
