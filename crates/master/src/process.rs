@@ -7,7 +7,7 @@ use libc::c_int;
 
 use crate::WorkerEnv;
 use crate::pool::Pool;
-use crate::signals::{MASTER_SIGNALS, SelfPipe, sigset};
+use crate::signals::{MASTER_SIGNALS, SelfPipe, WORKER_SIGNALS, sigset};
 use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_UNHEALTHY};
 use rapira_scoreboard::{PoolRegion, SharedSlot};
 
@@ -224,9 +224,9 @@ impl Forker {
                     #[cfg(target_os = "linux")]
                     libc::prctl(libc::PR_SET_NAME, c"rapira-worker".as_ptr());
 
-                    // This mask replaces the inherited one. Only QUIT, INT and USR2 stay blocked, for the sigwait thread of the worker (spawn_signal_thread). Every other signal is unblocked.
+                    // This mask replaces the inherited one. Only the worker signals stay blocked, for the sigwait thread of the worker (wait_worker_signal). Every other signal is unblocked.
                     // USR2 keeps SIG_DFL: POSIX lets a kernel discard an ignored signal even while it is blocked. https://pubs.opengroup.org/onlinepubs/9799919799/functions/V2_chap02.html#tag_16_04_01
-                    let hold = sigset(&[libc::SIGQUIT, libc::SIGINT, libc::SIGUSR2]);
+                    let hold = sigset(&WORKER_SIGNALS);
                     libc::sigprocmask(libc::SIG_SETMASK, &hold, std::ptr::null_mut());
                 }
 

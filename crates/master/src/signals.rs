@@ -21,6 +21,9 @@ pub(crate) const MASTER_SIGNALS: [c_int; 7] = [
     libc::SIGHUP,
 ];
 
+/// The signals a worker accepts by sigwait. The fork bracket leaves exactly these blocked in the child.
+pub(crate) const WORKER_SIGNALS: [c_int; 3] = [libc::SIGQUIT, libc::SIGINT, libc::SIGUSR2];
+
 pub(crate) struct SelfPipe {
     pub rd: UnixStream,
     pub wr: UnixStream,
@@ -80,9 +83,9 @@ pub(crate) fn sigset(sigs: &[c_int]) -> libc::sigset_t {
     set
 }
 
-/// Waits until one of `signals` (blocked in every thread) is pending and accepts it, so no handler runs. https://man7.org/linux/man-pages/man3/sigwait.3.html
-pub fn wait_signal(signals: &[c_int]) -> c_int {
-    let set = sigset(signals);
+/// Waits until one of the worker signals (blocked in every thread of the worker) is pending and accepts it, so no handler runs. https://man7.org/linux/man-pages/man3/sigwait.3.html
+pub fn wait_worker_signal() -> c_int {
+    let set = sigset(&WORKER_SIGNALS);
     let mut sig: c_int = 0;
     // SAFETY: set and sig are stack values live for the whole call.
     unsafe { libc::sigwait(&set, &mut sig) };
