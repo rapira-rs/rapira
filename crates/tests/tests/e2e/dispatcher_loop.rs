@@ -13,8 +13,8 @@ use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::{
-    Server, Spawn, diagnostics, parse_status_and_body, scratch_dir, signal, slot_line,
-    spawn_with_config, wait_log_contains, worker_pids,
+    Server, Spawn, diagnostics, fixture_path, parse_status_and_body, scratch_dir, signal,
+    slot_line, wait_log_contains, worker_pids,
 };
 
 /// Read budget of a raw socket exchange.
@@ -1128,11 +1128,13 @@ fn get_info_reports_the_server_identity() -> anyhow::Result<()> {
 #[test]
 fn get_info_reports_the_server_identity_at_boot() -> anyhow::Result<()> {
     const WORKERS: usize = 16;
-    let mut srv = spawn_with_config(
-        "lifecycle/boot-identity-worker.php",
-        WORKERS,
-        "mode = \"dispatcher\"\n[log]\nformat = \"json\"",
-    );
+    let mut srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/boot-identity-worker.php"),
+    )
+    .processes(WORKERS)
+    .json_log()
+    .spawn();
     let want = format!("name=localhost port={}", srv.addr.port());
     // A failed boot retries after 5 s, so a worker whose first boot failed still logs a record in this window.
     let booted = poll(Duration::from_secs(15), || {

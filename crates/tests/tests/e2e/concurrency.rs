@@ -1,13 +1,16 @@
 use std::time::Duration;
 
+use rapira_sapi::plugin::Mode;
 use tests::StatusBody;
 
-use crate::harness::{http_get, spawn_with_config, wait_workers};
+use crate::harness::{Spawn, fixture_path, http_get, wait_workers};
 
 /// Concurrent producers over a worker pool must never get another request's body.
 #[test]
 fn concurrent_unique_requests_never_mix() {
-    let srv = spawn_with_config("lifecycle/fiber-worker.php", 4, "");
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("lifecycle/fiber-worker.php"))
+        .processes(4)
+        .spawn();
     wait_workers(&srv, Duration::from_secs(20), "4 workers", |p| p.len() == 4);
 
     let addr = srv.addr;
@@ -42,14 +45,18 @@ mod round_robin {
     use std::collections::{HashMap, HashSet};
     use std::time::Duration;
 
-    use crate::harness::{diagnostics, serving_pid, spawn_with_config, wait_workers};
+    use rapira_sapi::plugin::Mode;
+
+    use crate::harness::{Spawn, diagnostics, fixture_path, serving_pid, wait_workers};
 
     /// One request at a time leaves every other worker blocked in accept when the next
     /// connection arrives. The kernel wakes one of them, and that worker re-registers behind
     /// the others, so the connections go round the pool.
     #[test]
     fn sequential_requests_go_round_the_pool() {
-        let srv = spawn_with_config("shared/echo-worker.php", 4, "");
+        let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+            .processes(4)
+            .spawn();
         let workers = wait_workers(&srv, Duration::from_secs(20), "4 workers", |p| p.len() == 4);
 
         // A worker takes a connection only once it waits in epoll_wait, so let every one answer first.

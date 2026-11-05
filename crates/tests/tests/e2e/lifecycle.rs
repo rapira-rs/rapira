@@ -6,11 +6,11 @@ use tests::{StatusBody, drain_resp, poll, req, server_log};
 
 #[test]
 fn retained_spl_tempfile_survives_next_request() {
-    let srv = spawn_with_config(
-        "lifecycle/retained-temp-worker.php",
-        1,
-        "mode = \"worker\"\n",
-    );
+    let srv = Spawn::http(
+        Mode::Worker,
+        fixture_path("lifecycle/retained-temp-worker.php"),
+    )
+    .spawn();
     let timeout = Duration::from_secs(10);
     let pid = wait_workers(&srv, timeout, "1 worker", |p| p.len() == 1)[0];
 
@@ -48,7 +48,9 @@ fn retained_spl_tempfile_survives_next_request() {
 
 #[test]
 fn killed_worker_respawns() {
-    let srv = spawn_with_config("shared/echo-worker.php", 2, "");
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+        .processes(2)
+        .spawn();
     let pids0 = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
     signal(pids0[0], libc::SIGKILL);
     wait_workers(
@@ -92,7 +94,7 @@ fn workers_ignore_usr_signals() {
             signal: libc::SIGUSR2,
         },
     ];
-    let srv = spawn_with_config("classic/cwd.php", 1, "mode = \"classic\"\n");
+    let srv = Spawn::http(Mode::Classic, fixture_path("classic/cwd.php")).spawn();
     let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
     for _ in 0..2 {
         let code = http_get(srv.addr, "/", Duration::from_secs(10))
@@ -136,7 +138,9 @@ fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
 
 #[test]
 fn sigquit_master_graceful() {
-    let mut srv = spawn_with_config("shared/echo-worker.php", 2, "");
+    let mut srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+        .processes(2)
+        .spawn();
     let pids = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
     let code = http_get(srv.addr, "/", Duration::from_secs(10))
         .expect("GET /")
@@ -150,7 +154,9 @@ fn sigquit_master_graceful() {
 
 #[test]
 fn sigterm_master_stops() {
-    let mut srv = spawn_with_config("shared/echo-worker.php", 2, "");
+    let mut srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+        .processes(2)
+        .spawn();
     let pids = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
     signal(srv.pid(), libc::SIGTERM);
     let status = srv.wait_exit(STOP_BUDGET);
@@ -237,7 +243,9 @@ const WORKER_EXIT_DRAINED: i32 = 0;
 #[cfg(target_os = "linux")]
 #[test]
 fn killed_master_leaves_workers_to_drain() {
-    let mut srv = spawn_with_config("shared/echo-worker.php", 2, "");
+    let mut srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+        .processes(2)
+        .spawn();
     let pids = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
     let code = http_get(srv.addr, "/", Duration::from_secs(10))
         .expect("GET /")
@@ -371,11 +379,9 @@ fn max_requests_restarts_the_app_without_losing_requests() {
 
 #[test]
 fn request_timeout_kills_and_replaces_worker() {
-    let srv = spawn_with_config(
-        "lifecycle/hang-worker.php",
-        1,
-        "request_terminate_timeout_secs = 2\n",
-    );
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("lifecycle/hang-worker.php"))
+        .http_pool("request_terminate_timeout_secs = 2")
+        .spawn();
     let pids0 = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
     let code = http_get(srv.addr, "/", Duration::from_secs(10))
         .expect("GET /")
@@ -442,7 +448,9 @@ fn a_worker_above_max_memory_is_replaced() {
 #[test]
 fn a_top_level_pool_table_refuses_to_boot() {
     let Exited { status, log } =
-        spawn_boot_failure("shared/echo-worker.php", "[pool]\nprocesses = 1\n");
+        Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+            .http_extra("[pool]\nprocesses = 1")
+            .boot_failure();
     assert_eq!(status.code(), Some(1), "\n{log}");
     assert!(log.contains("parsing config file"), "\n{log}");
     assert!(log.contains("unknown field `pool`"), "\n{log}");
@@ -451,7 +459,8 @@ fn a_top_level_pool_table_refuses_to_boot() {
 /// The entrypoint is fixed for the pool's lifetime, so the master proves it is readable at boot.
 #[test]
 fn a_missing_entrypoint_refuses_to_boot() {
-    let Exited { status, log } = spawn_boot_failure_with_entrypoint("no-such-entrypoint.php");
+    let Exited { status, log } =
+        Spawn::http_entrypoint(Mode::Dispatcher, "no-such-entrypoint.php").boot_failure();
     assert_eq!(status.code(), Some(1), "\n{log}");
     assert!(log.contains("http.pool.entrypoint"), "\n{log}");
     assert!(log.contains("no-such-entrypoint.php"), "\n{log}");
@@ -470,7 +479,8 @@ fn an_unreadable_entrypoint_refuses_to_boot() {
         let _ = std::fs::remove_dir_all(&dir);
         return;
     }
-    let Exited { status, log } = spawn_boot_failure_with_entrypoint(&script.display().to_string());
+    let Exited { status, log } =
+        Spawn::http_entrypoint(Mode::Dispatcher, &script.display().to_string()).boot_failure();
     let _ = std::fs::remove_dir_all(&dir);
     assert_eq!(status.code(), Some(1), "\n{log}");
     assert!(log.contains("http.pool.entrypoint"), "\n{log}");
@@ -480,7 +490,9 @@ fn an_unreadable_entrypoint_refuses_to_boot() {
 /// A gen-0 pool whose boot always fails stops the master with exit code 70. No request is necessary: each worker runs the boot again on its own, and the fifth failed boot flags it unhealthy. Two workers: a worker that fails its boot does not count as serving.
 #[test]
 fn master_failboot_exits_70() {
-    let mut srv = spawn_with_config("lifecycle/fatal-worker.php", 2, "");
+    let mut srv = Spawn::http(Mode::Dispatcher, fixture_path("lifecycle/fatal-worker.php"))
+        .processes(2)
+        .spawn();
     let status = srv.wait_exit(Duration::from_secs(60));
     assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
     let log = std::fs::read_to_string(srv.log_file()).expect("read server.log");
@@ -494,13 +506,15 @@ fn master_failboot_exits_70() {
 #[test]
 fn a_worker_that_never_boots_next_to_a_serving_worker_keeps_the_master_up() {
     let observability = std::net::SocketAddr::from(([127, 0, 0, 1], free_port()));
-    let mut srv = spawn_with_config(
-        "lifecycle/lock-boot-worker.php",
-        2,
-        &format!(
-            "mode = \"dispatcher\"\n[observability]\nlisten = \"{observability}\"\n[observability.probes]\n"
-        ),
-    );
+    let mut srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/lock-boot-worker.php"),
+    )
+    .processes(2)
+    .toml(&format!(
+        "[observability]\nlisten = \"{observability}\"\n[observability.probes]"
+    ))
+    .spawn();
     assert!(
         wait_log_contains(
             &srv,
@@ -529,7 +543,11 @@ fn a_worker_that_never_boots_next_to_a_serving_worker_keeps_the_master_up() {
 /// A worker-mode bootstrap that never calls handle_request() must failboot the master, not hang or shed 503s forever.
 #[test]
 fn worker_bootstrap_that_never_serves_failboots() {
-    let mut srv = spawn_with_config("lifecycle/never-loop-worker.php", 1, "mode = \"worker\"\n");
+    let mut srv = Spawn::http(
+        Mode::Worker,
+        fixture_path("lifecycle/never-loop-worker.php"),
+    )
+    .spawn();
     let addr = srv.addr;
     let status = poll(Duration::from_secs(60), || {
         if let Some(st) = srv.try_status() {
@@ -545,7 +563,7 @@ fn worker_bootstrap_that_never_serves_failboots() {
 /// A client that walks away mid-handler must not take the worker down: the abort ends only that unit, and the next request is served.
 #[test]
 fn worker_survives_client_leaving() {
-    let srv = spawn_with_config("lifecycle/hold-worker.php", 1, "mode = \"worker\"\n");
+    let srv = Spawn::http(Mode::Worker, fixture_path("lifecycle/hold-worker.php")).spawn();
     let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
     c.send(b"GET / HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send");
@@ -565,11 +583,13 @@ fn worker_survives_client_leaving() {
 /// An unfinalized exchange whose client left is finalized, so `activeCount()` no longer counts it. The next `receive()` discards it, and the discard is logged.
 #[test]
 fn cancelled_exchange_is_discarded_by_next_receive() {
-    let srv = spawn_without_rust_log(
-        "lifecycle/cancelled-receive-worker.php",
-        1,
-        "mode = \"dispatcher\"\n[log]\nlevel = \"debug\"\n",
-    );
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/cancelled-receive-worker.php"),
+    )
+    .toml("[log]\nlevel = \"debug\"")
+    .no_rust_log()
+    .spawn();
     let pid = wait_workers(&srv, BOOT, "1 dispatcher worker", |p| p.len() == 1)[0];
     let mut client = Conn::open(srv.addr, BOOT).expect("connect");
     client
@@ -611,11 +631,11 @@ fn cancelled_exchange_is_discarded_by_next_receive() {
 /// A field sent more than once reaches PHP as one value: a comma list, and `"; "` for Cookie.
 #[test]
 fn repeated_request_fields_reach_php_combined() {
-    let srv = spawn_with_config(
-        "lifecycle/repeated-headers-worker.php",
-        1,
-        "mode = \"worker\"\n",
-    );
+    let srv = Spawn::http(
+        Mode::Worker,
+        fixture_path("lifecycle/repeated-headers-worker.php"),
+    )
+    .spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
     let StatusBody { status: code, body } = http_get_with_headers(
         srv.addr,
@@ -641,11 +661,11 @@ fn repeated_request_fields_reach_php_combined() {
 /// A wire name carrying `_` or `.` must never reach the CGI variable a `-` name owns; the SAPI's cgi_header_name rewrites `.` to `_`.
 #[test]
 fn alias_names_never_reach_a_cgi_variable() {
-    let srv = spawn_with_config(
-        "lifecycle/repeated-headers-worker.php",
-        1,
-        "mode = \"worker\"\n",
-    );
+    let srv = Spawn::http(
+        Mode::Worker,
+        fixture_path("lifecycle/repeated-headers-worker.php"),
+    )
+    .spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
     let StatusBody { status: code, body } = http_get_with_headers(
         srv.addr,
@@ -669,7 +689,12 @@ fn alias_names_never_reach_a_cgi_variable() {
 /// The accumulate-loop cap: with no declared length the 413 fires when the streamed body crosses max_body_size.
 #[test]
 fn chunked_body_over_the_cap_answers_413() {
-    let srv = spawn_with_http_extra("lifecycle/fidelity-worker.php", 1, "max_body_size_mb = 1\n");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/fidelity-worker.php"),
+    )
+    .http_extra("max_body_size_mb = 1")
+    .spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
     let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
@@ -696,7 +721,12 @@ fn chunked_body_over_the_cap_answers_413() {
 /// An under-cap chunked body dispatches normally, pinning that the cap check is not over-eager.
 #[test]
 fn chunked_body_under_the_cap_is_served() {
-    let srv = spawn_with_http_extra("lifecycle/fidelity-worker.php", 1, "max_body_size_mb = 1\n");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/fidelity-worker.php"),
+    )
+    .http_extra("max_body_size_mb = 1")
+    .spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
     let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
@@ -729,7 +759,11 @@ fn malformed_chunked_body_answers_400_before_dispatch() {
             body: b"5\r\nhelloXX\r\n0\r\n\r\n",
         },
     ];
-    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/fidelity-worker.php"),
+    )
+    .spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
     for case in cases {
@@ -748,7 +782,11 @@ fn malformed_chunked_body_answers_400_before_dispatch() {
 /// The interim 100 goes out when the body is first polled, which happens only after admission.
 #[test]
 fn expect_100_continue_gets_the_interim_then_the_response() {
-    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/fidelity-worker.php"),
+    )
+    .spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
     let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
@@ -770,7 +808,12 @@ fn expect_100_continue_gets_the_interim_then_the_response() {
 /// A refused request must never see a 100: admission rejects before the body is ever polled.
 #[test]
 fn expect_100_continue_is_skipped_when_the_request_is_refused() {
-    let srv = spawn_with_http_extra("lifecycle/fidelity-worker.php", 1, "max_body_size_mb = 1\n");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/fidelity-worker.php"),
+    )
+    .http_extra("max_body_size_mb = 1")
+    .spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
     let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
@@ -793,7 +836,11 @@ fn expect_100_continue_is_skipped_when_the_request_is_refused() {
 /// A final 1xx from PHP cannot go on the wire: hyper would rewrite it to a 500 and error the connection, so the plugin serves 502.
 #[test]
 fn final_interim_status_becomes_502() {
-    let srv = spawn_with_config("lifecycle/status-1xx-worker.php", 1, "mode = \"worker\"\n");
+    let srv = Spawn::http(
+        Mode::Worker,
+        fixture_path("lifecycle/status-1xx-worker.php"),
+    )
+    .spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
     let raw = http_raw_bytes(
@@ -814,7 +861,11 @@ fn final_interim_status_becomes_502() {
 /// More than one Host line is a 400 in every HTTP version. hyper hands the repeated field through, so the rejection is the plugin's own. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 #[test]
 fn a_second_host_field_line_answers_400() {
-    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/fidelity-worker.php"),
+    )
+    .spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
     let code = http_get_with_headers(
@@ -831,11 +882,11 @@ fn a_second_host_field_line_answers_400() {
 /// `header("Status: 404")` must become the response code, not a literal field on a 200: php-src's sapi_header_op passes it through verbatim and the origin server converts it (RFC 3875 §6.2.1).
 #[test]
 fn status_field_sets_the_code_and_never_reaches_the_client() {
-    let srv = spawn_with_config(
-        "lifecycle/status-header-worker.php",
-        1,
-        "mode = \"worker\"\n",
-    );
+    let srv = Spawn::http(
+        Mode::Worker,
+        fixture_path("lifecycle/status-header-worker.php"),
+    )
+    .spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
     let raw = http_get_raw(srv.addr, "/", &[], Duration::from_secs(10)).expect("GET /");
     let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
@@ -862,7 +913,11 @@ fn status_field_sets_the_code_and_never_reaches_the_client() {
 /// RFC 9112 §3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 #[test]
 fn dispatcher_request_fidelity_over_the_wire() {
-    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/fidelity-worker.php"),
+    )
+    .spawn();
 
     let before = std::time::UNIX_EPOCH.elapsed().unwrap().as_secs_f64();
     let StatusBody { status: code, body } = http_get_with_headers(
@@ -909,7 +964,11 @@ fn dispatcher_request_fidelity_over_the_wire() {
 /// RFC 9110 §8.6: https://www.rfc-editor.org/rfc/rfc9110#section-8.6
 #[test]
 fn dispatcher_write_head_reaches_the_wire() {
-    let srv = spawn_with_config("lifecycle/fidelity-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/fidelity-worker.php"),
+    )
+    .spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
     let raw = http_get_raw(srv.addr, "/?probe=head", &[], Duration::from_secs(10))
@@ -942,7 +1001,7 @@ fn head_keeps_the_declared_content_length() {
     struct Case {
         name: &'static str,
         fixture: &'static str,
-        config: &'static str,
+        mode: Mode,
         status: &'static str,
         content_length: &'static str,
     }
@@ -950,20 +1009,20 @@ fn head_keeps_the_declared_content_length() {
         Case {
             name: "dispatcher writeHead",
             fixture: "lifecycle/fidelity-worker.php",
-            config: "",
+            mode: Mode::Dispatcher,
             status: "http/1.1 201",
             content_length: "999",
         },
         Case {
             name: "classic header()",
             fixture: "lifecycle/head-length-classic.php",
-            config: "mode = \"classic\"\n",
+            mode: Mode::Classic,
             status: "http/1.1 200",
             content_length: "11",
         },
     ];
     for case in cases {
-        let srv = spawn_with_config(case.fixture, 1, case.config);
+        let srv = Spawn::http(case.mode, fixture_path(case.fixture)).spawn();
         let raw = http_raw_bytes(
             srv.addr,
             b"HEAD /?probe=head HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
@@ -1000,25 +1059,25 @@ fn lowercase_head_is_not_head() {
     struct Case {
         name: &'static str,
         fixture: &'static str,
-        config: &'static str,
+        mode: Mode,
         body: &'static str,
     }
     let cases = [
         Case {
             name: "dispatcher writeBody",
             fixture: "lifecycle/fidelity-worker.php",
-            config: "",
+            mode: Mode::Dispatcher,
             body: "ok",
         },
         Case {
             name: "classic echo",
             fixture: "lifecycle/head-length-classic.php",
-            config: "mode = \"classic\"\n",
+            mode: Mode::Classic,
             body: "hello world",
         },
     ];
     for case in cases {
-        let srv = spawn_with_config(case.fixture, 1, case.config);
+        let srv = Spawn::http(case.mode, fixture_path(case.fixture)).spawn();
         let raw = http_raw_bytes(
             srv.addr,
             b"head / HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
@@ -1039,11 +1098,12 @@ fn lowercase_head_is_not_head() {
 /// Host-side multipart over the wire: a non-UTF-8 boundary round-trips, the spool file dies with finalization, malformed framing answers 400 and an over-limit file part 413.
 #[test]
 fn dispatcher_multipart_over_the_wire() {
-    let srv = spawn_with_http_extra(
-        "lifecycle/fidelity-worker.php",
-        1,
-        "[http.uploads]\nmax_file_size_mb = 1\n",
-    );
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/fidelity-worker.php"),
+    )
+    .http_extra("[http.uploads]\nmax_file_size_mb = 1")
+    .spawn();
 
     let ct = b"multipart/form-data; boundary=RAP\xff\xfeIRA".to_vec();
     let mut body = Vec::new();

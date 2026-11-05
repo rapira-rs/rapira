@@ -1,11 +1,12 @@
 use std::collections::HashMap;
 use std::time::Duration;
 
+use rapira_sapi::plugin::Mode;
 use tests::StatusBody;
 
 use crate::harness::{
-    Server, diagnostics, fan_out, fixture_path, http_get, http_get_with_headers, spawn_with_config,
-    spawn_with_phprc_and_config, wait_workers,
+    Server, Spawn, diagnostics, fan_out, fixture_path, http_get, http_get_with_headers,
+    wait_workers,
 };
 
 const REQ: Duration = Duration::from_secs(10);
@@ -33,7 +34,9 @@ fn rng_draw(body: &str) -> RngDraw {
 
 /// No two workers may emit identical first draws; the cached draw also pins that the entrypoint top level runs once per worker.
 fn assert_distinct_first_draws(fixture: &str) {
-    let srv = spawn_with_config(fixture, 4, "");
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path(fixture))
+        .processes(4)
+        .spawn();
     let workers = wait_workers(&srv, Duration::from_secs(20), "4 workers", |p| p.len() == 4);
     let StatusBody { body, .. } = http_get(srv.addr, "/", REQ).expect("GET /");
     if body == b"skip" {
@@ -109,12 +112,9 @@ fn browscap_probe(srv: &Server, ua: &str) -> String {
 /// The `browscap` ini is PHP_INI_SYSTEM: MINIT parses the file once into persistent memory, in the master before the fork.
 #[test]
 fn get_browser_uses_browscap_and_isolates_user_agent_requests() {
-    let srv = spawn_with_phprc_and_config(
-        "browscap/browscap-worker.php",
-        1,
-        &browscap_ini(),
-        "mode = \"worker\"\n",
-    );
+    let srv = Spawn::http(Mode::Worker, fixture_path("browscap/browscap-worker.php"))
+        .php_ini(&browscap_ini())
+        .spawn();
     wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
 
     struct Case {
@@ -187,12 +187,10 @@ fn table_and_pid(body: &str) -> BrowscapReply {
 /// One MINIT parse in the master serves every worker: identical answers from distinct pids, request after request.
 #[test]
 fn browscap_table_is_shared_and_stable_across_workers() {
-    let srv = spawn_with_phprc_and_config(
-        "browscap/browscap-worker.php",
-        3,
-        &browscap_ini(),
-        "mode = \"worker\"\n",
-    );
+    let srv = Spawn::http(Mode::Worker, fixture_path("browscap/browscap-worker.php"))
+        .processes(3)
+        .php_ini(&browscap_ini())
+        .spawn();
     let workers = wait_workers(&srv, Duration::from_secs(20), "3 workers", |p| p.len() == 3);
     let mut tables: Vec<String> = Vec::new();
     let mut pids: Vec<u32> = Vec::new();

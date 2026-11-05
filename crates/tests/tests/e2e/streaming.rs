@@ -1,9 +1,10 @@
 use std::time::{Duration, Instant};
 
+use rapira_sapi::plugin::Mode;
 use tests::StatusBody;
 
 use crate::harness::{
-    Conn, Head, diagnostics, http_get, http_get_raw, spawn_with_config, wait_log_contains,
+    Conn, Head, Spawn, diagnostics, fixture_path, http_get, http_get_raw, wait_log_contains,
     wait_workers,
 };
 
@@ -12,7 +13,11 @@ const T: Duration = Duration::from_secs(10);
 /// `flush()` puts the head on the wire ahead of the 400ms-late first event.
 #[test]
 fn sse_head_and_events_reach_the_wire_incrementally() {
-    let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/stream-worker.php"),
+    )
+    .spawn();
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=sse HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
         .expect("send");
@@ -44,7 +49,11 @@ fn sse_head_and_events_reach_the_wire_incrementally() {
 /// A chunked stream keeps the connection reusable for a second request.
 #[test]
 fn chunked_stream_preserves_keepalive() {
-    let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/stream-worker.php"),
+    )
+    .spawn();
     let mut c = Conn::open(srv.addr, T).expect("connect");
 
     c.send(b"GET /?probe=chunks HTTP/1.1\r\nHost: e2e\r\n\r\n")
@@ -68,7 +77,11 @@ fn chunked_stream_preserves_keepalive() {
 /// A PHP-committed 1xx never reaches the wire: the plugin drops interim heads, so the first head block is the final 200 and the response is otherwise untouched.
 #[test]
 fn interim_heads_never_reach_the_wire() {
-    let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/stream-worker.php"),
+    )
+    .spawn();
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=interim HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
         .expect("send");
@@ -81,7 +94,11 @@ fn interim_heads_never_reach_the_wire() {
 /// An HTTP/1.0 client gets close-delimited framing, never chunked.
 #[test]
 fn http10_gets_no_interim_and_no_chunked() {
-    let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/stream-worker.php"),
+    )
+    .spawn();
 
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=interim HTTP/1.0\r\n\r\n")
@@ -99,7 +116,11 @@ fn http10_gets_no_interim_and_no_chunked() {
 /// A declared length must not hold the head hostage: the head+first-chunk coalescing window is bounded.
 #[test]
 fn declared_length_head_beats_a_slow_body() {
-    let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/stream-worker.php"),
+    )
+    .spawn();
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=cl-slow-body HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
         .expect("send");
@@ -139,11 +160,11 @@ fn file_completion_does_not_cancel_php() {
 /// A HEAD reply is complete once its head is flushed: a close after that must not cancel PHP.
 #[test]
 fn head_completion_does_not_cancel_php() {
-    let srv = spawn_with_config(
-        "lifecycle/completed-response-worker.php",
-        1,
-        "mode = \"dispatcher\"\n",
-    );
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/completed-response-worker.php"),
+    )
+    .spawn();
     let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"HEAD /body HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
@@ -156,7 +177,7 @@ fn head_completion_does_not_cancel_php() {
         diagnostics(&srv)
     );
 
-    std::fs::write(srv.dir.join("client-read"), b"read").expect("release PHP");
+    std::fs::write(srv.dir.join("http/client-read"), b"read").expect("release PHP");
     let StatusBody { status, body } = http_get(srv.addr, "/state", T)
         .unwrap_or_else(|e| panic!("GET /state: {e}\n{}", diagnostics(&srv)));
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
@@ -170,14 +191,14 @@ fn head_completion_does_not_cancel_php() {
 
 fn assert_completed_response_finalizes(path: &str, contents: &[u8]) {
     for close in [false, true] {
-        let srv = spawn_with_config(
-            "lifecycle/completed-response-worker.php",
-            1,
-            "mode = \"dispatcher\"\n",
-        );
+        let srv = Spawn::http(
+            Mode::Dispatcher,
+            fixture_path("lifecycle/completed-response-worker.php"),
+        )
+        .spawn();
         let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
         if path == "/file" {
-            std::fs::write(srv.dir.join("payload.bin"), contents).expect("write payload");
+            std::fs::write(srv.dir.join("http/payload.bin"), contents).expect("write payload");
         }
         let mut c = Conn::open(srv.addr, T).expect("connect");
         let connection = if close { "Connection: close\r\n" } else { "" };
@@ -201,7 +222,7 @@ fn assert_completed_response_finalizes(path: &str, contents: &[u8]) {
         }
 
         // Let PHP finalize only after the client receives the complete response.
-        std::fs::write(srv.dir.join("client-read"), b"read").expect("release PHP");
+        std::fs::write(srv.dir.join("http/client-read"), b"read").expect("release PHP");
         c.send(b"GET /state HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
             .expect("next request");
         let status = c.read_head(T).expect("next head").status;
@@ -217,11 +238,11 @@ fn assert_completed_response_finalizes(path: &str, contents: &[u8]) {
 
 #[test]
 fn later_connection_error_does_not_cancel_completed_response() {
-    let srv = spawn_with_config(
-        "lifecycle/completed-response-worker.php",
-        1,
-        "mode = \"dispatcher\"\n",
-    );
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/completed-response-worker.php"),
+    )
+    .spawn();
     let pid = wait_workers(&srv, T, "1 worker", |p| p.len() == 1)[0];
     let mut client = Conn::open(srv.addr, T).expect("connect");
     client
@@ -238,7 +259,7 @@ fn later_connection_error_does_not_cancel_completed_response() {
     assert_eq!(status, 400);
     client.read_remaining(T).expect("failed connection closes");
 
-    std::fs::write(srv.dir.join("client-read"), b"read").expect("release PHP");
+    std::fs::write(srv.dir.join("http/client-read"), b"read").expect("release PHP");
     let StatusBody { status, body } = http_get(srv.addr, "/state", T)
         .unwrap_or_else(|e| panic!("GET /state: {e}\n{}", diagnostics(&srv)));
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
@@ -256,11 +277,11 @@ fn reset_during_buffered_write_cancels_php() {
     use std::net::TcpStream;
     use std::os::fd::AsRawFd;
 
-    let srv = spawn_with_config(
-        "lifecycle/buffered-download-worker.php",
-        1,
-        "mode = \"dispatcher\"\n",
-    );
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/buffered-download-worker.php"),
+    )
+    .spawn();
     let pid = wait_workers(&srv, T, "1 worker", |p| p.len() == 1)[0];
     let mut client = TcpStream::connect_timeout(&srv.addr, T).expect("connect");
     client.set_read_timeout(Some(T)).expect("read timeout");
@@ -332,7 +353,11 @@ fn reset_during_buffered_write_cancels_php() {
 /// An over-long body is cut to the declared content-length, keeping framing keepalive-safe.
 #[test]
 fn content_length_exceeded_serves_the_declared_prefix() {
-    let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/stream-worker.php"),
+    )
+    .spawn();
     let raw = http_get_raw(srv.addr, "/?probe=cl-exceeded", &[], T).expect("response");
     let text = String::from_utf8_lossy(&raw);
     assert!(
@@ -348,7 +373,11 @@ fn content_length_exceeded_serves_the_declared_prefix() {
 /// A client that walks away mid-stream surfaces as WorkDiscardedException in the worker.
 #[test]
 fn client_abort_discards_the_unit() {
-    let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/stream-worker.php"),
+    )
+    .spawn();
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=discard HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send");
@@ -365,7 +394,11 @@ fn client_abort_discards_the_unit() {
 /// A worker dying mid-stream must not fake a clean end: no chunked terminator arrives.
 #[test]
 fn worker_death_mid_stream_truncates_the_response() {
-    let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/stream-worker.php"),
+    )
+    .spawn();
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=die-mid-stream HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send");
@@ -383,8 +416,12 @@ fn worker_death_mid_stream_truncates_the_response() {
 /// sendFile streams the file from disk with a real content-length; PHP never holds the bytes.
 #[test]
 fn sendfile_streams_from_disk_with_length() {
-    let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
-    let payload = srv.dir.join("payload.bin");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/stream-worker.php"),
+    )
+    .spawn();
+    let payload = srv.dir.join("http/payload.bin");
     std::fs::write(&payload, vec![b'z'; 600_000]).expect("payload");
 
     let mut c = Conn::open(srv.addr, T).expect("connect");
@@ -412,7 +449,11 @@ fn sendfile_streams_from_disk_with_length() {
 /// Trailers are dropped on h1: no trailer bytes in the epilogue, connection stays reusable.
 #[test]
 fn trailers_are_dropped_on_h1_and_the_response_ends_cleanly() {
-    let srv = spawn_with_config("lifecycle/stream-worker.php", 1, "");
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/stream-worker.php"),
+    )
+    .spawn();
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"GET /?probe=trailers HTTP/1.1\r\nHost: e2e\r\n\r\n")
         .expect("send");

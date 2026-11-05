@@ -55,9 +55,10 @@ fn exit_in_a_frameless_callback_ends_the_reply_complete() -> anyhow::Result<()> 
 /// A worker enters the entrypoint directory once and stays there, so a userland chdir outlives the request that made it.
 #[test]
 fn classic_mode_keeps_the_working_directory_across_requests() {
-    let srv = harness::spawn_with_config("classic/cwd.php", 1, "mode = \"classic\"\n");
+    let srv = Spawn::http(Mode::Classic, harness::fixture_path("classic/cwd.php")).spawn();
     // getcwd() reports the resolved path, and the scratch dir can sit under a symlinked temp dir.
-    let entrypoint_dir = std::fs::canonicalize(&srv.dir).expect("canonicalize the scratch dir");
+    let entrypoint_dir =
+        std::fs::canonicalize(srv.dir.join("http")).expect("canonicalize the entrypoint dir");
     let entrypoint_dir = entrypoint_dir.to_string_lossy().into_owned();
 
     let StatusBody { status: code, body } = http_get(srv.addr, "/", REQ).expect("request");
