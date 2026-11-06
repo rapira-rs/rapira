@@ -1,10 +1,11 @@
-//! Encodes generated parts the way a browser does, parses the body, and compares the result with the parts byte for byte.
+//! Encodes generated parts the way a browser does, parses the body, and compares the result with the parts byte for byte. The body parses as one part and split into parts, and the two results must agree.
 
 #![no_main]
 
 use std::sync::LazyLock;
 
 use arbitrary::{Arbitrary, Unstructured};
+use bytes::Bytes;
 use rapira_fuzz::MAX_LEN;
 use rapira_http::check::Rejection;
 use rapira_http::multipart::{Limits, boundary, is_multipart, parse};
@@ -195,7 +196,15 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     body.extend_from_slice(b"--\r\n");
 
     let ctx = body.escape_ascii();
-    let got = match parse(&body, &bnd, &LIMITS) {
+    let whole = parse(&[Bytes::copy_from_slice(&body)], &bnd, &LIMITS);
+    let parts = rapira_fuzz::split(&body);
+    let lens: Vec<usize> = parts.iter().map(Bytes::len).collect();
+    rapira_fuzz::assert_same_parse(
+        format_args!("parts {lens:?} of {ctx}"),
+        &whole,
+        &parse(&parts, &bnd, &LIMITS),
+    );
+    let got = match whole {
         Ok(got) => got,
         Err(Rejection { status, reason }) => panic!("{status} {reason}: {ctx}"),
     };

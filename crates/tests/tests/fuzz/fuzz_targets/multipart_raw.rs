@@ -1,9 +1,10 @@
-//! Raw bytes through the multipart parser of the dispatcher mode. The bytes before the first LF are the Content-Type value and the rest is the body. The calls follow parse_multipart in crates/plugins/http/src/handler.rs.
+//! Raw bytes through the multipart parser of the dispatcher mode. The bytes before the first LF are the Content-Type value and the rest is the body. The calls follow parse_multipart in crates/plugins/http/src/handler.rs. The body parses as one part and split into parts, and the two results must agree.
 
 #![no_main]
 
 use std::sync::LazyLock;
 
+use bytes::Bytes;
 use rapira_http::check::Rejection;
 use rapira_http::multipart::{Limits, boundary, is_multipart, parse};
 
@@ -43,7 +44,15 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         return;
     }
     let l = &*LIMITS;
-    let form = match parse(body, &b, l) {
+    let whole = parse(&[Bytes::copy_from_slice(body)], &b, l);
+    let parts = rapira_fuzz::split(body);
+    let lens: Vec<usize> = parts.iter().map(Bytes::len).collect();
+    rapira_fuzz::assert_same_parse(
+        format_args!("parts {lens:?}"),
+        &whole,
+        &parse(&parts, &b, l),
+    );
+    let form = match whole {
         Ok(form) => form,
         Err(e) => return rejected(e, &[400, 413]),
     };
