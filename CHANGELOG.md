@@ -1,5 +1,22 @@
 # Changelog
 
+## [0.10.0](https://github.com/rapira-rs/rapira/compare/v0.9.2...v0.10.0) (2026-11-06)
+
+
+### Bug Fixes
+
+* **classic:** skip a queued unit whose client left ([9dbbfe5](https://github.com/rapira-rs/rapira/commit/9dbbfe51b0cb7d17937d6e6aebf60ea24b41f9ca))
+* **http,grpc:** write the layout asserts with static_assert ([dd3f6ef](https://github.com/rapira-rs/rapira/commit/dd3f6ef78c2c83f5b7e5c86b69a3b9cdf035639a))
+* **http:** keep the unused execution budget across a parked write ([9033cae](https://github.com/rapira-rs/rapira/commit/9033caeec677e0ada7f57d5e0aabb2c212de27b2))
+* **http:** remove the spool dir of a killed worker when its replacement starts ([3070ea1](https://github.com/rapira-rs/rapira/commit/3070ea116d4dff134771bfdbffe59744b2e76071))
+* **sapi:** reject PHP builds with ZEND_MAX_EXECUTION_TIMERS ([a4210e3](https://github.com/rapira-rs/rapira/commit/a4210e3029b9a6a1e4d2fdb61a24dbdeff339569))
+* spool cleanup, parked write budget and gone clients in classic mode ([25a3e18](https://github.com/rapira-rs/rapira/commit/25a3e1867051ab3c64c24c28bec255218053ff83))
+
+
+### Miscellaneous Chores
+
+* start the next release after 0.9.2 ([2f0d193](https://github.com/rapira-rs/rapira/commit/2f0d1936877395f00da0c857391f983079d958f2))
+
 ## [0.9.2](https://github.com/rapira-rs/rapira/compare/v0.9.1...v0.9.2) (2026-11-01)
 
 ### ⚠️ Breaking Changes
