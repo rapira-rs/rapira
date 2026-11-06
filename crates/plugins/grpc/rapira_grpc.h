@@ -16,12 +16,9 @@ static_assert(offsetof(rapira_grpc_call_obj, held) == 0,
               "the held word must be the first field of the prefix");
 
 typedef struct {
-    void *state; // borrowed from the call; the free_obj of the call sets it to NULL
+    rapira_held held; // a copy of the held word of the call; the free_obj of the call zeroes it
     zend_object std;
 } rapira_grpc_metadata_obj;
-// Rust writes state through handlers.offset, the arithmetic of HeldPtr::of
-static_assert(offsetof(rapira_grpc_metadata_obj, state) == 0,
-              "the borrowed state must be the first field of the prefix");
 
 // Class entries that rapira_grpc.c reads; rapira_grpc_register_classes assigns
 // them in MINIT, after the base classes. Rust declares its own externs
@@ -31,6 +28,7 @@ extern zend_class_entry *rapira_ce_grpc_method_kind;
 extern zend_class_entry *rapira_ce_grpc_protocol;
 extern zend_class_entry *rapira_ce_grpc_status;
 extern zend_class_entry *rapira_ce_grpc_metadata;
+extern zend_class_entry *rapira_ce_internal_grpc_response_metadata;
 
 void rapira_grpc_register_classes(void);
 

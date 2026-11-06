@@ -24,9 +24,10 @@ static zend_object_handlers rapira_grpc_metadata_handlers;
 // offset
 static void rapira_grpc_call_free(zend_object *std) {
     rapira_grpc_call_obj *obj = rapira_grpc_call_from(std);
-    // a kept ResponseMetadata object must not reach the freed state
+    // a kept ResponseMetadata object must not reach the freed unit
     if (Z_TYPE(obj->metadata) == IS_OBJECT) {
-        rapira_grpc_metadata_from(Z_OBJ(obj->metadata))->state = NULL;
+        rapira_grpc_metadata_from(Z_OBJ(obj->metadata))->held =
+            (rapira_held){0};
     }
     rapira_rs_held_drop(std);
     // no-op on IS_UNDEF

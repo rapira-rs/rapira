@@ -1,6 +1,6 @@
 //! The `GrpcState` work unit, the request Metadata and Context, the services list, and the Rust behind the methods of UnaryCall and ResponseMetadata.
 
-use std::ffi::{CStr, c_char, c_void};
+use std::ffi::{CStr, c_char};
 
 use base64::Engine as _;
 use base64::alphabet;
@@ -23,7 +23,7 @@ use tokio::sync::oneshot;
 use super::{
     rapira_ce_grpc_context, rapira_ce_grpc_error_detail, rapira_ce_grpc_metadata,
     rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind, rapira_ce_grpc_protocol,
-    rapira_ce_grpc_service_info, rapira_ce_grpc_status, rapira_ce_internal_grpc_response_metadata,
+    rapira_ce_grpc_service_info, rapira_ce_grpc_status,
 };
 use crate::{MethodInfo, RpcStatus, StatusDetail, UnaryCall, UnaryReply};
 
@@ -515,26 +515,6 @@ pub unsafe extern "C" fn rapira_rs_grpc_context(held: *const HeldPtr, memo: *mut
     })
 }
 
-/// Creates the accumulator into `memo`, the metadata memo of the call object. The C shell keeps the memo check.
-/// The accumulator borrows the state of the call. The state pointer is the first prefix word of rapira_grpc_metadata_obj, and Rust reaches it through handlers.offset as `HeldPtr::of` reaches the held word.
-/// # Safety
-/// As `rapira_rs_grpc_context`.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_grpc_response_metadata(
-    held: *const HeldPtr,
-    memo: *mut zval,
-) -> bool {
-    guard(false, || unsafe {
-        let mut metadata: zval = std::mem::zeroed();
-        let _ = object_init_ex(&mut metadata, rapira_ce_internal_grpc_response_metadata);
-        let obj = metadata.value.obj;
-        let state: *mut *mut c_void = obj.byte_sub((*(*obj).handlers).offset as usize).cast();
-        *state = (*held).state::<GrpcState>().cast();
-        *memo = metadata;
-        true
-    })
-}
-
 /// # Safety
 /// `held` the slot of a live call; `message` points at `len` readable bytes; engine active.
 #[unsafe(no_mangle)]
@@ -592,10 +572,10 @@ pub unsafe extern "C" fn rapira_rs_grpc_fail(
 }
 
 /// # Safety
-/// `state` NULL (the call object is gone) or from receive; `name` and `value` point at their readable bytes; engine active.
+/// `held` holds no unit, or is a copy of the held word of a live call that receive() attached; `name` and `value` point at their readable bytes; engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_add(
-    state: *mut c_void,
+    held: *const HeldPtr,
     trailer: bool,
     binary: bool,
     name: *const c_char,
@@ -607,7 +587,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_add(
         let name = std::slice::from_raw_parts(name.cast::<u8>(), name_len);
         let value = std::slice::from_raw_parts(value.cast::<u8>(), value_len);
         thrown(add_core(
-            state.cast::<GrpcState>().as_mut(),
+            (*held).try_state::<GrpcState>().map(|st| &mut *st),
             trailer,
             binary,
             name,
@@ -618,15 +598,15 @@ pub unsafe extern "C" fn rapira_rs_grpc_add(
 
 /// What one half holds so far, with raw `-bin` values. Empty when the call object is gone.
 /// # Safety
-/// `state` NULL or from receive; `rv` writable; engine active.
+/// `held` as in `rapira_rs_grpc_add`; `rv` writable; engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_snapshot(
-    state: *const c_void,
+    held: *const HeldPtr,
     trailer: bool,
     rv: *mut zval,
 ) -> bool {
     guard(false, || unsafe {
-        let fields: &[_] = match state.cast::<GrpcState>().as_ref() {
+        let fields: &[_] = match (*held).try_state::<GrpcState>().map(|st| &*st) {
             Some(st) if trailer => &st.trailers,
             Some(st) => &st.headers,
             None => &[],

@@ -22,7 +22,6 @@ unsafe extern "C" {
     pub static mut rapira_ce_internal_grpc_dispatcher: *mut zend_class_entry;
     pub static mut rapira_ce_internal_grpc_dispatcher_info: *mut zend_class_entry;
     pub static mut rapira_ce_internal_grpc_unary_call: *mut zend_class_entry;
-    pub static mut rapira_ce_internal_grpc_response_metadata: *mut zend_class_entry;
     pub fn rapira_grpc_register_classes();
 }
 

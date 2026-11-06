@@ -29,15 +29,14 @@ extern bool rapira_rs_grpc_kind_streams(const char *value, size_t len,
 extern bool rapira_rs_grpc_services(zval *rv);
 extern const char *rapira_rs_grpc_message(const rapira_held *held, size_t *len);
 extern bool rapira_rs_grpc_context(const rapira_held *held, zval *memo);
-extern bool rapira_rs_grpc_response_metadata(const rapira_held *held,
-                                             zval *memo);
 extern bool rapira_rs_grpc_respond(const rapira_held *held, const char *message,
                                    size_t len);
 extern bool rapira_rs_grpc_fail(const rapira_held *held, zend_object *status);
-extern bool rapira_rs_grpc_add(void *state, bool trailer, bool binary,
-                               const char *name, size_t name_len,
+extern bool rapira_rs_grpc_add(const rapira_held *held, bool trailer,
+                               bool binary, const char *name, size_t name_len,
                                const char *value, size_t value_len);
-extern bool rapira_rs_grpc_snapshot(const void *state, bool trailer, zval *rv);
+extern bool rapira_rs_grpc_snapshot(const rapira_held *held, bool trailer,
+                                    zval *rv);
 
 // $entries is property slot 0 and the constructor always sets it.
 static zend_always_inline zval *
@@ -244,9 +243,9 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getResponseMetadata) {
     ZEND_PARSE_PARAMETERS_NONE();
     rapira_grpc_call_obj *call = rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS));
     if (Z_ISUNDEF(call->metadata)) {
-        RAPIRA_RETURN_THROWS_UNLESS(
-            rapira_rs_grpc_response_metadata(&call->held, &call->metadata),
-            "getResponseMetadata");
+        object_init_ex(&call->metadata,
+                       rapira_ce_internal_grpc_response_metadata);
+        rapira_grpc_metadata_from(Z_OBJ(call->metadata))->held = call->held;
     }
     RETURN_COPY(&call->metadata);
 }
@@ -274,8 +273,7 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, fail) {
         "fail");
 }
 
-// state is NULL after the call object is gone; Rust then throws
-// AlreadyFinalizedError
+// the free_obj of the call zeroes held; Rust then throws AlreadyFinalizedError
 static void grpc_add(INTERNAL_FUNCTION_PARAMETERS, bool trailer, bool binary,
                      const char *what) {
     zend_string *name, *value;
@@ -284,9 +282,10 @@ static void grpc_add(INTERNAL_FUNCTION_PARAMETERS, bool trailer, bool binary,
     Z_PARAM_STR(value)
     ZEND_PARSE_PARAMETERS_END();
 
-    void *state = rapira_grpc_metadata_from(Z_OBJ_P(ZEND_THIS))->state;
+    const rapira_held *held =
+        &rapira_grpc_metadata_from(Z_OBJ_P(ZEND_THIS))->held;
     RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_grpc_add(state, trailer, binary, ZSTR_VAL(name),
+        rapira_rs_grpc_add(held, trailer, binary, ZSTR_VAL(name),
                            ZSTR_LEN(name), ZSTR_VAL(value), ZSTR_LEN(value)),
         what);
 }
@@ -307,13 +306,14 @@ ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addBinaryTrailer) {
     grpc_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, true, true, "addBinaryTrailer");
 }
 
-// state is NULL after the call object is gone; the snapshot is then empty
+// the free_obj of the call zeroes held; the snapshot is then empty
 static void grpc_snapshot(INTERNAL_FUNCTION_PARAMETERS, bool trailer,
                           const char *what) {
     ZEND_PARSE_PARAMETERS_NONE();
-    void *state = rapira_grpc_metadata_from(Z_OBJ_P(ZEND_THIS))->state;
+    const rapira_held *held =
+        &rapira_grpc_metadata_from(Z_OBJ_P(ZEND_THIS))->held;
     RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_grpc_snapshot(state, trailer, return_value), what);
+        rapira_rs_grpc_snapshot(held, trailer, return_value), what);
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, headers) {
