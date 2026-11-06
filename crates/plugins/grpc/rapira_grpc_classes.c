@@ -20,15 +20,15 @@ zend_class_entry *rapira_ce_internal_grpc_response_metadata;
 static zend_object_handlers rapira_grpc_call_handlers;
 static zend_object_handlers rapira_grpc_metadata_handlers;
 
-// free_obj hands the call back to Rust, which finds it through the handler
-// offset
+// free_obj hands the call back to Rust
 static void rapira_grpc_call_free(zend_object *std) {
     rapira_grpc_call_obj *obj = rapira_grpc_call_from(std);
-    // a kept ResponseMetadata object must not reach the freed state
+    // a kept ResponseMetadata object must not reach the freed unit
     if (Z_TYPE(obj->metadata) == IS_OBJECT) {
-        rapira_grpc_metadata_from(Z_OBJ(obj->metadata))->state = NULL;
+        rapira_grpc_metadata_from(Z_OBJ(obj->metadata))->held =
+            (rapira_held){0};
     }
-    rapira_rs_held_drop(std);
+    rapira_rs_held_drop(&obj->held);
     // no-op on IS_UNDEF
     zval_ptr_dtor(&obj->message);
     zval_ptr_dtor(&obj->context);
@@ -97,6 +97,9 @@ void rapira_grpc_register_classes(void) {
         register_class_Rapira_Internal_Grpc_ResponseMetadata(
             grpc_response_metadata);
 
+    // Reflection does not skip the constructor of a final class with
+    // create_object, so only get_dispatcher() creates the object.
+    rapira_ce_internal_grpc_dispatcher->create_object = rapira_object_create;
     rapira_ce_internal_grpc_dispatcher->default_object_handlers =
         &rapira_dispatcher_handlers;
 

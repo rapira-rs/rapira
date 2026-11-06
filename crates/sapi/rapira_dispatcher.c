@@ -5,14 +5,21 @@ extern void rapira_rs_log_call(zend_string *message, zend_object *level,
                                HashTable *context);
 extern bool rapira_rs_receive(int64_t timeout_us, zval *return_value);
 extern bool rapira_rs_try_receive(zval *return_value);
-extern bool rapira_rs_dispatcher_info(zval *return_value);
-extern bool rapira_rs_get_dispatcher(zval *return_value);
-extern bool rapira_rs_held_is_finalized(zend_object *obj);
-extern bool rapira_rs_held_is_cancelled(zend_object *obj);
+extern void rapira_rs_dispatcher_counts(zend_long *pending, zend_long *active);
+extern bool rapira_rs_held_is_finalized(const rapira_held *held);
+extern bool rapira_rs_held_is_cancelled(const rapira_held *held);
 extern int rapira_rs_handle_request(zend_fcall_info *fci,
                                     zend_fcall_info_cache *fcc);
 
 int rapira_mode = RAPIRA_MODE_CLASSIC;
+
+zend_class_entry *rapira_plugin_ce_dispatcher;
+zend_class_entry *rapira_plugin_ce_info;
+zend_class_entry *rapira_plugin_ce_unit;
+const char *rapira_plugin_busy;
+
+// the memoized plugin Dispatcher of this cycle; RSHUTDOWN releases it
+static zval rapira_dispatcher_memo;
 
 ZEND_FUNCTION(Rapira_get_version) {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -36,9 +43,27 @@ ZEND_FUNCTION(Rapira_get_mode) {
 
 ZEND_FUNCTION(Rapira_get_dispatcher) {
     ZEND_PARSE_PARAMETERS_NONE();
-    RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_get_dispatcher(return_value),
-                                "get_dispatcher");
+    if (rapira_mode != RAPIRA_MODE_DISPATCHER) {
+        zend_throw_exception(rapira_ce_no_dispatcher_error,
+                             "Dispatcher is only available in Mode::Dispatcher",
+                             0);
+        RETURN_THROWS();
+    }
+    if (Z_ISUNDEF(rapira_dispatcher_memo)) {
+        object_init_ex(&rapira_dispatcher_memo, rapira_plugin_ce_dispatcher);
+    }
+    RETURN_COPY(&rapira_dispatcher_memo);
 }
+
+// RSHUTDOWN calls it after the shutdown functions
+void rapira_dispatcher_release(void) {
+    zval_ptr_dtor(&rapira_dispatcher_memo);
+    ZVAL_UNDEF(&rapira_dispatcher_memo);
+}
+
+// A bailout in RSHUTDOWN skips the release. The object store teardown frees
+// the object, so this function clears the zval and calls no dtor.
+void rapira_dispatcher_forget(void) { ZVAL_UNDEF(&rapira_dispatcher_memo); }
 
 // a nested handle_request() would rebind SG(server_context) over the live unit
 static bool rapira_in_handle_request = false;
@@ -99,6 +124,10 @@ ZEND_FUNCTION(rapira_sapi_receive) {
     Z_PARAM_LONG(timeout)
     ZEND_PARSE_PARAMETERS_END();
 
+    if (timeout < -1) {
+        zend_argument_value_error(1, "must be greater than or equal to -1");
+        RETURN_THROWS();
+    }
     RAPIRA_RETURN_THROWS_UNLESS(
         rapira_rs_receive((int64_t)timeout, return_value), "receive");
 }
@@ -111,8 +140,10 @@ ZEND_FUNCTION(rapira_sapi_try_receive) {
 
 ZEND_FUNCTION(rapira_sapi_get_info) {
     ZEND_PARSE_PARAMETERS_NONE();
-    RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_dispatcher_info(return_value),
-                                "getInfo");
+    object_init_ex(return_value, rapira_plugin_ce_info);
+    rapira_dispatcher_info_obj *info =
+        rapira_dispatcher_info_from(Z_OBJ_P(return_value));
+    rapira_rs_dispatcher_counts(&info->pending, &info->active);
 }
 
 ZEND_FUNCTION(rapira_sapi_pending_count) {
@@ -127,12 +158,14 @@ ZEND_FUNCTION(rapira_sapi_active_count) {
 
 ZEND_FUNCTION(rapira_sapi_is_finalized) {
     ZEND_PARSE_PARAMETERS_NONE();
-    RETURN_BOOL(rapira_rs_held_is_finalized(Z_OBJ_P(ZEND_THIS)));
+    RETURN_BOOL(
+        rapira_rs_held_is_finalized(rapira_held_of(Z_OBJ_P(ZEND_THIS))));
 }
 
 ZEND_FUNCTION(rapira_sapi_is_cancelled) {
     ZEND_PARSE_PARAMETERS_NONE();
-    RETURN_BOOL(rapira_rs_held_is_cancelled(Z_OBJ_P(ZEND_THIS)));
+    RETURN_BOOL(
+        rapira_rs_held_is_cancelled(rapira_held_of(Z_OBJ_P(ZEND_THIS))));
 }
 
 ZEND_FUNCTION(rapira_sapi_dispatcher_construct) {

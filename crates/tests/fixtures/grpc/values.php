@@ -2,9 +2,12 @@
 
 use Rapira\Grpc\Call\Context;
 use Rapira\Grpc\Call\Protocol;
+use Rapira\Grpc\ErrorDetail;
 use Rapira\Grpc\Exception\GrpcException;
 use Rapira\Grpc\Metadata;
+use Rapira\Grpc\MethodInfo;
 use Rapira\Grpc\MethodKind;
+use Rapira\Grpc\ServiceInfo;
 use Rapira\Grpc\Status;
 use Rapira\Grpc\StatusCode;
 use Rapira\InetAddress;
@@ -94,6 +97,35 @@ $cases = [
             }
         })->status->code->name,
     ],
+    [
+        'name' => 'error detail keeps its pair',
+        'run' => static function (): string {
+            $d = new ErrorDetail('type.googleapis.com/google.rpc.RetryInfo', 'v');
+            return implode('|', [$d->typeUrl, $d->value]);
+        },
+    ],
+    [
+        'name' => 'status keeps its triple',
+        'run' => static function (): string {
+            $s = new Status(StatusCode::NotFound, 'nf', [new ErrorDetail('t', 'v')]);
+            return implode('|', [$s->code->name, $s->message, $s->details[0]->typeUrl]);
+        },
+    ],
+    [
+        'name' => 'method info keeps its four values',
+        'run' => static function (): string {
+            $m = new MethodInfo('m', 'in', 'out', MethodKind::ServerStreaming);
+            return implode('|', [$m->name, $m->inputType, $m->outputType, $m->kind->value]);
+        },
+    ],
+    [
+        'name' => 'service info keeps its methods',
+        'run' => static function (): string {
+            $m = new MethodInfo('m', 'in', 'out', MethodKind::Unary);
+            $s = new ServiceInfo('s', [$m, $m]);
+            return $s->name . '|' . count($s->methods);
+        },
+    ],
     // The host reads the properties that the constructor sets.
     [
         'name' => 'status needs its constructor',
@@ -103,7 +135,35 @@ $cases = [
         'name' => 'metadata needs its constructor',
         'run' => fn () => (string) count((new \ReflectionClass(Metadata::class))->newInstanceWithoutConstructor()),
     ],
+    // Only \Rapira\get_dispatcher() creates the dispatcher.
+    [
+        'name' => 'dispatcher needs the host',
+        'run' => fn () => (new \ReflectionClass(\Rapira\Internal\Grpc\Dispatcher::class))->newInstanceWithoutConstructor()::class,
+    ],
     ['name' => 'context rejects a remote that is not an address', 'run' => fn () => $context('nope')],
+    [
+        'name' => 'context keeps its seven values',
+        'run' => static function () use ($sample): string {
+            $c = new Context(
+                'rapira.test.v1.EchoService/Echo',
+                $sample(),
+                2.5,
+                new InetAddress('203.0.113.7', 44123),
+                null,
+                Protocol::GrpcWeb,
+                1722700000.25,
+            );
+            return implode('|', [
+                $c->method,
+                count($c->metadata),
+                $c->deadline,
+                $c->remote->ip,
+                var_export($c->tls, true),
+                $c->protocol->value,
+                $c->receivedAt,
+            ]);
+        },
+    ],
     [
         'name' => 'context keeps a null tls',
         'run' => fn () => var_export($context(new InetAddress('203.0.113.7', 44123))->tls, true),

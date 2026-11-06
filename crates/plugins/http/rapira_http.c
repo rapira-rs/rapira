@@ -1,22 +1,5 @@
 #include "rapira_http.h"
 
-// rust glue (src/php/values.rs): these return false with a PHP exception already pending
-extern bool rapira_rs_ctor_form_field(zend_object *obj, zend_string *name,
-                                      zend_string *value, zval *headers);
-extern bool rapira_rs_ctor_uploaded_file(zend_object *obj, zend_string *name,
-                                         zend_string *client_filename,
-                                         zend_string *client_media_type,
-                                         zval *headers, zend_string *tmp_path,
-                                         int64_t size);
-extern bool rapira_rs_ctor_multipart(zend_object *obj, zval *fields,
-                                     zval *files);
-extern bool rapira_rs_ctor_request(zend_object *obj, zend_string *method,
-                                   zend_string *uri, zend_string *target,
-                                   zend_string *authority,
-                                   zend_string *protocol, zval *headers,
-                                   zval *body, zval *remote, zval *server,
-                                   zval *tls, double received_at);
-
 ZEND_METHOD(Rapira_Http_FormField, __construct) {
     zend_string *name, *value;
     zval *headers;
@@ -26,9 +9,11 @@ ZEND_METHOD(Rapira_Http_FormField, __construct) {
     Z_PARAM_ARRAY(headers)
     ZEND_PARSE_PARAMETERS_END();
 
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_ctor_form_field(Z_OBJ_P(ZEND_THIS), name, value, headers),
-        "FormField construction");
+    zend_class_entry *ce = Z_OBJCE_P(ZEND_THIS);
+    zend_object *obj = Z_OBJ_P(ZEND_THIS);
+    zend_update_property_str(ce, obj, ZEND_STRL("name"), name);
+    zend_update_property_str(ce, obj, ZEND_STRL("value"), value);
+    zend_update_property(ce, obj, ZEND_STRL("headers"), headers);
 }
 
 ZEND_METHOD(Rapira_Http_UploadedFile, __construct) {
@@ -44,11 +29,16 @@ ZEND_METHOD(Rapira_Http_UploadedFile, __construct) {
     Z_PARAM_LONG(size)
     ZEND_PARSE_PARAMETERS_END();
 
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_ctor_uploaded_file(Z_OBJ_P(ZEND_THIS), name, client_filename,
-                                     client_media_type, headers, tmp_path,
-                                     (int64_t)size),
-        "UploadedFile construction");
+    zend_class_entry *ce = Z_OBJCE_P(ZEND_THIS);
+    zend_object *obj = Z_OBJ_P(ZEND_THIS);
+    zend_update_property_str(ce, obj, ZEND_STRL("name"), name);
+    zend_update_property_str(ce, obj, ZEND_STRL("clientFilename"),
+                             client_filename);
+    rapira_prop_str_or_null(ce, obj, ZEND_STRL("clientMediaType"),
+                            client_media_type);
+    zend_update_property(ce, obj, ZEND_STRL("headers"), headers);
+    zend_update_property_str(ce, obj, ZEND_STRL("tmpPath"), tmp_path);
+    zend_update_property_long(ce, obj, ZEND_STRL("size"), size);
 }
 
 ZEND_METHOD(Rapira_Http_Multipart, __construct) {
@@ -58,9 +48,10 @@ ZEND_METHOD(Rapira_Http_Multipart, __construct) {
     Z_PARAM_ARRAY(files)
     ZEND_PARSE_PARAMETERS_END();
 
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_ctor_multipart(Z_OBJ_P(ZEND_THIS), fields, files),
-        "Multipart construction");
+    zend_class_entry *ce = Z_OBJCE_P(ZEND_THIS);
+    zend_object *obj = Z_OBJ_P(ZEND_THIS);
+    zend_update_property(ce, obj, ZEND_STRL("fields"), fields);
+    zend_update_property(ce, obj, ZEND_STRL("files"), files);
 }
 
 ZEND_METHOD(Rapira_Http_Request, __construct) {
@@ -82,6 +73,10 @@ ZEND_METHOD(Rapira_Http_Request, __construct) {
     Z_PARAM_DOUBLE(received_at)
     ZEND_PARSE_PARAMETERS_END();
 
+    if (!rapira_address_arg(remote, 8) || !rapira_address_arg(server, 9)) {
+        RETURN_THROWS();
+    }
+
     // borrowed body zval: ownership stays with ZPP, no refcount taken
     zval body;
     if (body_obj != NULL) {
@@ -90,9 +85,21 @@ ZEND_METHOD(Rapira_Http_Request, __construct) {
         ZVAL_STR(&body, body_str);
     }
 
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_ctor_request(Z_OBJ_P(ZEND_THIS), method, uri, target,
-                               authority, protocol, headers, &body, remote,
-                               server, tls, received_at),
-        "Request construction");
+    zend_class_entry *ce = Z_OBJCE_P(ZEND_THIS);
+    zend_object *obj = Z_OBJ_P(ZEND_THIS);
+    zend_update_property_str(ce, obj, ZEND_STRL("method"), method);
+    zend_update_property_str(ce, obj, ZEND_STRL("uri"), uri);
+    zend_update_property_str(ce, obj, ZEND_STRL("target"), target);
+    rapira_prop_str_or_null(ce, obj, ZEND_STRL("authority"), authority);
+    zend_update_property_str(ce, obj, ZEND_STRL("protocol"), protocol);
+    zend_update_property(ce, obj, ZEND_STRL("headers"), headers);
+    zend_update_property(ce, obj, ZEND_STRL("body"), &body);
+    zend_update_property(ce, obj, ZEND_STRL("remote"), remote);
+    zend_update_property(ce, obj, ZEND_STRL("server"), server);
+    if (tls) {
+        zend_update_property(ce, obj, ZEND_STRL("tls"), tls);
+    } else {
+        zend_update_property_null(ce, obj, ZEND_STRL("tls"));
+    }
+    zend_update_property_double(ce, obj, ZEND_STRL("receivedAt"), received_at);
 }

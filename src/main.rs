@@ -18,6 +18,12 @@ mod worker;
 #[global_allocator]
 static GLOBAL: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
+/// The class register functions of the linked plugins. MINIT calls them in this order.
+static PLUGIN_REGISTERS: [unsafe extern "C" fn(); 2] = [
+    rapira_http::rapira_http_register_classes,
+    rapira_grpc::rapira_grpc_register_classes,
+];
+
 #[derive(Parser)]
 #[command(name = "rapira", version, about)]
 struct Cli {
@@ -150,10 +156,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     let pool_cfgs: Vec<PoolConfig> = pools.iter().map(PoolRun::config).collect();
 
     // MINIT once, after every pool bound its listeners. Every linked plugin registers its classes, whatever pools are configured.
-    let module: rapira_sapi::PhpModule = rapira_sapi::boot_master(&[
-        rapira_http::rapira_http_register_classes,
-        rapira_grpc::rapira_grpc_register_classes,
-    ])?;
+    let module: rapira_sapi::PhpModule = rapira_sapi::boot_master(&PLUGIN_REGISTERS)?;
 
     // forks ------------------------------------------------------------------
     let grace: Duration = settings.supervisor.process_control_timeout;

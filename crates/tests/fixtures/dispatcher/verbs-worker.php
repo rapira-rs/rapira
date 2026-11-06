@@ -97,8 +97,8 @@ try {
             }
             try {
                 $d->receive(-2);
-            } catch (\ValueError) {
-                $out[] = 'neg-timeout';
+            } catch (\ValueError $e) {
+                $out[] = $e::class . ': ' . $e->getMessage();
             }
             try {
                 $ex->writeBody(implode(';', $out), eos: true);

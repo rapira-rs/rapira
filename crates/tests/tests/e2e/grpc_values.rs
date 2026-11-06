@@ -68,11 +68,26 @@ const CASES: &[(&str, &str)] = &[
     ),
     ("grpc exception carries its status", "NotFound|nf|nf|0"),
     ("grpc exception subclass calls the parent", "Aborted"),
+    (
+        "error detail keeps its pair",
+        "type.googleapis.com/google.rpc.RetryInfo|v",
+    ),
+    ("status keeps its triple", "NotFound|nf|t"),
+    (
+        "method info keeps its four values",
+        "m|in|out|server-streaming",
+    ),
+    ("service info keeps its methods", "s|2"),
     ("status needs its constructor", "ReflectionException"),
     ("metadata needs its constructor", "ReflectionException"),
+    ("dispatcher needs the host", "ReflectionException"),
     (
         "context rejects a remote that is not an address",
         "TypeError",
+    ),
+    (
+        "context keeps its seven values",
+        "rapira.test.v1.EchoService/Echo|2|2.5|203.0.113.7|NULL|grpc-web|1722700000.25",
     ),
     ("context keeps a null tls", "NULL"),
 ];

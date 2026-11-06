@@ -100,30 +100,25 @@ unsafe fn build_multipart(dst: *mut zval, field_parts: &[FieldPart], file_parts:
     }
 }
 
-/// False means a throw is pending; a caught panic returns false without one and the C shell throws instead.
+/// Builds the Request into `memo`, the request memo of the exchange object. The C shell keeps the memo check. False means a throw is pending; a caught panic returns false without one and the C shell throws instead.
 /// # Safety
-/// `ex` is a live exchange that receive() attached; `return_value` is writable.
+/// `held` is the held word of a live exchange that receive() attached; `memo` is writable and IS_UNDEF.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_build_request(
-    ex: *mut ExchangeObj,
-    return_value: *mut zval,
+    held: *const HeldPtr,
+    memo: *mut zval,
 ) -> bool {
-    guard(false, || unsafe { build_request_impl(ex, return_value) })
+    guard(false, || unsafe { build_request_impl(held, memo) })
 }
 
 /// Slot offsets of the `Request` properties in declaration order; the class is fixed after MINIT.
 static REQUEST_SLOTS: OnceLock<[u32; 11]> = OnceLock::new();
 
 /// No write here throws. A Zend OOM bails out through this frame, so `RequestView` keeps the owned values in the state.
-unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> bool {
+unsafe fn build_request_impl(held: *const HeldPtr, memo: *mut zval) -> bool {
     unsafe {
-        if !zend::is_undef(&(*ex).request) {
-            *return_value = (*ex).request;
-            zval_add_ref(return_value);
-            return true;
-        }
         let ce: *mut zend_class_entry = rapira_ce_http_request;
-        let st = &mut *(*ex).held.state::<ExchangeState>();
+        let st = &mut *(*held).state::<ExchangeState>();
         let req = &st.req;
         let view = st.view.get_or_insert_with(|| RequestView::new(req));
 
@@ -185,9 +180,7 @@ unsafe fn build_request_impl(ex: *mut ExchangeObj, return_value: *mut zval) -> b
         zend::slot_null(o, tls_slot);
         zend::slot_double(o, received_at_slot, req.received_at);
 
-        (*ex).request = reqz;
-        *return_value = reqz;
-        zval_add_ref(return_value);
+        *memo = reqz;
         true
     }
 }

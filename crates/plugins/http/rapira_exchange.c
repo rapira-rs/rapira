@@ -1,8 +1,8 @@
 #include "rapira_http.h"
 
 // rust glue; the verbs throw from Rust and report false with the throw pending
-extern bool rapira_rs_exchange_build_request(rapira_exchange_obj *ex,
-                                             zval *return_value);
+extern bool rapira_rs_exchange_build_request(const rapira_held *held,
+                                             zval *memo);
 extern bool rapira_rs_exchange_write_head(const rapira_held *held,
                                           int64_t status, HashTable *headers);
 extern bool rapira_rs_exchange_write_body(const rapira_held *held,
@@ -65,6 +65,15 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, sendFile) {
     Z_PARAM_BOOL(eos)
     ZEND_PARSE_PARAMETERS_END();
 
+    if (offset < 0) {
+        zend_argument_value_error(2, "must be greater than or equal to 0");
+        RETURN_THROWS();
+    }
+    if (!length_is_null && length < 1) {
+        zend_argument_value_error(3, "must be greater than or equal to 1");
+        RETURN_THROWS();
+    }
+
     const rapira_held *held = exchange_held(ZEND_THIS);
     RAPIRA_RETURN_THROWS_UNLESS(
         rapira_rs_exchange_send_file(held, ZSTR_VAL(path), ZSTR_LEN(path),
@@ -90,10 +99,14 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
     RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_exchange_flush(held), "flush");
 }
 
-// the request graph builder lives in Rust (src/php/); this shell owns the macro layer
+// the request graph builder lives in Rust (src/php/); this shell owns the memo
 ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest) {
     ZEND_PARSE_PARAMETERS_NONE();
     rapira_exchange_obj *ex = rapira_exchange_from(Z_OBJ_P(ZEND_THIS));
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_exchange_build_request(ex, return_value), "getRequest");
+    if (Z_ISUNDEF(ex->request)) {
+        RAPIRA_RETURN_THROWS_UNLESS(
+            rapira_rs_exchange_build_request(&ex->held, &ex->request),
+            "getRequest");
+    }
+    RETURN_COPY(&ex->request);
 }

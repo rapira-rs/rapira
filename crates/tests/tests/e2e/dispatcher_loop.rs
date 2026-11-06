@@ -180,14 +180,20 @@ fn empty_non_eos_chunk_does_nothing() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Verb edges: `tryReceive()` with a unit out is the single-flight `\Error`, a timeout below -1 is `\ValueError`, and `writeHead()` after eos is `HeadAlreadyWrittenError`.
+/// Verb edges: `tryReceive()` with a unit out is the single-flight `\Error`, a timeout below -1 is `\ValueError` with the argument message, and `writeHead()` after eos is `HeadAlreadyWrittenError`.
 #[test]
 fn verb_edges_throw_their_documented_classes() -> anyhow::Result<()> {
     let mut srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php"))
         .json_log()
         .spawn();
     let StatusBody { status, body } = drain(submit(srv.addr, req("/?probe=verb-edges"))?);
-    assert_eq!((status, body.as_str()), (200, "try-busy;neg-timeout"));
+    assert_eq!(
+        (status, body.as_str()),
+        (
+            200,
+            r"try-busy;ValueError: Rapira\Internal\Http\Dispatcher::receive(): Argument #1 ($timeout) must be greater than or equal to -1"
+        )
+    );
     srv.stop();
 
     let records = server_log::app_contexts(&srv.log_file(), "head-after-eos");
@@ -1436,6 +1442,7 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
 
 /// sendFile rejects a directory, an offset or a slice past the end of the file, and a symlink out of the root before anything is written, so the handler answers 403.
 /// A symlink inside the root stays sendable, and a slice longer than two 256 KiB plugin reads keeps its offset across the reads.
+/// A negative offset or a length below 1 is a ValueError, and the handler answers 400 with its message.
 #[test]
 fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
     struct Case {
@@ -1497,6 +1504,20 @@ fn sendfile_validates_the_path_and_the_slice() -> anyhow::Result<()> {
             query: "&offset=1024&length=540672",
             status: 200,
             body: pattern[1024..1024 + 528 * 1024].to_vec(),
+        },
+        Case {
+            name: "negative offset",
+            path: payload.clone(),
+            query: "&offset=-1",
+            status: 400,
+            body: br"ValueError: Rapira\Internal\Http\Exchange::sendFile(): Argument #2 ($offset) must be greater than or equal to 0".to_vec(),
+        },
+        Case {
+            name: "zero length",
+            path: payload.clone(),
+            query: "&length=0",
+            status: 400,
+            body: br"ValueError: Rapira\Internal\Http\Exchange::sendFile(): Argument #3 ($length) must be greater than or equal to 1".to_vec(),
         },
     ];
 

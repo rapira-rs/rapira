@@ -60,11 +60,6 @@ impl UnitRx {
     }
 }
 
-thread_local! {
-    /// The register functions that MINIT calls after the base classes. MINIT runs on the thread that calls `boot_master`.
-    static REGISTER_FNS: RefCell<Vec<unsafe extern "C" fn()>> = const { RefCell::new(Vec::new()) };
-}
-
 pub struct PhpModule {}
 
 impl Drop for PhpModule {
@@ -122,9 +117,13 @@ pub fn linked_php_version() -> String {
 }
 
 /// MINIT once in the master. Base classes first, then each register function in order.
-pub fn boot_master(register: &[unsafe extern "C" fn()]) -> anyhow::Result<PhpModule> {
+pub fn boot_master(register: &'static [unsafe extern "C" fn()]) -> anyhow::Result<PhpModule> {
     check_linked_php()?;
-    REGISTER_FNS.set(register.to_vec());
+    // SAFETY: the master writes them once, before MINIT reads them. register is 'static, so the pointer stays valid. Option<unsafe extern "C" fn()>, the element type bindgen gives, has the layout of the fn pointer.
+    unsafe {
+        rapira_plugin_registers = register.as_ptr().cast();
+        rapira_plugin_register_count = register.len();
+    }
     let mut module: _sapi_module_struct = module::build_sapi_module();
     let started: bool = unsafe {
         // The Rust runtime sets SIGPIPE to SIG_IGN before main, so a write to a closed peer returns EPIPE: https://doc.rust-lang.org/beta/unstable-book/compiler-flags/on-broken-pipe.html
@@ -141,17 +140,6 @@ pub fn boot_master(register: &[unsafe extern "C" fn()]) -> anyhow::Result<PhpMod
     }
     unsafe { rapira_register_post_reader() };
     Ok(module)
-}
-
-/// MINIT calls it after the base classes (module.c).
-#[unsafe(no_mangle)]
-pub extern "C" fn rapira_rs_register_plugin_classes() {
-    REGISTER_FNS.with_borrow(|register| {
-        for f in register {
-            // SAFETY: MINIT runs on the booting thread, and the base classes the plugin classes extend are registered.
-            unsafe { f() };
-        }
-    });
 }
 
 impl Rapira {
@@ -241,7 +229,13 @@ impl Rapira {
 fn worker_main(mode: Mode, entrypoint: PathBuf, rx: UnitRx, classes: DispatcherClasses) {
     UNIT_RX.with_borrow_mut(|slot| *slot = Some(rx));
     if mode == Mode::Dispatcher {
-        crate::exchange::set_classes(classes);
+        // SAFETY: written once on the PHP thread before any PHP runs on it.
+        unsafe {
+            rapira_plugin_ce_dispatcher = (classes.dispatcher)();
+            rapira_plugin_ce_info = (classes.info)();
+            rapira_plugin_ce_unit = (classes.unit)();
+            rapira_plugin_busy = classes.busy.as_ptr();
+        }
     }
     loop {
         unsafe {

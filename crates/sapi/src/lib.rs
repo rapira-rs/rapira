@@ -13,7 +13,6 @@ mod rapira_worker;
 pub mod scoreboard;
 mod start;
 pub mod types;
-pub mod values;
 pub mod work;
 pub mod zend;
 

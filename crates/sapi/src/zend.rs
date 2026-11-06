@@ -2,7 +2,7 @@ use std::ffi::{CStr, c_char};
 
 use crate::{
     HashPosition, HashTable, IS_DOUBLE, IS_LONG, IS_NULL, IS_PROP_REINITABLE, IS_PROP_UNINIT,
-    IS_REFERENCE, IS_UNDEF, executor_globals, rapira_zval_stringl, zend_class_entry,
+    IS_REFERENCE, executor_globals, rapira_zval_stringl, zend_class_entry,
     zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object,
     zend_property_info, zend_read_property, zend_string, zend_throw_error, zend_throw_exception,
@@ -16,12 +16,6 @@ pub fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
     } else {
         bytes.as_ptr().cast()
     }
-}
-
-/// # Safety
-/// `zv` readable.
-pub unsafe fn is_undef(zv: *const zval) -> bool {
-    unsafe { u32::from((*zv).u1.v.type_) == IS_UNDEF }
 }
 
 /// # Safety
@@ -88,35 +82,6 @@ pub unsafe fn prop_zval(
     zv: *mut zval,
 ) {
     unsafe { zend_update_property(ce, obj, name.as_ptr(), name.count_bytes(), zv) }
-}
-
-/// `zend_update_property_str` shares `val` (addref), no byte copy.
-/// # Safety
-/// As `prop_stringl`; `val` a live zend_string.
-pub unsafe fn prop_zstr(
-    ce: *mut zend_class_entry,
-    obj: *mut zend_object,
-    name: &CStr,
-    val: *mut zend_string,
-) {
-    unsafe { crate::zend_update_property_str(ce, obj, name.as_ptr(), name.count_bytes(), val) }
-}
-
-/// # Safety
-/// As `prop_zstr`; `val` NULL registers the property null.
-pub unsafe fn prop_zstr_or_null(
-    ce: *mut zend_class_entry,
-    obj: *mut zend_object,
-    name: &CStr,
-    val: *mut zend_string,
-) {
-    unsafe {
-        if val.is_null() {
-            prop_null(ce, obj, name);
-        } else {
-            prop_zstr(ce, obj, name, val);
-        }
-    }
 }
 
 /// The slot offset of the property `name` declared on `ce`. Panics when `ce` declares no such property.

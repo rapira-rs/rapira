@@ -96,7 +96,7 @@ pub(super) unsafe fn send_file_core(
 }
 
 /// # Safety
-/// `held` the slot of a live exchange; `path` points at `path_len` readable bytes (ZPP-owned); engine active on this thread.
+/// `held` the slot of a live exchange; `path` points at `path_len` readable bytes (ZPP-owned); `offset >= 0`; `length >= 1` unless `length_is_null`; engine active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_send_file(
     held: *const HeldPtr,
@@ -108,20 +108,6 @@ pub unsafe extern "C" fn rapira_rs_exchange_send_file(
     eos: bool,
 ) -> bool {
     guard(false, || unsafe {
-        if offset < 0 {
-            rapira_sapi::zend_argument_value_error(
-                2,
-                c"must be greater than or equal to 0".as_ptr(),
-            );
-            return false;
-        }
-        if !length_is_null && length < 1 {
-            rapira_sapi::zend_argument_value_error(
-                3,
-                c"must be greater than or equal to 1".as_ptr(),
-            );
-            return false;
-        }
         let st = &mut *(*held).state::<ExchangeState>();
         let path = std::slice::from_raw_parts(path.cast::<u8>(), path_len);
         let length = (!length_is_null).then_some(length as u64);

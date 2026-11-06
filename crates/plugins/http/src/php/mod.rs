@@ -18,20 +18,17 @@ use rapira_sapi::work::{DispatcherClasses, Held, HeldPtr};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, zend, zend_class_entry,
-    zend_object, zval, zval_add_ref, zval_ptr_dtor,
+    zval, zval_ptr_dtor,
 };
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 
 mod headers;
-mod info;
 mod request;
 mod respond;
 mod sendfile;
 #[cfg(test)]
 mod tests;
-mod values;
 
-pub(crate) use info::set_server_identity;
 pub(crate) use sendfile::set_sendfile_root;
 
 // Class entries of the http stub; rapira_http_register_classes assigns them in MINIT (rapira_http.h).
@@ -48,14 +45,20 @@ unsafe extern "C" {
     pub static mut rapira_ce_internal_http_dispatcher_info: *mut zend_class_entry;
     pub static mut rapira_ce_internal_http_exchange: *mut zend_class_entry;
     pub fn rapira_http_register_classes();
+    // The server identity that DispatcherInfo::serverName() and serverPort() return (rapira_http.h).
+    static mut rapira_http_server_name: *const c_char;
+    static mut rapira_http_server_name_len: usize;
+    static mut rapira_http_server_port: rapira_sapi::zend_long;
 }
 
-/// Mirrors `rapira_exchange_obj` in rapira_http.h. The C fields sit before `std`.
-#[repr(C)]
-pub struct ExchangeObj {
-    pub held: HeldPtr,
-    pub request: zval,
-    pub std: zend_object,
+/// Runs once in the master before the fork; the workers inherit the values.
+pub(crate) fn set_server_identity(name: &'static str, port: u16) {
+    // SAFETY: the master is single-threaded and no PHP reads the values before the fork; name is static, so the pointer stays valid.
+    unsafe {
+        rapira_http_server_name = zend::ptr_or_empty(name.as_bytes());
+        rapira_http_server_name_len = name.len();
+        rapira_http_server_port = i64::from(port);
+    }
 }
 
 pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {

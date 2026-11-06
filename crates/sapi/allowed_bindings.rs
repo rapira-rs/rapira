@@ -11,15 +11,15 @@
     "RAPIRA_HANDLE_STOP", "RAPIRA_HANDLE_CONTINUE", "RAPIRA_HANDLE_RECYCLE",
     // the two halves of the linked-libphp version check, and the linked version string
     "PHP_VERSION_ID", "php_version_id", "php_version",
-    // the embedded-object layout; rapira_sapi.h is the source of truth
-    "rapira_dispatcher_info_obj",
     // MINIT-written class-entry globals the Rust builder reads (static mut)
-    "rapira_ce_tls", "rapira_ce_inet_address",
+    "rapira_ce_inet_address",
     "rapira_ce_unix_address", "rapira_ce_already_finalized_error",
     "rapira_ce_timeout_exception", "rapira_ce_closed_exception",
-    "rapira_ce_no_dispatcher_error",
-    "zend_argument_value_error", "zend_argument_type_error",
+    "zend_argument_type_error",
     "rapira_ce_work_discarded_exception",
+    // the plugin globals the Rust boot and worker start write (static mut)
+    "rapira_plugin_ce_dispatcher", "rapira_plugin_ce_info", "rapira_plugin_ce_unit",
+    "rapira_plugin_busy", "rapira_plugin_registers", "rapira_plugin_register_count",
     // the FOREACH macros are header-only, so the array walk uses the exported position API
     "zend_hash_internal_pointer_reset_ex", "zend_hash_get_current_key_ex",
     "zend_hash_get_current_data_ex", "zend_hash_move_forward_ex", "HashPosition",
@@ -27,7 +27,7 @@
     // zend_throw_error/zend_value_error/zend_type_error are varargs, called with a fixed format
     "zend_throw_error", "zend_value_error", "zend_type_error", "zend_throw_exception",
     // instanceof_function is inline; only its slow path is exported
-    "zend_update_property_str", "instanceof_function_slow", "zend_zval_value_name", "IS_OBJECT",
+    "instanceof_function_slow", "zend_zval_value_name", "IS_OBJECT",
     "zend_read_property", "zend_get_exception_base", "zend_ce_throwable", "php_json_encode",
     "smart_str", "PHP_JSON_PARTIAL_OUTPUT_ON_ERROR",
     // add_assoc_str/add_index_zval/smart_str_free are inline: these are their exported carriers and shim
@@ -55,7 +55,7 @@
     // zend_string_init is inline-only; the exported interner fn-pointer covers startup-time strings
     "zend_hash_str_update", "zend_string_init_interned",
     "php_default_post_reader", "php_default_treat_data", "php_default_input_filter",
-    "SAPI_HEADER_SENT_SUCCESSFULLY", "SAPI_HEADER_SEND_FAILED", "IS_UNDEF", "IS_STRING",
+    "SAPI_HEADER_SENT_SUCCESSFULLY", "SAPI_HEADER_SEND_FAILED", "IS_STRING",
     "E_WARNING", "E_CORE_WARNING", "E_COMPILE_WARNING", "E_USER_WARNING",
     "E_NOTICE", "E_USER_NOTICE", "E_DEPRECATED", "E_USER_DEPRECATED",
     "E_CORE", "E_FATAL_ERRORS", // php-src's own groupings

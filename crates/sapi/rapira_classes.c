@@ -3,16 +3,6 @@
 #include "rapira_arginfo.h"
 #include "rapira_exception_arginfo.h"
 
-// rust glue (src/values.rs): these return false with a PHP exception already
-// pending
-extern bool rapira_rs_ctor_inet_address(zend_object *obj, zend_string *ip,
-                                        int64_t port);
-extern bool rapira_rs_ctor_unix_address(zend_object *obj, zend_string *path);
-extern bool rapira_rs_ctor_tls(zend_object *obj, zend_string *version,
-                               zend_string *cipher, zend_string *negotiated,
-                               zend_string *server_name, zend_string *serial,
-                               zend_string *org, zend_string *fingerprint);
-
 zend_class_entry *rapira_ce_throwable;
 zend_class_entry *rapira_ce_work;
 zend_class_entry *rapira_ce_dispatcher;
@@ -35,6 +25,9 @@ zend_class_entry *rapira_ce_tls;
 zend_object_handlers rapira_dispatcher_handlers;
 zend_object_handlers rapira_info_handlers;
 
+void (*const *rapira_plugin_registers)(void);
+size_t rapira_plugin_register_count;
+
 // create_object for a class whose default_object_handlers set .offset: the C
 // prefix sits before std, and zend_object_alloc zeroes it
 // (Zend/zend_objects_API.h), so NULL and IS_UNDEF fields need no assignment.
@@ -55,9 +48,10 @@ ZEND_METHOD(Rapira_InetAddress, __construct) {
     Z_PARAM_LONG(port)
     ZEND_PARSE_PARAMETERS_END();
 
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_ctor_inet_address(Z_OBJ_P(ZEND_THIS), ip, (int64_t)port),
-        "InetAddress construction");
+    zend_object *obj = Z_OBJ_P(ZEND_THIS);
+    zend_update_property_str(rapira_ce_inet_address, obj, ZEND_STRL("ip"), ip);
+    zend_update_property_long(rapira_ce_inet_address, obj, ZEND_STRL("port"),
+                              port);
 }
 
 ZEND_METHOD(Rapira_UnixAddress, __construct) {
@@ -66,9 +60,8 @@ ZEND_METHOD(Rapira_UnixAddress, __construct) {
     Z_PARAM_STR_OR_NULL(path)
     ZEND_PARSE_PARAMETERS_END();
 
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_ctor_unix_address(Z_OBJ_P(ZEND_THIS), path),
-        "UnixAddress construction");
+    rapira_prop_str_or_null(rapira_ce_unix_address, Z_OBJ_P(ZEND_THIS),
+                            ZEND_STRL("path"), path);
 }
 
 ZEND_METHOD(Rapira_Tls, __construct) {
@@ -84,10 +77,30 @@ ZEND_METHOD(Rapira_Tls, __construct) {
     Z_PARAM_STR_OR_NULL(fingerprint)
     ZEND_PARSE_PARAMETERS_END();
 
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_ctor_tls(Z_OBJ_P(ZEND_THIS), version, cipher, negotiated,
-                           server_name, serial, org, fingerprint),
-        "Tls construction");
+    zend_class_entry *ce = rapira_ce_tls;
+    zend_object *obj = Z_OBJ_P(ZEND_THIS);
+    zend_update_property_str(ce, obj, ZEND_STRL("version"), version);
+    zend_update_property_str(ce, obj, ZEND_STRL("cipher"), cipher);
+    rapira_prop_str_or_null(ce, obj, ZEND_STRL("negotiatedProtocol"),
+                            negotiated);
+    rapira_prop_str_or_null(ce, obj, ZEND_STRL("requestedServerName"),
+                            server_name);
+    rapira_prop_str_or_null(ce, obj, ZEND_STRL("certSerial"), serial);
+    rapira_prop_str_or_null(ce, obj, ZEND_STRL("certOrganization"), org);
+    rapira_prop_str_or_null(ce, obj, ZEND_STRL("certFingerprint"), fingerprint);
+}
+
+bool rapira_address_arg(zval *zv, uint32_t num) {
+    if (Z_TYPE_P(zv) == IS_OBJECT &&
+        (instanceof_function(Z_OBJCE_P(zv), rapira_ce_inet_address) ||
+         instanceof_function(Z_OBJCE_P(zv), rapira_ce_unix_address))) {
+        return true;
+    }
+    zend_argument_type_error(
+        num,
+        "must be of type Rapira\\InetAddress|Rapira\\UnixAddress, %s given",
+        zend_zval_value_name(zv));
+    return false;
 }
 
 void rapira_register_classes(void) {
@@ -132,24 +145,21 @@ void rapira_register_classes(void) {
     rapira_info_handlers.offset = offsetof(rapira_dispatcher_info_obj, std);
 }
 
-// start.rs: runs each plugin register function, in the boot order
-extern void rapira_rs_register_plugin_classes(void);
-
 // the plugin classes extend the base classes, so the base classes register
 // first
 PHP_MINIT_FUNCTION(rapira) {
     rapira_register_classes();
-    rapira_rs_register_plugin_classes();
+    for (size_t i = 0; i < rapira_plugin_register_count; i++) {
+        rapira_plugin_registers[i]();
+    }
     return SUCCESS;
 }
-
-extern void rapira_rs_finish_response(void);
 
 // Runs after the shutdown functions
 PHP_RSHUTDOWN_FUNCTION(rapira) {
     php_header();
     rapira_rs_finish_response();
-    rapira_rs_dispatcher_release();
+    rapira_dispatcher_release();
     return SUCCESS;
 }
 

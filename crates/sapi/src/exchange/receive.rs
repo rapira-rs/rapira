@@ -12,7 +12,6 @@ enum RecvMode {
 /// `return_value` writable; engine active on this thread.
 unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
     unsafe {
-        let classes = classes();
         if let Some(ptr) = UNIT.get()
             && !(*ptr).settled()
             && (*ptr).cancelled()
@@ -23,11 +22,12 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
         if let Some(ptr) = UNIT.get()
             && !(*ptr).settled()
         {
-            zend::throw_error(classes.busy);
+            // SAFETY: worker_main points it at the 'static busy message of the plugin.
+            zend::throw_error(std::ffi::CStr::from_ptr(crate::rapira_plugin_busy));
             return false;
         }
         let mut obj: zval = std::mem::zeroed();
-        let _ = object_init_ex(&mut obj, (classes.unit)());
+        let _ = object_init_ex(&mut obj, crate::rapira_plugin_ce_unit);
         // The timer of the previous unit still runs. A queued unit re-arms it, so disarm it only before a wait.
         let mut armed = matches!(mode, RecvMode::Wait(t) if t != 0);
         if !armed {
@@ -46,7 +46,7 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
                     // SAFETY: plain zend timer bookkeeping; no bailout path.
                     rapira_receive_timed();
                     let ptr = NonNull::from(Box::leak(unit.into_held()));
-                    // SAFETY: obj is a live object of classes.unit, allocated above on this thread.
+                    // SAFETY: obj is a live object of rapira_plugin_ce_unit, allocated above on this thread.
                     (*HeldPtr::of(obj.value.obj)).0 = Some(ptr);
                     UNIT.set(Some(ptr.as_ptr()));
                     *return_value = obj;
@@ -82,14 +82,10 @@ unsafe fn receive_into(return_value: *mut zval, mode: RecvMode) -> bool {
 }
 
 /// # Safety
-/// `return_value` writable; engine active on this thread (the receive verbs touch the zend timer).
+/// `timeout_us >= -1`; `return_value` writable; engine active on this thread (the receive verbs touch the zend timer).
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_receive(timeout_us: i64, return_value: *mut zval) -> bool {
     guard(false, || unsafe {
-        if timeout_us < -1 {
-            crate::zend_argument_value_error(1, c"must be greater than or equal to -1".as_ptr());
-            return false;
-        }
         receive_into(return_value, RecvMode::Wait(timeout_us))
     })
 }
@@ -103,59 +99,13 @@ pub unsafe extern "C" fn rapira_rs_try_receive(return_value: *mut zval) -> bool 
     })
 }
 
+/// The intake depth and whether the unit handed out last is unfinalized: the two counts of a DispatcherInfo object.
 /// # Safety
-/// `return_value` writable; engine active on this thread.
+/// `pending` and `active` writable; engine active on this thread.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_dispatcher_info(return_value: *mut zval) -> bool {
-    guard(false, || unsafe {
-        let _ = object_init_ex(return_value, (classes().info)());
-        let info = info_from((*return_value).value.obj);
-        (*info).pending = pending_depth() as i64;
-        (*info).active = i64::from(UNIT.get().is_some_and(|p| !(*p).is_finalized()));
-        true
-    })
-}
-
-thread_local! {
-    pub(super) static DISPATCHER: Cell<Option<zval>> = const { Cell::new(None) };
-}
-
-/// # Safety
-/// `return_value` writable; engine active on this thread.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_get_dispatcher(return_value: *mut zval) -> bool {
-    guard(false, || unsafe {
-        if crate::rapira_mode != RAPIRA_MODE_DISPATCHER as c_int {
-            zend::throw_exception(
-                rapira_ce_no_dispatcher_error,
-                c"Dispatcher is only available in Mode::Dispatcher",
-            );
-            return false;
-        }
-        let inst = DISPATCHER.with(|d| match d.get() {
-            Some(zv) => zv,
-            None => {
-                let mut zv: zval = std::mem::zeroed();
-                let _ = object_init_ex(&mut zv, (classes().dispatcher)());
-                d.set(Some(zv));
-                zv
-            }
-        });
-        *return_value = inst;
-        zval_add_ref(return_value);
-        true
-    })
-}
-
-/// Called from the C RSHUTDOWN bracket.
-#[unsafe(no_mangle)]
-pub extern "C" fn rapira_rs_dispatcher_release() {
-    guard((), || {
-        DISPATCHER.with(|d| {
-            if let Some(mut zv) = d.take() {
-                // SAFETY: the zval came from object_init_ex on this thread.
-                unsafe { zval_ptr_dtor(&mut zv) };
-            }
-        });
+pub unsafe extern "C" fn rapira_rs_dispatcher_counts(pending: *mut i64, active: *mut i64) {
+    guard((), || unsafe {
+        *pending = pending_depth() as i64;
+        *active = i64::from(UNIT.get().is_some_and(|p| !(*p).is_finalized()));
     })
 }

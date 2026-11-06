@@ -14,6 +14,10 @@ $tls = new Tls('TLSv1.3', 'TLS_AES_128_GCM_SHA256', 'h2', 'example.test', null, 
 echo 'tls-class: ', $tls::class, "\n";
 $field = new FormField('note', 'hello', ['content-type' => ['text/plain']]);
 $file = new UploadedFile('avatar', 'me.png', 'image/png', [], '/tmp/spool-1', 512);
+$untyped = new UploadedFile('blob', 'a.bin', null, [], '/tmp/spool-2', 0);
+echo 'media-type=', var_export($untyped->clientMediaType, true), "\n";
+$unix = new UnixAddress('/run/x.sock');
+echo 'unix-path=', $unix->path, "\n";
 $body = new Multipart([$field], [$file]);
 
 $req = new Request(
@@ -60,8 +64,8 @@ try {
 try {
     new Request('GET', '/', '/', null, 'HTTP/1.1', [], '', 'nope', $server, null, 0.0);
     echo "union accepted\n";
-} catch (\TypeError) {
-    echo "union: enforced\n";
+} catch (\TypeError $e) {
+    echo 'union: ', $e->getMessage(), "\n";
 }
 
 echo 'done';
