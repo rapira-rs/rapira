@@ -693,6 +693,51 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// hyper delivers a 1 MiB body in several frames, so the parse reads a file part across the frame seams. PHP must get the same field values and file bytes that the client sent.
+#[test]
+fn multipart_file_part_across_frames_keeps_its_bytes() -> anyhow::Result<()> {
+    let srv = uploads_server("dispatcher/multipart-worker.php");
+
+    let file = patterned(1 << 20);
+    let mut body = format!(
+        "--{BOUNDARY}\r\ncontent-disposition: form-data; name=\"a\"\r\n\r\none\r\n\
+         --{BOUNDARY}\r\ncontent-disposition: form-data; name=\"f\"; filename=\"p.bin\"\r\n\r\n"
+    )
+    .into_bytes();
+    body.extend_from_slice(&file);
+    body.extend_from_slice(
+        format!(
+            "\r\n--{BOUNDARY}\r\ncontent-disposition: form-data; name=\"b\"\r\n\r\ntwo\r\n--{BOUNDARY}--\r\n"
+        )
+        .as_bytes(),
+    );
+    let mut rq = req("/");
+    *rq.method_mut() = Method::POST;
+    rq.headers_mut().insert(
+        CONTENT_TYPE,
+        HeaderValue::from_str(&format!("multipart/form-data; boundary={BOUNDARY}"))?,
+    );
+    *rq.body_mut() = body;
+    let resp = drain_resp(submit(srv.addr, rq)?);
+    let text = resp.body_string();
+    assert_eq!(resp.status(), 200, "body: {text:.300}");
+    for line in ["counts=2/1", "field0=a=one", "field1=b=two"] {
+        assert!(text.contains(line), "missing {line:?} in {text:.300}");
+    }
+    let prefix = b"file0=f:p.bin:1048576:";
+    let at = resp
+        .body
+        .windows(prefix.len())
+        .position(|w| w == prefix)
+        .with_context(|| format!("no file line in {text:.300}"))?;
+    let echoed = &resp.body[at + prefix.len()..];
+    assert!(
+        echoed.starts_with(&file) && echoed.get(file.len()) == Some(&b'\n'),
+        "the echoed file bytes differ from the sent bytes"
+    );
+    Ok(())
+}
+
 /// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, a file part in a body over 256 KiB (parsed on the blocking pool) reaches PHP, an empty name is a 400, and a field over the limit after a file part is a 413.
 /// Part header names keep the case that the client sent, and the values of one name keep their line order (contract FormField and UploadedFile `$headers`).
 /// No spool file outlives its request, also when a later part rejects the body after a file part was spooled.
