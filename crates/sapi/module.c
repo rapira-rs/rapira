@@ -581,6 +581,7 @@ int rapira_request_shutdown(void) {
         zend_end_try();
     }
     zend_end_try();
+    rapira_dispatcher_forget();
 #if PHP_VERSION_ID >= 80500
     // fast shutdown skips the backtrace release (zend_execute_API.c:282,309)
     // and the arena free reclaimed it; drop the stale zval without a dtor

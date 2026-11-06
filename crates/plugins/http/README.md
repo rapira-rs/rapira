@@ -29,9 +29,9 @@ The client gets 503 when the intake of the worker stays full for 30 seconds or w
 - `build.rs`: compiles the C files with `rapira_php_build::compile` against the PHP headers. `rapira_http.h` includes `rapira_sapi.h` by its path in `crates/sapi`.
 - `rapira_http.stub.php`: the PHP stub of the `Rapira\Http` and `Rapira\Internal\Http` classes.
 - `rapira_http_arginfo.h`: generated from the stub by `make stubs`. Do not edit it.
-- `rapira_http.h`: the C layout of the exchange object and the class entries.
+- `rapira_http.h`: the C layout of the exchange object, the class entries and the server identity.
 - `rapira_http_classes.c`: `rapira_http_register_classes`, the object handlers, and the method shells of the dispatcher classes. MINIT calls `rapira_http_register_classes` after the base classes.
-- `rapira_http.c`: the method shells of the value classes `Request`, `FormField`, `UploadedFile` and `Multipart`.
+- `rapira_http.c`: the constructors of the value classes `Request`, `FormField`, `UploadedFile` and `Multipart`.
 - `rapira_exchange.c`: the method shells of `Exchange`.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[http]` table), `Settings`, `resolve` with the boot checks, and `Server::from_settings`.
@@ -44,7 +44,7 @@ The client gets 503 when the intake of the worker stays full for 30 seconds or w
 - `src/bridge.rs`: the reply body that streams the PHP frames and the `sendFile` slices, and the write timeout.
 - `src/exchange.rs`: the `Exchange` unit and its `Work` impl.
 - `src/multipart.rs`: the multipart parser and the spool dirs of dispatcher mode.
-- `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES` and the declaration of `rapira_http_register_classes` (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), the server identity (`info.rs`), the value class constructors (`values.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
+- `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES`, the declaration of `rapira_http_register_classes` and the write of the server identity (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
 
 ## Middleware
 

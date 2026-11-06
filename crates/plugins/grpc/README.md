@@ -29,14 +29,14 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `rapira_grpc_arginfo.h`: generated from the stub by `make stubs`. Do not edit it.
 - `rapira_grpc.h`: the C layouts of the call object and the response metadata object, and the class entries.
 - `rapira_grpc_classes.c`: `rapira_grpc_register_classes` and the object handlers of the call and the response metadata. MINIT calls `rapira_grpc_register_classes` after the base classes. The stub aliases the constructors of the internal classes, `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters to the shared shells in `crates/sapi/rapira_dispatcher.c`.
-- `rapira_grpc.c`: the method shells of the value classes, `name()` and `getServices()` of the dispatcher, the call and the response metadata.
+- `rapira_grpc.c`: the constructors of the value classes, the `MethodKind` predicates, and the method shells of `name()` and `getServices()` of the dispatcher, the call and the response metadata.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set and builds the interceptors.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
 - `src/call.rs`: the `UnaryCall`, `UnaryReply` and `RpcStatus` types.
-- `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES` and the declaration of `rapira_grpc_register_classes` (`mod.rs`), the `GrpcState` unit with its `Work` impl, the call and its metadata (`call.rs`), and the value class constructors (`values.rs`).
+- `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES` and the declaration of `rapira_grpc_register_classes` (`mod.rs`), the `GrpcState` unit with its `Work` impl, the call and its metadata (`call.rs`), and the `Metadata` constructor (`values.rs`).
 
 ## Protocols
 

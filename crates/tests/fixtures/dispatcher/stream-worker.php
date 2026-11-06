@@ -69,6 +69,9 @@ try {
             } catch (FileNotSendableException) {
                 $ex->writeHead(403);
                 $ex->writeBody('denied');
+            } catch (\ValueError $e) {
+                $ex->writeHead(400);
+                $ex->writeBody($e::class . ': ' . $e->getMessage());
             }
             continue;
         }

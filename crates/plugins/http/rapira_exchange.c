@@ -65,6 +65,15 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, sendFile) {
     Z_PARAM_BOOL(eos)
     ZEND_PARSE_PARAMETERS_END();
 
+    if (offset < 0) {
+        zend_argument_value_error(2, "must be greater than or equal to 0");
+        RETURN_THROWS();
+    }
+    if (!length_is_null && length < 1) {
+        zend_argument_value_error(3, "must be greater than or equal to 1");
+        RETURN_THROWS();
+    }
+
     const rapira_held *held = exchange_held(ZEND_THIS);
     RAPIRA_RETURN_THROWS_UNLESS(
         rapira_rs_exchange_send_file(held, ZSTR_VAL(path), ZSTR_LEN(path),

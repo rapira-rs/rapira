@@ -55,6 +55,19 @@ enum {
 };
 extern int rapira_mode;
 
+// The dispatcher surface of the plugin this worker serves. In dispatcher
+// mode, worker_main (start.rs) writes these globals once before PHP runs on
+// the thread.
+extern zend_class_entry *rapira_plugin_ce_dispatcher;
+extern zend_class_entry *rapira_plugin_ce_info;
+extern zend_class_entry *rapira_plugin_ce_unit;
+// the error of receive() and tryReceive() while a unit is unfinalized
+extern const char *rapira_plugin_busy;
+// The plugin register functions that MINIT calls after the base classes, in
+// array order; boot_master (start.rs) writes them once in the master.
+extern void (*const *rapira_plugin_registers)(void);
+extern size_t rapira_plugin_register_count;
+
 // Return values of rapira_rs_handle_request (rapira_worker.rs);
 // rapira_dispatcher.c reads them.
 enum {
@@ -66,12 +79,15 @@ enum {
 // Return values of the request shims in module.c.
 enum { RAPIRA_OK = 0, RAPIRA_BAILOUT = 1, RAPIRA_THROW = 3 };
 
+// RSHUTDOWN releases the memoized plugin Dispatcher (rapira_dispatcher.c)
+void rapira_dispatcher_release(void);
+// rapira_request_shutdown calls it after each request shutdown. It clears the
+// memo without a dtor when a bailout in RSHUTDOWN skipped the release.
+void rapira_dispatcher_forget(void);
+
 // rust glue
-extern void rapira_rs_dispatcher_release(void);
 // the seal of the current CGI reply (rapira_worker.rs)
 extern void rapira_rs_finish_response(void);
-// free_obj of a unit class: hands the unit back to Rust (work.rs)
-extern void rapira_rs_held_drop(zend_object *obj);
 
 // The unit behind a Work object: the first field of the C prefix of every class
 // that receive() hands out. Rust owns the two words (HeldPtr in work.rs); C
@@ -82,7 +98,19 @@ typedef struct {
     void *words[2];
 } rapira_held;
 
-// C data sits before zend_object std; declared here so bindgen gives Rust named fields instead of a hardcoded offset: https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
+// The held word of a unit object: the prefix starts handlers.offset bytes
+// before the object (rapira_object_create), and the held word is its first
+// field.
+static zend_always_inline rapira_held *rapira_held_of(zend_object *obj) {
+    return (rapira_held *)((char *)obj - obj->handlers->offset);
+}
+
+// free_obj of a unit class passes the held word of the object: Rust reclaims
+// the unit (work.rs)
+extern void rapira_rs_held_drop(rapira_held *held);
+
+// The counts of a DispatcherInfo object sit before zend_object std:
+// https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
 typedef struct {
     zend_long pending;
     zend_long active;
@@ -118,6 +146,20 @@ zend_object *rapira_object_create(zend_class_entry *ce);
 
 // called from PHP_MINIT_FUNCTION
 void rapira_register_classes(void);
+// Checks the Rapira\InetAddress|Rapira\UnixAddress union that arginfo cannot
+// enforce: internal arg types are debug-only. Returns false with a TypeError
+// pending.
+bool rapira_address_arg(zval *zv, uint32_t num);
+// writes the string property name, or null when value is NULL
+static zend_always_inline void
+rapira_prop_str_or_null(zend_class_entry *ce, zend_object *obj,
+                        const char *name, size_t name_len, zend_string *value) {
+    if (value) {
+        zend_update_property_str(ce, obj, name, name_len, value);
+    } else {
+        zend_update_property_null(ce, obj, name, name_len);
+    }
+}
 // called from start.rs after php_module_startup: the post readers that hand
 // PHP the buffered body (module.c)
 void rapira_register_post_reader(void);

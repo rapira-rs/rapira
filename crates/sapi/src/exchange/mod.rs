@@ -1,44 +1,23 @@
-pub(crate) use std::{
-    cell::Cell,
-    ffi::{c_char, c_int},
-    path::Path,
-    ptr::NonNull,
-    time::Duration,
-};
+pub(crate) use std::{cell::Cell, ffi::c_char, path::Path, ptr::NonNull, time::Duration};
 use std::{
     fmt::NumBuffer,
     net::{IpAddr, Ipv4Addr},
     sync::OnceLock,
 };
 
-pub(crate) use crate::work::{DispatcherClasses, Held, HeldPtr, release};
+pub(crate) use crate::work::{Held, HeldPtr, release};
 pub(crate) use crate::{
-    IS_NULL, RAPIRA_MODE_DISPATCHER, add_assoc_zval_ex,
+    IS_NULL, add_assoc_zval_ex,
     callbacks::guard,
     object_init_ex, rapira_array_init, rapira_ce_closed_exception, rapira_ce_inet_address,
-    rapira_ce_no_dispatcher_error, rapira_ce_timeout_exception, rapira_ce_unix_address,
-    rapira_dispatcher_info_obj, rapira_receive_timed, rapira_receive_untimed,
+    rapira_ce_timeout_exception, rapira_ce_unix_address, rapira_receive_timed,
+    rapira_receive_untimed,
     start::{Pull, Wait, pending_depth, pull},
     types::Addr,
-    zend, zval, zval_add_ref, zval_ptr_dtor,
+    zend, zval, zval_ptr_dtor,
 };
 
 mod receive;
-
-thread_local! {
-    /// The dispatcher classes of the plugin this PHP thread serves; None outside dispatcher mode.
-    static CLASSES: Cell<Option<DispatcherClasses>> = const { Cell::new(None) };
-}
-
-pub(crate) fn set_classes(classes: DispatcherClasses) {
-    CLASSES.set(Some(classes));
-}
-
-fn classes() -> DispatcherClasses {
-    CLASSES
-        .get()
-        .expect("a dispatcher-mode worker started with no DispatcherClasses")
-}
 
 thread_local! {
     /// The Box pointer of the unit handed out last, so paths where free_obj never runs (bailout) can still reclaim it.
@@ -57,8 +36,6 @@ pub(crate) fn cycle_reset() {
     UNIT.set(None);
     crate::start::CLOSED_SEEN.set(false);
     crate::start::RECEIVED.set(false);
-    // A bailout in RSHUTDOWN skips rapira_rs_dispatcher_release(). The request shutdown freed the object, so drop the zval without a dtor.
-    receive::DISPATCHER.set(None);
 }
 
 /// Reclaim a unit free_obj never saw (shutdown bailout / allocation bailout).
@@ -167,13 +144,5 @@ pub unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
                 zend::slot_str_or_null((*dst).value.obj, path_slot, path.as_deref());
             }
         }
-    }
-}
-
-/// The enclosing C struct of a DispatcherInfo object: the C fields sit before `std` (the layout in rapira_sapi.h).
-unsafe fn info_from(obj: *mut crate::zend_object) -> *mut rapira_dispatcher_info_obj {
-    unsafe {
-        obj.byte_sub(std::mem::offset_of!(rapira_dispatcher_info_obj, std))
-            .cast()
     }
 }

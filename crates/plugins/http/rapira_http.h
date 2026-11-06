@@ -3,9 +3,11 @@
 
 #include "../../sapi/rapira_sapi.h"
 
-// rust glue
-extern bool rapira_rs_http_server_name(zval *return_value);
-extern zend_long rapira_rs_http_server_port(void);
+// the server identity from the http config; the plugin writes it once before
+// the fork (src/lib.rs)
+extern const char *rapira_http_server_name;
+extern size_t rapira_http_server_name_len;
+extern zend_long rapira_http_server_port;
 
 // C data sits before zend_object std, as in rapira_sapi.h
 typedef struct {
@@ -13,7 +15,8 @@ typedef struct {
     zval request; // cached Rapira\Http\Request; IS_UNDEF until getRequest()
     zend_object std;
 } rapira_exchange_obj;
-// HeldPtr::of (work.rs) steps back handlers.offset bytes to the held word
+// HeldPtr::of (work.rs) and rapira_held_of (rapira_sapi.h) step back
+// handlers.offset bytes to the held word
 static_assert(offsetof(rapira_exchange_obj, held) == 0,
               "the held word must be the first field of the prefix");
 

@@ -1,63 +1,12 @@
-//! The constructors of the value classes ErrorDetail, Status, Metadata, MethodInfo, ServiceInfo, Context and GrpcException, and the `MethodKind` streaming checks.
+//! The constructor of the value class Metadata: its rules share `call::printable` and `call::is_binary` with the protocol code.
 
-use std::ffi::{c_char, c_double, c_int};
+use std::ffi::c_int;
 
 use rapira_sapi::callbacks::guard;
-use rapira_sapi::values::address_arg;
 use rapira_sapi::{
-    HashTable, IS_ARRAY, IS_STRING, object_init_ex, rapira_array_is_list, zend,
-    zend_get_exception_base, zend_object, zend_string, zend_type_error, zend_value_error, zval,
-    zval_ptr_dtor,
+    HashTable, IS_ARRAY, IS_STRING, rapira_array_is_list, zend, zend_object, zend_type_error,
+    zend_value_error, zval,
 };
-
-use super::{rapira_ce_grpc_exception, rapira_ce_grpc_status};
-
-/// # Safety
-/// `obj` is under construction; strings/zvals are ZPP-owned for the call, and all ctors below share this contract.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_ctor_grpc_error_detail(
-    obj: *mut zend_object,
-    type_url: *mut zend_string,
-    value: *mut zend_string,
-) -> bool {
-    guard(false, || unsafe {
-        let ce = (*obj).ce;
-        zend::prop_zstr(ce, obj, c"typeUrl", type_url);
-        zend::prop_zstr(ce, obj, c"value", value);
-        !zend::exception_pending()
-    })
-}
-
-/// # Safety
-/// `obj` a Status under construction; `code` a StatusCode case; `details` a live array zval.
-unsafe fn status_props(
-    obj: *mut zend_object,
-    code: *mut zval,
-    message: *mut zend_string,
-    details: *mut zval,
-) {
-    unsafe {
-        let ce = (*obj).ce;
-        zend::prop_zval(ce, obj, c"code", code);
-        zend::prop_zstr(ce, obj, c"message", message);
-        zend::prop_zval(ce, obj, c"details", details);
-    }
-}
-
-/// # Safety
-/// As `rapira_rs_ctor_grpc_error_detail`; `code` a StatusCode case, `details` a live array zval.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_ctor_grpc_status(
-    obj: *mut zend_object,
-    code: *mut zval,
-    message: *mut zend_string,
-    details: *mut zval,
-) -> bool {
-    guard(false, || unsafe {
-        status_props(obj, code, message, details);
-        !zend::exception_pending()
-    })
-}
 
 /// Throws the contract's TypeError for `key`.
 /// # Safety
@@ -116,7 +65,7 @@ unsafe fn metadata_valid(ht: *mut HashTable) -> bool {
 }
 
 /// # Safety
-/// As `rapira_rs_ctor_grpc_error_detail`; `entries` a live array zval.
+/// `obj` is under construction; `entries` a live array zval, ZPP-owned for the call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_ctor_grpc_metadata(
     obj: *mut zend_object,
@@ -127,120 +76,6 @@ pub unsafe extern "C" fn rapira_rs_ctor_grpc_metadata(
             return false;
         }
         zend::prop_zval((*obj).ce, obj, c"entries", entries);
-        !zend::exception_pending()
-    })
-}
-
-/// Client and bidi streaming stream the request; server and bidi streaming stream the response.
-/// # Safety
-/// `value` points to `len` readable bytes: the backing value of a MethodKind case.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_grpc_kind_streams(
-    value: *const c_char,
-    len: usize,
-    request: bool,
-) -> bool {
-    guard(false, || {
-        let kind = unsafe { std::slice::from_raw_parts(value.cast::<u8>(), len) };
-        match kind {
-            b"bidi-streaming" => true,
-            b"client-streaming" => request,
-            b"server-streaming" => !request,
-            _ => false,
-        }
-    })
-}
-
-/// # Safety
-/// As `rapira_rs_ctor_grpc_error_detail`; `kind` a MethodKind case.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_ctor_grpc_method_info(
-    obj: *mut zend_object,
-    name: *mut zend_string,
-    input_type: *mut zend_string,
-    output_type: *mut zend_string,
-    kind: *mut zval,
-) -> bool {
-    guard(false, || unsafe {
-        let ce = (*obj).ce;
-        zend::prop_zstr(ce, obj, c"name", name);
-        zend::prop_zstr(ce, obj, c"inputType", input_type);
-        zend::prop_zstr(ce, obj, c"outputType", output_type);
-        zend::prop_zval(ce, obj, c"kind", kind);
-        !zend::exception_pending()
-    })
-}
-
-/// # Safety
-/// As `rapira_rs_ctor_grpc_error_detail`; `methods` a live array zval.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_ctor_grpc_service_info(
-    obj: *mut zend_object,
-    name: *mut zend_string,
-    methods: *mut zval,
-) -> bool {
-    guard(false, || unsafe {
-        let ce = (*obj).ce;
-        zend::prop_zstr(ce, obj, c"name", name);
-        zend::prop_zval(ce, obj, c"methods", methods);
-        !zend::exception_pending()
-    })
-}
-
-/// # Safety
-/// As `rapira_rs_ctor_grpc_error_detail`; `deadline` and `tls` nullable, `remote` validated here against the address union.
-#[unsafe(no_mangle)]
-#[allow(clippy::too_many_arguments)]
-pub unsafe extern "C" fn rapira_rs_ctor_grpc_context(
-    obj: *mut zend_object,
-    method: *mut zend_string,
-    metadata: *mut zval,
-    deadline: *const c_double,
-    remote: *mut zval,
-    tls: *mut zval,
-    protocol: *mut zval,
-    received_at: c_double,
-) -> bool {
-    guard(false, || unsafe {
-        if !address_arg(remote, 4) {
-            return false;
-        }
-        let ce = (*obj).ce;
-        zend::prop_zstr(ce, obj, c"method", method);
-        zend::prop_zval(ce, obj, c"metadata", metadata);
-        match deadline.as_ref() {
-            Some(d) => zend::prop_double(ce, obj, c"deadline", *d),
-            None => zend::prop_null(ce, obj, c"deadline"),
-        }
-        zend::prop_zval(ce, obj, c"remote", remote);
-        if tls.is_null() {
-            zend::prop_null(ce, obj, c"tls");
-        } else {
-            zend::prop_zval(ce, obj, c"tls", tls);
-        }
-        zend::prop_zval(ce, obj, c"protocol", protocol);
-        zend::prop_double(ce, obj, c"receivedAt", received_at);
-        !zend::exception_pending()
-    })
-}
-
-/// Writes `message` in the exception base scope, as `Exception::__construct` does. Writes the readonly `status` in the GrpcException scope, so a userland subclass can call `parent::__construct()`.
-/// # Safety
-/// As `rapira_rs_ctor_grpc_status`; `obj` a GrpcException or a subclass under construction.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_ctor_grpc_exception(
-    obj: *mut zend_object,
-    code: *mut zval,
-    message: *mut zend_string,
-    details: *mut zval,
-) -> bool {
-    guard(false, || unsafe {
-        zend::prop_zstr(zend_get_exception_base(obj), obj, c"message", message);
-        let mut status: zval = std::mem::zeroed();
-        let _ = object_init_ex(&mut status, rapira_ce_grpc_status);
-        status_props(status.value.obj, code, message, details);
-        zend::prop_zval(rapira_ce_grpc_exception, obj, c"status", &mut status);
-        zval_ptr_dtor(&mut status);
         !zend::exception_pending()
     })
 }

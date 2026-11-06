@@ -92,32 +92,28 @@ impl HeldPtr {
 
 /// Work::isFinalized().
 /// # Safety
-/// `obj` is a live unit object that receive() attached.
+/// `held` is the held word of a live unit object that receive() attached.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_held_is_finalized(obj: *mut zend_object) -> bool {
-    guard(false, || unsafe {
-        (*HeldPtr::of(obj)).get().as_ref().is_finalized()
-    })
+pub unsafe extern "C" fn rapira_rs_held_is_finalized(held: *const HeldPtr) -> bool {
+    guard(false, || unsafe { (*held).get().as_ref().is_finalized() })
 }
 
 /// Work::isCancelled().
 /// # Safety
 /// As `rapira_rs_held_is_finalized`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_held_is_cancelled(obj: *mut zend_object) -> bool {
-    guard(false, || unsafe {
-        (*HeldPtr::of(obj)).get().as_ref().cancelled()
-    })
+pub unsafe extern "C" fn rapira_rs_held_is_cancelled(held: *const HeldPtr) -> bool {
+    guard(false, || unsafe { (*held).get().as_ref().cancelled() })
 }
 
 /// The free_obj of a unit class: reclaims the unit, and an unsettled unit sends its lost outcome. A cycle that died (a fatal error, a timeout) skips the outcome: the plugin reports the worker death when the sender drops.
 /// # Safety
-/// `obj` is the object that free_obj got; engine active on this thread.
+/// `held` is the held word of the object that free_obj got; engine active on this thread.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_held_drop(obj: *mut zend_object) {
+pub unsafe extern "C" fn rapira_rs_held_drop(held: *mut HeldPtr) {
     guard((), || unsafe {
         // receive() allocates the object before the pull: a timeout, an empty tryReceive() or a closed source frees an object with no unit.
-        let Some(ptr) = (*HeldPtr::of(obj)).0.take() else {
+        let Some(ptr) = (*held).0.take() else {
             return;
         };
         let mut held = release(ptr.as_ptr());
@@ -189,7 +185,7 @@ pub(crate) enum Entry {
     RestartApp,
 }
 
-/// The class entries of one plugin's dispatcher surface. Set once per worker.
+/// The dispatcher surface of a plugin, copied into C globals at worker start.
 #[derive(Clone, Copy)]
 pub struct DispatcherClasses {
     pub dispatcher: unsafe fn() -> *mut zend_class_entry,

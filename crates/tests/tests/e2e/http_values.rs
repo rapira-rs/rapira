@@ -18,12 +18,14 @@ fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
         "server-path=NULL",
         "note=hello",
         "me.png 512",
+        "media-type=NULL",
+        "unix-path=/run/x.sock",
         "h2 NULL",
         "example.test:8443 1722700000.25",
         "tls-null: NULL",
         "readonly: enforced",
         "arity: enforced",
-        "union: enforced",
+        r"union: Rapira\Http\Request::__construct(): Argument #8 ($remote) must be of type Rapira\InetAddress|Rapira\UnixAddress, string given",
         "done",
     ] {
         assert!(body.contains(line), "missing {line:?} in {body:?}");

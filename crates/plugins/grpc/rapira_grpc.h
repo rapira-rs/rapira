@@ -11,7 +11,8 @@ typedef struct {
     zval metadata; // memoized Rapira\Internal\Grpc\ResponseMetadata; IS_UNDEF until getResponseMetadata()
     zend_object std;
 } rapira_grpc_call_obj;
-// HeldPtr::of (work.rs) steps back handlers.offset bytes to the held word
+// HeldPtr::of (work.rs) and rapira_held_of (rapira_sapi.h) step back
+// handlers.offset bytes to the held word
 static_assert(offsetof(rapira_grpc_call_obj, held) == 0,
               "the held word must be the first field of the prefix");
 
@@ -28,6 +29,7 @@ extern zend_class_entry *rapira_ce_grpc_method_kind;
 extern zend_class_entry *rapira_ce_grpc_protocol;
 extern zend_class_entry *rapira_ce_grpc_status;
 extern zend_class_entry *rapira_ce_grpc_metadata;
+extern zend_class_entry *rapira_ce_grpc_exception;
 extern zend_class_entry *rapira_ce_internal_grpc_response_metadata;
 
 void rapira_grpc_register_classes(void);

@@ -18,7 +18,6 @@ unsafe extern "C" {
     pub static mut rapira_ce_grpc_method_info: *mut zend_class_entry;
     pub static mut rapira_ce_grpc_service_info: *mut zend_class_entry;
     pub static mut rapira_ce_grpc_context: *mut zend_class_entry;
-    pub static mut rapira_ce_grpc_exception: *mut zend_class_entry;
     pub static mut rapira_ce_internal_grpc_dispatcher: *mut zend_class_entry;
     pub static mut rapira_ce_internal_grpc_dispatcher_info: *mut zend_class_entry;
     pub static mut rapira_ce_internal_grpc_unary_call: *mut zend_class_entry;

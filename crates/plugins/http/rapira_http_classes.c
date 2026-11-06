@@ -13,13 +13,16 @@ zend_class_entry *rapira_ce_http_head_not_written_error;
 zend_class_entry *rapira_ce_http_content_length_exceeded_error;
 zend_class_entry *rapira_ce_http_file_not_sendable_exception;
 
+const char *rapira_http_server_name;
+size_t rapira_http_server_name_len;
+zend_long rapira_http_server_port;
+
 // own copy: std_object_handlers is shared engine state
 static zend_object_handlers rapira_exchange_handlers;
 
-// free_obj hands the unit back to Rust, which finds it through the handler
-// offset
+// free_obj hands the unit back to Rust
 static void rapira_exchange_free(zend_object *std) {
-    rapira_rs_held_drop(std);
+    rapira_rs_held_drop(&rapira_exchange_from(std)->held);
     // no-op on IS_UNDEF (getRequest never called)
     zval_ptr_dtor(&rapira_exchange_from(std)->request);
 
@@ -34,13 +37,12 @@ ZEND_METHOD(Rapira_Internal_Http_Dispatcher, name) {
 
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverName) {
     ZEND_PARSE_PARAMETERS_NONE();
-    RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_http_server_name(return_value),
-                                "serverName");
+    RETURN_STRINGL(rapira_http_server_name, rapira_http_server_name_len);
 }
 
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverPort) {
     ZEND_PARSE_PARAMETERS_NONE();
-    RETURN_LONG(rapira_rs_http_server_port());
+    RETURN_LONG(rapira_http_server_port);
 }
 
 void rapira_http_register_classes(void) {
@@ -76,6 +78,9 @@ void rapira_http_register_classes(void) {
     rapira_ce_internal_http_exchange =
         register_class_Rapira_Internal_Http_Exchange(http_exchange);
 
+    // Reflection does not skip the constructor of a final class with
+    // create_object, so only get_dispatcher() creates the object.
+    rapira_ce_internal_http_dispatcher->create_object = rapira_object_create;
     rapira_ce_internal_http_dispatcher->default_object_handlers =
         &rapira_dispatcher_handlers;
 

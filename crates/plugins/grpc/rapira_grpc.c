@@ -1,28 +1,8 @@
 #include "rapira_grpc.h"
 #include "ext/spl/spl_array.h"
 
-// Rust glue: constructors return false with a PHP exception pending.
-// kind_streams returns the answer.
-extern bool rapira_rs_ctor_grpc_error_detail(zend_object *obj,
-                                             zend_string *type_url,
-                                             zend_string *value);
-extern bool rapira_rs_ctor_grpc_status(zend_object *obj, zval *code,
-                                       zend_string *message, zval *details);
+// rust glue (src/php/values.rs): returns false with a PHP exception pending
 extern bool rapira_rs_ctor_grpc_metadata(zend_object *obj, zval *entries);
-extern bool rapira_rs_ctor_grpc_method_info(zend_object *obj, zend_string *name,
-                                            zend_string *input_type,
-                                            zend_string *output_type,
-                                            zval *kind);
-extern bool rapira_rs_ctor_grpc_service_info(zend_object *obj,
-                                             zend_string *name, zval *methods);
-extern bool rapira_rs_ctor_grpc_context(zend_object *obj, zend_string *method,
-                                        zval *metadata, const double *deadline,
-                                        zval *remote, zval *tls, zval *protocol,
-                                        double received_at);
-extern bool rapira_rs_ctor_grpc_exception(zend_object *obj, zval *code,
-                                          zend_string *message, zval *details);
-extern bool rapira_rs_grpc_kind_streams(const char *value, size_t len,
-                                        bool request);
 
 // rust glue (src/php/call.rs): message returns a plain value; the others
 // return false with a PHP exception pending
@@ -44,18 +24,27 @@ rapira_grpc_metadata_entries(zend_object *metadata) {
     return OBJ_PROP_NUM(metadata, 0);
 }
 
+// client and bidi streaming stream the request; server and bidi streaming
+// stream the response
+static bool grpc_kind_streams(zval *this_ptr, bool request) {
+    zend_string *kind = Z_STR_P(zend_enum_fetch_case_value(Z_OBJ_P(this_ptr)));
+    if (zend_string_equals_literal(kind, "bidi-streaming")) {
+        return true;
+    }
+    if (request) {
+        return zend_string_equals_literal(kind, "client-streaming");
+    }
+    return zend_string_equals_literal(kind, "server-streaming");
+}
+
 ZEND_METHOD(Rapira_Grpc_MethodKind, isStreamingRequest) {
     ZEND_PARSE_PARAMETERS_NONE();
-    zval *value = zend_enum_fetch_case_value(Z_OBJ_P(ZEND_THIS));
-    RETURN_BOOL(rapira_rs_grpc_kind_streams(Z_STRVAL_P(value),
-                                            Z_STRLEN_P(value), true));
+    RETURN_BOOL(grpc_kind_streams(ZEND_THIS, true));
 }
 
 ZEND_METHOD(Rapira_Grpc_MethodKind, isStreamingResponse) {
     ZEND_PARSE_PARAMETERS_NONE();
-    zval *value = zend_enum_fetch_case_value(Z_OBJ_P(ZEND_THIS));
-    RETURN_BOOL(rapira_rs_grpc_kind_streams(Z_STRVAL_P(value),
-                                            Z_STRLEN_P(value), false));
+    RETURN_BOOL(grpc_kind_streams(ZEND_THIS, false));
 }
 
 ZEND_METHOD(Rapira_Grpc_ErrorDetail, __construct) {
@@ -65,16 +54,39 @@ ZEND_METHOD(Rapira_Grpc_ErrorDetail, __construct) {
     Z_PARAM_STR(value)
     ZEND_PARSE_PARAMETERS_END();
 
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_ctor_grpc_error_detail(Z_OBJ_P(ZEND_THIS), type_url, value),
-        "ErrorDetail construction");
+    zend_object *obj = Z_OBJ_P(ZEND_THIS);
+    zend_update_property_str(obj->ce, obj, ZEND_STRL("typeUrl"), type_url);
+    zend_update_property_str(obj->ce, obj, ZEND_STRL("value"), value);
+}
+
+// writes the (StatusCode, message, details) triple to a Status object
+static void grpc_status_props(zend_object *obj, zval *code,
+                              zend_string *message, zval *details) {
+    zend_class_entry *ce = obj->ce;
+    zend_update_property(ce, obj, ZEND_STRL("code"), code);
+    zend_update_property_str(ce, obj, ZEND_STRL("message"), message);
+    zend_update_property(ce, obj, ZEND_STRL("details"), details);
+}
+
+// Writes message in the exception base scope, as Exception::__construct does.
+// Writes the readonly status in the GrpcException scope, so a userland
+// subclass can call parent::__construct().
+static void grpc_exception_props(zend_object *obj, zval *code,
+                                 zend_string *message, zval *details) {
+    zend_update_property_str(zend_get_exception_base(obj), obj,
+                             ZEND_STRL("message"), message);
+    zval status;
+    object_init_ex(&status, rapira_ce_grpc_status);
+    grpc_status_props(Z_OBJ(status), code, message, details);
+    zend_update_property(rapira_ce_grpc_exception, obj, ZEND_STRL("status"),
+                         &status);
+    zval_ptr_dtor(&status);
 }
 
 // Status and GrpcException take the same (StatusCode, message, details) triple.
 static void grpc_status_ctor(INTERNAL_FUNCTION_PARAMETERS,
-                             bool (*ctor)(zend_object *, zval *, zend_string *,
-                                          zval *),
-                             const char *what) {
+                             void (*props)(zend_object *, zval *, zend_string *,
+                                           zval *)) {
     zval *code;
     zend_string *message = ZSTR_EMPTY_ALLOC();
     zval empty;
@@ -87,13 +99,11 @@ static void grpc_status_ctor(INTERNAL_FUNCTION_PARAMETERS,
     Z_PARAM_ARRAY(details)
     ZEND_PARSE_PARAMETERS_END();
 
-    RAPIRA_RETURN_THROWS_UNLESS(
-        ctor(Z_OBJ_P(ZEND_THIS), code, message, details), what);
+    props(Z_OBJ_P(ZEND_THIS), code, message, details);
 }
 
 ZEND_METHOD(Rapira_Grpc_Status, __construct) {
-    grpc_status_ctor(INTERNAL_FUNCTION_PARAM_PASSTHRU,
-                     rapira_rs_ctor_grpc_status, "Status construction");
+    grpc_status_ctor(INTERNAL_FUNCTION_PARAM_PASSTHRU, grpc_status_props);
 }
 
 ZEND_METHOD(Rapira_Grpc_Metadata, __construct) {
@@ -151,10 +161,12 @@ ZEND_METHOD(Rapira_Grpc_MethodInfo, __construct) {
     Z_PARAM_OBJECT_OF_CLASS(kind, rapira_ce_grpc_method_kind)
     ZEND_PARSE_PARAMETERS_END();
 
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_ctor_grpc_method_info(Z_OBJ_P(ZEND_THIS), name, input_type,
-                                        output_type, kind),
-        "MethodInfo construction");
+    zend_object *obj = Z_OBJ_P(ZEND_THIS);
+    zend_class_entry *ce = obj->ce;
+    zend_update_property_str(ce, obj, ZEND_STRL("name"), name);
+    zend_update_property_str(ce, obj, ZEND_STRL("inputType"), input_type);
+    zend_update_property_str(ce, obj, ZEND_STRL("outputType"), output_type);
+    zend_update_property(ce, obj, ZEND_STRL("kind"), kind);
 }
 
 ZEND_METHOD(Rapira_Grpc_ServiceInfo, __construct) {
@@ -165,9 +177,9 @@ ZEND_METHOD(Rapira_Grpc_ServiceInfo, __construct) {
     Z_PARAM_ARRAY(methods)
     ZEND_PARSE_PARAMETERS_END();
 
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_ctor_grpc_service_info(Z_OBJ_P(ZEND_THIS), name, methods),
-        "ServiceInfo construction");
+    zend_object *obj = Z_OBJ_P(ZEND_THIS);
+    zend_update_property_str(obj->ce, obj, ZEND_STRL("name"), name);
+    zend_update_property(obj->ce, obj, ZEND_STRL("methods"), methods);
 }
 
 ZEND_METHOD(Rapira_Grpc_Call_Context, __construct) {
@@ -185,17 +197,30 @@ ZEND_METHOD(Rapira_Grpc_Call_Context, __construct) {
     Z_PARAM_DOUBLE(received_at)
     ZEND_PARSE_PARAMETERS_END();
 
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_ctor_grpc_context(Z_OBJ_P(ZEND_THIS), method, metadata,
-                                    !deadline_null ? &deadline : NULL, remote,
-                                    tls, protocol, received_at),
-        "Context construction");
+    if (!rapira_address_arg(remote, 4)) {
+        RETURN_THROWS();
+    }
+    zend_object *obj = Z_OBJ_P(ZEND_THIS);
+    zend_class_entry *ce = obj->ce;
+    zend_update_property_str(ce, obj, ZEND_STRL("method"), method);
+    zend_update_property(ce, obj, ZEND_STRL("metadata"), metadata);
+    if (deadline_null) {
+        zend_update_property_null(ce, obj, ZEND_STRL("deadline"));
+    } else {
+        zend_update_property_double(ce, obj, ZEND_STRL("deadline"), deadline);
+    }
+    zend_update_property(ce, obj, ZEND_STRL("remote"), remote);
+    if (tls) {
+        zend_update_property(ce, obj, ZEND_STRL("tls"), tls);
+    } else {
+        zend_update_property_null(ce, obj, ZEND_STRL("tls"));
+    }
+    zend_update_property(ce, obj, ZEND_STRL("protocol"), protocol);
+    zend_update_property_double(ce, obj, ZEND_STRL("receivedAt"), received_at);
 }
 
 ZEND_METHOD(Rapira_Grpc_Exception_GrpcException, __construct) {
-    grpc_status_ctor(INTERNAL_FUNCTION_PARAM_PASSTHRU,
-                     rapira_rs_ctor_grpc_exception,
-                     "GrpcException construction");
+    grpc_status_ctor(INTERNAL_FUNCTION_PARAM_PASSTHRU, grpc_exception_props);
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, name) {

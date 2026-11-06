@@ -84,35 +84,6 @@ pub unsafe fn prop_zval(
     unsafe { zend_update_property(ce, obj, name.as_ptr(), name.count_bytes(), zv) }
 }
 
-/// `zend_update_property_str` shares `val` (addref), no byte copy.
-/// # Safety
-/// As `prop_stringl`; `val` a live zend_string.
-pub unsafe fn prop_zstr(
-    ce: *mut zend_class_entry,
-    obj: *mut zend_object,
-    name: &CStr,
-    val: *mut zend_string,
-) {
-    unsafe { crate::zend_update_property_str(ce, obj, name.as_ptr(), name.count_bytes(), val) }
-}
-
-/// # Safety
-/// As `prop_zstr`; `val` NULL registers the property null.
-pub unsafe fn prop_zstr_or_null(
-    ce: *mut zend_class_entry,
-    obj: *mut zend_object,
-    name: &CStr,
-    val: *mut zend_string,
-) {
-    unsafe {
-        if val.is_null() {
-            prop_null(ce, obj, name);
-        } else {
-            prop_zstr(ce, obj, name, val);
-        }
-    }
-}
-
 /// The slot offset of the property `name` declared on `ce`. Panics when `ce` declares no such property.
 /// # Safety
 /// `ce` a registered class.
