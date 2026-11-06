@@ -12,7 +12,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::callbacks::guard;
 use crate::scoreboard::{Event, count_shed, sb_update};
 use crate::types::Context;
-use crate::{zend_class_entry, zend_object};
+use crate::zend_class_entry;
 
 pub(crate) const INTAKE_WAIT: Duration = Duration::from_secs(30);
 
@@ -22,15 +22,17 @@ pub(crate) const INTAKE_SLOTS: usize = 1024;
 /// The body bytes that one worker holds for the units that PHP has not taken yet.
 const BODY_BUDGET: usize = 64 << 20;
 
-/// The cycle bookkeeping view of a unit that receive() handed out.
-pub trait Held {
+/// A dispatcher-mode unit, from submit to free_obj: the plugin state behind the object receive() hands to PHP.
+pub trait Held: Send + 'static {
     /// The worker committed the outcome, or discarded the unit.
     fn settled(&self) -> bool;
-    /// The unit takes no outcome: the client left, or the plugin closed the unit. Work::isCancelled().
+    /// The unit takes no outcome: the client left, or the plugin closed the unit. Work::isCancelled(). The pull skips a queued unit that is cancelled.
     fn cancelled(&self) -> bool;
     fn discard(&mut self);
     /// The object of an unsettled unit is gone: what the client gets in place of the outcome. The drop shell skips it when the cycle died.
     fn lost(&mut self);
+    /// A worker that cannot serve: the plugin's refusal, 503 or UNAVAILABLE.
+    fn shed(self: Box<Self>);
 
     /// Work::isFinalized().
     fn is_finalized(&self) -> bool {
@@ -66,13 +68,6 @@ const _: () = assert!(
 );
 
 impl HeldPtr {
-    /// The slot of a unit object. The prefix starts `handlers.offset` bytes before the object, where zend_objects_store_del frees the allocation: https://github.com/php/php-src/blob/php-8.5.12/Zend/zend_objects_API.c#L196-L200
-    /// # Safety
-    /// `obj` is a live object of a class whose C prefix starts with a rapira_held.
-    pub(crate) unsafe fn of(obj: *mut zend_object) -> *mut Self {
-        unsafe { obj.byte_sub((*(*obj).handlers).offset as usize).cast() }
-    }
-
     fn get(&self) -> NonNull<dyn Held> {
         self.0.expect("a unit object that receive() never attached")
     }
@@ -112,7 +107,7 @@ pub unsafe extern "C" fn rapira_rs_held_is_cancelled(held: *const HeldPtr) -> bo
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_held_drop(held: *mut HeldPtr) {
     guard((), || unsafe {
-        // receive() allocates the object before the pull: a timeout, an empty tryReceive() or a closed source frees an object with no unit.
+        // The receive shells allocate the object before the pull: a busy refusal, a timeout, an empty tryReceive() or a closed source frees an object with no unit.
         let Some(ptr) = (*held).0.take() else {
             return;
         };
@@ -123,20 +118,10 @@ pub unsafe extern "C" fn rapira_rs_held_drop(held: *mut HeldPtr) {
     })
 }
 
-/// A dispatcher-mode unit on the intake: the plugin state behind the object receive() hands to PHP.
-pub trait Work: Send + 'static {
-    /// The client left while the unit was queued: the pull skips it.
-    fn cancelled(&self) -> bool;
-    /// The state behind the object receive() hands to PHP.
-    fn into_held(self: Box<Self>) -> Box<dyn Held>;
-    /// A worker that cannot serve: the plugin's refusal, 503 or UNAVAILABLE.
-    fn shed(self: Box<Self>);
-}
-
 /// One unit on the intake: the CGI reply of the classic and worker modes, or a dispatcher-mode unit.
 pub enum Unit {
     Cgi(Box<Context>),
-    Dispatcher(Box<dyn Work>),
+    Dispatcher(Box<dyn Held>),
 }
 
 impl Unit {
@@ -144,7 +129,7 @@ impl Unit {
     pub(crate) fn cancelled(&self) -> bool {
         match self {
             Self::Cgi(ctx) => ctx.sender.as_ref().is_none_or(|tx| tx.is_closed()),
-            Self::Dispatcher(work) => work.cancelled(),
+            Self::Dispatcher(held) => held.cancelled(),
         }
     }
 
@@ -152,7 +137,7 @@ impl Unit {
     pub(crate) fn shed(self) {
         match self {
             Self::Cgi(mut ctx) => ctx.refuse(503),
-            Self::Dispatcher(work) => work.shed(),
+            Self::Dispatcher(held) => held.shed(),
         }
     }
 
@@ -164,10 +149,10 @@ impl Unit {
         }
     }
 
-    /// Dispatcher mode: `Work::into_held`.
+    /// Dispatcher mode: the unit behind the object.
     pub(crate) fn into_held(self) -> Box<dyn Held> {
         match self {
-            Self::Dispatcher(work) => work.into_held(),
+            Self::Dispatcher(held) => held,
             Self::Cgi(_) => unreachable!("a CGI unit on a dispatcher intake"),
         }
     }
@@ -334,13 +319,15 @@ mod tests {
     use super::*;
 
     struct Probe;
-    impl Work for Probe {
+    impl Held for Probe {
+        fn settled(&self) -> bool {
+            false
+        }
         fn cancelled(&self) -> bool {
             false
         }
-        fn into_held(self: Box<Self>) -> Box<dyn Held> {
-            unreachable!()
-        }
+        fn discard(&mut self) {}
+        fn lost(&mut self) {}
         fn shed(self: Box<Self>) {}
     }
 

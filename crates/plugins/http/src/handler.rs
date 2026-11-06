@@ -18,8 +18,9 @@ use tower::{Service as _, ServiceExt as _};
 use crate::bridge::{self, InflightRequest};
 use crate::check::{self, Rejection};
 use crate::middleware::{self, BoxError, Layer, Peer, Service};
+use crate::php::ExchangeState;
 use crate::response::{error_response, response_headers};
-use crate::{Config, Exchange, multipart, request};
+use crate::{Config, multipart, request};
 
 pub(crate) struct Shared {
     pub cfg: Config,
@@ -452,6 +453,9 @@ async fn timeout_lazy<F: Future>(
     }
 }
 
+/// Cap 16 lets a buffered Head+Chunk+End trio queue without parking the PHP thread and keeps a 1 MiB body in 64 KiB writes to about one park; tokio allocates one 32-slot block for any cap up to 32.
+const FRAME_CAP: usize = 16;
+
 /// Both refusals come before dispatch: the multipart parse, then the intake.
 async fn submit(
     shared: &Shared,
@@ -460,12 +464,12 @@ async fn submit(
     // request::build set the length from the collected body, so it is never -1.
     let bytes = request.content_length as usize;
     let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
-    let (tx, reply) = tokio::sync::mpsc::channel(crate::exchange::FRAME_CAP);
+    let (tx, reply) = tokio::sync::mpsc::channel(FRAME_CAP);
     // The classic and worker modes get their CGI view built here, on the transport thread.
     let unit = if shared.cfg.superglobals {
         Unit::Cgi(Box::new(rapira_sapi::types::Context::new(request, tx)))
     } else {
-        Unit::Dispatcher(Box::new(Exchange::new(request, tx)))
+        Unit::Dispatcher(Box::new(ExchangeState::new(request, tx)))
     };
     shared.intake.submit(unit, bytes).await?;
     Ok(reply)

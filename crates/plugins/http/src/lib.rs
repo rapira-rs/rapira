@@ -8,12 +8,9 @@ use rapira_net::{ListenAddr, PreparedListener};
 use rapira_sapi::plugin::{Mode, Plugin, Worker};
 use rapira_sapi::work::DispatcherClasses;
 
-use exchange::Exchange;
-
 mod bridge;
 pub mod check;
 pub mod config;
-mod exchange;
 mod handler;
 pub mod middleware;
 pub mod multipart;

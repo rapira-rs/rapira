@@ -78,7 +78,7 @@ enum Stage {
 
 enum BodyState {
     Raw(Vec<u8>),
-    /// seal(), discard_unit() and lost() unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
+    /// seal(), discard_unit() and fail() unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
     Multipart {
         fields: Vec<FieldPart>,
         files: Vec<FilePart>,
@@ -236,6 +236,35 @@ impl ExchangeState {
             bodiless,
         }
     }
+
+    /// The seal of a unit PHP does not answer: a `status` head and an End when no head was sent, else a truncated End.
+    fn fail(&mut self, status: u16) {
+        self.body.unlink_spools();
+        let Some(tx) = self.sender.take() else {
+            return;
+        };
+        if self.head_sent {
+            let _ = tx.try_send(Frame::End {
+                trailers: HeaderMap::new(),
+                truncated: true,
+            });
+        } else if tx
+            .try_send(Frame::Head {
+                head: ResponseHead {
+                    status,
+                    headers: HeaderMap::new(),
+                },
+                content_length: (!self.bodiless).then_some(0),
+                bodiless: self.bodiless,
+            })
+            .is_ok()
+        {
+            let _ = tx.try_send(Frame::End {
+                trailers: HeaderMap::new(),
+                truncated: false,
+            });
+        }
+    }
 }
 
 impl Held for ExchangeState {
@@ -252,32 +281,13 @@ impl Held for ExchangeState {
         respond::discard_unit(self);
     }
 
-    /// A 500 head and an End when no head was sent, else a truncated End.
+    /// The 500 seal.
     fn lost(&mut self) {
-        self.body.unlink_spools();
-        let Some(tx) = self.sender.take() else {
-            return;
-        };
-        if self.head_sent {
-            let _ = tx.try_send(Frame::End {
-                trailers: HeaderMap::new(),
-                truncated: true,
-            });
-        } else if tx
-            .try_send(Frame::Head {
-                head: ResponseHead {
-                    status: 500,
-                    headers: HeaderMap::new(),
-                },
-                content_length: (!self.bodiless).then_some(0),
-                bodiless: self.bodiless,
-            })
-            .is_ok()
-        {
-            let _ = tx.try_send(Frame::End {
-                trailers: HeaderMap::new(),
-                truncated: false,
-            });
-        }
+        self.fail(500);
+    }
+
+    /// The 503 seal of a failed boot.
+    fn shed(mut self: Box<Self>) {
+        self.fail(503);
     }
 }

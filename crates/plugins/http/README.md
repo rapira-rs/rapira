@@ -13,12 +13,13 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 - `prepare()` runs in the master before the fork, with no runtime. It sets the server identity and the `sendFile()` root that the workers inherit, removes the spool dirs of dead workers and binds the listener with `rapira_net::bind`.
 - `serve()` runs in the worker on the plugin thread `rapira-http`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the `Intake` to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
 
-`serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. hyper's http1 builder serves each connection on the runtime. Each request goes through the admission checks, the middleware chain and the inner service. The inner service reads the body and submits the unit to the intake: a `Context` with the CGI view in the classic and worker modes, an `Exchange` in dispatcher mode. PHP writes the reply as frames (`Head`, `Chunk`, `File`, `End`), and the plugin writes them to the socket as they arrive.
+`serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. hyper's http1 builder serves each connection on the runtime. Each request goes through the admission checks, the middleware chain and the inner service. The inner service reads the body and submits the unit to the intake: a `Context` with the CGI view in the classic and worker modes, an `ExchangeState` in dispatcher mode. PHP writes the reply as frames (`Head`, `Chunk`, `File`, `End`), and the plugin writes them to the socket as they arrive.
 
-`Exchange` is the dispatcher-mode unit. It implements `rapira_sapi::work::Work`:
+`ExchangeState` in `src/php/mod.rs` is the dispatcher-mode unit. It implements `rapira_sapi::work::Held`:
 
 - `cancelled()` returns true when the client is gone. `receive()` skips such a unit.
-- `into_held()` gives the `ExchangeState` that the `Rapira\Http\Exchange` object from `receive()` holds in dispatcher mode. The SAPI keeps the state in the object, answers `isFinalized()` and `isCancelled()` from it, and reclaims it when the object is freed. When the object is freed before the unit is settled, the state's `lost()` sends a 500 head, or a truncated End after a sent head.
+- The SAPI keeps the state in the `Rapira\Http\Exchange` object from `receive()`, answers `isFinalized()` and `isCancelled()` from it, and reclaims it when the object is freed.
+- `lost()` sends a 500 head, or a truncated End after a sent head, when the object is freed before the unit is settled.
 - `shed()` answers 503 when the PHP boot of the worker failed.
 
 The client gets 503 when the intake of the worker stays full for 30 seconds or when the waiting request bodies use the 64 MiB body budget of the worker, and 500 when the PHP thread of the worker has stopped. PHP does not see these requests.
@@ -42,7 +43,6 @@ The client gets 503 when the intake of the worker stays full for 30 seconds or w
 - `src/request.rs`: builds the SAPI `Request` from the HTTP request and the `Peer`.
 - `src/response.rs`: the response fields and the error responses.
 - `src/bridge.rs`: the reply body that streams the PHP frames and the `sendFile` slices, and the write timeout.
-- `src/exchange.rs`: the `Exchange` unit and its `Work` impl.
 - `src/multipart.rs`: the multipart parser and the spool dirs of dispatcher mode.
 - `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES`, the declaration of `rapira_http_register_classes` and the write of the server identity (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
 
