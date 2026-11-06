@@ -598,16 +598,15 @@ fn a_slow_client_reads_the_pieces_of_an_app_instance_that_ended() {
             first_mismatch
                 .map(|at| String::from_utf8_lossy(&read.body[at..read.body.len().min(at + 48)]))
         );
-        // A cut body can lose the bytes that hyper had queued when the body ended with an error.
-        if !case.truncated {
-            assert_eq!(
-                read.body.len(),
-                whole.len(),
-                "{}: the whole body\n{}",
-                case.name,
-                diagnostics(&srv)
-            );
-        }
+        // A cut body can lose the bytes that hyper had queued when the body ended with an error, and the byte check above sees only what arrived.
+        let least = if case.truncated { 65536 } else { whole.len() };
+        assert!(
+            read.body.len() >= least,
+            "{}: {} of at least {least} body bytes\n{}",
+            case.name,
+            read.body.len(),
+            diagnostics(&srv)
+        );
         assert_eq!(
             worker_pids(srv.pid()),
             [pid],
