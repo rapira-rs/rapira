@@ -215,31 +215,6 @@ impl GrpcState {
 /// The gRPC status of a boot-failed worker's shed call: https://github.com/grpc/grpc/blob/master/doc/statuscodes.md
 const GRPC_UNAVAILABLE: u32 = 14;
 
-/// The queued call is the state that PHP later holds, so the hand-out needs no second allocation.
-impl rapira_sapi::work::Work for GrpcState {
-    fn cancelled(&self) -> bool {
-        Held::cancelled(self)
-    }
-
-    fn into_held(self: Box<Self>) -> Box<dyn Held> {
-        self
-    }
-
-    fn shed(self: Box<Self>) {
-        if let Some(reply) = self.reply {
-            let _ = reply.send(UnaryReply {
-                headers: HeaderMap::new(),
-                trailers: HeaderMap::new(),
-                outcome: Err(RpcStatus {
-                    code: GRPC_UNAVAILABLE,
-                    message: "the worker failed to boot".into(),
-                    details: Vec::new(),
-                }),
-            });
-        }
-    }
-}
-
 impl Held for GrpcState {
     fn settled(&self) -> bool {
         self.reply.is_none()
@@ -262,6 +237,20 @@ impl Held for GrpcState {
 
     /// The drop of `reply` reports the lost call as INTERNAL.
     fn lost(&mut self) {}
+
+    fn shed(self: Box<Self>) {
+        if let Some(reply) = self.reply {
+            let _ = reply.send(UnaryReply {
+                headers: HeaderMap::new(),
+                trailers: HeaderMap::new(),
+                outcome: Err(RpcStatus {
+                    code: GRPC_UNAVAILABLE,
+                    message: "the worker failed to boot".into(),
+                    details: Vec::new(),
+                }),
+            });
+        }
+    }
 }
 
 /// A core returns a Verb and throws nothing: `thrown` throws after the core dropped its owned state, because `zend_throw_*` can bail out.

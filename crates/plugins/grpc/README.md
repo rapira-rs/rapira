@@ -15,10 +15,10 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 
 `serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. `PhpDispatcher` routes each unary method of a configured service to PHP: it builds a `GrpcState` and submits it to the intake. PHP finalizes the call with `respond()` or `fail()`, and the plugin sends the outcome to the client.
 
-`GrpcState` in `src/php/call.rs` is the dispatcher-mode unit. It implements `rapira_sapi::work::Work`:
+`GrpcState` in `src/php/call.rs` is the dispatcher-mode unit. It implements `rapira_sapi::work::Held`:
 
 - `cancelled()` returns true when the call is closed: the client cancelled it, closed the connection, or the deadline passed. `receive()` skips such a unit.
-- `into_held()` gives the `GrpcState` that the `Rapira\Grpc\UnaryCall` object from `receive()` holds. The SAPI keeps the state in the object, answers `isFinalized()` and `isCancelled()` from it, and reclaims it when the object is freed. When the object is freed before the call is settled, the drop of the reply reports INTERNAL to the client.
+- The SAPI keeps the `GrpcState` in the `Rapira\Grpc\UnaryCall` object from `receive()`, answers `isFinalized()` and `isCancelled()` from it, and reclaims it when the object is freed. When the object is freed before the call is settled, the drop of the reply reports INTERNAL to the client.
 - `shed()` answers UNAVAILABLE when the PHP boot of the worker failed.
 
 ## Crate layout
@@ -36,7 +36,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
 - `src/call.rs`: the `UnaryCall`, `UnaryReply` and `RpcStatus` types.
-- `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES` and the declaration of `rapira_grpc_register_classes` (`mod.rs`), the `GrpcState` unit with its `Work` impl, the call and its metadata (`call.rs`), and the `Metadata` constructor (`values.rs`).
+- `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES` and the declaration of `rapira_grpc_register_classes` (`mod.rs`), the `GrpcState` unit with its `Held` impl, the call and its metadata (`call.rs`), and the `Metadata` constructor (`values.rs`).
 
 ## Protocols
 

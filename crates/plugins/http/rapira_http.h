@@ -15,8 +15,7 @@ typedef struct {
     zval request; // cached Rapira\Http\Request; IS_UNDEF until getRequest()
     zend_object std;
 } rapira_exchange_obj;
-// HeldPtr::of (work.rs) and rapira_held_of (rapira_sapi.h) step back
-// handlers.offset bytes to the held word
+// rapira_held_of (rapira_sapi.h) steps back handlers.offset to the held word
 static_assert(offsetof(rapira_exchange_obj, held) == 0,
               "the held word must be the first field of the prefix");
 

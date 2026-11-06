@@ -373,20 +373,22 @@ mod tests {
 
     use super::*;
     use crate::scoreboard::sb_set;
-    use crate::work::Work;
+    use crate::work::Held;
 
     /// A unit on the intake. `cancelled`: its client left.
     struct Probe {
         cancelled: bool,
     }
 
-    impl Work for Probe {
+    impl Held for Probe {
+        fn settled(&self) -> bool {
+            false
+        }
         fn cancelled(&self) -> bool {
             self.cancelled
         }
-        fn into_held(self: Box<Self>) -> Box<dyn crate::work::Held> {
-            unreachable!()
-        }
+        fn discard(&mut self) {}
+        fn lost(&mut self) {}
         fn shed(self: Box<Self>) {}
     }
 

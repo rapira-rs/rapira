@@ -60,7 +60,7 @@ fn recv_sealed(rx: &mut tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>) 
     Sealed::Nothing
 }
 
-/// An exchange state as `Exchange::into_held` makes it.
+/// An exchange state as the submit makes it.
 struct Attached {
     state: ExchangeState,
     /// The reply that `state` sends to.
@@ -607,6 +607,42 @@ fn a_lost_unit_fails_or_truncates_the_reply() {
         assert_eq!(before, Verb::Ok, "{}", case.name);
         st.lost();
         drop(st);
+        let mut got = Vec::new();
+        while let Ok(frame) = rx.try_recv() {
+            got.push(describe(frame));
+        }
+        assert_eq!(got, case.want, "{}", case.name);
+    }
+}
+
+/// The frames of a shed unit, one the worker cannot serve: the 503 head and an End, bodiless for a HEAD request.
+#[test]
+fn a_shed_unit_gets_the_503_seal() {
+    struct Case {
+        name: &'static str,
+        method: &'static str,
+        want: &'static [&'static str],
+    }
+    let cases = [
+        Case {
+            name: "GET: a 503 with no body",
+            method: "GET",
+            want: &["head 503 cl=Some(0) bodiless=false", "end truncated=false"],
+        },
+        Case {
+            name: "HEAD request: a bodiless 503",
+            method: "HEAD",
+            want: &["head 503 cl=None bodiless=true", "end truncated=false"],
+        },
+    ];
+    for case in cases {
+        let mut req = base_req();
+        req.method = case.method.into();
+        let Attached {
+            state,
+            reply: mut rx,
+        } = state_of(req);
+        Box::new(state).shed();
         let mut got = Vec::new();
         while let Ok(frame) = rx.try_recv() {
             got.push(describe(frame));

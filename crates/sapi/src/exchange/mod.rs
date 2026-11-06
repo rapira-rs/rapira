@@ -7,14 +7,14 @@ use std::{
 
 pub(crate) use crate::work::{Held, HeldPtr, release};
 pub(crate) use crate::{
-    IS_NULL, add_assoc_zval_ex,
+    add_assoc_zval_ex,
     callbacks::guard,
     object_init_ex, rapira_array_init, rapira_ce_closed_exception, rapira_ce_inet_address,
     rapira_ce_timeout_exception, rapira_ce_unix_address, rapira_receive_timed,
     rapira_receive_untimed,
     start::{Pull, Wait, pending_depth, pull},
     types::Addr,
-    zend, zval, zval_ptr_dtor,
+    zend, zval,
 };
 
 mod receive;
