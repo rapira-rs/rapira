@@ -1,6 +1,6 @@
 //! writeHead(), writeBody(), writeTrailers(), flush(), the frames they send and the strings that the IO thread reads in place.
 
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -295,7 +295,7 @@ pub(super) unsafe fn write_body_core(
         send_body(st, len as u64, eos, |n| {
             let n = n as usize;
             // A cut piece lends the whole string: the slice keeps all of it alive.
-            if len >= ZERO_COPY_MIN && lent_bytes() + len <= BORROW_CAP {
+            if len >= ZERO_COPY_MIN && lending() && lent_bytes() + len <= BORROW_CAP {
                 Frame::Chunk(borrow(s, len).slice(..n))
             } else {
                 Frame::Chunk(Bytes::copy_from_slice(&zend::zstr_bytes(s)[..n]))
@@ -427,6 +427,13 @@ impl AsRef<[u8]> for Borrowed {
 thread_local! {
     /// The strings of this PHP thread that the IO thread can still read.
     static LENT: RefCell<Vec<Borrowed>> = const { RefCell::new(Vec::new()) };
+    /// The cycle whose quiesce ran: user code that a later RSHUTDOWN runs (a session save handler) copies, because the memory manager frees the request strings before the next quiesce.
+    static QUIESCED_CYCLE: Cell<u64> = const { Cell::new(0) };
+}
+
+/// A piece can be lent: the cycle is not past its quiesce.
+fn lending() -> bool {
+    rapira_sapi::exchange::cycle() != QUIESCED_CYCLE.get()
 }
 
 fn lent_bytes() -> usize {
@@ -464,6 +471,7 @@ pub unsafe extern "C" fn rapira_rs_http_quiesce() {
             release_done();
             let held = LENT.with_borrow(Vec::len);
             if held == 0 {
+                QUIESCED_CYCLE.set(rapira_sapi::exchange::cycle());
                 return;
             }
             if polls == 0 {
