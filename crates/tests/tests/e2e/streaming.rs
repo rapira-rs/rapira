@@ -1,11 +1,14 @@
 use std::time::{Duration, Instant};
 
+use rapira_sapi::Frame;
 use rapira_sapi::plugin::Mode;
-use tests::StatusBody;
+use tests::wire::submit;
+use tests::{Resp, StatusBody, drain_resp_deadline, poll, req, server_log};
+use tokio::sync::mpsc::Receiver;
 
 use crate::harness::{
-    Conn, Head, Spawn, diagnostics, fixture_path, http_get, http_get_raw, wait_log_contains,
-    wait_workers,
+    Conn, Head, Server, Spawn, diagnostics, fixture_path, http_get, http_get_raw,
+    wait_log_contains, wait_workers, worker_pids,
 };
 
 const T: Duration = Duration::from_secs(10);
@@ -350,24 +353,52 @@ fn reset_during_buffered_write_cancels_php() {
     );
 }
 
-/// An over-long body is cut to the declared content-length, keeping framing keepalive-safe.
+/// An over-long body is cut to the declared content-length, keeping framing keepalive-safe. A piece of 16 KiB or more is cut in place, a smaller piece is copied.
 #[test]
 fn content_length_exceeded_serves_the_declared_prefix() {
+    struct Case {
+        name: &'static str,
+        declared: usize,
+        /// Copies of "0123456789" in the piece.
+        tens: usize,
+    }
+    let cases = [
+        Case {
+            name: "a copied piece of 10 bytes",
+            declared: 5,
+            tens: 1,
+        },
+        Case {
+            name: "a piece of 20480 bytes that the IO thread reads in place",
+            declared: 20475,
+            tens: 2048,
+        },
+    ];
     let srv = Spawn::http(
         Mode::Dispatcher,
         fixture_path("lifecycle/stream-worker.php"),
     )
     .spawn();
-    let raw = http_get_raw(srv.addr, "/?probe=cl-exceeded", &[], T).expect("response");
-    let text = String::from_utf8_lossy(&raw);
-    assert!(
-        text.to_ascii_lowercase().contains("content-length: 5"),
-        "declared length must be honoured: {text}"
-    );
-    assert!(
-        text.ends_with("\r\n\r\n01234"),
-        "exactly the fitting prefix: {text}"
-    );
+    for case in cases {
+        let target = format!(
+            "/?probe=cl-exceeded&tens={}&cl={}",
+            case.tens, case.declared
+        );
+        let raw = http_get_raw(srv.addr, &target, &[], T).expect("response");
+        let text = String::from_utf8_lossy(&raw);
+        let prefix = &"0123456789".repeat(case.tens)[..case.declared];
+        assert!(
+            text.to_ascii_lowercase()
+                .contains(&format!("content-length: {}", case.declared)),
+            "{}: declared length must be honoured: {text}",
+            case.name
+        );
+        assert!(
+            text.ends_with(&format!("\r\n\r\n{prefix}")),
+            "{}: exactly the fitting prefix: {text}",
+            case.name
+        );
+    }
 }
 
 /// A client that walks away mid-stream surfaces as WorkDiscardedException in the worker.
@@ -474,4 +505,223 @@ fn trailers_are_dropped_on_h1_and_the_response_ends_cleanly() {
         .expect("second request");
     let status = c.read_head(T).expect("reused connection must serve").status;
     assert_eq!(status, 200);
+}
+
+/// The instance id that `lifecycle/large-body-worker.php` answers on a target with no probe.
+fn instance(srv: &Server) -> String {
+    let mut rx = submit(srv.addr, req("/")).expect("connect");
+    let resp = drain_resp_deadline(&mut rx, Instant::now() + T).expect("a reply in time");
+    assert_eq!(resp.status(), 200, "\n{}", diagnostics(srv));
+    resp.body_string()
+}
+
+/// The instance ids of the `booted` records, in log order, once the log holds `count` of them.
+fn booted(srv: &Server, count: usize) -> Vec<String> {
+    let ids = || -> Vec<String> {
+        server_log::app_contexts(&srv.log_file(), "booted")
+            .iter()
+            .filter_map(|c| serde_json::from_str::<serde_json::Value>(c).ok())
+            .map(|ctx| ctx["instance"].as_str().unwrap_or_default().to_owned())
+            .collect()
+    };
+    poll(T, || Some(ids()).filter(|ids| ids.len() >= count)).unwrap_or_else(ids)
+}
+
+/// The response of `rx`, read with a pause after each frame.
+fn read_slowly(mut rx: Receiver<Frame>) -> Resp {
+    let mut resp = Resp::default();
+    while let Some(frame) = rx.blocking_recv() {
+        if resp.fold(frame) {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(2));
+    }
+    resp
+}
+
+/// 160 writes of one 64 KiB string, read by a client that pauses after each frame. max_requests = 1 is a quota of 2, so the app instance ends after the large unit, while the IO thread still holds the pieces. Every byte read repeats the id of the instance that wrote it, the worker process stays, and a new app instance serves the next request on a new connection.
+#[test]
+fn a_slow_client_reads_the_pieces_of_an_app_instance_that_ended() {
+    struct Case {
+        name: &'static str,
+        probe: &'static str,
+        truncated: bool,
+        /// The text of the php record that the probe causes.
+        php_record: Option<&'static str>,
+    }
+    let cases = [
+        Case {
+            name: "the whole 10 MiB body, then the recycle",
+            probe: "large",
+            truncated: false,
+            php_record: None,
+        },
+        Case {
+            name: "a fatal error after the pieces cuts the body",
+            probe: "fatal",
+            truncated: true,
+            php_record: Some("Call to undefined function rapira_e2e_undefined_function()"),
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(
+            Mode::Dispatcher,
+            fixture_path("lifecycle/large-body-worker.php"),
+        )
+        .http_pool("max_requests = 1")
+        .json_log()
+        .spawn();
+        let pid = wait_workers(&srv, T, "1 worker", |p| p.len() == 1)[0];
+        let first = instance(&srv);
+        let read = read_slowly(
+            submit(srv.addr, req(&format!("/?probe={}", case.probe))).expect("connect"),
+        );
+        let whole = first.repeat(4096 * 160).into_bytes();
+        assert_eq!(read.status(), 200, "{}\n{}", case.name, diagnostics(&srv));
+        assert_eq!(
+            read.truncated || !read.ended,
+            case.truncated,
+            "{}: the body ended with an error\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        let first_mismatch = read
+            .body
+            .iter()
+            .zip(&whole)
+            .position(|(got, want)| got != want);
+        assert_eq!(
+            first_mismatch,
+            None,
+            "{}: every byte repeats the id {first}; the body from the mismatch: {:?}",
+            case.name,
+            first_mismatch
+                .map(|at| String::from_utf8_lossy(&read.body[at..read.body.len().min(at + 48)]))
+        );
+        // A cut body can lose the bytes that hyper had queued when the body ended with an error, and the byte check above sees only what arrived.
+        let least = if case.truncated { 65536 } else { whole.len() };
+        assert!(
+            read.body.len() >= least,
+            "{}: {} of at least {least} body bytes\n{}",
+            case.name,
+            read.body.len(),
+            diagnostics(&srv)
+        );
+        assert_eq!(
+            worker_pids(srv.pid()),
+            [pid],
+            "{}: the worker process stays\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        let next = instance(&srv);
+        assert_ne!(
+            next,
+            first,
+            "{}: a new app instance serves the next request\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        assert_eq!(
+            booted(&srv, 2),
+            [first, next],
+            "{}: one boot record per app instance",
+            case.name
+        );
+        if let Some(text) = case.php_record {
+            let logged = poll(T, || {
+                server_log::app_records(&srv.log_file())
+                    .php_messages
+                    .iter()
+                    .any(|m| m.contains(text))
+                    .then_some(())
+            });
+            assert!(
+                logged.is_some(),
+                "{}: a php record with {text:?}\n{}",
+                case.name,
+                diagnostics(&srv)
+            );
+        }
+    }
+}
+
+/// A client that reads nothing after the head: the write timeout closes the connection, and the cut body has no chunked terminator. max_requests = 1 is a quota of 2, so the app instance ends after the large unit, and the next boot comes after the cut.
+/// With 64 KiB pieces, the PHP thread waits on the full frame channel until the cut. The 1 MiB pieces fit in the channel, and the IO thread holds the first 8 of them in place (the 8 MiB cap), so the cycle end waits for the cut.
+#[test]
+fn the_write_timeout_cuts_a_stalled_client_before_the_app_instance_ends() {
+    struct Case {
+        name: &'static str,
+        probe: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "160 pieces of 64 KiB: the PHP thread waits on the full channel",
+            probe: "large",
+        },
+        Case {
+            name: "12 pieces of 1 MiB: the cycle end waits for the cut",
+            probe: "stall",
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(
+            Mode::Dispatcher,
+            fixture_path("lifecycle/large-body-worker.php"),
+        )
+        .http_pool("max_requests = 1")
+        .http_extra("write_timeout_secs = 2")
+        .rust_log("info,http=debug")
+        .json_log()
+        .spawn();
+        let first = instance(&srv);
+        let mut c = Conn::open(srv.addr, T).expect("connect");
+        c.send(format!("GET /?probe={} HTTP/1.1\r\nHost: e2e\r\n\r\n", case.probe).as_bytes())
+            .expect("send");
+        assert_eq!(c.read_head(T).expect("head").status, 200, "{}", case.name);
+        assert!(
+            wait_log_contains(&srv, "response write timed out", T),
+            "{}: the write timeout closes the connection\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        let rest = c
+            .read_remaining(Duration::from_secs(30))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "{}: the server closed the connection: {e}\n{}",
+                    case.name,
+                    diagnostics(&srv)
+                )
+            });
+        assert!(
+            !rest.ends_with(b"0\r\n\r\n"),
+            "{}: the cut body has no chunked terminator",
+            case.name
+        );
+        assert_ne!(
+            instance(&srv),
+            first,
+            "{}: a new app instance serves the next request\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        booted(&srv, 2);
+        let log = server_log::records(&srv.log_file());
+        let timed_out = log
+            .iter()
+            .position(|r| r.message.starts_with("response write timed out"));
+        let next_boot = log
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.target == "app" && r.message == "booted")
+            .nth(1)
+            .map(|(at, _)| at);
+        assert!(
+            matches!((timed_out, next_boot), (Some(cut), Some(boot)) if cut < boot),
+            "{}: the next boot comes after the cut (record positions {timed_out:?}, {next_boot:?})\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+    }
 }

@@ -235,6 +235,7 @@ fn worker_main(mode: Mode, entrypoint: PathBuf, rx: UnitRx, classes: DispatcherC
             rapira_plugin_ce_info = (classes.info)();
             rapira_plugin_ce_unit = (classes.unit)();
             rapira_plugin_busy = classes.busy.as_ptr();
+            rapira_plugin_quiesce = classes.quiesce;
         }
     }
     loop {

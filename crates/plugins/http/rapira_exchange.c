@@ -6,7 +6,7 @@ extern bool rapira_rs_exchange_build_request(const rapira_held *held,
 extern bool rapira_rs_exchange_write_head(const rapira_held *held,
                                           int64_t status, HashTable *headers);
 extern bool rapira_rs_exchange_write_body(const rapira_held *held,
-                                          const char *p, size_t len, bool eos);
+                                          zend_string *content, bool eos);
 extern bool rapira_rs_exchange_flush(const rapira_held *held);
 extern bool rapira_rs_exchange_send_file(const rapira_held *held,
                                          const char *path, size_t path_len,
@@ -46,9 +46,7 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeBody) {
 
     const rapira_held *held = exchange_held(ZEND_THIS);
     RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_exchange_write_body(held, ZSTR_VAL(content), ZSTR_LEN(content),
-                                      eos),
-        "writeBody");
+        rapira_rs_exchange_write_body(held, content, eos), "writeBody");
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, sendFile) {

@@ -18,6 +18,7 @@ zend_class_entry *rapira_plugin_ce_dispatcher;
 zend_class_entry *rapira_plugin_ce_info;
 zend_class_entry *rapira_plugin_ce_unit;
 const char *rapira_plugin_busy;
+void (*rapira_plugin_quiesce)(void);
 
 // the memoized plugin Dispatcher of this cycle; RSHUTDOWN releases it
 static zval rapira_dispatcher_memo;

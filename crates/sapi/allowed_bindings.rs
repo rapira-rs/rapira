@@ -19,7 +19,8 @@
     "rapira_ce_work_discarded_exception",
     // the plugin globals the Rust boot and worker start write (static mut)
     "rapira_plugin_ce_dispatcher", "rapira_plugin_ce_info", "rapira_plugin_ce_unit",
-    "rapira_plugin_busy", "rapira_plugin_registers", "rapira_plugin_register_count",
+    "rapira_plugin_busy", "rapira_plugin_quiesce", "rapira_plugin_registers",
+    "rapira_plugin_register_count",
     // the FOREACH macros are header-only, so the array walk uses the exported position API
     "zend_hash_internal_pointer_reset_ex", "zend_hash_get_current_key_ex",
     "zend_hash_get_current_data_ex", "zend_hash_move_forward_ex", "HashPosition",
@@ -39,6 +40,8 @@
     "rapira_array_init",
     // zend_array_is_list is inline -> rapira_array_is_list shim in wrapper.c
     "rapira_array_is_list",
+    // zend_string_addref and zend_string_release are inline -> shims in wrapper.c
+    "rapira_zstr_addref", "rapira_zstr_release",
     // ZVAL_OBJ_COPY is a macro -> rapira_zval_enum_case shim in wrapper.c
     "rapira_zval_enum_case",
     // zend_hash_str_find_ptr is inline; prop_offset (zend.rs) calls its exported half
