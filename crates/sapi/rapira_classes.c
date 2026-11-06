@@ -155,8 +155,15 @@ PHP_MINIT_FUNCTION(rapira) {
     return SUCCESS;
 }
 
-// Runs after the shutdown functions
+// The quiesce hook runs after the shutdown functions, the destructors, the
+// output flush and the timer stop, and before the memory manager shutdown:
+// https://github.com/php/php-src/blob/php-8.5.11/main/main.c#L1974-L2050
+// A write to a held unit from a later RSHUTDOWN would lend a string that the
+// memory manager then frees, so user code there must not write.
 PHP_RSHUTDOWN_FUNCTION(rapira) {
+    if (rapira_plugin_quiesce != NULL) {
+        rapira_plugin_quiesce();
+    }
     php_header();
     rapira_rs_finish_response();
     rapira_dispatcher_release();

@@ -82,7 +82,7 @@ impl Resp {
     }
 
     /// Fold one frame in; true when the stream is over.
-    fn fold(&mut self, frame: Frame) -> bool {
+    pub fn fold(&mut self, frame: Frame) -> bool {
         match frame {
             Frame::Head {
                 head,

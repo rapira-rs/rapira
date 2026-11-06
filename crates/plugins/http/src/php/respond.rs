@@ -1,4 +1,10 @@
-//! writeHead(), writeBody(), writeTrailers(), flush() and the frames they send.
+//! writeHead(), writeBody(), writeTrailers(), flush(), the frames they send and the strings that the IO thread reads in place.
+
+use std::cell::RefCell;
+use std::sync::Arc;
+use std::time::Duration;
+
+use rapira_sapi::{rapira_zstr_addref, rapira_zstr_release, zend_string};
 
 use super::headers::{forbidden_trailer, split_framing, walk_head_table};
 use super::*;
@@ -67,6 +73,7 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
     let Some(tx) = st.sender.as_ref() else {
         return Err(Closed);
     };
+    // A frame that try_send pushes while the receiver drops stays in the channel until the last Sender drops (tokio Rx::drop drains once), so a borrowed piece of a unit whose object outlives RSHUTDOWN unfinalized can hold the cycle end. Rare, no handling.
     match tx.try_send(frame) {
         Ok(()) => Ok(()),
         Err(TrySendError::Closed(_)) => Err(Closed),
@@ -121,8 +128,10 @@ pub(super) unsafe fn emit_head(
     }
 }
 
-/// Setting `Stage::Finalized` here prevents a second count of the unit in `release()`.
+/// Setting `Stage::Finalized` here prevents a second count of the unit in `release()`. The discard also releases the strings that the IO thread no longer reads.
 pub(super) fn discard_unit(st: &mut ExchangeState) {
+    // SAFETY: every caller runs on the PHP thread with the engine active.
+    unsafe { release_done() };
     if st.stage == Stage::Finalized {
         return;
     }
@@ -252,14 +261,20 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_head(
     })
 }
 
+/// The smallest writeBody piece that the IO thread reads in place; a smaller piece is copied. A measurement sets the value.
+const ZERO_COPY_MIN: usize = 16 << 10;
+
+/// The most bytes of PHP strings that the IO thread holds in place at once; above it a piece is copied. It bounds what memory_limit sees for borrowed strings and how long the cycle end waits for slow clients: at most the cap at the client's read speed.
+const BORROW_CAP: usize = 8 << 20;
+
 /// # Safety
-/// `st` valid; `p` points at `len` readable bytes; engine active.
+/// `st` valid; `s` a live string; engine active.
 pub(super) unsafe fn write_body_core(
     st: &mut ExchangeState,
-    p: *const c_char,
-    len: usize,
+    s: *mut zend_string,
     eos: bool,
 ) -> Verb {
+    unsafe { release_done() };
     if st.cancelled() {
         discard_unit(st);
         return Verb::Discarded;
@@ -267,15 +282,19 @@ pub(super) unsafe fn write_body_core(
     if st.stage == Stage::Finalized {
         return Verb::Finalized;
     }
+    let len = unsafe { (*s).len };
     if len == 0 && !eos {
         return Verb::Ok;
     }
     unsafe {
         send_body(st, len as u64, eos, |n| {
-            Frame::Chunk(Bytes::copy_from_slice(std::slice::from_raw_parts(
-                p.cast::<u8>(),
-                n as usize,
-            )))
+            let n = n as usize;
+            // A cut piece lends the whole string: the slice keeps all of it alive.
+            if len >= ZERO_COPY_MIN && lent_bytes() + len <= BORROW_CAP {
+                Frame::Chunk(borrow(s, len).slice(..n))
+            } else {
+                Frame::Chunk(Bytes::copy_from_slice(&zend::zstr_bytes(s)[..n]))
+            }
         })
     }
 }
@@ -321,23 +340,23 @@ pub(super) unsafe fn send_body(
 }
 
 /// # Safety
-/// `held` the slot of a live exchange; `p` points at `len` readable bytes.
+/// `held` the slot of a live exchange; `s` a live string that ZPP holds for the call; engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_write_body(
     held: *const HeldPtr,
-    p: *const c_char,
-    len: usize,
+    s: *mut zend_string,
     eos: bool,
 ) -> bool {
     guard(false, || unsafe {
         let st = &mut *(*held).state::<ExchangeState>();
-        throw_verb(write_body_core(st, p, len, eos))
+        throw_verb(write_body_core(st, s, eos))
     })
 }
 
 /// # Safety
 /// As `send_frame`.
 pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: HeaderMap) {
+    unsafe { release_done() };
     st.body.unlink_spools();
     st.stage = Stage::Finalized;
     sb_update(Event::Handled { errored: truncated });
@@ -380,4 +399,80 @@ pub unsafe extern "C" fn rapira_rs_exchange_flush(held: *const HeldPtr) -> bool 
         let st = &mut *(*held).state::<ExchangeState>();
         throw_verb(flush_core(st))
     })
+}
+
+/// A string that the IO thread reads in place: the Bytes owner, and the LENT entry of the PHP thread. A drop on any thread only lowers the count of `alive`.
+#[derive(Clone)]
+struct Borrowed {
+    s: *mut zend_string,
+    len: usize,
+    alive: Arc<()>,
+}
+
+// SAFETY: the IO thread only reads the bytes; the PHP thread changes the reference count.
+unsafe impl Send for Borrowed {}
+
+impl AsRef<[u8]> for Borrowed {
+    fn as_ref(&self) -> &[u8] {
+        // SAFETY: borrow() took a reference, and release_done() releases it only after the last Bytes owner dropped.
+        unsafe { zend::zstr_bytes(self.s) }
+    }
+}
+
+thread_local! {
+    /// The strings of this PHP thread that the IO thread can still read.
+    static LENT: RefCell<Vec<Borrowed>> = const { RefCell::new(Vec::new()) };
+}
+
+fn lent_bytes() -> usize {
+    LENT.with_borrow(|lent| lent.iter().map(|b| b.len).sum())
+}
+
+/// A frame body that reads `s` in place; the new reference keeps `s` alive until release_done().
+/// # Safety
+/// `s` a live string of `len` bytes; engine active on this thread.
+unsafe fn borrow(s: *mut zend_string, len: usize) -> Bytes {
+    unsafe { rapira_zstr_addref(s) };
+    let alive = Arc::new(());
+    let b = Borrowed { s, len, alive };
+    LENT.with_borrow_mut(|lent| lent.push(b.clone()));
+    Bytes::from_owner(b)
+}
+
+/// Releases the strings that the IO thread no longer reads. write_body_core, seal and discard_unit call it first, so a long response releases its strings while it runs. Arc::get_mut loads the count with Acquire, so the reads of the IO thread come before the release.
+/// # Safety
+/// Engine active on this thread.
+unsafe fn release_done() {
+    LENT.with_borrow_mut(|lent| {
+        for b in lent.extract_if(.., |b| Arc::get_mut(&mut b.alive).is_some()) {
+            unsafe { rapira_zstr_release(b.s) };
+        }
+    });
+}
+
+/// DispatcherClasses::quiesce of the http plugin: waits until the IO thread reads no lent string, then releases them. A warn record about every 5 s names what the IO thread still holds.
+/// # Safety
+/// Engine active on this thread.
+pub unsafe extern "C" fn rapira_rs_http_quiesce() {
+    guard((), || unsafe {
+        for polls in 0u64.. {
+            release_done();
+            let held = LENT.with_borrow(Vec::len);
+            if held == 0 {
+                return;
+            }
+            if polls == 0 {
+                // the request watchdog does not count the wait as a stuck request
+                sb_update(Event::Idle);
+            }
+            if polls % 5000 == 4999 {
+                tracing::warn!(
+                    target: "http",
+                    "the cycle end waits for {held} response piece(s) of {} bytes that the IO thread still holds",
+                    lent_bytes()
+                );
+            }
+            std::thread::sleep(Duration::from_millis(1));
+        }
+    });
 }
