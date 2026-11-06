@@ -445,9 +445,11 @@ void rapira_release_temporary_streams(void) {
     ZEND_HASH_FOREACH_END();
 }
 
-// The whole raw body of the bound request (callbacks.rs); 0 for a host-parsed
-// multipart or empty body.
-extern size_t rapira_rs_raw_body(const char **body);
+// The raw body of the bound request (callbacks.rs): the length, then one part
+// at a time in order. The length is 0 for a host-parsed multipart or empty
+// body, and a part length is 0 past the last part.
+extern size_t rapira_rs_raw_body_len(void);
+extern size_t rapira_rs_raw_body_part(size_t index, const char **part);
 // The Authorization field of the bound request (callbacks.rs); NULL when none.
 extern const char *rapira_rs_authorization(void);
 
@@ -456,13 +458,19 @@ extern const char *rapira_rs_authorization(void);
 // php_stream_temp_write off the temp file (main/streams/memory.c); post_read
 // and read_post_bytes keep php://input off read_post.
 static void rapira_install_body(void) {
-    const char *body = NULL;
-    size_t len = rapira_rs_raw_body(&body);
+    size_t len = rapira_rs_raw_body_len();
     if (len == 0) {
         return;
     }
     php_stream *stream = php_stream_temp_create(TEMP_STREAM_DEFAULT, len + 1);
-    php_stream_write(stream, body, len);
+    // One allocation of the whole length: a write past the current size grows
+    // the memory stream by a realloc, and ZendMM copies a block above 2 MiB
+    // when it cannot extend it in place.
+    php_stream_truncate_set_size(stream, len);
+    const char *part = NULL;
+    for (size_t i = 0, n; (n = rapira_rs_raw_body_part(i, &part)) != 0; i++) {
+        php_stream_write(stream, part, n);
+    }
     php_stream_rewind(stream);
     SG(request_info).request_body = stream;
     SG(read_post_bytes) = (int64_t)len;

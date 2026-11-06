@@ -6,7 +6,7 @@ use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
 use tests::{Resp, StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
-use crate::harness::Spawn;
+use crate::harness::{Spawn, patterned};
 
 fn post(
     fixture_name: &str,
@@ -1051,7 +1051,7 @@ fn request_bodies_worker() -> anyhow::Result<()> {
             name: "a 1 MiB octet-stream POST reaches php://input whole",
             method: Method::POST,
             content_type: Some("application/octet-stream"),
-            body: vec![b'x'; 1 << 20],
+            body: patterned(1 << 20),
             ini: NO_TMP,
             post_count: 0,
             post_last: "-",
@@ -1061,7 +1061,7 @@ fn request_bodies_worker() -> anyhow::Result<()> {
             name: "a 1 MiB PUT without a content type reaches php://input whole",
             method: Method::PUT,
             content_type: None,
-            body: vec![b'x'; 1 << 20],
+            body: patterned(1 << 20),
             ini: NO_TMP,
             post_count: 0,
             post_last: "-",
@@ -1092,25 +1092,32 @@ fn request_bodies_worker() -> anyhow::Result<()> {
                 .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
         }
         request.body_mut().clone_from(&case.body);
-        let StatusBody { status, body: got } = drain(submit(srv.addr, request)?);
+        let resp = drain_resp(submit(srv.addr, request)?);
+        let got = resp.body_string();
 
-        let expected = format!(
-            "{}|{}|{}|{}",
+        // A byte compare: the lossy text maps each non-UTF-8 byte of a body to the same U+FFFD.
+        let mut expected = format!(
+            "{}|{}|{}|",
             case.post_count,
             case.post_last,
-            case.body.len(),
-            String::from_utf8_lossy(&case.body)
-        );
-        assert_eq!(status, 200, "{}", case.name);
+            case.body.len()
+        )
+        .into_bytes();
+        expected.extend_from_slice(&case.body);
+        assert_eq!(resp.status(), 200, "{}", case.name);
         if case.refused {
             let warning = format!(
                 "POST Content-Length of {} bytes exceeds the limit of 16384 bytes",
                 case.body.len()
             );
             assert!(got.contains(&warning), "{}: got {got:.300}", case.name);
-            assert!(got.ends_with(&expected), "{}: got {got:.300}", case.name);
+            assert!(
+                resp.body.ends_with(&expected),
+                "{}: got {got:.300}",
+                case.name
+            );
         } else {
-            assert!(got == expected, "{}: got {got:.300}", case.name);
+            assert!(resp.body == expected, "{}: got {got:.300}", case.name);
         }
     }
     Ok(())

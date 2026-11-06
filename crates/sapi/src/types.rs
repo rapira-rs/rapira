@@ -81,8 +81,75 @@ pub struct MultipartBody {
     pub files: Vec<UploadedFile>,
 }
 
+/// The raw body as the transport delivered it: one part per received data frame, empty frames left out. Each consumer makes its one copy from the parts.
+#[derive(Default)]
+pub struct Chunks {
+    parts: Vec<Bytes>,
+    /// The sum of the part lengths.
+    len: usize,
+    /// The part where the next read starts.
+    part: usize,
+    /// The read position inside that part.
+    offset: usize,
+}
+
+impl Chunks {
+    pub fn new(mut parts: Vec<Bytes>) -> Self {
+        parts.retain(|p| !p.is_empty());
+        let len = parts.iter().map(Bytes::len).sum();
+        Self {
+            parts,
+            len,
+            part: 0,
+            offset: 0,
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn parts(&self) -> &[Bytes] {
+        &self.parts
+    }
+
+    /// One contiguous copy of the body, for the multipart parse.
+    pub fn concat(&self) -> Vec<u8> {
+        let mut out = Vec::with_capacity(self.len);
+        for part in &self.parts {
+            out.extend_from_slice(part);
+        }
+        out
+    }
+}
+
+/// read_post reads through this. A read fills the buffer across the part seams: sapi_read_post_block takes a short read as the end of the body.
+/// https://github.com/php/php-src/blob/php-8.5.11/main/SAPI.c#L232-L252
+impl std::io::Read for Chunks {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let mut n = 0;
+        while n < buf.len()
+            && let Some(part) = self.parts.get(self.part)
+        {
+            let take = (part.len() - self.offset).min(buf.len() - n);
+            buf[n..n + take].copy_from_slice(&part[self.offset..self.offset + take]);
+            n += take;
+            self.offset += take;
+            if self.offset == part.len() {
+                self.part += 1;
+                self.offset = 0;
+            }
+        }
+        Ok(n)
+    }
+}
+
 pub enum Body {
-    Raw(std::io::Cursor<Vec<u8>>),
+    Raw(Chunks),
     Multipart(MultipartBody),
 }
 
@@ -370,7 +437,7 @@ pub(crate) mod tests {
                 headers: HeaderMap::new(),
                 content_type: None,
                 content_length: -1,
-                body: Body::Raw(std::io::Cursor::new(Vec::new())),
+                body: Body::Raw(Chunks::default()),
                 received_at: 0.0,
             },
             c: ReqC {
@@ -568,5 +635,62 @@ pub(crate) mod tests {
     #[test]
     fn commit_head_lets_the_status_field_override_the_recorded_code() {
         assert_eq!(head_of(500, &[("Status", "404")]).status, 404);
+    }
+
+    /// A read fills the buffer across the part seams and is short only at the end of the body.
+    #[test]
+    fn chunks_read_in_order_across_the_parts() {
+        use std::io::Read;
+        struct Case {
+            name: &'static str,
+            parts: &'static [&'static [u8]],
+            /// The buffer length of each read, in order.
+            reads: &'static [usize],
+            /// The bytes that each read gives.
+            want: &'static [&'static [u8]],
+        }
+        let cases = [
+            Case {
+                name: "a read crosses the seam between two parts",
+                parts: &[b"abc", b"def"],
+                reads: &[4, 4, 1],
+                want: &[b"abcd", b"ef", b""],
+            },
+            Case {
+                name: "a read longer than the rest gives the rest",
+                parts: &[b"abc", b"def"],
+                reads: &[2, 10, 4],
+                want: &[b"ab", b"cdef", b""],
+            },
+            Case {
+                name: "a zero-length read in the middle moves nothing",
+                parts: &[b"abc", b"def"],
+                reads: &[2, 0, 4],
+                want: &[b"ab", b"", b"cdef"],
+            },
+            Case {
+                name: "an empty part changes nothing",
+                parts: &[b"abc", b"", b"def"],
+                reads: &[4, 4],
+                want: &[b"abcd", b"ef"],
+            },
+            Case {
+                name: "an empty body reads nothing",
+                parts: &[],
+                reads: &[4],
+                want: &[b""],
+            },
+        ];
+        for case in cases {
+            let mut chunks =
+                Chunks::new(case.parts.iter().map(|p| Bytes::from_static(p)).collect());
+            let mut got: Vec<Vec<u8>> = Vec::new();
+            for &n in case.reads {
+                let mut buf = vec![0; n];
+                let read = chunks.read(&mut buf).unwrap();
+                got.push(buf[..read].to_vec());
+            }
+            assert_eq!(got, case.want, "{}", case.name);
+        }
     }
 }

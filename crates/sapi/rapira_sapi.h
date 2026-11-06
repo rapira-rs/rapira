@@ -41,6 +41,10 @@ bool rapira_array_is_list(HashTable *ht);
 void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name);
 // ZVAL_STRINGL is a macro; the shim writes a new non-interned string into `zv`
 void rapira_zval_stringl(zval *zv, const char *s, size_t len);
+// ZVAL_NEW_STR and ZVAL_EMPTY_STRING are macros; the shim writes a new string of
+// len bytes into zv and returns its buffer for the caller to fill. For len 0 it
+// writes the empty string and returns NULL.
+char *rapira_zval_string_alloc(zval *zv, size_t len);
 // ZVAL_STRINGL_FAST is a macro; the shim registers the string `val` as `name` through php_register_known_variable.
 // `name` must be non-empty and non-numeric, have no NUL, ' ', '.' or '[', and not be "this" or "GLOBALS".
 void rapira_register_known_stringl(const char *name, size_t name_len,

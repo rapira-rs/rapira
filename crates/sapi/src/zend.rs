@@ -1,9 +1,10 @@
 use std::ffi::{CStr, c_char};
 
+use crate::types::Chunks;
 use crate::{
     HashPosition, HashTable, IS_DOUBLE, IS_LONG, IS_NULL, IS_PROP_REINITABLE, IS_PROP_UNINIT,
-    IS_REFERENCE, executor_globals, rapira_zval_stringl, zend_class_entry,
-    zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
+    IS_REFERENCE, executor_globals, rapira_zval_string_alloc, rapira_zval_stringl,
+    zend_class_entry, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object,
     zend_property_info, zend_read_property, zend_string, zend_throw_error, zend_throw_exception,
     zend_ulong, zend_update_property, zend_update_property_double, zend_update_property_long,
@@ -117,6 +118,23 @@ pub unsafe fn slot_stringl(obj: *mut zend_object, offset: u32, bytes: &[u8]) {
     unsafe {
         let mut v: zval = std::mem::zeroed();
         rapira_zval_stringl(&mut v, ptr_or_empty(bytes), bytes.len());
+        slot_init(obj, offset, &v);
+    }
+}
+
+/// Copies the parts of `chunks` in order into one new string and moves the string into the slot at `offset`.
+/// # Safety
+/// As `slot_init`; the property type accepts a string.
+pub unsafe fn slot_string_from_chunks(obj: *mut zend_object, offset: u32, chunks: &Chunks) {
+    unsafe {
+        let mut v: zval = std::mem::zeroed();
+        // NULL for an empty body: then there are no parts and the loop does not run.
+        let dst = rapira_zval_string_alloc(&mut v, chunks.len()).cast::<u8>();
+        let mut at = 0;
+        for part in chunks.parts() {
+            std::ptr::copy_nonoverlapping(part.as_ptr(), dst.add(at), part.len());
+            at += part.len();
+        }
         slot_init(obj, offset, &v);
     }
 }
