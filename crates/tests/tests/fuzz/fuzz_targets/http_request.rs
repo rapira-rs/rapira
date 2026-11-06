@@ -17,6 +17,7 @@ use rapira_http::php::RequestView;
 use rapira_http::request::build;
 use rapira_net::ListenAddr;
 use rapira_sapi::Addr;
+use rapira_sapi::types::Chunks;
 
 const MAX_BODY: usize = 1024;
 const SERVER: &str = "127.0.0.1:8000";
@@ -141,7 +142,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         https,
         received_at: 0.0,
     };
-    let built = build(parts, authority.clone(), Vec::new(), peer, &CONFIG);
+    let built = build(parts, authority.clone(), Chunks::default(), peer, &CONFIG);
     // http::Uri drops a fragment, so $target has none.
     let raw = target.split('#').next().unwrap_or_default();
     let (want_uri, want_target) = if raw == "*" || raw.starts_with('/') {

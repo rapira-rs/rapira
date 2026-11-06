@@ -428,14 +428,18 @@ void rapira_child_init(void) {
     SG(options) |= SAPI_OPTION_NO_CHDIR;
 }
 
-// sapi_deactivate_module only NULLs temp streams; nothing reclaims the resource
+// sapi_deactivate_module only NULLs the request body stream; nothing reclaims
+// the resource. The body is a memory stream, and sapi_read_standard_form_data
+// makes a temp stream.
 void rapira_release_temporary_streams(void) {
     zend_resource *val = NULL;
     int stream_type = php_file_le_stream();
     ZEND_HASH_FOREACH_PTR(&EG(regular_list), val) {
         if (val->type == stream_type) {
             php_stream *stream = val->ptr;
-            if (stream != NULL && stream->ops == &php_stream_temp_ops &&
+            if (stream != NULL &&
+                (stream->ops == &php_stream_memory_ops ||
+                 stream->ops == &php_stream_temp_ops) &&
                 !(stream->flags & PHP_STREAM_FLAG_NO_FCLOSE) &&
                 stream->__exposed == 0 && GC_REFCOUNT(val) == 1) {
                 zend_list_delete(val);
@@ -445,25 +449,33 @@ void rapira_release_temporary_streams(void) {
     ZEND_HASH_FOREACH_END();
 }
 
-// The whole raw body of the bound request (callbacks.rs); 0 for a host-parsed
-// multipart or empty body.
-extern size_t rapira_rs_raw_body(const char **body);
+// The raw body of the bound request (callbacks.rs): the length, then one part
+// at a time in order. The length is 0 for a host-parsed multipart or empty
+// body, and a part length is 0 past the last part.
+extern size_t rapira_rs_raw_body_len(void);
+extern size_t rapira_rs_raw_body_part(size_t index, const char **part);
 // The Authorization field of the bound request (callbacks.rs); NULL when none.
 extern const char *rapira_rs_authorization(void);
 
-// Hands the body to PHP in a temp stream: rapira_release_temporary_streams
-// frees only temp streams between units. The cap len + 1 keeps
-// php_stream_temp_write off the temp file (main/streams/memory.c); post_read
-// and read_post_bytes keep php://input off read_post.
+// Hands the body to PHP as a read-only memory stream over one string that the
+// parts fill in one pass; rapira_release_temporary_streams frees the stream
+// between units. post_read and read_post_bytes keep php://input off read_post.
 static void rapira_install_body(void) {
-    const char *body = NULL;
-    size_t len = rapira_rs_raw_body(&body);
+    size_t len = rapira_rs_raw_body_len();
     if (len == 0) {
         return;
     }
-    php_stream *stream = php_stream_temp_create(TEMP_STREAM_DEFAULT, len + 1);
-    php_stream_write(stream, body, len);
-    php_stream_rewind(stream);
+    zend_string *body = zend_string_alloc(len, false);
+    char *dst = ZSTR_VAL(body);
+    const char *part = NULL;
+    for (size_t i = 0, n; (n = rapira_rs_raw_body_part(i, &part)) != 0; i++) {
+        memcpy(dst, part, n);
+        dst += n;
+    }
+    ZSTR_VAL(body)[len] = '\0';
+    php_stream *stream = php_stream_memory_open(TEMP_STREAM_READONLY, body);
+    // the stream holds its own reference (main/streams/memory.c)
+    zend_string_release(body);
     SG(request_info).request_body = stream;
     SG(read_post_bytes) = (int64_t)len;
     SG(post_read) = 1;

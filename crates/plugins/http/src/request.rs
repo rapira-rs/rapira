@@ -1,7 +1,7 @@
 //! Builds the SAPI Request from the HTTP request and the Peer.
 
 use rapira_sapi::Request;
-use rapira_sapi::types::Body;
+use rapira_sapi::types::{Body, Chunks};
 
 use crate::Config;
 use crate::middleware::Peer;
@@ -10,7 +10,7 @@ use crate::middleware::Peer;
 pub fn build(
     parts: http::request::Parts,
     authority: Option<Vec<u8>>,
-    body: Vec<u8>,
+    body: Chunks,
     peer: Peer,
     cfg: &Config,
 ) -> Request {
@@ -50,7 +50,7 @@ pub fn build(
             .get(http::header::CONTENT_TYPE)
             .map(|v| v.as_bytes().to_vec()),
         content_length: body.len() as i64,
-        body: Body::Raw(std::io::Cursor::new(body)),
+        body: Body::Raw(body),
         headers,
     }
 }
@@ -96,7 +96,13 @@ mod tests {
             .body(())
             .unwrap();
         let (parts, ()) = req.into_parts();
-        let built = build(parts, Some(b"e2e".to_vec()), Vec::new(), peer(), &config());
+        let built = build(
+            parts,
+            Some(b"e2e".to_vec()),
+            Chunks::default(),
+            peer(),
+            &config(),
+        );
         let probes: Vec<_> = built.headers.get_all("x-probe").iter().collect();
         assert_eq!(probes, ["one", "two"]);
         assert_eq!(built.protocol, "HTTP/1.1");
@@ -151,7 +157,7 @@ mod tests {
                 .body(())
                 .unwrap();
             let (parts, ()) = req.into_parts();
-            let built = build(parts, None, Vec::new(), peer(), &config());
+            let built = build(parts, None, Chunks::default(), peer(), &config());
             assert_eq!(built.uri, case.want_uri, "{}", case.name);
             assert_eq!(built.target.as_deref(), case.want_target, "{}", case.name);
         }
