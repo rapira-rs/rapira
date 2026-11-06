@@ -14,8 +14,8 @@ typedef struct {
     zend_object std;
 } rapira_exchange_obj;
 // HeldPtr::of (work.rs) steps back handlers.offset bytes to the held word
-ZEND_STATIC_ASSERT(offsetof(rapira_exchange_obj, held) == 0,
-                   "the held word must be the first field of the prefix");
+static_assert(offsetof(rapira_exchange_obj, held) == 0,
+              "the held word must be the first field of the prefix");
 
 // Class entries that rapira_http.c reads; rapira_http_register_classes assigns
 // them in MINIT, after the base classes. Rust declares its own externs
