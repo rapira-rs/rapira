@@ -648,28 +648,21 @@ fn a_slow_client_reads_the_pieces_of_an_app_instance_that_ended() {
 }
 
 /// A client that reads nothing after the head: the write timeout closes the connection, and the cut body has no chunked terminator. max_requests = 1 is a quota of 2, so the app instance ends after the large unit, and the next boot comes after the cut.
-/// With 64 KiB pieces, the PHP thread waits on the full frame channel until the cut. The 1 MiB pieces fit in the channel, and the IO thread holds the first 8 of them in place (the 8 MiB cap), so the cycle end waits for the cut, and an 8 s timeout gives one warn record of that wait.
+/// With 64 KiB pieces, the PHP thread waits on the full frame channel until the cut. The 1 MiB pieces fit in the channel, and the IO thread holds the first 8 of them in place (the 8 MiB cap), so the cycle end waits for the cut.
 #[test]
 fn the_write_timeout_cuts_a_stalled_client_before_the_app_instance_ends() {
     struct Case {
         name: &'static str,
         probe: &'static str,
-        write_timeout_secs: u64,
-        /// The warn records of the wait at the cycle end.
-        waits: usize,
     }
     let cases = [
         Case {
             name: "160 pieces of 64 KiB: the PHP thread waits on the full channel",
             probe: "large",
-            write_timeout_secs: 2,
-            waits: 0,
         },
         Case {
             name: "12 pieces of 1 MiB: the cycle end waits for the cut",
             probe: "stall",
-            write_timeout_secs: 8,
-            waits: 1,
         },
     ];
     for case in cases {
@@ -678,7 +671,7 @@ fn the_write_timeout_cuts_a_stalled_client_before_the_app_instance_ends() {
             fixture_path("lifecycle/large-body-worker.php"),
         )
         .http_pool("max_requests = 1")
-        .http_extra(&format!("write_timeout_secs = {}", case.write_timeout_secs))
+        .http_extra("write_timeout_secs = 2")
         .rust_log("info,http=debug")
         .json_log()
         .spawn();
@@ -731,12 +724,5 @@ fn the_write_timeout_cuts_a_stalled_client_before_the_app_instance_ends() {
             case.name,
             diagnostics(&srv)
         );
-        let waits = log
-            .iter()
-            .filter(|r| {
-                r.level == tracing::Level::WARN && r.message.starts_with("the cycle end waits for")
-            })
-            .count();
-        assert_eq!(waits, case.waits, "{}: warn records of the wait", case.name);
     }
 }

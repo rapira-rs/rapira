@@ -73,8 +73,7 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
     let Some(tx) = st.sender.as_ref() else {
         return Err(Closed);
     };
-    // A frame that try_send pushes while the receiver drops stays in the channel until the last Sender drops (tokio Rx::drop drains once), so a borrowed piece of a unit whose object outlives RSHUTDOWN unfinalized can hold the cycle end. Rare, no handling.
-    match tx.try_send(frame) {
+    let sent = match tx.try_send(frame) {
         Ok(()) => Ok(()),
         Err(TrySendError::Closed(_)) => Err(Closed),
         Err(TrySendError::Full(frame)) => unsafe {
@@ -90,7 +89,13 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
             }
             r
         },
+    };
+    // A frame pushed while the receiver drops stays in the channel until the last Sender drops (tokio Rx::drop drains once). The drop of the Sender here frees it, so a lent string cannot hold the cycle end.
+    if sent.is_ok() && tx.is_closed() {
+        st.sender = None;
+        return Err(Closed);
     }
+    sent
 }
 
 /// `finalizing_len` is the one-shot body length used only when nothing streamed before: a declared content-length wins, and a bodiless response gets none.
