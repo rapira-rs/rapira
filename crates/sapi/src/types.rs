@@ -116,15 +116,6 @@ impl Chunks {
     pub fn parts(&self) -> &[Bytes] {
         &self.parts
     }
-
-    /// One contiguous copy of the body, for the multipart parse.
-    pub fn concat(&self) -> Vec<u8> {
-        let mut out = Vec::with_capacity(self.len);
-        for part in &self.parts {
-            out.extend_from_slice(part);
-        }
-        out
-    }
 }
 
 /// read_post reads through this. A read fills the buffer across the part seams: sapi_read_post_block takes a short read as the end of the body.

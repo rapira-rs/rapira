@@ -525,23 +525,19 @@ async fn parse_multipart(
     }
     let boundary = multipart::boundary(content_type)?;
     if raw.len() <= INLINE_PARSE_MAX {
-        let parsed = multipart::parse(&raw.concat(), &boundary, limits)?;
+        let parsed = multipart::parse(raw.parts(), &boundary, limits)?;
         req.body = rapira_sapi::types::Body::Multipart(parsed);
         return Ok(req);
     }
     let raw = std::mem::take(raw);
     let limits = limits.clone();
-    // The concatenation runs on the blocking pool with the parse.
-    let parsed = tokio::task::spawn_blocking(move || {
-        let bytes = raw.concat();
-        drop(raw);
-        multipart::parse(&bytes, &boundary, &limits)
-    })
-    .await
-    .map_err(|e| Rejection {
-        status: http::StatusCode::INTERNAL_SERVER_ERROR,
-        reason: format!("multipart parse task failed: {e}"),
-    })?;
+    let parsed =
+        tokio::task::spawn_blocking(move || multipart::parse(raw.parts(), &boundary, &limits))
+            .await
+            .map_err(|e| Rejection {
+                status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                reason: format!("multipart parse task failed: {e}"),
+            })?;
     req.body = rapira_sapi::types::Body::Multipart(parsed?);
     Ok(req)
 }
