@@ -22,6 +22,13 @@ mod receive;
 thread_local! {
     /// The Box pointer of the unit handed out last, so paths where free_obj never runs (bailout) can still reclaim it.
     pub(crate) static UNIT: Cell<Option<*mut dyn Held>> = const { Cell::new(None) };
+    /// The count of the cycles this PHP thread ran, 1 in the first cycle.
+    static CYCLE: Cell<u64> = const { Cell::new(0) };
+}
+
+/// The number of the current cycle of this PHP thread. A plugin that closes something at the cycle end reopens it when the number changes.
+pub fn cycle() -> u64 {
+    CYCLE.get()
 }
 
 /// Clears the cycle slot if it still points at `ptr`.
@@ -34,6 +41,7 @@ pub(crate) fn forget_held(ptr: *const ()) {
 pub(crate) fn cycle_reset() {
     reclaim_current();
     UNIT.set(None);
+    CYCLE.set(CYCLE.get() + 1);
     crate::start::CLOSED_SEEN.set(false);
     crate::start::RECEIVED.set(false);
 }

@@ -178,6 +178,8 @@ pub struct DispatcherClasses {
     pub unit: unsafe fn() -> *mut zend_class_entry,
     /// The error of receive() and tryReceive() while a unit is unfinalized.
     pub busy: &'static CStr,
+    /// Runs on the PHP thread in RSHUTDOWN, before php_request_shutdown frees the request strings: the plugin waits until its IO thread holds no request string, then releases the strings.
+    pub quiesce: Option<unsafe extern "C" fn()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -41,6 +41,10 @@ void rapira_register_known_stringl(const char *name, size_t name_len,
     php_register_known_variable(name, name_len, &value, track_vars_array);
 }
 
+void rapira_zstr_addref(zend_string *s) { zend_string_addref(s); }
+
+void rapira_zstr_release(zend_string *s) { zend_string_release(s); }
+
 void rapira_init_call_stack(void) {
 #ifdef ZEND_CHECK_STACK_LIMIT
     zend_call_stack_init();

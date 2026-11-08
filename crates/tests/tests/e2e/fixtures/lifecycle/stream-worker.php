@@ -42,9 +42,10 @@ try {
 			continue;
 		}
 		if ($probe === "cl-exceeded") {
-			$ex->writeHead(200, ["content-length" => ["5"]]);
+			// tens copies of "0123456789" under a declared length of cl bytes
+			$ex->writeHead(200, ["content-length" => [$q["cl"] ?? "5"]]);
 			try {
-				$ex->writeBody("0123456789");
+				$ex->writeBody(str_repeat("0123456789", (int) ($q["tens"] ?? 1)));
 			} catch (ContentLengthExceededError) {
 			}
 			continue;

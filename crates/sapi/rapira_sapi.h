@@ -45,6 +45,10 @@ void rapira_zval_stringl(zval *zv, const char *s, size_t len);
 // len bytes into zv and returns its buffer for the caller to fill. For len 0 it
 // writes the empty string and returns NULL.
 char *rapira_zval_string_alloc(zval *zv, size_t len);
+// zend_string_addref and zend_string_release are inline; the shims add and
+// release one reference, and an interned string gets neither
+void rapira_zstr_addref(zend_string *s);
+void rapira_zstr_release(zend_string *s);
 // ZVAL_STRINGL_FAST is a macro; the shim registers the string `val` as `name` through php_register_known_variable.
 // `name` must be non-empty and non-numeric, have no NUL, ' ', '.' or '[', and not be "this" or "GLOBALS".
 void rapira_register_known_stringl(const char *name, size_t name_len,
@@ -67,6 +71,10 @@ extern zend_class_entry *rapira_plugin_ce_info;
 extern zend_class_entry *rapira_plugin_ce_unit;
 // the error of receive() and tryReceive() while a unit is unfinalized
 extern const char *rapira_plugin_busy;
+// RSHUTDOWN calls it on the PHP thread before the request strings are freed:
+// the plugin waits until its IO thread holds no request string, then releases
+// the strings. NULL when the plugin lends nothing.
+extern void (*rapira_plugin_quiesce)(void);
 // The plugin register functions that MINIT calls after the base classes, in
 // array order; boot_master (start.rs) writes them once in the master.
 extern void (*const *rapira_plugin_registers)(void);

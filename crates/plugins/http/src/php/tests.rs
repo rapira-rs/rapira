@@ -2,6 +2,7 @@ use super::headers::*;
 use super::respond::*;
 use super::*;
 use rapira_sapi::types::Request;
+use rapira_sapi::zend_string;
 use std::path::PathBuf;
 
 fn base_req() -> Request {
@@ -60,6 +61,31 @@ fn recv_sealed(rx: &mut tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>) 
     Sealed::Nothing
 }
 
+/// A zend_string in test memory. write_body_core copies a piece below ZERO_COPY_MIN, so no ZendMM call reaches it.
+struct Piece(Vec<u64>);
+
+impl Piece {
+    fn new(bytes: &[u8]) -> Self {
+        let head = std::mem::offset_of!(zend_string, val);
+        let mut words = vec![0u64; (head + bytes.len() + 1).div_ceil(8)];
+        let s = words.as_mut_ptr().cast::<zend_string>();
+        // SAFETY: words holds the header and bytes.len() + 1 bytes from val on.
+        unsafe {
+            (*s).len = bytes.len();
+            std::ptr::copy_nonoverlapping(
+                bytes.as_ptr(),
+                (&raw mut (*s).val).cast::<u8>(),
+                bytes.len(),
+            );
+        }
+        Self(words)
+    }
+
+    fn ptr(&mut self) -> *mut zend_string {
+        self.0.as_mut_ptr().cast()
+    }
+}
+
 /// An exchange state as the submit makes it.
 struct Attached {
     state: ExchangeState,
@@ -91,7 +117,7 @@ fn seal_drops_the_body_for_304() {
         unsafe { write_head_core(&mut st, 304, HeaderMap::new()) },
         Verb::Ok
     );
-    let v = unsafe { write_body_core(&mut st, c"gone".as_ptr(), 4, true) };
+    let v = unsafe { write_body_core(&mut st, Piece::new(b"gone").ptr(), true) };
     assert_eq!(v, Verb::Ok);
     let Sealed::Complete { status, body } = recv_sealed(&mut rx) else {
         panic!("must seal cleanly");
@@ -107,14 +133,14 @@ fn empty_non_eos_chunk_commits_nothing() {
         state: mut st,
         reply: mut rx,
     } = state();
-    let v = unsafe { write_body_core(&mut st, c"".as_ptr(), 0, false) };
+    let v = unsafe { write_body_core(&mut st, Piece::new(b"").ptr(), false) };
     assert_eq!(v, Verb::Ok);
     assert_eq!(
         unsafe { write_head_core(&mut st, 404, HeaderMap::new()) },
         Verb::Ok,
         "the head slot must still be open"
     );
-    let v = unsafe { write_body_core(&mut st, c"x".as_ptr(), 1, true) };
+    let v = unsafe { write_body_core(&mut st, Piece::new(b"x").ptr(), true) };
     assert_eq!(v, Verb::Ok);
     let Sealed::Complete { status, .. } = recv_sealed(&mut rx) else {
         panic!("must seal cleanly");
@@ -313,7 +339,7 @@ fn head_frame_length_follows_the_write_shape() {
             state: mut st,
             reply: mut rx,
         } = state();
-        let v = unsafe { write_body_core(&mut st, c"abc".as_ptr(), 3, case.eos) };
+        let v = unsafe { write_body_core(&mut st, Piece::new(b"abc").ptr(), case.eos) };
         assert_eq!(v, Verb::Ok, "{}", case.name);
         let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
             panic!("{}: head first", case.name);
@@ -332,7 +358,7 @@ fn content_length_exceeded_sends_the_prefix_and_seals() {
     } = state();
     let v = unsafe { write_head_core(&mut st, 200, map(&[("content-length", "5")])) };
     assert_eq!(v, Verb::Ok);
-    let v = unsafe { write_body_core(&mut st, c"0123456789".as_ptr(), 10, true) };
+    let v = unsafe { write_body_core(&mut st, Piece::new(b"0123456789").ptr(), true) };
     assert_eq!(v, Verb::ContentLengthExceeded);
 
     let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
@@ -348,7 +374,7 @@ fn content_length_exceeded_sends_the_prefix_and_seals() {
     };
     assert!(!truncated, "complete per its declaration");
 
-    let v = unsafe { write_body_core(&mut st, c"x".as_ptr(), 1, true) };
+    let v = unsafe { write_body_core(&mut st, Piece::new(b"x").ptr(), true) };
     assert_eq!(v, Verb::Finalized, "nothing written after it");
 }
 
@@ -393,9 +419,9 @@ fn gone_client_discards_once_and_stays_discarded() {
         reply: rx,
     } = state();
     drop(rx);
-    let v = unsafe { write_body_core(&mut st, c"x".as_ptr(), 1, false) };
+    let v = unsafe { write_body_core(&mut st, Piece::new(b"x").ptr(), false) };
     assert_eq!(v, Verb::Discarded);
-    let v = unsafe { write_body_core(&mut st, c"y".as_ptr(), 1, true) };
+    let v = unsafe { write_body_core(&mut st, Piece::new(b"y").ptr(), true) };
     assert_eq!(v, Verb::Discarded, "sticky across repeat writes");
 
     assert!(st.is_finalized());
@@ -438,7 +464,7 @@ fn a_101_head_drops_body_chunks() {
         unsafe { write_head_core(&mut st, 101, HeaderMap::new()) },
         Verb::Ok
     );
-    let v = unsafe { write_body_core(&mut st, c"upgrade".as_ptr(), 7, true) };
+    let v = unsafe { write_body_core(&mut st, Piece::new(b"upgrade").ptr(), true) };
     assert_eq!(v, Verb::Ok);
     let Ok(Frame::Head { bodiless, .. }) = rx.try_recv() else {
         panic!("head first");
@@ -602,7 +628,9 @@ fn a_lost_unit_fails_or_truncates_the_reply() {
         let before = match case.before {
             Before::Nothing => Verb::Ok,
             Before::HeadCommitted => unsafe { write_head_core(&mut st, 200, HeaderMap::new()) },
-            Before::HeadSent => unsafe { write_body_core(&mut st, c"abc".as_ptr(), 3, false) },
+            Before::HeadSent => unsafe {
+                write_body_core(&mut st, Piece::new(b"abc").ptr(), false)
+            },
         };
         assert_eq!(before, Verb::Ok, "{}", case.name);
         st.lost();

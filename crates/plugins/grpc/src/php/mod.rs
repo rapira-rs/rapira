@@ -29,4 +29,5 @@ pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {
     info: || unsafe { rapira_ce_internal_grpc_dispatcher_info },
     unit: || unsafe { rapira_ce_internal_grpc_unary_call },
     busy: c"this worker holds one unit at a time, and its Rapira\\Grpc\\UnaryCall is unfinalized; finalize it first",
+    quiesce: None,
 };
