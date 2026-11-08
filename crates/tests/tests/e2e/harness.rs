@@ -737,6 +737,11 @@ pub fn parse_status_and_body(raw: &[u8]) -> io::Result<StatusBody<&[u8]>> {
     })
 }
 
+/// A request body of `len` bytes where byte i is i % 251: a dropped or reordered transport chunk changes the bytes.
+pub fn patterned(len: usize) -> Vec<u8> {
+    (0..len).map(|i| (i % 251) as u8).collect()
+}
+
 /// Direct children of `master`; the `ps` field syntax is valid on both procps and BSD ps, and `Z` is excluded so a dead-but-unreaped worker is not counted.
 pub fn worker_pids(master: u32) -> Vec<u32> {
     let out = match Command::new("ps")

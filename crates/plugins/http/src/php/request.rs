@@ -172,7 +172,7 @@ unsafe fn build_request_impl(held: *const HeldPtr, memo: *mut zval) -> bool {
         zend::slot_stringl(o, protocol_slot, protocol_php(req.protocol).as_bytes());
         zend::slot_init(o, headers_slot, &headers);
         match &st.body {
-            BodyState::Raw(v) => zend::slot_stringl(o, body_slot, v),
+            BodyState::Raw(chunks) => zend::slot_string_from_chunks(o, body_slot, chunks),
             BodyState::Multipart { .. } => zend::slot_init(o, body_slot, &mp),
         }
         zend::slot_init(o, remote_slot, &remote);

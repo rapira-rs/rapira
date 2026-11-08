@@ -10,7 +10,7 @@ use std::time::Duration;
 use http::header::CONTENT_TYPE;
 use http_body_util::BodyExt;
 use hyper::body::{Body, Bytes, Incoming, SizeHint};
-use rapira_sapi::types::ResponseHead;
+use rapira_sapi::types::{Chunks, ResponseHead};
 use rapira_sapi::work::{Intake, Refused, Unit};
 use rapira_sapi::{Addr, Frame, Request};
 use tower::{Service as _, ServiceExt as _};
@@ -329,9 +329,10 @@ where
     B::Error: std::fmt::Display,
 {
     let cfg = &shared.cfg;
-    // The direct path bounds the hint through the content-length check; a middleware body can report any lower bound.
-    let reserve = body.size_hint().lower().min(cfg.max_body_size as u64) as usize;
-    let mut collected: Vec<u8> = Vec::with_capacity(reserve);
+    let mut collected: Vec<Bytes> = Vec::new();
+    // A kept frame holds hyper's whole read buffer, and hyper then reads the next frame into a new buffer of at least 8 KiB. A client that sends a body in small reads would make the worker allocate many times the body size, so frames below KEEP_FRAME_MIN are copied into one buffer with their neighbors.
+    let mut small: Vec<u8> = Vec::new();
+    let mut received = 0;
     loop {
         // hyper only times the head read, so each body frame gets its own progress bound here.
         let frame = match timeout_lazy(cfg.keepalive_timeout, body.frame()).await {
@@ -348,11 +349,19 @@ where
                 let Ok(data) = frame.into_data() else {
                     continue;
                 };
-                if collected.len() + data.len() > cfg.max_body_size {
+                received += data.len();
+                if received > cfg.max_body_size {
                     tracing::warn!(target: "http", "request body exceeds max_body_size");
                     return refused(http::StatusCode::PAYLOAD_TOO_LARGE, guard);
                 }
-                collected.extend_from_slice(&data);
+                if data.len() < KEEP_FRAME_MIN {
+                    small.extend_from_slice(&data);
+                } else {
+                    if !small.is_empty() {
+                        collected.push(Bytes::from(std::mem::take(&mut small)));
+                    }
+                    collected.push(data);
+                }
             }
             Some(Err(e)) => {
                 tracing::debug!(target: "http", "request body read failed: {e}");
@@ -360,8 +369,11 @@ where
             }
         }
     }
+    if !small.is_empty() {
+        collected.push(Bytes::from(small));
+    }
 
-    let request = request::build(parts, authority, collected, peer, cfg);
+    let request = request::build(parts, authority, Chunks::new(collected), peer, cfg);
     let mut reply = match submit(shared, request).await {
         Ok(reply) => reply,
         Err(r) => {
@@ -456,6 +468,9 @@ async fn timeout_lazy<F: Future>(
 /// Cap 16 lets a buffered Head+Chunk+End trio queue without parking the PHP thread and keeps a 1 MiB body in 64 KiB writes to about one park; tokio allocates one 32-slot block for any cap up to 32.
 const FRAME_CAP: usize = 16;
 
+/// A body frame at or above this size travels as hyper delivered it; a smaller frame is copied into one buffer with its neighbors. hyper reads up to 400 KiB per frame on a fast link, so a bulk body keeps its frames.
+const KEEP_FRAME_MIN: usize = 64 << 10;
+
 /// Both refusals come before dispatch: the multipart parse, then the intake.
 async fn submit(
     shared: &Shared,
@@ -499,7 +514,7 @@ async fn parse_multipart(
     let rapira_sapi::types::Body::Raw(raw) = &mut req.body else {
         return Ok(req);
     };
-    if raw.get_ref().is_empty() {
+    if raw.is_empty() {
         return Ok(req);
     }
     let Some(content_type) = req.content_type.as_deref() else {
@@ -509,19 +524,24 @@ async fn parse_multipart(
         return Ok(req);
     }
     let boundary = multipart::boundary(content_type)?;
-    if raw.get_ref().len() <= INLINE_PARSE_MAX {
-        let parsed = multipart::parse(raw.get_ref(), &boundary, limits)?;
+    if raw.len() <= INLINE_PARSE_MAX {
+        let parsed = multipart::parse(&raw.concat(), &boundary, limits)?;
         req.body = rapira_sapi::types::Body::Multipart(parsed);
         return Ok(req);
     }
-    let bytes = std::mem::take(raw.get_mut());
+    let raw = std::mem::take(raw);
     let limits = limits.clone();
-    let parsed = tokio::task::spawn_blocking(move || multipart::parse(&bytes, &boundary, &limits))
-        .await
-        .map_err(|e| Rejection {
-            status: http::StatusCode::INTERNAL_SERVER_ERROR,
-            reason: format!("multipart parse task failed: {e}"),
-        })?;
+    // The concatenation runs on the blocking pool with the parse.
+    let parsed = tokio::task::spawn_blocking(move || {
+        let bytes = raw.concat();
+        drop(raw);
+        multipart::parse(&bytes, &boundary, &limits)
+    })
+    .await
+    .map_err(|e| Rejection {
+        status: http::StatusCode::INTERNAL_SERVER_ERROR,
+        reason: format!("multipart parse task failed: {e}"),
+    })?;
     req.body = rapira_sapi::types::Body::Multipart(parsed?);
     Ok(req)
 }

@@ -13,8 +13,8 @@ use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::{
-    Server, Spawn, diagnostics, fixture_path, parse_status_and_body, scratch_dir, signal,
-    slot_line, wait_log_contains, worker_pids,
+    Server, Spawn, diagnostics, fixture_path, parse_status_and_body, patterned, scratch_dir,
+    signal, slot_line, wait_log_contains, worker_pids,
 };
 
 /// Read budget of a raw socket exchange.
@@ -1011,6 +1011,13 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
             status: None,
         },
         Case {
+            name: "1 MiB patterned octet-stream body",
+            method: "POST",
+            content_type: &["application/octet-stream"],
+            body: patterned(1 << 20),
+            status: None,
+        },
+        Case {
             name: "get",
             method: "GET",
             content_type: &[],
@@ -1053,22 +1060,20 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
                 .append(CONTENT_TYPE, HeaderValue::from_static(line));
         }
         *rq.body_mut() = case.body.clone();
-        let StatusBody { status, body } = drain(submit(srv.addr, rq)?);
+        let resp = drain_resp(submit(srv.addr, rq)?);
+        let body = resp.body_string();
         assert_eq!(
-            status,
+            resp.status(),
             case.status.unwrap_or(200),
-            "{}: {body:?}",
+            "{}: {body:.300}",
             case.name
         );
         if case.status.is_none() {
             // echo-loop-worker.php cannot print a parsed Multipart, so a parsed body fails the status check above.
-            let raw = String::from_utf8_lossy(&case.body);
-            assert_eq!(
-                body,
-                format!("method={} body={raw}", case.method),
-                "{}",
-                case.name
-            );
+            // A byte compare: the lossy text maps each non-UTF-8 byte of a body to the same U+FFFD.
+            let mut want = format!("method={} body=", case.method).into_bytes();
+            want.extend_from_slice(&case.body);
+            assert!(resp.body == want, "{}: {body:.300}", case.name);
             accepted += 1;
         }
     }
