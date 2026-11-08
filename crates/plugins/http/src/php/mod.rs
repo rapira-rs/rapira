@@ -13,7 +13,9 @@ use rapira_sapi::exchange::{
     AddrOwned, add_list, build_address, header_key, path_bytes, push_ipv4,
 };
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::types::{Addr, Body, FormField, Frame, Request, ResponseHead, UploadedFile};
+use rapira_sapi::types::{
+    Addr, Body, Chunks, FormField, Frame, Request, ResponseHead, UploadedFile,
+};
 use rapira_sapi::work::{DispatcherClasses, Held, HeldPtr};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
@@ -78,7 +80,7 @@ enum Stage {
 }
 
 enum BodyState {
-    Raw(Vec<u8>),
+    Raw(Chunks),
     /// seal(), discard_unit() and fail() unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
     Multipart {
         fields: Vec<FieldPart>,
@@ -199,9 +201,9 @@ pub struct ExchangeState {
 
 impl ExchangeState {
     pub(crate) fn new(mut req: Request, tx: Sender<Frame>) -> Self {
-        let taken = std::mem::replace(&mut req.body, Body::Raw(std::io::Cursor::new(Vec::new())));
+        let taken = std::mem::replace(&mut req.body, Body::Raw(Chunks::default()));
         let body = match taken {
-            Body::Raw(cursor) => BodyState::Raw(cursor.into_inner()),
+            Body::Raw(chunks) => BodyState::Raw(chunks),
             Body::Multipart(mb) => {
                 let mut fields = Vec::with_capacity(mb.fields.len());
                 for mut field in mb.fields {

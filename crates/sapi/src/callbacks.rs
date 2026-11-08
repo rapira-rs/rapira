@@ -249,17 +249,27 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
         reader.read(dst).unwrap_or(0)
     })
 }
-/// The whole raw body of the bound request, for the post readers in module.c; 0 for a host-parsed multipart or empty body.
-/// # Safety
-/// `body` must point at a writable `*const c_char`
+/// The raw body length of the bound request, for the post readers in module.c; 0 for a host-parsed multipart or empty body.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_raw_body(body: *mut *const c_char) -> usize {
+pub extern "C" fn rapira_rs_raw_body_len() -> usize {
+    with_ctx(0, |ctx| match &ctx.req.body {
+        crate::types::Body::Raw(chunks) => chunks.len(),
+        crate::types::Body::Multipart(_) => 0,
+    })
+}
+/// Part `index` of the raw body of the bound request, for the post readers in module.c: writes its address into `part` and returns its length; 0 past the last part (no part is empty).
+/// # Safety
+/// `part` must point at a writable `*const c_char`
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_raw_body_part(index: usize, part: *mut *const c_char) -> usize {
     with_ctx(0, |ctx| {
-        let crate::types::Body::Raw(reader) = &ctx.req.body else {
+        let crate::types::Body::Raw(chunks) = &ctx.req.body else {
             return 0;
         };
-        let bytes = reader.get_ref();
-        unsafe { *body = bytes.as_ptr().cast() };
+        let Some(bytes) = chunks.parts().get(index) else {
+            return 0;
+        };
+        unsafe { *part = bytes.as_ptr().cast() };
         bytes.len()
     })
 }

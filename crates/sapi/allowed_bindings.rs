@@ -49,8 +49,8 @@
     // $_SERVER registration: ZVAL_STRINGL_FAST is a macro -> rapira_register_known_stringl shim in wrapper.c
     "rapira_register_known_stringl", "zend_hash_extend", "php_import_environment_variables",
     "zend_is_auto_global_str",
-    // slot writes of declared properties (zend.rs): ZVAL_STRINGL is a macro -> rapira_zval_stringl shim in wrapper.c
-    "zend_property_info", "rapira_zval_stringl", "IS_LONG", "IS_DOUBLE", "IS_PROP_UNINIT", "IS_PROP_REINITABLE",
+    // slot writes of declared properties (zend.rs): ZVAL_STRINGL and ZVAL_NEW_STR are macros -> rapira_zval_stringl and rapira_zval_string_alloc shims in wrapper.c
+    "zend_property_info", "rapira_zval_stringl", "rapira_zval_string_alloc", "IS_LONG", "IS_DOUBLE", "IS_PROP_UNINIT", "IS_PROP_REINITABLE",
     // zend_symtable_str_update is inline; add_assoc_zval_ex is its exported caller (zend_API.c)
     "add_assoc_zval_ex", "add_next_index_stringl", "add_next_index_object",
     "zval_add_ref",

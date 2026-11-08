@@ -20,7 +20,7 @@ fn base_req() -> Request {
         headers: HeaderMap::new(),
         content_type: None,
         content_length: 0,
-        body: Body::Raw(std::io::Cursor::new(Vec::new())),
+        body: Body::Raw(Chunks::default()),
         received_at: 0.0,
     }
 }

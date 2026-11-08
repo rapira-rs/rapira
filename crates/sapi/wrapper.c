@@ -22,6 +22,17 @@ void rapira_zval_stringl(zval *zv, const char *s, size_t len) {
     ZVAL_STRINGL(zv, s, len);
 }
 
+char *rapira_zval_string_alloc(zval *zv, size_t len) {
+    if (len == 0) {
+        ZVAL_EMPTY_STRING(zv);
+        return NULL;
+    }
+    zend_string *s = zend_string_alloc(len, false);
+    ZSTR_VAL(s)[len] = '\0';
+    ZVAL_NEW_STR(zv, s);
+    return ZSTR_VAL(s);
+}
+
 void rapira_register_known_stringl(const char *name, size_t name_len,
                                    const char *val, size_t val_len,
                                    zval *track_vars_array) {

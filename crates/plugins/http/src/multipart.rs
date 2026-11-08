@@ -3,6 +3,7 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
+use hyper::body::Bytes;
 use memchr::memmem;
 use rapira_sapi::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
 
@@ -120,6 +121,97 @@ pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
     Err(bad("multipart/form-data without a boundary parameter"))
 }
 
+/// The body parts as one byte sequence. Every method takes global byte indices.
+struct View<'a> {
+    parts: &'a [Bytes],
+    /// The global index of the first byte of each part.
+    starts: Vec<usize>,
+    len: usize,
+}
+
+impl<'a> View<'a> {
+    fn new(parts: &'a [Bytes]) -> Self {
+        let mut starts = Vec::with_capacity(parts.len());
+        let mut len = 0;
+        for part in parts {
+            starts.push(len);
+            len += part.len();
+        }
+        Self { parts, starts, len }
+    }
+
+    /// The bytes from i towards b that the part of i holds. i is less than b, and b is at most len.
+    fn run(&self, i: usize, b: usize) -> &'a [u8] {
+        // The last part that starts at or before i holds i. An empty part starts at the index of the next part, so it is never that last part.
+        let k = self.starts.partition_point(|&s| s <= i) - 1;
+        let local = i - self.starts[k];
+        let part = &self.parts[k];
+        &part[local..part.len().min(local + b - i)]
+    }
+
+    /// The first match at or after from. A match inside a part comes before a match that starts in that part and ends after it.
+    fn find(&self, finder: &memmem::Finder<'_>, from: usize) -> Option<usize> {
+        let reach = finder.needle().len() - 1;
+        let mut i = from;
+        while i < self.len {
+            let run = self.run(i, self.len);
+            if let Some(o) = finder.find(run) {
+                return Some(i + o);
+            }
+            let end = i + run.len();
+            // Each match in this window starts before end and ends after it.
+            let a = i.max(end.saturating_sub(reach));
+            let window = self.copy(a, self.len.min(end + reach));
+            if let Some(o) = finder.find(&window) {
+                return Some(a + o);
+            }
+            i = end;
+        }
+        None
+    }
+
+    fn memchr(&self, b: u8, from: usize) -> Option<usize> {
+        let mut i = from;
+        while i < self.len {
+            let run = self.run(i, self.len);
+            if let Some(o) = memchr::memchr(b, run) {
+                return Some(i + o);
+            }
+            i += run.len();
+        }
+        None
+    }
+
+    fn get(&self, i: usize) -> Option<u8> {
+        (i < self.len).then(|| self.run(i, i + 1)[0])
+    }
+
+    fn starts_with(&self, i: usize, needle: &[u8]) -> bool {
+        (i..).zip(needle).all(|(at, &b)| self.get(at) == Some(b))
+    }
+
+    fn copy(&self, a: usize, b: usize) -> Vec<u8> {
+        let mut out = Vec::with_capacity(b - a);
+        let mut i = a;
+        while i < b {
+            let run = self.run(i, b);
+            out.extend_from_slice(run);
+            i += run.len();
+        }
+        out
+    }
+
+    fn write_to(&self, file: &mut std::fs::File, a: usize, b: usize) -> std::io::Result<()> {
+        let mut i = a;
+        while i < b {
+            let run = self.run(i, b);
+            file.write_all(run)?;
+            i += run.len();
+        }
+        Ok(())
+    }
+}
+
 struct DelimHit {
     line_start: usize,
     after: usize,
@@ -128,23 +220,21 @@ struct DelimHit {
 
 /// A delimiter must start a line; a line merely beginning with the boundary bytes is content, so the scan continues at the next line. The scan is linear in the body: a run of boundary bytes inside a line is skipped in one step.
 fn next_delimiter(
-    body: &[u8],
+    view: &View<'_>,
     mut from: usize,
     finder: &memmem::Finder<'_>,
     dlen: usize,
 ) -> Option<DelimHit> {
-    while let Some(i) = finder.find(&body[from..]).map(|o| o + from) {
-        if i == 0 || body[i - 1] == b'\n' {
+    while let Some(i) = view.find(finder, from) {
+        if i == 0 || view.get(i - 1) == Some(b'\n') {
             let mut j = i + dlen;
-            if body[j..].starts_with(b"--") {
+            if view.starts_with(j, b"--") {
                 // after the dashes a close-delimiter allows only transport padding and a line ending or end of body, RFC 2046 §5.1.1
                 let mut k = j + 2;
-                while matches!(body.get(k), Some(b' ' | b'\t')) {
+                while matches!(view.get(k), Some(b' ' | b'\t')) {
                     k += 1;
                 }
-                if matches!(body.get(k), None | Some(b'\n'))
-                    || (body.get(k) == Some(&b'\r') && body.get(k + 1) == Some(&b'\n'))
-                {
+                if matches!(view.get(k), None | Some(b'\n')) || view.starts_with(k, b"\r\n") {
                     return Some(DelimHit {
                         line_start: i,
                         after: j + 2,
@@ -152,10 +242,10 @@ fn next_delimiter(
                     });
                 }
             }
-            while matches!(body.get(j), Some(b' ' | b'\t')) {
+            while matches!(view.get(j), Some(b' ' | b'\t')) {
                 j += 1;
             }
-            match body.get(j) {
+            match view.get(j) {
                 Some(b'\n') => {
                     return Some(DelimHit {
                         line_start: i,
@@ -163,7 +253,7 @@ fn next_delimiter(
                         close: false,
                     });
                 }
-                Some(b'\r') if body.get(j + 1) == Some(&b'\n') => {
+                Some(b'\r') if view.get(j + 1) == Some(b'\n') => {
                     return Some(DelimHit {
                         line_start: i,
                         after: j + 2,
@@ -173,21 +263,22 @@ fn next_delimiter(
                 _ => {}
             }
         }
-        from = i + memchr::memchr(b'\n', &body[i..])? + 1;
+        from = view.memchr(b'\n', i)? + 1;
     }
     None
 }
 
-/// Parses a non-empty body; the empty-body case lands on the contract's string arm (`$body === ''`) instead.
+/// Parses a non-empty body from the parts that the transport delivered; the empty-body case lands on the contract's string arm (`$body === ''`) instead.
 /// https://www.rfc-editor.org/rfc/rfc7578
-pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartBody, Rejection> {
+pub fn parse(body: &[Bytes], boundary: &[u8], limits: &Limits) -> Result<MultipartBody, Rejection> {
+    let view = View::new(body);
     let delim: Vec<u8> = [b"--".as_slice(), boundary].concat();
     let finder = memmem::Finder::new(&delim);
 
     let mut fields: Vec<FormField> = Vec::new();
     let mut files: Vec<UploadedFile> = Vec::new();
 
-    let opening = next_delimiter(body, 0, &finder, delim.len())
+    let opening = next_delimiter(&view, 0, &finder, delim.len())
         .ok_or_else(|| bad("no opening boundary line"))?;
     if opening.close {
         return Ok(MultipartBody { fields, files });
@@ -198,17 +289,17 @@ pub fn parse(body: &[u8], boundary: &[u8], limits: &Limits) -> Result<MultipartB
         if fields.len() + files.len() + 1 > limits.max_parts {
             return Err(over("part count over max_parts"));
         }
-        let ending = next_delimiter(body, part_start, &finder, delim.len())
+        let ending = next_delimiter(&view, part_start, &finder, delim.len())
             .ok_or_else(|| bad("no closing boundary line"))?;
         // the line terminator preceding a delimiter line belongs to the delimiter, not the part, RFC 2046 §5.1.1
         let mut part_end = ending.line_start;
-        if part_end > part_start && body[part_end - 1] == b'\n' {
+        if part_end > part_start && view.get(part_end - 1) == Some(b'\n') {
             part_end -= 1;
-            if part_end > part_start && body[part_end - 1] == b'\r' {
+            if part_end > part_start && view.get(part_end - 1) == Some(b'\r') {
                 part_end -= 1;
             }
         }
-        parse_part(&body[part_start..part_end], limits, &mut fields, &mut files)?;
+        parse_part(&view, part_start, part_end, limits, &mut fields, &mut files)?;
 
         if ending.close {
             return Ok(MultipartBody { fields, files });
@@ -288,7 +379,7 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
 static SPOOL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
 /// The SpooledFile wraps the path before the write, so a failed write unlinks the file on drop.
-fn spool(bytes: &[u8], dir: &Path) -> std::io::Result<SpooledFile> {
+fn spool(view: &View<'_>, a: usize, b: usize, dir: &Path) -> std::io::Result<SpooledFile> {
     use std::os::unix::fs::OpenOptionsExt;
     let n = SPOOL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
     let path = dir.join(format!("{}-{n}", std::process::id()));
@@ -298,21 +389,38 @@ fn spool(bytes: &[u8], dir: &Path) -> std::io::Result<SpooledFile> {
         .mode(0o600)
         .open(&path)?;
     let spooled = SpooledFile { path };
-    file.write_all(bytes)?;
+    view.write_to(&mut file, a, b)?;
     Ok(spooled)
 }
 
-/// A filename parameter, even an empty one, makes the part a file part.
+/// The part is the range from part_start to part_end of the view. A filename parameter, even an empty one, makes the part a file part.
 fn parse_part(
-    part: &[u8],
+    view: &View<'_>,
+    part_start: usize,
+    part_end: usize,
     limits: &Limits,
     fields: &mut Vec<FormField>,
     files: &mut Vec<UploadedFile>,
 ) -> Result<(), Rejection> {
+    // The header section ends at the first empty line, CRLF or bare LF. A line starts at the part start or after a LF, as in httparse.
+    let mut line = part_start;
+    let section_end = loop {
+        if line < part_end && view.get(line) == Some(b'\n') {
+            break line + 1;
+        }
+        if line + 2 <= part_end && view.starts_with(line, b"\r\n") {
+            break line + 2;
+        }
+        match view.memchr(b'\n', line) {
+            Some(lf) if lf < part_end => line = lf + 1,
+            _ => return Err(bad("part without a header/body separator")),
+        }
+    };
+    let section = view.copy(part_start, section_end);
     let mut hbuf = vec![httparse::EMPTY_HEADER; limits.max_part_headers];
-    let (body, parsed) = match httparse::parse_headers(part, &mut hbuf) {
-        // the header section ends at the first empty line, CRLF or bare LF; len includes that line
-        Ok(httparse::Status::Complete((len, headers))) => (&part[len..], headers),
+    let (content_start, parsed) = match httparse::parse_headers(&section, &mut hbuf) {
+        // len includes the empty line
+        Ok(httparse::Status::Complete((len, headers))) => (part_start + len, headers),
         Ok(httparse::Status::Partial) => return Err(bad("part without a header/body separator")),
         Err(httparse::Error::TooManyHeaders) => {
             return Err(over("part headers over max_part_headers"));
@@ -347,34 +455,36 @@ fn parse_part(
     // httparse trims the value already.
     let client_media_type = media_type.filter(|v| !v.is_empty()).map(<[u8]>::to_vec);
 
+    let len = part_end - content_start;
     match filename {
         Some(client_filename) => {
             if files.len() + 1 > limits.max_files {
                 return Err(over("file parts over max_files"));
             }
-            if body.len() as u64 > limits.max_file_size {
+            if len as u64 > limits.max_file_size {
                 return Err(over("file part over max_file_size"));
             }
-            let file = spool(body, &limits.dir).map_err(|e| Rejection {
-                status: http::StatusCode::INTERNAL_SERVER_ERROR,
-                reason: format!("upload spool failed: {e}"),
-            })?;
+            let file =
+                spool(view, content_start, part_end, &limits.dir).map_err(|e| Rejection {
+                    status: http::StatusCode::INTERNAL_SERVER_ERROR,
+                    reason: format!("upload spool failed: {e}"),
+                })?;
             files.push(UploadedFile {
                 name,
                 client_filename,
                 client_media_type,
                 headers,
                 file,
-                size: body.len() as u64,
+                size: len as u64,
             });
         }
         None => {
-            if body.len() > limits.max_field_size {
+            if len > limits.max_field_size {
                 return Err(over("field part over max_field_size"));
             }
             fields.push(FormField {
                 name,
-                value: body.to_vec(),
+                value: view.copy(content_start, part_end),
                 headers,
             });
         }
@@ -398,12 +508,13 @@ mod tests {
     }
 
     fn ok(body: &[u8]) -> MultipartBody {
-        parse(body, b"B", &limits()).unwrap_or_else(|_| panic!("expected a parse"))
+        parse(&[Bytes::copy_from_slice(body)], b"B", &limits())
+            .unwrap_or_else(|_| panic!("expected a parse"))
     }
 
     /// The status of the rejection.
     fn rejected(body: &[u8], l: &Limits) -> u16 {
-        match parse(body, b"B", l) {
+        match parse(&[Bytes::copy_from_slice(body)], b"B", l) {
             Err(Rejection { status, .. }) => status.as_u16(),
             Ok(_) => panic!("expected a rejection"),
         }
@@ -633,7 +744,106 @@ mod tests {
         assert_eq!(b, b"RAP\xff\xfeIRA");
         let mut body = Vec::new();
         body.extend_from_slice(b"--RAP\xff\xfeIRA\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\n--RAP\xff\xfeIRA--");
-        let mb = parse(&body, &b, &limits()).map_err(|_| ()).expect("parses");
+        let mb = parse(&[Bytes::from(body)], &b, &limits())
+            .map_err(|_| ())
+            .expect("parses");
         assert_eq!(mb.fields[0].value, b"v");
+    }
+
+    /// Compares two parse results field by field, with the bytes of each spooled file.
+    fn assert_same(
+        case: &str,
+        want: &Result<MultipartBody, Rejection>,
+        got: &Result<MultipartBody, Rejection>,
+    ) {
+        match (want, got) {
+            (Ok(want), Ok(got)) => {
+                assert_eq!(want.fields.len(), got.fields.len(), "{case}: field count");
+                for (w, g) in want.fields.iter().zip(&got.fields) {
+                    assert_eq!(
+                        (&w.name, &w.value, &w.headers),
+                        (&g.name, &g.value, &g.headers),
+                        "{case}: field"
+                    );
+                }
+                assert_eq!(want.files.len(), got.files.len(), "{case}: file count");
+                for (w, g) in want.files.iter().zip(&got.files) {
+                    assert_eq!(
+                        (&w.name, &w.client_filename, &w.client_media_type),
+                        (&g.name, &g.client_filename, &g.client_media_type),
+                        "{case}: file"
+                    );
+                    assert_eq!(
+                        (&w.headers, w.size),
+                        (&g.headers, g.size),
+                        "{case}: file headers and size"
+                    );
+                    let spooled = |f: &UploadedFile| std::fs::read(&f.file.path).expect("spooled");
+                    assert_eq!(spooled(w), spooled(g), "{case}: spooled bytes");
+                }
+            }
+            (Err(w), Err(g)) => assert_eq!(
+                (w.status, &w.reason),
+                (g.status, &g.reason),
+                "{case}: rejection"
+            ),
+            _ => panic!("{case}: one parse is Ok and the other is a rejection"),
+        }
+    }
+
+    /// Each split of a body gives the result of the one-part body: at every position, and into single-byte parts.
+    #[test]
+    fn split_bodies_parse_the_same() {
+        struct Case {
+            name: &'static str,
+            body: &'static [u8],
+        }
+        let cases = [
+            Case {
+                name: "two fields",
+                body: b"--B\r\ncontent-disposition: form-data; name=a\r\n\r\none\r\n--B\r\ncontent-disposition: form-data; name=b\r\n\r\ntwo\r\n--B--",
+            },
+            Case {
+                name: "a field and a file",
+                body: b"--B\r\ncontent-disposition: form-data; name=a\r\n\r\none\r\n--B\r\ncontent-disposition: form-data; name=f; filename=a.bin\r\ncontent-type: application/octet-stream\r\n\r\nPAYLOAD\r\n--B--\r\n",
+            },
+            Case {
+                name: "LF-only lines, preamble and padding",
+                body: b"preamble to ignore\n--B \t\ncontent-disposition: form-data; name=x\n\nv\n--B--\nepilogue",
+            },
+            Case {
+                name: "close padding at the end of the body",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\n--B-- \t",
+            },
+            Case {
+                name: "close line ending and epilogue",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\n--B--\r\nepilogue",
+            },
+            Case {
+                name: "close padding, line ending and epilogue",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\n--B-- \t\r\nepilogue",
+            },
+            Case {
+                name: "boundary-like line inside a value",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nbefore\r\n--B--junk\r\nafter\r\n--B--",
+            },
+            Case {
+                name: "part without a header/body separator",
+                body: b"--B\r\nheaderwithoutseparator\r\n--B--",
+            },
+        ];
+        let l = limits();
+        for case in cases {
+            let whole = parse(&[Bytes::from_static(case.body)], b"B", &l);
+            for at in 1..case.body.len() {
+                let (head, tail) = case.body.split_at(at);
+                let split = [Bytes::from_static(head), Bytes::from_static(tail)];
+                let name = format!("{} split at {at}", case.name);
+                assert_same(&name, &whole, &parse(&split, b"B", &l));
+            }
+            let single: Vec<Bytes> = case.body.chunks(1).map(Bytes::from_static).collect();
+            let name = format!("{} in single bytes", case.name);
+            assert_same(&name, &whole, &parse(&single, b"B", &l));
+        }
     }
 }
