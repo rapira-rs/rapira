@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 
 use bytes::Bytes;
 use rapira_http::check::Rejection;
-use rapira_http::multipart::{Limits, boundary, is_multipart, parse};
+use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart, parse};
 
 /// Small limits, so that a 4 KiB input can go over each count and size limit.
 static LIMITS: LazyLock<Limits> = LazyLock::new(|| Limits {
@@ -24,6 +24,21 @@ fn rejected(Rejection { status, reason }: Rejection, allowed: &[u16]) {
         allowed.contains(&status.as_u16()),
         "status {status}: {reason}"
     );
+}
+
+/// One entry per name, names compared byte for byte, each entry with a value, and at most max_part_headers field lines in all.
+fn assert_grouped(headers: &[HeaderValues], l: &Limits) {
+    let mut lines = 0;
+    for (i, h) in headers.iter().enumerate() {
+        assert!(!h.values.is_empty(), "entry without a value: {}", h.name);
+        assert!(
+            headers[..i].iter().all(|o| o.name != h.name),
+            "repeated entry: {}",
+            h.name
+        );
+        lines += h.values.len();
+    }
+    assert!(lines <= l.max_part_headers, "{lines} field lines");
 }
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
@@ -61,12 +76,12 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     for f in &form.fields {
         assert!(!f.name.is_empty());
         assert!(f.value.len() <= l.max_field_size);
-        assert!(f.headers.len() <= l.max_part_headers);
+        assert_grouped(&f.headers, l);
     }
     for f in &form.files {
         assert!(!f.name.is_empty());
         assert!(f.size <= l.max_file_size);
-        assert!(f.headers.len() <= l.max_part_headers);
+        assert_grouped(&f.headers, l);
         let len = std::fs::metadata(&f.file.path).expect("spooled file").len();
         assert_eq!(len, f.size, "spooled file size");
     }

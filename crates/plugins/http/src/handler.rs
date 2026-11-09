@@ -474,17 +474,16 @@ const KEEP_FRAME_MIN: usize = 64 << 10;
 /// Both refusals come before dispatch: the multipart parse, then the intake.
 async fn submit(
     shared: &Shared,
-    request: Request,
+    mut request: Request,
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
-    // request::build set the length from the collected body, so it is never -1.
-    let bytes = request.content_length as usize;
-    let request = parse_multipart(request, shared.cfg.uploads.as_ref()).await?;
+    let bytes = request.body.len();
+    let multipart = parse_multipart(&mut request, shared.cfg.uploads.as_ref()).await?;
     let (tx, reply) = tokio::sync::mpsc::channel(FRAME_CAP);
     // The classic and worker modes get their CGI view built here, on the transport thread.
     let unit = if shared.cfg.superglobals {
         Unit::Cgi(Box::new(rapira_sapi::types::Context::new(request, tx)))
     } else {
-        Unit::Dispatcher(Box::new(ExchangeState::new(request, tx)))
+        Unit::Dispatcher(Box::new(ExchangeState::new(request, multipart, tx)))
     };
     shared.intake.submit(unit, bytes).await?;
     Ok(reply)
@@ -495,12 +494,13 @@ const INLINE_PARSE_MAX: usize = 256 << 10;
 
 /// Parses a multipart body before submit, so a rejected body never reaches the pending and active counters. `limits` is None outside dispatcher mode.
 /// A body up to INLINE_PARSE_MAX is parsed on the IO thread, which saves the switch to the blocking pool. A larger body is parsed on the blocking pool.
+/// A parsed body takes the raw chunks out of `req`, so they are freed after the parse.
 async fn parse_multipart(
-    mut req: Request,
+    req: &mut Request,
     limits: Option<&multipart::Limits>,
-) -> Result<Request, Rejection> {
+) -> Result<Option<multipart::MultipartBody>, Rejection> {
     let Some(limits) = limits else {
-        return Ok(req);
+        return Ok(None);
     };
     // Content-Type is a singleton field: with repeated lines, the plugin and a PHP consumer could split the body on different boundaries. https://www.rfc-editor.org/rfc/rfc9110#section-8.3
     let lines = req.headers.get_all(CONTENT_TYPE);
@@ -511,25 +511,20 @@ async fn parse_multipart(
             reason: "repeated content-type field lines with a multipart body".into(),
         });
     }
-    let rapira_sapi::types::Body::Raw(raw) = &mut req.body else {
-        return Ok(req);
-    };
-    if raw.is_empty() {
-        return Ok(req);
+    if req.body.is_empty() {
+        return Ok(None);
     }
-    let Some(content_type) = req.content_type.as_deref() else {
-        return Ok(req);
+    let Some(content_type) = req.headers.get(CONTENT_TYPE) else {
+        return Ok(None);
     };
-    if !multipart::is_multipart(content_type) {
-        return Ok(req);
+    if !multipart::is_multipart(content_type.as_bytes()) {
+        return Ok(None);
     }
-    let boundary = multipart::boundary(content_type)?;
+    let boundary = multipart::boundary(content_type.as_bytes())?;
+    let raw = std::mem::take(&mut req.body);
     if raw.len() <= INLINE_PARSE_MAX {
-        let parsed = multipart::parse(raw.parts(), &boundary, limits)?;
-        req.body = rapira_sapi::types::Body::Multipart(parsed);
-        return Ok(req);
+        return multipart::parse(raw.parts(), &boundary, limits).map(Some);
     }
-    let raw = std::mem::take(raw);
     let limits = limits.clone();
     let parsed =
         tokio::task::spawn_blocking(move || multipart::parse(raw.parts(), &boundary, &limits))
@@ -538,8 +533,7 @@ async fn parse_multipart(
                 status: http::StatusCode::INTERNAL_SERVER_ERROR,
                 reason: format!("multipart parse task failed: {e}"),
             })?;
-    req.body = rapira_sapi::types::Body::Multipart(parsed?);
-    Ok(req)
+    parsed.map(Some)
 }
 
 #[cfg(test)]

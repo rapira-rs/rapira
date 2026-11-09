@@ -18,9 +18,7 @@ fn base_req() -> Request {
         server_name: "",
         server_port: 8080,
         headers: HeaderMap::new(),
-        content_type: None,
-        content_length: 0,
-        body: Body::Raw(Chunks::default()),
+        body: Chunks::default(),
         received_at: 0.0,
     }
 }
@@ -97,7 +95,7 @@ struct Attached {
 fn state_of(req: Request) -> Attached {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     Attached {
-        state: ExchangeState::new(req, tx),
+        state: ExchangeState::new(req, None, tx),
         reply: rx,
     }
 }

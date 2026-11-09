@@ -5,9 +5,66 @@ use std::path::{Path, PathBuf};
 
 use hyper::body::Bytes;
 use memchr::memmem;
-use rapira_sapi::types::{FormField, MultipartBody, SpooledFile, UploadedFile};
 
 use crate::check::Rejection;
+
+/// `unlink` is the one remover: seal calls it at finalize; Drop removes a file that a bailout (fatal or timeout) leaves behind.
+pub struct SpooledFile {
+    pub path: PathBuf,
+    /// Set by the first `unlink`: a recycled file name is never removed twice.
+    unlinked: bool,
+}
+
+impl SpooledFile {
+    /// Removes the file once; a later call and the Drop do nothing.
+    pub fn unlink(&mut self) {
+        if std::mem::replace(&mut self.unlinked, true) {
+            return;
+        }
+        if let Err(e) = std::fs::remove_file(&self.path)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            tracing::warn!(target: "rapira", "removing spool file {}: {e}", self.path.display());
+        }
+    }
+}
+
+impl Drop for SpooledFile {
+    fn drop(&mut self) {
+        self.unlink();
+    }
+}
+
+/// The field lines of one name in a part header section, in field line order.
+#[derive(Debug, PartialEq)]
+pub struct HeaderValues {
+    pub name: String,
+    pub values: Vec<Vec<u8>>,
+}
+
+pub struct FormField {
+    pub name: Vec<u8>,
+    pub value: Vec<u8>,
+    /// One entry per name in first-seen order.
+    pub headers: Vec<HeaderValues>,
+}
+
+pub struct UploadedFile {
+    pub name: Vec<u8>,
+    pub client_filename: Vec<u8>,
+    /// content-type verbatim; an empty or OWS-only value maps to None upstream.
+    pub client_media_type: Option<Vec<u8>>,
+    /// One entry per name in first-seen order.
+    pub headers: Vec<HeaderValues>,
+    pub file: SpooledFile,
+    /// Bytes written to disk; a 64-bit zend_long is assumed at the FFI edge.
+    pub size: u64,
+}
+
+pub struct MultipartBody {
+    pub fields: Vec<FormField>,
+    pub files: Vec<UploadedFile>,
+}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct Limits {
@@ -388,7 +445,10 @@ fn spool(view: &View<'_>, a: usize, b: usize, dir: &Path) -> std::io::Result<Spo
         .create_new(true)
         .mode(0o600)
         .open(&path)?;
-    let spooled = SpooledFile { path };
+    let spooled = SpooledFile {
+        path,
+        unlinked: false,
+    };
     view.write_to(&mut file, a, b)?;
     Ok(spooled)
 }
@@ -429,7 +489,7 @@ fn parse_part(
         Err(_) => return Err(bad("unparseable part header section")),
     };
 
-    let mut headers: Vec<(String, Vec<u8>)> = Vec::with_capacity(parsed.len());
+    let mut headers: Vec<HeaderValues> = Vec::with_capacity(parsed.len());
     let mut disposition: Option<&[u8]> = None;
     let mut media_type: Option<&[u8]> = None;
     for h in parsed {
@@ -440,7 +500,13 @@ fn parse_part(
         } else if h.name.eq_ignore_ascii_case("content-type") && media_type.is_none() {
             media_type = Some(h.value);
         }
-        headers.push((h.name.to_owned(), h.value.to_vec()));
+        match headers.iter_mut().find(|header| header.name == h.name) {
+            Some(header) => header.values.push(h.value.to_vec()),
+            None => headers.push(HeaderValues {
+                name: h.name.to_owned(),
+                values: vec![h.value.to_vec()],
+            }),
+        }
     }
     let Some(disposition) = disposition else {
         return Err(bad("part without content-disposition"));
@@ -578,6 +644,55 @@ mod tests {
             let body = [field.as_slice(), case.close].concat();
             let mb = ok(&body);
             assert_eq!(mb.fields[0].value, b"v", "{}", case.name);
+        }
+    }
+
+    /// The contract shape of FormField and UploadedFile `$headers`: one entry per name in first-seen order, the values in field line order, names compared byte for byte.
+    #[test]
+    fn part_headers_group_by_name() {
+        struct Case {
+            name: &'static str,
+            body: &'static [u8],
+            want: &'static [(&'static str, &'static [&'static [u8]])],
+        }
+        let cases = [
+            Case {
+                name: "a repeated name gives one entry with the values in line order",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\nx-a: 2\r\nx-a: 1\r\n\r\nv\r\n--B--",
+                want: &[
+                    ("content-disposition", &[b"form-data; name=x"]),
+                    ("x-a", &[b"2", b"1"]),
+                ],
+            },
+            Case {
+                name: "two names keep first-seen order",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\nx-b: 1\r\nx-a: 2\r\nx-b: 3\r\n\r\nv\r\n--B--",
+                want: &[
+                    ("content-disposition", &[b"form-data; name=x"]),
+                    ("x-b", &[b"1", b"3"]),
+                    ("x-a", &[b"2"]),
+                ],
+            },
+            Case {
+                name: "two names that differ only in case stay two entries",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\nX-A: 1\r\nx-a: 2\r\n\r\nv\r\n--B--",
+                want: &[
+                    ("content-disposition", &[b"form-data; name=x"]),
+                    ("X-A", &[b"1"]),
+                    ("x-a", &[b"2"]),
+                ],
+            },
+        ];
+        for case in cases {
+            let mut want = Vec::new();
+            for (name, values) in case.want {
+                want.push(HeaderValues {
+                    name: (*name).to_owned(),
+                    values: values.iter().map(|v| v.to_vec()).collect(),
+                });
+            }
+            let mb = ok(case.body);
+            assert_eq!(mb.fields[0].headers, want, "{}", case.name);
         }
     }
 

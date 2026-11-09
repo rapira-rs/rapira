@@ -241,21 +241,14 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
 
 pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usize {
     with_ctx(0, |ctx| {
-        let crate::types::Body::Raw(reader) = &mut ctx.req.body else {
-            tracing::debug!(target: "rapira", "read_post on a host-parsed multipart body");
-            return 0;
-        };
         let dst = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), count) };
-        reader.read(dst).unwrap_or(0)
+        ctx.req.body.read(dst).unwrap_or(0)
     })
 }
-/// The raw body length of the bound request, for the post readers in module.c; 0 for a host-parsed multipart or empty body.
+/// The raw body length of the bound request, for the post readers in module.c; 0 for an empty body.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_raw_body_len() -> usize {
-    with_ctx(0, |ctx| match &ctx.req.body {
-        crate::types::Body::Raw(chunks) => chunks.len(),
-        crate::types::Body::Multipart(_) => 0,
-    })
+    with_ctx(0, |ctx| ctx.req.body.len())
 }
 /// Part `index` of the raw body of the bound request, for the post readers in module.c: writes its address into `part` and returns its length; 0 past the last part (no part is empty).
 /// # Safety
@@ -263,10 +256,7 @@ pub extern "C" fn rapira_rs_raw_body_len() -> usize {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_raw_body_part(index: usize, part: *mut *const c_char) -> usize {
     with_ctx(0, |ctx| {
-        let crate::types::Body::Raw(chunks) = &ctx.req.body else {
-            return 0;
-        };
-        let Some(bytes) = chunks.parts().get(index) else {
+        let Some(bytes) = ctx.req.body.parts().get(index) else {
             return 0;
         };
         unsafe { *part = bytes.as_ptr().cast() };
@@ -365,11 +355,11 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             put_bytes(c"REMOTE_USER", user.to_bytes());
         }
 
-        if let Some(ct) = &ctx.req.content_type {
-            put_bytes(c"CONTENT_TYPE", ct);
+        if let Some(ct) = &reqc.ctype {
+            put_bytes(c"CONTENT_TYPE", ct.to_bytes());
         }
 
-        cgi_header_vars(&ctx.req.headers, ctx.req.content_length, put_bytes);
+        cgi_header_vars(&ctx.req.headers, ctx.req.body.len() as i64, put_bytes);
     })
 }
 

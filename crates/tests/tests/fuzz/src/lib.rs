@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use rapira_http::check::Rejection;
-use rapira_sapi::types::{MultipartBody, UploadedFile};
+use rapira_http::multipart::{MultipartBody, UploadedFile};
 
 /// The largest input of connect_json and multipart_echo. The CI runs use the same -max_len.
 pub const MAX_LEN: usize = 4096;

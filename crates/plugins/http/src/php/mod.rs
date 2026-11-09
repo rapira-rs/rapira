@@ -9,13 +9,9 @@ use std::{
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::body::Bytes;
 use rapira_sapi::callbacks::guard;
-use rapira_sapi::exchange::{
-    AddrOwned, add_list, build_address, header_key, path_bytes, push_ipv4,
-};
+use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key, push_ipv4};
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::types::{
-    Addr, Body, Chunks, FormField, Frame, Request, ResponseHead, UploadedFile,
-};
+use rapira_sapi::types::{Addr, Chunks, Frame, Request, ResponseHead};
 use rapira_sapi::work::{Held, HeldPtr};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
@@ -23,6 +19,8 @@ use rapira_sapi::{
     zend_class_entry, zval, zval_ptr_dtor,
 };
 use tokio::sync::mpsc::{Sender, error::TrySendError};
+
+use crate::multipart::{HeaderValues, MultipartBody, UploadedFile};
 
 mod headers;
 mod request;
@@ -73,51 +71,17 @@ enum Stage {
 enum BodyState {
     Raw(Chunks),
     /// seal(), discard_unit() and fail() unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
-    Multipart {
-        fields: Vec<FieldPart>,
-        files: Vec<FilePart>,
-    },
+    Multipart(MultipartBody),
 }
 
 impl BodyState {
     fn unlink_spools(&mut self) {
-        if let Self::Multipart { files, .. } = self {
-            for p in files {
-                p.upload.file.unlink();
+        if let Self::Multipart(body) = self {
+            for f in &mut body.files {
+                f.file.unlink();
             }
         }
     }
-}
-
-struct FieldPart {
-    field: FormField,
-    headers: Vec<HeaderValues>,
-}
-
-struct FilePart {
-    upload: UploadedFile,
-    path: Vec<u8>,
-    headers: Vec<HeaderValues>,
-}
-
-/// Multipart part headers, one entry per name.
-struct HeaderValues {
-    name: String,
-    values: Vec<Vec<u8>>,
-}
-
-fn group_headers(headers: Vec<(String, Vec<u8>)>) -> Vec<HeaderValues> {
-    let mut out: Vec<HeaderValues> = Vec::new();
-    for (name, value) in headers {
-        match out.iter_mut().find(|header| header.name == name) {
-            Some(header) => header.values.push(value),
-            None => out.push(HeaderValues {
-                name,
-                values: vec![value],
-            }),
-        }
-    }
-    out
 }
 
 /// Contract spelling for `Request::$protocol`: HTTP/2, not the CGI HTTP/2.0.
@@ -191,28 +155,14 @@ pub struct ExchangeState {
 }
 
 impl ExchangeState {
-    pub(crate) fn new(mut req: Request, tx: Sender<Frame>) -> Self {
-        let taken = std::mem::replace(&mut req.body, Body::Raw(Chunks::default()));
-        let body = match taken {
-            Body::Raw(chunks) => BodyState::Raw(chunks),
-            Body::Multipart(mb) => {
-                let mut fields = Vec::with_capacity(mb.fields.len());
-                for mut field in mb.fields {
-                    fields.push(FieldPart {
-                        headers: group_headers(std::mem::take(&mut field.headers)),
-                        field,
-                    });
-                }
-                let mut files = Vec::with_capacity(mb.files.len());
-                for mut upload in mb.files {
-                    files.push(FilePart {
-                        path: path_bytes(&upload.file.path),
-                        headers: group_headers(std::mem::take(&mut upload.headers)),
-                        upload,
-                    });
-                }
-                BodyState::Multipart { fields, files }
-            }
+    pub(crate) fn new(
+        mut req: Request,
+        multipart: Option<MultipartBody>,
+        tx: Sender<Frame>,
+    ) -> Self {
+        let body = match multipart {
+            Some(parsed) => BodyState::Multipart(parsed),
+            None => BodyState::Raw(std::mem::take(&mut req.body)),
         };
         let bodiless = req.method == "HEAD";
 
