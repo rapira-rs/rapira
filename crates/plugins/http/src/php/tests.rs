@@ -391,7 +391,11 @@ fn repeated_content_length_is_a_bad_field() {
         )
     };
     assert!(matches!(v, Verb::BadField(_)));
-    assert_eq!(st.stage, Stage::Open, "a rejected head commits nothing");
+    assert_eq!(
+        unsafe { write_trailers_core(&mut st, HeaderMap::new()) },
+        Verb::HeadNotWritten,
+        "a rejected head commits nothing"
+    );
 }
 
 /// An interim head puts nothing on the reply stream and leaves the final-head slot open.

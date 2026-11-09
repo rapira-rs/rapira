@@ -61,11 +61,17 @@ pub(crate) fn set_server_identity(name: &'static str, port: u16) {
 }
 
 /// The head locks on the first head or body write: a body chunk commits an implicit 200 first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stage {
+enum Phase {
+    /// No head written.
     Open,
-    HeadCommitted,
-    Finalized,
+    /// `writeHead()` stored the final head, and it is not sent.
+    Committed(ResponseHead),
+    /// The head frame went out.
+    Sent,
+    /// The End went out.
+    Sealed,
+    /// The unit closed with no answer.
+    Discarded,
 }
 
 enum BodyState {
@@ -143,13 +149,10 @@ pub struct ExchangeState {
     sender: Option<Sender<Frame>>,
     /// Filled by the first `getRequest()`.
     view: Option<RequestView>,
-    stage: Stage,
-    head_sent: bool,
-    pending: Option<ResponseHead>,
+    phase: Phase,
     declared_cl: Option<u64>,
     /// Bytes accepted toward `declared_cl`: bodiless units count too, so a HEAD handler hits the same errors.
     sent_body: u64,
-    discarded: bool,
     /// 204, 304, 101, or a HEAD request: chunks are accepted and dropped.
     bodiless: bool,
 }
@@ -171,12 +174,9 @@ impl ExchangeState {
             req,
             sender: Some(tx),
             view: None,
-            stage: Stage::Open,
-            head_sent: false,
-            pending: None,
+            phase: Phase::Open,
             declared_cl: None,
             sent_body: 0,
-            discarded: false,
             bodiless,
         }
     }
@@ -187,7 +187,7 @@ impl ExchangeState {
         let Some(tx) = self.sender.take() else {
             return;
         };
-        if self.head_sent {
+        if matches!(self.phase, Phase::Sent) {
             let _ = tx.try_send(Frame::End {
                 trailers: HeaderMap::new(),
                 truncated: true,
@@ -213,12 +213,13 @@ impl ExchangeState {
 
 impl Held for ExchangeState {
     fn settled(&self) -> bool {
-        self.stage == Stage::Finalized
+        matches!(self.phase, Phase::Sealed | Phase::Discarded)
     }
 
     /// A finalized unit holds no sender, so only an open one can see the client go.
     fn cancelled(&self) -> bool {
-        self.discarded || self.sender.as_ref().is_some_and(Sender::is_closed)
+        matches!(self.phase, Phase::Discarded)
+            || self.sender.as_ref().is_some_and(Sender::is_closed)
     }
 
     fn discard(&mut self) {

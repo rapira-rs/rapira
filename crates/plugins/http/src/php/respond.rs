@@ -105,22 +105,22 @@ pub(super) unsafe fn emit_head(
     st: &mut ExchangeState,
     finalizing_len: Option<u64>,
 ) -> Result<(), Closed> {
-    if st.head_sent {
-        return Ok(());
-    }
-    let head = st.pending.take().unwrap_or(ResponseHead {
-        status: 200,
-        headers: HeaderMap::new(),
-    });
-    if st.stage == Stage::Open {
-        st.stage = Stage::HeadCommitted;
-    }
+    let head = match std::mem::replace(&mut st.phase, Phase::Sent) {
+        Phase::Open => ResponseHead {
+            status: 200,
+            headers: HeaderMap::new(),
+        },
+        Phase::Committed(head) => head,
+        phase => {
+            st.phase = phase;
+            return Ok(());
+        }
+    };
     let content_length = if st.bodiless {
         st.declared_cl
     } else {
         st.declared_cl.or(finalizing_len)
     };
-    st.head_sent = true;
     unsafe {
         send_frame(
             st,
@@ -133,15 +133,14 @@ pub(super) unsafe fn emit_head(
     }
 }
 
-/// Setting `Stage::Finalized` here prevents a second count of the unit in `release()`. The discard also releases the strings that the IO thread no longer reads.
+/// Setting `Phase::Discarded` here prevents a second count of the unit in `release()`. The discard also releases the strings that the IO thread no longer reads.
 pub(super) fn discard_unit(st: &mut ExchangeState) {
     // SAFETY: every caller runs on the PHP thread with the engine active.
     unsafe { release_done() };
-    if st.stage == Stage::Finalized {
+    if st.settled() {
         return;
     }
-    st.discarded = true;
-    st.stage = Stage::Finalized;
+    st.phase = Phase::Discarded;
     st.body.unlink_spools();
     sb_update(Event::Handled { errored: true });
     // Every caller saw the channel closed first, so no frame can reach the plugin.
@@ -155,10 +154,10 @@ pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: Heade
         discard_unit(st);
         return Verb::Discarded;
     }
-    if st.stage == Stage::Finalized {
+    if st.settled() {
         return Verb::Finalized;
     }
-    if st.stage == Stage::Open {
+    if matches!(st.phase, Phase::Open) {
         return Verb::HeadNotWritten;
     }
     if unsafe { emit_head(st, Some(st.sent_body)) }.is_err() {
@@ -170,9 +169,7 @@ pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: Heade
     } else {
         trailers
     };
-    unsafe {
-        seal(st, /*truncated=*/ false, trailers)
-    };
+    unsafe { seal(st, trailers) };
     Verb::Ok
 }
 
@@ -214,7 +211,7 @@ pub(super) unsafe fn write_head_core(
         discard_unit(st);
         return Verb::Discarded;
     }
-    if st.stage != Stage::Open {
+    if !matches!(st.phase, Phase::Open) {
         return Verb::HeadWritten;
     }
     // The contract calls an interim head advisory, and HTTP/1.1 from PHP carries none: the plugin drops it here.
@@ -226,7 +223,7 @@ pub(super) unsafe fn write_head_core(
         Err(msg) => return Verb::BadField(msg),
     };
     st.declared_cl = split.declared_cl;
-    st.pending = Some(ResponseHead {
+    st.phase = Phase::Committed(ResponseHead {
         status,
         headers: split.headers,
     });
@@ -234,7 +231,6 @@ pub(super) unsafe fn write_head_core(
     if matches!(status, 204 | 304 | 101) {
         st.bodiless = true;
     }
-    st.stage = Stage::HeadCommitted;
     Verb::Ok
 }
 
@@ -284,7 +280,7 @@ pub(super) unsafe fn write_body_core(
         discard_unit(st);
         return Verb::Discarded;
     }
-    if st.stage == Stage::Finalized {
+    if st.settled() {
         return Verb::Finalized;
     }
     let len = unsafe { (*s).len };
@@ -321,9 +317,7 @@ pub(super) unsafe fn send_body(
             let _ = unsafe { send_frame(st, frame(fit)) };
         }
         st.sent_body = cl;
-        unsafe {
-            seal(st, /*truncated=*/ false, HeaderMap::new())
-        };
+        unsafe { seal(st, HeaderMap::new()) };
         return Verb::ContentLengthExceeded;
     }
     let finalizing = (eos && st.sent_body == 0).then_some(len);
@@ -337,9 +331,7 @@ pub(super) unsafe fn send_body(
         return Verb::Discarded;
     }
     if eos {
-        unsafe {
-            seal(st, /*truncated=*/ false, HeaderMap::new())
-        };
+        unsafe { seal(st, HeaderMap::new()) };
     }
     Verb::Ok
 }
@@ -360,17 +352,17 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
 
 /// # Safety
 /// As `send_frame`.
-pub(super) unsafe fn seal(st: &mut ExchangeState, truncated: bool, trailers: HeaderMap) {
+pub(super) unsafe fn seal(st: &mut ExchangeState, trailers: HeaderMap) {
     unsafe { release_done() };
     st.body.unlink_spools();
-    st.stage = Stage::Finalized;
-    sb_update(Event::Handled { errored: truncated });
+    st.phase = Phase::Sealed;
+    sb_update(Event::Handled { errored: false });
     let _ = unsafe {
         send_frame(
             st,
             Frame::End {
                 trailers,
-                truncated,
+                truncated: false,
             },
         )
     };
@@ -384,7 +376,7 @@ pub(super) unsafe fn flush_core(st: &mut ExchangeState) -> Verb {
         discard_unit(st);
         return Verb::Discarded;
     }
-    if st.stage == Stage::Finalized {
+    if st.settled() {
         return Verb::Finalized;
     }
     match unsafe { emit_head(st, None) } {

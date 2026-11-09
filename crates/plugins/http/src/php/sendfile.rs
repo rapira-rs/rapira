@@ -75,7 +75,7 @@ pub(super) unsafe fn send_file_core(
         discard_unit(st);
         return Verb::Discarded;
     }
-    if st.stage == Stage::Finalized {
+    if st.settled() {
         return Verb::Finalized;
     }
     let FileSlice { file, len } = match open_send_file(path, offset, length) {
