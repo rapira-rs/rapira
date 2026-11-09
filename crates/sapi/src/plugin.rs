@@ -26,8 +26,6 @@ pub trait Plugin: Send + 'static {
     fn modes(&self) -> &'static [Mode];
     /// The dispatcher surface receive() serves in dispatcher mode.
     fn dispatcher(&self) -> DispatcherClasses;
-    /// Master side, before the fork, no runtime.
-    fn prepare(&mut self) -> anyhow::Result<()>;
     /// Worker side, on the plugin thread. Returns after the stop signal and the drain.
     fn serve(self: Box<Self>, worker: Worker) -> anyhow::Result<()>;
 }

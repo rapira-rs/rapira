@@ -41,7 +41,7 @@ pub(crate) struct Config {
 
 pub struct Server {
     config: Config,
-    prepared: Option<Prepared>,
+    prepared: Prepared,
 }
 
 /// What `prepare` leaves for `serve`: the listener and the routes that the plugin answers without PHP.
@@ -49,6 +49,32 @@ pub(crate) struct Prepared {
     pub(crate) listener: PreparedListener,
     pub(crate) router: Router,
     pub(crate) health: Arc<StaticChecker>,
+}
+
+/// Runs in the master before the fork, with no runtime.
+fn prepare(config: &Config) -> Result<Prepared> {
+    set_schema(Arc::clone(&config.schema));
+    let listener = rapira_net::bind(&config.listen)?;
+    tracing::info!(target: "grpc", "prepared listener on {}", listener.addr());
+
+    let names: Vec<String> = config
+        .schema
+        .services()
+        .iter()
+        .map(|s| s.name.clone())
+        .collect();
+    let (mut router, health) = connectrpc_health::install_static(Router::new(), names.clone());
+    if config.reflection {
+        let reflector = Reflector::from_descriptor_pool(Arc::clone(config.schema.pool()))
+            .map_err(|e| anyhow!("building grpc reflection: {e}"))?
+            .with_services(names);
+        router = connectrpc_reflection::install(router, reflector);
+    }
+    Ok(Prepared {
+        listener,
+        router,
+        health,
+    })
 }
 
 impl Plugin for Server {
@@ -64,38 +90,8 @@ impl Plugin for Server {
         php::DISPATCHER_CLASSES
     }
 
-    fn prepare(&mut self) -> Result<()> {
-        set_schema(Arc::clone(&self.config.schema));
-        let listener = rapira_net::bind(&self.config.listen)?;
-        tracing::info!(target: "grpc", "prepared listener on {}", listener.addr());
-
-        let names: Vec<String> = self
-            .config
-            .schema
-            .services()
-            .iter()
-            .map(|s| s.name.clone())
-            .collect();
-        let (mut router, health) = connectrpc_health::install_static(Router::new(), names.clone());
-        if self.config.reflection {
-            let reflector = Reflector::from_descriptor_pool(Arc::clone(self.config.schema.pool()))
-                .map_err(|e| anyhow!("building grpc reflection: {e}"))?
-                .with_services(names);
-            router = connectrpc_reflection::install(router, reflector);
-        }
-        self.prepared = Some(Prepared {
-            listener,
-            router,
-            health,
-        });
-        Ok(())
-    }
-
     fn serve(self: Box<Self>, worker: Worker) -> Result<()> {
         let Self { config, prepared } = *self;
-        let Some(prepared) = prepared else {
-            return Err(anyhow!("grpc listener was not prepared"));
-        };
         serve::serve(config, prepared, worker)
     }
 }

@@ -5,14 +5,14 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, bail};
+use anyhow::{Context, Result, bail};
 use rapira_config::{
     ListenAddr, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, opt_path,
     parse_listen, resolve_pool,
 };
 use serde::Deserialize;
 
-use crate::{Config, Schema, Server};
+use crate::{Config, Schema, Server, prepare};
 
 /// The `[grpc]` table.
 #[derive(Debug, Deserialize)]
@@ -163,7 +163,7 @@ fn resolve_interceptors(
 }
 
 impl Server {
-    /// The master loads the schema and interceptors before the fork. A load error stops the boot.
+    /// The master loads the schema and interceptors and binds the listener before the fork. An error stops the boot.
     pub fn from_settings(settings: Settings) -> Result<Self> {
         let schema = Arc::new(Schema::load(
             &settings.descriptor_set,
@@ -178,19 +178,18 @@ impl Server {
                 }
             }
         }
-        Ok(Self {
-            config: Config {
-                listen: settings.listen,
-                schema,
-                reflection: settings.reflection,
-                default_timeout: settings.default_timeout,
-                max_timeout: settings.max_timeout,
-                keepalive_interval: settings.keepalive_interval,
-                keepalive_timeout: settings.keepalive_timeout,
-                interceptors,
-            },
-            prepared: None,
-        })
+        let config = Config {
+            listen: settings.listen,
+            schema,
+            reflection: settings.reflection,
+            default_timeout: settings.default_timeout,
+            max_timeout: settings.max_timeout,
+            keepalive_interval: settings.keepalive_interval,
+            keepalive_timeout: settings.keepalive_timeout,
+            interceptors,
+        };
+        let prepared = prepare(&config).context("plugin grpc: prepare failed")?;
+        Ok(Self { config, prepared })
     }
 }
 

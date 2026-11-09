@@ -6,7 +6,7 @@ use std::num::NonZero;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
-use anyhow::{Result, anyhow, bail, ensure};
+use anyhow::{Context, Result, anyhow, bail, ensure};
 use rapira_config::{
     ListenAddr, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, opt_path,
     parse_listen, resolve_pool,
@@ -14,7 +14,7 @@ use rapira_config::{
 use serde::Deserialize;
 
 use crate::multipart::Limits;
-use crate::{Config, Server};
+use crate::{Config, Server, prepare};
 
 /// The `[http]` table.
 #[derive(Debug, Deserialize)]
@@ -239,30 +239,29 @@ fn check_uploads_dir(dir: &Path) -> Result<()> {
 }
 
 impl Server {
-    /// Runs in the master after the logger starts.
-    pub fn from_settings(settings: Settings) -> Self {
+    /// Runs in the master after the logger starts. It binds the listener before the fork.
+    pub fn from_settings(settings: Settings) -> Result<Self> {
         let mut middleware: Vec<crate::middleware::Layer> = Vec::new();
         if let Some(st) = settings.static_files {
             tracing::info!(target: "rapira", "static files from {}, forbid {:?}", st.root.display(), st.forbid);
             middleware.push(rapira_static_files::StaticFiles::new(st.root, st.forbid).layer());
         }
 
-        Self {
-            config: Config {
-                listen: settings.listen,
-                // Leaked once at boot: every request borrows it until the process exits.
-                server_name: Box::leak(settings.server_name.into_boxed_str()),
-                server_port: settings.server_port,
-                max_body_size: settings.max_body_size,
-                write_timeout: settings.write_timeout,
-                superglobals: settings.pool.mode != Mode::Dispatcher,
-                keepalive_timeout: settings.keepalive_timeout,
-                middleware,
-                uploads: settings.uploads,
-                sendfile_root: settings.sendfile_root,
-            },
-            prepared: None,
-        }
+        let config = Config {
+            listen: settings.listen,
+            // Leaked once at boot: every request borrows it until the process exits.
+            server_name: Box::leak(settings.server_name.into_boxed_str()),
+            server_port: settings.server_port,
+            max_body_size: settings.max_body_size,
+            write_timeout: settings.write_timeout,
+            superglobals: settings.pool.mode != Mode::Dispatcher,
+            keepalive_timeout: settings.keepalive_timeout,
+            middleware,
+            uploads: settings.uploads,
+            sendfile_root: settings.sendfile_root,
+        };
+        let prepared = prepare(&config).context("plugin http: prepare failed")?;
+        Ok(Self { config, prepared })
     }
 }
 

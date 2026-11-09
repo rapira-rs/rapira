@@ -10,7 +10,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `modes()` accepts dispatcher mode only.
 - `dispatcher()` returns `DISPATCHER_CLASSES`, the dispatcher classes.
 - The crate exports `rapira_grpc_register_classes`. MINIT calls it after the base classes to register the `Rapira\Grpc` classes.
-- `prepare()` runs in the master before the fork, with no runtime. It sets the service list that `getServices()` returns, binds the listener with `rapira_net::bind`, and builds the routes that the plugin answers without PHP: health, and reflection when it is on.
+- `Server::from_settings` runs in the master before the fork, with no runtime. It sets the service list that `getServices()` returns, binds the listener with `rapira_net::bind`, and builds the routes that the plugin answers without PHP: health, and reflection when it is on.
 - `serve()` runs in the worker on the plugin thread `rapira-grpc`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the `Intake` to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
 
 `serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. `PhpDispatcher` routes each unary method of a configured service to PHP: it builds a `GrpcState` and submits it to the intake. PHP finalizes the call with `respond()` or `fail()`, and the plugin sends the outcome to the client.
@@ -31,7 +31,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `rapira_grpc_classes.c`: `rapira_grpc_register_classes` and the object handlers of the call and the response metadata. MINIT calls `rapira_grpc_register_classes` after the base classes. The stub aliases the constructors of the internal classes, `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters to the shared shells in `crates/sapi/rapira_dispatcher.c`.
 - `rapira_grpc.c`: the constructors of the value classes, the `MethodKind` predicates, and the method shells of `name()` and `getServices()` of the dispatcher, the call and the response metadata.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
-- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set and builds the interceptors.
+- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set, builds the interceptors and binds the listener.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.

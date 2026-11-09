@@ -1,4 +1,3 @@
-use anyhow::Context;
 use clap::{Args, CommandFactory, Parser, Subcommand};
 use rapira_config::PoolSettings;
 use rapira_master::PoolConfig;
@@ -115,14 +114,9 @@ fn check_mode(name: &str, served: &[Mode], mode: Mode) -> anyhow::Result<()> {
     )
 }
 
-/// Checks the pool mode, binds the pool's listeners and packs what the master forks with.
-fn pool_run(mut plugin: Box<dyn Plugin>, pool: PoolSettings) -> anyhow::Result<PoolRun> {
-    let name: &'static str = plugin.name();
-    check_mode(name, plugin.modes(), pool.mode)?;
-    // An address that an earlier pool bound fails here: that pool keeps its listener open.
-    plugin
-        .prepare()
-        .with_context(|| format!("plugin {name}: prepare failed"))?;
+/// Checks the pool mode and packs what the master forks with.
+fn pool_run(plugin: Box<dyn Plugin>, pool: PoolSettings) -> anyhow::Result<PoolRun> {
+    check_mode(plugin.name(), plugin.modes(), pool.mode)?;
     Ok(PoolRun::Php { plugin, pool })
 }
 
@@ -137,10 +131,11 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     if let Some(observability) = settings.observability {
         pools.push(observability::pool_run(observability)?);
     }
+    // The constructor of each plugin binds its listener. An address that an earlier pool bound fails there: that pool keeps its listener open.
     // http pool-------
     if let Some(http) = settings.http {
         let pool: PoolSettings = http.pool.clone();
-        let plugin = rapira_http::Server::from_settings(http);
+        let plugin = rapira_http::Server::from_settings(http)?;
         pools.push(pool_run(Box::new(plugin), pool)?);
     }
     // ---------------
