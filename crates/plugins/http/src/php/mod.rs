@@ -116,7 +116,7 @@ pub fn uri_abs(req: &Request) -> String {
 
 pub struct ExchangeState {
     // multipart above sender: declaration drop order unlinks the spool files before the frame sender closes
-    /// The parsed multipart body; the raw body stays in `req`. seal(), discard_unit() and fail() unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
+    /// The parsed multipart body. The parse takes the raw chunks out of `req`, so `req.body` is empty when this is `Some`; with `None`, `req.body` holds the raw body. seal(),discard_unit() and fail() unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
     multipart: Option<MultipartBody>,
     req: Request,
     sender: Option<Sender<Frame>>,
