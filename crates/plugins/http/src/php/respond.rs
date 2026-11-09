@@ -462,9 +462,10 @@ unsafe fn release_done() {
     });
 }
 
-/// DispatcherClasses::quiesce of the http plugin: waits until the IO thread reads no lent string, then releases them. A warn record about every 5 s names what the IO thread still holds.
+/// The quiesce hook of the http plugin record (rapira_http_classes.c): waits until the IO thread reads no lent string, then releases them. A warn record about every 5 s names what the IO thread still holds.
 /// # Safety
 /// Engine active on this thread.
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_http_quiesce() {
     guard((), || unsafe {
         for polls in 0u64.. {

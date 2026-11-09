@@ -1,13 +1,13 @@
 #include "rapira_http.h"
 #include "rapira_http_arginfo.h"
 
+// rust glue (src/php/respond.rs)
+extern void rapira_rs_http_quiesce(void);
+
 zend_class_entry *rapira_ce_http_multipart;
-zend_class_entry *rapira_ce_internal_http_dispatcher;
 zend_class_entry *rapira_ce_http_form_field;
 zend_class_entry *rapira_ce_http_uploaded_file;
 zend_class_entry *rapira_ce_http_request;
-zend_class_entry *rapira_ce_internal_http_exchange;
-zend_class_entry *rapira_ce_internal_http_dispatcher_info;
 zend_class_entry *rapira_ce_http_head_already_written_error;
 zend_class_entry *rapira_ce_http_head_not_written_error;
 zend_class_entry *rapira_ce_http_content_length_exceeded_error;
@@ -16,6 +16,13 @@ zend_class_entry *rapira_ce_http_file_not_sendable_exception;
 const char *rapira_http_server_name;
 size_t rapira_http_server_name_len;
 zend_long rapira_http_server_port;
+
+// the dispatcher surface; Plugin::dispatcher() returns its address (src/lib.rs)
+rapira_plugin rapira_http_plugin = {
+    .busy = "this worker holds one unit at a time, and its "
+            "Rapira\\Http\\Exchange is unfinalized; finalize it first",
+    .quiesce = rapira_rs_http_quiesce,
+};
 
 // own copy: std_object_handlers is shared engine state
 static zend_object_handlers rapira_exchange_handlers;
@@ -27,12 +34,6 @@ static void rapira_exchange_free(zend_object *std) {
     zval_ptr_dtor(&rapira_exchange_from(std)->request);
 
     zend_object_std_dtor(std);
-}
-
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, name) {
-    ZEND_PARSE_PARAMETERS_NONE();
-    // the plugin's root TOML section
-    RETURN_STRING("http");
 }
 
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverName) {
@@ -71,29 +72,19 @@ void rapira_http_register_classes(void) {
         register_class_Rapira_Http_Exception_FileNotSendableException(
             spl_ce_RuntimeException, rapira_ce_throwable);
 
-    rapira_ce_internal_http_dispatcher =
+    rapira_http_plugin.dispatcher =
         register_class_Rapira_Internal_Http_Dispatcher(http_dispatcher);
-    rapira_ce_internal_http_dispatcher_info =
+    rapira_http_plugin.info =
         register_class_Rapira_Internal_Http_DispatcherInfo(http_info);
-    rapira_ce_internal_http_exchange =
+    rapira_http_plugin.unit =
         register_class_Rapira_Internal_Http_Exchange(http_exchange);
-
-    // Reflection does not skip the constructor of a final class with
-    // create_object, so only get_dispatcher() creates the object.
-    rapira_ce_internal_http_dispatcher->create_object = rapira_object_create;
-    rapira_ce_internal_http_dispatcher->default_object_handlers =
-        &rapira_dispatcher_handlers;
+    rapira_plugin_wire(&rapira_http_plugin);
 
     rapira_exchange_handlers = std_object_handlers;
     rapira_exchange_handlers.clone_obj = NULL;
     rapira_exchange_handlers.offset = offsetof(rapira_exchange_obj, std);
     rapira_exchange_handlers.free_obj = rapira_exchange_free;
-    rapira_ce_internal_http_exchange->create_object = rapira_object_create;
-    rapira_ce_internal_http_exchange->default_object_handlers =
+    rapira_http_plugin.unit->create_object = rapira_object_create;
+    rapira_http_plugin.unit->default_object_handlers =
         &rapira_exchange_handlers;
-
-    rapira_ce_internal_http_dispatcher_info->create_object =
-        rapira_object_create;
-    rapira_ce_internal_http_dispatcher_info->default_object_handlers =
-        &rapira_info_handlers;
 }

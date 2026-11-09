@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: eab844176c2ad2abf2fdcb582e01f43e54fb33ec */
+ * Stub hash: 9849547e29937ae05396bacccf6d4c57601a7a2c */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Grpc_MethodKind_isStreamingRequest, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
@@ -183,7 +183,7 @@ ZEND_METHOD(Rapira_Grpc_ServiceInfo, __construct);
 ZEND_METHOD(Rapira_Grpc_Call_Context, __construct);
 ZEND_METHOD(Rapira_Grpc_Exception_GrpcException, __construct);
 ZEND_FUNCTION(rapira_sapi_dispatcher_construct);
-ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, name);
+ZEND_FUNCTION(rapira_sapi_dispatcher_name);
 ZEND_FUNCTION(rapira_sapi_try_receive);
 ZEND_FUNCTION(rapira_sapi_receive);
 ZEND_FUNCTION(rapira_sapi_get_info);
@@ -307,7 +307,7 @@ static const zend_function_entry class_Rapira_Grpc_Exception_GrpcException_metho
 
 static const zend_function_entry class_Rapira_Internal_Grpc_Dispatcher_methods[] = {
 	ZEND_RAW_FENTRY("__construct", zif_rapira_sapi_dispatcher_construct, arginfo_class_Rapira_Internal_Grpc_Dispatcher___construct, ZEND_ACC_PRIVATE, NULL, NULL)
-	ZEND_ME(Rapira_Internal_Grpc_Dispatcher, name, arginfo_class_Rapira_Internal_Grpc_Dispatcher_name, ZEND_ACC_PUBLIC)
+	ZEND_RAW_FENTRY("name", zif_rapira_sapi_dispatcher_name, arginfo_class_Rapira_Internal_Grpc_Dispatcher_name, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_RAW_FENTRY("tryReceive", zif_rapira_sapi_try_receive, arginfo_class_Rapira_Internal_Grpc_Dispatcher_tryReceive, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_RAW_FENTRY("receive", zif_rapira_sapi_receive, arginfo_class_Rapira_Internal_Grpc_Dispatcher_receive, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_RAW_FENTRY("getInfo", zif_rapira_sapi_get_info, arginfo_class_Rapira_Internal_Grpc_Dispatcher_getInfo, ZEND_ACC_PUBLIC, NULL, NULL)

@@ -9,7 +9,7 @@ use connectrpc_health::StaticChecker;
 use connectrpc_reflection::Reflector;
 use rapira_net::{ListenAddr, PreparedListener};
 use rapira_sapi::plugin::{Mode, Plugin, Worker};
-use rapira_sapi::work::DispatcherClasses;
+use rapira_sapi::rapira_plugin;
 
 mod call;
 pub mod config;
@@ -86,8 +86,8 @@ impl Plugin for Server {
         &[Mode::Dispatcher]
     }
 
-    fn dispatcher(&self) -> DispatcherClasses {
-        php::DISPATCHER_CLASSES
+    fn dispatcher(&self) -> *const rapira_plugin {
+        &raw const php::rapira_grpc_plugin
     }
 
     fn serve(self: Box<Self>, worker: Worker) -> Result<()> {

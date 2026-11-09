@@ -17,10 +17,9 @@
     "rapira_ce_timeout_exception", "rapira_ce_closed_exception",
     "zend_argument_type_error",
     "rapira_ce_work_discarded_exception",
-    // the plugin globals the Rust boot and worker start write (static mut)
-    "rapira_plugin_ce_dispatcher", "rapira_plugin_ce_info", "rapira_plugin_ce_unit",
-    "rapira_plugin_busy", "rapira_plugin_quiesce", "rapira_plugin_registers",
-    "rapira_plugin_register_count",
+    // the plugin globals the Rust boot and worker start write (static mut), and the record type of the dispatcher surface
+    "rapira_plugin", "rapira_plugin_current", "rapira_plugin_name", "rapira_plugin_name_len",
+    "rapira_plugin_registers", "rapira_plugin_register_count",
     // the FOREACH macros are header-only, so the array walk uses the exported position API
     "zend_hash_internal_pointer_reset_ex", "zend_hash_get_current_key_ex",
     "zend_hash_get_current_data_ex", "zend_hash_move_forward_ex", "HashPosition",

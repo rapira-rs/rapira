@@ -373,6 +373,7 @@ namespace Rapira\Internal\Grpc {
          */
         private function __construct() {}
 
+        /** @implementation-alias rapira_sapi_dispatcher_name */
         public function name(): string {}
 
         /** @implementation-alias rapira_sapi_try_receive */

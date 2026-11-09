@@ -6,7 +6,7 @@ use std::time::Duration;
 use anyhow::Result;
 use rapira_net::{ListenAddr, PreparedListener};
 use rapira_sapi::plugin::{Mode, Plugin, Worker};
-use rapira_sapi::work::DispatcherClasses;
+use rapira_sapi::rapira_plugin;
 
 mod bridge;
 pub mod check;
@@ -65,8 +65,8 @@ impl Plugin for Server {
         &[Mode::Classic, Mode::Worker, Mode::Dispatcher]
     }
 
-    fn dispatcher(&self) -> DispatcherClasses {
-        php::DISPATCHER_CLASSES
+    fn dispatcher(&self) -> *const rapira_plugin {
+        &raw const php::rapira_http_plugin
     }
 
     fn serve(self: Box<Self>, worker: Worker) -> Result<()> {

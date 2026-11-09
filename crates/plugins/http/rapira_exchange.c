@@ -15,11 +15,6 @@ extern bool rapira_rs_exchange_send_file(const rapira_held *held,
 extern bool rapira_rs_exchange_write_trailers(const rapira_held *held,
                                               HashTable *trailers);
 
-// receive() fills the slot before PHP code can reach the object
-static const rapira_held *exchange_held(zval *this_ptr) {
-    return &rapira_exchange_from(Z_OBJ_P(this_ptr))->held;
-}
-
 ZEND_METHOD(Rapira_Internal_Http_Exchange, writeHead) {
     zend_long status;
     HashTable *headers = NULL;
@@ -29,7 +24,7 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeHead) {
     Z_PARAM_ARRAY_HT(headers)
     ZEND_PARSE_PARAMETERS_END();
 
-    const rapira_held *held = exchange_held(ZEND_THIS);
+    const rapira_held *held = rapira_held_of(Z_OBJ_P(ZEND_THIS));
     RAPIRA_RETURN_THROWS_UNLESS(
         rapira_rs_exchange_write_head(held, (int64_t)status, headers),
         "writeHead");
@@ -44,7 +39,7 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeBody) {
     Z_PARAM_BOOL(eos)
     ZEND_PARSE_PARAMETERS_END();
 
-    const rapira_held *held = exchange_held(ZEND_THIS);
+    const rapira_held *held = rapira_held_of(Z_OBJ_P(ZEND_THIS));
     RAPIRA_RETURN_THROWS_UNLESS(
         rapira_rs_exchange_write_body(held, content, eos), "writeBody");
 }
@@ -72,7 +67,7 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, sendFile) {
         RETURN_THROWS();
     }
 
-    const rapira_held *held = exchange_held(ZEND_THIS);
+    const rapira_held *held = rapira_held_of(Z_OBJ_P(ZEND_THIS));
     RAPIRA_RETURN_THROWS_UNLESS(
         rapira_rs_exchange_send_file(held, ZSTR_VAL(path), ZSTR_LEN(path),
                                      (int64_t)offset, (int64_t)length,
@@ -86,14 +81,14 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, writeTrailers) {
     Z_PARAM_ARRAY_HT(trailers)
     ZEND_PARSE_PARAMETERS_END();
 
-    const rapira_held *held = exchange_held(ZEND_THIS);
+    const rapira_held *held = rapira_held_of(Z_OBJ_P(ZEND_THIS));
     RAPIRA_RETURN_THROWS_UNLESS(
         rapira_rs_exchange_write_trailers(held, trailers), "writeTrailers");
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
     ZEND_PARSE_PARAMETERS_NONE();
-    const rapira_held *held = exchange_held(ZEND_THIS);
+    const rapira_held *held = rapira_held_of(Z_OBJ_P(ZEND_THIS));
     RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_exchange_flush(held), "flush");
 }
 

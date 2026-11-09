@@ -16,11 +16,11 @@ use rapira_sapi::scoreboard::{Event, sb_update};
 use rapira_sapi::types::{
     Addr, Body, Chunks, FormField, Frame, Request, ResponseHead, UploadedFile,
 };
-use rapira_sapi::work::{DispatcherClasses, Held, HeldPtr};
+use rapira_sapi::work::{Held, HeldPtr};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
-    rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, zend, zend_class_entry,
-    zval, zval_ptr_dtor,
+    rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_plugin, zend,
+    zend_class_entry, zval, zval_ptr_dtor,
 };
 use tokio::sync::mpsc::{Sender, error::TrySendError};
 
@@ -43,9 +43,8 @@ unsafe extern "C" {
     pub static mut rapira_ce_http_head_not_written_error: *mut zend_class_entry;
     pub static mut rapira_ce_http_content_length_exceeded_error: *mut zend_class_entry;
     pub static mut rapira_ce_http_file_not_sendable_exception: *mut zend_class_entry;
-    pub static mut rapira_ce_internal_http_dispatcher: *mut zend_class_entry;
-    pub static mut rapira_ce_internal_http_dispatcher_info: *mut zend_class_entry;
-    pub static mut rapira_ce_internal_http_exchange: *mut zend_class_entry;
+    // The dispatcher surface of the http plugin (rapira_http_classes.c).
+    pub static mut rapira_http_plugin: rapira_plugin;
     pub fn rapira_http_register_classes();
     // The server identity that DispatcherInfo::serverName() and serverPort() return (rapira_http.h).
     static mut rapira_http_server_name: *const c_char;
@@ -62,14 +61,6 @@ pub(crate) fn set_server_identity(name: &'static str, port: u16) {
         rapira_http_server_port = i64::from(port);
     }
 }
-
-pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {
-    dispatcher: || unsafe { rapira_ce_internal_http_dispatcher },
-    info: || unsafe { rapira_ce_internal_http_dispatcher_info },
-    unit: || unsafe { rapira_ce_internal_http_exchange },
-    busy: c"this worker holds one unit at a time, and its Rapira\\Http\\Exchange is unfinalized; finalize it first",
-    quiesce: Some(respond::rapira_rs_http_quiesce),
-};
 
 /// The head locks on the first head or body write: a body chunk commits an implicit 200 first.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

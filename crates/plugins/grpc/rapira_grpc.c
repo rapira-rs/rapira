@@ -223,21 +223,10 @@ ZEND_METHOD(Rapira_Grpc_Exception_GrpcException, __construct) {
     grpc_status_ctor(INTERNAL_FUNCTION_PARAM_PASSTHRU, grpc_exception_props);
 }
 
-ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, name) {
-    ZEND_PARSE_PARAMETERS_NONE();
-    // the plugin's root TOML section
-    RETURN_STRING("grpc");
-}
-
 ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, getServices) {
     ZEND_PARSE_PARAMETERS_NONE();
     RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_grpc_services(return_value),
                                 "getServices");
-}
-
-// receive() fills the slot before PHP code can reach the object
-static const rapira_held *grpc_call_held(zval *this_ptr) {
-    return &rapira_grpc_call_from(Z_OBJ_P(this_ptr))->held;
 }
 
 // getMessage() copies the message into one zend_string on its first call.
@@ -247,8 +236,7 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getMessage) {
     rapira_grpc_call_obj *call = rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS));
     if (Z_ISUNDEF(call->message)) {
         size_t len = 0;
-        const char *message =
-            rapira_rs_grpc_message(grpc_call_held(ZEND_THIS), &len);
+        const char *message = rapira_rs_grpc_message(&call->held, &len);
         ZVAL_STRINGL(&call->message, message, len);
     }
     RETURN_COPY(&call->message);
@@ -282,8 +270,8 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, respond) {
     ZEND_PARSE_PARAMETERS_END();
 
     RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_grpc_respond(grpc_call_held(ZEND_THIS), ZSTR_VAL(message),
-                               ZSTR_LEN(message)),
+        rapira_rs_grpc_respond(rapira_held_of(Z_OBJ_P(ZEND_THIS)),
+                               ZSTR_VAL(message), ZSTR_LEN(message)),
         "respond");
 }
 
@@ -294,7 +282,8 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, fail) {
     ZEND_PARSE_PARAMETERS_END();
 
     RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_grpc_fail(grpc_call_held(ZEND_THIS), Z_OBJ_P(status)),
+        rapira_rs_grpc_fail(rapira_held_of(Z_OBJ_P(ZEND_THIS)),
+                            Z_OBJ_P(status)),
         "fail");
 }
 

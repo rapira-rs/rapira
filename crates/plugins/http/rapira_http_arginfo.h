@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 00d2f454f0fb1356fb3706ea4310b1f6e1b71684 */
+ * Stub hash: e3d45ee785c68207527a1ded7109e7a271bb815c */
 
 ZEND_BEGIN_ARG_INFO_EX(arginfo_class_Rapira_Http_FormField___construct, 0, 0, 3)
 	ZEND_ARG_TYPE_INFO(0, name, IS_STRING, 0)
@@ -123,7 +123,7 @@ ZEND_METHOD(Rapira_Http_UploadedFile, __construct);
 ZEND_METHOD(Rapira_Http_Multipart, __construct);
 ZEND_METHOD(Rapira_Http_Request, __construct);
 ZEND_FUNCTION(rapira_sapi_dispatcher_construct);
-ZEND_METHOD(Rapira_Internal_Http_Dispatcher, name);
+ZEND_FUNCTION(rapira_sapi_dispatcher_name);
 ZEND_FUNCTION(rapira_sapi_try_receive);
 ZEND_FUNCTION(rapira_sapi_receive);
 ZEND_FUNCTION(rapira_sapi_get_info);
@@ -186,7 +186,7 @@ static const zend_function_entry class_Rapira_Http_HttpDispatcher_methods[] = {
 
 static const zend_function_entry class_Rapira_Internal_Http_Dispatcher_methods[] = {
 	ZEND_RAW_FENTRY("__construct", zif_rapira_sapi_dispatcher_construct, arginfo_class_Rapira_Internal_Http_Dispatcher___construct, ZEND_ACC_PRIVATE, NULL, NULL)
-	ZEND_ME(Rapira_Internal_Http_Dispatcher, name, arginfo_class_Rapira_Internal_Http_Dispatcher_name, ZEND_ACC_PUBLIC)
+	ZEND_RAW_FENTRY("name", zif_rapira_sapi_dispatcher_name, arginfo_class_Rapira_Internal_Http_Dispatcher_name, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_RAW_FENTRY("tryReceive", zif_rapira_sapi_try_receive, arginfo_class_Rapira_Internal_Http_Dispatcher_tryReceive, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_RAW_FENTRY("receive", zif_rapira_sapi_receive, arginfo_class_Rapira_Internal_Http_Dispatcher_receive, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_RAW_FENTRY("getInfo", zif_rapira_sapi_get_info, arginfo_class_Rapira_Internal_Http_Dispatcher_getInfo, ZEND_ACC_PUBLIC, NULL, NULL)

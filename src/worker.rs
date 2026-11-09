@@ -41,7 +41,7 @@ pub fn worker_body(
         max_requests,
         env.slot_view,
         stopper.clone(),
-        plugin.dispatcher(),
+        plugin.as_ref(),
     );
 
     rapira_master::spawn_lifeline_watch(env.lifeline);

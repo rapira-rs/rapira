@@ -1,4 +1,3 @@
-use std::ffi::CStr;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -12,7 +11,6 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::callbacks::guard;
 use crate::scoreboard::{Event, count_shed, sb_update};
 use crate::types::Context;
-use crate::zend_class_entry;
 
 pub(crate) const INTAKE_WAIT: Duration = Duration::from_secs(30);
 
@@ -168,18 +166,6 @@ pub(crate) enum Entry {
     },
     /// A reload: the app instance takes no more units, and the next one takes the rest.
     RestartApp,
-}
-
-/// The dispatcher surface of a plugin, copied into C globals at worker start.
-#[derive(Clone, Copy)]
-pub struct DispatcherClasses {
-    pub dispatcher: unsafe fn() -> *mut zend_class_entry,
-    pub info: unsafe fn() -> *mut zend_class_entry,
-    pub unit: unsafe fn() -> *mut zend_class_entry,
-    /// The error of receive() and tryReceive() while a unit is unfinalized.
-    pub busy: &'static CStr,
-    /// Runs on the PHP thread in RSHUTDOWN, before php_request_shutdown frees the request strings: the plugin waits until its IO thread holds no request string, then releases the strings.
-    pub quiesce: Option<unsafe extern "C" fn()>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

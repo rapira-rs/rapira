@@ -5,7 +5,8 @@ use std::time::{Duration, Instant};
 use anyhow::anyhow;
 use tokio::sync::watch;
 
-use crate::work::{DispatcherClasses, Intake};
+use crate::rapira_plugin;
+use crate::work::Intake;
 
 pub use rapira_config::Mode;
 
@@ -24,8 +25,8 @@ pub trait Plugin: Send + 'static {
     fn name(&self) -> &'static str;
     /// The pool modes this plugin serves. The root refuses another mode at boot.
     fn modes(&self) -> &'static [Mode];
-    /// The dispatcher surface receive() serves in dispatcher mode.
-    fn dispatcher(&self) -> DispatcherClasses;
+    /// The address of the plugin's C record (`rapira_plugin` in rapira_sapi.h): the dispatcher surface receive() serves in dispatcher mode.
+    fn dispatcher(&self) -> *const rapira_plugin;
     /// Worker side, on the plugin thread. Returns after the stop signal and the drain.
     fn serve(self: Box<Self>, worker: Worker) -> anyhow::Result<()>;
 }

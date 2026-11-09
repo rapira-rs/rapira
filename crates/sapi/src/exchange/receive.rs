@@ -22,8 +22,10 @@ unsafe fn receive_into(held: *mut HeldPtr, mode: RecvMode) -> bool {
         if let Some(ptr) = UNIT.get()
             && !(*ptr).settled()
         {
-            // SAFETY: worker_main points it at the 'static busy message of the plugin.
-            zend::throw_error(std::ffi::CStr::from_ptr(crate::rapira_plugin_busy));
+            // SAFETY: a unit exists only in dispatcher mode, where start_worker points rapira_plugin_current at the static record of the plugin, and the record holds a static busy text.
+            zend::throw_error(std::ffi::CStr::from_ptr(
+                (*crate::rapira_plugin_current).busy,
+            ));
             return false;
         }
         // The timer of the previous unit still runs. A queued unit re-arms it, so disarm it only before a wait.
