@@ -110,7 +110,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_build_request(
 /// Slot offsets of the `Request` properties in declaration order; the class is fixed after MINIT.
 static REQUEST_SLOTS: OnceLock<[u32; 11]> = OnceLock::new();
 
-/// No write here throws. A Zend OOM bails out through this frame, so `RequestView` keeps the owned values in the state.
+/// No write here throws. A Zend OOM bails out through this frame, so `RequestView` keeps the owned `$uri` in the state.
 unsafe fn build_request_impl(held: *const HeldPtr, memo: *mut zval) -> bool {
     unsafe {
         let ce: *mut zend_class_entry = rapira_ce_http_request;
@@ -121,9 +121,9 @@ unsafe fn build_request_impl(held: *const HeldPtr, memo: *mut zval) -> bool {
         let mut headers: zval = std::mem::zeroed();
         emit_header_map(&mut headers, &req.headers);
         let mut remote: zval = std::mem::zeroed();
-        build_address(&mut remote, &view.remote);
+        build_address(&mut remote, &req.remote);
         let mut server: zval = std::mem::zeroed();
-        build_address(&mut server, &view.server);
+        build_address(&mut server, &req.server);
         let mut mp: zval = std::mem::zeroed();
         if let BodyState::Multipart(body) = &st.body {
             build_multipart(&mut mp, body);

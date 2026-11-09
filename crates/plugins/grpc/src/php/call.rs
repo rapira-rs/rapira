@@ -10,7 +10,7 @@ use bytes::Bytes;
 use connectrpc::Protocol;
 use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
 use rapira_sapi::callbacks::guard;
-use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key};
+use rapira_sapi::exchange::{add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};
 use rapira_sapi::work::{Held, HeldPtr, now_unix_f64};
 use rapira_sapi::{
@@ -179,9 +179,8 @@ fn wire(fields: &[MetadataField]) -> HeaderMap {
     map
 }
 
-/// Owned values of the Context object. The state keeps them because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
+/// The owned metadata of the Context object. The state keeps it because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
 struct ContextView {
-    remote: AddrOwned,
     metadata: Vec<MetadataField>,
 }
 
@@ -405,13 +404,12 @@ unsafe fn build_context(dst: *mut zval, st: &mut GrpcState) {
     unsafe {
         let req = &st.req;
         let view = st.view.get_or_insert_with(|| ContextView {
-            remote: AddrOwned::new(&req.remote),
             metadata: context_metadata(&req.metadata),
         });
         let mut metadata: zval = std::mem::zeroed();
         build_metadata(&mut metadata, &view.metadata);
         let mut remote: zval = std::mem::zeroed();
-        build_address(&mut remote, &view.remote);
+        build_address(&mut remote, &req.remote);
         let mut protocol: zval = std::mem::zeroed();
         rapira_zval_enum_case(
             &mut protocol,

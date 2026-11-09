@@ -3,13 +3,13 @@
 use std::{
     ffi::{CStr, c_char},
     fmt::NumBuffer,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
 };
 
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::body::Bytes;
 use rapira_sapi::callbacks::guard;
-use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key, push_ipv4};
+use rapira_sapi::exchange::{add_list, build_address, header_key, ip_text};
 use rapira_sapi::scoreboard::{Event, sb_update};
 use rapira_sapi::types::{Addr, Chunks, Frame, Request, ResponseHead};
 use rapira_sapi::work::{Held, HeldPtr};
@@ -98,11 +98,9 @@ fn protocol_php(protocol: &str) -> &str {
     }
 }
 
-/// Owned values of the `Request` object. The builder keeps them in the state because a Zend OOM bailout longjmps through its frame, so that frame holds no values with Drop glue.
+/// The owned `$uri` of the `Request` object. The builder keeps it in the state because a Zend OOM bailout longjmps through its frame, so that frame holds no values with Drop glue.
 pub struct RequestView {
     pub uri_abs: String,
-    remote: AddrOwned,
-    server: AddrOwned,
 }
 
 impl RequestView {
@@ -121,7 +119,7 @@ impl RequestView {
             Some(a) => uri_abs.push_str(&String::from_utf8_lossy(a)),
             None => match &req.server {
                 Addr::Inet(SocketAddr::V4(sa)) => {
-                    push_ipv4(&mut uri_abs, *sa.ip());
+                    uri_abs.push_str(ip_text(IpAddr::V4(*sa.ip()), &mut [0; _]));
                     uri_abs.push(':');
                     uri_abs.push_str(sa.port().format_into(&mut NumBuffer::new()));
                 }
@@ -134,11 +132,7 @@ impl RequestView {
             },
         }
         uri_abs.push_str(path);
-        Self {
-            uri_abs,
-            remote: AddrOwned::new(&req.remote),
-            server: AddrOwned::new(&req.server),
-        }
+        Self { uri_abs }
     }
 }
 
