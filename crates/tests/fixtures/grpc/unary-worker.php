@@ -78,6 +78,15 @@ function serve(GrpcDispatcher $d, UnaryCall $call): void
         case 'drop':
             unset($call); // never finalized: the plugin loses this call
             return;
+        case 'keep-md':
+            $md = $call->getResponseMetadata();
+            unset($call);
+            try {
+                $d->tryReceive();
+            } catch (\Error $e) {
+                \Rapira\log('keep-md', context: ['result' => $e->getMessage()]);
+            }
+            return; // the return frees $md, the last reference to the call: the plugin loses this call
         case 'throw':
             throw new \RuntimeException('uncaught');
         case 'info':
@@ -125,9 +134,6 @@ function serve(GrpcDispatcher $d, UnaryCall $call): void
             });
             $call->respond('md-rules');
             probe('add after respond', fn () => $md->addHeader('x-late', 'v'));
-            unset($call);
-            probe('add after the call object is gone', fn () => $md->addHeader('x-gone', 'v'));
-            probe('headers() after the call object is gone', fn () => json_encode($md->headers()->entries));
             return;
         case 'cancel':
             \Rapira\log('got'); // the call is out; the test may drop the receiver

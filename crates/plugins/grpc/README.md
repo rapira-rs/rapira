@@ -27,8 +27,8 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `build.rs`: compiles the C files with `rapira_php_build::compile` against the PHP headers. `rapira_grpc.h` includes `rapira_sapi.h` by its path in `crates/sapi`.
 - `rapira_grpc.stub.php`: the PHP stub of the `Rapira\Grpc` and `Rapira\Internal\Grpc` classes.
 - `rapira_grpc_arginfo.h`: generated from the stub by `make stubs`. Do not edit it.
-- `rapira_grpc.h`: the C layouts of the call object and the response metadata object, and the class entries.
-- `rapira_grpc_classes.c`: the `rapira_grpc_plugin` record, `rapira_grpc_register_classes` and the object handlers of the call and the response metadata. MINIT calls `rapira_grpc_register_classes` after the base classes. The stub aliases the constructors of the internal classes, `name()`, `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters to the shared shells in `crates/sapi/rapira_dispatcher.c`.
+- `rapira_grpc.h`: the C layout of the call object, and the class entries. The call object is also its own response metadata.
+- `rapira_grpc_classes.c`: the `rapira_grpc_plugin` record, `rapira_grpc_register_classes` and the object handlers of the call. MINIT calls `rapira_grpc_register_classes` after the base classes. The stub aliases the constructors of the internal classes, `name()`, `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters to the shared shells in `crates/sapi/rapira_dispatcher.c`.
 - `rapira_grpc.c`: the constructors of the value classes, the `MethodKind` predicates, and the method shells of `getServices()` of the dispatcher, the call and the response metadata.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set, builds the interceptors and binds the listener.

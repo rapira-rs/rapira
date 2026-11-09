@@ -255,13 +255,7 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getContext) {
 
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getResponseMetadata) {
     ZEND_PARSE_PARAMETERS_NONE();
-    rapira_grpc_call_obj *call = rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS));
-    if (Z_ISUNDEF(call->metadata)) {
-        object_init_ex(&call->metadata,
-                       rapira_ce_internal_grpc_response_metadata);
-        rapira_grpc_metadata_from(Z_OBJ(call->metadata))->held = call->held;
-    }
-    RETURN_COPY(&call->metadata);
+    RETURN_OBJ_COPY(Z_OBJ_P(ZEND_THIS));
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, respond) {
@@ -293,7 +287,6 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, fail) {
         "fail");
 }
 
-// the free_obj of the call zeroes held; Rust then throws AlreadyFinalizedError
 static void grpc_add(INTERNAL_FUNCTION_PARAMETERS, bool trailer, bool binary,
                      const char *what) {
     zend_string *name, *value;
@@ -302,44 +295,42 @@ static void grpc_add(INTERNAL_FUNCTION_PARAMETERS, bool trailer, bool binary,
     Z_PARAM_STR(value)
     ZEND_PARSE_PARAMETERS_END();
 
-    const rapira_held *held =
-        &rapira_grpc_metadata_from(Z_OBJ_P(ZEND_THIS))->held;
     RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_grpc_add(held, trailer, binary, ZSTR_VAL(name),
-                           ZSTR_LEN(name), ZSTR_VAL(value), ZSTR_LEN(value)),
+        rapira_rs_grpc_add(rapira_held_of(Z_OBJ_P(ZEND_THIS)), trailer, binary,
+                           ZSTR_VAL(name), ZSTR_LEN(name), ZSTR_VAL(value),
+                           ZSTR_LEN(value)),
         what);
 }
 
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addHeader) {
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, addHeader) {
     grpc_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, false, false, "addHeader");
 }
 
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addBinaryHeader) {
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, addBinaryHeader) {
     grpc_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, false, true, "addBinaryHeader");
 }
 
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addTrailer) {
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, addTrailer) {
     grpc_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, true, false, "addTrailer");
 }
 
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addBinaryTrailer) {
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, addBinaryTrailer) {
     grpc_add(INTERNAL_FUNCTION_PARAM_PASSTHRU, true, true, "addBinaryTrailer");
 }
 
-// the free_obj of the call zeroes held; the snapshot is then empty
 static void grpc_snapshot(INTERNAL_FUNCTION_PARAMETERS, bool trailer,
                           const char *what) {
     ZEND_PARSE_PARAMETERS_NONE();
-    const rapira_held *held =
-        &rapira_grpc_metadata_from(Z_OBJ_P(ZEND_THIS))->held;
     RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_grpc_snapshot(held, trailer, return_value), what);
+        rapira_rs_grpc_snapshot(rapira_held_of(Z_OBJ_P(ZEND_THIS)), trailer,
+                                return_value),
+        what);
 }
 
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, headers) {
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, headers) {
     grpc_snapshot(INTERNAL_FUNCTION_PARAM_PASSTHRU, false, "headers");
 }
 
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, trailers) {
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, trailers) {
     grpc_snapshot(INTERNAL_FUNCTION_PARAM_PASSTHRU, true, "trailers");
 }

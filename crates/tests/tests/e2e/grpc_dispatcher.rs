@@ -321,6 +321,17 @@ const OUTCOME_CASES: &[OutcomeCase] = &[
         log: None,
     },
     OutcomeCase {
+        name: "a kept accumulator keeps its call active",
+        steps: &[Step {
+            message: "keep-md",
+            want: Want::Lost,
+        }],
+        log: Some(AppResult {
+            message: "keep-md",
+            text: "this worker holds one unit at a time, and its Rapira\\Grpc\\UnaryCall is unfinalized",
+        }),
+    },
+    OutcomeCase {
         name: "an uncaught throwable loses the call and the worker recovers",
         steps: &[
             Step {
@@ -520,7 +531,7 @@ async fn call_context_reports_the_request_facts() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Expected values: ResponseMetadata.php (lower-case names, reserved names, the -bin rule, raw bytes) and its "dead with the call" docblock.
+// Expected values: ResponseMetadata.php (lower-case names, reserved names, the -bin rule, raw bytes, AlreadyFinalizedError after the finalization).
 const METADATA_CASES: &[(&str, &str)] = &[
     ("the accumulator is memoized", "true"),
     ("an upper-case name is normalized", "x-up"),
@@ -531,11 +542,6 @@ const METADATA_CASES: &[(&str, &str)] = &[
         "add after respond",
         "Rapira\\Exception\\AlreadyFinalizedError",
     ),
-    (
-        "add after the call object is gone",
-        "Rapira\\Exception\\AlreadyFinalizedError",
-    ),
-    ("headers() after the call object is gone", "[]"),
 ];
 
 #[tokio::test]

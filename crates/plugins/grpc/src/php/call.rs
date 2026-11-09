@@ -256,13 +256,7 @@ enum Verb {
 }
 
 /// Validates one response metadata entry, then adds it to its half. The entry is checked before the state, so a bad entry gives a ValueError on a finalized call too.
-fn add_core(
-    st: Option<&mut GrpcState>,
-    trailer: bool,
-    binary: bool,
-    name: &[u8],
-    value: &[u8],
-) -> Verb {
+fn add_core(st: &mut GrpcState, trailer: bool, binary: bool, name: &[u8], value: &[u8]) -> Verb {
     // from_bytes lower-cases the name
     let Ok(name) = HeaderName::from_bytes(name) else {
         return Verb::BadField(c"the metadata name is not a valid header name");
@@ -292,9 +286,6 @@ fn add_core(
     if !binary && !printable(value) {
         return Verb::BadField(c"a text metadata value must be printable ASCII");
     }
-    let Some(st) = st else {
-        return Verb::Finalized;
-    };
     // a call that the plugin closed keeps the entry, and finish() gives WorkDiscardedException
     if st.settled() {
         return Verb::Finalized;
@@ -551,7 +542,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_fail(
 }
 
 /// # Safety
-/// `held` holds no unit, or is a copy of the held word of a live call that receive() attached; `name` and `value` point at their readable bytes; engine active.
+/// `held` the slot of a live call; `name` and `value` point at their readable bytes; engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_add(
     held: *const HeldPtr,
@@ -566,7 +557,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_add(
         let name = std::slice::from_raw_parts(name.cast::<u8>(), name_len);
         let value = std::slice::from_raw_parts(value.cast::<u8>(), value_len);
         thrown(add_core(
-            (*held).try_state::<GrpcState>().map(|st| &mut *st),
+            &mut *(*held).state::<GrpcState>(),
             trailer,
             binary,
             name,
@@ -575,9 +566,9 @@ pub unsafe extern "C" fn rapira_rs_grpc_add(
     })
 }
 
-/// What one half holds so far, with raw `-bin` values. Empty when the call object is gone.
+/// What one half holds so far, with raw `-bin` values.
 /// # Safety
-/// `held` as in `rapira_rs_grpc_add`; `rv` writable; engine active.
+/// `held` the slot of a live call; `rv` writable; engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_snapshot(
     held: *const HeldPtr,
@@ -585,12 +576,8 @@ pub unsafe extern "C" fn rapira_rs_grpc_snapshot(
     rv: *mut zval,
 ) -> bool {
     guard(false, || unsafe {
-        let fields: &[_] = match (*held).try_state::<GrpcState>().map(|st| &*st) {
-            Some(st) if trailer => &st.trailers,
-            Some(st) => &st.headers,
-            None => &[],
-        };
-        build_metadata(rv, fields);
+        let st = &*(*held).state::<GrpcState>();
+        build_metadata(rv, if trailer { &st.trailers } else { &st.headers });
         true
     })
 }
@@ -884,7 +871,6 @@ mod tests {
         Open,
         Responded,
         HostClosed,
-        Detached,
     }
 
     enum Want {
@@ -1059,15 +1045,6 @@ mod tests {
                     value: b"a",
                 },
             },
-            Case {
-                name: "detached accumulator",
-                setup: Setup::Detached,
-                trailer: false,
-                binary: false,
-                key: b"x-a",
-                value: b"a",
-                want: Want::Finalized,
-            },
         ];
         for c in CASES {
             let (tx, rx) = oneshot::channel();
@@ -1081,13 +1058,9 @@ mod tests {
                     drop(rx);
                     None
                 }
-                Setup::Open | Setup::Detached => Some(rx),
+                Setup::Open => Some(rx),
             };
-            let target = match c.setup {
-                Setup::Detached => None,
-                _ => Some(&mut st),
-            };
-            let v = add_core(target, c.trailer, c.binary, c.key, c.value);
+            let v = add_core(&mut st, c.trailer, c.binary, c.key, c.value);
             match c.want {
                 Want::Stored { name, value } => {
                     assert_eq!(v, Verb::Ok, "{}", c.name);
@@ -1258,7 +1231,7 @@ mod tests {
             let mut rx = (!c.drop_receiver).then_some(rx);
             for e in c.adds {
                 assert_eq!(
-                    add_core(Some(&mut st), e.trailer, e.binary, e.name, e.value),
+                    add_core(&mut st, e.trailer, e.binary, e.name, e.value),
                     Verb::Ok,
                     "{}",
                     c.name

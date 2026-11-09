@@ -76,11 +76,6 @@ impl HeldPtr {
     pub unsafe fn state<T>(&self) -> *mut T {
         self.get().cast::<T>().as_ptr()
     }
-
-    /// The plugin state that receive() attached, or None when the slot holds no unit.
-    pub fn try_state<T>(&self) -> Option<*mut T> {
-        self.0.map(|p| p.cast::<T>().as_ptr())
-    }
 }
 
 /// Work::isFinalized().
