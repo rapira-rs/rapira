@@ -33,9 +33,9 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set, builds the interceptors and binds the listener.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
-- `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
+- `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the PHP outcome as a connectrpc response or error.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
-- `src/call.rs`: the `UnaryCall`, `UnaryReply` and `RpcStatus` types.
+- `src/call.rs`: the `UnaryCall` and `UnaryReply` types.
 - `src/php/`: the Rust behind the PHP methods: the class entries and the declarations of `rapira_grpc_plugin` and `rapira_grpc_register_classes` (`mod.rs`), the `GrpcState` unit with its `Held` impl, the call and its metadata (`call.rs`), and the `Metadata` constructor (`values.rs`).
 
 ## Protocols

@@ -11,7 +11,6 @@ pub(crate) use call::GrpcState;
 unsafe extern "C" {
     pub static mut rapira_ce_grpc_method_kind: *mut zend_class_entry;
     pub static mut rapira_ce_grpc_protocol: *mut zend_class_entry;
-    pub static mut rapira_ce_grpc_status: *mut zend_class_entry;
     pub static mut rapira_ce_grpc_metadata: *mut zend_class_entry;
     pub static mut rapira_ce_grpc_error_detail: *mut zend_class_entry;
     pub static mut rapira_ce_grpc_method_info: *mut zend_class_entry;

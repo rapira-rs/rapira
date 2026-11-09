@@ -11,7 +11,8 @@ extern const char *rapira_rs_grpc_message(const rapira_held *held, size_t *len);
 extern bool rapira_rs_grpc_context(const rapira_held *held, zval *memo);
 extern bool rapira_rs_grpc_respond(const rapira_held *held, const char *message,
                                    size_t len);
-extern bool rapira_rs_grpc_fail(const rapira_held *held, zend_object *status);
+extern bool rapira_rs_grpc_fail(const rapira_held *held, zend_long code,
+                                const zend_string *message, HashTable *details);
 extern bool rapira_rs_grpc_add(const rapira_held *held, bool trailer,
                                bool binary, const char *name, size_t name_len,
                                const char *value, size_t value_len);
@@ -281,9 +282,14 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, fail) {
     Z_PARAM_OBJECT_OF_CLASS(status, rapira_ce_grpc_status)
     ZEND_PARSE_PARAMETERS_END();
 
+    // The constructor always sets $code, $message and $details: slots 0 to 2.
+    zend_object *obj = Z_OBJ_P(status);
+    zend_object *code = Z_OBJ_P(OBJ_PROP_NUM(obj, 0));
     RAPIRA_RETURN_THROWS_UNLESS(
         rapira_rs_grpc_fail(rapira_held_of(Z_OBJ_P(ZEND_THIS)),
-                            Z_OBJ_P(status)),
+                            Z_LVAL_P(zend_enum_fetch_case_value(code)),
+                            Z_STR_P(OBJ_PROP_NUM(obj, 1)),
+                            Z_ARRVAL_P(OBJ_PROP_NUM(obj, 2))),
         "fail");
 }
 
