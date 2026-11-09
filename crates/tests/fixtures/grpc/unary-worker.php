@@ -121,7 +121,7 @@ function serve(GrpcDispatcher $d, UnaryCall $call): void
             return;
         case 'md-rules':
             $md = $call->getResponseMetadata();
-            probe('the accumulator is memoized', fn () => var_export($md === $call->getResponseMetadata(), true));
+            probe('getResponseMetadata() returns the call', fn () => var_export($call->getResponseMetadata() === $call, true));
             probe('an upper-case name is normalized', static function () use ($md): string {
                 $md->addHeader('X-Up', 'v');
                 return implode(',', array_keys($md->headers()->entries));

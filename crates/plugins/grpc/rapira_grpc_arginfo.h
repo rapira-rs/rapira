@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: b4b344b18d3f3e6e6675203d0e4ad91bbee4f5ad */
+ * Stub hash: cdb3ec92b7e0e9c0eb29afd6a3582e86b993918a */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Grpc_MethodKind_isStreamingRequest, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()

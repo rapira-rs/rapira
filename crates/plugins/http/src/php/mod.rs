@@ -1,4 +1,4 @@
-//! The Rust behind the PHP classes of the http plugin: the class entries, the exchange state and the request view.
+//! The Rust behind the PHP classes of the http plugin: the class entries and the exchange state.
 
 use std::{
     ffi::{CStr, c_char},
@@ -11,7 +11,7 @@ use hyper::body::Bytes;
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{add_list, build_address, header_key, ip_text};
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::types::{Addr, Chunks, Frame, Request, ResponseHead};
+use rapira_sapi::types::{Addr, Frame, Request, ResponseHead};
 use rapira_sapi::work::{Held, HeldPtr};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
@@ -60,7 +60,7 @@ pub(crate) fn set_server_identity(name: &'static str, port: u16) {
     }
 }
 
-/// The head locks on the first head or body write: a body chunk commits an implicit 200 first.
+/// The head locks on the first head or body write: a body write sends an implicit 200 head first.
 enum Phase {
     /// No head written.
     Open,
@@ -70,24 +70,8 @@ enum Phase {
     Sent,
     /// The End went out.
     Sealed,
-    /// The unit closed with no answer.
+    /// The unit closed before its End went out.
     Discarded,
-}
-
-enum BodyState {
-    Raw(Chunks),
-    /// seal(), discard_unit() and fail() unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
-    Multipart(MultipartBody),
-}
-
-impl BodyState {
-    fn unlink_spools(&mut self) {
-        if let Self::Multipart(body) = self {
-            for f in &mut body.files {
-                f.file.unlink();
-            }
-        }
-    }
 }
 
 /// Contract spelling for `Request::$protocol`: HTTP/2, not the CGI HTTP/2.0.
@@ -98,51 +82,46 @@ fn protocol_php(protocol: &str) -> &str {
     }
 }
 
-/// The owned `$uri` of the `Request` object. The builder keeps it in the state because a Zend OOM bailout longjmps through its frame, so that frame holds no values with Drop glue.
-pub struct RequestView {
-    pub uri_abs: String,
-}
-
-impl RequestView {
-    pub fn new(req: &Request) -> Self {
-        let scheme = if req.https { "https://" } else { "http://" };
-        let path = if req.uri.starts_with('/') {
-            req.uri.as_str()
-        } else {
-            "/"
-        };
-        // 21 bytes hold the longest IPv4 host, "255.255.255.255:65535".
-        let host_len = req.authority.as_ref().map_or(21, Vec::len);
-        let mut uri_abs = String::with_capacity(scheme.len() + host_len + path.len());
-        uri_abs.push_str(scheme);
-        match &req.authority {
-            Some(a) => uri_abs.push_str(&String::from_utf8_lossy(a)),
-            None => match &req.server {
-                Addr::Inet(SocketAddr::V4(sa)) => {
-                    uri_abs.push_str(ip_text(IpAddr::V4(*sa.ip()), &mut [0; _]));
-                    uri_abs.push(':');
-                    uri_abs.push_str(sa.port().format_into(&mut NumBuffer::new()));
-                }
-                Addr::Inet(sa) => uri_abs.push_str(&sa.to_string()),
-                Addr::Unix(_) => {
-                    uri_abs.push_str(req.server_name);
-                    uri_abs.push(':');
-                    uri_abs.push_str(req.server_port.format_into(&mut NumBuffer::new()));
-                }
-            },
-        }
-        uri_abs.push_str(path);
-        Self { uri_abs }
+/// The `$uri` of the `Request` object.
+pub fn uri_abs(req: &Request) -> String {
+    let scheme = if req.https { "https://" } else { "http://" };
+    let path = if req.uri.starts_with('/') {
+        req.uri.as_str()
+    } else {
+        "/"
+    };
+    // 21 bytes hold the longest IPv4 host, "255.255.255.255:65535".
+    let host_len = req.authority.as_ref().map_or(21, Vec::len);
+    let mut uri_abs = String::with_capacity(scheme.len() + host_len + path.len());
+    uri_abs.push_str(scheme);
+    match &req.authority {
+        Some(a) => uri_abs.push_str(&String::from_utf8_lossy(a)),
+        None => match &req.server {
+            Addr::Inet(SocketAddr::V4(sa)) => {
+                uri_abs.push_str(ip_text(IpAddr::V4(*sa.ip()), &mut [0; _]));
+                uri_abs.push(':');
+                uri_abs.push_str(sa.port().format_into(&mut NumBuffer::new()));
+            }
+            Addr::Inet(sa) => uri_abs.push_str(&sa.to_string()),
+            Addr::Unix(_) => {
+                uri_abs.push_str(req.server_name);
+                uri_abs.push(':');
+                uri_abs.push_str(req.server_port.format_into(&mut NumBuffer::new()));
+            }
+        },
     }
+    uri_abs.push_str(path);
+    uri_abs
 }
 
 pub struct ExchangeState {
-    // body above sender: declaration drop order unlinks the spool files before the frame sender closes
-    body: BodyState,
+    // multipart above sender: declaration drop order unlinks the spool files before the frame sender closes
+    /// The parsed multipart body; the raw body stays in `req`. seal(), discard_unit() and fail() unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
+    multipart: Option<MultipartBody>,
     req: Request,
     sender: Option<Sender<Frame>>,
-    /// Filled by the first `getRequest()`.
-    view: Option<RequestView>,
+    /// Filled by the first `getRequest()`. The state keeps the owned `$uri` because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
+    uri_abs: Option<String>,
     phase: Phase,
     declared_cl: Option<u64>,
     /// Bytes accepted toward `declared_cl`: bodiless units count too, so a HEAD handler hits the same errors.
@@ -152,22 +131,14 @@ pub struct ExchangeState {
 }
 
 impl ExchangeState {
-    pub(crate) fn new(
-        mut req: Request,
-        multipart: Option<MultipartBody>,
-        tx: Sender<Frame>,
-    ) -> Self {
-        let body = match multipart {
-            Some(parsed) => BodyState::Multipart(parsed),
-            None => BodyState::Raw(std::mem::take(&mut req.body)),
-        };
+    pub(crate) fn new(req: Request, multipart: Option<MultipartBody>, tx: Sender<Frame>) -> Self {
         let bodiless = req.method == "HEAD";
 
         Self {
-            body,
+            multipart,
             req,
             sender: Some(tx),
-            view: None,
+            uri_abs: None,
             phase: Phase::Open,
             declared_cl: None,
             sent_body: 0,
@@ -175,9 +146,17 @@ impl ExchangeState {
         }
     }
 
+    fn unlink_spools(&mut self) {
+        if let Some(body) = &mut self.multipart {
+            for f in &mut body.files {
+                f.file.unlink();
+            }
+        }
+    }
+
     /// The seal of a unit PHP does not answer: a `status` head and an End when no head was sent, else a truncated End.
     fn fail(&mut self, status: u16) {
-        self.body.unlink_spools();
+        self.unlink_spools();
         let Some(tx) = self.sender.take() else {
             return;
         };

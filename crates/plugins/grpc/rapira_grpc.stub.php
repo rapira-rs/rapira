@@ -409,7 +409,7 @@ namespace Rapira\Internal\Grpc {
     }
 
     /**
-     * The extension's implementation of \Rapira\Grpc\UnaryCall. Host-created.
+     * The extension's implementation of \Rapira\Grpc\UnaryCall and \Rapira\Grpc\Responder\ResponseMetadata. Host-created.
      *
      * @strict-properties
      * @not-serializable

@@ -533,7 +533,7 @@ async fn call_context_reports_the_request_facts() -> anyhow::Result<()> {
 
 // Expected values: ResponseMetadata.php (lower-case names, reserved names, the -bin rule, raw bytes, AlreadyFinalizedError after the finalization).
 const METADATA_CASES: &[(&str, &str)] = &[
-    ("the accumulator is memoized", "true"),
+    ("getResponseMetadata() returns the call", "true"),
     ("an upper-case name is normalized", "x-up"),
     ("a reserved name", "ValueError"),
     ("-bin on addHeader", "ValueError"),

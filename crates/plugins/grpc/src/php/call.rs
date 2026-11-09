@@ -180,11 +180,6 @@ fn wire(fields: &[MetadataField]) -> HeaderMap {
     map
 }
 
-/// The owned metadata of the Context object. The state keeps it because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
-struct ContextView {
-    metadata: Vec<MetadataField>,
-}
-
 pub(crate) struct GrpcState {
     req: UnaryCall,
     received_at: f64,
@@ -193,8 +188,8 @@ pub(crate) struct GrpcState {
     discarded: bool,
     headers: Vec<MetadataField>,
     trailers: Vec<MetadataField>,
-    /// Filled by the first `getContext()`.
-    view: Option<ContextView>,
+    /// The metadata of the Context object, filled by the first `getContext()`. The state keeps it because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
+    context_metadata: Option<Vec<MetadataField>>,
 }
 
 impl GrpcState {
@@ -207,7 +202,7 @@ impl GrpcState {
             discarded: false,
             headers: Vec::new(),
             trailers: Vec::new(),
-            view: None,
+            context_metadata: None,
         }
     }
 }
@@ -388,11 +383,11 @@ fn protocol_case(protocol: Protocol) -> &'static CStr {
 unsafe fn build_context(dst: *mut zval, st: &mut GrpcState) {
     unsafe {
         let req = &st.req;
-        let view = st.view.get_or_insert_with(|| ContextView {
-            metadata: context_metadata(&req.metadata),
-        });
+        let fields = st
+            .context_metadata
+            .get_or_insert_with(|| context_metadata(&req.metadata));
         let mut metadata: zval = std::mem::zeroed();
-        build_metadata(&mut metadata, &view.metadata);
+        build_metadata(&mut metadata, fields);
         let mut remote: zval = std::mem::zeroed();
         build_address(&mut remote, &req.remote);
         let mut protocol: zval = std::mem::zeroed();
@@ -522,8 +517,8 @@ pub unsafe extern "C" fn rapira_rs_grpc_fail(
     details: *mut HashTable,
 ) -> bool {
     guard(false, || unsafe {
-        let protocol = (*(*held).state::<GrpcState>()).req.protocol;
-        let details = match read_details(details, protocol) {
+        let st = &mut *(*held).state::<GrpcState>();
+        let details = match read_details(details, st.req.protocol) {
             Ok(details) => details,
             Err(item) => {
                 zend_argument_type_error(
@@ -537,7 +532,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_fail(
         let code = ErrorCode::from_grpc_code(code as u32).unwrap_or(ErrorCode::Unknown);
         let mut err = ConnectError::new(code, String::from_utf8_lossy(zend::zstr_bytes(message)));
         err.details = details;
-        thrown(finish(&mut *(*held).state::<GrpcState>(), Err(err)))
+        thrown(finish(st, Err(err)))
     })
 }
 

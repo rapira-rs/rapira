@@ -1,4 +1,4 @@
-//! Request headers through the unsafe field name drop to the `$_SERVER` variables of the classic and worker modes. The first byte selects the content length, and the rest is one `name:value` field per line.
+//! Request headers through the unsafe field name drop to the `$_SERVER` variables of the classic and worker modes. The input is one `name:value` field per line, and its length is the content length.
 
 #![no_main]
 
@@ -18,22 +18,11 @@ const SINGLETONS: [&str; 6] = [
 ];
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
-    let Some((&flags, rest)) = data.split_first() else {
-        return;
-    };
-    let content_length = if flags & 1 == 0 {
-        rest.len() as i64
-    } else {
-        -1
-    };
-    let sent = rapira_fuzz::header_map(rest);
+    let sent = rapira_fuzz::header_map(data);
     let mut headers = sent.clone();
     drop_unsafe_field_names(&mut headers);
 
-    let mut want = Vec::new();
-    if content_length >= 0 {
-        want.push(("CONTENT_LENGTH".to_owned(), content_length.to_string()));
-    }
+    let mut want = vec![("CONTENT_LENGTH".to_owned(), data.len().to_string())];
     for name in sent.keys().filter(|n| safe_name(n)) {
         let var = format!(
             "HTTP_{}",
@@ -51,7 +40,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         want.push((var, value.escape_ascii().to_string()));
     }
     let mut got = Vec::new();
-    cgi_header_vars(&headers, content_length, |name, value| {
+    cgi_header_vars(&headers, data.len(), |name, value| {
         got.push((
             name.to_string_lossy().into_owned(),
             value.escape_ascii().to_string(),

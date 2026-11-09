@@ -110,13 +110,13 @@ pub unsafe extern "C" fn rapira_rs_exchange_build_request(
 /// Slot offsets of the `Request` properties in declaration order; the class is fixed after MINIT.
 static REQUEST_SLOTS: OnceLock<[u32; 11]> = OnceLock::new();
 
-/// No write here throws. A Zend OOM bails out through this frame, so `RequestView` keeps the owned `$uri` in the state.
+/// No write here throws. A Zend OOM bails out through this frame, so the state keeps the owned `$uri`.
 unsafe fn build_request_impl(held: *const HeldPtr, memo: *mut zval) -> bool {
     unsafe {
         let ce: *mut zend_class_entry = rapira_ce_http_request;
         let st = &mut *(*held).state::<ExchangeState>();
         let req = &st.req;
-        let view = st.view.get_or_insert_with(|| RequestView::new(req));
+        let uri = st.uri_abs.get_or_insert_with(|| uri_abs(req));
 
         let mut headers: zval = std::mem::zeroed();
         emit_header_map(&mut headers, &req.headers);
@@ -125,7 +125,7 @@ unsafe fn build_request_impl(held: *const HeldPtr, memo: *mut zval) -> bool {
         let mut server: zval = std::mem::zeroed();
         build_address(&mut server, &req.server);
         let mut mp: zval = std::mem::zeroed();
-        if let BodyState::Multipart(body) = &st.body {
+        if let Some(body) = &st.multipart {
             build_multipart(&mut mp, body);
         }
 
@@ -161,15 +161,15 @@ unsafe fn build_request_impl(held: *const HeldPtr, memo: *mut zval) -> bool {
         let _ = object_init_ex(&mut reqz, ce);
         let o = reqz.value.obj;
         zend::slot_stringl(o, method_slot, req.method.as_bytes());
-        zend::slot_stringl(o, uri_slot, view.uri_abs.as_bytes());
+        zend::slot_stringl(o, uri_slot, uri.as_bytes());
         let target = req.target.as_deref().unwrap_or(req.uri.as_bytes());
         zend::slot_stringl(o, target_slot, target);
         zend::slot_str_or_null(o, authority_slot, req.authority.as_deref());
         zend::slot_stringl(o, protocol_slot, protocol_php(req.protocol).as_bytes());
         zend::slot_init(o, headers_slot, &headers);
-        match &st.body {
-            BodyState::Raw(chunks) => zend::slot_string_from_chunks(o, body_slot, chunks),
-            BodyState::Multipart(_) => zend::slot_init(o, body_slot, &mp),
+        match &st.multipart {
+            None => zend::slot_string_from_chunks(o, body_slot, &req.body),
+            Some(_) => zend::slot_init(o, body_slot, &mp),
         }
         zend::slot_init(o, remote_slot, &remote);
         zend::slot_init(o, server_slot, &server);

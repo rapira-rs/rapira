@@ -141,7 +141,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
         return;
     }
     st.phase = Phase::Discarded;
-    st.body.unlink_spools();
+    st.unlink_spools();
     sb_update(Event::Handled { errored: true });
     // Every caller saw the channel closed first, so no frame can reach the plugin.
     st.sender = None;
@@ -354,7 +354,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
 /// As `send_frame`.
 pub(super) unsafe fn seal(st: &mut ExchangeState, trailers: HeaderMap) {
     unsafe { release_done() };
-    st.body.unlink_spools();
+    st.unlink_spools();
     st.phase = Phase::Sealed;
     sb_update(Event::Handled { errored: false });
     let _ = unsafe {

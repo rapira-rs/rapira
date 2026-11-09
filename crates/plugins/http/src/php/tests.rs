@@ -1,7 +1,7 @@
 use super::headers::*;
 use super::respond::*;
 use super::*;
-use rapira_sapi::types::Request;
+use rapira_sapi::types::{Chunks, Request};
 use rapira_sapi::zend_string;
 
 fn base_req() -> Request {
@@ -151,7 +151,7 @@ fn protocol_uses_the_contract_spelling() {
     assert_eq!(protocol_php("HTTP/2.0"), "HTTP/2");
 }
 
-/// The view takes the host of `$uri` from the authority. With no authority, it uses the `Display` of the server socket address (IPv6 in brackets with its scope id) or, for a unix server, `server_name:server_port`.
+/// `uri_abs` takes the host of `$uri` from the authority. With no authority, it uses the `Display` of the server socket address (IPv6 in brackets with its scope id) or, for a unix server, `server_name:server_port`.
 #[test]
 fn view_spells_the_uri() {
     struct Case {
@@ -263,8 +263,7 @@ fn view_spells_the_uri() {
         req.server = c.server;
         req.server_name = "localhost";
         req.server_port = 80;
-        let view = RequestView::new(&req);
-        assert_eq!(view.uri_abs, c.want_uri, "{}", c.name);
+        assert_eq!(uri_abs(&req), c.want_uri, "{}", c.name);
     }
 }
 

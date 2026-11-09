@@ -13,7 +13,7 @@ use rapira_fuzz::safe_name;
 use rapira_http::Config;
 use rapira_http::check::check_request;
 use rapira_http::middleware::Peer;
-use rapira_http::php::RequestView;
+use rapira_http::php::uri_abs;
 use rapira_http::request::build;
 use rapira_net::ListenAddr;
 use rapira_sapi::Addr;
@@ -169,12 +169,11 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     );
 
     // Request::$uri: the listener scheme, the authority or else the listener address, and the path. OPTIONS * gives the root.
-    let view = RequestView::new(&built);
+    let uri_abs = uri_abs(&built);
     let a = authority.as_deref().unwrap_or(SERVER.as_bytes());
     // rapira puts any Host value into $uri, so $uri is checked only for an authority that http::Uri accepts.
     if http::uri::Authority::try_from(a).is_ok() {
-        let u = Uri::try_from(view.uri_abs.as_str())
-            .unwrap_or_else(|e| panic!("$uri {}: {e}", view.uri_abs));
+        let u = Uri::try_from(uri_abs.as_str()).unwrap_or_else(|e| panic!("$uri {uri_abs}: {e}"));
         assert_eq!(
             u.scheme_str(),
             Some(if https { "https" } else { "http" }),

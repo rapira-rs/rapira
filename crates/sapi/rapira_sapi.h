@@ -114,9 +114,8 @@ extern void rapira_rs_finish_response(void);
 
 // The unit behind a Work object: the first field of the C prefix of every class
 // that receive() hands out. Rust owns the two words (HeldPtr in work.rs); C
-// passes the address, copies or zeroes the struct as a whole, and never reads
-// the words. A zeroed rapira_held holds no unit. zend_object_alloc zeroes the
-// prefix, so a fresh object holds no unit.
+// passes the address and never reads the words. A zeroed rapira_held holds no
+// unit. zend_object_alloc zeroes the prefix, so a fresh object holds no unit.
 typedef struct {
     void *words[2];
 } rapira_held;

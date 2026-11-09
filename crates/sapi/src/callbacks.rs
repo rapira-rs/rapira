@@ -138,15 +138,13 @@ fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
 /// Owned buffers stay in ManuallyDrop because `put` can bail out over this frame.
 pub fn cgi_header_vars(
     headers: &HeaderMap,
-    content_length: i64,
+    content_length: usize,
     mut put: impl FnMut(&CStr, &[u8]),
 ) {
-    if content_length >= 0 {
-        put(
-            c"CONTENT_LENGTH",
-            content_length.format_into(&mut NumBuffer::new()).as_bytes(),
-        );
-    }
+    put(
+        c"CONTENT_LENGTH",
+        content_length.format_into(&mut NumBuffer::new()).as_bytes(),
+    );
     let mut name = ManuallyDrop::new(Vec::new());
     let mut joined = ManuallyDrop::new(Vec::new());
     for field in headers.keys() {
@@ -245,7 +243,7 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
         ctx.req.body.read(dst).unwrap_or(0)
     })
 }
-/// The raw body length of the bound request, for the post readers in module.c; 0 for an empty body.
+/// The raw body length of the bound request, for the post readers in module.c.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_raw_body_len() -> usize {
     with_ctx(0, |ctx| ctx.req.body.len())
@@ -359,7 +357,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             put_bytes(c"CONTENT_TYPE", ct.to_bytes());
         }
 
-        cgi_header_vars(&ctx.req.headers, ctx.req.body.len() as i64, put_bytes);
+        cgi_header_vars(&ctx.req.headers, ctx.req.body.len(), put_bytes);
     })
 }
 
