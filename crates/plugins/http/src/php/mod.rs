@@ -161,10 +161,7 @@ impl ExchangeState {
             return;
         };
         if matches!(self.phase, Phase::Sent) {
-            let _ = tx.try_send(Frame::End {
-                trailers: HeaderMap::new(),
-                truncated: true,
-            });
+            let _ = tx.try_send(Frame::End { truncated: true });
         } else if tx
             .try_send(Frame::Head {
                 head: ResponseHead {
@@ -176,10 +173,7 @@ impl ExchangeState {
             })
             .is_ok()
         {
-            let _ = tx.try_send(Frame::End {
-                trailers: HeaderMap::new(),
-                truncated: false,
-            });
+            let _ = tx.try_send(Frame::End { truncated: false });
         }
     }
 }

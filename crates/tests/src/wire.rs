@@ -4,7 +4,7 @@ use std::net::SocketAddr;
 use std::sync::OnceLock;
 
 use http::header::CONTENT_LENGTH;
-use http::{HeaderMap, Method, StatusCode};
+use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
@@ -98,29 +98,18 @@ async fn forward(
         return;
     }
 
-    let mut trailers = HeaderMap::new();
     let truncated = loop {
         match body.frame().await {
             None => break false,
             Some(Err(_)) => break true,
-            Some(Ok(frame)) => match frame.into_data() {
-                Ok(data) => {
-                    if tx.send(Frame::Chunk(data)).await.is_err() {
-                        return;
-                    }
+            Some(Ok(frame)) => {
+                if let Ok(data) = frame.into_data()
+                    && tx.send(Frame::Chunk(data)).await.is_err()
+                {
+                    return;
                 }
-                Err(frame) => {
-                    if let Ok(fields) = frame.into_trailers() {
-                        trailers = fields;
-                    }
-                }
-            },
+            }
         }
     };
-    let _ = tx
-        .send(Frame::End {
-            trailers,
-            truncated,
-        })
-        .await;
+    let _ = tx.send(Frame::End { truncated }).await;
 }

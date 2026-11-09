@@ -149,7 +149,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
 
 /// # Safety
 /// As `send_frame`.
-pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: HeaderMap) -> Verb {
+pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState) -> Verb {
     if st.cancelled() {
         discard_unit(st);
         return Verb::Discarded;
@@ -164,12 +164,7 @@ pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState, trailers: Heade
         discard_unit(st);
         return Verb::Discarded;
     }
-    let trailers = if st.bodiless {
-        HeaderMap::new()
-    } else {
-        trailers
-    };
-    unsafe { seal(st, trailers) };
+    unsafe { seal(st) };
     Verb::Ok
 }
 
@@ -188,15 +183,17 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
                 return false;
             }
         };
-        if map.keys().any(|n| forbidden_trailer(n.as_str())) {
-            drop(map);
+        let forbidden = map.keys().any(|n| forbidden_trailer(n.as_str()));
+        // The plugin serves HTTP/1.1 and sends no trailer section, so only the checks read the map.
+        drop(map);
+        if forbidden {
             zend::throw_value_error(
                 c"the field may not travel in a trailer section: framing, routing, authentication, request modifiers, response controls and content format stay in the head",
             );
             return false;
         }
         let st = &mut *(*held).state::<ExchangeState>();
-        throw_verb(write_trailers_core(st, map))
+        throw_verb(write_trailers_core(st))
     })
 }
 
@@ -317,7 +314,7 @@ pub(super) unsafe fn send_body(
             let _ = unsafe { send_frame(st, frame(fit)) };
         }
         st.sent_body = cl;
-        unsafe { seal(st, HeaderMap::new()) };
+        unsafe { seal(st) };
         return Verb::ContentLengthExceeded;
     }
     let finalizing = (eos && st.sent_body == 0).then_some(len);
@@ -331,7 +328,7 @@ pub(super) unsafe fn send_body(
         return Verb::Discarded;
     }
     if eos {
-        unsafe { seal(st, HeaderMap::new()) };
+        unsafe { seal(st) };
     }
     Verb::Ok
 }
@@ -352,20 +349,12 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
 
 /// # Safety
 /// As `send_frame`.
-pub(super) unsafe fn seal(st: &mut ExchangeState, trailers: HeaderMap) {
+pub(super) unsafe fn seal(st: &mut ExchangeState) {
     unsafe { release_done() };
     st.unlink_spools();
     st.phase = Phase::Sealed;
     sb_update(Event::Handled { errored: false });
-    let _ = unsafe {
-        send_frame(
-            st,
-            Frame::End {
-                trailers,
-                truncated: false,
-            },
-        )
-    };
+    let _ = unsafe { send_frame(st, Frame::End { truncated: false }) };
     st.sender = None;
 }
 

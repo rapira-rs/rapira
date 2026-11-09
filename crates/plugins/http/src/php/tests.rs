@@ -43,7 +43,7 @@ fn recv_sealed(rx: &mut tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>) 
             rapira_sapi::types::Frame::File { .. } => {}
             rapira_sapi::types::Frame::Head { head, .. } => status = Some(head.status),
             rapira_sapi::types::Frame::Chunk(b) => body.extend_from_slice(&b),
-            rapira_sapi::types::Frame::End { truncated, .. } => {
+            rapira_sapi::types::Frame::End { truncated } => {
                 return match (truncated, status) {
                     (true, _) => Sealed::Truncated,
                     (false, Some(status)) => Sealed::Complete { status, body },
@@ -153,7 +153,7 @@ fn protocol_uses_the_contract_spelling() {
 
 /// `uri_abs` takes the host of `$uri` from the authority. With no authority, it uses the `Display` of the server socket address (IPv6 in brackets with its scope id) or, for a unix server, `server_name:server_port`.
 #[test]
-fn view_spells_the_uri() {
+fn uri_abs_spells_the_uri() {
     struct Case {
         name: &'static str,
         https: bool,
@@ -323,7 +323,7 @@ fn content_length_exceeded_sends_the_prefix_and_seals() {
         panic!("the fitting prefix must be sent");
     };
     assert_eq!(&b[..], b"01234");
-    let Ok(Frame::End { truncated, .. }) = rx.try_recv() else {
+    let Ok(Frame::End { truncated }) = rx.try_recv() else {
         panic!("sealed");
     };
     assert!(!truncated, "complete per its declaration");
@@ -348,7 +348,7 @@ fn repeated_content_length_is_a_bad_field() {
     };
     assert!(matches!(v, Verb::BadField(_)));
     assert_eq!(
-        unsafe { write_trailers_core(&mut st, HeaderMap::new()) },
+        unsafe { write_trailers_core(&mut st) },
         Verb::HeadNotWritten,
         "a rejected head commits nothing"
     );
@@ -434,7 +434,7 @@ fn a_101_head_drops_body_chunks() {
     );
 }
 
-/// Trailers end the response on the End frame: a headless call is HeadNotWritten, a repeat call Finalized.
+/// `writeTrailers()` ends the response with an End frame: a headless call is HeadNotWritten, a repeat call Finalized.
 #[test]
 fn trailers_finalize_with_a_committed_head() {
     use rapira_sapi::types::Frame;
@@ -442,14 +442,14 @@ fn trailers_finalize_with_a_committed_head() {
         state: mut st,
         reply: mut rx,
     } = state();
-    let v = unsafe { write_trailers_core(&mut st, map(&[("x", "y")])) };
+    let v = unsafe { write_trailers_core(&mut st) };
     assert_eq!(v, Verb::HeadNotWritten, "nothing here commits a head");
 
     assert_eq!(
         unsafe { write_head_core(&mut st, 200, HeaderMap::new()) },
         Verb::Ok
     );
-    let v = unsafe { write_trailers_core(&mut st, map(&[("x", "y")])) };
+    let v = unsafe { write_trailers_core(&mut st) };
     assert_eq!(v, Verb::Ok);
     let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
         panic!("head first");
@@ -459,17 +459,12 @@ fn trailers_finalize_with_a_committed_head() {
         Some(0),
         "trailers-only keeps length framing"
     );
-    let Ok(Frame::End {
-        trailers,
-        truncated,
-    }) = rx.try_recv()
-    else {
-        panic!("the trailers ride the End frame");
+    let Ok(Frame::End { truncated }) = rx.try_recv() else {
+        panic!("an End frame ends the response");
     };
     assert!(!truncated);
-    assert_eq!(trailers, map(&[("x", "y")]));
 
-    let v = unsafe { write_trailers_core(&mut st, HeaderMap::new()) };
+    let v = unsafe { write_trailers_core(&mut st) };
     assert_eq!(v, Verb::Finalized);
 }
 
@@ -526,7 +521,7 @@ fn describe(frame: rapira_sapi::types::Frame) -> String {
         ),
         Frame::Chunk(b) => format!("chunk {}", String::from_utf8_lossy(&b)),
         Frame::File { .. } => "file".into(),
-        Frame::End { truncated, .. } => format!("end truncated={truncated}"),
+        Frame::End { truncated } => format!("end truncated={truncated}"),
     }
 }
 

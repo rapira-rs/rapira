@@ -28,7 +28,6 @@ pub enum Frame {
         len: u64,
     },
     End {
-        trailers: HeaderMap,
         truncated: bool,
     },
 }
@@ -316,13 +315,7 @@ impl Context {
                 send(&tx, Frame::Chunk(body.into()));
             }
         }
-        send(
-            &tx,
-            Frame::End {
-                trailers: HeaderMap::new(),
-                truncated,
-            },
-        );
+        send(&tx, Frame::End { truncated });
     }
 }
 
@@ -421,7 +414,7 @@ pub(crate) mod tests {
             ),
             Frame::Chunk(b) => format!("chunk {}", String::from_utf8_lossy(&b)),
             Frame::File { .. } => "file".into(),
-            Frame::End { truncated, .. } => format!("end truncated={truncated}"),
+            Frame::End { truncated } => format!("end truncated={truncated}"),
         }
     }
 
