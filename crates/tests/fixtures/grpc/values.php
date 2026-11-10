@@ -1,9 +1,11 @@
 <?php
 
+use Rapira\Exception\RapiraThrowable;
 use Rapira\Grpc\Call\Context;
 use Rapira\Grpc\Call\Protocol;
 use Rapira\Grpc\ErrorDetail;
 use Rapira\Grpc\Exception\GrpcException;
+use Rapira\Grpc\Exception\HeadersAlreadyCommittedError;
 use Rapira\Grpc\Metadata;
 use Rapira\Grpc\MethodInfo;
 use Rapira\Grpc\MethodKind;
@@ -139,6 +141,14 @@ $cases = [
     [
         'name' => 'dispatcher needs the host',
         'run' => fn () => (new \ReflectionClass(\Rapira\Internal\Grpc\Dispatcher::class))->newInstanceWithoutConstructor()::class,
+    ],
+    // Only a streaming response commits the headers before the finalization, and the host has the unary call only.
+    [
+        'name' => 'HeadersAlreadyCommittedError is an Error and a RapiraThrowable',
+        'run' => static function (): string {
+            $e = new HeadersAlreadyCommittedError();
+            return get_parent_class($e) . '|' . var_export($e instanceof RapiraThrowable, true);
+        },
     ],
     ['name' => 'context rejects a remote that is not an address', 'run' => fn () => $context('nope')],
     [
