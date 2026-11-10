@@ -132,6 +132,10 @@ function serve(GrpcDispatcher $d, UnaryCall $call): void
                 $md->addBinaryHeader('x-raw-bin', "\x01\x02");
                 return bin2hex($md->headers()->values('x-raw-bin')[0]);
             });
+            probe('trailers() holds the trailers half', static function () use ($md): string {
+                $md->addTrailer('x-tr', 'w');
+                return implode(',', array_keys($md->trailers()->entries));
+            });
             $call->respond('md-rules');
             probe('add after respond', fn () => $md->addHeader('x-late', 'v'));
             return;

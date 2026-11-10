@@ -531,13 +531,14 @@ async fn call_context_reports_the_request_facts() -> anyhow::Result<()> {
     Ok(())
 }
 
-// Expected values: ResponseMetadata.php (lower-case names, reserved names, the -bin rule, raw bytes, AlreadyFinalizedError after the finalization).
+// Expected values: ResponseMetadata.php (lower-case names, reserved names, the -bin rule, raw bytes, the trailers half, AlreadyFinalizedError after the finalization).
 const METADATA_CASES: &[(&str, &str)] = &[
     ("getResponseMetadata() returns the call", "true"),
     ("an upper-case name is normalized", "x-up"),
     ("a reserved name", "ValueError"),
     ("-bin on addHeader", "ValueError"),
     ("headers() holds raw bytes", "0102"),
+    ("trailers() holds the trailers half", "x-tr"),
     (
         "add after respond",
         "Rapira\\Exception\\AlreadyFinalizedError",

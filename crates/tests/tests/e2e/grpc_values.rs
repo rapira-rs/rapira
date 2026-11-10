@@ -82,6 +82,10 @@ const CASES: &[(&str, &str)] = &[
     ("metadata needs its constructor", "ReflectionException"),
     ("dispatcher needs the host", "ReflectionException"),
     (
+        "HeadersAlreadyCommittedError is an Error and a RapiraThrowable",
+        "Error|true",
+    ),
+    (
         "context rejects a remote that is not an address",
         "TypeError",
     ),
