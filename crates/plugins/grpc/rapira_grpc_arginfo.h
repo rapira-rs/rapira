@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: eab844176c2ad2abf2fdcb582e01f43e54fb33ec */
+ * Stub hash: cdb3ec92b7e0e9c0eb29afd6a3582e86b993918a */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Grpc_MethodKind_isStreamingRequest, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
@@ -156,19 +156,17 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_Rapira_Internal_Grpc_UnaryCall_fail arginfo_class_Rapira_Grpc_Responder_fail
 
-#define arginfo_class_Rapira_Internal_Grpc_ResponseMetadata___construct arginfo_class_Rapira_Internal_Grpc_Dispatcher___construct
+#define arginfo_class_Rapira_Internal_Grpc_UnaryCall_addHeader arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_addHeader
 
-#define arginfo_class_Rapira_Internal_Grpc_ResponseMetadata_addHeader arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_addHeader
+#define arginfo_class_Rapira_Internal_Grpc_UnaryCall_addBinaryHeader arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_addBinaryHeader
 
-#define arginfo_class_Rapira_Internal_Grpc_ResponseMetadata_addBinaryHeader arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_addBinaryHeader
+#define arginfo_class_Rapira_Internal_Grpc_UnaryCall_addTrailer arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_addHeader
 
-#define arginfo_class_Rapira_Internal_Grpc_ResponseMetadata_addTrailer arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_addHeader
+#define arginfo_class_Rapira_Internal_Grpc_UnaryCall_addBinaryTrailer arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_addBinaryHeader
 
-#define arginfo_class_Rapira_Internal_Grpc_ResponseMetadata_addBinaryTrailer arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_addBinaryHeader
+#define arginfo_class_Rapira_Internal_Grpc_UnaryCall_headers arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_headers
 
-#define arginfo_class_Rapira_Internal_Grpc_ResponseMetadata_headers arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_headers
-
-#define arginfo_class_Rapira_Internal_Grpc_ResponseMetadata_trailers arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_headers
+#define arginfo_class_Rapira_Internal_Grpc_UnaryCall_trailers arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_headers
 
 ZEND_METHOD(Rapira_Grpc_MethodKind, isStreamingRequest);
 ZEND_METHOD(Rapira_Grpc_MethodKind, isStreamingResponse);
@@ -183,7 +181,7 @@ ZEND_METHOD(Rapira_Grpc_ServiceInfo, __construct);
 ZEND_METHOD(Rapira_Grpc_Call_Context, __construct);
 ZEND_METHOD(Rapira_Grpc_Exception_GrpcException, __construct);
 ZEND_FUNCTION(rapira_sapi_dispatcher_construct);
-ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, name);
+ZEND_FUNCTION(rapira_sapi_dispatcher_name);
 ZEND_FUNCTION(rapira_sapi_try_receive);
 ZEND_FUNCTION(rapira_sapi_receive);
 ZEND_FUNCTION(rapira_sapi_get_info);
@@ -198,12 +196,12 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getMessage);
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getResponseMetadata);
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, respond);
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, fail);
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addHeader);
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addBinaryHeader);
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addTrailer);
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, addBinaryTrailer);
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, headers);
-ZEND_METHOD(Rapira_Internal_Grpc_ResponseMetadata, trailers);
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, addHeader);
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, addBinaryHeader);
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, addTrailer);
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, addBinaryTrailer);
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, headers);
+ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, trailers);
 
 static const zend_function_entry class_Rapira_Grpc_MethodKind_methods[] = {
 	ZEND_ME(Rapira_Grpc_MethodKind, isStreamingRequest, arginfo_class_Rapira_Grpc_MethodKind_isStreamingRequest, ZEND_ACC_PUBLIC)
@@ -307,7 +305,7 @@ static const zend_function_entry class_Rapira_Grpc_Exception_GrpcException_metho
 
 static const zend_function_entry class_Rapira_Internal_Grpc_Dispatcher_methods[] = {
 	ZEND_RAW_FENTRY("__construct", zif_rapira_sapi_dispatcher_construct, arginfo_class_Rapira_Internal_Grpc_Dispatcher___construct, ZEND_ACC_PRIVATE, NULL, NULL)
-	ZEND_ME(Rapira_Internal_Grpc_Dispatcher, name, arginfo_class_Rapira_Internal_Grpc_Dispatcher_name, ZEND_ACC_PUBLIC)
+	ZEND_RAW_FENTRY("name", zif_rapira_sapi_dispatcher_name, arginfo_class_Rapira_Internal_Grpc_Dispatcher_name, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_RAW_FENTRY("tryReceive", zif_rapira_sapi_try_receive, arginfo_class_Rapira_Internal_Grpc_Dispatcher_tryReceive, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_RAW_FENTRY("receive", zif_rapira_sapi_receive, arginfo_class_Rapira_Internal_Grpc_Dispatcher_receive, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_RAW_FENTRY("getInfo", zif_rapira_sapi_get_info, arginfo_class_Rapira_Internal_Grpc_Dispatcher_getInfo, ZEND_ACC_PUBLIC, NULL, NULL)
@@ -331,17 +329,12 @@ static const zend_function_entry class_Rapira_Internal_Grpc_UnaryCall_methods[] 
 	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, getResponseMetadata, arginfo_class_Rapira_Internal_Grpc_UnaryCall_getResponseMetadata, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, respond, arginfo_class_Rapira_Internal_Grpc_UnaryCall_respond, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, fail, arginfo_class_Rapira_Internal_Grpc_UnaryCall_fail, ZEND_ACC_PUBLIC)
-	ZEND_FE_END
-};
-
-static const zend_function_entry class_Rapira_Internal_Grpc_ResponseMetadata_methods[] = {
-	ZEND_RAW_FENTRY("__construct", zif_rapira_sapi_host_created, arginfo_class_Rapira_Internal_Grpc_ResponseMetadata___construct, ZEND_ACC_PRIVATE, NULL, NULL)
-	ZEND_ME(Rapira_Internal_Grpc_ResponseMetadata, addHeader, arginfo_class_Rapira_Internal_Grpc_ResponseMetadata_addHeader, ZEND_ACC_PUBLIC)
-	ZEND_ME(Rapira_Internal_Grpc_ResponseMetadata, addBinaryHeader, arginfo_class_Rapira_Internal_Grpc_ResponseMetadata_addBinaryHeader, ZEND_ACC_PUBLIC)
-	ZEND_ME(Rapira_Internal_Grpc_ResponseMetadata, addTrailer, arginfo_class_Rapira_Internal_Grpc_ResponseMetadata_addTrailer, ZEND_ACC_PUBLIC)
-	ZEND_ME(Rapira_Internal_Grpc_ResponseMetadata, addBinaryTrailer, arginfo_class_Rapira_Internal_Grpc_ResponseMetadata_addBinaryTrailer, ZEND_ACC_PUBLIC)
-	ZEND_ME(Rapira_Internal_Grpc_ResponseMetadata, headers, arginfo_class_Rapira_Internal_Grpc_ResponseMetadata_headers, ZEND_ACC_PUBLIC)
-	ZEND_ME(Rapira_Internal_Grpc_ResponseMetadata, trailers, arginfo_class_Rapira_Internal_Grpc_ResponseMetadata_trailers, ZEND_ACC_PUBLIC)
+	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, addHeader, arginfo_class_Rapira_Internal_Grpc_UnaryCall_addHeader, ZEND_ACC_PUBLIC)
+	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, addBinaryHeader, arginfo_class_Rapira_Internal_Grpc_UnaryCall_addBinaryHeader, ZEND_ACC_PUBLIC)
+	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, addTrailer, arginfo_class_Rapira_Internal_Grpc_UnaryCall_addTrailer, ZEND_ACC_PUBLIC)
+	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, addBinaryTrailer, arginfo_class_Rapira_Internal_Grpc_UnaryCall_addBinaryTrailer, ZEND_ACC_PUBLIC)
+	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, headers, arginfo_class_Rapira_Internal_Grpc_UnaryCall_headers, ZEND_ACC_PUBLIC)
+	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, trailers, arginfo_class_Rapira_Internal_Grpc_UnaryCall_trailers, ZEND_ACC_PUBLIC)
 	ZEND_FE_END
 };
 
@@ -846,24 +839,13 @@ static zend_class_entry *register_class_Rapira_Internal_Grpc_DispatcherInfo(zend
 	return class_entry;
 }
 
-static zend_class_entry *register_class_Rapira_Internal_Grpc_UnaryCall(zend_class_entry *class_entry_Rapira_Grpc_UnaryCall)
+static zend_class_entry *register_class_Rapira_Internal_Grpc_UnaryCall(zend_class_entry *class_entry_Rapira_Grpc_UnaryCall, zend_class_entry *class_entry_Rapira_Grpc_Responder_ResponseMetadata)
 {
 	zend_class_entry ce, *class_entry;
 
 	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Internal\\Grpc", "UnaryCall", class_Rapira_Internal_Grpc_UnaryCall_methods);
 	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE);
-	zend_class_implements(class_entry, 1, class_entry_Rapira_Grpc_UnaryCall);
-
-	return class_entry;
-}
-
-static zend_class_entry *register_class_Rapira_Internal_Grpc_ResponseMetadata(zend_class_entry *class_entry_Rapira_Grpc_Responder_ResponseMetadata)
-{
-	zend_class_entry ce, *class_entry;
-
-	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Internal\\Grpc", "ResponseMetadata", class_Rapira_Internal_Grpc_ResponseMetadata_methods);
-	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE);
-	zend_class_implements(class_entry, 1, class_entry_Rapira_Grpc_Responder_ResponseMetadata);
+	zend_class_implements(class_entry, 2, class_entry_Rapira_Grpc_UnaryCall, class_entry_Rapira_Grpc_Responder_ResponseMetadata);
 
 	return class_entry;
 }

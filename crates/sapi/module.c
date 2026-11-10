@@ -450,8 +450,7 @@ void rapira_release_temporary_streams(void) {
 }
 
 // The raw body of the bound request (callbacks.rs): the length, then one part
-// at a time in order. The length is 0 for a host-parsed multipart or empty
-// body, and a part length is 0 past the last part.
+// at a time in order. A part length is 0 past the last part.
 extern size_t rapira_rs_raw_body_len(void);
 extern size_t rapira_rs_raw_body_part(size_t index, const char **part);
 // The Authorization field of the bound request (callbacks.rs); NULL when none.

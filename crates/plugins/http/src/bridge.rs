@@ -225,7 +225,7 @@ impl hyper::body::Body for ReplyBody {
                 }
                 // The producer latches the head, so a second one cannot follow it.
                 Some(Frame::Head { .. }) => {}
-                Some(Frame::End { truncated, .. }) => {
+                Some(Frame::End { truncated }) => {
                     if truncated {
                         tracing::debug!(target: "http", "php ended the reply as truncated");
                         return this.terminal_error(cx);
@@ -428,10 +428,7 @@ mod tests {
     }
 
     fn end(truncated: bool) -> Frame {
-        Frame::End {
-            trailers: http::HeaderMap::new(),
-            truncated,
-        }
+        Frame::End { truncated }
     }
 
     fn chunk(s: &str) -> Frame {

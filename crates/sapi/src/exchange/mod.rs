@@ -1,9 +1,5 @@
-pub(crate) use std::{cell::Cell, ffi::c_char, path::Path, ptr::NonNull, time::Duration};
-use std::{
-    fmt::NumBuffer,
-    net::{IpAddr, Ipv4Addr},
-    sync::OnceLock,
-};
+pub(crate) use std::{cell::Cell, ffi::c_char, ptr::NonNull, time::Duration};
+use std::{fmt::NumBuffer, io::Write, net::IpAddr, os::unix::ffi::OsStrExt, sync::OnceLock};
 
 pub(crate) use crate::work::{Held, HeldPtr, release};
 pub(crate) use crate::{
@@ -54,48 +50,32 @@ pub(crate) fn reclaim_current() {
     }
 }
 
-#[derive(Debug, PartialEq, Eq)]
-pub enum AddrOwned {
-    Inet {
-        ip: String,
-        port: u16,
-    },
-    /// None = unnamed endpoint.
-    Unix(Option<Vec<u8>>),
-}
-
-pub fn path_bytes(p: &Path) -> Vec<u8> {
-    use std::os::unix::ffi::OsStrExt;
-    p.as_os_str().as_bytes().to_vec()
-}
-
-/// Appends the dotted form of `ip`, the same bytes as its `Display`.
-pub fn push_ipv4(out: &mut String, ip: Ipv4Addr) {
-    for (i, octet) in ip.octets().into_iter().enumerate() {
-        if i > 0 {
-            out.push('.');
+/// Writes the text of `ip` into `buf` and returns it, the same bytes as its `Display`.
+/// 39 bytes hold every `Display` of an `Ipv6Addr`: eight groups of four hex digits and seven colons, or "::ffff:" and a dotted IPv4 (22 bytes). The std padding path of that `Display` uses the same bound. A dotted IPv4 has at most 15 bytes.
+pub fn ip_text(ip: IpAddr, buf: &mut [u8; 39]) -> &str {
+    let len = match ip {
+        IpAddr::V4(v4) => {
+            let mut len = 0;
+            for (i, octet) in v4.octets().into_iter().enumerate() {
+                if i > 0 {
+                    buf[len] = b'.';
+                    len += 1;
+                }
+                let mut digits = NumBuffer::new();
+                let digits = octet.format_into(&mut digits).as_bytes();
+                buf[len..len + digits.len()].copy_from_slice(digits);
+                len += digits.len();
+            }
+            len
         }
-        out.push_str(octet.format_into(&mut NumBuffer::new()));
-    }
-}
-
-impl AddrOwned {
-    pub fn new(a: &Addr) -> Self {
-        match a {
-            Addr::Inet(sa) => Self::Inet {
-                ip: match sa.ip() {
-                    IpAddr::V4(v4) => {
-                        let mut ip = String::with_capacity(15);
-                        push_ipv4(&mut ip, v4);
-                        ip
-                    }
-                    v6 @ IpAddr::V6(_) => v6.to_string(),
-                },
-                port: sa.port(),
-            },
-            Addr::Unix(p) => Self::Unix(p.as_deref().map(path_bytes).filter(|b| !b.is_empty())),
+        IpAddr::V6(v6) => {
+            let mut rest = &mut buf[..];
+            write!(rest, "{v6}").expect("39 bytes hold the Display of an Ipv6Addr");
+            let free = rest.len();
+            buf.len() - free
         }
-    }
+    };
+    std::str::from_utf8(&buf[..len]).expect("an IP text is ASCII")
 }
 
 /// add_assoc_zval_ex moves the list ref in: the hash-update family never addrefs.
@@ -133,24 +113,91 @@ static UNIX_SLOT: OnceLock<u32> = OnceLock::new();
 
 /// # Safety
 /// `dst` writable; engine active on this thread.
-pub unsafe fn build_address(dst: *mut zval, addr: &AddrOwned) {
+pub unsafe fn build_address(dst: *mut zval, addr: &Addr) {
     unsafe {
         match addr {
-            AddrOwned::Inet { ip, port } => {
+            Addr::Inet(sa) => {
+                let mut buf = [0; _];
+                let ip = ip_text(sa.ip(), &mut buf);
                 let ce = rapira_ce_inet_address;
                 let [ip_slot, port_slot] =
                     *INET_SLOTS.get_or_init(|| [c"ip", c"port"].map(|n| zend::prop_offset(ce, n)));
                 let _ = object_init_ex(dst, ce);
                 let o = (*dst).value.obj;
                 zend::slot_stringl(o, ip_slot, ip.as_bytes());
-                zend::slot_long(o, port_slot, i64::from(*port));
+                zend::slot_long(o, port_slot, i64::from(sa.port()));
             }
-            AddrOwned::Unix(path) => {
+            Addr::Unix(path) => {
+                let path = path.as_deref().map(|p| p.as_os_str().as_bytes());
                 let ce = rapira_ce_unix_address;
                 let path_slot = *UNIX_SLOT.get_or_init(|| zend::prop_offset(ce, c"path"));
                 let _ = object_init_ex(dst, ce);
-                zend::slot_str_or_null((*dst).value.obj, path_slot, path.as_deref());
+                zend::slot_str_or_null((*dst).value.obj, path_slot, path);
             }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::net::{SocketAddr, SocketAddrV6};
+
+    /// The ip text of an inet address is the `Display` of its ip, with no port and no scope id.
+    #[test]
+    fn ip_text_is_the_display_of_the_ip() {
+        struct Case {
+            name: &'static str,
+            addr: SocketAddr,
+            want: &'static str,
+        }
+        let v6 = |segments: [u16; 8], scope| {
+            SocketAddr::V6(SocketAddrV6::new(segments.into(), 0, 0, scope))
+        };
+        let cases = [
+            Case {
+                name: "ipv4 client",
+                addr: ([10, 0, 0, 1], 5000).into(),
+                want: "10.0.0.1",
+            },
+            Case {
+                name: "ipv4 zero address",
+                addr: ([0, 0, 0, 0], 0).into(),
+                want: "0.0.0.0",
+            },
+            Case {
+                name: "ipv4 octets of three and one digits",
+                addr: ([192, 168, 100, 9], 65535).into(),
+                want: "192.168.100.9",
+            },
+            Case {
+                name: "ipv4 loopback",
+                addr: ([127, 0, 0, 1], 0).into(),
+                want: "127.0.0.1",
+            },
+            Case {
+                name: "ipv6 with a compressed zero run",
+                addr: v6([0x2001, 0xdb8, 0, 0, 0, 0, 0, 1], 0),
+                want: "2001:db8::1",
+            },
+            Case {
+                name: "ipv6 scope id stays out of the ip",
+                addr: v6([0xfe80, 0, 0, 0, 0, 0, 0, 1], 3),
+                want: "fe80::1",
+            },
+            Case {
+                name: "ipv4-mapped ipv6",
+                addr: v6([0, 0, 0, 0, 0, 0xffff, 0x0102, 0x0304], 0),
+                want: "::ffff:1.2.3.4",
+            },
+            Case {
+                name: "longest ipv6 text fills the buffer",
+                addr: v6([0xffff; 8], 0),
+                want: "ffff:ffff:ffff:ffff:ffff:ffff:ffff:ffff",
+            },
+        ];
+        for c in cases {
+            assert_eq!(ip_text(c.addr.ip(), &mut [0; _]), c.want, "{}", c.name);
         }
     }
 }

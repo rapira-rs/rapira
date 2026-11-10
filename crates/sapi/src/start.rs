@@ -11,10 +11,10 @@ use tracing::{debug, error, info, trace};
 use crate::quota;
 use crate::rapira_worker::{WorkerExit, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
-use crate::work::{DispatcherClasses, Entry, Intake, Unit};
+use crate::work::{Entry, Intake, Unit};
 use crate::{
     classic_worker::classic_worker,
-    plugin::{Mode, Stopper},
+    plugin::{Mode, Plugin, Stopper},
     *,
 };
 
@@ -144,7 +144,7 @@ pub fn boot_master(register: &'static [unsafe extern "C" fn()]) -> anyhow::Resul
 
 impl Rapira {
     /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `max_requests`: the configured value, 0 = unlimited; classic mode gets no quota, the other modes get a jitter.
-    /// `slot`: the scoreboard slot this worker reports into. `stopper` stops the plugin when PHP turns unhealthy. `classes`: the dispatcher surface receive() serves in dispatcher mode.
+    /// `slot`: the scoreboard slot this worker reports into. `stopper` stops the plugin when PHP turns unhealthy. `plugin`: the plugin of the pool; in dispatcher mode, its name and its record are the dispatcher surface that PHP sees.
     /// On return, the calling thread blocks SIGPROF, and every thread it starts inherits the block.
     pub fn start_worker(
         mode: Mode,
@@ -152,7 +152,7 @@ impl Rapira {
         max_requests: u64,
         slot: &'static rapira_scoreboard::SharedSlot,
         stopper: Stopper,
-        classes: DispatcherClasses,
+        plugin: &dyn Plugin,
     ) -> StartedWorker {
         // Classic mode runs every unit in a new cycle, so max_requests has nothing to restart there.
         let max_requests = if mode == Mode::Classic {
@@ -165,13 +165,19 @@ impl Rapira {
         let intake = Intake::new(intake_tx, slot);
 
         crate::context::set_script(&entrypoint);
-        // SAFETY: written once, before the PHP thread that reads it exists.
+        // SAFETY: written once, before the PHP thread that reads them exists. The name and the record are static, so the pointers stay valid.
         unsafe {
             crate::rapira_mode = match mode {
                 Mode::Classic => RAPIRA_MODE_CLASSIC,
                 Mode::Worker => RAPIRA_MODE_WORKER,
                 Mode::Dispatcher => RAPIRA_MODE_DISPATCHER,
             } as c_int;
+            if mode == Mode::Dispatcher {
+                let name = plugin.name();
+                rapira_plugin_current = plugin.dispatcher();
+                rapira_plugin_name = name.as_ptr().cast();
+                rapira_plugin_name_len = name.len();
+            }
         };
 
         trace!(target: "rapira", "spawning worker thread");
@@ -189,7 +195,6 @@ impl Rapira {
                         pending,
                         classic: mode == Mode::Classic,
                     },
-                    classes,
                 )
             })
             .expect("spawn the PHP thread");
@@ -226,18 +231,8 @@ impl Rapira {
 }
 
 /// NTS inits module and request on different threads, so the call stack is re-initialized on this thread: https://github.com/php/php-src/pull/9104
-fn worker_main(mode: Mode, entrypoint: PathBuf, rx: UnitRx, classes: DispatcherClasses) {
+fn worker_main(mode: Mode, entrypoint: PathBuf, rx: UnitRx) {
     UNIT_RX.with_borrow_mut(|slot| *slot = Some(rx));
-    if mode == Mode::Dispatcher {
-        // SAFETY: written once on the PHP thread before any PHP runs on it.
-        unsafe {
-            rapira_plugin_ce_dispatcher = (classes.dispatcher)();
-            rapira_plugin_ce_info = (classes.info)();
-            rapira_plugin_ce_unit = (classes.unit)();
-            rapira_plugin_busy = classes.busy.as_ptr();
-            rapira_plugin_quiesce = classes.quiesce;
-        }
-    }
     loop {
         unsafe {
             rapira_init_call_stack();

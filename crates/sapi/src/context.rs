@@ -93,5 +93,5 @@ pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     ri.request_uri = reqc.uri.as_ptr() as *mut c_char;
     ri.path_translated = reqc.script.as_ptr() as *mut c_char;
     ri.content_type = reqc.ctype.as_ref().map_or(null(), |s| s.as_ptr());
-    ri.content_length = ctx.req.content_length;
+    ri.content_length = ctx.req.body.len() as i64;
 }

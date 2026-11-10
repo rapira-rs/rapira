@@ -21,9 +21,11 @@ zend_class_entry *rapira_ce_inet_address;
 zend_class_entry *rapira_ce_unix_address;
 zend_class_entry *rapira_ce_tls;
 
-// own copies: std_object_handlers is shared engine state
-zend_object_handlers rapira_dispatcher_handlers;
-zend_object_handlers rapira_info_handlers;
+// own copies: std_object_handlers is shared engine state. A plugin's
+// Dispatcher class gets std handlers without clone, and its DispatcherInfo
+// class gets the rapira_dispatcher_info_obj layout.
+static zend_object_handlers rapira_dispatcher_handlers;
+static zend_object_handlers rapira_info_handlers;
 
 void (*const *rapira_plugin_registers)(void);
 size_t rapira_plugin_register_count;
@@ -145,6 +147,15 @@ void rapira_register_classes(void) {
     rapira_info_handlers.offset = offsetof(rapira_dispatcher_info_obj, std);
 }
 
+// Reflection does not skip the constructor of a final class with
+// create_object, so only get_dispatcher() creates the Dispatcher object.
+void rapira_plugin_wire(const rapira_plugin *plugin) {
+    plugin->dispatcher->create_object = rapira_object_create;
+    plugin->dispatcher->default_object_handlers = &rapira_dispatcher_handlers;
+    plugin->info->create_object = rapira_object_create;
+    plugin->info->default_object_handlers = &rapira_info_handlers;
+}
+
 // the plugin classes extend the base classes, so the base classes register
 // first
 PHP_MINIT_FUNCTION(rapira) {
@@ -161,8 +172,9 @@ PHP_MINIT_FUNCTION(rapira) {
 // A write to a held unit from a later RSHUTDOWN would lend a string that the
 // memory manager then frees, so user code there must not write.
 PHP_RSHUTDOWN_FUNCTION(rapira) {
-    if (rapira_plugin_quiesce != NULL) {
-        rapira_plugin_quiesce();
+    if (rapira_plugin_current != NULL &&
+        rapira_plugin_current->quiesce != NULL) {
+        rapira_plugin_current->quiesce();
     }
     php_header();
     rapira_rs_finish_response();

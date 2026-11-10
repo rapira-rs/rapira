@@ -373,6 +373,7 @@ namespace Rapira\Internal\Grpc {
          */
         private function __construct() {}
 
+        /** @implementation-alias rapira_sapi_dispatcher_name */
         public function name(): string {}
 
         /** @implementation-alias rapira_sapi_try_receive */
@@ -408,12 +409,12 @@ namespace Rapira\Internal\Grpc {
     }
 
     /**
-     * The extension's implementation of \Rapira\Grpc\UnaryCall. Host-created.
+     * The extension's implementation of \Rapira\Grpc\UnaryCall and \Rapira\Grpc\Responder\ResponseMetadata. Host-created.
      *
      * @strict-properties
      * @not-serializable
      */
-    final class UnaryCall implements \Rapira\Grpc\UnaryCall
+    final class UnaryCall implements \Rapira\Grpc\UnaryCall, \Rapira\Grpc\Responder\ResponseMetadata
     {
         /**
          * Host-created.
@@ -437,22 +438,6 @@ namespace Rapira\Internal\Grpc {
         public function respond(string $message): void {}
 
         public function fail(\Rapira\Grpc\Status $status): void {}
-    }
-
-    /**
-     * The response headers and trailers of one UnaryCall. It lives as long as its call.
-     *
-     * @strict-properties
-     * @not-serializable
-     */
-    final class ResponseMetadata implements \Rapira\Grpc\Responder\ResponseMetadata
-    {
-        /**
-         * Host-created.
-         *
-         * @implementation-alias rapira_sapi_host_created
-         */
-        private function __construct() {}
 
         public function addHeader(string $name, string $value): void {}
 

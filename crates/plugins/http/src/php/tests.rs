@@ -1,9 +1,8 @@
 use super::headers::*;
 use super::respond::*;
 use super::*;
-use rapira_sapi::types::Request;
+use rapira_sapi::types::{Chunks, Request};
 use rapira_sapi::zend_string;
-use std::path::PathBuf;
 
 fn base_req() -> Request {
     Request {
@@ -18,9 +17,7 @@ fn base_req() -> Request {
         server_name: "",
         server_port: 8080,
         headers: HeaderMap::new(),
-        content_type: None,
-        content_length: 0,
-        body: Body::Raw(Chunks::default()),
+        body: Chunks::default(),
         received_at: 0.0,
     }
 }
@@ -46,7 +43,7 @@ fn recv_sealed(rx: &mut tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>) 
             rapira_sapi::types::Frame::File { .. } => {}
             rapira_sapi::types::Frame::Head { head, .. } => status = Some(head.status),
             rapira_sapi::types::Frame::Chunk(b) => body.extend_from_slice(&b),
-            rapira_sapi::types::Frame::End { truncated, .. } => {
+            rapira_sapi::types::Frame::End { truncated } => {
                 return match (truncated, status) {
                     (true, _) => Sealed::Truncated,
                     (false, Some(status)) => Sealed::Complete { status, body },
@@ -97,7 +94,7 @@ struct Attached {
 fn state_of(req: Request) -> Attached {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     Attached {
-        state: ExchangeState::new(req, tx),
+        state: ExchangeState::new(req, None, tx),
         reply: rx,
     }
 }
@@ -148,37 +145,25 @@ fn empty_non_eos_chunk_commits_nothing() {
     assert_eq!(status, 404);
 }
 
-/// The view normalizes the protocol spelling and maps an empty unix path to the unnamed endpoint.
+/// `$protocol` uses the contract spelling HTTP/2.
 #[test]
-fn view_normalizes_protocol_and_empty_unix_path() {
-    let mut req = base_req();
-    req.remote = Addr::Unix(Some(PathBuf::new()));
+fn protocol_uses_the_contract_spelling() {
     assert_eq!(protocol_php("HTTP/2.0"), "HTTP/2");
-    assert!(matches!(
-        RequestView::new(&req).remote,
-        AddrOwned::Unix(None)
-    ));
 }
 
-/// The view spells `$uri` and the address ips as the `Display` of the socket addresses: IPv6 in brackets with its scope id, the unix fallback as `server_name:server_port`.
+/// `uri_abs` takes the host of `$uri` from the authority. With no authority, it uses the `Display` of the server socket address (IPv6 in brackets with its scope id) or, for a unix server, `server_name:server_port`.
 #[test]
-fn view_spells_uri_and_addresses() {
+fn uri_abs_spells_the_uri() {
     struct Case {
         name: &'static str,
         https: bool,
         authority: Option<&'static [u8]>,
         uri: &'static str,
         server: Addr,
-        remote: Addr,
         want_uri: &'static str,
-        want_remote: AddrOwned,
     }
     let v6 = |ip: &str, port, scope| {
         Addr::Inet(std::net::SocketAddrV6::new(ip.parse().unwrap(), port, 0, scope).into())
-    };
-    let inet = |ip: &str| AddrOwned::Inet {
-        ip: ip.into(),
-        port: 0,
     };
     let cases = [
         Case {
@@ -187,12 +172,7 @@ fn view_spells_uri_and_addresses() {
             authority: None,
             uri: "/a?b=1",
             server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-            remote: Addr::Inet(([10, 0, 0, 1], 5000).into()),
             want_uri: "http://127.0.0.1:8080/a?b=1",
-            want_remote: AddrOwned::Inet {
-                ip: "10.0.0.1".into(),
-                port: 5000,
-            },
         },
         Case {
             name: "ipv4 zero address and port",
@@ -200,9 +180,7 @@ fn view_spells_uri_and_addresses() {
             authority: None,
             uri: "/",
             server: Addr::Inet(([0, 0, 0, 0], 0).into()),
-            remote: Addr::Inet(([0, 0, 0, 0], 0).into()),
             want_uri: "http://0.0.0.0:0/",
-            want_remote: inet("0.0.0.0"),
         },
         Case {
             name: "ipv4 widest octets and port",
@@ -210,12 +188,7 @@ fn view_spells_uri_and_addresses() {
             authority: None,
             uri: "/",
             server: Addr::Inet(([255, 255, 255, 255], 65535).into()),
-            remote: Addr::Inet(([192, 168, 100, 9], 65535).into()),
             want_uri: "https://255.255.255.255:65535/",
-            want_remote: AddrOwned::Inet {
-                ip: "192.168.100.9".into(),
-                port: 65535,
-            },
         },
         Case {
             name: "ipv6 loopback server",
@@ -223,9 +196,7 @@ fn view_spells_uri_and_addresses() {
             authority: None,
             uri: "/x",
             server: v6("::1", 443, 0),
-            remote: v6("2001:db8::1", 0, 0),
             want_uri: "https://[::1]:443/x",
-            want_remote: inet("2001:db8::1"),
         },
         Case {
             name: "ipv6 scope id stays in the uri only",
@@ -233,9 +204,7 @@ fn view_spells_uri_and_addresses() {
             authority: None,
             uri: "/",
             server: v6("fe80::1", 80, 3),
-            remote: v6("fe80::1", 0, 3),
             want_uri: "http://[fe80::1%3]:80/",
-            want_remote: inet("fe80::1"),
         },
         Case {
             name: "ipv4-mapped ipv6",
@@ -243,9 +212,7 @@ fn view_spells_uri_and_addresses() {
             authority: None,
             uri: "/",
             server: v6("::ffff:1.2.3.4", 1, 0),
-            remote: v6("::ffff:1.2.3.4", 0, 0),
             want_uri: "http://[::ffff:1.2.3.4]:1/",
-            want_remote: inet("::ffff:1.2.3.4"),
         },
         Case {
             name: "authority wins over the server socket",
@@ -253,9 +220,7 @@ fn view_spells_uri_and_addresses() {
             authority: Some(b"example.com:8443"),
             uri: "/x",
             server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-            remote: Addr::Inet(([127, 0, 0, 1], 0).into()),
             want_uri: "http://example.com:8443/x",
-            want_remote: inet("127.0.0.1"),
         },
         Case {
             name: "invalid utf-8 authority is replaced",
@@ -263,9 +228,7 @@ fn view_spells_uri_and_addresses() {
             authority: Some(b"h\xff"),
             uri: "/",
             server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-            remote: Addr::Inet(([127, 0, 0, 1], 0).into()),
             want_uri: "http://h\u{fffd}/",
-            want_remote: inet("127.0.0.1"),
         },
         Case {
             name: "asterisk-form target collapses to the root",
@@ -273,9 +236,7 @@ fn view_spells_uri_and_addresses() {
             authority: Some(b"h"),
             uri: "*",
             server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-            remote: Addr::Inet(([127, 0, 0, 1], 0).into()),
             want_uri: "http://h/",
-            want_remote: inet("127.0.0.1"),
         },
         Case {
             name: "unix server, no authority",
@@ -283,19 +244,15 @@ fn view_spells_uri_and_addresses() {
             authority: None,
             uri: "/p",
             server: Addr::Unix(Some("/run/r.sock".into())),
-            remote: Addr::Unix(Some("/run/peer.sock".into())),
             want_uri: "http://localhost:80/p",
-            want_remote: AddrOwned::Unix(Some(b"/run/peer.sock".to_vec())),
         },
         Case {
-            name: "unnamed unix peer",
+            name: "unnamed unix server",
             https: false,
             authority: None,
             uri: "/",
             server: Addr::Unix(None),
-            remote: Addr::Unix(None),
             want_uri: "http://localhost:80/",
-            want_remote: AddrOwned::Unix(None),
         },
     ];
     for c in cases {
@@ -304,12 +261,9 @@ fn view_spells_uri_and_addresses() {
         req.authority = c.authority.map(<[u8]>::to_vec);
         req.uri = c.uri.into();
         req.server = c.server;
-        req.remote = c.remote;
         req.server_name = "localhost";
         req.server_port = 80;
-        let view = RequestView::new(&req);
-        assert_eq!(view.uri_abs, c.want_uri, "{}", c.name);
-        assert_eq!(view.remote, c.want_remote, "{}", c.name);
+        assert_eq!(uri_abs(&req), c.want_uri, "{}", c.name);
     }
 }
 
@@ -369,7 +323,7 @@ fn content_length_exceeded_sends_the_prefix_and_seals() {
         panic!("the fitting prefix must be sent");
     };
     assert_eq!(&b[..], b"01234");
-    let Ok(Frame::End { truncated, .. }) = rx.try_recv() else {
+    let Ok(Frame::End { truncated }) = rx.try_recv() else {
         panic!("sealed");
     };
     assert!(!truncated, "complete per its declaration");
@@ -393,7 +347,11 @@ fn repeated_content_length_is_a_bad_field() {
         )
     };
     assert!(matches!(v, Verb::BadField(_)));
-    assert_eq!(st.stage, Stage::Open, "a rejected head commits nothing");
+    assert_eq!(
+        unsafe { write_trailers_core(&mut st) },
+        Verb::HeadNotWritten,
+        "a rejected head commits nothing"
+    );
 }
 
 /// An interim head puts nothing on the reply stream and leaves the final-head slot open.
@@ -476,7 +434,7 @@ fn a_101_head_drops_body_chunks() {
     );
 }
 
-/// Trailers end the response on the End frame: a headless call is HeadNotWritten, a repeat call Finalized.
+/// `writeTrailers()` ends the response with an End frame: a headless call is HeadNotWritten, a repeat call Finalized.
 #[test]
 fn trailers_finalize_with_a_committed_head() {
     use rapira_sapi::types::Frame;
@@ -484,14 +442,14 @@ fn trailers_finalize_with_a_committed_head() {
         state: mut st,
         reply: mut rx,
     } = state();
-    let v = unsafe { write_trailers_core(&mut st, map(&[("x", "y")])) };
+    let v = unsafe { write_trailers_core(&mut st) };
     assert_eq!(v, Verb::HeadNotWritten, "nothing here commits a head");
 
     assert_eq!(
         unsafe { write_head_core(&mut st, 200, HeaderMap::new()) },
         Verb::Ok
     );
-    let v = unsafe { write_trailers_core(&mut st, map(&[("x", "y")])) };
+    let v = unsafe { write_trailers_core(&mut st) };
     assert_eq!(v, Verb::Ok);
     let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
         panic!("head first");
@@ -501,17 +459,12 @@ fn trailers_finalize_with_a_committed_head() {
         Some(0),
         "trailers-only keeps length framing"
     );
-    let Ok(Frame::End {
-        trailers,
-        truncated,
-    }) = rx.try_recv()
-    else {
-        panic!("the trailers ride the End frame");
+    let Ok(Frame::End { truncated }) = rx.try_recv() else {
+        panic!("an End frame ends the response");
     };
     assert!(!truncated);
-    assert_eq!(trailers, map(&[("x", "y")]));
 
-    let v = unsafe { write_trailers_core(&mut st, HeaderMap::new()) };
+    let v = unsafe { write_trailers_core(&mut st) };
     assert_eq!(v, Verb::Finalized);
 }
 
@@ -568,7 +521,7 @@ fn describe(frame: rapira_sapi::types::Frame) -> String {
         ),
         Frame::Chunk(b) => format!("chunk {}", String::from_utf8_lossy(&b)),
         Frame::File { .. } => "file".into(),
-        Frame::End { truncated, .. } => format!("end truncated={truncated}"),
+        Frame::End { truncated } => format!("end truncated={truncated}"),
     }
 }
 

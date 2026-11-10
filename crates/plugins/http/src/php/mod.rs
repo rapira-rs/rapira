@@ -1,28 +1,26 @@
-//! The Rust behind the PHP classes of the http plugin: the class entries, the exchange state and the request view.
+//! The Rust behind the PHP classes of the http plugin: the class entries and the exchange state.
 
 use std::{
     ffi::{CStr, c_char},
     fmt::NumBuffer,
-    net::SocketAddr,
+    net::{IpAddr, SocketAddr},
 };
 
 use http::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::body::Bytes;
 use rapira_sapi::callbacks::guard;
-use rapira_sapi::exchange::{
-    AddrOwned, add_list, build_address, header_key, path_bytes, push_ipv4,
-};
+use rapira_sapi::exchange::{add_list, build_address, header_key, ip_text};
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::types::{
-    Addr, Body, Chunks, FormField, Frame, Request, ResponseHead, UploadedFile,
-};
-use rapira_sapi::work::{DispatcherClasses, Held, HeldPtr};
+use rapira_sapi::types::{Addr, Frame, Request, ResponseHead};
+use rapira_sapi::work::{Held, HeldPtr};
 use rapira_sapi::{
     HashTable, IS_ARRAY, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
-    rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, zend, zend_class_entry,
-    zval, zval_ptr_dtor,
+    rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_plugin, zend,
+    zend_class_entry, zval, zval_ptr_dtor,
 };
 use tokio::sync::mpsc::{Sender, error::TrySendError};
+
+use crate::multipart::{HeaderValues, MultipartBody, UploadedFile};
 
 mod headers;
 mod request;
@@ -43,9 +41,8 @@ unsafe extern "C" {
     pub static mut rapira_ce_http_head_not_written_error: *mut zend_class_entry;
     pub static mut rapira_ce_http_content_length_exceeded_error: *mut zend_class_entry;
     pub static mut rapira_ce_http_file_not_sendable_exception: *mut zend_class_entry;
-    pub static mut rapira_ce_internal_http_dispatcher: *mut zend_class_entry;
-    pub static mut rapira_ce_internal_http_dispatcher_info: *mut zend_class_entry;
-    pub static mut rapira_ce_internal_http_exchange: *mut zend_class_entry;
+    // The dispatcher surface of the http plugin (rapira_http_classes.c).
+    pub static mut rapira_http_plugin: rapira_plugin;
     pub fn rapira_http_register_classes();
     // The server identity that DispatcherInfo::serverName() and serverPort() return (rapira_http.h).
     static mut rapira_http_server_name: *const c_char;
@@ -63,70 +60,18 @@ pub(crate) fn set_server_identity(name: &'static str, port: u16) {
     }
 }
 
-pub static DISPATCHER_CLASSES: DispatcherClasses = DispatcherClasses {
-    dispatcher: || unsafe { rapira_ce_internal_http_dispatcher },
-    info: || unsafe { rapira_ce_internal_http_dispatcher_info },
-    unit: || unsafe { rapira_ce_internal_http_exchange },
-    busy: c"this worker holds one unit at a time, and its Rapira\\Http\\Exchange is unfinalized; finalize it first",
-    quiesce: Some(respond::rapira_rs_http_quiesce),
-};
-
-/// The head locks on the first head or body write: a body chunk commits an implicit 200 first.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Stage {
+/// The head locks on the first head or body write: a body write sends an implicit 200 head first.
+enum Phase {
+    /// No head written.
     Open,
-    HeadCommitted,
-    Finalized,
-}
-
-enum BodyState {
-    Raw(Chunks),
-    /// seal(), discard_unit() and fail() unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
-    Multipart {
-        fields: Vec<FieldPart>,
-        files: Vec<FilePart>,
-    },
-}
-
-impl BodyState {
-    fn unlink_spools(&mut self) {
-        if let Self::Multipart { files, .. } = self {
-            for p in files {
-                p.upload.file.unlink();
-            }
-        }
-    }
-}
-
-struct FieldPart {
-    field: FormField,
-    headers: Vec<HeaderValues>,
-}
-
-struct FilePart {
-    upload: UploadedFile,
-    path: Vec<u8>,
-    headers: Vec<HeaderValues>,
-}
-
-/// Multipart part headers, one entry per name.
-struct HeaderValues {
-    name: String,
-    values: Vec<Vec<u8>>,
-}
-
-fn group_headers(headers: Vec<(String, Vec<u8>)>) -> Vec<HeaderValues> {
-    let mut out: Vec<HeaderValues> = Vec::new();
-    for (name, value) in headers {
-        match out.iter_mut().find(|header| header.name == name) {
-            Some(header) => header.values.push(value),
-            None => out.push(HeaderValues {
-                name,
-                values: vec![value],
-            }),
-        }
-    }
-    out
+    /// `writeHead()` stored the final head, and it is not sent.
+    Committed(ResponseHead),
+    /// The head frame went out.
+    Sent,
+    /// The End went out.
+    Sealed,
+    /// The unit closed before its End went out.
+    Discarded,
 }
 
 /// Contract spelling for `Request::$protocol`: HTTP/2, not the CGI HTTP/2.0.
@@ -137,120 +82,86 @@ fn protocol_php(protocol: &str) -> &str {
     }
 }
 
-/// Owned values of the `Request` object. The builder keeps them in the state because a Zend OOM bailout longjmps through its frame, so that frame holds no values with Drop glue.
-pub struct RequestView {
-    pub uri_abs: String,
-    remote: AddrOwned,
-    server: AddrOwned,
-}
-
-impl RequestView {
-    pub fn new(req: &Request) -> Self {
-        let scheme = if req.https { "https://" } else { "http://" };
-        let path = if req.uri.starts_with('/') {
-            req.uri.as_str()
-        } else {
-            "/"
-        };
-        // 21 bytes hold the longest IPv4 host, "255.255.255.255:65535".
-        let host_len = req.authority.as_ref().map_or(21, Vec::len);
-        let mut uri_abs = String::with_capacity(scheme.len() + host_len + path.len());
-        uri_abs.push_str(scheme);
-        match &req.authority {
-            Some(a) => uri_abs.push_str(&String::from_utf8_lossy(a)),
-            None => match &req.server {
-                Addr::Inet(SocketAddr::V4(sa)) => {
-                    push_ipv4(&mut uri_abs, *sa.ip());
-                    uri_abs.push(':');
-                    uri_abs.push_str(sa.port().format_into(&mut NumBuffer::new()));
-                }
-                Addr::Inet(sa) => uri_abs.push_str(&sa.to_string()),
-                Addr::Unix(_) => {
-                    uri_abs.push_str(req.server_name);
-                    uri_abs.push(':');
-                    uri_abs.push_str(req.server_port.format_into(&mut NumBuffer::new()));
-                }
-            },
-        }
-        uri_abs.push_str(path);
-        Self {
-            uri_abs,
-            remote: AddrOwned::new(&req.remote),
-            server: AddrOwned::new(&req.server),
-        }
+/// The `$uri` of the `Request` object.
+pub fn uri_abs(req: &Request) -> String {
+    let scheme = if req.https { "https://" } else { "http://" };
+    let path = if req.uri.starts_with('/') {
+        req.uri.as_str()
+    } else {
+        "/"
+    };
+    // 21 bytes hold the longest IPv4 host, "255.255.255.255:65535".
+    let host_len = req.authority.as_ref().map_or(21, Vec::len);
+    let mut uri_abs = String::with_capacity(scheme.len() + host_len + path.len());
+    uri_abs.push_str(scheme);
+    match &req.authority {
+        Some(a) => uri_abs.push_str(&String::from_utf8_lossy(a)),
+        None => match &req.server {
+            Addr::Inet(SocketAddr::V4(sa)) => {
+                uri_abs.push_str(ip_text(IpAddr::V4(*sa.ip()), &mut [0; _]));
+                uri_abs.push(':');
+                uri_abs.push_str(sa.port().format_into(&mut NumBuffer::new()));
+            }
+            Addr::Inet(sa) => uri_abs.push_str(&sa.to_string()),
+            Addr::Unix(_) => {
+                uri_abs.push_str(req.server_name);
+                uri_abs.push(':');
+                uri_abs.push_str(req.server_port.format_into(&mut NumBuffer::new()));
+            }
+        },
     }
+    uri_abs.push_str(path);
+    uri_abs
 }
 
 pub struct ExchangeState {
-    // body above sender: declaration drop order unlinks the spool files before the frame sender closes
-    body: BodyState,
+    // multipart above sender: declaration drop order unlinks the spool files before the frame sender closes
+    /// The parsed multipart body. The parse takes the raw chunks out of `req`, so `req.body` is empty when this is `Some`; with `None`, `req.body` holds the raw body. seal(),discard_unit() and fail() unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
+    multipart: Option<MultipartBody>,
     req: Request,
     sender: Option<Sender<Frame>>,
-    /// Filled by the first `getRequest()`.
-    view: Option<RequestView>,
-    stage: Stage,
-    head_sent: bool,
-    pending: Option<ResponseHead>,
+    /// Filled by the first `getRequest()`. The state keeps the owned `$uri` because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
+    uri_abs: Option<String>,
+    phase: Phase,
     declared_cl: Option<u64>,
     /// Bytes accepted toward `declared_cl`: bodiless units count too, so a HEAD handler hits the same errors.
     sent_body: u64,
-    discarded: bool,
     /// 204, 304, 101, or a HEAD request: chunks are accepted and dropped.
     bodiless: bool,
 }
 
 impl ExchangeState {
-    pub(crate) fn new(mut req: Request, tx: Sender<Frame>) -> Self {
-        let taken = std::mem::replace(&mut req.body, Body::Raw(Chunks::default()));
-        let body = match taken {
-            Body::Raw(chunks) => BodyState::Raw(chunks),
-            Body::Multipart(mb) => {
-                let mut fields = Vec::with_capacity(mb.fields.len());
-                for mut field in mb.fields {
-                    fields.push(FieldPart {
-                        headers: group_headers(std::mem::take(&mut field.headers)),
-                        field,
-                    });
-                }
-                let mut files = Vec::with_capacity(mb.files.len());
-                for mut upload in mb.files {
-                    files.push(FilePart {
-                        path: path_bytes(&upload.file.path),
-                        headers: group_headers(std::mem::take(&mut upload.headers)),
-                        upload,
-                    });
-                }
-                BodyState::Multipart { fields, files }
-            }
-        };
+    pub(crate) fn new(req: Request, multipart: Option<MultipartBody>, tx: Sender<Frame>) -> Self {
         let bodiless = req.method == "HEAD";
 
         Self {
-            body,
+            multipart,
             req,
             sender: Some(tx),
-            view: None,
-            stage: Stage::Open,
-            head_sent: false,
-            pending: None,
+            uri_abs: None,
+            phase: Phase::Open,
             declared_cl: None,
             sent_body: 0,
-            discarded: false,
             bodiless,
+        }
+    }
+
+    fn unlink_spools(&mut self) {
+        if let Some(body) = &mut self.multipart {
+            for f in &mut body.files {
+                f.file.unlink();
+            }
         }
     }
 
     /// The seal of a unit PHP does not answer: a `status` head and an End when no head was sent, else a truncated End.
     fn fail(&mut self, status: u16) {
-        self.body.unlink_spools();
+        self.unlink_spools();
         let Some(tx) = self.sender.take() else {
             return;
         };
-        if self.head_sent {
-            let _ = tx.try_send(Frame::End {
-                trailers: HeaderMap::new(),
-                truncated: true,
-            });
+        if matches!(self.phase, Phase::Sent) {
+            let _ = tx.try_send(Frame::End { truncated: true });
         } else if tx
             .try_send(Frame::Head {
                 head: ResponseHead {
@@ -262,22 +173,20 @@ impl ExchangeState {
             })
             .is_ok()
         {
-            let _ = tx.try_send(Frame::End {
-                trailers: HeaderMap::new(),
-                truncated: false,
-            });
+            let _ = tx.try_send(Frame::End { truncated: false });
         }
     }
 }
 
 impl Held for ExchangeState {
     fn settled(&self) -> bool {
-        self.stage == Stage::Finalized
+        matches!(self.phase, Phase::Sealed | Phase::Discarded)
     }
 
     /// A finalized unit holds no sender, so only an open one can see the client go.
     fn cancelled(&self) -> bool {
-        self.discarded || self.sender.as_ref().is_some_and(Sender::is_closed)
+        matches!(self.phase, Phase::Discarded)
+            || self.sender.as_ref().is_some_and(Sender::is_closed)
     }
 
     fn discard(&mut self) {

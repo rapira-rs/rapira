@@ -35,7 +35,7 @@ fn open_send_file(
     use std::os::unix::ffi::OsStrExt;
     let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
     let canonical = std::fs::canonicalize(path).map_err(|_| c"no readable file at the path")?;
-    let root = SENDFILE_ROOT.get().expect("set in Plugin::prepare");
+    let root = SENDFILE_ROOT.get().expect("set in Server::from_settings");
     if !canonical.starts_with(root) {
         return Err(c"the path is outside the configured sendfile root");
     }
@@ -75,7 +75,7 @@ pub(super) unsafe fn send_file_core(
         discard_unit(st);
         return Verb::Discarded;
     }
-    if st.stage == Stage::Finalized {
+    if st.settled() {
         return Verb::Finalized;
     }
     let FileSlice { file, len } = match open_send_file(path, offset, length) {

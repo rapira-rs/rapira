@@ -7,25 +7,26 @@ use base64::alphabet;
 use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD_NO_PAD};
 use bytes::Bytes;
-use connectrpc::Protocol;
 use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
+use connectrpc::{ConnectError, ErrorCode, ErrorDetail, Protocol};
 use rapira_sapi::callbacks::guard;
-use rapira_sapi::exchange::{AddrOwned, add_list, build_address, header_key};
+use rapira_sapi::exchange::{add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};
 use rapira_sapi::work::{Held, HeldPtr, now_unix_f64};
 use rapira_sapi::{
     HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_zval_enum_case,
-    zend, zend_argument_type_error, zend_object, zend_zval_value_name, zval, zval_ptr_dtor,
+    zend, zend_argument_type_error, zend_long, zend_object, zend_string, zend_zval_value_name,
+    zval, zval_ptr_dtor,
 };
 use tokio::sync::oneshot;
 
 use super::{
     rapira_ce_grpc_context, rapira_ce_grpc_error_detail, rapira_ce_grpc_metadata,
     rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind, rapira_ce_grpc_protocol,
-    rapira_ce_grpc_service_info, rapira_ce_grpc_status,
+    rapira_ce_grpc_service_info,
 };
-use crate::{MethodInfo, RpcStatus, StatusDetail, UnaryCall, UnaryReply};
+use crate::{MethodInfo, UnaryCall, UnaryReply};
 
 /// # Safety
 /// `dst` writable; engine active on this thread.
@@ -179,12 +180,6 @@ fn wire(fields: &[MetadataField]) -> HeaderMap {
     map
 }
 
-/// Owned values of the Context object. The state keeps them because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
-struct ContextView {
-    remote: AddrOwned,
-    metadata: Vec<MetadataField>,
-}
-
 pub(crate) struct GrpcState {
     req: UnaryCall,
     received_at: f64,
@@ -193,8 +188,8 @@ pub(crate) struct GrpcState {
     discarded: bool,
     headers: Vec<MetadataField>,
     trailers: Vec<MetadataField>,
-    /// Filled by the first `getContext()`.
-    view: Option<ContextView>,
+    /// The metadata of the Context object, filled by the first `getContext()`. The state keeps it because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
+    context_metadata: Option<Vec<MetadataField>>,
 }
 
 impl GrpcState {
@@ -207,13 +202,10 @@ impl GrpcState {
             discarded: false,
             headers: Vec::new(),
             trailers: Vec::new(),
-            view: None,
+            context_metadata: None,
         }
     }
 }
-
-/// The gRPC status of a boot-failed worker's shed call: https://github.com/grpc/grpc/blob/master/doc/statuscodes.md
-const GRPC_UNAVAILABLE: u32 = 14;
 
 impl Held for GrpcState {
     fn settled(&self) -> bool {
@@ -243,11 +235,7 @@ impl Held for GrpcState {
             let _ = reply.send(UnaryReply {
                 headers: HeaderMap::new(),
                 trailers: HeaderMap::new(),
-                outcome: Err(RpcStatus {
-                    code: GRPC_UNAVAILABLE,
-                    message: "the worker failed to boot".into(),
-                    details: Vec::new(),
-                }),
+                outcome: Err(ConnectError::unavailable("the worker failed to boot")),
             });
         }
     }
@@ -263,13 +251,7 @@ enum Verb {
 }
 
 /// Validates one response metadata entry, then adds it to its half. The entry is checked before the state, so a bad entry gives a ValueError on a finalized call too.
-fn add_core(
-    st: Option<&mut GrpcState>,
-    trailer: bool,
-    binary: bool,
-    name: &[u8],
-    value: &[u8],
-) -> Verb {
+fn add_core(st: &mut GrpcState, trailer: bool, binary: bool, name: &[u8], value: &[u8]) -> Verb {
     // from_bytes lower-cases the name
     let Ok(name) = HeaderName::from_bytes(name) else {
         return Verb::BadField(c"the metadata name is not a valid header name");
@@ -299,9 +281,6 @@ fn add_core(
     if !binary && !printable(value) {
         return Verb::BadField(c"a text metadata value must be printable ASCII");
     }
-    let Some(st) = st else {
-        return Verb::Finalized;
-    };
     // a call that the plugin closed keeps the entry, and finish() gives WorkDiscardedException
     if st.settled() {
         return Verb::Finalized;
@@ -322,7 +301,7 @@ fn add_core(
 }
 
 /// Sends the one outcome of the call, with both metadata halves in wire form.
-fn finish(st: &mut GrpcState, result: Result<Bytes, RpcStatus>) -> Verb {
+fn finish(st: &mut GrpcState, result: Result<Bytes, ConnectError>) -> Verb {
     if st.cancelled() {
         st.discard();
         return Verb::Discarded;
@@ -404,14 +383,13 @@ fn protocol_case(protocol: Protocol) -> &'static CStr {
 unsafe fn build_context(dst: *mut zval, st: &mut GrpcState) {
     unsafe {
         let req = &st.req;
-        let view = st.view.get_or_insert_with(|| ContextView {
-            remote: AddrOwned::new(&req.remote),
-            metadata: context_metadata(&req.metadata),
-        });
+        let fields = st
+            .context_metadata
+            .get_or_insert_with(|| context_metadata(&req.metadata));
         let mut metadata: zval = std::mem::zeroed();
-        build_metadata(&mut metadata, &view.metadata);
+        build_metadata(&mut metadata, fields);
         let mut remote: zval = std::mem::zeroed();
-        build_address(&mut remote, &view.remote);
+        build_address(&mut remote, &req.remote);
         let mut protocol: zval = std::mem::zeroed();
         rapira_zval_enum_case(
             &mut protocol,
@@ -449,11 +427,16 @@ unsafe fn detail_prop<'a>(obj: *mut zend_object, name: &CStr) -> Option<&'a [u8]
     }
 }
 
-/// `Status::$details` as owned details, or the first item that is not an ErrorDetail.
+/// `Status::$details` as connectrpc details, or the first item that is not an ErrorDetail. The value is unpadded base64.
+/// A Connect detail carries the bare type name. gRPC and gRPC-Web keep the `google.protobuf.Any` type URL whole, because connectrpc adds `type.googleapis.com/` only to a name without a `/`.
 /// # Safety
 /// `details` a live array.
-unsafe fn read_details(details: *mut HashTable) -> Result<Vec<StatusDetail>, *mut zval> {
+unsafe fn read_details(
+    details: *mut HashTable,
+    protocol: Protocol,
+) -> Result<Vec<ErrorDetail>, *mut zval> {
     unsafe {
+        let whole_url = matches!(protocol, Protocol::Grpc | Protocol::GrpcWeb);
         let mut out = Vec::new();
         for zend::Entry { val: item, .. } in zend::entries(details) {
             let pair = if zend::zval_type(item) == IS_OBJECT
@@ -467,9 +450,14 @@ unsafe fn read_details(details: *mut HashTable) -> Result<Vec<StatusDetail>, *mu
             let Some((url, value)) = pair else {
                 return Err(item);
             };
-            out.push(StatusDetail {
-                type_url: String::from_utf8_lossy(url).into_owned(),
-                value: Bytes::copy_from_slice(value),
+            let url = String::from_utf8_lossy(url);
+            out.push(ErrorDetail {
+                type_url: match url.rsplit_once('/') {
+                    Some((_, name)) if !whole_url => name.to_owned(),
+                    _ => url.into_owned(),
+                },
+                value: Some(STANDARD_NO_PAD.encode(value)),
+                debug: None,
             });
         }
         Ok(out)
@@ -518,29 +506,19 @@ pub unsafe extern "C" fn rapira_rs_grpc_respond(
     })
 }
 
-/// `status` is a `Rapira\Grpc\Status`; its constructor typed the three properties. A detail that is not an ErrorDetail gives a TypeError before any state change.
+/// The three properties of a `Rapira\Grpc\Status`: `code` is the value of its StatusCode case. A detail that is not an ErrorDetail gives a TypeError before any state change.
 /// # Safety
-/// `held` the slot of a live call; `status` a live object; engine active.
+/// `held` the slot of a live call; `message` and `details` live; engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_fail(
     held: *const HeldPtr,
-    status: *mut zend_object,
+    code: zend_long,
+    message: *const zend_string,
+    details: *mut HashTable,
 ) -> bool {
     guard(false, || unsafe {
-        let mut code_rv: zval = std::mem::zeroed();
-        let mut value_rv: zval = std::mem::zeroed();
-        let mut message_rv: zval = std::mem::zeroed();
-        let mut details_rv: zval = std::mem::zeroed();
-        let code = zend::read_prop(rapira_ce_grpc_status, status, c"code", &mut code_rv);
-        let code = zend::read_prop(
-            (*(*code).value.obj).ce,
-            (*code).value.obj,
-            c"value",
-            &mut value_rv,
-        );
-        let message = zend::read_prop(rapira_ce_grpc_status, status, c"message", &mut message_rv);
-        let details = zend::read_prop(rapira_ce_grpc_status, status, c"details", &mut details_rv);
-        let details = match read_details((*details).value.arr) {
+        let st = &mut *(*held).state::<GrpcState>();
+        let details = match read_details(details, st.req.protocol) {
             Ok(details) => details,
             Err(item) => {
                 zend_argument_type_error(
@@ -551,17 +529,15 @@ pub unsafe extern "C" fn rapira_rs_grpc_fail(
                 return false;
             }
         };
-        let status = RpcStatus {
-            code: (*code).value.lval as u32,
-            message: String::from_utf8_lossy(zend::zstr_bytes((*message).value.str_)).into_owned(),
-            details,
-        };
-        thrown(finish(&mut *(*held).state::<GrpcState>(), Err(status)))
+        let code = ErrorCode::from_grpc_code(code as u32).unwrap_or(ErrorCode::Unknown);
+        let mut err = ConnectError::new(code, String::from_utf8_lossy(zend::zstr_bytes(message)));
+        err.details = details;
+        thrown(finish(st, Err(err)))
     })
 }
 
 /// # Safety
-/// `held` holds no unit, or is a copy of the held word of a live call that receive() attached; `name` and `value` point at their readable bytes; engine active.
+/// `held` the slot of a live call; `name` and `value` point at their readable bytes; engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_add(
     held: *const HeldPtr,
@@ -576,7 +552,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_add(
         let name = std::slice::from_raw_parts(name.cast::<u8>(), name_len);
         let value = std::slice::from_raw_parts(value.cast::<u8>(), value_len);
         thrown(add_core(
-            (*held).try_state::<GrpcState>().map(|st| &mut *st),
+            &mut *(*held).state::<GrpcState>(),
             trailer,
             binary,
             name,
@@ -585,9 +561,9 @@ pub unsafe extern "C" fn rapira_rs_grpc_add(
     })
 }
 
-/// What one half holds so far, with raw `-bin` values. Empty when the call object is gone.
+/// What one half holds so far, with raw `-bin` values.
 /// # Safety
-/// `held` as in `rapira_rs_grpc_add`; `rv` writable; engine active.
+/// `held` the slot of a live call; `rv` writable; engine active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_snapshot(
     held: *const HeldPtr,
@@ -595,12 +571,8 @@ pub unsafe extern "C" fn rapira_rs_grpc_snapshot(
     rv: *mut zval,
 ) -> bool {
     guard(false, || unsafe {
-        let fields: &[_] = match (*held).try_state::<GrpcState>().map(|st| &*st) {
-            Some(st) if trailer => &st.trailers,
-            Some(st) => &st.headers,
-            None => &[],
-        };
-        build_metadata(rv, fields);
+        let st = &*(*held).state::<GrpcState>();
+        build_metadata(rv, if trailer { &st.trailers } else { &st.headers });
         true
     })
 }
@@ -894,7 +866,6 @@ mod tests {
         Open,
         Responded,
         HostClosed,
-        Detached,
     }
 
     enum Want {
@@ -1069,15 +1040,6 @@ mod tests {
                     value: b"a",
                 },
             },
-            Case {
-                name: "detached accumulator",
-                setup: Setup::Detached,
-                trailer: false,
-                binary: false,
-                key: b"x-a",
-                value: b"a",
-                want: Want::Finalized,
-            },
         ];
         for c in CASES {
             let (tx, rx) = oneshot::channel();
@@ -1091,13 +1053,9 @@ mod tests {
                     drop(rx);
                     None
                 }
-                Setup::Open | Setup::Detached => Some(rx),
+                Setup::Open => Some(rx),
             };
-            let target = match c.setup {
-                Setup::Detached => None,
-                _ => Some(&mut st),
-            };
-            let v = add_core(target, c.trailer, c.binary, c.key, c.value);
+            let v = add_core(&mut st, c.trailer, c.binary, c.key, c.value);
             match c.want {
                 Want::Stored { name, value } => {
                     assert_eq!(v, Verb::Ok, "{}", c.name);
@@ -1110,16 +1068,16 @@ mod tests {
         }
     }
 
-    #[derive(Clone, Copy)]
     struct Status {
-        code: u32,
+        code: ErrorCode,
         message: &'static str,
         details: &'static [Detail],
     }
 
     struct Detail {
         type_url: &'static str,
-        value: &'static [u8],
+        /// Unpadded base64, as connectrpc carries it.
+        value: &'static str,
     }
 
     enum Finish {
@@ -1138,18 +1096,16 @@ mod tests {
         Nothing,
     }
 
-    fn status(code: u32, message: &str, details: &[Detail]) -> RpcStatus {
-        RpcStatus {
-            code,
-            message: message.to_owned(),
-            details: details
-                .iter()
-                .map(|d| StatusDetail {
-                    type_url: d.type_url.to_owned(),
-                    value: Bytes::copy_from_slice(d.value),
-                })
-                .collect(),
+    fn error(s: &Status) -> ConnectError {
+        let mut err = ConnectError::new(s.code, s.message);
+        for d in s.details {
+            err.details.push(ErrorDetail {
+                type_url: d.type_url.to_owned(),
+                value: Some(d.value.to_owned()),
+                debug: None,
+            });
         }
+        err
     }
 
     #[test]
@@ -1170,7 +1126,7 @@ mod tests {
             cancelled: bool,
             sent: Sent,
         }
-        // Sources: Responder.php and Work.php, PROTOCOL-HTTP2 Requests (unpadded -bin values), RFC 4648 (01 02 is "AQI").
+        // Sources: Responder.php and Work.php, PROTOCOL-HTTP2 Requests (unpadded -bin values), RFC 4648 (01 02 is "AQI", 0a 01 78 is "CgF4").
         const CASES: &[Case] = &[
             Case {
                 name: "respond carries both halves",
@@ -1216,11 +1172,11 @@ mod tests {
                 adds: &[],
                 drop_receiver: false,
                 finishes: &[Finish::Fail(Status {
-                    code: 5,
+                    code: ErrorCode::NotFound,
                     message: "no invoice",
                     details: &[Detail {
                         type_url: "type.googleapis.com/google.rpc.ErrorInfo",
-                        value: b"\x0a\x01x",
+                        value: "CgF4",
                     }],
                 })],
                 verbs: &[Verb::Ok],
@@ -1230,11 +1186,11 @@ mod tests {
                     headers: &[],
                     trailers: &[],
                     result: Err(Status {
-                        code: 5,
+                        code: ErrorCode::NotFound,
                         message: "no invoice",
                         details: &[Detail {
                             type_url: "type.googleapis.com/google.rpc.ErrorInfo",
-                            value: b"\x0a\x01x",
+                            value: "CgF4",
                         }],
                     }),
                 },
@@ -1270,7 +1226,7 @@ mod tests {
             let mut rx = (!c.drop_receiver).then_some(rx);
             for e in c.adds {
                 assert_eq!(
-                    add_core(Some(&mut st), e.trailer, e.binary, e.name, e.value),
+                    add_core(&mut st, e.trailer, e.binary, e.name, e.value),
                     Verb::Ok,
                     "{}",
                     c.name
@@ -1281,7 +1237,7 @@ mod tests {
                 .iter()
                 .map(|f| match f {
                     Finish::Respond(message) => finish(&mut st, Ok(Bytes::from_static(message))),
-                    Finish::Fail(s) => finish(&mut st, Err(status(s.code, s.message, s.details))),
+                    Finish::Fail(s) => finish(&mut st, Err(error(s))),
                 })
                 .collect();
             assert_eq!(verbs, c.verbs, "{}", c.name);
@@ -1295,15 +1251,25 @@ mod tests {
                     trailers,
                     result,
                 } => {
-                    let want = UnaryReply {
-                        headers: map(headers),
-                        trailers: map(trailers),
-                        outcome: result
-                            .map(Bytes::from_static)
-                            .map_err(|s| status(s.code, s.message, s.details)),
+                    let Some(got) = rx.as_mut().and_then(|rx| rx.try_recv().ok()) else {
+                        panic!("{}: no outcome", c.name);
                     };
-                    let got = rx.as_mut().map(|rx| rx.try_recv());
-                    assert_eq!(got, Some(Ok(want)), "{}", c.name);
+                    assert_eq!(got.headers, map(headers), "{}", c.name);
+                    assert_eq!(got.trailers, map(trailers), "{}", c.name);
+                    // ConnectError has no PartialEq: compare its code, message and details.
+                    match (got.outcome, result) {
+                        (Ok(message), Ok(want)) => assert_eq!(message, *want, "{}", c.name),
+                        (Err(err), Err(want)) => {
+                            assert_eq!(err.code, want.code, "{}", c.name);
+                            assert_eq!(err.message.as_deref(), Some(want.message), "{}", c.name);
+                            assert_eq!(err.details.len(), want.details.len(), "{}", c.name);
+                            for (detail, want) in err.details.iter().zip(want.details) {
+                                assert_eq!(detail.type_url, want.type_url, "{}", c.name);
+                                assert_eq!(detail.value.as_deref(), Some(want.value), "{}", c.name);
+                            }
+                        }
+                        (got, _) => panic!("{}: the other outcome kind: {got:?}", c.name),
+                    }
                 }
                 Sent::Nothing => {}
             }

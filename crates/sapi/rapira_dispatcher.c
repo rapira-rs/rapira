@@ -14,11 +14,9 @@ extern int rapira_rs_handle_request(zend_fcall_info *fci,
 
 int rapira_mode = RAPIRA_MODE_CLASSIC;
 
-zend_class_entry *rapira_plugin_ce_dispatcher;
-zend_class_entry *rapira_plugin_ce_info;
-zend_class_entry *rapira_plugin_ce_unit;
-const char *rapira_plugin_busy;
-void (*rapira_plugin_quiesce)(void);
+const rapira_plugin *rapira_plugin_current;
+const char *rapira_plugin_name;
+size_t rapira_plugin_name_len;
 
 // the memoized plugin Dispatcher of this cycle; RSHUTDOWN releases it
 static zval rapira_dispatcher_memo;
@@ -52,7 +50,8 @@ ZEND_FUNCTION(Rapira_get_dispatcher) {
         RETURN_THROWS();
     }
     if (Z_ISUNDEF(rapira_dispatcher_memo)) {
-        object_init_ex(&rapira_dispatcher_memo, rapira_plugin_ce_dispatcher);
+        object_init_ex(&rapira_dispatcher_memo,
+                       rapira_plugin_current->dispatcher);
     }
     RETURN_COPY(&rapira_dispatcher_memo);
 }
@@ -119,6 +118,12 @@ ZEND_FUNCTION(Rapira_log) {
     }
 }
 
+// the plugin's root TOML section
+ZEND_FUNCTION(rapira_sapi_dispatcher_name) {
+    ZEND_PARSE_PARAMETERS_NONE();
+    RETURN_STRINGL(rapira_plugin_name, rapira_plugin_name_len);
+}
+
 // The object exists before the pull, so a unit never waits for an owner.
 ZEND_FUNCTION(rapira_sapi_receive) {
     zend_long timeout = -1;
@@ -132,7 +137,7 @@ ZEND_FUNCTION(rapira_sapi_receive) {
         RETURN_THROWS();
     }
     zval obj;
-    object_init_ex(&obj, rapira_plugin_ce_unit);
+    object_init_ex(&obj, rapira_plugin_current->unit);
     bool attached =
         rapira_rs_receive((int64_t)timeout, rapira_held_of(Z_OBJ(obj)));
     if (!attached) {
@@ -145,7 +150,7 @@ ZEND_FUNCTION(rapira_sapi_receive) {
 ZEND_FUNCTION(rapira_sapi_try_receive) {
     ZEND_PARSE_PARAMETERS_NONE();
     zval obj;
-    object_init_ex(&obj, rapira_plugin_ce_unit);
+    object_init_ex(&obj, rapira_plugin_current->unit);
     if (!rapira_rs_try_receive(rapira_held_of(Z_OBJ(obj)))) {
         zval_ptr_dtor(&obj);
         if (EG(exception)) {
@@ -158,7 +163,7 @@ ZEND_FUNCTION(rapira_sapi_try_receive) {
 
 ZEND_FUNCTION(rapira_sapi_get_info) {
     ZEND_PARSE_PARAMETERS_NONE();
-    object_init_ex(return_value, rapira_plugin_ce_info);
+    object_init_ex(return_value, rapira_plugin_current->info);
     rapira_dispatcher_info_obj *info =
         rapira_dispatcher_info_from(Z_OBJ_P(return_value));
     rapira_rs_dispatcher_counts(&info->pending, &info->active);

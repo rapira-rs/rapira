@@ -8,9 +8,9 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 
 - `name()` returns `http`: the TOML table and the dispatcher name that PHP sees.
 - `modes()` accepts the classic, worker and dispatcher modes.
-- `dispatcher()` returns `DISPATCHER_CLASSES`, the dispatcher classes of dispatcher mode.
+- `dispatcher()` returns the address of `rapira_http_plugin`, the C record of the dispatcher surface: the dispatcher classes, the busy error of `receive()` and the quiesce hook of dispatcher mode.
 - The crate exports `rapira_http_register_classes`. MINIT calls it after the base classes to register the `Rapira\Http` classes.
-- `prepare()` runs in the master before the fork, with no runtime. It sets the server identity and the `sendFile()` root that the workers inherit, removes the spool dirs of dead workers and binds the listener with `rapira_net::bind`.
+- `Server::from_settings` runs in the master before the fork, with no runtime. It sets the server identity and the `sendFile()` root that the workers inherit, removes the spool dirs of dead workers and binds the listener with `rapira_net::bind`.
 - `serve()` runs in the worker on the plugin thread `rapira-http`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the `Intake` to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
 
 `serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. hyper's http1 builder serves each connection on the runtime. Each request goes through the admission checks, the middleware chain and the inner service. The inner service reads the body and submits the unit to the intake: a `Context` with the CGI view in the classic and worker modes, an `ExchangeState` in dispatcher mode. PHP writes the reply as frames (`Head`, `Chunk`, `File`, `End`), and the plugin writes them to the socket as they arrive.
@@ -31,7 +31,7 @@ The client gets 503 when the intake of the worker stays full for 30 seconds or w
 - `rapira_http.stub.php`: the PHP stub of the `Rapira\Http` and `Rapira\Internal\Http` classes.
 - `rapira_http_arginfo.h`: generated from the stub by `make stubs`. Do not edit it.
 - `rapira_http.h`: the C layout of the exchange object, the class entries and the server identity.
-- `rapira_http_classes.c`: `rapira_http_register_classes`, the object handlers, and the method shells of the dispatcher classes. MINIT calls `rapira_http_register_classes` after the base classes.
+- `rapira_http_classes.c`: the `rapira_http_plugin` record, `rapira_http_register_classes`, the object handlers, and the method shells of `serverName()` and `serverPort()` of the dispatcher info. MINIT calls `rapira_http_register_classes` after the base classes.
 - `rapira_http.c`: the constructors of the value classes `Request`, `FormField`, `UploadedFile` and `Multipart`.
 - `rapira_exchange.c`: the method shells of `Exchange`.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
@@ -44,7 +44,7 @@ The client gets 503 when the intake of the worker stays full for 30 seconds or w
 - `src/response.rs`: the response fields and the error responses.
 - `src/bridge.rs`: the reply body that streams the PHP frames and the `sendFile` slices, and the write timeout.
 - `src/multipart.rs`: the multipart parser and the spool dirs of dispatcher mode.
-- `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES`, the declaration of `rapira_http_register_classes` and the write of the server identity (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
+- `src/php/`: the Rust behind the PHP methods: the class entries, the declarations of `rapira_http_plugin` and `rapira_http_register_classes` and the write of the server identity (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
 
 ## Middleware
 

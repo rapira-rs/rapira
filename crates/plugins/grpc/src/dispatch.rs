@@ -3,21 +3,19 @@
 use std::sync::Arc;
 use std::time::Instant;
 
-use base64::Engine as _;
-use base64::engine::general_purpose::STANDARD_NO_PAD;
 use bytes::Bytes;
 use connectrpc::dispatcher::{RequestStream, StreamingResult, UnaryResult};
 use connectrpc::{
-    CodecFormat, ConnectError, Dispatcher, EncodedBody, EncodedResponse, ErrorCode, ErrorDetail,
-    MethodDescriptor, Payload, Protocol, RequestContext, http,
+    CodecFormat, ConnectError, Dispatcher, EncodedBody, EncodedResponse, MethodDescriptor, Payload,
+    Protocol, RequestContext, http,
 };
 use rapira_sapi::Addr;
 use rapira_sapi::work::{Intake, Unit, now_unix_f64};
 use tokio::sync::oneshot;
 
+use crate::UnaryCall;
 use crate::php::GrpcState;
 use crate::schema::Schema;
-use crate::{RpcStatus, UnaryCall};
 
 /// Routes the unary methods of the configured services to PHP.
 pub(crate) struct PhpDispatcher {
@@ -134,8 +132,8 @@ async fn unary(
     };
     let message = match reply.outcome {
         Ok(message) => message,
-        Err(status) => {
-            return Err(status_error(status, protocol)
+        Err(err) => {
+            return Err(err
                 .with_headers(reply.headers)
                 .with_trailers(reply.trailers));
         }
@@ -164,24 +162,4 @@ async fn unary(
         );
     }
     Ok(response)
-}
-
-/// A Connect error detail carries the bare type name. gRPC and gRPC-Web keep the `google.protobuf.Any` type URL whole, because connectrpc adds `type.googleapis.com/` only to a name without a `/`.
-fn status_error(status: RpcStatus, protocol: Protocol) -> ConnectError {
-    let whole_url = matches!(protocol, Protocol::Grpc | Protocol::GrpcWeb);
-    let code = ErrorCode::from_grpc_code(status.code).unwrap_or(ErrorCode::Unknown);
-    let mut err = ConnectError::new(code, status.message);
-    err.details = status
-        .details
-        .into_iter()
-        .map(|d| ErrorDetail {
-            type_url: match d.type_url.rsplit_once('/') {
-                Some((_, name)) if !whole_url => name.to_owned(),
-                _ => d.type_url,
-            },
-            value: Some(STANDARD_NO_PAD.encode(d.value)),
-            debug: None,
-        })
-        .collect();
-    err
 }

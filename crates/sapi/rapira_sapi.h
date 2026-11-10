@@ -63,18 +63,29 @@ enum {
 };
 extern int rapira_mode;
 
-// The dispatcher surface of the plugin this worker serves. In dispatcher
-// mode, worker_main (start.rs) writes these globals once before PHP runs on
-// the thread.
-extern zend_class_entry *rapira_plugin_ce_dispatcher;
-extern zend_class_entry *rapira_plugin_ce_info;
-extern zend_class_entry *rapira_plugin_ce_unit;
-// the error of receive() and tryReceive() while a unit is unfinalized
-extern const char *rapira_plugin_busy;
-// RSHUTDOWN calls it on the PHP thread before the request strings are freed:
-// the plugin waits until its IO thread holds no request string, then releases
-// the strings. NULL when the plugin lends nothing.
-extern void (*rapira_plugin_quiesce)(void);
+// The dispatcher surface of a plugin. Each plugin defines one record; its
+// register function assigns the classes in MINIT.
+typedef struct {
+    zend_class_entry *dispatcher;
+    zend_class_entry *info;
+    zend_class_entry *unit;
+    // the error of receive() and tryReceive() while a unit is unfinalized
+    const char *busy;
+    // RSHUTDOWN calls it on the PHP thread before the request strings are
+    // freed: the plugin waits until its IO thread holds no request string,
+    // then releases the strings. NULL when the plugin lends nothing.
+    void (*quiesce)(void);
+} rapira_plugin;
+// The plugin of this worker's pool. In dispatcher mode, start_worker
+// (start.rs) writes these globals once before the PHP thread starts.
+// NULL outside dispatcher mode.
+extern const rapira_plugin *rapira_plugin_current;
+// Plugin::name() of this worker's pool, without a NUL terminator.
+extern const char *rapira_plugin_name;
+extern size_t rapira_plugin_name_len;
+// A plugin register function calls it after it assigns the classes of the
+// record: the Dispatcher and DispatcherInfo classes get the shared handlers.
+void rapira_plugin_wire(const rapira_plugin *plugin);
 // The plugin register functions that MINIT calls after the base classes, in
 // array order; boot_master (start.rs) writes them once in the master.
 extern void (*const *rapira_plugin_registers)(void);
@@ -103,9 +114,8 @@ extern void rapira_rs_finish_response(void);
 
 // The unit behind a Work object: the first field of the C prefix of every class
 // that receive() hands out. Rust owns the two words (HeldPtr in work.rs); C
-// passes the address, copies or zeroes the struct as a whole, and never reads
-// the words. A zeroed rapira_held holds no unit. zend_object_alloc zeroes the
-// prefix, so a fresh object holds no unit.
+// passes the address and never reads the words. A zeroed rapira_held holds no
+// unit. zend_object_alloc zeroes the prefix, so a fresh object holds no unit.
 typedef struct {
     void *words[2];
 } rapira_held;
@@ -147,11 +157,6 @@ extern zend_class_entry *rapira_ce_tls;
 extern zend_class_entry *rapira_ce_inet_address;
 extern zend_class_entry *rapira_ce_unix_address;
 
-// rapira_register_classes fills both before the plugin classes register.
-// A plugin's Dispatcher class: std handlers without clone.
-extern zend_object_handlers rapira_dispatcher_handlers;
-// A plugin's DispatcherInfo class: the rapira_dispatcher_info_obj layout.
-extern zend_object_handlers rapira_info_handlers;
 // create_object for every class with a C prefix; the handler offset gives the
 // prefix size.
 zend_object *rapira_object_create(zend_class_entry *ce);
@@ -180,6 +185,7 @@ void rapira_register_post_reader(void);
 // the private constructors of its host-created classes. The plugin stubs name
 // them with @implementation-alias, so the plugin arginfo points at them
 // directly.
+ZEND_FUNCTION(rapira_sapi_dispatcher_name);
 ZEND_FUNCTION(rapira_sapi_receive);
 ZEND_FUNCTION(rapira_sapi_try_receive);
 ZEND_FUNCTION(rapira_sapi_get_info);

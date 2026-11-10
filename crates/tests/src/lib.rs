@@ -60,7 +60,6 @@ pub struct Resp {
     pub head: Option<rapira_sapi::types::ResponseHead>,
     pub content_length: Option<u64>,
     pub body: Vec<u8>,
-    pub trailers: HeaderMap,
     pub truncated: bool,
     /// An `End` frame arrived; false = the producer died first.
     pub ended: bool,
@@ -93,11 +92,7 @@ impl Resp {
                 self.content_length = content_length;
             }
             Frame::Chunk(b) => self.body.extend_from_slice(&b),
-            Frame::End {
-                trailers,
-                truncated,
-            } => {
-                self.trailers = trailers;
+            Frame::End { truncated } => {
                 self.truncated = truncated;
                 self.ended = true;
                 return true;

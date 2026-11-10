@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use http::header::{AUTHORIZATION, CONTENT_LENGTH, COOKIE, HeaderMap, HeaderName};
+use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap, HeaderName};
 use std::ffi::CString;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -28,57 +28,8 @@ pub enum Frame {
         len: u64,
     },
     End {
-        trailers: HeaderMap,
         truncated: bool,
     },
-}
-
-/// `unlink` is the one remover: seal calls it at finalize; Drop removes a file that a bailout (fatal or timeout) leaves behind.
-pub struct SpooledFile {
-    pub path: PathBuf,
-}
-
-impl SpooledFile {
-    /// Takes the path, so a later Drop is a no-op and a recycled file name is never removed twice.
-    pub fn unlink(&mut self) {
-        let path = std::mem::take(&mut self.path);
-        if path.as_os_str().is_empty() {
-            return;
-        }
-        if let Err(e) = std::fs::remove_file(&path)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            tracing::warn!(target: "rapira", "removing spool file {}: {e}", path.display());
-        }
-    }
-}
-
-impl Drop for SpooledFile {
-    fn drop(&mut self) {
-        self.unlink();
-    }
-}
-
-pub struct FormField {
-    pub name: Vec<u8>,
-    pub value: Vec<u8>,
-    pub headers: Vec<(String, Vec<u8>)>,
-}
-
-pub struct UploadedFile {
-    pub name: Vec<u8>,
-    pub client_filename: Vec<u8>,
-    /// content-type verbatim; an empty or OWS-only value maps to None upstream.
-    pub client_media_type: Option<Vec<u8>>,
-    pub headers: Vec<(String, Vec<u8>)>,
-    pub file: SpooledFile,
-    /// Bytes written to disk; a 64-bit zend_long is assumed at the FFI edge.
-    pub size: u64,
-}
-
-pub struct MultipartBody {
-    pub fields: Vec<FormField>,
-    pub files: Vec<UploadedFile>,
 }
 
 /// The raw body as the transport delivered it: one part per received data frame, empty frames left out. Each consumer makes its one copy from the parts.
@@ -139,11 +90,6 @@ impl std::io::Read for Chunks {
     }
 }
 
-pub enum Body {
-    Raw(Chunks),
-    Multipart(MultipartBody),
-}
-
 pub struct Request {
     pub method: String,
     pub uri: String,
@@ -160,11 +106,7 @@ pub struct Request {
     pub server_name: &'static str,
     pub server_port: u16,
     pub headers: HeaderMap,
-    /// First content-type field line, raw bytes.
-    pub content_type: Option<Vec<u8>>,
-    /// Wire byte count, never re-derived from parsed parts; -1 if unknown.
-    pub content_length: i64,
-    pub body: Body,
+    pub body: Chunks,
     /// Unix seconds.
     pub received_at: f64,
 }
@@ -262,9 +204,9 @@ impl ReqC {
             cookie,
             authorization,
             ctype: r
-                .content_type
-                .as_deref()
-                .map(|s| cgi_cstring("CONTENT_TYPE", s)),
+                .headers
+                .get(CONTENT_TYPE)
+                .map(|v| cgi_cstring("CONTENT_TYPE", v.as_bytes())),
             remote_addr,
             remote_port,
             server_port: r.server_port.to_string(),
@@ -373,13 +315,7 @@ impl Context {
                 send(&tx, Frame::Chunk(body.into()));
             }
         }
-        send(
-            &tx,
-            Frame::End {
-                trailers: HeaderMap::new(),
-                truncated,
-            },
-        );
+        send(&tx, Frame::End { truncated });
     }
 }
 
@@ -426,9 +362,7 @@ pub(crate) mod tests {
                 server_name: "",
                 server_port: 8080,
                 headers: HeaderMap::new(),
-                content_type: None,
-                content_length: -1,
-                body: Body::Raw(Chunks::default()),
+                body: Chunks::default(),
                 received_at: 0.0,
             },
             c: ReqC {
@@ -480,7 +414,7 @@ pub(crate) mod tests {
             ),
             Frame::Chunk(b) => format!("chunk {}", String::from_utf8_lossy(&b)),
             Frame::File { .. } => "file".into(),
-            Frame::End { truncated, .. } => format!("end truncated={truncated}"),
+            Frame::End { truncated } => format!("end truncated={truncated}"),
         }
     }
 

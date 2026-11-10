@@ -1,0 +1,9 @@
+multipart/form-data; boundary=B
+--B
+Content-Disposition: form-data; name="a"
+X-A: 1
+x-a: 2
+X-A: 3
+
+v
+--B--

@@ -11,28 +11,23 @@ zend_class_entry *rapira_ce_grpc_method_info;
 zend_class_entry *rapira_ce_grpc_service_info;
 zend_class_entry *rapira_ce_grpc_context;
 zend_class_entry *rapira_ce_grpc_exception;
-zend_class_entry *rapira_ce_internal_grpc_dispatcher;
-zend_class_entry *rapira_ce_internal_grpc_dispatcher_info;
-zend_class_entry *rapira_ce_internal_grpc_unary_call;
-zend_class_entry *rapira_ce_internal_grpc_response_metadata;
+
+// the dispatcher surface; Plugin::dispatcher() returns its address (src/lib.rs)
+rapira_plugin rapira_grpc_plugin = {
+    .busy = "this worker holds one unit at a time, and its "
+            "Rapira\\Grpc\\UnaryCall is unfinalized; finalize it first",
+};
 
 // own copies: std_object_handlers is shared engine state
 static zend_object_handlers rapira_grpc_call_handlers;
-static zend_object_handlers rapira_grpc_metadata_handlers;
 
 // free_obj hands the call back to Rust
 static void rapira_grpc_call_free(zend_object *std) {
     rapira_grpc_call_obj *obj = rapira_grpc_call_from(std);
-    // a kept ResponseMetadata object must not reach the freed unit
-    if (Z_TYPE(obj->metadata) == IS_OBJECT) {
-        rapira_grpc_metadata_from(Z_OBJ(obj->metadata))->held =
-            (rapira_held){0};
-    }
     rapira_rs_held_drop(&obj->held);
     // no-op on IS_UNDEF
     zval_ptr_dtor(&obj->message);
     zval_ptr_dtor(&obj->context);
-    zval_ptr_dtor(&obj->metadata);
 
     zend_object_std_dtor(std);
 }
@@ -87,42 +82,19 @@ void rapira_grpc_register_classes(void) {
     register_class_Rapira_Grpc_Exception_HeadersAlreadyCommittedError(
         zend_ce_error, rapira_ce_throwable);
 
-    rapira_ce_internal_grpc_dispatcher =
+    rapira_grpc_plugin.dispatcher =
         register_class_Rapira_Internal_Grpc_Dispatcher(grpc_dispatcher);
-    rapira_ce_internal_grpc_dispatcher_info =
+    rapira_grpc_plugin.info =
         register_class_Rapira_Internal_Grpc_DispatcherInfo(grpc_info);
-    rapira_ce_internal_grpc_unary_call =
-        register_class_Rapira_Internal_Grpc_UnaryCall(grpc_unary_call);
-    rapira_ce_internal_grpc_response_metadata =
-        register_class_Rapira_Internal_Grpc_ResponseMetadata(
-            grpc_response_metadata);
-
-    // Reflection does not skip the constructor of a final class with
-    // create_object, so only get_dispatcher() creates the object.
-    rapira_ce_internal_grpc_dispatcher->create_object = rapira_object_create;
-    rapira_ce_internal_grpc_dispatcher->default_object_handlers =
-        &rapira_dispatcher_handlers;
-
-    rapira_ce_internal_grpc_dispatcher_info->create_object =
-        rapira_object_create;
-    rapira_ce_internal_grpc_dispatcher_info->default_object_handlers =
-        &rapira_info_handlers;
+    rapira_grpc_plugin.unit = register_class_Rapira_Internal_Grpc_UnaryCall(
+        grpc_unary_call, grpc_response_metadata);
+    rapira_plugin_wire(&rapira_grpc_plugin);
 
     rapira_grpc_call_handlers = std_object_handlers;
     rapira_grpc_call_handlers.clone_obj = NULL;
     rapira_grpc_call_handlers.offset = offsetof(rapira_grpc_call_obj, std);
     rapira_grpc_call_handlers.free_obj = rapira_grpc_call_free;
-    rapira_ce_internal_grpc_unary_call->create_object = rapira_object_create;
-    rapira_ce_internal_grpc_unary_call->default_object_handlers =
+    rapira_grpc_plugin.unit->create_object = rapira_object_create;
+    rapira_grpc_plugin.unit->default_object_handlers =
         &rapira_grpc_call_handlers;
-
-    // the standard free_obj: the metadata object owns nothing
-    rapira_grpc_metadata_handlers = std_object_handlers;
-    rapira_grpc_metadata_handlers.clone_obj = NULL;
-    rapira_grpc_metadata_handlers.offset =
-        offsetof(rapira_grpc_metadata_obj, std);
-    rapira_ce_internal_grpc_response_metadata->create_object =
-        rapira_object_create;
-    rapira_ce_internal_grpc_response_metadata->default_object_handlers =
-        &rapira_grpc_metadata_handlers;
 }

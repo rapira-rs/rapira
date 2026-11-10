@@ -1,7 +1,7 @@
 //! Builds the SAPI Request from the HTTP request and the Peer.
 
 use rapira_sapi::Request;
-use rapira_sapi::types::{Body, Chunks};
+use rapira_sapi::types::Chunks;
 
 use crate::Config;
 use crate::middleware::Peer;
@@ -20,7 +20,6 @@ pub fn build(
         http::Version::HTTP_2 => "HTTP/2.0",
         _ => "HTTP/1.1",
     };
-    let headers = parts.headers;
     Request {
         method: parts.method.as_str().to_owned(),
         // Origin-form view for every target form. Display restores the leading slash
@@ -46,12 +45,8 @@ pub fn build(
         server_name: cfg.server_name,
         server_port: cfg.server_port,
         received_at: peer.received_at,
-        content_type: headers
-            .get(http::header::CONTENT_TYPE)
-            .map(|v| v.as_bytes().to_vec()),
-        content_length: body.len() as i64,
-        body: Body::Raw(body),
-        headers,
+        body,
+        headers: parts.headers,
     }
 }
 

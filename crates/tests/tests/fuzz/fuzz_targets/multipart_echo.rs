@@ -8,7 +8,7 @@ use arbitrary::{Arbitrary, Unstructured};
 use bytes::Bytes;
 use rapira_fuzz::MAX_LEN;
 use rapira_http::check::Rejection;
-use rapira_http::multipart::{Limits, boundary, is_multipart, parse};
+use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart, parse};
 
 #[derive(Arbitrary)]
 struct EchoPart<'a> {
@@ -99,6 +99,27 @@ fn value_bytes(raw: &[u8]) -> Vec<u8> {
 /// RFC 9110 tchar: https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2
 fn is_tchar(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b"!#$%&'*+-.^_`|~".contains(&b)
+}
+
+/// The sent field lines as the contract groups them: one entry per name in first-seen order, the values in field line order, names compared byte for byte.
+fn grouped(lines: &[(String, Vec<u8>)]) -> Vec<HeaderValues> {
+    let mut out = Vec::new();
+    for (i, (name, _)) in lines.iter().enumerate() {
+        if lines[..i].iter().any(|(n, _)| n == name) {
+            continue;
+        }
+        let mut values = Vec::new();
+        for (n, v) in &lines[i..] {
+            if n == name {
+                values.push(v.clone());
+            }
+        }
+        out.push(HeaderValues {
+            name: name.clone(),
+            values,
+        });
+    }
+    out
 }
 
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
@@ -218,7 +239,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
                     .unwrap_or_else(|| panic!("missing field: {ctx}"));
                 assert_eq!(f.name, s.name, "field name: {ctx}");
                 assert_eq!(f.value, s.data, "field value: {ctx}");
-                assert_eq!(f.headers, s.headers, "field headers: {ctx}");
+                assert_eq!(f.headers, grouped(&s.headers), "field headers: {ctx}");
             }
             Some(filename) => {
                 let f = files
@@ -233,7 +254,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
                 assert_eq!(f.name, s.name, "file name: {ctx}");
                 assert_eq!(&f.client_filename, filename, "client filename: {ctx}");
                 assert_eq!(f.client_media_type, media, "client media type: {ctx}");
-                assert_eq!(f.headers, s.headers, "file headers: {ctx}");
+                assert_eq!(f.headers, grouped(&s.headers), "file headers: {ctx}");
                 assert_eq!(f.size, s.data.len() as u64, "file size: {ctx}");
                 let spooled = std::fs::read(&f.file.path).expect("spooled file");
                 assert_eq!(spooled, s.data, "spooled bytes: {ctx}");

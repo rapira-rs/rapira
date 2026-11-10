@@ -8,9 +8,9 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 
 - `name()` returns `grpc`: the TOML table and the dispatcher name that PHP sees.
 - `modes()` accepts dispatcher mode only.
-- `dispatcher()` returns `DISPATCHER_CLASSES`, the dispatcher classes.
+- `dispatcher()` returns the address of `rapira_grpc_plugin`, the C record of the dispatcher surface: the dispatcher classes and the busy error of `receive()`.
 - The crate exports `rapira_grpc_register_classes`. MINIT calls it after the base classes to register the `Rapira\Grpc` classes.
-- `prepare()` runs in the master before the fork, with no runtime. It sets the service list that `getServices()` returns, binds the listener with `rapira_net::bind`, and builds the routes that the plugin answers without PHP: health, and reflection when it is on.
+- `Server::from_settings` runs in the master before the fork, with no runtime. It sets the service list that `getServices()` returns, binds the listener with `rapira_net::bind`, and builds the routes that the plugin answers without PHP: health, and reflection when it is on.
 - `serve()` runs in the worker on the plugin thread `rapira-grpc`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the `Intake` to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
 
 `serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. `PhpDispatcher` routes each unary method of a configured service to PHP: it builds a `GrpcState` and submits it to the intake. PHP finalizes the call with `respond()` or `fail()`, and the plugin sends the outcome to the client.
@@ -27,16 +27,16 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `build.rs`: compiles the C files with `rapira_php_build::compile` against the PHP headers. `rapira_grpc.h` includes `rapira_sapi.h` by its path in `crates/sapi`.
 - `rapira_grpc.stub.php`: the PHP stub of the `Rapira\Grpc` and `Rapira\Internal\Grpc` classes.
 - `rapira_grpc_arginfo.h`: generated from the stub by `make stubs`. Do not edit it.
-- `rapira_grpc.h`: the C layouts of the call object and the response metadata object, and the class entries.
-- `rapira_grpc_classes.c`: `rapira_grpc_register_classes` and the object handlers of the call and the response metadata. MINIT calls `rapira_grpc_register_classes` after the base classes. The stub aliases the constructors of the internal classes, `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters to the shared shells in `crates/sapi/rapira_dispatcher.c`.
-- `rapira_grpc.c`: the constructors of the value classes, the `MethodKind` predicates, and the method shells of `name()` and `getServices()` of the dispatcher, the call and the response metadata.
+- `rapira_grpc.h`: the C layout of the call object, and the class entries. The call object is also its own response metadata.
+- `rapira_grpc_classes.c`: the `rapira_grpc_plugin` record, `rapira_grpc_register_classes` and the object handlers of the call. MINIT calls `rapira_grpc_register_classes` after the base classes. The stub aliases the constructors of the internal classes, `name()`, `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters to the shared shells in `crates/sapi/rapira_dispatcher.c`.
+- `rapira_grpc.c`: the constructors of the value classes, the `MethodKind` predicates, the method shell of `getServices()` of the dispatcher, and the method shells of the call, with its `ResponseMetadata` methods.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
-- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set and builds the interceptors.
+- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set, builds the interceptors and binds the listener.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
-- `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the map from the PHP outcome to a status.
+- `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the PHP outcome as a connectrpc response or error.
 - `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
-- `src/call.rs`: the `UnaryCall`, `UnaryReply` and `RpcStatus` types.
-- `src/php/`: the Rust behind the PHP methods: the class entries, `DISPATCHER_CLASSES` and the declaration of `rapira_grpc_register_classes` (`mod.rs`), the `GrpcState` unit with its `Held` impl, the call and its metadata (`call.rs`), and the `Metadata` constructor (`values.rs`).
+- `src/call.rs`: the `UnaryCall` and `UnaryReply` types.
+- `src/php/`: the Rust behind the PHP methods: the class entries and the declarations of `rapira_grpc_plugin` and `rapira_grpc_register_classes` (`mod.rs`), the `GrpcState` unit with its `Held` impl, the call and its metadata (`call.rs`), and the `Metadata` constructor (`values.rs`).
 
 ## Protocols
 
@@ -121,7 +121,7 @@ The pool runs in dispatcher mode only. `\Rapira\get_dispatcher()` returns a `Rap
 - `Context::$metadata` holds the application metadata. Names are lower case. The values of a name keep their arrival order.
 - The plugin removes the transport names from it: the prefixes `grpc-`, `connect-`, `content-` and `trailer-`, and the names `te`, `trailer`, `connection`, `keep-alive`, `proxy-connection`, `transfer-encoding`, `upgrade`, `host` and `accept-encoding`.
 - A text value that is not printable ASCII is dropped. A `-bin` value is split on `,`, then each piece is base64-decoded, with or without padding, and PHP gets the raw bytes. A piece that does not decode is dropped. An empty piece is an empty value.
-- `getResponseMetadata()` returns the response headers and trailers of the call. `addHeader()` and `addTrailer()` take a text value: printable ASCII (0x20 to 0x7E). An empty value is permitted. The plugin removes the leading and trailing spaces of a text value when it sends it, because an HTTP/2 field value must not start or end with whitespace. https://www.rfc-editor.org/rfc/rfc9113#section-8.2.1
+- `getResponseMetadata()` returns the call object, which holds the response headers and trailers. While the app keeps this object, a call that is not finalized stays active: `receive()` throws the busy `\Error`, and the client gets INTERNAL when the last reference goes. `addHeader()` and `addTrailer()` take a text value: printable ASCII (0x20 to 0x7E). An empty value is permitted. The plugin removes the leading and trailing spaces of a text value when it sends it, because an HTTP/2 field value must not start or end with whitespace. https://www.rfc-editor.org/rfc/rfc9113#section-8.2.1
 - `addBinaryHeader()` and `addBinaryTrailer()` take raw bytes and need a name with the `-bin` suffix. The text methods refuse a name with this suffix. The plugin sends a `-bin` value as base64 without padding.
 - A metadata name uses only `0-9`, `a-z`, `_`, `-` and `.`. A reserved name, an invalid name or a bad value throws `\ValueError`. A repeated name adds a value.
 - `respond()` and `fail()` send both halves. For gRPC, the trailers are HTTP/2 trailers. For gRPC-Web, they are in the trailer frame. For Connect, each trailer is a header with the `trailer-` prefix.
