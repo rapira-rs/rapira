@@ -249,8 +249,8 @@ fn server_variables() -> anyhow::Result<()> {
             "$_SERVER missing {expected:?} (got: {body:?})"
         );
     }
-    // The spawn stages the fixture as http/server-variables.php in its scratch dir; DOCUMENT_ROOT is the directory of the entrypoint.
-    let root = srv.dir.join("http");
+    // The spawn stages the fixture as http/server-variables.php in its scratch dir; DOCUMENT_ROOT is the real path of the entrypoint directory.
+    let root = std::fs::canonicalize(srv.dir.join("http"))?;
     for expected in [
         format!(
             "[SCRIPT_FILENAME] => {}\n",
