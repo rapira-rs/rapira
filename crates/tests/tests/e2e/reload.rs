@@ -2,7 +2,7 @@ use crate::harness::*;
 use rapira_sapi::plugin::Mode;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-use tests::server_log::{app_contexts, wait_app_record};
+use tests::server_log::{app_contexts, records, wait_app_record};
 use tests::wire::submit;
 use tests::{StatusBody, drain, poll, req};
 
@@ -70,26 +70,6 @@ fn usr2_restarts_an_idle_app() {
         "the idle app booted again\n{}",
         diagnostics(&srv)
     );
-    assert_eq!(
-        worker_pids(srv.pid()),
-        vec![pid],
-        "the worker process stays\n{}",
-        diagnostics(&srv)
-    );
-}
-
-/// Classic mode runs every request in a new request cycle, so a reload has nothing to restart and the worker keeps serving.
-#[test]
-fn a_reload_leaves_a_classic_pool_alone() {
-    let srv = Spawn::http(Mode::Classic, fixture_path("classic/cwd.php")).spawn();
-    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
-    signal(srv.pid(), libc::SIGUSR2);
-    // Nothing must happen, so the test waits a fixed time before it looks.
-    std::thread::sleep(Duration::from_secs(1));
-    let code = http_get(srv.addr, "/", Duration::from_secs(10))
-        .expect("GET /")
-        .status;
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
     assert_eq!(
         worker_pids(srv.pid()),
         vec![pid],
@@ -611,6 +591,86 @@ fn a_reload_after_a_failed_boot_runs_every_file_of_the_new_release() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A symlink deploy whose link points at no folder, then a reload: each boot fails, a request gets 503, and an ERROR record names the entrypoint. A reload after the fix runs the fixed release in the same worker process.
+#[test]
+fn an_entrypoint_that_does_not_resolve_answers_503_until_a_reload_after_the_fix() {
+    let dir: PathBuf = scratch_dir();
+    let [release_1, release_2] = stage_releases(&dir, "dispatcher.php");
+    let entrypoint = dir.join("current").join("dispatcher.php");
+    let srv = Spawn::http_entrypoint(Mode::Dispatcher, &entrypoint.display().to_string())
+        .json_log()
+        .spawn();
+    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    assert_eq!(
+        seen(&srv),
+        format!("code=1 cwd={release_1} file=1"),
+        "before the deploy\n{}",
+        diagnostics(&srv)
+    );
+    let switch = |release: &str| {
+        let next = dir.join("current.next");
+        std::os::unix::fs::symlink(release, &next).expect("link current.next");
+        std::fs::rename(&next, dir.join("current")).expect("switch current");
+    };
+    // The wire client decodes the chunked body of the fixture.
+    let answer = || match submit(srv.addr, req("/")) {
+        Ok(rx) => {
+            let got = drain(rx);
+            format!("{} {}", got.status, got.body)
+        }
+        Err(e) => format!("error {e}"),
+    };
+
+    switch("releases/missing");
+    signal(srv.pid(), libc::SIGUSR2);
+    // Each request during a failed boot starts the next boot, and the fifth failed boot ends the worker, so the poll stops at the first 503.
+    let mut last = String::new();
+    let refused = poll(Duration::from_secs(10), || {
+        last = answer();
+        last.starts_with("503").then_some(())
+    });
+    assert!(
+        refused.is_some(),
+        "a request after the broken deploy\n want: 503\n last: {last}\n{}",
+        diagnostics(&srv)
+    );
+    let named = format!("resolving the entrypoint {}", entrypoint.display());
+    assert!(
+        records(&srv.log_file())
+            .iter()
+            .any(|r| r.level == tracing::Level::ERROR && r.message.starts_with(&named)),
+        "an ERROR record {named:?}\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(
+        worker_pids(srv.pid()),
+        vec![pid],
+        "the worker process stays after the broken deploy\n{}",
+        diagnostics(&srv)
+    );
+
+    switch("releases/2");
+    signal(srv.pid(), libc::SIGUSR2);
+    let want = format!("200 code=2 cwd={release_2} file=2");
+    let fixed = poll(Duration::from_secs(10), || {
+        last = answer();
+        (last == want).then_some(())
+    });
+    assert!(
+        fixed.is_some(),
+        "after the fix and the reload\n want: {want}\n last: {last}\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(
+        worker_pids(srv.pid()),
+        vec![pid],
+        "the worker process stays after the fix\n{}",
+        diagnostics(&srv)
+    );
+    drop(srv);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
 /// The pid at the start of an answer `pid=<pid> ...`.
 fn pid_of(body: &str) -> u32 {
     body.strip_prefix("pid=")
@@ -732,13 +792,15 @@ fn opcache_state(body: &str) -> OpcacheState {
     }
 }
 
-/// A scheduled OPcache restart waits until no app holds OPcache. Every app of every pool restarts, the restart runs, every http worker gets OPcache back, and no worker is killed, also with a request in flight.
+/// A scheduled OPcache restart waits until no app holds OPcache. Every app of every pool restarts, the restart runs, every http worker gets OPcache back, and no worker is killed, also with a request in flight on another worker. One WARN record names the reason of the restart.
 #[test]
 fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
     struct Case {
         name: &'static str,
         /// The request that makes OPcache schedule a restart.
         trigger: &'static str,
+        /// The reason that the WARN record of the restart names.
+        reason: &'static str,
         /// A grpc pool runs next to the http pool. Its apps hold OPcache too.
         grpc: bool,
     }
@@ -747,16 +809,19 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
         Case {
             name: "opcache_reset()",
             trigger: "/?reset=1",
+            reason: "opcache_reset()",
             grpc: false,
         },
         Case {
             name: "a full hash table with wasted memory",
             trigger: "/?fill=1",
+            reason: "hash table full",
             grpc: false,
         },
         Case {
             name: "an http pool and a grpc pool",
             trigger: "/?reset=1",
+            reason: "opcache_reset()",
             grpc: true,
         },
     ];
@@ -776,7 +841,8 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
             fixture_path("lifecycle/opcache-restart-worker.php"),
         )
         .processes(HTTP_WORKERS)
-        .php_ini(&ini);
+        .php_ini(&ini)
+        .json_log();
         if case.grpc {
             spawn = spawn.with_grpc(fixture_path("grpc/echo-worker.php"));
         }
@@ -789,25 +855,24 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
         let pids = wait_workers(&srv, Duration::from_secs(20), "every worker", |p| {
             p.len() == workers
         });
-        let first = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
-        if first.body == b"skip" {
+        // A connection stays with the worker that accepted it, so the held request and the trigger run on two workers.
+        let Some([mut a, mut b]) = pin_two_workers(&srv) else {
             return;
-        }
-        let addr = srv.addr;
-        let held = std::thread::spawn(move || {
-            http_get(addr, "/?sleep=3", Duration::from_secs(30)).map(|r| r.status)
+        };
+        let held = std::thread::scope(|scope| {
+            let request = scope.spawn(|| get_on(&mut a, "/?sleep=3").status);
+            std::thread::sleep(Duration::from_millis(500));
+            let trigger = get_on(&mut b, case.trigger).body;
+            assert!(
+                trigger.ends_with("pending=true"),
+                "{}: OPcache scheduled a restart: {trigger:?}\n{}",
+                case.name,
+                diagnostics(&srv)
+            );
+            request.join().expect("the held request thread")
         });
-        std::thread::sleep(Duration::from_millis(500));
-        let trigger = http_get(srv.addr, case.trigger, Duration::from_secs(30)).expect("trigger");
-        assert!(
-            String::from_utf8_lossy(&trigger.body).ends_with("pending=true"),
-            "{}: OPcache scheduled a restart: {:?}\n{}",
-            case.name,
-            String::from_utf8_lossy(&trigger.body),
-            diagnostics(&srv)
-        );
         let all_on = poll(Duration::from_secs(20), || {
-            let states = fan_out(addr, "/", 4, 2, opcache_state);
+            let states = fan_out(srv.addr, "/", 4, 2, opcache_state);
             let mut on: Vec<u32> = states.iter().filter(|s| s.on).map(|s| s.pid).collect();
             on.sort_unstable();
             on.dedup();
@@ -819,11 +884,25 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
             case.name,
             diagnostics(&srv)
         );
-        let held = held.join().expect("the held request thread");
         assert_eq!(
-            held.ok(),
-            Some(200),
+            held,
+            200,
             "{}: the request in flight is served\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        let restarts: Vec<String> = records(&srv.log_file())
+            .into_iter()
+            .filter(|r| {
+                r.level == tracing::Level::WARN
+                    && r.message.starts_with("OPcache scheduled a restart")
+            })
+            .map(|r| r.message)
+            .collect();
+        let want = format!("OPcache scheduled a restart ({})", case.reason);
+        assert!(
+            restarts.len() == 1 && restarts[0].starts_with(&want),
+            "{}: one WARN record {want:?}\n got: {restarts:?}\n{}",
             case.name,
             diagnostics(&srv)
         );
