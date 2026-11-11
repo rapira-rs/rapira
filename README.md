@@ -69,7 +69,7 @@ mode = "classic"
 rapira serve rapira.toml
 ```
 
-A worker resolves the entrypoint directory when it starts and keeps its working directory across requests. A `chdir()` in one request applies to every later request of that worker, until the worker process exits. Worker and dispatcher modes work the same way. A deploy that re-points a symlink in the entrypoint path needs a reload (SIGHUP or SIGUSR2), so new workers start in the new directory.
+Each app instance resolves the entrypoint path when it starts, enters the entrypoint directory and keeps that working directory until the next app start. A `chdir()` in one request applies to every later request of that app instance. In classic mode a worker resolves the path when it starts and at each reload. A deploy that re-points a symlink in the entrypoint path needs a reload (SIGHUP or SIGUSR2) right after the switch. The reload moves every worker to the new directory and the new code.
 
 ### Worker
 
