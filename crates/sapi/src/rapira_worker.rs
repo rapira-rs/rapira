@@ -33,7 +33,7 @@ thread_local! {
     static PREVIOUS_END: Cell<Option<zend_long>> = const { Cell::new(None) };
 }
 
-/// The zend_accel_restart_reason of a restart that OPcache scheduled in this process, until the next pull reports it. An atomic, because the hook runs inside OPcache with its lock held.
+/// The zend_accel_restart_reason of a restart that OPcache scheduled in this process, until the next pull reports it.
 static OPCACHE_SCHEDULED: AtomicI32 = AtomicI32::new(NO_RESTART);
 const NO_RESTART: i32 = -1;
 
@@ -194,10 +194,11 @@ pub(crate) unsafe extern "C" fn opcache_restart_scheduled(reason: c_int) {
 
 /// The restart runs only when no app holds OPcache, so the master reloads every pool. SIGUSR2 is the reload of the master, the parent of every worker.
 pub(crate) fn reload_for_opcache_restart() {
-    let reason = OPCACHE_SCHEDULED.swap(NO_RESTART, Ordering::Relaxed);
-    if reason == NO_RESTART {
+    // a load first: almost every pull finds no record, and a swap is a locked instruction
+    if OPCACHE_SCHEDULED.load(Ordering::Relaxed) == NO_RESTART {
         return;
     }
+    let reason = OPCACHE_SCHEDULED.swap(NO_RESTART, Ordering::Relaxed);
     // the order of zend_accel_restart_reason (ext/opcache/ZendAccelerator.h)
     let why = match reason {
         0 => "out of memory",

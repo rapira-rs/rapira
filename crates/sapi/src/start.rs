@@ -290,7 +290,7 @@ pub(crate) enum Pull {
     NoUnit,
 }
 
-/// The app pull of every mode. It applies the app rules: the quota, a reload, a cancelled unit and the cycle flags. A timed pull keeps one deadline across the entries it skips.
+/// The app pull of every mode. It applies the app rules: the quota, a reload, the OPcache restart, a cancelled unit and the cycle flags. A timed pull keeps one deadline across the entries it skips.
 /// Idle covers only the park: control returns to PHP as Active on every arm, or the master watchdog skips a worker spinning after a no-unit return. A polling worker must refresh last_activity_ms, or the watchdog TERMs it as a stuck request (`Pool::watchdog_tick`).
 pub(crate) fn pull(wait: Wait) -> Pull {
     UNIT_RX.with_borrow(|slot| {
