@@ -11,6 +11,8 @@ unsafe extern "C" fn ini_defaults(configuration_hash: *mut HashTable) {
         (c"log_errors", c"1"),
         // The execution timer also counts the CPU time of the IO threads, so the hard timeout can end the worker process while PHP waits.
         (c"hard_timeout", c"0"),
+        // An app instance holds the OPcache usage lock for its whole life, so after this timeout OPcache kills the workers that hold it (kill_all_lockers in ext/opcache/ZendAccelerator.c).
+        (c"opcache.force_restart_timeout", c"0"),
     ] {
         unsafe {
             let intern = zend_string_init_interned.expect("set by zend_startup");
