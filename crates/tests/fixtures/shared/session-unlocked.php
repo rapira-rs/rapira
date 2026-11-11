@@ -34,6 +34,19 @@ final class UnlockedStore implements SessionHandlerInterface
 	{
 		return 0;
 	}
+
+	// PHP 9.0 requires create_sid() and validateId(), and php-src master warns
+	// at the class declaration without them:
+	// https://github.com/php/php-src/blob/38169618ce1d3a2a364d628125de2174e552f248/ext/session/session.c#L3033-L3046
+	public function create_sid(): string
+	{
+		return 'shared';
+	}
+
+	public function validateId(string $id): bool
+	{
+		return true;
+	}
 }
 
 $serve = static function (): void {
