@@ -71,9 +71,10 @@ fn boot_request_startup() -> bool {
 fn run_cycle(script: &Path) -> Cycle {
     crate::exchange::cycle_reset();
     crate::quota::renew();
+    crate::context::set_script(script);
     let started = boot_request_startup();
     if started {
-        unsafe { run_script(script) };
+        unsafe { run_script(&crate::context::script().filename) };
     } else {
         error!(target: "rapira", "php_request_startup() failed");
     }

@@ -28,7 +28,7 @@ fn classic_executor(ctx: &mut Context) -> Event {
         }
         crate::context::apply_proto_num(ctx);
 
-        let failed = !run_script(std::path::Path::new(&crate::context::script().filename));
+        let failed = !run_script(&crate::context::script().filename);
         let exec_err: bool = failed && fatal_error_recorded();
         ctx.tearing_down = true;
         ctx.errored = exec_err;

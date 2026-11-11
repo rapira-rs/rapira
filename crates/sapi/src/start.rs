@@ -1,6 +1,6 @@
 use std::cell::{Cell, RefCell};
-use std::ffi::{CStr, CString};
-use std::path::{Path, PathBuf};
+use std::ffi::CStr;
+use std::path::PathBuf;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, channel};
 use std::thread;
@@ -164,7 +164,6 @@ impl Rapira {
         let (intake_tx, intake_rx) = channel::<Entry>();
         let intake = Intake::new(intake_tx, slot);
 
-        crate::context::set_script(&entrypoint);
         // SAFETY: written once, before the PHP thread that reads them exists. The name and the record are static, so the pointers stay valid.
         unsafe {
             crate::rapira_mode = match mode {
@@ -239,6 +238,7 @@ fn worker_main(mode: Mode, entrypoint: PathBuf, rx: UnitRx) {
         };
         let exit: WorkerExit = match mode {
             Mode::Classic => {
+                crate::context::set_script(&entrypoint);
                 classic_worker();
                 WorkerExit::Closed
             }
@@ -252,12 +252,10 @@ fn worker_main(mode: Mode, entrypoint: PathBuf, rx: UnitRx) {
 
 /// # Safety
 /// Requires an active request. `php_execute_script` catches a bailout itself.
-pub(crate) unsafe fn run_script(script: &Path) -> bool {
+pub(crate) unsafe fn run_script(script: &CStr) -> bool {
     unsafe {
-        let c_script: CString =
-            CString::new(script.to_string_lossy().as_bytes()).unwrap_or_default();
         let mut fh: zend_file_handle = std::mem::zeroed();
-        zend_stream_init_filename(&mut fh, c_script.as_ptr());
+        zend_stream_init_filename(&mut fh, script.as_ptr());
         fh.primary_script = true;
         let ok: bool = php_execute_script(&mut fh);
         zend_destroy_file_handle(&mut fh);

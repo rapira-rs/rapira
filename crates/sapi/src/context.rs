@@ -1,22 +1,26 @@
 use crate::{callbacks::guard, types::Context, *};
 use std::{
-    ffi::c_char,
-    os::raw::c_void,
+    cell::Cell,
+    ffi::{CString, c_char},
+    os::{raw::c_void, unix::ffi::OsStrExt},
     path::Path,
     ptr::{null, null_mut},
-    sync::OnceLock,
 };
 
-/// The script paths of this worker process, the same for every request.
+/// The script paths of the current app instance. In classic mode, the paths of every request of the worker.
 pub(crate) struct ScriptPaths {
-    pub(crate) filename: String,
+    /// `SG(request_info).path_translated` points at it while a unit runs.
+    pub(crate) filename: CString,
     pub(crate) script_name: String,
     pub(crate) document_root: String,
 }
 
-static SCRIPT: OnceLock<ScriptPaths> = OnceLock::new();
+thread_local! {
+    /// A box from `set_script`, or null. Only the PHP thread sets and reads it, and it sets it between units only.
+    static SCRIPT: Cell<*mut ScriptPaths> = const { Cell::new(null_mut()) };
+}
 
-/// Sets the script paths for all later requests. A worker process sets them once, before its first request.
+/// Sets the script paths of this thread from the configured entrypoint. Worker and dispatcher mode set them at each app start, classic mode at the worker start.
 pub(crate) fn set_script(filename: &Path) {
     let document_root = filename
         .parent()
@@ -25,17 +29,23 @@ pub(crate) fn set_script(filename: &Path) {
     let script_name = filename
         .file_name()
         .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
-    let _ = SCRIPT.set(ScriptPaths {
-        filename: filename.to_string_lossy().into_owned(),
+    let paths = Box::new(ScriptPaths {
+        filename: CString::new(filename.as_os_str().as_bytes()).unwrap_or_default(),
         script_name,
         document_root,
     });
+    let old = SCRIPT.replace(Box::into_raw(paths));
+    if !old.is_null() {
+        // SAFETY: old came from Box::into_raw above. The PHP thread replaces the paths only between units, and no reader keeps the reference past its unit.
+        drop(unsafe { Box::from_raw(old) });
+    }
 }
 
+/// Valid until the next `set_script` on this thread.
 pub(crate) fn script() -> &'static ScriptPaths {
-    SCRIPT
-        .get()
-        .expect("start_worker sets the script paths before the first request")
+    // SAFETY: the pointer is null or a live box from set_script.
+    unsafe { SCRIPT.get().as_ref() }
+        .expect("the PHP thread sets the script paths before the first request")
 }
 
 /// # Safety
@@ -91,7 +101,7 @@ pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     ri.request_method = reqc.method.as_ptr();
     ri.query_string = reqc.query.as_ptr() as *mut c_char;
     ri.request_uri = reqc.uri.as_ptr() as *mut c_char;
-    ri.path_translated = reqc.script.as_ptr() as *mut c_char;
+    ri.path_translated = script().filename.as_ptr() as *mut c_char;
     ri.content_type = reqc.ctype.as_ref().map_or(null(), |s| s.as_ptr());
     ri.content_length = ctx.req.body.len() as i64;
 }
