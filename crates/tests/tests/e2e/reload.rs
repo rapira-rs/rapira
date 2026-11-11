@@ -191,6 +191,21 @@ fn stage_releases(dir: &Path, entrypoint: &str) -> [String; 2] {
     folders
 }
 
+/// Waits until the classic worker has handled the reload. The master counts the reload before it signals the pool, so this record of the worker means that the count is visible.
+fn wait_for_the_classic_reload(srv: &Server) {
+    let log = srv.log_file();
+    let handled = poll(Duration::from_secs(10), || {
+        std::fs::read_to_string(&log)
+            .is_ok_and(|text| text.contains("reload requested; resolving the entrypoint again"))
+            .then_some(())
+    });
+    assert!(
+        handled.is_some(),
+        "the worker handles the reload\n{}",
+        diagnostics(srv)
+    );
+}
+
 /// A reload after a deploy moves the pool to release 2: its code, its working directory, its relative file reads and the root of sendFile().
 #[test]
 fn a_reload_after_a_deploy_runs_the_new_release() {
@@ -367,18 +382,7 @@ fn the_first_classic_request_after_a_reload_runs_the_new_release() {
     std::fs::write(folder.join("release.php"), "<?php return '2';\n").expect("write release.php");
     std::fs::write(folder.join("release.txt"), "2").expect("write release.txt");
     signal(srv.pid(), libc::SIGUSR2);
-    // The master counts the reload before it signals the pool, so this record of the worker means that the count is visible.
-    let log = srv.log_file();
-    let handled = poll(Duration::from_secs(10), || {
-        std::fs::read_to_string(&log)
-            .is_ok_and(|text| text.contains("reload requested; resolving the entrypoint again"))
-            .then_some(())
-    });
-    assert!(
-        handled.is_some(),
-        "the worker handles the reload\n{}",
-        diagnostics(&srv)
-    );
+    wait_for_the_classic_reload(&srv);
     assert_eq!(
         seen(&srv),
         format!("code=2 cwd={release_1} file=2"),
@@ -387,6 +391,42 @@ fn the_first_classic_request_after_a_reload_runs_the_new_release() {
     );
     drop(srv);
     let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// PHP keeps its copy of a content type that it does not parse until the request ends. With USE_ZEND_ALLOC=0 each free of PHP goes to the C library, which aborts the worker on a second free of that copy.
+#[test]
+fn a_reload_after_a_json_post_keeps_the_classic_worker() {
+    let srv = Spawn::http(Mode::Classic, fixture_path("classic/cwd.php"))
+        .env("USE_ZEND_ALLOC", "0")
+        .spawn();
+    let before = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    let posted = http_post(
+        srv.addr,
+        "/",
+        b"application/json",
+        b"{}",
+        Duration::from_secs(10),
+    )
+    .map(|r| r.status)
+    .ok();
+    assert_eq!(posted, Some(200), "the POST\n{}", diagnostics(&srv));
+    signal(srv.pid(), libc::SIGUSR2);
+    wait_for_the_classic_reload(&srv);
+    let got = http_get(srv.addr, "/", Duration::from_secs(10))
+        .map(|r| r.status)
+        .ok();
+    assert_eq!(
+        got,
+        Some(200),
+        "the first request after the reload\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(
+        worker_pids(srv.pid()),
+        before,
+        "the worker process stays\n{}",
+        diagnostics(&srv)
+    );
 }
 
 /// A one-worker server on release 1 of `deploy/breakable-worker.php`, with opcache.validate_timestamps = 0, after an in-place deploy of a release.php whose boot fails and its reload. Returns None without OPcache.

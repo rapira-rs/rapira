@@ -690,5 +690,9 @@ int rapira_request_shutdown(void) {
     // and the arena free reclaimed it; drop the stale zval without a dtor
     ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
 #endif
+    // sapi_deactivate_module frees content_type_dup and keeps the pointer, and
+    // sapi_activate clears it only for a request with a server context
+    // (main/SAPI.c). The next request can be one with no client
+    SG(request_info).content_type_dup = NULL;
     return bailed;
 }
