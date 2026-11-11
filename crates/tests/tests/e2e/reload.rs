@@ -314,11 +314,12 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
     ];
     let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
         .expect("read the shared php.ini");
-    // 223 hash slots and 84 KB of waste make OPcache schedule a restart by itself; a 1 s force timeout makes a kill happen within the test
+    // 223 hash slots and a waste threshold of 84 KB (1 % of 8 MB) make OPcache schedule a restart by itself.
+    // php-src counts the force timeout in whole seconds: with 2, a kill can start 1 to 2 s after the schedule, after the boots that follow the schedule and before the 3 s request ends.
     let ini = format!(
         "{shared}\nopcache.memory_consumption = 8\nopcache.interned_strings_buffer = 1\n\
          opcache.max_accelerated_files = 200\nopcache.max_wasted_percentage = 1\n\
-         opcache.force_restart_timeout = 1\nopcache.file_update_protection = 0\n\
+         opcache.force_restart_timeout = 2\nopcache.file_update_protection = 0\n\
          opcache.revalidate_freq = 0\n"
     );
     for case in cases {
