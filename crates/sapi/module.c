@@ -250,7 +250,27 @@ static void rapira_reset_super_global(void) {
     zend_hash_str_del_ind(&EG(symbol_table), "_SESSION",
                           sizeof("_SESSION") - 1);
 }
-// exit()/die() in 8.4+ are not bailouts: they land in EG(exception).
+// A pending throw is uncaught: the user exception handler gets it, else the
+// fatal record. Returns true for the record. exit()/die() in 8.4+ are not
+// bailouts: they land in EG(exception), and this clears them.
+static bool rapira_report_uncaught(void) {
+    if (!EG(exception)) {
+        return false;
+    }
+    if (zend_is_unwind_exit(EG(exception)) ||
+        zend_is_graceful_exit(EG(exception))) {
+        zend_clear_exception();
+        return false;
+    }
+    zend_try_exception_handler();
+    if (!EG(exception)) {
+        return false;
+    }
+    // Throwable path is E_DONT_BAIL and releases the object
+    zend_exception_error(EG(exception), E_ERROR);
+    return true;
+}
+
 int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     int outcome = RAPIRA_OK;
     zval retval;
@@ -268,30 +288,18 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
         },
         outcome, observed_base);
 
-    zend_try {
-        if (EG(exception)) {
-            if (zend_is_unwind_exit(EG(exception)) ||
-                zend_is_graceful_exit(EG(exception))) {
-                zend_clear_exception();
-            } else {
-                // the zend_try contains a bailout from the userland handler
-                zend_try_exception_handler();
-                if (EG(exception)) {
-                    outcome = RAPIRA_THROW;
-                    // Throwable path is E_DONT_BAIL and releases the object
-                    zend_exception_error(EG(exception), E_ERROR);
-                }
-            }
-        }
-    }
-    zend_catch {
-        outcome = RAPIRA_BAILOUT;
-        rapira_observer_end_to(observed_base);
-    }
-    zend_end_try();
+    // the guard contains a bailout from the userland exception handler
+    RAPIRA_GUARD(
+        if (rapira_report_uncaught()) { outcome = RAPIRA_THROW; }, outcome,
+        observed_base);
 
     // No destructor sweep per unit: it would run __destruct on live objects
     RAPIRA_OBSERVER_CLOSE(php_call_shutdown_functions(), observed_base);
+    // the handler frame is live, so zend_call_function leaves a throw of a
+    // shutdown function pending (Zend/zend_execute_API.c)
+    RAPIRA_GUARD(
+        if (rapira_report_uncaught()) { outcome = RAPIRA_THROW; }, outcome,
+        observed_base);
     // freeing the table releases closure captures, which can run __destruct
     RAPIRA_OBSERVER_CLOSE(php_free_shutdown_functions(), observed_base);
 
