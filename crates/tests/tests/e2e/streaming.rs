@@ -725,3 +725,51 @@ fn the_write_timeout_cuts_a_stalled_client_before_the_app_instance_ends() {
         );
     }
 }
+
+/// `keepalive_timeout_secs` answers 408 to a body that stops, and closes a keep-alive connection that stays idle. Each timer starts after the request is sent, so the close comes no earlier than the timeout. The 10 s reads leave 9 s for a slow runner; the 60 s default and the 30 s hyper default miss them.
+#[test]
+fn the_keepalive_timeout_ends_a_stalled_body_and_an_idle_connection() {
+    const KEEPALIVE: Duration = Duration::from_secs(1);
+    struct Case {
+        name: &'static str,
+        request: &'static [u8],
+        status: u16,
+    }
+    let cases = [
+        Case {
+            name: "a body that stops after 1 of 10 bytes",
+            request: b"POST / HTTP/1.1\r\nHost: e2e\r\nContent-Length: 10\r\n\r\nx",
+            status: 408,
+        },
+        Case {
+            name: "an idle keep-alive connection after a response",
+            request: b"GET / HTTP/1.1\r\nHost: e2e\r\n\r\n",
+            status: 200,
+        },
+    ];
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+        .http_extra(&format!("keepalive_timeout_secs = {}", KEEPALIVE.as_secs()))
+        .spawn();
+    for case in cases {
+        let mut c = Conn::open(srv.addr, T).expect("connect");
+        let sent = Instant::now();
+        c.send(case.request).expect("send");
+        let head = c
+            .read_head(T)
+            .unwrap_or_else(|e| panic!("{}: {e}\n{}", case.name, diagnostics(&srv)));
+        assert_eq!(head.status, case.status, "{}", case.name);
+        c.read_remaining(T).unwrap_or_else(|e| {
+            panic!(
+                "{}: the server closes the connection: {e}\n{}",
+                case.name,
+                diagnostics(&srv)
+            )
+        });
+        let closed = sent.elapsed();
+        assert!(
+            closed >= KEEPALIVE,
+            "{}: closed after {closed:?}, before the timeout",
+            case.name
+        );
+    }
+}
