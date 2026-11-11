@@ -362,8 +362,9 @@ int rapira_request_teardown(void) {
             php_header();
         },
         bailed, observed_base);
-    // a store without a lock serves the old session to a request that starts
-    // when the response arrives
+    // the session write comes before the response: a store without a lock
+    // serves the old session to a request that starts when the response
+    // arrives
     RAPIRA_GUARD(rapira_reset_session(), bailed, observed_base);
     rapira_rs_finish_response();
     RAPIRA_GUARD(rapira_modules_request(false), bailed, observed_base);

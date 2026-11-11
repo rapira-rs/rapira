@@ -192,6 +192,10 @@ fn the_next_request_reads_the_session_of_the_previous_response() {
         mode: Mode,
         register_shutdown: &'static str,
     }
+    struct Pinned {
+        pid: String,
+        conn: Conn,
+    }
     let cases = [
         Case {
             name: "classic mode: the session RSHUTDOWN writes the session",
@@ -214,26 +218,26 @@ fn the_next_request_reads_the_session_of_the_previous_response() {
             .processes(2)
             .env("REGISTER_SHUTDOWN", case.register_shutdown)
             .spawn();
-        let mut pinned: Vec<(String, Conn)> = Vec::new();
+        let mut pinned: Vec<Pinned> = Vec::new();
         for _ in 0..64 {
             let mut conn = Conn::open(srv.addr, READ).expect("connect");
             let body = keep_alive_get(&mut conn, "/");
             let pid = body.split(' ').next().unwrap_or_default().to_owned();
-            if pinned.iter().all(|(p, _)| *p != pid) {
-                pinned.push((pid, conn));
+            if pinned.iter().all(|p| p.pid != pid) {
+                pinned.push(Pinned { pid, conn });
             }
             if pinned.len() == 2 {
                 break;
             }
         }
-        let [(_, mut a), (pid_b, mut b)]: [(String, Conn); 2] = pinned
+        let [mut a, mut b]: [Pinned; 2] = pinned
             .try_into()
             .unwrap_or_else(|_| panic!("{}: two workers must answer", case.name));
 
-        keep_alive_get(&mut a, "/?set=new");
-        let body = keep_alive_get(&mut b, "/");
+        keep_alive_get(&mut a.conn, "/?set=new");
+        let body = keep_alive_get(&mut b.conn, "/");
 
-        assert_eq!(body, format!("{pid_b} new"), "{}", case.name);
+        assert_eq!(body, format!("{} new", b.pid), "{}", case.name);
     }
 }
 
