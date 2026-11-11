@@ -4,7 +4,7 @@ use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn, scratch_dir, slot_line};
+use crate::harness::{Server, Spawn, diagnostics, scratch_dir, slot_line};
 
 #[test]
 fn fibers_stress_classic() -> anyhow::Result<()> {
@@ -172,6 +172,30 @@ fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
             case.name
         );
     }
+    Ok(())
+}
+
+/// A memory_limit fatal error ends the app instance with a heap that has no free slot for the next small allocation. The host reads the OPcache state at the app end, and a bailout of that read stays inside the C helper: the same worker boots the app again and serves the next request.
+#[test]
+fn worker_survives_a_memory_limit_fatal_error() -> anyhow::Result<()> {
+    let srv = Spawn::http(Mode::Worker, fixture("shared/memory-limit-worker.php")).spawn();
+    let before = drain(submit(srv.addr, req("/"))?);
+    assert_eq!(before.status, 200, "before: {before:?}");
+    drain(submit(srv.addr, req("/?leak=1"))?);
+    let after = drain(submit(srv.addr, req("/"))?);
+    let pid = |body: &str| body.split_once(" boot=").map(|(pid, _)| pid.to_owned());
+    assert_eq!(
+        (after.status, pid(&after.body)),
+        (200, pid(&before.body)),
+        "the same worker serves the next request: {after:?}\n{}",
+        diagnostics(&srv)
+    );
+    assert_ne!(
+        after.body,
+        before.body,
+        "the app booted again with a new boot id\n{}",
+        diagnostics(&srv)
+    );
     Ok(())
 }
 

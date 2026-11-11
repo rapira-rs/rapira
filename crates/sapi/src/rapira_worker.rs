@@ -182,8 +182,8 @@ fn note_opcache_at_boot() {
 pub(crate) fn opcache_restart_ran() -> bool {
     OPCACHE_WAIT.get().is_some_and(|seen| {
         let mut last_restart: zend_long = 0;
-        unsafe { rapira_opcache_state(&mut last_restart) };
-        last_restart != seen
+        let state = unsafe { rapira_opcache_state(&mut last_restart) };
+        state >= 0 && last_restart != seen
     })
 }
 
