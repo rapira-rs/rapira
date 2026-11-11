@@ -122,9 +122,14 @@ impl Serving {
 
 impl Serve for Serving {
     fn spawn_tcp(&self, stream: tokio::net::TcpStream, peer: std::net::SocketAddr) {
-        let server = stream
-            .local_addr()
-            .expect("an accepted inet socket has a local address");
+        // On macOS getsockname fails with EINVAL on a socket that has been shut down: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/getsockname.2.html
+        let server = match stream.local_addr() {
+            Ok(server) => server,
+            Err(e) => {
+                tracing::debug!(target: "http", "connection from {peer} dropped: {e}");
+                return;
+            }
+        };
         self.spawn_conn(stream, Addr::Inet(peer), Addr::Inet(server));
     }
 
