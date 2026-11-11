@@ -1,4 +1,4 @@
-use tracing::error;
+use tracing::{error, info, warn};
 
 use crate::{
     callbacks::*,
@@ -6,7 +6,14 @@ use crate::{
     scoreboard::sb_update,
     start::{Pull, Wait, pull, pull_unit_to_shed, run_script},
 };
-use std::{cell::Cell, os::raw::c_int, path::Path, ptr::null_mut, time::Duration};
+use std::{
+    cell::Cell,
+    os::raw::c_int,
+    path::Path,
+    ptr::null_mut,
+    sync::atomic::{AtomicI32, Ordering},
+    time::Duration,
+};
 
 use crate::{
     callbacks::guard,
@@ -20,7 +27,20 @@ thread_local! {
     /// The next handle_request() call tears down the boot request first.
     static FIRST_CALL: Cell<bool> = const { Cell::new(true) };
     static RECYCLE: Cell<bool> = const { Cell::new(false) };
+    /// The app instance runs with OPcache off until the OPcache restart has run: the last_restart_time that the pull waits to see change.
+    pub(crate) static OPCACHE_WAIT: Cell<Option<zend_long>> = const { Cell::new(None) };
+    /// The last_restart_time at the end of the previous app instance of this thread.
+    static PREVIOUS_END: Cell<Option<zend_long>> = const { Cell::new(None) };
 }
+
+/// The zend_accel_restart_reason of a restart that OPcache scheduled in this process, until the next pull reports it. An atomic, because the hook runs inside OPcache with its lock held.
+static OPCACHE_SCHEDULED: AtomicI32 = AtomicI32::new(NO_RESTART);
+const NO_RESTART: i32 = -1;
+
+/// The flags of rapira_opcache_state().
+const OPCACHE_ON: c_int = 1;
+const OPCACHE_PENDING: c_int = 2;
+const OPCACHE_RESTARTING: c_int = 4;
 
 const UNHEALTHY_AFTER: u32 = 5;
 /// After a failed boot cycle, the worker runs the boot again when no unit arrives within this time. A load balancer that reads `/readyz` sends no requests to a pool that is not ready.
@@ -75,7 +95,12 @@ fn run_cycle(script: &Path) -> Cycle {
     crate::context::enter_entrypoint_dir();
     let started = boot_request_startup();
     if started {
+        note_opcache_at_boot();
         unsafe { run_script(&crate::context::script().filename) };
+        // the boot of the next app instance compares last_restart_time with this value
+        let mut last_restart: zend_long = 0;
+        let state = unsafe { rapira_opcache_state(&mut last_restart) };
+        PREVIOUS_END.set((state >= 0).then_some(last_restart));
     } else {
         error!(target: "rapira", "php_request_startup() failed");
     }
@@ -96,6 +121,92 @@ fn run_cycle(script: &Path) -> Cycle {
     } else {
         Cycle::Failed
     }
+}
+
+/// What an app boot does about OPcache.
+enum OpcacheBoot {
+    Run,
+    /// OPcache is on and a restart is pending: this app instance holds the usage lock, so it leaves at its first pull.
+    LeaveAtFirstPull,
+    /// OPcache is off for this app instance: it leaves when last_restart_time is no longer `seen`.
+    Wait {
+        seen: zend_long,
+    },
+}
+
+/// The boot decision from the result of rapira_opcache_state() and the last_restart_time at the end of the previous app instance.
+/// An app instance that boots while a restart is pending has OPcache off for its whole life, and the restart runs only when no app holds the usage lock (ZEND_RINIT_FUNCTION(zend_accelerator) in ext/opcache/ZendAccelerator.c).
+/// The restart clears restart_pending before it turns OPcache on, so a boot with OPcache off also waits when a restart runs now or ran after the previous app instance.
+fn opcache_boot(
+    state: c_int,
+    last_restart: zend_long,
+    previous_end: Option<zend_long>,
+) -> OpcacheBoot {
+    if state < 0 {
+        return OpcacheBoot::Run;
+    }
+    if state & OPCACHE_ON != 0 {
+        return if state & OPCACHE_PENDING != 0 {
+            OpcacheBoot::LeaveAtFirstPull
+        } else {
+            OpcacheBoot::Run
+        };
+    }
+    let restart = state & (OPCACHE_PENDING | OPCACHE_RESTARTING) != 0
+        || previous_end.is_some_and(|end| end != last_restart);
+    if restart {
+        OpcacheBoot::Wait {
+            seen: previous_end.unwrap_or(last_restart),
+        }
+    } else {
+        OpcacheBoot::Run
+    }
+}
+
+/// Reads the OPcache state one time at the app boot. Needs an active request.
+fn note_opcache_at_boot() {
+    let mut last_restart: zend_long = 0;
+    let state = unsafe { rapira_opcache_state(&mut last_restart) };
+    OPCACHE_WAIT.set(None);
+    match opcache_boot(state, last_restart, PREVIOUS_END.get()) {
+        OpcacheBoot::Run => {}
+        OpcacheBoot::LeaveAtFirstPull => crate::quota::exhaust(),
+        OpcacheBoot::Wait { seen } => {
+            info!(target: "rapira", "the app booted with OPcache off; it restarts when the OPcache restart has run");
+            OPCACHE_WAIT.set(Some(seen));
+        }
+    }
+}
+
+/// The app runs with OPcache off, and the restart that it waits for has run. Needs an active request.
+pub(crate) fn opcache_restart_ran() -> bool {
+    OPCACHE_WAIT.get().is_some_and(|seen| {
+        let mut last_restart: zend_long = 0;
+        unsafe { rapira_opcache_state(&mut last_restart) };
+        last_restart != seen
+    })
+}
+
+/// OPcache calls it on the PHP thread that schedules a restart, inside OPcache with its lock held and before it marks the restart pending, so it only stores the reason.
+pub(crate) unsafe extern "C" fn opcache_restart_scheduled(reason: c_int) {
+    OPCACHE_SCHEDULED.store(reason, Ordering::Relaxed);
+}
+
+/// The restart runs only when no app holds OPcache, so the master reloads every pool. SIGUSR2 is the reload of the master, the parent of every worker.
+pub(crate) fn reload_for_opcache_restart() {
+    let reason = OPCACHE_SCHEDULED.swap(NO_RESTART, Ordering::Relaxed);
+    if reason == NO_RESTART {
+        return;
+    }
+    // the order of zend_accel_restart_reason (ext/opcache/ZendAccelerator.h)
+    let why = match reason {
+        0 => "out of memory",
+        1 => "hash table full",
+        _ => "opcache_reset()",
+    };
+    warn!(target: "rapira", "OPcache scheduled a restart ({why}); every app restarts so that the restart can run");
+    // SAFETY: plain syscalls.
+    unsafe { libc::kill(libc::getppid(), libc::SIGUSR2) };
 }
 
 pub fn rapira_worker(script: &Path) -> WorkerExit {
@@ -247,5 +358,100 @@ fn log_and_clear_last_error() {
             );
         }
         rapira_clear_last_error();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn text(boot: &OpcacheBoot) -> String {
+        match boot {
+            OpcacheBoot::Run => "run".to_owned(),
+            OpcacheBoot::LeaveAtFirstPull => "leave at the first pull".to_owned(),
+            OpcacheBoot::Wait { seen } => format!("wait until last_restart_time is not {seen}"),
+        }
+    }
+
+    #[test]
+    fn opcache_boot_follows_the_opcache_state() {
+        struct Case {
+            name: &'static str,
+            /// The result of rapira_opcache_state().
+            state: c_int,
+            last_restart: zend_long,
+            previous_end: Option<zend_long>,
+            want: OpcacheBoot,
+        }
+        let cases = [
+            Case {
+                name: "no OPcache",
+                state: -1,
+                last_restart: 0,
+                previous_end: None,
+                want: OpcacheBoot::Run,
+            },
+            Case {
+                name: "OPcache on",
+                state: 1,
+                last_restart: 7,
+                previous_end: Some(7),
+                want: OpcacheBoot::Run,
+            },
+            Case {
+                name: "on, and a restart is pending",
+                state: 1 | 2,
+                last_restart: 7,
+                previous_end: Some(7),
+                want: OpcacheBoot::LeaveAtFirstPull,
+            },
+            Case {
+                name: "off, and a restart is pending",
+                state: 2,
+                last_restart: 7,
+                previous_end: Some(7),
+                want: OpcacheBoot::Wait { seen: 7 },
+            },
+            Case {
+                name: "off, a restart is pending, first app instance of a process",
+                state: 2,
+                last_restart: 7,
+                previous_end: None,
+                want: OpcacheBoot::Wait { seen: 7 },
+            },
+            Case {
+                name: "off, and a restart runs now",
+                state: 4,
+                last_restart: 7,
+                previous_end: Some(7),
+                want: OpcacheBoot::Wait { seen: 7 },
+            },
+            Case {
+                name: "off, and a restart ran after the previous app instance",
+                state: 0,
+                last_restart: 8,
+                previous_end: Some(7),
+                want: OpcacheBoot::Wait { seen: 7 },
+            },
+            // Known limit: a boot inside a restart can read this state, and the app then runs without OPcache until its next start.
+            Case {
+                name: "off, and no restart ran after the previous app instance",
+                state: 0,
+                last_restart: 7,
+                previous_end: Some(7),
+                want: OpcacheBoot::Run,
+            },
+            Case {
+                name: "off with no sign of a restart, first app instance of a process",
+                state: 0,
+                last_restart: 7,
+                previous_end: None,
+                want: OpcacheBoot::Run,
+            },
+        ];
+        for case in cases {
+            let got = opcache_boot(case.state, case.last_restart, case.previous_end);
+            assert_eq!(text(&got), text(&case.want), "{}", case.name);
+        }
     }
 }

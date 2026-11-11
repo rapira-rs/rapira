@@ -428,6 +428,67 @@ void rapira_child_init(void) {
     SG(options) |= SAPI_OPTION_NO_CHDIR;
 }
 
+// The OPcache state of this process as flags. Value 1: OPcache serves this app
+// instance. Value 2: a restart is pending. Value 4: a restart runs now. -1: no
+// OPcache, opcache.file_cache_only or opcache.restrict_api. *last_restart gets
+// last_restart_time, which a restart changes after it turns OPcache on again
+// (ZEND_RINIT_FUNCTION(zend_accelerator)). opcache_get_status() is the only
+// exported reader. Needs an active request.
+int rapira_opcache_state(zend_long *last_restart) {
+    // php-src refuses the API with a warning when path_translated is not under
+    // restrict_api, and the host calls run outside a unit, where it is NULL
+    // (zend_accelerator_module.c:65)
+    const char *restrict_api = INI_STR("opcache.restrict_api");
+    if (restrict_api != NULL && *restrict_api != '\0') {
+        return -1;
+    }
+    // looked up at each call: on PHP 8.4 opcache.so can load after this module
+    zend_function *fn = zend_hash_str_find_ptr(CG(function_table),
+                                               ZEND_STRL("opcache_get_status"));
+    if (fn == NULL) {
+        return -1;
+    }
+    zval scripts, status;
+    ZVAL_FALSE(&scripts);
+    zend_fcall_info fci = {
+        .size = sizeof(fci),
+        .retval = &status,
+        .params = &scripts,
+        .param_count = 1,
+    };
+    ZVAL_UNDEF(&fci.function_name);
+    zend_fcall_info_cache fcc = {.function_handler = fn};
+    // after a memory_limit fatal error every call fails
+    // (zend_execute_API.c:838), and zend_call_known_function then raises
+    // E_CORE_ERROR with no jump target
+    if (zend_call_function(&fci, &fcc) == FAILURE) {
+        return -1;
+    }
+    int state = -1;
+    // with file_cache_only the array has no restart keys
+    // (zend_accelerator_module.c:705)
+    if (Z_TYPE(status) == IS_ARRAY &&
+        !zend_hash_str_exists(Z_ARRVAL(status), ZEND_STRL("file_cache_only"))) {
+        HashTable *ht = Z_ARRVAL(status);
+        zval *on = zend_hash_str_find(ht, ZEND_STRL("opcache_enabled"));
+        zval *pending = zend_hash_str_find(ht, ZEND_STRL("restart_pending"));
+        zval *running =
+            zend_hash_str_find(ht, ZEND_STRL("restart_in_progress"));
+        zval *stats = zend_hash_str_find(ht, ZEND_STRL("opcache_statistics"));
+        zval *last = stats != NULL && Z_TYPE_P(stats) == IS_ARRAY
+                         ? zend_hash_str_find(Z_ARRVAL_P(stats),
+                                              ZEND_STRL("last_restart_time"))
+                         : NULL;
+        state = (on != NULL && Z_TYPE_P(on) == IS_TRUE ? 1 : 0) |
+                (pending != NULL && Z_TYPE_P(pending) == IS_TRUE ? 2 : 0) |
+                (running != NULL && Z_TYPE_P(running) == IS_TRUE ? 4 : 0);
+        *last_restart =
+            last != NULL && Z_TYPE_P(last) == IS_LONG ? Z_LVAL_P(last) : 0;
+    }
+    zval_ptr_dtor(&status);
+    return state;
+}
+
 // sapi_deactivate_module only NULLs the request body stream; nothing reclaims
 // the resource. The body is a memory stream, and sapi_read_standard_form_data
 // makes a temp stream.

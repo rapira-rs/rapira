@@ -48,6 +48,10 @@ unsafe extern "C" {
     pub fn rapira_ub_write(str_: *const std::os::raw::c_char, len: usize) -> usize;
 
     pub fn rapira_run_handler(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> c_int;
+    // Flags 1, 2 and 4: OPcache serves this app instance, a restart is pending, a restart runs now; -1: no OPcache. Writes last_restart_time (module.c).
+    pub fn rapira_opcache_state(last_restart: *mut zend_long) -> c_int;
 
     pub static mut rapira_module_entry: zend_module_entry;
+    // OPcache calls it in the process that schedules a restart (Zend/zend.h).
+    pub static mut zend_accel_schedule_restart_hook: Option<unsafe extern "C" fn(reason: c_int)>;
 }
