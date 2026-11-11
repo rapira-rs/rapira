@@ -17,13 +17,8 @@ struct CycleRoot {
 }
 
 thread_local! {
-    /// Cycle 0 is before the first app instance of the PHP thread, so the first sendFile() resolves the root.
-    static CYCLE_ROOT: RefCell<CycleRoot> = const {
-        RefCell::new(CycleRoot {
-            cycle: 0,
-            root: PathBuf::new(),
-        })
-    };
+    /// None until the first sendFile() of the PHP thread.
+    static CYCLE_ROOT: RefCell<Option<CycleRoot>> = const { RefCell::new(None) };
 }
 
 /// Runs once in the master before the fork; the workers inherit the value. A later call changes nothing.
@@ -35,9 +30,9 @@ pub(crate) fn set_sendfile_root(root: PathBuf) {
 fn under_root(canonical: &Path) -> bool {
     let cycle = rapira_sapi::exchange::cycle();
     CYCLE_ROOT.with_borrow_mut(|resolved| {
-        if resolved.cycle != cycle {
+        if resolved.as_ref().is_none_or(|r| r.cycle != cycle) {
             let root = SENDFILE_ROOT.get().expect("set in Server::from_settings");
-            resolved.root = std::fs::canonicalize(root).unwrap_or_else(|e| {
+            let real = std::fs::canonicalize(root).unwrap_or_else(|e| {
                 tracing::warn!(
                     target: "rapira",
                     "sendfile root {} cannot be canonicalized ({e}); sendFile() will reject every path",
@@ -45,9 +40,11 @@ fn under_root(canonical: &Path) -> bool {
                 );
                 root.clone()
             });
-            resolved.cycle = cycle;
+            *resolved = Some(CycleRoot { cycle, root: real });
         }
-        canonical.starts_with(&resolved.root)
+        resolved
+            .as_ref()
+            .is_some_and(|r| canonical.starts_with(&r.root))
     })
 }
 
