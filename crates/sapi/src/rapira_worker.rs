@@ -91,7 +91,6 @@ fn boot_request_startup() -> bool {
 
 /// Logs PG(last_error_message) before php_request_shutdown frees it (main/main.c:2024).
 fn run_cycle(script: &Path) -> Cycle {
-    crate::exchange::cycle_reset();
     crate::quota::renew();
     crate::context::resolve_script(script);
     crate::context::enter_entrypoint_dir();
@@ -99,6 +98,8 @@ fn run_cycle(script: &Path) -> Cycle {
         error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
         return Cycle::Restart;
     }
+    // the cycle number changes after the reset request, because its quiesce hook stores the number of the cycle that it ends
+    crate::exchange::cycle_reset();
     let started = boot_request_startup();
     if started {
         note_opcache_at_boot();
