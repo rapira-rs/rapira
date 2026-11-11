@@ -1,5 +1,8 @@
 use std::ops::Range;
-use std::sync::atomic::{AtomicU32, AtomicU64, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicU32, AtomicU64,
+    Ordering::{AcqRel, Acquire, Relaxed},
+};
 
 pub const SB_MAX_SLOTS: usize = 4096;
 
@@ -52,16 +55,37 @@ pub fn now_millis() -> u64 {
     ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000
 }
 
+/// The reloads of the whole server: OPcache is one cache for every pool, so one worker of any pool resets it for each reload.
+pub struct Reloads {
+    /// The reloads that the master sent.
+    sent: AtomicU64,
+    /// The highest `sent` value for which an `opcache_reset()` call has returned.
+    reset: AtomicU64,
+}
+
 /// Master-side. The mmap happens once, pre-fork, so the addresses are identical in every forked child.
 /// Callers pass a bounded count: the master derives it from its pool regions, which stop at `SB_MAX_SLOTS`.
 pub fn create(nslots: usize) -> std::io::Result<&'static [SharedSlot]> {
-    let bytes = nslots * size_of::<SharedSlot>();
+    // SAFETY: every field of SharedSlot is an atomic integer, for which zero is valid.
+    unsafe { map_zeroed(nslots) }
+}
+
+/// Master-side, one time before the first fork, as [`create`].
+pub fn create_reloads() -> std::io::Result<&'static Reloads> {
+    // SAFETY: both fields of Reloads are atomic integers, for which zero is valid.
+    Ok(&unsafe { map_zeroed::<Reloads>(1) }?[0])
+}
+
+/// `count` zero-filled values in a shared anonymous mapping.
+/// # Safety
+/// The all-zero bit pattern must be a valid `T`.
+unsafe fn map_zeroed<T>(count: usize) -> std::io::Result<&'static [T]> {
     // SAFETY:
-    // MAP_SHARED|MAP_ANONYMOUS is page-aligned and zero-filled (a valid bit pattern for every field), and the mapping is never munmap'd, so the slice is 'static.
+    // MAP_SHARED|MAP_ANONYMOUS is page-aligned and zero-filled, and the mapping is never munmap'd, so the slice is 'static.
     unsafe {
         let ptr = libc::mmap(
             std::ptr::null_mut(),
-            bytes,
+            count * size_of::<T>(),
             libc::PROT_READ | libc::PROT_WRITE,
             libc::MAP_SHARED | libc::MAP_ANONYMOUS,
             -1,
@@ -70,7 +94,26 @@ pub fn create(nslots: usize) -> std::io::Result<&'static [SharedSlot]> {
         if ptr == libc::MAP_FAILED {
             return Err(std::io::Error::last_os_error());
         }
-        Ok(std::slice::from_raw_parts(ptr.cast::<SharedSlot>(), nslots))
+        Ok(std::slice::from_raw_parts(ptr.cast::<T>(), count))
+    }
+}
+
+// The record publishes that a reset call has returned: Acquire in reset_due and AcqRel in record_reset, so a worker that skips its call sees the effects of the call that the record names.
+impl Reloads {
+    /// Master-side, before it signals the pools.
+    pub fn add_sent(&self) {
+        self.sent.fetch_add(1, Relaxed);
+    }
+
+    /// Worker-side, at each app boot, each app end and each classic request: the `sent` value to reset for, or `None` when a reset call for it has returned already.
+    pub fn reset_due(&self) -> Option<u64> {
+        let sent = self.sent.load(Relaxed);
+        (self.reset.load(Acquire) < sent).then_some(sent)
+    }
+
+    /// Worker-side, after its `opcache_reset()` call for `sent` has returned.
+    pub fn record_reset(&self, sent: u64) {
+        self.reset.fetch_max(sent, AcqRel);
     }
 }
 
@@ -127,5 +170,84 @@ mod tests {
             (3, 1, 1),
             "the counts of the first worker stay in the slot"
         );
+    }
+
+    #[test]
+    fn a_reset_is_due_until_a_reset_call_for_the_last_reload_has_returned() {
+        struct Case {
+            name: &'static str,
+            sent: u64,
+            reset_before: u64,
+            want_due: Option<u64>,
+            /// The value of the record call, None when the case makes no record call.
+            record: Option<u64>,
+            want_reset_after: u64,
+        }
+        let cases = [
+            Case {
+                name: "no reload yet",
+                sent: 0,
+                reset_before: 0,
+                want_due: None,
+                record: None,
+                want_reset_after: 0,
+            },
+            Case {
+                name: "one reload",
+                sent: 1,
+                reset_before: 0,
+                want_due: Some(1),
+                record: Some(1),
+                want_reset_after: 1,
+            },
+            Case {
+                name: "the reset of this reload is done",
+                sent: 1,
+                reset_before: 1,
+                want_due: None,
+                record: None,
+                want_reset_after: 1,
+            },
+            Case {
+                name: "two reloads before a reset",
+                sent: 2,
+                reset_before: 0,
+                want_due: Some(2),
+                record: Some(2),
+                want_reset_after: 2,
+            },
+            Case {
+                name: "a new reload after a reset",
+                sent: 2,
+                reset_before: 1,
+                want_due: Some(2),
+                record: Some(2),
+                want_reset_after: 2,
+            },
+            Case {
+                name: "a worker records an older reload after a newer one",
+                sent: 2,
+                reset_before: 2,
+                want_due: None,
+                record: Some(1),
+                want_reset_after: 2,
+            },
+        ];
+        for case in cases {
+            let reloads = Reloads {
+                sent: AtomicU64::new(case.sent),
+                reset: AtomicU64::new(case.reset_before),
+            };
+            let due = reloads.reset_due();
+            if let Some(sent) = case.record {
+                reloads.record_reset(sent);
+            }
+            assert_eq!(
+                (due, reloads.reset.load(Relaxed)),
+                (case.want_due, case.want_reset_after),
+                "{}",
+                case.name
+            );
+        }
     }
 }

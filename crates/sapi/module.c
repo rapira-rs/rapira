@@ -496,6 +496,30 @@ int rapira_opcache_state(zend_long *last_restart) {
     return state;
 }
 
+// Calls opcache_reset(). It does nothing without OPcache or with
+// opcache.restrict_api. Needs an active request. The checks and the zend_try
+// are those of rapira_opcache_state.
+void rapira_opcache_reset(void) {
+    const char *restrict_api = INI_STR("opcache.restrict_api");
+    if (restrict_api != NULL && *restrict_api != '\0') {
+        return;
+    }
+    zend_function *fn =
+        zend_hash_str_find_ptr(CG(function_table), ZEND_STRL("opcache_reset"));
+    if (fn == NULL) {
+        return;
+    }
+    zval retval;
+    zend_fcall_info fci = {
+        .size = sizeof(fci),
+        .retval = &retval,
+    };
+    ZVAL_UNDEF(&fci.function_name);
+    zend_fcall_info_cache fcc = {.function_handler = fn};
+    zend_try { zend_call_function(&fci, &fcc); }
+    zend_end_try();
+}
+
 // sapi_deactivate_module only NULLs the request body stream; nothing reclaims
 // the resource. The body is a memory stream, and sapi_read_standard_form_data
 // makes a temp stream.
