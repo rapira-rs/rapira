@@ -105,7 +105,7 @@ impl Reloads {
         self.sent.fetch_add(1, Relaxed);
     }
 
-    /// Worker-side, at each app boot, each app end and each classic request: the `sent` value to reset for, or `None` when a reset call for it has returned already.
+    /// Worker-side, before each app boot and each classic request, at each app end and in the OPcache restart hook: the `sent` value to reset for, or `None` when a reset call for it has returned already.
     pub fn reset_due(&self) -> Option<u64> {
         let sent = self.sent.load(Relaxed);
         (self.reset.load(Acquire) < sent).then_some(sent)
