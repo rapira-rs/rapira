@@ -6,7 +6,7 @@ use crate::{
     scoreboard::sb_update,
     start::{Pull, Wait, pull, pull_unit_to_shed, run_script},
 };
-use std::{cell::Cell, ffi::CString, os::raw::c_int, path::Path, ptr::null_mut, time::Duration};
+use std::{cell::Cell, os::raw::c_int, path::Path, ptr::null_mut, time::Duration};
 
 use crate::{
     callbacks::guard,
@@ -43,8 +43,8 @@ pub enum WorkerExit {
 /// https://github.com/php/php-src/blob/php-8.5.11/sapi/cli/php_cli.c#L941
 /// https://github.com/php/php-src/blob/php-8.5.11/main/php_variables.c#L881-L887
 fn boot_request_startup() -> bool {
-    let arg0 = CString::new(crate::context::script().filename.as_bytes()).unwrap_or_default();
-    let mut argv = [arg0.as_ptr().cast_mut()];
+    // php_build_argv copies the string; the script paths stay until the next app start.
+    let mut argv = [crate::context::script().filename.as_ptr().cast_mut()];
     unsafe {
         let sg = &raw mut sapi_globals;
         (*sg).request_info.argc = 1;
