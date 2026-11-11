@@ -502,7 +502,7 @@ mod tests {
             name: &'static str,
             reload_sent: bool,
             reset_recorded: bool,
-            /// OPCACHE_SCHEDULED after the hook ran with reason 2.
+            /// The record that the hook leaves after a call with reason 2.
             want: i32,
         }
         let cases = [
@@ -534,15 +534,10 @@ mod tests {
                 reloads.record_reset(reloads.reset_due().expect("a reset is due"));
             }
             RELOADS.set(Some(reloads));
-            OPCACHE_SCHEDULED.store(NO_RESTART, Ordering::Relaxed);
             unsafe { opcache_restart_scheduled(2) };
-            assert_eq!(
-                OPCACHE_SCHEDULED.load(Ordering::Relaxed),
-                case.want,
-                "{}",
-                case.name
-            );
+            // A swap right after the hook: the pull test of this crate reads the same value and signals the parent process when it finds a reason.
+            let got = OPCACHE_SCHEDULED.swap(NO_RESTART, Ordering::Relaxed);
+            assert_eq!(got, case.want, "{}", case.name);
         }
-        OPCACHE_SCHEDULED.store(NO_RESTART, Ordering::Relaxed);
     }
 }
