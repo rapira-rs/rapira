@@ -214,6 +214,12 @@ fn a_reload_after_a_deploy_runs_the_new_release() {
             entrypoint: "classic.php",
             validate_timestamps: 0,
         },
+        DeployCase {
+            name: "classic mode, symlink switch, a require through the symlink path",
+            mode: Mode::Classic,
+            entrypoint: "classic-through-current.php",
+            validate_timestamps: 1,
+        },
     ];
     let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
         .expect("read the shared php.ini");
