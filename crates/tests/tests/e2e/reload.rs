@@ -1,8 +1,10 @@
 use crate::harness::*;
 use rapira_sapi::plugin::Mode;
-use std::time::Duration;
-use tests::poll;
+use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 use tests::server_log::{app_contexts, wait_app_record};
+use tests::wire::submit;
+use tests::{drain, poll, req};
 
 /// USR2 restarts the app inside every worker: the listener and the worker processes stay, and no request fails.
 #[test]
@@ -128,4 +130,131 @@ fn a_reload_into_a_failing_boot_keeps_the_server_running() {
     wait_workers(&srv, Duration::from_secs(20), "a replacement worker", |p| {
         p.len() == 1 && p[0] != pid
     });
+}
+
+struct DeployCase {
+    name: &'static str,
+    mode: Mode,
+    /// The fixture in `deploy/` that each release folder gets as its entrypoint.
+    entrypoint: &'static str,
+    /// opcache.validate_timestamps: 0 is the usual production value.
+    validate_timestamps: u8,
+}
+
+/// The body of a `deploy/` fixture: the release of the code, the working directory and the content of release.txt.
+fn seen(srv: &Server) -> String {
+    let got = drain(submit(srv.addr, req("/")).expect("GET /"));
+    assert_eq!(got.status, 200, "\n{}", diagnostics(srv));
+    got.body
+}
+
+/// Writes `contents` to `path` with a modification time of one hour ago: OPcache caches a file only when it is older than opcache.file_update_protection (2 s), as the files of a real deploy are.
+fn write_old(path: &Path, contents: &str) {
+    std::fs::write(path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
+    std::fs::File::options()
+        .write(true)
+        .open(path)
+        .and_then(|f| f.set_modified(SystemTime::now() - Duration::from_secs(3600)))
+        .unwrap_or_else(|e| panic!("set the time of {}: {e}", path.display()));
+}
+
+/// `releases/1` and `releases/2` under `dir`, each with the entrypoint, release.php and release.txt, and `current` pointing at release 1. Returns the real path of each release folder: getcwd() reports it.
+fn stage_releases(dir: &Path, entrypoint: &str) -> [String; 2] {
+    let source = std::fs::read_to_string(fixture_path(&format!("deploy/{entrypoint}")))
+        .expect("read the deploy fixture");
+    let folders = ["1", "2"].map(|release| {
+        let folder = dir.join("releases").join(release);
+        std::fs::create_dir_all(&folder).expect("create the release folder");
+        write_old(&folder.join(entrypoint), &source);
+        write_old(
+            &folder.join("release.php"),
+            &format!("<?php return '{release}';\n"),
+        );
+        write_old(&folder.join("release.txt"), release);
+        std::fs::canonicalize(&folder)
+            .expect("canonicalize the release folder")
+            .display()
+            .to_string()
+    });
+    std::os::unix::fs::symlink("releases/1", dir.join("current")).expect("link current");
+    folders
+}
+
+/// A reload after a symlink deploy moves the pool to release 2: its code, its working directory, its relative file reads and the root of sendFile().
+#[test]
+fn a_reload_after_a_deploy_runs_the_new_release() {
+    let cases = [
+        DeployCase {
+            name: "worker mode, symlink switch",
+            mode: Mode::Worker,
+            entrypoint: "worker.php",
+            validate_timestamps: 1,
+        },
+        DeployCase {
+            name: "dispatcher mode, symlink switch, sendFile() under __DIR__",
+            mode: Mode::Dispatcher,
+            entrypoint: "dispatcher.php",
+            validate_timestamps: 1,
+        },
+        DeployCase {
+            name: "classic mode, symlink switch",
+            mode: Mode::Classic,
+            entrypoint: "classic.php",
+            validate_timestamps: 1,
+        },
+        DeployCase {
+            name: "worker mode, symlink switch, opcache.validate_timestamps = 0",
+            mode: Mode::Worker,
+            entrypoint: "worker.php",
+            validate_timestamps: 0,
+        },
+        DeployCase {
+            name: "classic mode, symlink switch, opcache.validate_timestamps = 0",
+            mode: Mode::Classic,
+            entrypoint: "classic.php",
+            validate_timestamps: 0,
+        },
+    ];
+    let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
+        .expect("read the shared php.ini");
+    for case in &cases {
+        // The OPcache values, written out so that an ambient ini file does not change them.
+        let ini = format!(
+            "{shared}\nopcache.enable = 1\nopcache.validate_timestamps = {}\nopcache.revalidate_freq = 2\n",
+            case.validate_timestamps
+        );
+        let dir: PathBuf = scratch_dir();
+        let [release_1, release_2] = stage_releases(&dir, case.entrypoint);
+        let entrypoint = dir.join("current").join(case.entrypoint);
+        let srv = Spawn::http_entrypoint(case.mode, &entrypoint.display().to_string())
+            .php_ini(&ini)
+            .spawn();
+
+        assert_eq!(
+            seen(&srv),
+            format!("code=1 cwd={release_1} file=1"),
+            "{}: before the deploy\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        let next = dir.join("current.next");
+        std::os::unix::fs::symlink("releases/2", &next).expect("link current.next");
+        std::fs::rename(&next, dir.join("current")).expect("switch current");
+        signal(srv.pid(), libc::SIGUSR2);
+
+        let want = format!("code=2 cwd={release_2} file=2");
+        let mut last = String::new();
+        let moved = poll(Duration::from_secs(10), || {
+            last = seen(&srv);
+            (last == want).then_some(())
+        });
+        assert!(
+            moved.is_some(),
+            "{}: after the deploy and the reload\n want: {want}\n last: {last}\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        drop(srv);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
 }

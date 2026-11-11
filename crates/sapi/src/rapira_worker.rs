@@ -71,7 +71,8 @@ fn boot_request_startup() -> bool {
 fn run_cycle(script: &Path) -> Cycle {
     crate::exchange::cycle_reset();
     crate::quota::renew();
-    crate::context::set_script(script);
+    crate::context::resolve_script(script);
+    crate::context::enter_entrypoint_dir();
     let started = boot_request_startup();
     if started {
         unsafe { run_script(&crate::context::script().filename) };

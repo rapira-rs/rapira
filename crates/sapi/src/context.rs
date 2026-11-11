@@ -7,7 +7,7 @@ use std::{
     ptr::{null, null_mut},
 };
 
-/// The script paths of the current app instance. In classic mode, the paths of every request of the worker.
+/// The script paths of the current app instance. In classic mode, the paths of the requests since the worker start or the last reload.
 pub(crate) struct ScriptPaths {
     /// `SG(request_info).path_translated` points at it while a unit runs.
     pub(crate) filename: CString,
@@ -16,21 +16,25 @@ pub(crate) struct ScriptPaths {
 }
 
 thread_local! {
-    /// A box from `set_script`, or null. Only the PHP thread sets and reads it, and it sets it between units only.
+    /// A box from `resolve_script`, or null. Only the PHP thread sets and reads it, and it sets it between units only.
     static SCRIPT: Cell<*mut ScriptPaths> = const { Cell::new(null_mut()) };
 }
 
-/// Sets the script paths of this thread from the configured entrypoint. Worker and dispatcher mode set them at each app start, classic mode at the worker start.
-pub(crate) fn set_script(filename: &Path) {
-    let document_root = filename
+/// Resolves the configured entrypoint to its real path and gives that path to PHP: the script file, `SCRIPT_FILENAME`, `DOCUMENT_ROOT` and the boot argv. OPcache then keys the entrypoint by the path of the release, so a symlink deploy and a reload run the new release. A path that does not resolve stays as configured.
+pub(crate) fn resolve_script(configured: &Path) {
+    let real = std::fs::canonicalize(configured).unwrap_or_else(|e| {
+        tracing::error!(target: "rapira", "resolving the entrypoint {}: {e}", configured.display());
+        configured.to_path_buf()
+    });
+    let document_root = real
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let script_name = filename
+    let script_name = real
         .file_name()
         .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
     let paths = Box::new(ScriptPaths {
-        filename: CString::new(filename.as_os_str().as_bytes()).unwrap_or_default(),
+        filename: CString::new(real.as_os_str().as_bytes()).unwrap_or_default(),
         script_name,
         document_root,
     });
@@ -41,11 +45,21 @@ pub(crate) fn set_script(filename: &Path) {
     }
 }
 
-/// Valid until the next `set_script` on this thread.
+/// Valid until the next `resolve_script` on this thread.
 pub(crate) fn script() -> &'static ScriptPaths {
-    // SAFETY: the pointer is null or a live box from set_script.
+    // SAFETY: the pointer is null or a live box from resolve_script.
     unsafe { SCRIPT.get().as_ref() }
-        .expect("the PHP thread sets the script paths before the first request")
+        .expect("the PHP thread resolves the script paths before the first request")
+}
+
+/// Enters the directory of the resolved entrypoint and empties the realpath cache of PHP, so a path through a switched symlink resolves again. A cache entry lives `realpath_cache_ttl` seconds, 120 by default.
+pub(crate) fn enter_entrypoint_dir() {
+    let dir = &script().document_root;
+    if let Err(e) = std::env::set_current_dir(dir) {
+        tracing::error!(target: "rapira", "entering the entrypoint directory {dir}: {e}");
+    }
+    // SAFETY: NTS keeps one realpath cache per process, and only the PHP thread uses it.
+    unsafe { realpath_cache_clean() };
 }
 
 /// # Safety

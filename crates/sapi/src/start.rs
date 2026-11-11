@@ -6,7 +6,7 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, TryRecvError, channel};
 use std::thread;
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
-use tracing::{debug, error, info, trace};
+use tracing::{error, info, trace};
 
 use crate::quota;
 use crate::rapira_worker::{WorkerExit, rapira_worker};
@@ -30,8 +30,10 @@ struct UnitRx {
     rx: Receiver<Entry>,
     /// The `pending` field of this worker's scoreboard slot.
     pending: &'static AtomicU64,
-    /// Classic mode runs every unit in a new cycle, so a reload has no app instance to restart and the pull ignores it.
+    /// Classic mode runs every unit in a new cycle, so a reload has no app instance to restart: the pull resolves the entrypoint again and enters its directory.
     classic: bool,
+    /// The configured entrypoint, with its symlinks.
+    entrypoint: PathBuf,
 }
 
 /// The idle wait after which the PHP thread calls `mi_collect`. mimalloc purges freed arena slices only from a page free or a collect, so an idle worker keeps the slices of the last burst committed.
@@ -188,11 +190,12 @@ impl Rapira {
                 quota::install(max_requests, stopper);
                 worker_main(
                     mode,
-                    entrypoint,
+                    entrypoint.clone(),
                     UnitRx {
                         rx: intake_rx,
                         pending,
                         classic: mode == Mode::Classic,
+                        entrypoint,
                     },
                 )
             })
@@ -238,7 +241,8 @@ fn worker_main(mode: Mode, entrypoint: PathBuf, rx: UnitRx) {
         };
         let exit: WorkerExit = match mode {
             Mode::Classic => {
-                crate::context::set_script(&entrypoint);
+                crate::context::resolve_script(&entrypoint);
+                crate::context::enter_entrypoint_dir();
                 classic_worker();
                 WorkerExit::Closed
             }
@@ -321,7 +325,9 @@ pub(crate) fn pull(wait: Wait) -> Pull {
                     return Pull::Unit(unit);
                 }
                 Ok(Entry::RestartApp) if unit_r.classic => {
-                    debug!(target: "rapira", "reload ignored: classic mode runs every unit in a new cycle");
+                    info!(target: "rapira", "reload requested; resolving the entrypoint again");
+                    crate::context::resolve_script(&unit_r.entrypoint);
+                    crate::context::enter_entrypoint_dir();
                 }
                 // The current app instance takes no more units; the next one takes the rest.
                 Ok(Entry::RestartApp) => {
@@ -404,6 +410,8 @@ mod tests {
                 rx,
                 pending: &slot.pending,
                 classic,
+                // A classic reload enters the directory of the entrypoint, so the test names a file in the current directory.
+                entrypoint: std::env::current_dir().unwrap().join("index.php"),
             })
         });
         TestWorker {
@@ -578,7 +586,7 @@ mod tests {
                 max_elapsed: NO_LIMIT,
             },
             Case {
-                name: "classic mode ignores a reload",
+                name: "a classic reload restarts nothing and the unit follows",
                 max_requests: 0,
                 classic: true,
                 feed: &[Feed::Reload, Feed::Unit],
