@@ -547,6 +547,7 @@ fn a_throw_from_a_shutdown_function_is_uncaught() -> anyhow::Result<()> {
             truncated: true,
             levels: vec![tracing::Level::ERROR],
         },
+        // last: its exception handler stays set for the later units of the app instance
         Case {
             name: "the exception handler takes it: no record",
             step: "shutdown-handled",

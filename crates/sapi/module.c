@@ -295,8 +295,8 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
 
     // No destructor sweep per unit: it would run __destruct on live objects
     RAPIRA_OBSERVER_CLOSE(php_call_shutdown_functions(), observed_base);
-    // the handler frame is live, so zend_call_function leaves a throw of a
-    // shutdown function pending (Zend/zend_execute_API.c)
+    // the internal frame of handle_request is live, so zend_call_function
+    // leaves a throw of a shutdown function pending (Zend/zend_execute_API.c)
     RAPIRA_GUARD(
         if (rapira_report_uncaught()) { outcome = RAPIRA_THROW; }, outcome,
         observed_base);
