@@ -726,7 +726,7 @@ fn the_write_timeout_cuts_a_stalled_client_before_the_app_instance_ends() {
     }
 }
 
-/// `keepalive_timeout_secs` answers 408 to a body that stops, and closes a keep-alive connection that stays idle. Each timer starts after the request is sent, so the close comes no earlier than the timeout. The 10 s reads leave 9 s for a slow runner; the 60 s default and the 30 s hyper default miss them.
+/// With `keepalive_timeout_secs`, the server answers 408 to a body that stops, and closes a keep-alive connection that stays idle. Each timer starts after the request is sent, so the close comes no earlier than the timeout. The 10 s reads leave 9 s for a slow runner; the 60 s default and the 30 s hyper default miss them.
 #[test]
 fn the_keepalive_timeout_ends_a_stalled_body_and_an_idle_connection() {
     const KEEPALIVE: Duration = Duration::from_secs(1);
