@@ -178,12 +178,13 @@ fn note_opcache_at_boot() {
     }
 }
 
-/// The app runs with OPcache off, and the restart that it waits for has run. Needs an active request.
+/// The app runs with OPcache off, and the restart that it waits for has run or the state read failed. Needs an active request.
 pub(crate) fn opcache_restart_ran() -> bool {
     OPCACHE_WAIT.get().is_some_and(|seen| {
         let mut last_restart: zend_long = 0;
         let state = unsafe { rapira_opcache_state(&mut last_restart) };
-        state >= 0 && last_restart != seen
+        // a read fails here only at the memory limit, and the app instance must end then
+        state < 0 || last_restart != seen
     })
 }
 
