@@ -428,6 +428,18 @@ void rapira_child_init(void) {
     SG(options) |= SAPI_OPTION_NO_CHDIR;
 }
 
+// NULL with opcache.restrict_api set: php-src refuses the API with a warning
+// when path_translated is not under restrict_api, and the host calls run
+// outside a unit, where it is NULL (zend_accelerator_module.c:65). Looked up at
+// each call: on PHP 8.4 opcache.so can load after this module.
+static zend_function *rapira_opcache_function(const char *name) {
+    const char *restrict_api = INI_STR("opcache.restrict_api");
+    if (restrict_api != NULL && *restrict_api != '\0') {
+        return NULL;
+    }
+    return zend_hash_str_find_ptr(CG(function_table), name, strlen(name));
+}
+
 // The OPcache state of this process as flags. Value 1: OPcache serves this app
 // instance. Value 2: a restart is pending. Value 4: a restart runs now. -1: no
 // OPcache, opcache.file_cache_only or opcache.restrict_api. *last_restart gets
@@ -435,16 +447,7 @@ void rapira_child_init(void) {
 // (ZEND_RINIT_FUNCTION(zend_accelerator)). opcache_get_status() is the only
 // exported reader. Needs an active request.
 int rapira_opcache_state(zend_long *last_restart) {
-    // php-src refuses the API with a warning when path_translated is not under
-    // restrict_api, and the host calls run outside a unit, where it is NULL
-    // (zend_accelerator_module.c:65)
-    const char *restrict_api = INI_STR("opcache.restrict_api");
-    if (restrict_api != NULL && *restrict_api != '\0') {
-        return -1;
-    }
-    // looked up at each call: on PHP 8.4 opcache.so can load after this module
-    zend_function *fn = zend_hash_str_find_ptr(CG(function_table),
-                                               ZEND_STRL("opcache_get_status"));
+    zend_function *fn = rapira_opcache_function("opcache_get_status");
     if (fn == NULL) {
         return -1;
     }
@@ -497,15 +500,10 @@ int rapira_opcache_state(zend_long *last_restart) {
 }
 
 // Calls opcache_reset(). It does nothing without OPcache or with
-// opcache.restrict_api. Needs an active request. The checks and the zend_try
-// are those of rapira_opcache_state.
+// opcache.restrict_api. Needs an active request. The zend_try is that of
+// rapira_opcache_state.
 void rapira_opcache_reset(void) {
-    const char *restrict_api = INI_STR("opcache.restrict_api");
-    if (restrict_api != NULL && *restrict_api != '\0') {
-        return;
-    }
-    zend_function *fn =
-        zend_hash_str_find_ptr(CG(function_table), ZEND_STRL("opcache_reset"));
+    zend_function *fn = rapira_opcache_function("opcache_reset");
     if (fn == NULL) {
         return;
     }

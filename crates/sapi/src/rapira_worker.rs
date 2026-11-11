@@ -207,11 +207,10 @@ pub(crate) unsafe extern "C" fn opcache_restart_scheduled(reason: c_int) {
 
 /// The restart runs only when no app holds OPcache, so the master reloads every pool. SIGUSR2 is the reload of the master, the parent of every worker.
 pub(crate) fn reload_for_opcache_restart() {
-    // a load first: almost every pull finds no record, and a swap is a locked instruction
-    if OPCACHE_SCHEDULED.load(Ordering::Relaxed) == NO_RESTART {
+    let reason = OPCACHE_SCHEDULED.swap(NO_RESTART, Ordering::Relaxed);
+    if reason == NO_RESTART {
         return;
     }
-    let reason = OPCACHE_SCHEDULED.swap(NO_RESTART, Ordering::Relaxed);
     // the order of zend_accel_restart_reason (ext/opcache/ZendAccelerator.h)
     let why = match reason {
         0 => "out of memory",
@@ -239,7 +238,7 @@ pub(crate) fn reset_opcache_before_request() -> bool {
 }
 
 /// A reload empties OPcache, as a PHP-FPM reload does. A worker calls opcache_reset() only when no reset call for the last reload has returned, and it records its call after the call. A call that finds a restart pending schedules nothing.
-/// A call from a request that holds no usage lock can schedule a second restart for one reload: it waits for the lock of OPcache while another call schedules the first restart and a third request runs it. opcache_restart_scheduled keeps the record of that second restart, and the next pull of a booted app asks the master for a reload.
+/// A call from a request that holds no usage lock can schedule a second restart for one reload: it waits for the lock of OPcache while another call schedules the first restart and a third request runs it. opcache_restart_scheduled keeps the record of that second restart, and the next pull asks the master for a reload, except the pull after a failed boot.
 /// Needs an active request: the end of each app instance in worker and dispatcher mode, and the request of reset_opcache_before_request in every mode.
 fn reset_opcache_if_due() {
     let Some(reloads) = RELOADS.get() else {
