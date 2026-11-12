@@ -433,7 +433,8 @@ void rapira_child_init(void) {
 // outside a unit, where it is NULL (zend_accelerator_module.c:65). Looked up at
 // each call: on PHP 8.4 opcache.so can load after this module.
 static zend_function *rapira_opcache_function(const char *name) {
-    const char *restrict_api = INI_STR("opcache.restrict_api");
+    const char *restrict_api =
+        zend_ini_string(ZEND_STRL("opcache.restrict_api"), 0);
     if (restrict_api != NULL && *restrict_api != '\0') {
         return NULL;
     }
