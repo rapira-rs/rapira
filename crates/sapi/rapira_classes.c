@@ -176,6 +176,14 @@ PHP_RSHUTDOWN_FUNCTION(rapira) {
         rapira_plugin_current->quiesce != NULL) {
         rapira_plugin_current->quiesce();
     }
+#ifdef HAVE_PHP_SESSION
+    // the session RSHUTDOWN runs after this one (zend_collect_module_handlers):
+    // write the session before the response leaves
+    if (PS(session_status) == php_session_active) {
+        zend_try { php_session_flush(1); }
+        zend_end_try();
+    }
+#endif
     php_header();
     rapira_rs_finish_response();
     rapira_dispatcher_release();

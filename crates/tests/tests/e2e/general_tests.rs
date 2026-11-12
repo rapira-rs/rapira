@@ -1,10 +1,11 @@
 use http::Method;
 use http::header::{CONTENT_TYPE, HeaderValue};
 use rapira_sapi::plugin::Mode;
+use std::time::Duration;
 use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn, slot_line};
+use crate::harness::{Conn, Head, Server, Spawn, slot_line};
 
 fn post(body: Vec<u8>) -> http::Request<Vec<u8>> {
     let mut r = req("/");
@@ -166,6 +167,78 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
         "a bailing save handler must not leave the previous session active (b1={b1:?}, b2={b2:?})"
     );
     Ok(())
+}
+
+const READ: Duration = Duration::from_secs(10);
+
+/// One keep-alive GET on `conn`: the body by content-length.
+fn keep_alive_get(conn: &mut Conn, path: &str) -> String {
+    conn.send(format!("GET {path} HTTP/1.1\r\nHost: e2e\r\n\r\n").as_bytes())
+        .expect("send");
+    let Head { fields, .. } = conn.read_head(READ).expect("head");
+    let length = fields
+        .iter()
+        .find(|(k, _)| k == "content-length")
+        .and_then(|(_, v)| v.parse().ok())
+        .expect("content-length");
+    String::from_utf8(conn.read_n(length, READ).expect("body")).expect("utf-8 body")
+}
+
+/// With a store that has no lock, a request that starts when the previous response arrives reads the session that the previous request wrote. Request 2 goes to the other worker, so only the order of the write and the response decides.
+#[test]
+fn the_next_request_reads_the_session_of_the_previous_response() {
+    struct Case {
+        name: &'static str,
+        mode: Mode,
+        register_shutdown: &'static str,
+    }
+    struct Pinned {
+        pid: String,
+        conn: Conn,
+    }
+    let cases = [
+        Case {
+            name: "classic mode: the session RSHUTDOWN writes the session",
+            mode: Mode::Classic,
+            register_shutdown: "0",
+        },
+        Case {
+            name: "worker mode: a handler set before the loop, register_shutdown off",
+            mode: Mode::Worker,
+            register_shutdown: "0",
+        },
+        Case {
+            name: "worker mode: a handler set before the loop, register_shutdown on",
+            mode: Mode::Worker,
+            register_shutdown: "1",
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(case.mode, fixture("shared/session-unlocked.php"))
+            .processes(2)
+            .env("REGISTER_SHUTDOWN", case.register_shutdown)
+            .spawn();
+        let mut pinned: Vec<Pinned> = Vec::new();
+        for _ in 0..64 {
+            let mut conn = Conn::open(srv.addr, READ).expect("connect");
+            let body = keep_alive_get(&mut conn, "/");
+            let pid = body.split(' ').next().unwrap_or_default().to_owned();
+            if pinned.iter().all(|p| p.pid != pid) {
+                pinned.push(Pinned { pid, conn });
+            }
+            if pinned.len() == 2 {
+                break;
+            }
+        }
+        let [mut a, mut b]: [Pinned; 2] = pinned
+            .try_into()
+            .unwrap_or_else(|_| panic!("{}: two workers must answer", case.name));
+
+        keep_alive_get(&mut a.conn, "/?set=new");
+        let body = keep_alive_get(&mut b.conn, "/");
+
+        assert_eq!(body, format!("{} new", b.pid), "{}", case.name);
+    }
 }
 
 #[test]
