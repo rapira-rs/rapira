@@ -56,6 +56,8 @@
     "zend_object", "zend_class_entry", "zval_ptr_dtor", // zval_ptr_dtor_nogc is inline-only -> use zval_ptr_dtor
     // zend_string_init is inline-only; the exported interner fn-pointer covers startup-time strings
     "zend_hash_str_update", "zend_string_init_interned",
+    // the realpath cache of the process (Zend/zend_virtual_cwd.c); each app start empties it
+    "realpath_cache_clean",
     "php_default_post_reader", "php_default_treat_data", "php_default_input_filter",
     "SAPI_HEADER_SENT_SUCCESSFULLY", "SAPI_HEADER_SEND_FAILED", "IS_STRING",
     "E_WARNING", "E_CORE_WARNING", "E_COMPILE_WARNING", "E_USER_WARNING",

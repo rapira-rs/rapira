@@ -22,7 +22,7 @@ pub fn worker_body(
     } = pool;
     // SAFETY: single-threaded here, before the PHP worker thread exists.
     unsafe { rapira_sapi::rapira_child_init() };
-    // The worker enters the entrypoint directory once and owns it from here; PHP keeps it over every script run.
+    // A start check: a worker that cannot enter the entrypoint directory exits. Each app start and each classic reload enter the directory again.
     let entrypoint_dir: &Path = entrypoint
         .parent()
         .expect("the boot check accepted a regular file");

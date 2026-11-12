@@ -134,7 +134,6 @@ pub struct ReqC {
     pub method: CString,
     pub query: CString,
     pub uri: CString,
-    pub script: CString,
     pub ctype: Option<CString>,
     pub cookie: Option<CString>,
     pub authorization: Option<CString>,
@@ -197,10 +196,6 @@ impl ReqC {
                 r.uri.split_once('?').map_or("", |(_, q)| q).as_bytes(),
             ),
             uri: cgi_cstring("REQUEST_URI", r.uri.as_bytes()),
-            script: cgi_cstring(
-                "SCRIPT_FILENAME",
-                crate::context::script().filename.as_bytes(),
-            ),
             cookie,
             authorization,
             ctype: r
@@ -369,7 +364,6 @@ pub(crate) mod tests {
                 method: CString::default(),
                 query: CString::default(),
                 uri: CString::default(),
-                script: CString::default(),
                 ctype: None,
                 cookie: None,
                 authorization: None,

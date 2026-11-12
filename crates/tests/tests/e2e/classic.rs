@@ -52,7 +52,7 @@ fn exit_in_a_frameless_callback_ends_the_reply_complete() -> anyhow::Result<()> 
     Ok(())
 }
 
-/// A worker enters the entrypoint directory once and stays there, so a userland chdir outlives the request that made it.
+/// A classic worker enters the entrypoint directory at its start and at each reload, so a userland chdir outlives the request that made it.
 #[test]
 fn classic_mode_keeps_the_working_directory_across_requests() {
     let srv = Spawn::http(Mode::Classic, harness::fixture_path("classic/cwd.php")).spawn();

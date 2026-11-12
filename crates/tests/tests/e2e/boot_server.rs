@@ -73,7 +73,11 @@ fn boot_server_follows_the_cli() -> anyhow::Result<()> {
         assert_eq!(status, 200, "{}: {body}", case.name);
 
         let name = case.fixture.rsplit('/').next().expect("file name");
-        let entrypoint = srv.dir.join("http").join(name).display().to_string();
+        // The boot gets the real path of the entrypoint.
+        let entrypoint = std::fs::canonicalize(srv.dir.join("http"))?
+            .join(name)
+            .display()
+            .to_string();
         let want = json!({
             "BOOT_PROBE": "from-env",
             "PHP_SELF": entrypoint,

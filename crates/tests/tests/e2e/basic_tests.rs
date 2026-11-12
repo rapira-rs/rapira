@@ -249,8 +249,8 @@ fn server_variables() -> anyhow::Result<()> {
             "$_SERVER missing {expected:?} (got: {body:?})"
         );
     }
-    // The spawn stages the fixture as http/server-variables.php in its scratch dir; DOCUMENT_ROOT is the directory of the entrypoint.
-    let root = srv.dir.join("http");
+    // The spawn stages the fixture as http/server-variables.php in its scratch dir; DOCUMENT_ROOT is the real path of the entrypoint directory.
+    let root = std::fs::canonicalize(srv.dir.join("http"))?;
     for expected in [
         format!(
             "[SCRIPT_FILENAME] => {}\n",
@@ -264,6 +264,52 @@ fn server_variables() -> anyhow::Result<()> {
             body.contains(&expected),
             "$_SERVER missing {expected:?} (got: {body:?})"
         );
+    }
+    Ok(())
+}
+
+/// SCRIPT_NAME and PHP_SELF are URI paths, so an entrypoint that is a symlink to a file with another name keeps its configured name. SCRIPT_FILENAME is the real path.
+#[test]
+fn script_name_keeps_the_name_of_a_symlinked_entrypoint() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        mode: Mode,
+        script: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "classic mode",
+            mode: Mode::Classic,
+            script: "<?php\necho require __DIR__ . '/values.php';\n",
+        },
+        Case {
+            name: "worker mode",
+            mode: Mode::Worker,
+            script: "<?php\n$handler = static function (): void {\n    echo require __DIR__ . '/values.php';\n};\nwhile (\\Rapira\\handle_request($handler)) {\n}\n",
+        },
+    ];
+    for case in &cases {
+        let dir = scratch_dir();
+        std::fs::copy(fixture("boot_server/values.php"), dir.join("values.php"))?;
+        std::fs::write(dir.join("front.php"), case.script)?;
+        std::os::unix::fs::symlink("front.php", dir.join("index.php"))?;
+        let srv =
+            Spawn::http_entrypoint(case.mode, &dir.join("index.php").display().to_string()).spawn();
+
+        let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
+        assert_eq!(status, 200, "{}: {body}", case.name);
+        let got: serde_json::Value = serde_json::from_str(&body)?;
+        let filename = std::fs::canonicalize(&dir)?.join("front.php");
+        assert_eq!(got["SCRIPT_NAME"], "/index.php", "{}", case.name);
+        assert_eq!(got["PHP_SELF"], "/index.php", "{}", case.name);
+        assert_eq!(
+            got["SCRIPT_FILENAME"],
+            filename.display().to_string(),
+            "{}",
+            case.name
+        );
+        drop(srv);
+        std::fs::remove_dir_all(&dir)?;
     }
     Ok(())
 }

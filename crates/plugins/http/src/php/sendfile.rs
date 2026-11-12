@@ -1,24 +1,51 @@
 //! sendFile(): the root check and the file slice frame.
 
-use std::path::PathBuf;
+use std::cell::RefCell;
+use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use super::respond::{Verb, discard_unit, send_body, throw_verb};
 use super::*;
 
+/// The configured root, with its symlinks.
 static SENDFILE_ROOT: OnceLock<PathBuf> = OnceLock::new();
+
+/// The real path of the root for the app instance of `cycle`.
+struct CycleRoot {
+    cycle: u64,
+    root: PathBuf,
+}
+
+thread_local! {
+    /// None until the first sendFile() of the PHP thread.
+    static CYCLE_ROOT: RefCell<Option<CycleRoot>> = const { RefCell::new(None) };
+}
 
 /// Runs once in the master before the fork; the workers inherit the value. A later call changes nothing.
 pub(crate) fn set_sendfile_root(root: PathBuf) {
-    let canonical = std::fs::canonicalize(&root).unwrap_or_else(|e| {
-        tracing::warn!(
-            target: "rapira",
-            "sendfile root {} cannot be canonicalized ({e}); sendFile() will reject every path",
-            root.display()
-        );
-        root
-    });
-    let _ = SENDFILE_ROOT.set(canonical);
+    let _ = SENDFILE_ROOT.set(root);
+}
+
+/// Whether `canonical` is under the root. The first call of an app instance resolves the root, so after a symlink deploy and a reload the root follows the code to the new release.
+fn under_root(canonical: &Path) -> bool {
+    let cycle = rapira_sapi::exchange::cycle();
+    CYCLE_ROOT.with_borrow_mut(|resolved| {
+        if resolved.as_ref().is_none_or(|r| r.cycle != cycle) {
+            let root = SENDFILE_ROOT.get().expect("set in Server::from_settings");
+            let real = std::fs::canonicalize(root).unwrap_or_else(|e| {
+                tracing::warn!(
+                    target: "rapira",
+                    "sendfile root {} cannot be canonicalized ({e}); sendFile() will reject every path",
+                    root.display()
+                );
+                root.clone()
+            });
+            *resolved = Some(CycleRoot { cycle, root: real });
+        }
+        resolved
+            .as_ref()
+            .is_some_and(|r| canonical.starts_with(&r.root))
+    })
 }
 
 struct FileSlice {
@@ -35,8 +62,7 @@ fn open_send_file(
     use std::os::unix::ffi::OsStrExt;
     let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
     let canonical = std::fs::canonicalize(path).map_err(|_| c"no readable file at the path")?;
-    let root = SENDFILE_ROOT.get().expect("set in Server::from_settings");
-    if !canonical.starts_with(root) {
+    if !under_root(&canonical) {
         return Err(c"the path is outside the configured sendfile root");
     }
     let file = std::fs::File::open(&canonical).map_err(|_| c"no readable file at the path")?;

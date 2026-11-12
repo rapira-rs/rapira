@@ -1,41 +1,65 @@
 use crate::{callbacks::guard, types::Context, *};
 use std::{
-    ffi::c_char,
-    os::raw::c_void,
+    cell::Cell,
+    ffi::{CString, c_char},
+    os::{raw::c_void, unix::ffi::OsStrExt},
     path::Path,
     ptr::{null, null_mut},
-    sync::OnceLock,
 };
 
-/// The script paths of this worker process, the same for every request.
+/// The script paths of the current app instance. In classic mode, the paths of the requests since the worker start or the last reload.
 pub(crate) struct ScriptPaths {
-    pub(crate) filename: String,
+    /// `SG(request_info).path_translated` points at it while a unit runs.
+    pub(crate) filename: CString,
     pub(crate) script_name: String,
     pub(crate) document_root: String,
 }
 
-static SCRIPT: OnceLock<ScriptPaths> = OnceLock::new();
+thread_local! {
+    /// A box from `resolve_script`, or null. Only the PHP thread sets and reads it, and it sets it between units only.
+    static SCRIPT: Cell<*mut ScriptPaths> = const { Cell::new(null_mut()) };
+}
 
-/// Sets the script paths for all later requests. A worker process sets them once, before its first request.
-pub(crate) fn set_script(filename: &Path) {
-    let document_root = filename
+/// Resolves the configured entrypoint to its real path and gives that path to PHP: the script file, `SCRIPT_FILENAME`, `DOCUMENT_ROOT` and the boot argv. OPcache then keys the entrypoint by the path of the release, so a symlink deploy and a reload run the new release. A path that does not resolve stays as configured.
+pub(crate) fn resolve_script(configured: &Path) {
+    let real = std::fs::canonicalize(configured).unwrap_or_else(|e| {
+        tracing::error!(target: "rapira", "resolving the entrypoint {}: {e}", configured.display());
+        configured.to_path_buf()
+    });
+    let document_root = real
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let script_name = filename
+    let script_name = configured
         .file_name()
         .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
-    let _ = SCRIPT.set(ScriptPaths {
-        filename: filename.to_string_lossy().into_owned(),
+    let paths = Box::new(ScriptPaths {
+        filename: CString::new(real.as_os_str().as_bytes()).unwrap_or_default(),
         script_name,
         document_root,
     });
+    let old = SCRIPT.replace(Box::into_raw(paths));
+    if !old.is_null() {
+        // SAFETY: old came from Box::into_raw above. The PHP thread replaces the paths only between units, and no reader keeps the reference past its unit.
+        drop(unsafe { Box::from_raw(old) });
+    }
 }
 
+/// Valid until the next `resolve_script` on this thread.
 pub(crate) fn script() -> &'static ScriptPaths {
-    SCRIPT
-        .get()
-        .expect("start_worker sets the script paths before the first request")
+    // SAFETY: the pointer is null or a live box from resolve_script.
+    unsafe { SCRIPT.get().as_ref() }
+        .expect("the PHP thread resolves the script paths before the first request")
+}
+
+/// Enters the directory of the resolved entrypoint and empties the realpath cache of PHP, so a path through a switched symlink resolves again. A cache entry lives `realpath_cache_ttl` seconds, 120 by default.
+pub(crate) fn enter_entrypoint_dir() {
+    let dir = &script().document_root;
+    if let Err(e) = std::env::set_current_dir(dir) {
+        tracing::error!(target: "rapira", "entering the entrypoint directory {dir}: {e}");
+    }
+    // SAFETY: NTS keeps one realpath cache per process, and only the PHP thread uses it.
+    unsafe { realpath_cache_clean() };
 }
 
 /// # Safety
@@ -91,7 +115,7 @@ pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     ri.request_method = reqc.method.as_ptr();
     ri.query_string = reqc.query.as_ptr() as *mut c_char;
     ri.request_uri = reqc.uri.as_ptr() as *mut c_char;
-    ri.path_translated = reqc.script.as_ptr() as *mut c_char;
+    ri.path_translated = script().filename.as_ptr() as *mut c_char;
     ri.content_type = reqc.ctype.as_ref().map_or(null(), |s| s.as_ptr());
     ri.content_length = ctx.req.body.len() as i64;
 }
