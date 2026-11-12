@@ -443,11 +443,20 @@ static zend_function *rapira_opcache_function(const char *name) {
 
 // The OPcache state of this process as flags. Value 1: OPcache serves this app
 // instance. Value 2: a restart is pending. Value 4: a restart runs now. -1: no
-// OPcache, opcache.file_cache_only or opcache.restrict_api. *last_restart gets
-// last_restart_time, which a restart changes after it turns OPcache on again
+// OPcache, opcache.file_cache_only, opcache.restrict_api or a memory_limit
+// error in this request. *last_restart gets last_restart_time, which a restart
+// changes after it turns OPcache on again
 // (ZEND_RINIT_FUNCTION(zend_accelerator)). opcache_get_status() is the only
 // exported reader. Needs an active request.
 int rapira_opcache_state(zend_long *last_restart) {
+#ifdef ZEND_HAS_OOM
+    // after a memory_limit error php-src calls no function until the request
+    // shutdown: zend_call_function() fails, and a debug build can assert
+    // https://github.com/php/php-src/blob/8eb02dbaa339613075d1c9db9f130eb7e4c8af73/Zend/zend_execute_API.c#L849-L853
+    if (ZEND_HAS_OOM()) {
+        return -1;
+    }
+#endif
     zend_function *fn = rapira_opcache_function("opcache_get_status");
     if (fn == NULL) {
         return -1;
