@@ -308,6 +308,8 @@ fn script_name_keeps_the_name_of_a_symlinked_entrypoint() -> anyhow::Result<()> 
             "{}",
             case.name
         );
+        drop(srv);
+        std::fs::remove_dir_all(&dir)?;
     }
     Ok(())
 }
