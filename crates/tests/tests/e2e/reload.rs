@@ -2,9 +2,9 @@ use crate::harness::*;
 use rapira_sapi::plugin::Mode;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-use tests::server_log::{app_contexts, wait_app_record};
+use tests::server_log::{app_contexts, records, wait_app_record};
 use tests::wire::submit;
-use tests::{drain, poll, req};
+use tests::{StatusBody, drain, poll, req};
 
 /// USR2 restarts the app inside every worker: the listener and the worker processes stay, and no request fails.
 #[test]
@@ -265,6 +265,61 @@ fn a_reload_after_a_deploy_runs_the_new_release() {
     }
 }
 
+/// The pid at the start of an answer `pid=<pid> ...`.
+fn pid_of(body: &str) -> u32 {
+    body.strip_prefix("pid=")
+        .and_then(|r| r.split(' ').next())
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("unexpected body {body:?}"))
+}
+
+/// One kept connection to each of the 2 workers of `srv`, found by the pid at the start of each answer. None when the fixture answers `skip`.
+fn pin_two_workers(srv: &Server) -> Option<[Conn; 2]> {
+    let mut pids: Vec<u32> = Vec::new();
+    let mut pinned: Vec<Conn> = Vec::new();
+    for _ in 0..200 {
+        let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
+        let body = get_on(&mut c, "/").body;
+        if body == "skip" {
+            return None;
+        }
+        let pid = pid_of(&body);
+        if !pids.contains(&pid) {
+            pids.push(pid);
+            pinned.push(c);
+        }
+        if pinned.len() == 2 {
+            break;
+        }
+    }
+    assert_eq!(
+        pinned.len(),
+        2,
+        "a connection to each worker\n{}",
+        diagnostics(srv)
+    );
+    pinned.try_into().ok()
+}
+
+/// One GET on a kept connection: the status and the body.
+fn get_on(c: &mut Conn, path: &str) -> StatusBody<String> {
+    let t = Duration::from_secs(30);
+    c.send(format!("GET {path} HTTP/1.1\r\nHost: e2e\r\n\r\n").as_bytes())
+        .expect("send the request");
+    let head = c.read_head(t).expect("read the head");
+    let len = head
+        .fields
+        .iter()
+        .find(|(k, _)| k == "content-length")
+        .and_then(|(_, v)| v.parse().ok())
+        .expect("content-length");
+    let body = c.read_n(len, t).expect("read the body");
+    StatusBody {
+        status: head.status,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    }
+}
+
 /// One answer of `opcache-restart-worker.php`.
 struct OpcacheState {
     pid: u32,
@@ -273,24 +328,21 @@ struct OpcacheState {
 }
 
 fn opcache_state(body: &str) -> OpcacheState {
-    let pid = body
-        .strip_prefix("pid=")
-        .and_then(|r| r.split(' ').next())
-        .and_then(|p| p.parse().ok())
-        .unwrap_or_else(|| panic!("unexpected body {body:?}"));
     OpcacheState {
-        pid,
+        pid: pid_of(body),
         on: body.ends_with("enabled=true pending=false"),
     }
 }
 
-/// A scheduled OPcache restart waits until no app holds OPcache. Every app of every pool restarts, the restart runs, every http worker gets OPcache back, and no worker is killed, also with a request in flight.
+/// A scheduled OPcache restart waits until no app holds OPcache. Every app of every pool restarts, the restart runs, every http worker gets OPcache back, and no worker is killed, also with a request in flight on another worker. One WARN record names the reason of the restart.
 #[test]
 fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
     struct Case {
         name: &'static str,
         /// The request that makes OPcache schedule a restart.
         trigger: &'static str,
+        /// The reason that the WARN record of the restart names.
+        reason: &'static str,
         /// A grpc pool runs next to the http pool. Its apps hold OPcache too.
         grpc: bool,
     }
@@ -299,16 +351,19 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
         Case {
             name: "opcache_reset()",
             trigger: "/?reset=1",
+            reason: "opcache_reset()",
             grpc: false,
         },
         Case {
             name: "a full hash table with wasted memory",
             trigger: "/?fill=1",
+            reason: "hash table full",
             grpc: false,
         },
         Case {
             name: "an http pool and a grpc pool",
             trigger: "/?reset=1",
+            reason: "opcache_reset()",
             grpc: true,
         },
     ];
@@ -328,7 +383,8 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
             fixture_path("lifecycle/opcache-restart-worker.php"),
         )
         .processes(HTTP_WORKERS)
-        .php_ini(&ini);
+        .php_ini(&ini)
+        .json_log();
         if case.grpc {
             spawn = spawn.with_grpc(fixture_path("grpc/echo-worker.php"));
         }
@@ -341,25 +397,24 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
         let pids = wait_workers(&srv, Duration::from_secs(20), "every worker", |p| {
             p.len() == workers
         });
-        let first = http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
-        if first.body == b"skip" {
+        // A connection stays with the worker that accepted it, so the held request and the trigger run on two workers.
+        let Some([mut a, mut b]) = pin_two_workers(&srv) else {
             return;
-        }
-        let addr = srv.addr;
-        let held = std::thread::spawn(move || {
-            http_get(addr, "/?sleep=3", Duration::from_secs(30)).map(|r| r.status)
+        };
+        let held = std::thread::scope(|scope| {
+            let request = scope.spawn(|| get_on(&mut a, "/?sleep=3").status);
+            std::thread::sleep(Duration::from_millis(500));
+            let trigger = get_on(&mut b, case.trigger).body;
+            assert!(
+                trigger.ends_with("pending=true"),
+                "{}: OPcache scheduled a restart: {trigger:?}\n{}",
+                case.name,
+                diagnostics(&srv)
+            );
+            request.join().expect("the held request thread")
         });
-        std::thread::sleep(Duration::from_millis(500));
-        let trigger = http_get(srv.addr, case.trigger, Duration::from_secs(30)).expect("trigger");
-        assert!(
-            String::from_utf8_lossy(&trigger.body).ends_with("pending=true"),
-            "{}: OPcache scheduled a restart: {:?}\n{}",
-            case.name,
-            String::from_utf8_lossy(&trigger.body),
-            diagnostics(&srv)
-        );
         let all_on = poll(Duration::from_secs(20), || {
-            let states = fan_out(addr, "/", 4, 2, opcache_state);
+            let states = fan_out(srv.addr, "/", 4, 2, opcache_state);
             let mut on: Vec<u32> = states.iter().filter(|s| s.on).map(|s| s.pid).collect();
             on.sort_unstable();
             on.dedup();
@@ -371,11 +426,25 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
             case.name,
             diagnostics(&srv)
         );
-        let held = held.join().expect("the held request thread");
         assert_eq!(
-            held.ok(),
-            Some(200),
+            held,
+            200,
             "{}: the request in flight is served\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        let restarts: Vec<String> = records(&srv.log_file())
+            .into_iter()
+            .filter(|r| {
+                r.level == tracing::Level::WARN
+                    && r.message.starts_with("OPcache scheduled a restart")
+            })
+            .map(|r| r.message)
+            .collect();
+        let want = format!("OPcache scheduled a restart ({})", case.reason);
+        assert!(
+            restarts.len() == 1 && restarts[0].starts_with(&want),
+            "{}: one WARN record {want:?}\n got: {restarts:?}\n{}",
             case.name,
             diagnostics(&srv)
         );
