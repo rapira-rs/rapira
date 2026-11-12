@@ -438,7 +438,8 @@ int rapira_opcache_state(zend_long *last_restart) {
     // php-src refuses the API with a warning when path_translated is not under
     // restrict_api, and the host calls run outside a unit, where it is NULL
     // (zend_accelerator_module.c:65)
-    const char *restrict_api = INI_STR("opcache.restrict_api");
+    const char *restrict_api =
+        zend_ini_string(ZEND_STRL("opcache.restrict_api"), 0);
     if (restrict_api != NULL && *restrict_api != '\0') {
         return -1;
     }
