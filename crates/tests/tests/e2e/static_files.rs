@@ -748,6 +748,14 @@ fn cached_entries_answer_until_they_go_stale() {
     assert_eq!(split_response(&get("/resize.css", &[])).body, b"aaaaaa");
     write_at(&resize, "aaaaaaaaa", 1_000_000);
 
+    // A rename puts a new file in place with the same mtime and the same length. Only the inode shows the difference.
+    let swap = root.join("swap.css");
+    write_at(&swap, "aaaaaa", 1_000_000);
+    assert_eq!(split_response(&get("/swap.css", &[])).body, b"aaaaaa");
+    let staged = root.join("swap.css.new");
+    write_at(&staged, "bbbbbb", 1_000_000);
+    std::fs::rename(&staged, &swap).expect("rename over swap.css");
+
     assert_eq!(split_response(&get("/kept.bin", &[])).body, b"abcdefghij");
 
     assert_eq!(split_response(&get("/gone.css", &[])).body, b"body{}");
@@ -772,6 +780,8 @@ fn cached_entries_answer_until_they_go_stale() {
     let after = get("/resize.css", &[]);
     assert_eq!(head_field(&after, "content-length"), "9");
     assert_eq!(split_response(&after).body, b"aaaaaaaaa");
+
+    assert_eq!(split_response(&get("/swap.css", &[])).body, b"bbbbbb");
 
     // A HEAD revalidation reads only the metadata. The body must survive it, so the GET after
     // the delete still answers from memory.

@@ -13,8 +13,8 @@
 //! An entry is fresh for one second. Each forked worker has its own cache. Only a change to a
 //! cached file can give stale data.
 //!
-//! The cache treats a file as changed when the mtime or the length is different. The ETag
-//! encodes the same two values.
+//! The cache treats a file as changed when the device, the inode, the mtime or the length is
+//! different. The ETag encodes only the mtime and the length.
 //!
 //! A change of permissions does not stop the cache from serving a file. `stat` needs search
 //! permission on the parent directory, not read permission on the file. To stop the cache
@@ -27,6 +27,7 @@
 use std::collections::HashMap;
 use std::future::{Ready, ready};
 use std::io::{self, Cursor, Read, Seek, SeekFrom};
+use std::os::unix::fs::MetadataExt;
 use std::path::{Path, PathBuf};
 use std::pin::Pin;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -53,6 +54,8 @@ pub(crate) struct CachedMeta {
     is_dir: bool,
     modified: Option<SystemTime>,
     len: u64,
+    dev: u64,
+    ino: u64,
 }
 
 impl CachedMeta {
@@ -61,16 +64,18 @@ impl CachedMeta {
             is_dir: meta.is_dir(),
             modified: meta.modified().ok(),
             len: meta.len(),
+            dev: meta.dev(),
+            ino: meta.ino(),
         }
     }
 
-    /// `ServeDir` builds the ETag from these two values, and `Last-Modified` from the mtime.
-    /// Equal values therefore give the client the same validators. The comparison holds no
-    /// device number and no inode number. The cache does not detect a replacement that keeps
-    /// the mtime and the length.
-    /// TODO!: probably here we need to add device and inode numbers to detect better.
+    /// A rename or a symlink switch puts another inode at the path, so the device and the
+    /// inode detect a replacement that keeps the mtime and the length.
     fn same_file(&self, other: &Self) -> bool {
-        self.modified == other.modified && self.len == other.len
+        self.modified == other.modified
+            && self.len == other.len
+            && self.dev == other.dev
+            && self.ino == other.ino
     }
 }
 
@@ -440,6 +445,8 @@ mod tests {
             is_dir: false,
             modified: Some(UNIX_EPOCH),
             len: MAX_FILE,
+            dev: 0,
+            ino: 0,
         };
         for case in cases {
             let mut store = Store::default();
@@ -569,6 +576,8 @@ mod tests {
                 is_dir: false,
                 modified: case.modified,
                 len: 1,
+                dev: 0,
+                ino: 0,
             };
             assert_eq!(meta.modified().ok(), case.served, "{}", case.name);
         }
