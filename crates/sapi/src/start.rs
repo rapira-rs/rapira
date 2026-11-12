@@ -38,6 +38,8 @@ struct UnitRx {
 
 /// The idle wait after which the PHP thread calls `mi_collect`. mimalloc purges freed arena slices only from a page free or a collect, so an idle worker keeps the slices of the last burst committed.
 const IDLE_PURGE_AFTER: Duration = Duration::from_secs(2);
+/// While the app waits for an OPcache restart, an idle pull wakes this often to look at it.
+const OPCACHE_POLL: Duration = Duration::from_secs(1);
 
 impl UnitRx {
     /// Waits for one entry, with no time limit when `timeout` is None.
@@ -181,6 +183,10 @@ impl Rapira {
             }
         };
 
+        // SAFETY: written once in this worker process, before the PHP thread exists.
+        unsafe {
+            zend_accel_schedule_restart_hook = Some(crate::rapira_worker::opcache_restart_scheduled)
+        };
         trace!(target: "rapira", "spawning worker thread");
         // PHP sets its stack limit from the stack size of this thread. 8 MiB matches the CLI and FPM main thread under the default RLIMIT_STACK. https://github.com/php/php-src/blob/php-8.5.11/Zend/zend_call_stack.c#L129-L173
         let worker: JoinHandle<()> = thread::Builder::new()
@@ -284,7 +290,7 @@ pub(crate) enum Pull {
     NoUnit,
 }
 
-/// The app pull of every mode. It applies the app rules: the quota, a reload, a cancelled unit and the cycle flags. A timed pull keeps one deadline across the entries it skips.
+/// The app pull of every mode. It applies the app rules: the quota, a reload, the OPcache restart, a cancelled unit and the cycle flags. A timed pull keeps one deadline across the entries it skips.
 /// Idle covers only the park: control returns to PHP as Active on every arm, or the master watchdog skips a worker spinning after a no-unit return. A polling worker must refresh last_activity_ms, or the watchdog TERMs it as a stuck request (`Pool::watchdog_tick`).
 pub(crate) fn pull(wait: Wait) -> Pull {
     UNIT_RX.with_borrow(|slot| {
@@ -296,21 +302,31 @@ pub(crate) fn pull(wait: Wait) -> Pull {
             Wait::For(t) => Some(Instant::now() + t),
             Wait::Forever | Wait::Never => None,
         };
+        crate::rapira_worker::reload_for_opcache_restart();
         loop {
             // The app instance took its last unit; the worker stays for the next one.
             if quota::exhausted() {
                 return Pull::Closed;
             }
+            if crate::rapira_worker::opcache_restart_ran() {
+                info!(target: "rapira", "the OPcache restart has run; restarting the app");
+                quota::exhaust();
+                return Pull::Closed;
+            }
             sb_update(Event::Idle);
+            let poll = crate::rapira_worker::OPCACHE_WAIT
+                .get()
+                .map(|_| OPCACHE_POLL);
             let got = match wait {
                 Wait::Never => unit_r.rx.try_recv().map_err(|e| match e {
                     TryRecvError::Empty => RecvTimeoutError::Timeout,
                     TryRecvError::Disconnected => RecvTimeoutError::Disconnected,
                 }),
-                Wait::Forever => unit_r.recv(None),
-                Wait::For(_) => {
-                    unit_r.recv(deadline.map(|d| d.saturating_duration_since(Instant::now())))
-                }
+                Wait::Forever => unit_r.recv(poll),
+                Wait::For(_) => unit_r.recv(deadline.map(|d| {
+                    let left = d.saturating_duration_since(Instant::now());
+                    poll.map_or(left, |p| left.min(p))
+                })),
             };
             sb_update(Event::Active);
             match got {
@@ -334,6 +350,11 @@ pub(crate) fn pull(wait: Wait) -> Pull {
                     info!(target: "rapira", "reload requested; restarting the app");
                     quota::exhaust();
                 }
+                // The poll woke up before the wait ended: the next turn looks at the restart.
+                Err(RecvTimeoutError::Timeout)
+                    if poll.is_some()
+                        && !matches!(wait, Wait::Never)
+                        && deadline.is_none_or(|d| Instant::now() < d) => {}
                 Err(RecvTimeoutError::Timeout) => return Pull::NoUnit,
                 Err(RecvTimeoutError::Disconnected) => {
                     CLOSED_SEEN.set(true);

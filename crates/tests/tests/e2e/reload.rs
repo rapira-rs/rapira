@@ -2,9 +2,9 @@ use crate::harness::*;
 use rapira_sapi::plugin::Mode;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
-use tests::server_log::{app_contexts, wait_app_record};
+use tests::server_log::{app_contexts, records, wait_app_record};
 use tests::wire::submit;
-use tests::{drain, poll, req};
+use tests::{StatusBody, drain, poll, req};
 
 /// USR2 restarts the app inside every worker: the listener and the worker processes stay, and no request fails.
 #[test]
@@ -263,4 +263,230 @@ fn a_reload_after_a_deploy_runs_the_new_release() {
         drop(srv);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// The pid at the start of an answer `pid=<pid> ...`.
+fn pid_of(body: &str) -> u32 {
+    body.strip_prefix("pid=")
+        .and_then(|r| r.split(' ').next())
+        .and_then(|p| p.parse().ok())
+        .unwrap_or_else(|| panic!("unexpected body {body:?}"))
+}
+
+/// One kept connection to each of the 2 workers of `srv`, found by the pid at the start of each answer. None when the fixture answers `skip`.
+fn pin_two_workers(srv: &Server) -> Option<[Conn; 2]> {
+    let mut pids: Vec<u32> = Vec::new();
+    let mut pinned: Vec<Conn> = Vec::new();
+    for _ in 0..200 {
+        let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
+        let body = get_on(&mut c, "/").body;
+        if body == "skip" {
+            return None;
+        }
+        let pid = pid_of(&body);
+        if !pids.contains(&pid) {
+            pids.push(pid);
+            pinned.push(c);
+        }
+        if pinned.len() == 2 {
+            break;
+        }
+    }
+    assert_eq!(
+        pinned.len(),
+        2,
+        "a connection to each worker\n{}",
+        diagnostics(srv)
+    );
+    pinned.try_into().ok()
+}
+
+/// One GET on a kept connection: the status and the body.
+fn get_on(c: &mut Conn, path: &str) -> StatusBody<String> {
+    let t = Duration::from_secs(30);
+    c.send(format!("GET {path} HTTP/1.1\r\nHost: e2e\r\n\r\n").as_bytes())
+        .expect("send the request");
+    let head = c.read_head(t).expect("read the head");
+    let len = head
+        .fields
+        .iter()
+        .find(|(k, _)| k == "content-length")
+        .and_then(|(_, v)| v.parse().ok())
+        .expect("content-length");
+    let body = c.read_n(len, t).expect("read the body");
+    StatusBody {
+        status: head.status,
+        body: String::from_utf8_lossy(&body).into_owned(),
+    }
+}
+
+/// One answer of `opcache-restart-worker.php`.
+struct OpcacheState {
+    pid: u32,
+    /// OPcache is on and no restart is pending.
+    on: bool,
+}
+
+fn opcache_state(body: &str) -> OpcacheState {
+    OpcacheState {
+        pid: pid_of(body),
+        on: body.ends_with("enabled=true pending=false"),
+    }
+}
+
+/// A scheduled OPcache restart waits until no app holds OPcache. Every app of every pool restarts, the restart runs, every http worker gets OPcache back, and no worker is killed, also with a request in flight on another worker. One WARN record names the reason of the restart.
+#[test]
+fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
+    struct Case {
+        name: &'static str,
+        /// The request that makes OPcache schedule a restart.
+        trigger: &'static str,
+        /// The reason that the WARN record of the restart names.
+        reason: &'static str,
+        /// A grpc pool runs next to the http pool. Its apps hold OPcache too.
+        grpc: bool,
+    }
+    const HTTP_WORKERS: usize = 2;
+    let cases = [
+        Case {
+            name: "opcache_reset()",
+            trigger: "/?reset=1",
+            reason: "opcache_reset()",
+            grpc: false,
+        },
+        Case {
+            name: "a full hash table with wasted memory",
+            trigger: "/?fill=1",
+            reason: "hash table full",
+            grpc: false,
+        },
+        Case {
+            name: "an http pool and a grpc pool",
+            trigger: "/?reset=1",
+            reason: "opcache_reset()",
+            grpc: true,
+        },
+    ];
+    let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
+        .expect("read the shared php.ini");
+    // 223 hash slots and a waste threshold of 84 KB (1 % of 8 MB) make OPcache schedule a restart by itself.
+    // php-src counts the force timeout in whole seconds: with 2, a kill can start 1 to 2 s after the schedule, after the boots that follow the schedule and before the 3 s request ends.
+    let ini = format!(
+        "{shared}\nopcache.memory_consumption = 8\nopcache.interned_strings_buffer = 1\n\
+         opcache.max_accelerated_files = 200\nopcache.max_wasted_percentage = 1\n\
+         opcache.force_restart_timeout = 2\nopcache.file_update_protection = 0\n\
+         opcache.revalidate_freq = 0\n"
+    );
+    for case in cases {
+        let mut spawn = Spawn::http(
+            Mode::Worker,
+            fixture_path("lifecycle/opcache-restart-worker.php"),
+        )
+        .processes(HTTP_WORKERS)
+        .php_ini(&ini)
+        .json_log();
+        if case.grpc {
+            spawn = spawn.with_grpc(fixture_path("grpc/echo-worker.php"));
+        }
+        let srv = spawn.spawn();
+        let workers = if case.grpc {
+            2 * HTTP_WORKERS
+        } else {
+            HTTP_WORKERS
+        };
+        let pids = wait_workers(&srv, Duration::from_secs(20), "every worker", |p| {
+            p.len() == workers
+        });
+        // A connection stays with the worker that accepted it, so the held request and the trigger run on two workers.
+        let Some([mut a, mut b]) = pin_two_workers(&srv) else {
+            return;
+        };
+        let held = std::thread::scope(|scope| {
+            let request = scope.spawn(|| get_on(&mut a, "/?sleep=3").status);
+            std::thread::sleep(Duration::from_millis(500));
+            let trigger = get_on(&mut b, case.trigger).body;
+            assert!(
+                trigger.ends_with("pending=true"),
+                "{}: OPcache scheduled a restart: {trigger:?}\n{}",
+                case.name,
+                diagnostics(&srv)
+            );
+            request.join().expect("the held request thread")
+        });
+        let all_on = poll(Duration::from_secs(20), || {
+            let states = fan_out(srv.addr, "/", 4, 2, opcache_state);
+            let mut on: Vec<u32> = states.iter().filter(|s| s.on).map(|s| s.pid).collect();
+            on.sort_unstable();
+            on.dedup();
+            (states.iter().all(|s| s.on) && on.len() == HTTP_WORKERS).then_some(())
+        });
+        assert!(
+            all_on.is_some(),
+            "{}: every worker has OPcache on and no restart is pending\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        assert_eq!(
+            held,
+            200,
+            "{}: the request in flight is served\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        let restarts: Vec<String> = records(&srv.log_file())
+            .into_iter()
+            .filter(|r| {
+                r.level == tracing::Level::WARN
+                    && r.message.starts_with("OPcache scheduled a restart")
+            })
+            .map(|r| r.message)
+            .collect();
+        let want = format!("OPcache scheduled a restart ({})", case.reason);
+        assert!(
+            restarts.len() == 1 && restarts[0].starts_with(&want),
+            "{}: one WARN record {want:?}\n got: {restarts:?}\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        assert_eq!(
+            worker_pids(srv.pid()),
+            pids,
+            "{}: no worker is killed\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+    }
+}
+
+/// With opcache.restrict_api set, php-src refuses the OPcache API outside a unit with a warning. The host reads no OPcache state at the app end and at the boot, so the log gets no such warning.
+#[test]
+fn a_reload_with_a_restricted_opcache_api_logs_no_warning() {
+    let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
+        .expect("read the shared php.ini");
+    let srv = Spawn::http(
+        Mode::Worker,
+        fixture_path("lifecycle/boot-log-handle-worker.php"),
+    )
+    .php_ini(&format!(
+        "{shared}\nopcache.restrict_api = \"/nonexistent\"\n"
+    ))
+    .json_log()
+    .spawn();
+    let log = srv.log_file();
+    wait_app_record(&log, "booted");
+    signal(srv.pid(), libc::SIGUSR2);
+    let booted = poll(Duration::from_secs(10), || {
+        (app_contexts(&log, "booted").len() >= 2).then_some(())
+    });
+    assert!(
+        booted.is_some(),
+        "the app booted again\n{}",
+        diagnostics(&srv)
+    );
+    let text = std::fs::read_to_string(&log).expect("read the server log");
+    assert!(
+        !text.contains("restrict_api"),
+        "a record names restrict_api\n{}",
+        diagnostics(&srv)
+    );
 }
