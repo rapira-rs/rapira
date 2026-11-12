@@ -30,7 +30,7 @@ pub(crate) fn resolve_script(configured: &Path) {
         .parent()
         .map(|p| p.to_string_lossy().into_owned())
         .unwrap_or_default();
-    let script_name = real
+    let script_name = configured
         .file_name()
         .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
     let paths = Box::new(ScriptPaths {
