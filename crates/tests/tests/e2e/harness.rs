@@ -84,7 +84,7 @@ impl Drop for Server {
     }
 }
 
-/// The bin belongs to the root package, so CARGO_BIN_EXE is unset here: locate it beside the test binary, or via `RAPIRA_BIN`, a name on PATH or a path. A relative path becomes absolute, because the master starts in the scratch dir.
+/// The bin belongs to the root package, so CARGO_BIN_EXE is unset here: locate it in the nearest directory above the test binary that holds it, or via `RAPIRA_BIN`, a name on PATH or a path. A relative path becomes absolute, because the master starts in the scratch dir.
 fn rapira_bin() -> PathBuf {
     if let Ok(p) = std::env::var("RAPIRA_BIN") {
         if !p.contains('/') {
@@ -93,17 +93,17 @@ fn rapira_bin() -> PathBuf {
         return std::path::absolute(p).expect("absolute RAPIRA_BIN");
     }
     let exe = std::env::current_exe().expect("current_exe");
-    let bin = exe
-        .parent()
-        .and_then(Path::parent)
-        .expect("target/<profile> dir")
-        .join("rapira");
-    assert!(
-        bin.exists(),
-        "rapira binary not found at {}; build it first (cargo build -p rapira_core --bin rapira) or set RAPIRA_BIN",
-        bin.display()
+    // the depth of the test binary below target/<profile> depends on the cargo version
+    for dir in exe.ancestors() {
+        let bin = dir.join("rapira");
+        if bin.is_file() {
+            return bin;
+        }
+    }
+    panic!(
+        "rapira binary not found above {}; build it first (cargo build -p rapira_core --bin rapira) or set RAPIRA_BIN",
+        exe.display()
     );
-    bin
 }
 
 /// The version that `rapira --version` prints.
