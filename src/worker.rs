@@ -85,7 +85,9 @@ pub fn spawn_signal_thread(
             stop();
             while rapira_master::wait_worker_signal() == libc::SIGUSR2 {}
             tracing::warn!(target: "rapira", "second signal; forcing worker exit");
-            std::process::exit(131);
+            // The PHP thread still runs, so no atexit handler may free what it uses. https://man7.org/linux/man-pages/man2/_exit.2.html
+            // SAFETY: _exit takes no pointers.
+            unsafe { libc::_exit(131) }
         })
         .expect("spawn worker signal thread");
 }

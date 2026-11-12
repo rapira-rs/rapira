@@ -36,7 +36,6 @@ pub(crate) fn forget_held(ptr: *const ()) {
 
 pub(crate) fn cycle_reset() {
     reclaim_current();
-    UNIT.set(None);
     CYCLE.set(CYCLE.get() + 1);
     crate::start::CLOSED_SEEN.set(false);
     crate::start::RECEIVED.set(false);
