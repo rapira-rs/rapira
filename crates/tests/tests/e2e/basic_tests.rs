@@ -526,6 +526,66 @@ fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A throw that a shutdown function of the unit leaves is uncaught, as in the CLI: the user exception handler gets it, or it fails the unit as an uncaught throw from the handler does. The body began in the handler, so a failed unit ends cut.
+#[test]
+fn a_throw_from_a_shutdown_function_is_uncaught() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        step: &'static str,
+        mark: &'static str,
+        /// The start of the body: display_errors appends the fatal text.
+        body: &'static str,
+        truncated: bool,
+        levels: Vec<tracing::Level>,
+    }
+    let cases = [
+        Case {
+            name: "no exception handler: an error record",
+            step: "shutdown",
+            mark: "Uncaught RuntimeException: SHUTDOWN-UNCAUGHT",
+            body: "ok",
+            truncated: true,
+            levels: vec![tracing::Level::ERROR],
+        },
+        // last: its exception handler stays set for the later units of the app instance
+        Case {
+            name: "the exception handler takes it: no record",
+            step: "shutdown-handled",
+            mark: "SHUTDOWN-HANDLED",
+            body: "ok handled SHUTDOWN-HANDLED",
+            truncated: false,
+            levels: vec![],
+        },
+    ];
+    let mut srv = error_levels_worker();
+    let mut bodies = Vec::new();
+    for case in &cases {
+        let resp = drain_resp(submit(srv.addr, req(&format!("/?step={}", case.step)))?);
+        let body = resp.body_string();
+        assert_eq!(resp.status(), 200, "{}: status (body {body:?})", case.name);
+        assert_eq!(resp.truncated, case.truncated, "{}: truncated", case.name);
+        bodies.push(body);
+    }
+    srv.stop();
+
+    let logged = server_log::records(&srv.log_file());
+    for (case, body) in cases.iter().zip(bodies) {
+        assert!(
+            body.starts_with(case.body),
+            "{}: want {:?} first, got {body:?}",
+            case.name,
+            case.body
+        );
+        assert_eq!(
+            php_levels(&logged, case.mark),
+            case.levels,
+            "{} (captured: {logged:?})",
+            case.name
+        );
+    }
+    Ok(())
+}
+
 /// log_errors routes an unmasked deprecation through the SAPI log callback, which reports debug.
 #[test]
 fn logged_deprecation_stays_at_debug() -> anyhow::Result<()> {

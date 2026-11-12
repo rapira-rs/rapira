@@ -18,7 +18,7 @@ $handler = static function (): void {
     Counter::$n++;
     $boom = $_GET['boom'] ?? '';
     if ($boom === 'shutdown') {
-        // the shutdown functions of a unit run with no user frame, so nothing reports the exception and it stays pending
+        // the host reports the exception that the shutdown function leaves, and the report releases it
         register_shutdown_function(static function (): void {
             throw new FatalOnRelease('from a shutdown function');
         });

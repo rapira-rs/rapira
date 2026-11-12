@@ -16,6 +16,19 @@ $handler = static function (): void {
 		case 'silent-fatal':
 			error_reporting(0);
 			throw new \RuntimeException('SILENCED-FATAL');
+		case 'shutdown':
+			register_shutdown_function(static function (): void {
+				throw new \RuntimeException('SHUTDOWN-UNCAUGHT');
+			});
+			break;
+		case 'shutdown-handled':
+			set_exception_handler(static function (\Throwable $e): void {
+				echo ' handled ', $e->getMessage();
+			});
+			register_shutdown_function(static function (): void {
+				throw new \RuntimeException('SHUTDOWN-HANDLED');
+			});
+			break;
 		case 'logged':
 			// unmasked, and with log_errors the SAPI log callback reports it as well
 			error_reporting(E_ALL);
