@@ -151,8 +151,12 @@ static void rapira_request_init(void) {
     rapira_receive_timed();
 
     if (PG(expose_php)) {
-        sapi_add_header(SAPI_PHP_VERSION_HEADER,
-                        sizeof(SAPI_PHP_VERSION_HEADER) - 1, 1);
+        // php_version() is the PHP_VERSION of the loaded libphp, which can be
+        // another patch release than the build headers (main/php_main.h)
+        char line[128];
+        int len =
+            slprintf(line, sizeof(line), "X-Powered-By: PHP/%s", php_version());
+        sapi_add_header(line, len, 1);
     }
 
     // 8.6: output_handler is a zend_string*, empty is NULL (php-src e0221be8)
