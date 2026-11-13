@@ -148,13 +148,14 @@ pub fn boot_master(register: &'static [unsafe extern "C" fn()]) -> anyhow::Resul
 
 impl Rapira {
     /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `max_requests`: the configured value, 0 = unlimited; classic mode gets no quota, the other modes get a jitter.
-    /// `slot`: the scoreboard slot this worker reports into. `stopper` stops the plugin when PHP turns unhealthy. `plugin`: the plugin of the pool; in dispatcher mode, its name and its record are the dispatcher surface that PHP sees.
+    /// `slot`: the scoreboard slot this worker reports into. `reloads`: the reload count of the server. `stopper` stops the plugin when PHP turns unhealthy. `plugin`: the plugin of the pool; in dispatcher mode, its name and its record are the dispatcher surface that PHP sees.
     /// On return, the calling thread blocks SIGPROF, and every thread it starts inherits the block.
     pub fn start_worker(
         mode: Mode,
         entrypoint: PathBuf,
         max_requests: u64,
         slot: &'static rapira_scoreboard::SharedSlot,
+        reloads: &'static rapira_scoreboard::Reloads,
         stopper: Stopper,
         plugin: &dyn Plugin,
     ) -> StartedWorker {
@@ -193,6 +194,7 @@ impl Rapira {
             .stack_size(8 << 20)
             .spawn(move || {
                 sb_set(slot);
+                crate::rapira_worker::RELOADS.set(Some(reloads));
                 quota::install(max_requests, stopper);
                 worker_main(
                     mode,

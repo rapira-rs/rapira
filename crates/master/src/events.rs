@@ -55,6 +55,7 @@ impl Master {
                 Some(StopReason::Forced)
             }
             SignalAction::Reload => {
+                self.spawner.reloads.add_sent();
                 // Each worker restarts its app on its own.
                 for p in &self.pools {
                     p.signal_all(libc::SIGUSR2);

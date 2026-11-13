@@ -40,6 +40,7 @@ pub fn worker_body(
         entrypoint,
         max_requests,
         env.slot_view,
+        env.reloads,
         stopper.clone(),
         plugin.as_ref(),
     );

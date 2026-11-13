@@ -4,7 +4,7 @@ use std::path::PathBuf;
 use std::time::Duration;
 
 use anyhow::Context as _;
-use rapira_scoreboard::{PoolRegion, SB_MAX_SLOTS, SharedSlot};
+use rapira_scoreboard::{PoolRegion, Reloads, SB_MAX_SLOTS, SharedSlot};
 
 mod events;
 mod lifeline;
@@ -83,6 +83,8 @@ pub struct WorkerEnv {
     pub board: &'static [SharedSlot],
     /// The part of `board` that each pool owns, in `MasterConfig::pools` order.
     pub regions: &'static [PoolRegion],
+    /// The reload count of the whole server.
+    pub reloads: &'static Reloads,
 }
 
 /// Why [`run`] returned; the caller picks the exit status from it.
@@ -102,6 +104,7 @@ pub fn run(
     let regions = cfg.regions()?;
     let board = rapira_scoreboard::create(regions.last().map_or(0, |r| r.slots.end))
         .context("scoreboard mmap failed")?;
+    let reloads = rapira_scoreboard::create_reloads().context("reload count mmap failed")?;
     // Built once per boot and never freed, as the board: every forked child reads the same regions.
     let regions: &'static [PoolRegion] = regions.leak();
     let self_pipe: signals::SelfPipe = signals::install_master_signals()?;
@@ -120,6 +123,7 @@ pub fn run(
         lifeline_wr,
         board,
         regions,
+        reloads,
         worker: Box::new(worker),
     };
     let mut master = events::Master::new(cfg, forker);

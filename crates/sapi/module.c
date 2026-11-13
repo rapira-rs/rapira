@@ -439,6 +439,19 @@ void rapira_child_init(void) {
     SG(options) |= SAPI_OPTION_NO_CHDIR;
 }
 
+// NULL with opcache.restrict_api set: php-src refuses the API with a warning
+// when path_translated is not under restrict_api, and the host calls run
+// outside a unit, where it is NULL (zend_accelerator_module.c:65). Looked up at
+// each call: on PHP 8.4 opcache.so can load after this module.
+static zend_function *rapira_opcache_function(const char *name) {
+    const char *restrict_api =
+        zend_ini_string(ZEND_STRL("opcache.restrict_api"), 0);
+    if (restrict_api != NULL && *restrict_api != '\0') {
+        return NULL;
+    }
+    return zend_hash_str_find_ptr(CG(function_table), name, strlen(name));
+}
+
 // The OPcache state of this process as flags. Value 1: OPcache serves this app
 // instance. Value 2: a restart is pending. Value 4: a restart runs now. -1: no
 // OPcache, opcache.file_cache_only, opcache.restrict_api or a memory_limit
@@ -455,17 +468,7 @@ int rapira_opcache_state(zend_long *last_restart) {
         return -1;
     }
 #endif
-    // php-src refuses the API with a warning when path_translated is not under
-    // restrict_api, and the host calls run outside a unit, where it is NULL
-    // (zend_accelerator_module.c:65)
-    const char *restrict_api =
-        zend_ini_string(ZEND_STRL("opcache.restrict_api"), 0);
-    if (restrict_api != NULL && *restrict_api != '\0') {
-        return -1;
-    }
-    // looked up at each call: on PHP 8.4 opcache.so can load after this module
-    zend_function *fn = zend_hash_str_find_ptr(CG(function_table),
-                                               ZEND_STRL("opcache_get_status"));
+    zend_function *fn = rapira_opcache_function("opcache_get_status");
     if (fn == NULL) {
         return -1;
     }
@@ -515,6 +518,25 @@ int rapira_opcache_state(zend_long *last_restart) {
     zend_catch { return -1; }
     zend_end_try();
     return state;
+}
+
+// Calls opcache_reset(). It does nothing without OPcache or with
+// opcache.restrict_api. Needs an active request. The zend_try is that of
+// rapira_opcache_state.
+void rapira_opcache_reset(void) {
+    zend_function *fn = rapira_opcache_function("opcache_reset");
+    if (fn == NULL) {
+        return;
+    }
+    zval retval;
+    zend_fcall_info fci = {
+        .size = sizeof(fci),
+        .retval = &retval,
+    };
+    ZVAL_UNDEF(&fci.function_name);
+    zend_fcall_info_cache fcc = {.function_handler = fn};
+    zend_try { zend_call_function(&fci, &fcc); }
+    zend_end_try();
 }
 
 // sapi_deactivate_module only NULLs the request body stream; nothing reclaims
@@ -687,5 +709,9 @@ int rapira_request_shutdown(void) {
     // and the arena free reclaimed it; drop the stale zval without a dtor
     ZVAL_UNDEF(&EG(last_fatal_error_backtrace));
 #endif
+    // sapi_deactivate_module frees content_type_dup and keeps the pointer, and
+    // sapi_activate clears it only for a request with a server context
+    // (main/SAPI.c). The next request can be one with no client
+    SG(request_info).content_type_dup = NULL;
     return bailed;
 }

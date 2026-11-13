@@ -78,26 +78,6 @@ fn usr2_restarts_an_idle_app() {
     );
 }
 
-/// Classic mode runs every request in a new request cycle, so a reload has nothing to restart and the worker keeps serving.
-#[test]
-fn a_reload_leaves_a_classic_pool_alone() {
-    let srv = Spawn::http(Mode::Classic, fixture_path("classic/cwd.php")).spawn();
-    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
-    signal(srv.pid(), libc::SIGUSR2);
-    // Nothing must happen, so the test waits a fixed time before it looks.
-    std::thread::sleep(Duration::from_secs(1));
-    let code = http_get(srv.addr, "/", Duration::from_secs(10))
-        .expect("GET /")
-        .status;
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    assert_eq!(
-        worker_pids(srv.pid()),
-        vec![pid],
-        "the worker process stays\n{}",
-        diagnostics(&srv)
-    );
-}
-
 /// A reload into code that fails its boot makes the worker unhealthy. The pool booted before the reload, so the master replaces the worker and keeps the server running.
 #[test]
 fn a_reload_into_a_failing_boot_keeps_the_server_running() {
@@ -132,11 +112,22 @@ fn a_reload_into_a_failing_boot_keeps_the_server_running() {
     });
 }
 
+/// How a deploy puts release 2 in place.
+enum Deploy {
+    /// The `current` symlink points at the folder of release 2.
+    Symlink,
+    /// Release 2 replaces the files of release 1 at the same paths.
+    InPlace,
+}
+
 struct DeployCase {
     name: &'static str,
     mode: Mode,
     /// The fixture in `deploy/` that each release folder gets as its entrypoint.
     entrypoint: &'static str,
+    deploy: Deploy,
+    /// A reload right before the deploy, so the deploy reload comes less than opcache.revalidate_freq (2 s) after an app boot.
+    reload_first: bool,
     /// opcache.validate_timestamps: 0 is the usual production value.
     validate_timestamps: u8,
 }
@@ -180,7 +171,22 @@ fn stage_releases(dir: &Path, entrypoint: &str) -> [String; 2] {
     folders
 }
 
-/// A reload after a symlink deploy moves the pool to release 2: its code, its working directory, its relative file reads and the root of sendFile().
+/// Waits until the classic worker has handled the reload. The master counts the reload before it signals the pool, so this record of the worker means that the count is visible.
+fn wait_for_the_classic_reload(srv: &Server) {
+    let log = srv.log_file();
+    let handled = poll(Duration::from_secs(10), || {
+        std::fs::read_to_string(&log)
+            .is_ok_and(|text| text.contains("reload requested; resolving the entrypoint again"))
+            .then_some(())
+    });
+    assert!(
+        handled.is_some(),
+        "the worker handles the reload\n{}",
+        diagnostics(srv)
+    );
+}
+
+/// A reload after a deploy moves the pool to release 2: its code, its working directory, its relative file reads and the root of sendFile().
 #[test]
 fn a_reload_after_a_deploy_runs_the_new_release() {
     let cases = [
@@ -188,37 +194,81 @@ fn a_reload_after_a_deploy_runs_the_new_release() {
             name: "worker mode, symlink switch",
             mode: Mode::Worker,
             entrypoint: "worker.php",
+            deploy: Deploy::Symlink,
+            reload_first: false,
             validate_timestamps: 1,
         },
         DeployCase {
             name: "dispatcher mode, symlink switch, sendFile() under __DIR__",
             mode: Mode::Dispatcher,
             entrypoint: "dispatcher.php",
+            deploy: Deploy::Symlink,
+            reload_first: false,
             validate_timestamps: 1,
         },
         DeployCase {
             name: "classic mode, symlink switch",
             mode: Mode::Classic,
             entrypoint: "classic.php",
+            deploy: Deploy::Symlink,
+            reload_first: false,
             validate_timestamps: 1,
         },
         DeployCase {
             name: "worker mode, symlink switch, opcache.validate_timestamps = 0",
             mode: Mode::Worker,
             entrypoint: "worker.php",
+            deploy: Deploy::Symlink,
+            reload_first: false,
             validate_timestamps: 0,
         },
         DeployCase {
             name: "classic mode, symlink switch, opcache.validate_timestamps = 0",
             mode: Mode::Classic,
             entrypoint: "classic.php",
+            deploy: Deploy::Symlink,
+            reload_first: false,
             validate_timestamps: 0,
         },
         DeployCase {
             name: "classic mode, symlink switch, a require through the symlink path",
             mode: Mode::Classic,
             entrypoint: "classic-through-current.php",
+            deploy: Deploy::Symlink,
+            reload_first: false,
             validate_timestamps: 1,
+        },
+        DeployCase {
+            name: "worker mode, symlink switch, a require through the symlink path",
+            mode: Mode::Worker,
+            entrypoint: "worker-through-current.php",
+            deploy: Deploy::Symlink,
+            reload_first: false,
+            validate_timestamps: 1,
+        },
+        DeployCase {
+            name: "worker mode, in-place change less than 1 s after a reload",
+            mode: Mode::Worker,
+            entrypoint: "worker.php",
+            deploy: Deploy::InPlace,
+            reload_first: true,
+            validate_timestamps: 1,
+        },
+        DeployCase {
+            name: "worker mode, in-place change, opcache.validate_timestamps = 0",
+            mode: Mode::Worker,
+            entrypoint: "worker.php",
+            deploy: Deploy::InPlace,
+            reload_first: false,
+            validate_timestamps: 0,
+        },
+        DeployCase {
+            name: "classic mode, in-place change, opcache.validate_timestamps = 0",
+            mode: Mode::Classic,
+            entrypoint: "classic.php",
+            deploy: Deploy::InPlace,
+            reload_first: false,
+            validate_timestamps: 0,
         },
     ];
     let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
@@ -234,6 +284,7 @@ fn a_reload_after_a_deploy_runs_the_new_release() {
         let entrypoint = dir.join("current").join(case.entrypoint);
         let srv = Spawn::http_entrypoint(case.mode, &entrypoint.display().to_string())
             .php_ini(&ini)
+            .json_log()
             .spawn();
 
         assert_eq!(
@@ -243,12 +294,36 @@ fn a_reload_after_a_deploy_runs_the_new_release() {
             case.name,
             diagnostics(&srv)
         );
-        let next = dir.join("current.next");
-        std::os::unix::fs::symlink("releases/2", &next).expect("link current.next");
-        std::fs::rename(&next, dir.join("current")).expect("switch current");
+        if case.reload_first {
+            signal(srv.pid(), libc::SIGUSR2);
+            let log = srv.log_file();
+            let rebooted = poll(Duration::from_secs(10), || {
+                (app_contexts(&log, "booted").len() >= 2).then_some(())
+            });
+            assert!(
+                rebooted.is_some(),
+                "{}: the first reload boots the app again\n{}",
+                case.name,
+                diagnostics(&srv)
+            );
+        }
+        let want = match case.deploy {
+            Deploy::Symlink => {
+                let next = dir.join("current.next");
+                std::os::unix::fs::symlink("releases/2", &next).expect("link current.next");
+                std::fs::rename(&next, dir.join("current")).expect("switch current");
+                format!("code=2 cwd={release_2} file=2")
+            }
+            Deploy::InPlace => {
+                let folder = dir.join("releases/1");
+                std::fs::write(folder.join("release.php"), "<?php return '2';\n")
+                    .expect("write release.php");
+                std::fs::write(folder.join("release.txt"), "2").expect("write release.txt");
+                format!("code=2 cwd={release_1} file=2")
+            }
+        };
         signal(srv.pid(), libc::SIGUSR2);
 
-        let want = format!("code=2 cwd={release_2} file=2");
         let mut last = String::new();
         let moved = poll(Duration::from_secs(10), || {
             last = seen(&srv);
@@ -263,6 +338,337 @@ fn a_reload_after_a_deploy_runs_the_new_release() {
         drop(srv);
         let _ = std::fs::remove_dir_all(&dir);
     }
+}
+
+/// In classic mode the first request after a reload runs the new release, also with opcache.validate_timestamps = 0.
+#[test]
+fn the_first_classic_request_after_a_reload_runs_the_new_release() {
+    let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
+        .expect("read the shared php.ini");
+    let ini = format!("{shared}\nopcache.enable = 1\nopcache.validate_timestamps = 0\n");
+    let dir: PathBuf = scratch_dir();
+    let [release_1, _] = stage_releases(&dir, "classic.php");
+    let entrypoint = dir.join("current").join("classic.php");
+    let srv = Spawn::http_entrypoint(Mode::Classic, &entrypoint.display().to_string())
+        .php_ini(&ini)
+        .spawn();
+    assert_eq!(
+        seen(&srv),
+        format!("code=1 cwd={release_1} file=1"),
+        "before the deploy\n{}",
+        diagnostics(&srv)
+    );
+    let folder = dir.join("releases/1");
+    std::fs::write(folder.join("release.php"), "<?php return '2';\n").expect("write release.php");
+    std::fs::write(folder.join("release.txt"), "2").expect("write release.txt");
+    signal(srv.pid(), libc::SIGUSR2);
+    wait_for_the_classic_reload(&srv);
+    assert_eq!(
+        seen(&srv),
+        format!("code=2 cwd={release_1} file=2"),
+        "the first request after the reload\n{}",
+        diagnostics(&srv)
+    );
+    drop(srv);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// PHP keeps its copy of a content type that it does not parse until the request ends. With USE_ZEND_ALLOC=0 each free of PHP goes to the C library, which aborts the worker on a second free of that copy.
+#[test]
+fn a_reload_after_a_json_post_keeps_the_classic_worker() {
+    let srv = Spawn::http(Mode::Classic, fixture_path("classic/cwd.php"))
+        .env("USE_ZEND_ALLOC", "0")
+        .spawn();
+    let before = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    let posted = http_post(
+        srv.addr,
+        "/",
+        b"application/json",
+        b"{}",
+        Duration::from_secs(10),
+    )
+    .map(|r| r.status)
+    .ok();
+    assert_eq!(posted, Some(200), "the POST\n{}", diagnostics(&srv));
+    signal(srv.pid(), libc::SIGUSR2);
+    wait_for_the_classic_reload(&srv);
+    let got = http_get(srv.addr, "/", Duration::from_secs(10))
+        .map(|r| r.status)
+        .ok();
+    assert_eq!(
+        got,
+        Some(200),
+        "the first request after the reload\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(
+        worker_pids(srv.pid()),
+        before,
+        "the worker process stays\n{}",
+        diagnostics(&srv)
+    );
+}
+
+/// A one-worker server on release 1 of `deploy/breakable-worker.php`, with opcache.validate_timestamps = 0, after an in-place deploy of a release.php whose boot fails and its reload. Returns None without OPcache.
+fn breakable_server(dir: &Path) -> Option<Server> {
+    let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
+        .expect("read the shared php.ini");
+    // With file_update_protection = 0, OPcache caches the broken release.php at the first failed boot.
+    let ini = format!(
+        "{shared}\nopcache.enable = 1\nopcache.validate_timestamps = 0\nopcache.file_update_protection = 0\n"
+    );
+    stage_releases(dir, "breakable-worker.php");
+    let entrypoint = dir.join("current/breakable-worker.php");
+    let srv = Spawn::http_entrypoint(Mode::Worker, &entrypoint.display().to_string())
+        .php_ini(&ini)
+        .json_log()
+        .spawn();
+    let first = seen(&srv);
+    if first == "skip" {
+        return None;
+    }
+    assert_eq!(first, "code=1", "before the deploy\n{}", diagnostics(&srv));
+    std::fs::write(
+        dir.join("releases/1/release.php"),
+        "<?php return 'broken';\n",
+    )
+    .expect("write the broken release.php");
+    signal(srv.pid(), libc::SIGUSR2);
+    Some(srv)
+}
+
+/// Polls GET / until it answers 200 with code=2. Fails with the last answer when the time runs out.
+fn wait_for_code_2(srv: &Server, within: Duration) {
+    let mut last = String::new();
+    let fixed = poll(within, || {
+        last = match http_get(srv.addr, "/", Duration::from_secs(10)) {
+            Ok(r) => format!("{} {}", r.status, String::from_utf8_lossy(&r.body)),
+            Err(e) => format!("error {e}"),
+        };
+        (last == "200 code=2").then_some(())
+    });
+    assert!(
+        fixed.is_some(),
+        "after the fix and the reload\n want: 200 code=2\n last: {last}\n{}",
+        diagnostics(srv)
+    );
+}
+
+/// A reload that reaches a worker after a failed boot also empties OPcache. So after an in-place fix of a release whose boot fails, one reload runs the fix, also with opcache.validate_timestamps = 0. The reload starts no boot of the broken release.
+#[test]
+fn a_reload_after_a_failed_boot_runs_the_fixed_release() {
+    let dir: PathBuf = scratch_dir();
+    let Some(srv) = breakable_server(&dir) else {
+        return;
+    };
+    let log = srv.log_file();
+    let failed = poll(Duration::from_secs(10), || {
+        (!app_contexts(&log, "boot failed").is_empty()).then_some(())
+    });
+    assert!(
+        failed.is_some(),
+        "the broken release fails its boot\n{}",
+        diagnostics(&srv)
+    );
+    std::fs::write(dir.join("releases/1/release.php"), "<?php return '2';\n")
+        .expect("write the fixed release.php");
+    signal(srv.pid(), libc::SIGUSR2);
+    // No request arrives before the fixed release has booted: a request that reaches the worker before the reload starts one more boot of the broken release.
+    let booted = poll(Duration::from_secs(10), || {
+        app_contexts(&log, "booted")
+            .iter()
+            .filter_map(|c| serde_json::from_str::<serde_json::Value>(c).ok())
+            .any(|ctx| ctx["code"] == "2")
+            .then_some(())
+    });
+    assert!(
+        booted.is_some(),
+        "the fixed release boots after the reload\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(
+        app_contexts(&log, "boot failed").len(),
+        1,
+        "the reload starts no boot of the broken release\n{}",
+        diagnostics(&srv)
+    );
+    wait_for_code_2(&srv, Duration::from_secs(10));
+    drop(srv);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A reload that finds no live worker process. Under steady traffic a worker whose boot fails ends as unhealthy, and the master forks the next one after a growing delay. That worker has no reload entry: its boot reads the reload count and makes the reset call before the app starts, and it runs the fixed release, also with opcache.validate_timestamps = 0.
+#[test]
+fn a_reload_with_no_live_worker_runs_the_fixed_release() {
+    let dir: PathBuf = scratch_dir();
+    let Some(srv) = breakable_server(&dir) else {
+        return;
+    };
+    // Each shed request starts the next boot, so 5 failed boots soon end the process.
+    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let traffic = {
+        let stop = std::sync::Arc::clone(&stop);
+        let addr = srv.addr;
+        std::thread::spawn(move || {
+            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
+                let _ = http_get(addr, "/", Duration::from_secs(1));
+                std::thread::sleep(Duration::from_millis(50));
+            }
+        })
+    };
+    let gone = poll(Duration::from_secs(30), || {
+        worker_pids(srv.pid()).is_empty().then_some(())
+    });
+    // A respawn can come before the reload. The reload then reaches a live worker, and the test checks that sequence.
+    std::fs::write(dir.join("releases/1/release.php"), "<?php return '2';\n")
+        .expect("write the fixed release.php");
+    signal(srv.pid(), libc::SIGUSR2);
+    stop.store(true, std::sync::atomic::Ordering::Relaxed);
+    traffic.join().expect("the traffic thread");
+    assert!(
+        gone.is_some(),
+        "the worker process ends as unhealthy\n{}",
+        diagnostics(&srv)
+    );
+    // The respawn delay of the master grows to at most 25.6 s.
+    wait_for_code_2(&srv, Duration::from_secs(40));
+    drop(srv);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A boot that fails for a cause outside OPcache, then a reload of a release that also changes cached files. Every worker then runs every file of the new release, also with opcache.validate_timestamps = 0.
+#[test]
+fn a_reload_after_a_failed_boot_runs_every_file_of_the_new_release() {
+    let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
+        .expect("read the shared php.ini");
+    let ini = format!("{shared}\nopcache.enable = 1\nopcache.validate_timestamps = 0\n");
+    let dir: PathBuf = scratch_dir();
+    stage_releases(&dir, "two-files-worker.php");
+    let folder = dir.join("releases/1");
+    write_old(&folder.join("extra.php"), "<?php return '1';\n");
+    let entrypoint = dir.join("current/two-files-worker.php");
+    let srv = Spawn::http_entrypoint(Mode::Worker, &entrypoint.display().to_string())
+        .processes(2)
+        .php_ini(&ini)
+        .json_log()
+        .spawn();
+    wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
+    let [mut a, mut b] = pin_two_workers(&srv).expect("the fixture answers without OPcache");
+
+    // Deploy step 1: extra.php is not there yet, so the boot of each worker fails.
+    std::fs::remove_file(folder.join("extra.php")).expect("remove extra.php");
+    signal(srv.pid(), libc::SIGUSR2);
+    let log = srv.log_file();
+    let failed = poll(Duration::from_secs(10), || {
+        (app_contexts(&log, "boot failed").len() >= 2).then_some(())
+    });
+    assert!(
+        failed.is_some(),
+        "the boot of each worker fails\n{}",
+        diagnostics(&srv)
+    );
+    // Deploy step 2: release 2 of both files.
+    std::fs::write(folder.join("release.php"), "<?php return '2';\n").expect("write release.php");
+    std::fs::write(folder.join("extra.php"), "<?php return '2';\n").expect("write extra.php");
+    signal(srv.pid(), libc::SIGUSR2);
+
+    let mut last_a = String::new();
+    let mut last_b = String::new();
+    let new_release = poll(Duration::from_secs(10), || {
+        last_a = get_on(&mut a, "/").body;
+        last_b = get_on(&mut b, "/").body;
+        let want = "release.php=2 extra.php=2";
+        (last_a.ends_with(want) && last_b.ends_with(want)).then_some(())
+    });
+    assert!(
+        new_release.is_some(),
+        "every worker runs release 2 of both files\n last A: {last_a}\n last B: {last_b}\n{}",
+        diagnostics(&srv)
+    );
+    // The stop of the server waits for open connections.
+    drop([a, b]);
+    drop(srv);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+/// A symlink deploy whose link points at no folder, then a reload: each boot fails, a request gets 503, and an ERROR record names the entrypoint. A reload after the fix runs the fixed release in the same worker process.
+#[test]
+fn an_entrypoint_that_does_not_resolve_answers_503_until_a_reload_after_the_fix() {
+    let dir: PathBuf = scratch_dir();
+    let [release_1, release_2] = stage_releases(&dir, "dispatcher.php");
+    let entrypoint = dir.join("current").join("dispatcher.php");
+    let srv = Spawn::http_entrypoint(Mode::Dispatcher, &entrypoint.display().to_string())
+        .json_log()
+        .spawn();
+    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    assert_eq!(
+        seen(&srv),
+        format!("code=1 cwd={release_1} file=1"),
+        "before the deploy\n{}",
+        diagnostics(&srv)
+    );
+    let switch = |release: &str| {
+        let next = dir.join("current.next");
+        std::os::unix::fs::symlink(release, &next).expect("link current.next");
+        std::fs::rename(&next, dir.join("current")).expect("switch current");
+    };
+    // The wire client decodes the chunked body of the fixture.
+    let answer = || match submit(srv.addr, req("/")) {
+        Ok(rx) => {
+            let got = drain(rx);
+            format!("{} {}", got.status, got.body)
+        }
+        Err(e) => format!("error {e}"),
+    };
+
+    switch("releases/missing");
+    signal(srv.pid(), libc::SIGUSR2);
+    // Each request during a failed boot starts the next boot, and the fifth failed boot ends the worker, so the poll stops at the first 503.
+    let mut last = String::new();
+    let refused = poll(Duration::from_secs(10), || {
+        last = answer();
+        last.starts_with("503").then_some(())
+    });
+    assert!(
+        refused.is_some(),
+        "a request after the broken deploy\n want: 503\n last: {last}\n{}",
+        diagnostics(&srv)
+    );
+    let named = format!("resolving the entrypoint {}", entrypoint.display());
+    assert!(
+        records(&srv.log_file())
+            .iter()
+            .any(|r| r.level == tracing::Level::ERROR && r.message.starts_with(&named)),
+        "an ERROR record {named:?}\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(
+        worker_pids(srv.pid()),
+        vec![pid],
+        "the worker process stays after the broken deploy\n{}",
+        diagnostics(&srv)
+    );
+
+    switch("releases/2");
+    signal(srv.pid(), libc::SIGUSR2);
+    let want = format!("200 code=2 cwd={release_2} file=2");
+    let fixed = poll(Duration::from_secs(10), || {
+        last = answer();
+        (last == want).then_some(())
+    });
+    assert!(
+        fixed.is_some(),
+        "after the fix and the reload\n want: {want}\n last: {last}\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(
+        worker_pids(srv.pid()),
+        vec![pid],
+        "the worker process stays after the fix\n{}",
+        diagnostics(&srv)
+    );
+    drop(srv);
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The pid at the start of an answer `pid=<pid> ...`.
@@ -318,6 +724,58 @@ fn get_on(c: &mut Conn, path: &str) -> StatusBody<String> {
         status: head.status,
         body: String::from_utf8_lossy(&body).into_owned(),
     }
+}
+
+/// A second reload while both workers serve long requests. An app can end with its reload entry still in the queue, so the next app of that worker takes the entry after the OPcache restart of the first reload has run. One reset per reload keeps that app from scheduling a restart that no app leaves for.
+#[test]
+fn two_reloads_during_long_requests_leave_opcache_on_in_every_worker() {
+    let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
+        .expect("read the shared php.ini");
+    let srv = Spawn::http(
+        Mode::Worker,
+        fixture_path("lifecycle/opcache-restart-worker.php"),
+    )
+    .processes(2)
+    .php_ini(&format!("{shared}\nopcache.enable = 1\n"))
+    .spawn();
+    wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
+    // A connection stays with the worker that accepted it, so each long request goes to its own worker.
+    let Some([mut a, mut b]) = pin_two_workers(&srv) else {
+        return;
+    };
+
+    let statuses = std::thread::scope(|scope| {
+        let held_a = scope.spawn(|| get_on(&mut a, "/?sleep=3").status);
+        std::thread::sleep(Duration::from_millis(300));
+        signal(srv.pid(), libc::SIGUSR2);
+        std::thread::sleep(Duration::from_millis(500));
+        let held_b = scope.spawn(|| get_on(&mut b, "/?sleep=5").status);
+        std::thread::sleep(Duration::from_millis(1700));
+        signal(srv.pid(), libc::SIGUSR2);
+        [
+            held_a.join().expect("the request thread of worker A"),
+            held_b.join().expect("the request thread of worker B"),
+        ]
+    });
+    assert_eq!(
+        statuses,
+        [200, 200],
+        "both long requests are served\n{}",
+        diagnostics(&srv)
+    );
+
+    let mut last_a = String::new();
+    let mut last_b = String::new();
+    let all_on = poll(Duration::from_secs(20), || {
+        last_a = get_on(&mut a, "/").body;
+        last_b = get_on(&mut b, "/").body;
+        (opcache_state(&last_a).on && opcache_state(&last_b).on).then_some(())
+    });
+    assert!(
+        all_on.is_some(),
+        "both workers have OPcache on and no restart pending\n last A: {last_a}\n last B: {last_b}\n{}",
+        diagnostics(&srv)
+    );
 }
 
 /// One answer of `opcache-restart-worker.php`.

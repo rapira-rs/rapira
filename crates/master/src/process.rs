@@ -9,7 +9,7 @@ use crate::WorkerEnv;
 use crate::pool::Pool;
 use crate::signals::{MASTER_SIGNALS, SelfPipe, WORKER_SIGNALS, sigset};
 use crate::{WORKER_EXIT_DRAINED, WORKER_EXIT_UNHEALTHY};
-use rapira_scoreboard::{PoolRegion, SharedSlot};
+use rapira_scoreboard::{PoolRegion, Reloads, SharedSlot};
 
 /// A worker that lived at least this long before it failed starts a new backoff streak.
 const QUICK_CRASH: Duration = Duration::from_secs(10);
@@ -181,6 +181,8 @@ pub(crate) struct Forker {
     pub board: &'static [SharedSlot],
     /// The slot range of each pool, in pool order, for every `WorkerEnv`.
     pub regions: &'static [PoolRegion],
+    /// The reload count, for every `WorkerEnv`.
+    pub reloads: &'static Reloads,
     pub worker: Box<dyn FnMut(WorkerEnv) -> i32>,
 }
 
@@ -238,6 +240,7 @@ impl Forker {
                         slot_view,
                         board: self.board,
                         regions: self.regions,
+                        reloads: self.reloads,
                     })
                 }));
                 // A panic exits with 101, which the master counts as a crash.

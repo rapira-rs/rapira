@@ -290,7 +290,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             track_vars_array,
         );
     };
-    // No bound request: the boot run of the entrypoint in worker and dispatcher mode.
+    // No bound request: the boot run of the entrypoint in worker and dispatcher mode, and the request that makes the OPcache reset call.
     if unsafe { ctx() }.is_none() {
         guard((), || unsafe {
             register_boot_variables(track_vars_array, put_bytes)
