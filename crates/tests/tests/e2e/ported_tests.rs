@@ -424,11 +424,11 @@ fn assert_headers_list_response(resp: &Resp, i: u16) {
     }
     assert!(body.contains(&format!("I: {i}")), "got: {body:?}");
     assert_eq!(resp.header("Foo").as_deref(), Some("bar"));
-    assert!(
-        resp.header("X-Powered-By")
-            .is_some_and(|v| v.starts_with("PHP/")),
-        "X-Powered-By must be a response header (headers: {:?})",
-        resp.head.as_ref().expect("head").headers
+    let php_version = resp.header("Php-Version").expect("Php-Version header");
+    assert_eq!(
+        resp.header("X-Powered-By"),
+        Some(format!("PHP/{php_version}")),
+        "X-Powered-By must name the PHP_VERSION that runs the request"
     );
     assert!(resp.header("Invalid").is_none());
 }
