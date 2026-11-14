@@ -1,11 +1,15 @@
 # syntax=docker/dockerfile:1
 
-# Dependabot does not update this digest. Change it together with the 8.5 base in .github/workflows/docker.yml at each PHP patch release.
-ARG PHP_BASE=php:8.5-cli-trixie@sha256:50956f094e90a716d43bea28087d447555ad80510e386ab8c9c10d8c70d781a9
+# PHP minor of the base stage: 8.4 or 8.5. Dependabot updates the digests on the literal FROM lines.
+ARG PHP=8.5
 
 FROM rust:1-trixie@sha256:8a4e90c7946b74626488b1446f712c0fe0ed1a596cbd3d871684bc9c5433ae07 AS rust
 
-FROM ${PHP_BASE} AS php-extensions
+FROM php:8.4-cli-trixie@sha256:d63e8b80cd4c6cfd01cfa7c910522e299cdc7ca1a2b6d6563db48df3c17e6c55 AS php-8.4
+
+FROM php:8.5-cli-trixie@sha256:50956f094e90a716d43bea28087d447555ad80510e386ab8c9c10d8c70d781a9 AS php-8.5
+
+FROM php-${PHP} AS php-extensions
 
 RUN set -eux; \
     apt-get update; \
