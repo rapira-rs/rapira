@@ -6,7 +6,7 @@ use tracing::info;
 use crate::plugin::Stopper;
 use crate::scoreboard::{Event, sb_update};
 
-/// The worker stops because PHP keeps failing to boot.
+/// The worker stops because the app keeps failing to boot or keeps failing at its first unit.
 static UNHEALTHY: AtomicBool = AtomicBool::new(false);
 
 /// The units the current app instance may take: it takes no more once `served` reaches `max`.

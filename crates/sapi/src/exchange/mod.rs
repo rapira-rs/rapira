@@ -38,7 +38,7 @@ pub(crate) fn cycle_reset() {
     reclaim_current();
     CYCLE.set(CYCLE.get() + 1);
     crate::start::CLOSED_SEEN.set(false);
-    crate::start::RECEIVED.set(false);
+    crate::start::RECEIVED.set(0);
 }
 
 /// Reclaim a unit free_obj never saw (shutdown bailout / allocation bailout).

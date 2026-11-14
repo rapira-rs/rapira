@@ -7,7 +7,8 @@ use tests::wire::submit;
 use tests::{drain_resp_deadline, fixture, req};
 
 use crate::harness::{
-    MASTER_EXIT_FAILBOOT, MASTER_EXIT_OK, Spawn, assert_exit_code, listen, signal,
+    MASTER_EXIT_FAILBOOT, MASTER_EXIT_OK, Spawn, assert_exit_code, diagnostics, listen, signal,
+    wait_log_contains, wait_workers, worker_pids,
 };
 
 // A worker that fatals before its receive loop must 503 the queued unit, and the graceful stop must not wait on a boot that retries forever.
@@ -109,5 +110,93 @@ fn failboot_worker_flags_unhealthy_after_threshold() -> anyhow::Result<()> {
         log.contains("worker keeps failing to boot; flagged unhealthy"),
         "5 consecutive boot failures must flag the worker unhealthy\n{log}"
     );
+    Ok(())
+}
+
+// An app instance that takes one unit and then ends with a non-zero exit status is a failed cycle; a fatal error sets status 255. UNHEALTHY_AFTER (5) failed cycles in a row flag the worker. An app instance that takes a second unit resets the count.
+// The app took units, so the pool booted: the master replaces the flagged worker and keeps running.
+#[test]
+fn an_app_that_fails_at_its_first_unit_flags_the_worker_unhealthy() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        fixture: &'static str,
+        /// The status of each request, in the order sent.
+        statuses: &'static [u16],
+        /// The worker is flagged unhealthy after the last response.
+        flagged: bool,
+    }
+    let cases = [
+        Case {
+            name: "the app answers 500, then the entrypoint ends with exit status 1",
+            fixture: "failboot_worker_tests/exit-at-first-unit-worker.php",
+            statuses: &[500, 500, 500, 500, 500],
+            flagged: true,
+        },
+        Case {
+            name: "a fatal error ends the app instance at its first unit",
+            fixture: "failboot_worker_tests/fatal-at-first-unit-worker.php",
+            statuses: &[500, 500, 500, 500, 500],
+            flagged: true,
+        },
+        Case {
+            name: "the app serves one unit, then fails at its second unit",
+            fixture: "failboot_worker_tests/exit-at-second-unit-worker.php",
+            // 6 failed cycles. The last 200 comes from cycle 7, so cycle 6 ended before it.
+            statuses: &[
+                200, 500, 200, 500, 200, 500, 200, 500, 200, 500, 200, 500, 200,
+            ],
+            flagged: false,
+        },
+    ];
+    let record = "worker keeps failing at its first unit; flagged unhealthy";
+    for case in cases {
+        let mut srv = Spawn::http(Mode::Worker, fixture(case.fixture)).spawn();
+        let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+        let deadline = Instant::now() + Duration::from_secs(15);
+
+        let mut statuses = Vec::new();
+        for _ in case.statuses {
+            let mut rx = submit(srv.addr, req("/"))?;
+            let resp = drain_resp_deadline(&mut rx, deadline)
+                .unwrap_or_else(|| panic!("{}: no response\n{}", case.name, diagnostics(&srv)));
+            statuses.push(resp.status());
+        }
+        assert_eq!(
+            statuses,
+            case.statuses,
+            "{}\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+
+        if case.flagged {
+            assert!(
+                wait_log_contains(&srv, record, Duration::from_secs(10)),
+                "{}: the worker stays healthy\n{}",
+                case.name,
+                diagnostics(&srv)
+            );
+            wait_workers(&srv, Duration::from_secs(20), "a replacement worker", |p| {
+                p.len() == 1 && p[0] != pid
+            });
+            assert_eq!(
+                srv.try_status(),
+                None,
+                "{}: the master keeps running\n{}",
+                case.name,
+                diagnostics(&srv)
+            );
+        } else {
+            let log = std::fs::read_to_string(srv.log_file())?;
+            assert!(!log.contains("flagged unhealthy"), "{}\n{log}", case.name);
+            assert_eq!(
+                worker_pids(srv.pid()),
+                vec![pid],
+                "{}: the worker process stays\n{}",
+                case.name,
+                diagnostics(&srv)
+            );
+        }
+    }
     Ok(())
 }

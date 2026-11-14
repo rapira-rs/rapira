@@ -50,7 +50,10 @@ const BOOT_RETRY: Duration = Duration::from_secs(5);
 
 enum Cycle {
     Stop,
-    Recycle,
+    Recycle {
+        /// The app instance took one unit, then ended with a non-zero exit status.
+        failed: bool,
+    },
     Failed,
     Restart,
 }
@@ -101,9 +104,16 @@ fn run_cycle(script: &Path) -> Cycle {
     // the cycle number changes after the reset request, because its quiesce hook stores the number of the cycle that it ends
     crate::exchange::cycle_reset();
     let started = boot_request_startup();
+    let mut exit_status = 0;
     if started {
         note_opcache_at_boot();
-        unsafe { run_script(&crate::context::script().filename) };
+        // An NTS build keeps the exit status of the previous cycle, so the host clears it before the script, as PHP-FPM does. A fatal error sets 255. Shutdown functions run after this read.
+        // https://github.com/php/php-src/blob/php-8.5.12/sapi/fpm/fpm/fpm_main.c#L1896-L1899
+        unsafe {
+            executor_globals.exit_status = 0;
+            run_script(&crate::context::script().filename);
+            exit_status = executor_globals.exit_status;
+        }
         // the boot of the next app instance compares last_restart_time with this value
         let mut last_restart: zend_long = 0;
         let state = unsafe { rapira_opcache_state(&mut last_restart) };
@@ -122,10 +132,13 @@ fn run_cycle(script: &Path) -> Cycle {
         return Cycle::Restart;
     }
 
+    let received = crate::start::RECEIVED.get();
     if crate::start::CLOSED_SEEN.get() {
         Cycle::Stop
-    } else if recycle || crate::quota::exhausted() || crate::start::RECEIVED.get() {
-        Cycle::Recycle
+    } else if recycle || crate::quota::exhausted() || received > 0 {
+        Cycle::Recycle {
+            failed: received == 1 && exit_status != 0,
+        }
     } else {
         Cycle::Failed
     }
@@ -256,11 +269,19 @@ pub fn rapira_worker(script: &Path) -> WorkerExit {
         match run_cycle(script) {
             Cycle::Stop => break WorkerExit::Closed,
             Cycle::Restart => break WorkerExit::Restart,
-            Cycle::Recycle => {
+            Cycle::Recycle { failed } => {
+                if failed {
+                    failures += 1;
+                    if failures == UNHEALTHY_AFTER {
+                        error!(target: "rapira", "worker keeps failing at its first unit; flagged unhealthy");
+                        crate::quota::fire_unhealthy();
+                    }
+                } else {
+                    failures = 0;
+                }
                 sb_update(scoreboard::Event::Recycled);
                 // No request runs while the app boots again, so the request watchdog skips the slot.
                 sb_update(scoreboard::Event::Idle);
-                failures = 0;
             }
             Cycle::Failed => {
                 failures += 1;
