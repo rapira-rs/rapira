@@ -20,8 +20,8 @@ use crate::{
 
 thread_local! {
     static UNIT_RX: RefCell<Option<UnitRx>> = const { RefCell::new(None) };
-    /// A pull of this cycle took a unit: a fatal error after that is an app failure, not a boot failure.
-    pub(crate) static RECEIVED: Cell<bool> = const { Cell::new(false) };
+    /// The units that the pulls of this cycle took. After the first one, a fatal error is an app failure, not a boot failure.
+    pub(crate) static RECEIVED: Cell<u64> = const { Cell::new(0) };
     /// A pull of this cycle saw the intake closed.
     pub(crate) static CLOSED_SEEN: Cell<bool> = const { Cell::new(false) };
 }
@@ -339,7 +339,7 @@ pub(crate) fn pull(wait: Wait) -> Pull {
                         sb_update(Event::Shed);
                         continue;
                     }
-                    RECEIVED.set(true);
+                    RECEIVED.set(RECEIVED.get() + 1);
                     return Pull::Unit(unit);
                 }
                 Ok(Entry::RestartApp) if unit_r.classic => {
@@ -425,7 +425,7 @@ mod tests {
         let slot = &rapira_scoreboard::create(1).unwrap()[0];
         sb_set(slot);
         quota::install(max_requests, Stopper::default());
-        RECEIVED.set(false);
+        RECEIVED.set(0);
         CLOSED_SEEN.set(false);
         let (tx, rx) = channel::<Entry>();
         UNIT_RX.with_borrow_mut(|unit_rx| {
@@ -747,7 +747,7 @@ mod tests {
                 case.max_elapsed
             );
             assert_eq!(
-                (RECEIVED.get(), CLOSED_SEEN.get(), quota::exhausted()),
+                (RECEIVED.get() > 0, CLOSED_SEEN.get(), quota::exhausted()),
                 (case.received, case.closed_seen, case.exhausted),
                 "{}: received, closed seen, exhausted",
                 case.name
