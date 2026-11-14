@@ -239,9 +239,10 @@ fn a_booting_worker_is_starting_and_not_ready_until_its_first_pull() {
 /// A worker whose boot fails stays starting: the host's shed pull does not count as the app's first pull. The 503 shows that the host shed the request in its shed pull. The slot stays starting through the re-boot and the next shed pull.
 #[test]
 fn a_worker_whose_boot_fails_stays_starting() {
+    // No failure limit: with the default limit, the server stops 1.5 s after the first failed boot.
     let ObservedServer { srv, observability } = spawn(
         "lifecycle/never-loop-worker.php",
-        "",
+        "max_failures = 0",
         "[observability.metrics]",
     );
     let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
@@ -261,9 +262,10 @@ fn a_worker_whose_boot_fails_stays_starting() {
 /// A pool whose boot failed turns ready without a request when a later boot succeeds. The fixture fails its boot until up.flag exists next to it.
 #[test]
 fn a_pool_whose_boot_failed_turns_ready_without_a_request() {
+    // No failure limit: with the default limit, the server stops 1.5 s after the first failed boot.
     let ObservedServer { srv, observability } = spawn(
         "lifecycle/dependency-boot-worker.php",
-        "",
+        "max_failures = 0",
         "[observability.probes]",
     );
     assert!(
@@ -296,9 +298,10 @@ fn a_pool_whose_boot_failed_turns_ready_without_a_request() {
 /// A failed re-boot after the app served shows starting, so the request watchdog skips the worker.
 #[test]
 fn a_failed_reboot_stays_starting() {
+    // No failure limit: with the default limit, the worker process ends 1.5 s after the first failed boot.
     let ObservedServer { srv, observability } = spawn(
         "lifecycle/reboot-fails-worker.php",
-        "request_terminate_timeout_secs = 1",
+        "request_terminate_timeout_secs = 1\nmax_failures = 0",
         "[observability.metrics]",
     );
     let StatusBody { status: code, body } = http_get(srv.addr, "/", REQ).expect("GET /");

@@ -1192,7 +1192,7 @@ fn get_info_reports_the_server_identity_at_boot() -> anyhow::Result<()> {
     .json_log()
     .spawn();
     let want = format!("name=localhost port={}", srv.addr.port());
-    // A failed boot retries after 5 s, so a worker whose first boot failed still logs a record in this window.
+    // A failed boot runs again after a short wait, so a worker whose first boot failed still logs a record in this window.
     let booted = poll(Duration::from_secs(15), || {
         let results = server_log::app_results(&srv.log_file(), "boot-identity");
         (results.len() >= WORKERS).then_some(results)

@@ -9,3 +9,9 @@ $mode = \Rapira\get_mode();
     'case' => $mode === \Rapira\Mode::Dispatcher,
     'class' => $mode::class,
 ]);
+
+// The pull makes the boot succeed, so the worker runs the script once. The script ends when the server stops.
+try {
+    \Rapira\get_dispatcher()->receive();
+} catch (\Rapira\Exception\ClosedException) {
+}

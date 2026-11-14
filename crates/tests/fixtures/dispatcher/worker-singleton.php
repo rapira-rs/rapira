@@ -18,3 +18,9 @@ try {
     'base' => $d instanceof \Rapira\Dispatcher,
     'clone' => $clone,
 ]);
+
+// The pull makes the boot succeed, so the worker runs the script once. The script ends when the server stops.
+try {
+    $d->receive();
+} catch (\Rapira\Exception\ClosedException) {
+}

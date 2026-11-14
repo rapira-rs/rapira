@@ -91,10 +91,6 @@ fn a_reload_into_a_failing_boot_keeps_the_server_running() {
     wait_app_record(&srv.log_file(), "booted");
     std::fs::write(srv.dir.join("http/broken.flag"), "").expect("break the boot");
     signal(srv.pid(), libc::SIGUSR2);
-    // A request during a failed boot gets 503 and starts the next boot at once, so a few requests make the worker unhealthy.
-    for _ in 0..5 {
-        let _ = http_get(srv.addr, "/", Duration::from_secs(10));
-    }
     assert!(
         wait_log_contains(&srv, "flagged unhealthy", Duration::from_secs(20)),
         "the worker stays healthy\n{}",
@@ -409,8 +405,8 @@ fn a_reload_after_a_json_post_keeps_the_classic_worker() {
     );
 }
 
-/// A one-worker server on release 1 of `deploy/breakable-worker.php`, with opcache.validate_timestamps = 0, after an in-place deploy of a release.php whose boot fails and its reload. Returns None without OPcache.
-fn breakable_server(dir: &Path) -> Option<Server> {
+/// A one-worker server on release 1 of `deploy/breakable-worker.php`, with `pool` keys in `[http.pool]` and opcache.validate_timestamps = 0, after an in-place deploy of a release.php whose boot fails and its reload. Returns None without OPcache.
+fn breakable_server(dir: &Path, pool: &str) -> Option<Server> {
     let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
         .expect("read the shared php.ini");
     // With file_update_protection = 0, OPcache caches the broken release.php at the first failed boot.
@@ -420,6 +416,7 @@ fn breakable_server(dir: &Path) -> Option<Server> {
     stage_releases(dir, "breakable-worker.php");
     let entrypoint = dir.join("current/breakable-worker.php");
     let srv = Spawn::http_entrypoint(Mode::Worker, &entrypoint.display().to_string())
+        .http_pool(pool)
         .php_ini(&ini)
         .json_log()
         .spawn();
@@ -458,22 +455,24 @@ fn wait_for_code_2(srv: &Server, within: Duration) {
 #[test]
 fn a_reload_after_a_failed_boot_runs_the_fixed_release() {
     let dir: PathBuf = scratch_dir();
-    let Some(srv) = breakable_server(&dir) else {
+    // No failure limit: with the default limit, the worker process ends at the fifth failed boot.
+    let Some(srv) = breakable_server(&dir, "max_failures = 0") else {
         return;
     };
     let log = srv.log_file();
-    let failed = poll(Duration::from_secs(10), || {
-        (!app_contexts(&log, "boot failed").is_empty()).then_some(())
-    });
-    assert!(
-        failed.is_some(),
-        "the broken release fails its boot\n{}",
-        diagnostics(&srv)
-    );
+    // The wait after the sixth failed boot is 3.2 s, so the reload arrives before the next boot.
+    let Some(failed) = poll(Duration::from_secs(20), || {
+        let boots = app_contexts(&log, "boot failed").len();
+        (boots >= 6).then_some(boots)
+    }) else {
+        panic!(
+            "the broken release fails its boot 6 times\n{}",
+            diagnostics(&srv)
+        );
+    };
     std::fs::write(dir.join("releases/1/release.php"), "<?php return '2';\n")
         .expect("write the fixed release.php");
     signal(srv.pid(), libc::SIGUSR2);
-    // No request arrives before the fixed release has booted: a request that reaches the worker before the reload starts one more boot of the broken release.
     let booted = poll(Duration::from_secs(10), || {
         app_contexts(&log, "booted")
             .iter()
@@ -488,7 +487,7 @@ fn a_reload_after_a_failed_boot_runs_the_fixed_release() {
     );
     assert_eq!(
         app_contexts(&log, "boot failed").len(),
-        1,
+        failed,
         "the reload starts no boot of the broken release\n{}",
         diagnostics(&srv)
     );
@@ -501,10 +500,10 @@ fn a_reload_after_a_failed_boot_runs_the_fixed_release() {
 #[test]
 fn a_reload_with_no_live_worker_runs_the_fixed_release() {
     let dir: PathBuf = scratch_dir();
-    let Some(srv) = breakable_server(&dir) else {
+    let Some(srv) = breakable_server(&dir, "") else {
         return;
     };
-    // Each shed request starts the next boot, so 5 failed boots soon end the process.
+    // Steady traffic during the failed boots: each request gets 503. The fifth failed boot ends the worker process.
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let traffic = {
         let stop = std::sync::Arc::clone(&stop);
@@ -598,6 +597,8 @@ fn an_entrypoint_that_does_not_resolve_answers_503_until_a_reload_after_the_fix(
     let [release_1, release_2] = stage_releases(&dir, "dispatcher.php");
     let entrypoint = dir.join("current").join("dispatcher.php");
     let srv = Spawn::http_entrypoint(Mode::Dispatcher, &entrypoint.display().to_string())
+        // No failure limit: with the default limit, the worker process ends 1.5 s after the first failed boot.
+        .http_pool("max_failures = 0")
         .json_log()
         .spawn();
     let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
@@ -623,7 +624,6 @@ fn an_entrypoint_that_does_not_resolve_answers_503_until_a_reload_after_the_fix(
 
     switch("releases/missing");
     signal(srv.pid(), libc::SIGUSR2);
-    // Each request during a failed boot starts the next boot, and the fifth failed boot ends the worker, so the poll stops at the first 503.
     let mut last = String::new();
     let refused = poll(Duration::from_secs(10), || {
         last = answer();

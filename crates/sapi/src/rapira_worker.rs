@@ -12,7 +12,7 @@ use std::{
     path::Path,
     ptr::null_mut,
     sync::atomic::{AtomicI32, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -44,9 +44,16 @@ const OPCACHE_ON: c_int = 1;
 const OPCACHE_PENDING: c_int = 2;
 const OPCACHE_RESTARTING: c_int = 4;
 
-const UNHEALTHY_AFTER: u32 = 5;
-/// After a failed boot cycle, the worker runs the boot again when no unit arrives within this time. A load balancer that reads `/readyz` sends no requests to a pool that is not ready.
-const BOOT_RETRY: Duration = Duration::from_secs(5);
+/// The wait after the first failed boot of a sequence. Each further failed boot doubles it, up to `BOOT_RETRY_MAX`.
+const BOOT_RETRY_BASE: Duration = Duration::from_millis(100);
+/// The longest wait between two boots. The boot repeats without a request: a load balancer that reads `/readyz` sends no requests to a pool that is not ready.
+const BOOT_RETRY_MAX: Duration = Duration::from_secs(5);
+
+/// The wait after failed boot number `failures` of a sequence, counted from 1.
+fn boot_retry_delay(failures: u32) -> Duration {
+    // 2^6 times the base is above the maximum, so a larger exponent gives the same wait.
+    (BOOT_RETRY_BASE * (1 << (failures - 1).min(6))).min(BOOT_RETRY_MAX)
+}
 
 enum Cycle {
     Stop,
@@ -250,9 +257,10 @@ fn reset_opcache_if_due() {
     }
 }
 
-pub fn rapira_worker(script: &Path) -> WorkerExit {
+/// `max_failures`: the failed boots in sequence after which the worker stops as unhealthy; 0 is no limit.
+pub fn rapira_worker(script: &Path, max_failures: u32) -> WorkerExit {
     let mut failures: u32 = 0;
-    let exit = loop {
+    let exit = 'cycles: loop {
         match run_cycle(script) {
             Cycle::Stop => break WorkerExit::Closed,
             Cycle::Restart => break WorkerExit::Restart,
@@ -264,19 +272,28 @@ pub fn rapira_worker(script: &Path) -> WorkerExit {
             }
             Cycle::Failed => {
                 failures += 1;
-                if failures == UNHEALTHY_AFTER {
+                // The count starts at 1, so a limit of 0 never matches.
+                if failures == max_failures {
                     error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
                     crate::quota::fire_unhealthy();
                 }
                 sb_update(scoreboard::Event::BootFailed);
-                match pull_unit_to_shed(BOOT_RETRY) {
-                    Pull::Closed => break WorkerExit::Closed,
-                    Pull::Unit(unit) => {
-                        unit.shed();
-                        sb_update(scoreboard::Event::Shed);
+                // One deadline for the whole wait: the units that arrive get shed, and they do not move the next boot.
+                let retry_at = Instant::now() + boot_retry_delay(failures);
+                loop {
+                    let wait = retry_at.saturating_duration_since(Instant::now());
+                    if wait.is_zero() {
+                        break;
                     }
-                    // The retry time passed, or a reload arrived: the next boot starts.
-                    Pull::NoUnit => {}
+                    match pull_unit_to_shed(wait) {
+                        Pull::Closed => break 'cycles WorkerExit::Closed,
+                        Pull::Unit(unit) => {
+                            unit.shed();
+                            sb_update(scoreboard::Event::Shed);
+                        }
+                        // The wait ended, or a reload arrived: the next boot starts.
+                        Pull::NoUnit => break,
+                    }
                 }
             }
         }
@@ -493,6 +510,56 @@ mod tests {
         for case in cases {
             let got = opcache_boot(case.state, case.last_restart, case.previous_end);
             assert_eq!(text(&got), text(&case.want), "{}", case.name);
+        }
+    }
+
+    #[test]
+    fn the_boot_retry_delay_doubles_up_to_the_maximum() {
+        struct Case {
+            name: &'static str,
+            /// Failed boots in sequence, counted from 1.
+            failures: u32,
+            want: Duration,
+        }
+        let cases = [
+            Case {
+                name: "first failed boot",
+                failures: 1,
+                want: Duration::from_millis(100),
+            },
+            Case {
+                name: "second failed boot",
+                failures: 2,
+                want: Duration::from_millis(200),
+            },
+            Case {
+                name: "fifth failed boot",
+                failures: 5,
+                want: Duration::from_millis(1600),
+            },
+            Case {
+                name: "sixth failed boot",
+                failures: 6,
+                want: Duration::from_millis(3200),
+            },
+            Case {
+                name: "seventh failed boot reaches the maximum",
+                failures: 7,
+                want: Duration::from_secs(5),
+            },
+            Case {
+                name: "a count above the bit width of the factor",
+                failures: 40,
+                want: Duration::from_secs(5),
+            },
+            Case {
+                name: "the largest count",
+                failures: u32::MAX,
+                want: Duration::from_secs(5),
+            },
+        ];
+        for case in cases {
+            assert_eq!(boot_retry_delay(case.failures), case.want, "{}", case.name);
         }
     }
 
