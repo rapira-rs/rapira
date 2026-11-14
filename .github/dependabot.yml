@@ -35,9 +35,3 @@ updates:
     commit-message:
       prefix: chore
       include: scope
-    # Each php base stays on its PHP minor. Digest updates of the current tag continue.
-    ignore:
-      - dependency-name: php
-        update-types:
-          - version-update:semver-minor
-          - version-update:semver-major
