@@ -1,5 +1,6 @@
 use anyhow::bail;
 use serde::Deserialize;
+use std::collections::BTreeMap;
 use std::fmt;
 use std::fs::File;
 use std::num::NonZero;
@@ -21,6 +22,8 @@ pub struct PoolSettings {
     pub max_boot_failures: u32,
     /// Wall-clock bound on a single request; zero = disabled.
     pub request_terminate_timeout: Duration,
+    /// Variables each worker sets before PHP starts. The check in `resolve_pool` repeats the panics of `std::env::set_var` (https://doc.rust-lang.org/std/env/fn.set_var.html#panics).
+    pub env: BTreeMap<String, String>,
 }
 
 /// The pool mode of a worker.
@@ -53,6 +56,7 @@ pub struct PoolSection {
     max_memory_mb: Option<u64>,
     max_boot_failures: Option<u32>,
     request_terminate_timeout_secs: Option<u64>,
+    env: Option<BTreeMap<String, String>>,
 }
 
 fn default_processes() -> usize {
@@ -73,6 +77,16 @@ pub fn resolve_pool(section: PoolSection, table: &str, dir: &Path) -> anyhow::Re
         bail!("{table}.entrypoint is required");
     };
 
+    let env = section.env.unwrap_or_default();
+    for (name, value) in &env {
+        if name.is_empty() || name.contains(['=', '\0']) {
+            bail!("{table}.env name {name:?} is empty or contains '=' or NUL");
+        }
+        if value.contains('\0') {
+            bail!("{table}.env.{name} contains NUL");
+        }
+    }
+
     Ok(PoolSettings {
         entrypoint,
         processes,
@@ -85,6 +99,7 @@ pub fn resolve_pool(section: PoolSection, table: &str, dir: &Path) -> anyhow::Re
             "request_terminate_timeout_secs",
             section.request_terminate_timeout_secs.unwrap_or(0),
         )?,
+        env,
     })
 }
 
@@ -128,6 +143,7 @@ mod tests {
             max_memory_mb: 0,
             max_boot_failures: 5,
             request_terminate_timeout: Duration::ZERO,
+            env: BTreeMap::new(),
         }
     }
 
@@ -183,6 +199,17 @@ mod tests {
                 toml: "entrypoint = \"a.php\"\nprocesses = 4\nmax_boot_failures = 2\n",
                 want: PoolSettings {
                     max_boot_failures: 2,
+                    ..base()
+                },
+            },
+            Case {
+                name: "env table",
+                toml: "entrypoint = \"a.php\"\nprocesses = 4\n[env]\nAPP_ENV = \"prod\"\nPOOL_EMPTY = \"\"\n",
+                want: PoolSettings {
+                    env: BTreeMap::from([
+                        ("APP_ENV".to_owned(), "prod".to_owned()),
+                        ("POOL_EMPTY".to_owned(), String::new()),
+                    ]),
                     ..base()
                 },
             },
@@ -255,6 +282,31 @@ mod tests {
                 name: "negative max boot failures",
                 toml: "entrypoint = \"a.php\"\nmax_boot_failures = -1\n",
                 error: "invalid value: integer `-1`, expected u32",
+            },
+            ErrCase {
+                name: "empty env name",
+                toml: "entrypoint = \"a.php\"\n[env]\n\"\" = \"x\"\n",
+                error: "http.pool.env name \"\" is empty or contains '=' or NUL",
+            },
+            ErrCase {
+                name: "equals sign in an env name",
+                toml: "entrypoint = \"a.php\"\n[env]\n\"A=B\" = \"x\"\n",
+                error: "http.pool.env name \"A=B\" is empty or contains '=' or NUL",
+            },
+            ErrCase {
+                name: "NUL in an env name",
+                toml: "entrypoint = \"a.php\"\n[env]\n\"A\\u0000\" = \"x\"\n",
+                error: "http.pool.env name \"A\\0\" is empty or contains '=' or NUL",
+            },
+            ErrCase {
+                name: "NUL in an env value",
+                toml: "entrypoint = \"a.php\"\n[env]\nA = \"x\\u0000\"\n",
+                error: "http.pool.env.A contains NUL",
+            },
+            ErrCase {
+                name: "integer env value",
+                toml: "entrypoint = \"a.php\"\n[env]\nPORT = 8080\n",
+                error: "invalid type: integer `8080`, expected a string",
             },
             ErrCase {
                 name: "unknown mode",
