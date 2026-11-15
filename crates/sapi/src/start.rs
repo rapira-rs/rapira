@@ -195,7 +195,7 @@ impl Rapira {
         unsafe {
             zend_accel_schedule_restart_hook = Some(crate::rapira_worker::opcache_restart_scheduled)
         };
-        // SAFETY: no other thread reads or writes the environment yet. The master checked every pair before the fork, so set_var cannot panic.
+        // SAFETY: the process has one thread here: the PHP thread, the lifeline thread, the plugin threads and the signal thread start later. The master checked every pair before the fork, so set_var cannot panic.
         for (name, value) in &env {
             unsafe { std::env::set_var(name, value) };
         }
@@ -206,6 +206,7 @@ impl Rapira {
             .spawn(move || {
                 sb_set(slot);
                 crate::rapira_worker::RELOADS.set(Some(reloads));
+                crate::context::intern_server_env(&env);
                 quota::install(max_requests, stopper);
                 worker_main(
                     mode,

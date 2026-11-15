@@ -299,9 +299,19 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
     }
     with_ctx((), |ctx| {
         let reqc = &ctx.c;
-        // One allocation for the whole array: the names below, one HTTP_* name per field, and the entries php_register_server_variables adds after this callback.
-        let size = SERVER_VARS_MAX + ctx.req.headers.keys_len() as u32;
+        // One allocation for the whole array: the env pairs of the pool, the names below, one HTTP_* name per field, and the entries php_register_server_variables adds after this callback.
+        let server_env = crate::context::server_env();
+        let size = SERVER_VARS_MAX + ctx.req.headers.keys_len() as u32 + server_env.len() as u32;
         unsafe { zend_hash_extend((*track_vars_array).value.arr, size, false) };
+        // The env pairs of the pool go in first: the request variables below win over a pair with the same name.
+        for &(name, value) in server_env {
+            unsafe {
+                let mut v: zval = std::mem::zeroed();
+                v.value.str_ = value;
+                v.u1.type_info = IS_STRING;
+                zend_hash_update((*track_vars_array).value.arr, name, &mut v);
+            }
+        }
         let put = |name: &CStr, val: &str| put_bytes(name, val.as_bytes());
         let script = crate::context::script();
         put(c"PHP_SELF", &script.script_name);

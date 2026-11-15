@@ -1,6 +1,7 @@
 use crate::{callbacks::guard, types::Context, *};
 use std::{
     cell::Cell,
+    collections::BTreeMap,
     ffi::{CString, c_char},
     os::{raw::c_void, unix::ffi::OsStrExt},
     path::Path,
@@ -18,6 +19,28 @@ pub(crate) struct ScriptPaths {
 thread_local! {
     /// A box from `resolve_script`, or null. Only the PHP thread sets and reads it, and it sets it between units only.
     static SCRIPT: Cell<*mut ScriptPaths> = const { Cell::new(null_mut()) };
+    /// The env pairs of the pool as permanent interned strings, from `intern_server_env`.
+    static SERVER_ENV: Cell<&'static [(*mut zend_string, *mut zend_string)]> = const { Cell::new(&[]) };
+}
+
+/// Makes the env pairs of the pool into permanent interned strings once, for the `$_SERVER` of each request. The slice and the strings live until the worker process exits, and the process exits without module teardown.
+pub(crate) fn intern_server_env(env: &BTreeMap<String, String>) {
+    let rows: Box<[_]> = env
+        .iter()
+        // SAFETY: the pointers and lengths come from live strings, and the shim copies the bytes.
+        .map(|(name, value)| unsafe {
+            (
+                rapira_permanent_string(name.as_ptr().cast(), name.len()),
+                rapira_permanent_string(value.as_ptr().cast(), value.len()),
+            )
+        })
+        .collect();
+    SERVER_ENV.set(Box::leak(rows));
+}
+
+/// The rows of `intern_server_env`, or none before it runs.
+pub(crate) fn server_env() -> &'static [(*mut zend_string, *mut zend_string)] {
+    SERVER_ENV.get()
 }
 
 /// Resolves the configured entrypoint to its real path and gives that path to PHP: the script file, `SCRIPT_FILENAME`, `DOCUMENT_ROOT` and the boot argv. OPcache then keys the entrypoint by the path of the release, so a symlink deploy and a reload run the new release. A path that does not resolve stays as configured.

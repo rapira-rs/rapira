@@ -38,6 +38,9 @@ processes = 16                # a fixed worker count; defaults to the CPU count
 # max_memory_mb = 0           # drain + replace a worker whose RSS goes above this; checked every second; 0 = unlimited
 # max_boot_failures = 5       # stop a worker as unhealthy after N failed boots in sequence; 0 = unlimited; worker and dispatcher modes
 # request_terminate_timeout_secs = 0  # kill + replace a worker whose request runs longer; 0 = off
+# Environment variables of each worker of the pool; each request $_SERVER also gets them.
+# [http.pool.env]
+# APP_ENV = "prod"
 
 # The gRPC listener: unary calls over gRPC, gRPC-Web and Connect (crates/plugins/grpc/README.md).
 # With a [grpc] table, grpc.descriptor_set and grpc.pool.entrypoint are required.
