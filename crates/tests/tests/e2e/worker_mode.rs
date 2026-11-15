@@ -134,7 +134,7 @@ fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
 fn never_looping_script_sheds_503() -> anyhow::Result<()> {
     // No failure limit: with the default limit, the server stops 7.5 s after the first failed boot.
     let srv = Spawn::http(Mode::Worker, fixture("worker/never-loop-worker.php"))
-        .http_pool("max_failures = 0")
+        .http_pool("max_boot_failures = 0")
         .spawn();
     let mut rx = submit(srv.addr, req("/"))?;
     let resp = drain_resp_deadline(&mut rx, Instant::now() + Duration::from_secs(10))

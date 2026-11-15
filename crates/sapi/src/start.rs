@@ -162,7 +162,7 @@ impl Rapira {
             mode,
             entrypoint,
             max_requests,
-            max_failures,
+            max_boot_failures,
             ..
         } = pool;
         // Classic mode runs every unit in a new cycle, so max_requests has nothing to restart there.
@@ -205,7 +205,7 @@ impl Rapira {
                 worker_main(
                     mode,
                     entrypoint.clone(),
-                    max_failures,
+                    max_boot_failures,
                     UnitRx {
                         rx: intake_rx,
                         pending,
@@ -248,7 +248,7 @@ impl Rapira {
 }
 
 /// NTS inits module and request on different threads, so the call stack is re-initialized on this thread: https://github.com/php/php-src/pull/9104
-fn worker_main(mode: Mode, entrypoint: PathBuf, max_failures: u32, rx: UnitRx) {
+fn worker_main(mode: Mode, entrypoint: PathBuf, max_boot_failures: u32, rx: UnitRx) {
     UNIT_RX.with_borrow_mut(|slot| *slot = Some(rx));
     loop {
         unsafe {
@@ -261,7 +261,7 @@ fn worker_main(mode: Mode, entrypoint: PathBuf, max_failures: u32, rx: UnitRx) {
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker | Mode::Dispatcher => rapira_worker(&entrypoint, max_failures),
+            Mode::Worker | Mode::Dispatcher => rapira_worker(&entrypoint, max_boot_failures),
         };
         if matches!(exit, WorkerExit::Closed) {
             break;

@@ -18,7 +18,7 @@ pub struct PoolSettings {
     /// RSS of one worker in MiB above which the master drains the worker and forks a new one; 0 = unlimited.
     pub max_memory_mb: u64,
     /// Failed boots in sequence after which a worker stops as unhealthy; 0 = unlimited.
-    pub max_failures: u32,
+    pub max_boot_failures: u32,
     /// Wall-clock bound on a single request; zero = disabled.
     pub request_terminate_timeout: Duration,
 }
@@ -51,7 +51,7 @@ pub struct PoolSection {
     mode: Option<Mode>,
     max_requests: Option<u64>,
     max_memory_mb: Option<u64>,
-    max_failures: Option<u32>,
+    max_boot_failures: Option<u32>,
     request_terminate_timeout_secs: Option<u64>,
 }
 
@@ -79,7 +79,7 @@ pub fn resolve_pool(section: PoolSection, table: &str, dir: &Path) -> anyhow::Re
         mode,
         max_requests: section.max_requests.unwrap_or(0),
         max_memory_mb: section.max_memory_mb.unwrap_or(0),
-        max_failures: section.max_failures.unwrap_or(5),
+        max_boot_failures: section.max_boot_failures.unwrap_or(5),
         request_terminate_timeout: capped_timeout(
             table,
             "request_terminate_timeout_secs",
@@ -126,7 +126,7 @@ mod tests {
             mode: Mode::Dispatcher,
             max_requests: 0,
             max_memory_mb: 0,
-            max_failures: 5,
+            max_boot_failures: 5,
             request_terminate_timeout: Duration::ZERO,
         }
     }
@@ -179,10 +179,10 @@ mod tests {
                 },
             },
             Case {
-                name: "max failures",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nmax_failures = 2\n",
+                name: "max boot failures",
+                toml: "entrypoint = \"a.php\"\nprocesses = 4\nmax_boot_failures = 2\n",
                 want: PoolSettings {
-                    max_failures: 2,
+                    max_boot_failures: 2,
                     ..base()
                 },
             },
@@ -252,8 +252,8 @@ mod tests {
                 error: "http.pool.request_terminate_timeout_secs 100000 is too large (max 86400)",
             },
             ErrCase {
-                name: "negative max failures",
-                toml: "entrypoint = \"a.php\"\nmax_failures = -1\n",
+                name: "negative max boot failures",
+                toml: "entrypoint = \"a.php\"\nmax_boot_failures = -1\n",
                 error: "invalid value: integer `-1`, expected u32",
             },
             ErrCase {

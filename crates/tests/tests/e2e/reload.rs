@@ -456,7 +456,7 @@ fn wait_for_code_2(srv: &Server, within: Duration) {
 fn a_reload_after_a_failed_boot_runs_the_fixed_release() {
     let dir: PathBuf = scratch_dir();
     // No failure limit: with the default limit, the worker process ends at the fifth failed boot.
-    let Some(srv) = breakable_server(&dir, "max_failures = 0") else {
+    let Some(srv) = breakable_server(&dir, "max_boot_failures = 0") else {
         return;
     };
     let log = srv.log_file();
@@ -598,7 +598,7 @@ fn an_entrypoint_that_does_not_resolve_answers_503_until_a_reload_after_the_fix(
     let entrypoint = dir.join("current").join("dispatcher.php");
     let srv = Spawn::http_entrypoint(Mode::Dispatcher, &entrypoint.display().to_string())
         // No failure limit: with the default limit, the worker process ends 7.5 s after the first failed boot.
-        .http_pool("max_failures = 0")
+        .http_pool("max_boot_failures = 0")
         .json_log()
         .spawn();
     let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];

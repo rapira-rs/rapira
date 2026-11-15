@@ -406,7 +406,7 @@ impl Spawn {
         self
     }
 
-    /// Keys inside `[grpc.pool]`, for example `max_failures = 0`.
+    /// Keys inside `[grpc.pool]`, for example `max_boot_failures = 0`.
     pub fn grpc_pool(mut self, keys: &str) -> Spawn {
         self.grpc_pool += keys;
         self.grpc_pool.push('\n');

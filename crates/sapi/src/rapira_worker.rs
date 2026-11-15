@@ -251,8 +251,8 @@ fn reset_opcache_if_due() {
     }
 }
 
-/// `max_failures`: the failed boots in sequence after which the worker stops as unhealthy; 0 is no limit.
-pub fn rapira_worker(script: &Path, max_failures: u32) -> WorkerExit {
+/// `max_boot_failures`: the failed boots in sequence after which the worker stops as unhealthy; 0 is no limit.
+pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
     let mut failures: u32 = 0;
     let mut retry_delay = BOOT_RETRY_BASE;
     let exit = 'cycles: loop {
@@ -269,7 +269,7 @@ pub fn rapira_worker(script: &Path, max_failures: u32) -> WorkerExit {
             Cycle::Failed => {
                 failures += 1;
                 // The count starts at 1, so a limit of 0 never matches.
-                if failures == max_failures {
+                if failures == max_boot_failures {
                     error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
                     crate::quota::fire_unhealthy();
                 }

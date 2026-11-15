@@ -242,7 +242,7 @@ fn a_worker_whose_boot_fails_stays_starting() {
     // No failure limit: with the default limit, the server stops 7.5 s after the first failed boot.
     let ObservedServer { srv, observability } = spawn(
         "lifecycle/never-loop-worker.php",
-        "max_failures = 0",
+        "max_boot_failures = 0",
         "[observability.metrics]",
     );
     let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
@@ -265,7 +265,7 @@ fn a_pool_whose_boot_failed_turns_ready_without_a_request() {
     // No failure limit: with the default limit, the server stops 7.5 s after the first failed boot.
     let ObservedServer { srv, observability } = spawn(
         "lifecycle/dependency-boot-worker.php",
-        "max_failures = 0",
+        "max_boot_failures = 0",
         "[observability.probes]",
     );
     assert!(
@@ -301,7 +301,7 @@ fn a_failed_reboot_stays_starting() {
     // No failure limit: with the default limit, the worker process ends 7.5 s after the first failed boot.
     let ObservedServer { srv, observability } = spawn(
         "lifecycle/reboot-fails-worker.php",
-        "request_terminate_timeout_secs = 1\nmax_failures = 0",
+        "request_terminate_timeout_secs = 1\nmax_boot_failures = 0",
         "[observability.metrics]",
     );
     let StatusBody { status: code, body } = http_get(srv.addr, "/", REQ).expect("GET /");
