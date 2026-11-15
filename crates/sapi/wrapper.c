@@ -52,11 +52,10 @@ void rapira_init_call_stack(void) {
 }
 
 // A string that lives until the process exits: PHP never refcounts or frees an interned string.
-// The flags match zend_add_interned_string (Zend/zend_string.c). The hash comes first: zend_hash_update reads ZSTR_H of an interned key.
+// The flags match zend_add_interned_string (Zend/zend_string.c). The hash is set once here, as zend_new_interned_string_permanent does, so no request computes it.
 zend_string *rapira_permanent_string(const char *s, size_t len) {
     zend_string *str = zend_string_init(s, len, true);
     zend_string_hash_val(str);
-    GC_SET_REFCOUNT(str, 1);
     GC_ADD_FLAGS(str, IS_STR_INTERNED | IS_STR_PERMANENT);
     return str;
 }

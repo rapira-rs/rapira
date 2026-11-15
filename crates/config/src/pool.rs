@@ -22,7 +22,7 @@ pub struct PoolSettings {
     pub max_boot_failures: u32,
     /// Wall-clock bound on a single request; zero = disabled.
     pub request_terminate_timeout: Duration,
-    /// Variables each worker sets before PHP starts. The check in `resolve_pool` repeats the panics of `std::env::set_var` (https://doc.rust-lang.org/std/env/fn.set_var.html#panics).
+    /// Variables each worker sets before its PHP thread starts. `resolve_pool` rejects the names and values that `std::env::set_var` panics on (https://doc.rust-lang.org/std/env/fn.set_var.html#panics).
     pub env: BTreeMap<String, String>,
 }
 
