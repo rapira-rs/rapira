@@ -12,7 +12,7 @@ use std::{
     path::Path,
     ptr::null_mut,
     sync::atomic::{AtomicI32, Ordering},
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use crate::{
@@ -44,9 +44,10 @@ const OPCACHE_ON: c_int = 1;
 const OPCACHE_PENDING: c_int = 2;
 const OPCACHE_RESTARTING: c_int = 4;
 
-const UNHEALTHY_AFTER: u32 = 5;
-/// After a failed boot cycle, the worker runs the boot again when no unit arrives within this time. A load balancer that reads `/readyz` sends no requests to a pool that is not ready.
-const BOOT_RETRY: Duration = Duration::from_secs(5);
+/// The wait after the first failed boot of a sequence. Each further failed boot doubles it, up to `BOOT_RETRY_MAX`.
+const BOOT_RETRY_BASE: Duration = Duration::from_millis(500);
+/// The longest wait between two boots. The boot repeats without a request: a load balancer that reads `/readyz` sends no requests to a pool that is not ready.
+const BOOT_RETRY_MAX: Duration = Duration::from_secs(5);
 
 enum Cycle {
     Stop,
@@ -250,9 +251,11 @@ fn reset_opcache_if_due() {
     }
 }
 
-pub fn rapira_worker(script: &Path) -> WorkerExit {
+/// `max_boot_failures`: the failed boots in sequence after which the worker stops as unhealthy; 0 is no limit.
+pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
     let mut failures: u32 = 0;
-    let exit = loop {
+    let mut retry_delay = BOOT_RETRY_BASE;
+    let exit = 'cycles: loop {
         match run_cycle(script) {
             Cycle::Stop => break WorkerExit::Closed,
             Cycle::Restart => break WorkerExit::Restart,
@@ -261,22 +264,33 @@ pub fn rapira_worker(script: &Path) -> WorkerExit {
                 // No request runs while the app boots again, so the request watchdog skips the slot.
                 sb_update(scoreboard::Event::Idle);
                 failures = 0;
+                retry_delay = BOOT_RETRY_BASE;
             }
             Cycle::Failed => {
                 failures += 1;
-                if failures == UNHEALTHY_AFTER {
+                // The count starts at 1, so a limit of 0 never matches.
+                if failures == max_boot_failures {
                     error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
                     crate::quota::fire_unhealthy();
                 }
                 sb_update(scoreboard::Event::BootFailed);
-                match pull_unit_to_shed(BOOT_RETRY) {
-                    Pull::Closed => break WorkerExit::Closed,
-                    Pull::Unit(unit) => {
-                        unit.shed();
-                        sb_update(scoreboard::Event::Shed);
+                // One deadline for the whole wait: the units that arrive get shed, and they do not move the next boot.
+                let retry_at = Instant::now() + retry_delay;
+                retry_delay = (retry_delay * 2).min(BOOT_RETRY_MAX);
+                loop {
+                    let wait = retry_at.saturating_duration_since(Instant::now());
+                    if wait.is_zero() {
+                        break;
                     }
-                    // The retry time passed, or a reload arrived: the next boot starts.
-                    Pull::NoUnit => {}
+                    match pull_unit_to_shed(wait) {
+                        Pull::Closed => break 'cycles WorkerExit::Closed,
+                        Pull::Unit(unit) => {
+                            unit.shed();
+                            sb_update(scoreboard::Event::Shed);
+                        }
+                        // The wait ended, or a reload arrived: the next boot starts.
+                        Pull::NoUnit => break,
+                    }
                 }
             }
         }

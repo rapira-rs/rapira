@@ -189,3 +189,9 @@ foreach ($cases as $case) {
     }
     \Rapira\log('case', context: ['name' => $case['name'], 'result' => $result]);
 }
+
+// The pull makes the boot succeed, so the worker runs the script once. The script ends when the server stops.
+try {
+    \Rapira\get_dispatcher()->receive();
+} catch (\Rapira\Exception\ClosedException) {
+}

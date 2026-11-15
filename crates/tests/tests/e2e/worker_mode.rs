@@ -132,7 +132,10 @@ fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
 /// A bootstrap that never calls handle_request() sheds 503 instead of hanging or answering 200.
 #[test]
 fn never_looping_script_sheds_503() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Worker, fixture("worker/never-loop-worker.php")).spawn();
+    // No failure limit: with the default limit, the server stops 7.5 s after the first failed boot.
+    let srv = Spawn::http(Mode::Worker, fixture("worker/never-loop-worker.php"))
+        .http_pool("max_boot_failures = 0")
+        .spawn();
     let mut rx = submit(srv.addr, req("/"))?;
     let resp = drain_resp_deadline(&mut rx, Instant::now() + Duration::from_secs(10))
         .expect("the shed 503 never arrived");

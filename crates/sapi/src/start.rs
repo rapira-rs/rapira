@@ -1,3 +1,4 @@
+use rapira_config::PoolSettings;
 use std::cell::{Cell, RefCell};
 use std::ffi::CStr;
 use std::path::PathBuf;
@@ -147,18 +148,23 @@ pub fn boot_master(register: &'static [unsafe extern "C" fn()]) -> anyhow::Resul
 }
 
 impl Rapira {
-    /// `entrypoint`: the script of every request in classic mode, the worker script otherwise. `max_requests`: the configured value, 0 = unlimited; classic mode gets no quota, the other modes get a jitter.
+    /// `pool`: the settings of the pool. Its `entrypoint` is the script of every request in classic mode, the worker script otherwise. Its `max_requests` gives classic mode no quota, and the other modes a quota with a jitter.
     /// `slot`: the scoreboard slot this worker reports into. `reloads`: the reload count of the server. `stopper` stops the plugin when PHP turns unhealthy. `plugin`: the plugin of the pool; in dispatcher mode, its name and its record are the dispatcher surface that PHP sees.
     /// On return, the calling thread blocks SIGPROF, and every thread it starts inherits the block.
     pub fn start_worker(
-        mode: Mode,
-        entrypoint: PathBuf,
-        max_requests: u64,
+        pool: PoolSettings,
         slot: &'static rapira_scoreboard::SharedSlot,
         reloads: &'static rapira_scoreboard::Reloads,
         stopper: Stopper,
         plugin: &dyn Plugin,
     ) -> StartedWorker {
+        let PoolSettings {
+            mode,
+            entrypoint,
+            max_requests,
+            max_boot_failures,
+            ..
+        } = pool;
         // Classic mode runs every unit in a new cycle, so max_requests has nothing to restart there.
         let max_requests = if mode == Mode::Classic {
             0
@@ -199,6 +205,7 @@ impl Rapira {
                 worker_main(
                     mode,
                     entrypoint.clone(),
+                    max_boot_failures,
                     UnitRx {
                         rx: intake_rx,
                         pending,
@@ -241,7 +248,7 @@ impl Rapira {
 }
 
 /// NTS inits module and request on different threads, so the call stack is re-initialized on this thread: https://github.com/php/php-src/pull/9104
-fn worker_main(mode: Mode, entrypoint: PathBuf, rx: UnitRx) {
+fn worker_main(mode: Mode, entrypoint: PathBuf, max_boot_failures: u32, rx: UnitRx) {
     UNIT_RX.with_borrow_mut(|slot| *slot = Some(rx));
     loop {
         unsafe {
@@ -254,7 +261,7 @@ fn worker_main(mode: Mode, entrypoint: PathBuf, rx: UnitRx) {
                 classic_worker();
                 WorkerExit::Closed
             }
-            Mode::Worker | Mode::Dispatcher => rapira_worker(&entrypoint),
+            Mode::Worker | Mode::Dispatcher => rapira_worker(&entrypoint, max_boot_failures),
         };
         if matches!(exit, WorkerExit::Closed) {
             break;

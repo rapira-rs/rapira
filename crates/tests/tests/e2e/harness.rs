@@ -230,7 +230,7 @@ fn render_config(
 
 pub use tests::grpc::ECHO_SERVICE;
 
-/// A `[grpc]` pool of `processes` workers over `entrypoint`. `listen`, `descriptor_set` and `extra` (keys inside `[grpc]`) go into the file verbatim; `services` becomes a TOML string array, and None leaves the key out.
+/// A `[grpc]` pool of `processes` workers over `entrypoint`. `listen`, `descriptor_set`, `extra` (keys inside `[grpc]`) and `pool` (keys inside `[grpc.pool]`) go into the file verbatim; `services` becomes a TOML string array, and None leaves the key out.
 fn render_grpc(
     listen: &str,
     processes: usize,
@@ -238,6 +238,7 @@ fn render_grpc(
     descriptor_set: &str,
     services: Option<&[String]>,
     extra: &str,
+    pool: &str,
 ) -> String {
     let services = services.map_or(String::new(), |names| {
         let quoted: Vec<String> = names.iter().map(|n| format!("\"{n}\"")).collect();
@@ -245,7 +246,7 @@ fn render_grpc(
     });
     format!(
         "[grpc]\nlisten = \"{listen}\"\ndescriptor_set = \"{descriptor_set}\"\n{services}{extra}\n\
-         [grpc.pool]\nprocesses = {processes}\nentrypoint = \"{entrypoint}\"\n"
+         [grpc.pool]\nprocesses = {processes}\nentrypoint = \"{entrypoint}\"\n{pool}"
     )
 }
 
@@ -269,6 +270,8 @@ pub struct Spawn {
     /// Keys inside `[http.pool]`, after `mode`.
     http_pool: String,
     grpc_extra: String,
+    /// Keys inside `[grpc.pool]`.
+    grpc_pool: String,
     toml: String,
     php_ini: String,
     /// False leaves PHPRC unset, so PHP reads its compiled-in php.ini.
@@ -336,6 +339,7 @@ impl Spawn {
             http_extra: String::new(),
             http_pool: String::new(),
             grpc_extra: String::new(),
+            grpc_pool: String::new(),
             toml: String::new(),
             php_ini: std::fs::read_to_string(&ini)
                 .unwrap_or_else(|e| panic!("read {}: {e}", ini.display())),
@@ -399,6 +403,13 @@ impl Spawn {
     pub fn grpc_extra(mut self, keys: &str) -> Spawn {
         self.grpc_extra += keys;
         self.grpc_extra.push('\n');
+        self
+    }
+
+    /// Keys inside `[grpc.pool]`, for example `max_boot_failures = 0`.
+    pub fn grpc_pool(mut self, keys: &str) -> Spawn {
+        self.grpc_pool += keys;
+        self.grpc_pool.push('\n');
         self
     }
 
@@ -551,6 +562,7 @@ impl Spawn {
                     descriptor_set,
                     self.services.as_deref(),
                     &self.grpc_extra,
+                    &self.grpc_pool,
                 );
                 config.push('\n');
             }
