@@ -119,7 +119,7 @@ The `[http]` table. Unknown keys fail the boot.
 
 The drain window is not a key of this table. It is `[supervisor].process_control_timeout_secs` minus 5 seconds, or minus half of it when it is below 10 seconds. The drain therefore ends before the master sends SIGTERM.
 
-`[http.pool.env]` sets environment variables for the workers of the pool. Each worker sets them before PHP starts, so `getenv()`, `$_ENV` and the boot `$_SERVER` show them. Each request `$_SERVER` also gets them, and a request variable with the same name wins. The master parses `php.ini` before it forks the workers, so `${VAR}` in `php.ini` does not see them. A name that is empty or contains `=` or NUL, or a value that contains NUL, fails the boot.
+`[http.pool.env]` sets environment variables for the workers of the pool. Each worker sets them before PHP starts, so `getenv()`, the boot `$_SERVER` and `$_ENV` (when `variables_order` contains `E`) show them. Each request `$_SERVER` also gets them, and a request variable with the same name wins. The master parses `php.ini` before it forks the workers, so `${VAR}` in `php.ini` does not see them. A name that is empty or contains `=` or NUL, or a value that contains NUL, fails the boot.
 
 Each of these errors in the middleware list fails the boot with exit code 1:
 
