@@ -460,13 +460,13 @@ fn a_reload_after_a_failed_boot_runs_the_fixed_release() {
         return;
     };
     let log = srv.log_file();
-    // The wait after the sixth failed boot is 3.2 s, so the reload arrives before the next boot.
+    // The wait after the fourth failed boot is 4 s, so the reload arrives before the next boot.
     let Some(failed) = poll(Duration::from_secs(20), || {
         let boots = app_contexts(&log, "boot failed").len();
-        (boots >= 6).then_some(boots)
+        (boots >= 4).then_some(boots)
     }) else {
         panic!(
-            "the broken release fails its boot 6 times\n{}",
+            "the broken release fails its boot 4 times\n{}",
             diagnostics(&srv)
         );
     };
@@ -597,7 +597,7 @@ fn an_entrypoint_that_does_not_resolve_answers_503_until_a_reload_after_the_fix(
     let [release_1, release_2] = stage_releases(&dir, "dispatcher.php");
     let entrypoint = dir.join("current").join("dispatcher.php");
     let srv = Spawn::http_entrypoint(Mode::Dispatcher, &entrypoint.display().to_string())
-        // No failure limit: with the default limit, the worker process ends 1.5 s after the first failed boot.
+        // No failure limit: with the default limit, the worker process ends 7.5 s after the first failed boot.
         .http_pool("max_failures = 0")
         .json_log()
         .spawn();

@@ -45,7 +45,7 @@ const OPCACHE_PENDING: c_int = 2;
 const OPCACHE_RESTARTING: c_int = 4;
 
 /// The wait after the first failed boot of a sequence. Each further failed boot doubles it, up to `BOOT_RETRY_MAX`.
-const BOOT_RETRY_BASE: Duration = Duration::from_millis(100);
+const BOOT_RETRY_BASE: Duration = Duration::from_millis(500);
 /// The longest wait between two boots. The boot repeats without a request: a load balancer that reads `/readyz` sends no requests to a pool that is not ready.
 const BOOT_RETRY_MAX: Duration = Duration::from_secs(5);
 

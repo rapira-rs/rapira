@@ -18,7 +18,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
         Mode::Dispatcher,
         fixture("failboot_worker_tests/failboot-worker.php"),
     )
-    // No failure limit: with the default limit, the server stops 1.5 s after the first failed boot.
+    // No failure limit: with the default limit, the server stops 7.5 s after the first failed boot.
     .http_pool("max_failures = 0")
     .spawn();
     let deadline = Instant::now() + Duration::from_secs(10);
@@ -41,7 +41,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
 // A gRPC worker that fatals before its receive loop sheds the queued call with UNAVAILABLE, as the HTTP worker sheds with 503.
 #[test]
 fn failboot_grpc_worker_sheds_with_unavailable() -> anyhow::Result<()> {
-    // No failure limit: with the default limit, the server stops 1.5 s after the first failed boot.
+    // No failure limit: with the default limit, the server stops 7.5 s after the first failed boot.
     let srv = Spawn::grpc(fixture("failboot_worker_tests/failboot-worker.php"))
         .grpc_pool("max_failures = 0")
         .spawn();
@@ -85,7 +85,7 @@ fn failboot_grpc_worker_sheds_with_unavailable() -> anyhow::Result<()> {
     Ok(())
 }
 
-// A request during the wait after a failed boot gets 503 and starts no boot: the next boot starts when the wait ends. The 5 failed boots of the default max_failures have 4 waits between them (100, 200, 400 and 800 ms), so the 4 requests do not shorten the time to the unhealthy flag. The flag stops the worker, and the master stops with exit code 70 because the pool never served.
+// A request during the wait after a failed boot gets 503 and starts no boot: the next boot starts when the wait ends. The 5 failed boots of the default max_failures have 4 waits between them (0.5, 1, 2 and 4 s), so the 4 requests do not shorten the time to the unhealthy flag. The flag stops the worker, and the master stops with exit code 70 because the pool never served.
 #[test]
 fn requests_during_the_boot_wait_get_503_and_start_no_boot() -> anyhow::Result<()> {
     let started = Instant::now();
@@ -94,7 +94,7 @@ fn requests_during_the_boot_wait_get_503_and_start_no_boot() -> anyhow::Result<(
         fixture("failboot_worker_tests/failboot-worker.php"),
     )
     .spawn();
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(20);
 
     let mut statuses = Vec::new();
     for _ in 0..4 {
@@ -114,13 +114,13 @@ fn requests_during_the_boot_wait_get_503_and_start_no_boot() -> anyhow::Result<(
         "5 failed boots in sequence must flag the worker unhealthy\n{log}"
     );
     assert!(
-        took >= Duration::from_millis(1500),
+        took >= Duration::from_millis(7500),
         "the requests started boots: the master stopped after {took:?}\n{log}"
     );
     Ok(())
 }
 
-// A pool whose boot always fails stops the master with exit code 70 after max_failures failed boots in sequence, 5 by default. The worker waits between the boots: 100 ms after the first failed boot, and each further failed boot doubles the wait.
+// A pool whose boot always fails stops the master with exit code 70 after max_failures failed boots in sequence, 5 by default. The worker waits between the boots: 500 ms after the first failed boot, and each further failed boot doubles the wait.
 #[test]
 fn a_pool_that_never_boots_gives_up_after_max_failures_boots() {
     struct Case {
@@ -137,7 +137,7 @@ fn a_pool_that_never_boots_gives_up_after_max_failures_boots() {
             name: "the default limit",
             pool: "",
             boots: 5,
-            waits: Duration::from_millis(1500),
+            waits: Duration::from_millis(7500),
         },
         Case {
             name: "the smallest limit",
