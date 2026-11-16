@@ -128,7 +128,7 @@ struct DeployCase {
     validate_timestamps: u8,
 }
 
-/// The body of a `deploy/` fixture: the release of the code, the working directory and the content of release.txt.
+/// The body that a `deploy/` fixture prints.
 fn seen(srv: &Server) -> String {
     let got = drain(submit(srv.addr, req("/")).expect("GET /"));
     assert_eq!(got.status, 200, "\n{}", diagnostics(srv));
@@ -320,6 +320,75 @@ fn a_reload_after_a_deploy_runs_the_new_release() {
         };
         signal(srv.pid(), libc::SIGUSR2);
 
+        let mut last = String::new();
+        let moved = poll(Duration::from_secs(10), || {
+            last = seen(&srv);
+            (last == want).then_some(())
+        });
+        assert!(
+            moved.is_some(),
+            "{}: after the deploy and the reload\n want: {want}\n last: {last}\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        drop(srv);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+}
+
+/// A reload after a symlink deploy moves the script paths of $_SERVER to release 2. SCRIPT_NAME and PHP_SELF keep the configured file name.
+#[test]
+fn a_reload_after_a_deploy_moves_the_server_script_paths() {
+    struct Case {
+        name: &'static str,
+        mode: Mode,
+        /// The fixture in `deploy/` that each release folder gets as its entrypoint.
+        entrypoint: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "classic mode",
+            mode: Mode::Classic,
+            entrypoint: "classic-server-paths.php",
+        },
+        Case {
+            name: "worker mode",
+            mode: Mode::Worker,
+            entrypoint: "worker-server-paths.php",
+        },
+    ];
+    for case in &cases {
+        let dir: PathBuf = scratch_dir();
+        let [release_1, release_2] = stage_releases(&dir, case.entrypoint);
+        let entrypoint = dir.join("current").join(case.entrypoint);
+        let srv = Spawn::http_entrypoint(case.mode, &entrypoint.display().to_string()).spawn();
+        let paths = |release: &str| {
+            format!(
+                "file={release}/{e} root={release} name=/{e} self=/{e}",
+                e = case.entrypoint
+            )
+        };
+
+        assert_eq!(
+            seen(&srv),
+            paths(&release_1),
+            "{}: the first request before the deploy\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        assert_eq!(
+            seen(&srv),
+            paths(&release_1),
+            "{}: the second request before the deploy\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        let next = dir.join("current.next");
+        std::os::unix::fs::symlink("releases/2", &next).expect("link current.next");
+        std::fs::rename(&next, dir.join("current")).expect("switch current");
+        signal(srv.pid(), libc::SIGUSR2);
+
+        let want = paths(&release_2);
         let mut last = String::new();
         let moved = poll(Duration::from_secs(10), || {
             last = seen(&srv);

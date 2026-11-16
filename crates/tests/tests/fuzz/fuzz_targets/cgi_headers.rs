@@ -1,4 +1,4 @@
-//! Request headers through the unsafe field name drop to the `$_SERVER` variables of the classic and worker modes. The input is one `name:value` field per line, and its length is the content length.
+//! Request headers through the unsafe field name drop to the `HTTP_*` variables of `$_SERVER` in the classic and worker modes. The input is one `name:value` field per line.
 
 #![no_main]
 
@@ -22,7 +22,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     let mut headers = sent.clone();
     drop_unsafe_field_names(&mut headers);
 
-    let mut want = vec![("CONTENT_LENGTH".to_owned(), data.len().to_string())];
+    let mut want = Vec::new();
     for name in sent.keys().filter(|n| safe_name(n)) {
         let var = format!(
             "HTTP_{}",
@@ -40,7 +40,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         want.push((var, value.escape_ascii().to_string()));
     }
     let mut got = Vec::new();
-    cgi_header_vars(&headers, data.len(), |name, value| {
+    cgi_header_vars(&headers, |name, value| {
         got.push((
             name.to_string_lossy().into_owned(),
             value.escape_ascii().to_string(),

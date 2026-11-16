@@ -54,6 +54,9 @@ void rapira_zstr_release(zend_string *s);
 void rapira_register_known_stringl(const char *name, size_t name_len,
                                    const char *val, size_t val_len,
                                    zval *track_vars_array);
+// ZVAL_STRINGL_FAST is a macro; the shim stores the string `val` in `ht` under `key` through zend_hash_update.
+void rapira_hash_update_stringl(HashTable *ht, zend_string *key,
+                                const char *val, size_t val_len);
 
 // Mode in rapira_config (crates/config/src/pool.rs), mapped in start.rs (start_worker) - keep in sync
 enum {
