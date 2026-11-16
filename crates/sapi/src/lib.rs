@@ -52,6 +52,8 @@ unsafe extern "C" {
     pub fn rapira_opcache_state(last_restart: *mut zend_long) -> c_int;
     // Calls opcache_reset() (module.c).
     pub fn rapira_opcache_reset();
+    // A permanent interned string: PHP never refcounts or frees it (wrapper.c).
+    pub fn rapira_permanent_string(s: *const std::os::raw::c_char, len: usize) -> *mut zend_string;
 
     pub static mut rapira_module_entry: zend_module_entry;
     // OPcache calls it in the process that schedules a restart (Zend/zend.h).
