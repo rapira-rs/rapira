@@ -84,6 +84,13 @@ $cases = [
         )),
     ],
     [
+        'name' => 'protocol cases',
+        'run' => fn () => implode(' ', array_map(
+            static fn (Protocol $p): string => $p->name . ':' . $p->value,
+            Protocol::cases(),
+        )),
+    ],
+    [
         'name' => 'grpc exception carries its status',
         'run' => static function (): string {
             $e = new GrpcException(StatusCode::NotFound, 'nf');

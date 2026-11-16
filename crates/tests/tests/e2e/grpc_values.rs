@@ -66,6 +66,10 @@ const CASES: &[(&str, &str)] = &[
         "method kind axes",
         "unary:00 server-streaming:01 client-streaming:10 bidi-streaming:11",
     ),
+    (
+        "protocol cases",
+        "Grpc:grpc GrpcWeb:grpc-web Connect:connect Rest:rest",
+    ),
     ("grpc exception carries its status", "NotFound|nf|nf|0"),
     ("grpc exception subclass calls the parent", "Aborted"),
     (

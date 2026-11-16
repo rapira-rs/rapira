@@ -246,6 +246,12 @@ namespace Rapira\Grpc\Call {
         case Grpc = 'grpc';
         case GrpcWeb = 'grpc-web';
         case Connect = 'connect';
+
+        /**
+         * Reserved for a build with `google.api.http` transcoding. The default build never reports it.
+         * https://github.com/googleapis/googleapis/blob/master/google/api/http.proto
+         */
+        case Rest = 'rest';
     }
 
     /**
