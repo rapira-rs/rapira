@@ -207,6 +207,7 @@ impl Rapira {
                 sb_set(slot);
                 crate::rapira_worker::RELOADS.set(Some(reloads));
                 crate::context::intern_server_env(&env);
+                crate::context::intern_server_strings();
                 quota::install(max_requests, stopper);
                 worker_main(
                     mode,

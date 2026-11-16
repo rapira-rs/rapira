@@ -139,7 +139,6 @@ pub struct ReqC {
     pub authorization: Option<CString>,
     pub remote_addr: String,
     pub remote_port: String,
-    pub server_port: String,
 }
 
 /// The REMOTE_ADDR and REMOTE_PORT values of one peer.
@@ -204,7 +203,6 @@ impl ReqC {
                 .map(|v| cgi_cstring("CONTENT_TYPE", v.as_bytes())),
             remote_addr,
             remote_port,
-            server_port: r.server_port.to_string(),
         }
     }
 }
@@ -369,7 +367,6 @@ pub(crate) mod tests {
                 authorization: None,
                 remote_addr: String::new(),
                 remote_port: String::new(),
-                server_port: String::new(),
             },
             sender: None,
             head: None,

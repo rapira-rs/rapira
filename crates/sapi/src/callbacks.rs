@@ -133,18 +133,9 @@ fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
     CStr::from_bytes_until_nul(buf).unwrap_or_default()
 }
 
-/// php_register_known_variable is last-write-wins, so the call order is the precedence rule: CONTENT_LENGTH, then HTTP_*.
-/// Each name registers once, with its repeats joined.
+/// The `HTTP_*` variables of `headers`. Each name registers once, with its repeats joined.
 /// Owned buffers stay in ManuallyDrop because `put` can bail out over this frame.
-pub fn cgi_header_vars(
-    headers: &HeaderMap,
-    content_length: usize,
-    mut put: impl FnMut(&CStr, &[u8]),
-) {
-    put(
-        c"CONTENT_LENGTH",
-        content_length.format_into(&mut NumBuffer::new()).as_bytes(),
-    );
+pub fn cgi_header_vars(headers: &HeaderMap, mut put: impl FnMut(&CStr, &[u8])) {
     let mut name = ManuallyDrop::new(Vec::new());
     let mut joined = ManuallyDrop::new(Vec::new());
     for field in headers.keys() {
@@ -280,7 +271,7 @@ pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
 const SERVER_VARS_MAX: u32 = 28;
 
 pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut zval) {
-    // Every name is valid for php_register_known_variable: the fixed names as written, HTTP_* through cgi_header_name.
+    // Every name is valid for php_register_known_variable: the boot names as written, HTTP_* through cgi_header_name.
     let put_bytes = |name: &CStr, val: &[u8]| unsafe {
         rapira_register_known_stringl(
             name.as_ptr(),
@@ -302,49 +293,67 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         // One allocation for the whole array: the env pairs of the pool, the names below, one HTTP_* name per field, and the entries php_register_server_variables adds after this callback.
         let server_env = crate::context::SERVER_ENV.get();
         let size = SERVER_VARS_MAX + ctx.req.headers.keys_len() as u32 + server_env.len() as u32;
-        unsafe { zend_hash_extend((*track_vars_array).value.arr, size, false) };
+        let ht = unsafe { (*track_vars_array).value.arr };
+        unsafe { zend_hash_extend(ht, size, false) };
+        // A permanent interned name and value: the insert takes no hash, no allocation and no copy.
+        let put_interned = |name: *mut zend_string, value: *mut zend_string| unsafe {
+            let mut v: zval = std::mem::zeroed();
+            v.value.str_ = value;
+            v.u1.type_info = IS_STRING;
+            zend_hash_update(ht, name, &mut v);
+        };
+        // A permanent interned name and a value of this request, which PHP copies.
+        let put = |name: *mut zend_string, value: &[u8]| unsafe {
+            rapira_hash_update_stringl(ht, name, value.as_ptr().cast(), value.len());
+        };
         // The env pairs of the pool go in first: the request variables below win over a pair with the same name.
         // Each name goes in as written. The environment import of PHP skips a name with a space, '.' or '[', and it stores an all-digit name as an integer key. Such a name is therefore different in the boot $_SERVER.
         for &(name, value) in server_env {
-            unsafe {
-                let mut v: zval = std::mem::zeroed();
-                v.value.str_ = value;
-                v.u1.type_info = IS_STRING;
-                zend_hash_update((*track_vars_array).value.arr, name, &mut v);
-            }
+            put_interned(name, value);
         }
-        let put = |name: &CStr, val: &str| put_bytes(name, val.as_bytes());
+        let s = crate::context::server_strings();
         let script = crate::context::script();
-        put(c"PHP_SELF", &script.script_name);
+        let identity = crate::context::server_identity(ctx.req.server_name, ctx.req.server_port);
+        put_interned(s.php_self, script.server_script_name);
         let (doc_uri, query) = ctx
             .req
             .uri
             .split_once('?')
             .unwrap_or((ctx.req.uri.as_str(), ""));
-        put(c"DOCUMENT_URI", doc_uri);
-        put(c"DOCUMENT_ROOT", &script.document_root);
-        put(
-            c"REQUEST_SCHEME",
-            if ctx.req.https { "https" } else { "http" },
-        );
-        put(c"REMOTE_HOST", &reqc.remote_addr);
-        put(c"REMOTE_PORT", &reqc.remote_port);
+        put(s.document_uri, doc_uri.as_bytes());
+        put_interned(s.document_root, script.server_document_root);
+        let scheme = if ctx.req.https {
+            s.scheme_https
+        } else {
+            s.scheme_http
+        };
+        put_interned(s.request_scheme, scheme);
+        put(s.remote_host, reqc.remote_addr.as_bytes());
+        put(s.remote_port, reqc.remote_port.as_bytes());
         // REMOTE_IDENT is optional per CGI/1.1; rapira runs no RFC 1413 ident lookup, so it is empty.
         // https://www.rfc-editor.org/rfc/rfc3875#section-4.1.10
         // https://www.rfc-editor.org/rfc/rfc1413
-        put(c"REMOTE_IDENT", "");
-        put(c"REQUEST_METHOD", &ctx.req.method);
-        put(c"REQUEST_URI", &ctx.req.uri);
-        put(c"QUERY_STRING", query);
-        put_bytes(c"SCRIPT_FILENAME", script.filename.as_bytes());
-        put(c"SCRIPT_NAME", &script.script_name);
-        put(c"SERVER_PROTOCOL", ctx.req.protocol);
-        put(c"SERVER_SOFTWARE", "Rapira");
-        put(c"SERVER_NAME", ctx.req.server_name);
-        put(c"SERVER_PORT", &reqc.server_port);
-        put(c"REMOTE_ADDR", &reqc.remote_addr);
-        put(c"GATEWAY_INTERFACE", "CGI/1.1");
-        put(c"HTTPS", if ctx.req.https { "on" } else { "" });
+        put(s.remote_ident, b"");
+        put(s.request_method, ctx.req.method.as_bytes());
+        put(s.request_uri, ctx.req.uri.as_bytes());
+        put(s.query_string, query.as_bytes());
+        put_interned(s.script_filename, script.server_filename);
+        put_interned(s.script_name, script.server_script_name);
+        match ctx.req.protocol {
+            "HTTP/1.1" => put_interned(s.server_protocol, s.http_1_1),
+            "HTTP/1.0" => put_interned(s.server_protocol, s.http_1_0),
+            other => put(s.server_protocol, other.as_bytes()),
+        }
+        put_interned(s.server_software, s.rapira);
+        put_interned(s.server_name, identity.server_name);
+        put_interned(s.server_port, identity.server_port);
+        put(s.remote_addr, reqc.remote_addr.as_bytes());
+        put_interned(s.gateway_interface, s.cgi_1_1);
+        if ctx.req.https {
+            put_interned(s.https, s.on);
+        } else {
+            put(s.https, b"");
+        }
 
         let auth_type: &[u8] = ctx
             .req
@@ -356,19 +365,24 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
                     .find(|s| !s.is_empty())
             })
             .unwrap_or(b"");
-        put_bytes(c"AUTH_TYPE", auth_type);
+        put(s.auth_type, auth_type);
 
         let auth_user = unsafe { sapi_globals.request_info.auth_user };
         if !auth_user.is_null() {
             let user: &CStr = unsafe { CStr::from_ptr(auth_user as *const c_char) };
-            put_bytes(c"REMOTE_USER", user.to_bytes());
+            put(s.remote_user, user.to_bytes());
         }
 
         if let Some(ct) = &reqc.ctype {
-            put_bytes(c"CONTENT_TYPE", ct.to_bytes());
+            put(s.content_type, ct.to_bytes());
         }
 
-        cgi_header_vars(&ctx.req.headers, ctx.req.body.len(), put_bytes);
+        let content_length = ctx.req.body.len();
+        put(
+            s.content_length,
+            content_length.format_into(&mut NumBuffer::new()).as_bytes(),
+        );
+        cgi_header_vars(&ctx.req.headers, put_bytes);
     })
 }
 
@@ -522,7 +536,7 @@ mod tests {
         }
     }
 
-    /// `HTTP_*` registration is last-write-wins: each name registers once, after CONTENT_LENGTH, in the order of its first line.
+    /// `HTTP_*` registration is last-write-wins: each name registers once, in the order of its first line.
     #[test]
     fn cgi_header_vars_register_each_name_once() {
         let headers = map(&[
@@ -532,14 +546,13 @@ mod tests {
             ("cookie", "b=2"),
         ]);
         let mut got = Vec::new();
-        cgi_header_vars(&headers, 5, |name, value| {
+        cgi_header_vars(&headers, |name, value| {
             got.push((
                 name.to_str().unwrap().to_owned(),
                 String::from_utf8(value.to_vec()).unwrap(),
             ));
         });
         let want = [
-            ("CONTENT_LENGTH", "5"),
             ("HTTP_X_FORWARDED_FOR", "1.2.3.4, 5.6.7.8"),
             ("HTTP_COOKIE", "a=1; b=2"),
         ]

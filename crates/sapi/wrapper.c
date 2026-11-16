@@ -41,6 +41,13 @@ void rapira_register_known_stringl(const char *name, size_t name_len,
     php_register_known_variable(name, name_len, &value, track_vars_array);
 }
 
+void rapira_hash_update_stringl(HashTable *ht, zend_string *key,
+                                const char *val, size_t val_len) {
+    zval value;
+    ZVAL_STRINGL_FAST(&value, val, val_len);
+    zend_hash_update(ht, key, &value);
+}
+
 void rapira_zstr_addref(zend_string *s) { zend_string_addref(s); }
 
 void rapira_zstr_release(zend_string *s) { zend_string_release(s); }
