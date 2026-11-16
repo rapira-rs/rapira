@@ -304,6 +304,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         let size = SERVER_VARS_MAX + ctx.req.headers.keys_len() as u32 + server_env.len() as u32;
         unsafe { zend_hash_extend((*track_vars_array).value.arr, size, false) };
         // The env pairs of the pool go in first: the request variables below win over a pair with the same name.
+        // Each name goes in as written. The environment import of PHP skips a name with a space, '.' or '[', and it stores an all-digit name as an integer key. Such a name is therefore different in the boot $_SERVER.
         for &(name, value) in server_env {
             unsafe {
                 let mut v: zval = std::mem::zeroed();
