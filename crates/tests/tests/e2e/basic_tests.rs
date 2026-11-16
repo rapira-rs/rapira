@@ -1,5 +1,5 @@
-use http::Method;
 use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
+use http::{Method, Version};
 use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, fixture, req, server_log};
@@ -283,10 +283,57 @@ fn server_variables() -> anyhow::Result<()> {
         format!("[DOCUMENT_ROOT] => {}\n", root.display()),
         "[SCRIPT_NAME] => /server-variables.php\n".into(),
         "[PHP_SELF] => /server-variables.php\n".into(),
+        // https://www.rfc-editor.org/rfc/rfc3875#section-4.1.4
+        "[GATEWAY_INTERFACE] => CGI/1.1\n".into(),
+        // The listener has no TLS, and rapira runs no ident lookup.
+        "[REQUEST_SCHEME] => http\n".into(),
+        "[HTTPS] => \n".into(),
+        "[REMOTE_IDENT] => \n".into(),
     ] {
         assert!(
             body.contains(&expected),
             "$_SERVER missing {expected:?} (got: {body:?})"
+        );
+    }
+    Ok(())
+}
+
+/// SERVER_PROTOCOL follows the version of each request: one worker serves the cases in sequence.
+#[test]
+fn server_protocol_follows_the_request_version() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        version: Version,
+        want: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "an HTTP/1.1 request",
+            version: Version::HTTP_11,
+            want: "[SERVER_PROTOCOL] => HTTP/1.1\n",
+        },
+        Case {
+            name: "an HTTP/1.0 request on the same worker",
+            version: Version::HTTP_10,
+            want: "[SERVER_PROTOCOL] => HTTP/1.0\n",
+        },
+        Case {
+            name: "an HTTP/1.1 request after the HTTP/1.0 request",
+            version: Version::HTTP_11,
+            want: "[SERVER_PROTOCOL] => HTTP/1.1\n",
+        },
+    ];
+    let srv = Spawn::http(Mode::Worker, fixture("shared/server-variables.php")).spawn();
+    for case in &cases {
+        let mut request = req("/");
+        *request.version_mut() = case.version;
+        let StatusBody { status, body } = drain(submit(srv.addr, request)?);
+        assert_eq!(status, 200, "{}", case.name);
+        assert!(
+            body.contains(case.want),
+            "{}: $_SERVER missing {:?} (got: {body:?})",
+            case.name,
+            case.want
         );
     }
     Ok(())
