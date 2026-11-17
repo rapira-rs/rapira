@@ -46,7 +46,7 @@ processes = 16                # a fixed worker count; defaults to the CPU count
 # With a [grpc] table, grpc.descriptor_set and grpc.pool.entrypoint are required.
 # [grpc]
 # listen = "127.0.0.1:50051"   # host:port, ":port" (all interfaces), or "unix:/path"
-# descriptor_set = "api.binpb" # relative to this file's directory; build it with its imports: buf build --as-file-descriptor-set -o api.binpb
+# descriptor_set = "api.binpb" # relative to this file's directory, or an http:// or https:// URL that the master downloads at boot; build it with its imports: buf build --as-file-descriptor-set -o api.binpb
 # services = ["billing.v1.InvoiceService"] # serve only these (fully qualified, each in descriptor_set); unset = the services of the files that no other file imports
 # reflection = false           # serve grpc.reflection.v1 and v1alpha
 # default_timeout_secs = 30    # deadline of a call without a client timeout; unset (the default) = no deadline

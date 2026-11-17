@@ -34,7 +34,7 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set, builds the interceptors and binds the listener.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the PHP outcome as a connectrpc response or error.
-- `src/schema.rs`: the descriptor set, the method routes, the JSON transcoding, and the service list of `getServices()`.
+- `src/schema.rs`: the descriptor set and its `Source` (a file or a URL), the download, the method routes, the JSON transcoding, and the service list of `getServices()`.
 - `src/call.rs`: the `UnaryCall` and `UnaryReply` types.
 - `src/php/`: the Rust behind the PHP methods: the class entries and the declarations of `rapira_grpc_plugin` and `rapira_grpc_register_classes` (`mod.rs`), the `GrpcState` unit with its `Held` impl, the call and its metadata (`call.rs`), and the `Metadata` constructor (`values.rs`).
 
@@ -99,9 +99,18 @@ protoc --include_imports --descriptor_set_out=api.binpb -I proto proto/billing/v
 
 `buf build` includes the imported files by default. `protoc` includes them only with `--include_imports`.
 
+`descriptor_set` is a path or a URL. A value that starts with `http://` or `https://` is a URL, as for a Buf image input: https://buf.build/docs/reference/inputs/#image-formats. The master downloads the set with one GET request at boot. A reload does not download it again.
+
+- The download follows up to 10 redirects. A response status of 400 or above fails the boot.
+- HTTPS trusts the certificate store of the system. `SSL_CERT_FILE` and `SSL_CERT_DIR` select another store.
+- The userinfo of the URL (`https://user:password@host/api.binpb`) goes out as HTTP Basic credentials. The log shows the URL without its userinfo and its query.
+- The download uses the proxy that `ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY` names. `NO_PROXY` lists the hosts that need no proxy.
+- The connection, the response head and the body have a time limit of 30 s each. The set has a size limit of 64 MiB.
+- The response body is the binary set. A compressed or JSON image does not decode.
+
 By default, the pool serves the services of the files that no other file of the set imports, in descriptor order. A file that another file imports is a dependency, for example `google/longrunning/operations.proto`, so its services are not served. The plugin answers `grpc.health.v1.Health` and the reflection services itself, so the pool never serves them. `services` sets the list of fully qualified names, for example `["billing.v1.InvoiceService"]`. Use it when several rapira instances share one set, or to serve a service of an imported file. The master loads the set before the fork, so each of these fails the boot once, with exit code 1:
 
-- a set that rapira cannot read or decode;
+- a set that rapira cannot read, download or decode;
 - a set without its imports, for example with `unresolved type name ".google.protobuf.Timestamp"`;
 - a set that declares no service to serve;
 - a `services` entry that is not in the set, or one listed twice, also when one entry has a leading dot;
@@ -170,7 +179,7 @@ The listener sends an HTTP/2 keepalive PING to a connection that sends no reques
 The `[grpc]` table. Unknown keys fail the boot.
 
 - `listen`: `host:port`, `:port` for all interfaces, or `unix:/path`. Default `127.0.0.1:50051`.
-- `descriptor_set`: the binary descriptor set, relative to the directory of `rapira.toml`. Required.
+- `descriptor_set`: the binary descriptor set: a path relative to the directory of `rapira.toml`, or an `http://` or `https://` URL. Required.
 - `services`: the fully qualified names of the services to serve. Default: the services of the files that no other file imports. An empty list fails the boot.
 - `reflection`: serve server reflection. Default `false`.
 - `default_timeout_secs`: the timeout of a call that has none. Default: unset, no deadline.

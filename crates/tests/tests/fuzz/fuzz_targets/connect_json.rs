@@ -2,13 +2,12 @@
 
 #![no_main]
 
-use std::path::Path;
 use std::sync::{Arc, LazyLock};
 
 use buffa_descriptor::DynamicMessage;
 use buffa_descriptor::reflect::{ReflectMessageMut, Value};
 use rapira_fuzz::MAX_LEN;
-use rapira_grpc::schema::{Method, Schema};
+use rapira_grpc::schema::{Method, Schema, Source};
 
 const SAMPLE_BINPB: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/grpc/sample.binpb");
 const ECHO: &str = "rapira.test.fuzz.v1.FuzzService/Echo";
@@ -16,8 +15,9 @@ const ECHO: &str = "rapira.test.fuzz.v1.FuzzService/Echo";
 const FLOAT: u32 = 11;
 const DOUBLE: u32 = 12;
 
-static SCHEMA: LazyLock<Schema> =
-    LazyLock::new(|| Schema::load(Path::new(SAMPLE_BINPB), None).expect("loading sample.binpb"));
+static SCHEMA: LazyLock<Schema> = LazyLock::new(|| {
+    Schema::load(&Source::File(SAMPLE_BINPB.into()), None).expect("loading sample.binpb")
+});
 
 fn decode(s: &Schema, m: &Method, bytes: &[u8]) -> DynamicMessage {
     DynamicMessage::decode(Arc::clone(s.pool()), m.input, bytes)
