@@ -149,6 +149,8 @@ pub fn run_plugin(
         .thread_name(format!("rapira-{name}-io"))
         .build()
         .map_err(|e| anyhow!("building the {name} runtime: {e}"))?;
+    // One worker runs one plugin, so this is the only set of the process.
+    let _ = crate::stream::HANDLE.set(rt.handle().clone());
     let ended = Ended(Arc::clone(&stopper.events));
     // The task and its Intake clone drop with the runtime when serve returns, so the clone never keeps the intake open after a stop.
     let restart = Arc::clone(&stopper.restart);

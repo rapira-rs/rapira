@@ -4,7 +4,7 @@ use std::cell::{Cell, RefCell};
 use std::sync::Arc;
 use std::time::Duration;
 
-use rapira_sapi::{rapira_zstr_addref, rapira_zstr_release, zend_string};
+use rapira_sapi::{rapira_zstr_addref, rapira_zstr_release, stream, zend_string};
 
 use super::headers::{forbidden_trailer, split_framing, walk_head_table};
 use super::*;
@@ -60,13 +60,7 @@ pub(super) unsafe fn throw_verb(v: Verb) -> bool {
 
 pub(super) struct Closed;
 
-/// The timer of zend_set_timeout on NTS: ITIMER_REAL on Apple Silicon, ITIMER_PROF (process CPU time) elsewhere. https://github.com/php/php-src/blob/php-8.5.12/Zend/zend_execute_API.c#L1647-L1655
-#[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-const ZEND_TIMER: libc::c_int = libc::ITIMER_REAL;
-#[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-const ZEND_TIMER: libc::c_int = libc::ITIMER_PROF;
-
-/// On a full channel, park with the execution timer paused: a parked thread never reaches an opcode boundary, and on NTS a second expiry would `_exit(124)`. The resume restores the time that the timer had left.
+/// On a full channel, park with the execution timer paused (`stream::paused`).
 /// # Safety
 /// Engine active on this thread.
 pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
@@ -76,19 +70,10 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
     let sent = match tx.try_send(frame) {
         Ok(()) => Ok(()),
         Err(TrySendError::Closed(_)) => Err(Closed),
-        Err(TrySendError::Full(frame)) => unsafe {
-            let paused: libc::itimerval = std::mem::zeroed();
-            let mut left: libc::itimerval = std::mem::zeroed();
-            // SAFETY: both pointers are live itimerval values. https://man7.org/linux/man-pages/man2/setitimer.2.html
-            libc::setitimer(ZEND_TIMER, &paused, &mut left);
-            // Only Closed ends the park: a slow consumer is backpressure, not cancellation.
-            let r = tx.blocking_send(frame).map_err(|_| Closed);
-            // A zero value is a timer that was off or that expired: an expired timer already set EG(timed_out).
-            if left.it_value.tv_sec != 0 || left.it_value.tv_usec != 0 {
-                libc::setitimer(ZEND_TIMER, &left, std::ptr::null_mut());
-            }
-            r
-        },
+        // Only Closed ends the park: a slow consumer is backpressure, not cancellation.
+        Err(TrySendError::Full(frame)) => {
+            stream::paused(|| tx.blocking_send(frame).map_err(|_| Closed))
+        }
     };
     // A frame pushed while the receiver drops stays in the channel until the last Sender drops (tokio Rx::drop drains once). The drop of the Sender here frees it, so a lent string cannot hold the cycle end.
     if sent.is_ok() && tx.is_closed() {

@@ -15,7 +15,7 @@
 #ifdef ZTS
 #error "rapira is NTS-only, but these PHP headers are from a thread-safe (ZTS) build. Rebuild PHP without --enable-zts, or point PHP_CONFIG at an NTS php-config."
 #endif
-// The http write park pauses the setitimer() execution timer (respond.rs). This option replaces that timer with a POSIX timer: https://github.com/php/php-src/blob/php-8.5.12/Zend/Zend.m4#L446-L455
+// A park of the PHP thread pauses the setitimer() execution timer (stream.rs). This option replaces that timer with a POSIX timer: https://github.com/php/php-src/blob/php-8.5.12/Zend/Zend.m4#L446-L455
 #ifdef ZEND_MAX_EXECUTION_TIMERS
 #error "rapira needs the setitimer() execution timer, but these PHP headers enable ZEND_MAX_EXECUTION_TIMERS. Rebuild PHP without --enable-zend-max-execution-timers."
 #endif
@@ -133,6 +133,28 @@ static zend_always_inline rapira_held *rapira_held_of(zend_object *obj) {
 // free_obj of a unit class passes the held word of the object: Rust reclaims
 // the unit (work.rs)
 extern void rapira_rs_held_drop(rapira_held *held);
+
+// Return values of rapira_rs_stream_send (work.rs): what the unit did with one
+// yielded value. THROWN has an exception pending.
+enum {
+    RAPIRA_SENT_OK = 0,
+    RAPIRA_SENT_CLOSED = 1,
+    RAPIRA_SENT_THROWN = 2,
+};
+
+// How rapira_stream_run_generator ended.
+typedef enum {
+    // the generator ended and the unit is open
+    RAPIRA_LOOP_DONE,
+    // the generator ended after the host closed the unit
+    RAPIRA_LOOP_CLOSED,
+    // an exception is pending; exit() is one too
+    RAPIRA_LOOP_THROWN,
+} rapira_loop;
+// Runs a generator to its end for a plugin method that takes one, and gives
+// each yielded value to Held::send of the unit behind held (rapira_stream.c).
+rapira_loop rapira_stream_run_generator(zend_object *generator,
+                                        rapira_held *held);
 
 // The counts of a DispatcherInfo object sit before zend_object std:
 // https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects

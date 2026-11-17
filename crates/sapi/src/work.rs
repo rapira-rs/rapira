@@ -1,3 +1,4 @@
+use std::ffi::c_int;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::callbacks::guard;
 use crate::scoreboard::{Event, count_shed, sb_update};
 use crate::types::Context;
-use crate::zend_class_entry;
+use crate::{RAPIRA_SENT_CLOSED, RAPIRA_SENT_OK, RAPIRA_SENT_THROWN, zend_class_entry, zval};
 
 pub(crate) const INTAKE_WAIT: Duration = Duration::from_secs(30);
 
@@ -39,6 +40,22 @@ pub trait Held: Send + 'static {
     fn is_finalized(&self) -> bool {
         self.settled() || self.cancelled()
     }
+
+    /// One value that the generator of the unit yielded (rapira_stream.c). The default is a unit with no stream.
+    /// # Safety
+    /// `value` is a live zval; engine active on this thread.
+    unsafe fn send(&mut self, _value: *mut zval) -> Sent {
+        Sent::Closed
+    }
+}
+
+/// What a unit did with one yielded value.
+pub enum Sent {
+    Ok,
+    /// The host closed the unit, so the value has no destination.
+    Closed,
+    /// The unit refused the value, and an exception is pending.
+    Thrown,
 }
 
 /// Reclaims the Box that receive() handed out: clears the cycle slot if it still points here, and counts an unsettled unit as handled.
@@ -95,6 +112,21 @@ pub unsafe extern "C" fn rapira_rs_held_is_finalized(held: *const HeldPtr) -> bo
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_held_is_cancelled(held: *const HeldPtr) -> bool {
     guard(false, || unsafe { (*held).get().as_ref().cancelled() })
+}
+
+/// Gives one yielded value to the unit: the generator loop of rapira_stream.c calls it for each yield.
+/// # Safety
+/// As `rapira_rs_held_is_finalized`; `value` is a live zval; engine active on this thread.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_stream_send(held: *const HeldPtr, value: *mut zval) -> c_int {
+    let sent = guard(RAPIRA_SENT_CLOSED, || unsafe {
+        match (*held).get().as_mut().send(value) {
+            Sent::Ok => RAPIRA_SENT_OK,
+            Sent::Closed => RAPIRA_SENT_CLOSED,
+            Sent::Thrown => RAPIRA_SENT_THROWN,
+        }
+    });
+    sent as c_int
 }
 
 /// The free_obj of a unit class: reclaims the unit, and an unsettled unit sends its lost outcome. A cycle that died (a fatal error, a timeout) skips the outcome: the plugin reports the worker death when the sender drops.
