@@ -1,6 +1,7 @@
-//! The `GrpcState` work unit, the request Metadata and Context, the services list, and the Rust behind the methods of UnaryCall and ResponseMetadata.
+//! The `GrpcState` work unit, the request Metadata and Context, the services list, and the Rust behind the methods of UnaryCall, ServerStreamingCall and ResponseMetadata.
 
 use std::ffi::{CStr, c_char};
+use std::time::Instant;
 
 use base64::Engine as _;
 use base64::alphabet;
@@ -8,25 +9,28 @@ use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD_NO_PAD};
 use bytes::Bytes;
 use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
-use connectrpc::{ConnectError, ErrorCode, ErrorDetail, Protocol};
+use connectrpc::{ConnectError, ErrorCode, ErrorDetail, MethodKind, Protocol};
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::work::{Held, HeldPtr, now_unix_f64};
+use rapira_sapi::stream::{self, Step, Wait};
+use rapira_sapi::work::{self, Held, HeldPtr, now_unix_f64};
 use rapira_sapi::{
     HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_zval_enum_case,
     zend, zend_argument_type_error, zend_class_entry, zend_long, zend_object, zend_string,
     zend_zval_value_name, zval, zval_ptr_dtor,
 };
-use tokio::sync::oneshot;
+use tokio::sync::mpsc::error::TrySendError;
+use tokio::sync::{mpsc, oneshot};
 
 use super::{
-    rapira_ce_grpc_context, rapira_ce_grpc_error_detail, rapira_ce_grpc_metadata,
+    rapira_ce_grpc_context, rapira_ce_grpc_error_detail,
+    rapira_ce_grpc_headers_already_committed_error, rapira_ce_grpc_metadata,
     rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind, rapira_ce_grpc_protocol,
-    rapira_ce_grpc_service_info, rapira_ce_grpc_unary_call,
+    rapira_ce_grpc_server_streaming_call, rapira_ce_grpc_service_info, rapira_ce_grpc_unary_call,
 };
-use crate::{MethodInfo, UnaryCall, UnaryReply};
+use crate::{Call, Head, MethodInfo, Part, UnaryReply};
 
 /// # Safety
 /// `dst` writable; engine active on this thread.
@@ -180,11 +184,43 @@ fn wire(fields: &[MetadataField]) -> HeaderMap {
     map
 }
 
+/// Where the outcome of a call goes.
+pub(crate) enum Reply {
+    Unary(oneshot::Sender<UnaryReply>),
+    Stream(StreamReply),
+}
+
+/// The two senders of a streaming response. The handler holds both receivers until the head arrives, then the response stream holds the receiver of `parts`. So a closed `parts` means in each phase that the plugin closed the call.
+pub(crate) struct StreamReply {
+    /// None after the head went out.
+    head: Option<oneshot::Sender<Result<Head, ConnectError>>>,
+    parts: mpsc::Sender<Part>,
+    /// The deadline of the call. No park waits past it.
+    until: Option<Instant>,
+    /// A trailer was added after the head went out. A stream that ends with success does not send it.
+    late_trailer: bool,
+}
+
+impl StreamReply {
+    pub(crate) fn new(
+        head: oneshot::Sender<Result<Head, ConnectError>>,
+        parts: mpsc::Sender<Part>,
+        until: Option<Instant>,
+    ) -> Self {
+        Self {
+            head: Some(head),
+            parts,
+            until,
+            late_trailer: false,
+        }
+    }
+}
+
 pub(crate) struct GrpcState {
-    req: UnaryCall,
+    req: Call,
     received_at: f64,
     /// None after the outcome went out or the call was discarded: the call is then finalized.
-    reply: Option<oneshot::Sender<UnaryReply>>,
+    reply: Option<Reply>,
     discarded: bool,
     headers: Vec<MetadataField>,
     trailers: Vec<MetadataField>,
@@ -193,8 +229,8 @@ pub(crate) struct GrpcState {
 }
 
 impl GrpcState {
-    /// One unary call on the intake. A dropped `reply` means that PHP lost the call; dropping its receiver closes the call for PHP.
-    pub(crate) fn new(req: UnaryCall, reply: oneshot::Sender<UnaryReply>) -> Self {
+    /// One call on the intake. A dropped `reply` means that PHP lost the call; dropping its receivers closes the call for PHP.
+    pub(crate) fn new(req: Call, reply: Reply) -> Self {
         Self {
             req,
             received_at: now_unix_f64(),
@@ -214,7 +250,12 @@ impl Held for GrpcState {
 
     /// The plugin dropped the receiver: the deadline passed or the client left.
     fn cancelled(&self) -> bool {
-        self.discarded || self.reply.as_ref().is_some_and(oneshot::Sender::is_closed)
+        self.discarded
+            || match &self.reply {
+                Some(Reply::Unary(reply)) => reply.is_closed(),
+                Some(Reply::Stream(out)) => out.parts.is_closed(),
+                None => false,
+            }
     }
 
     /// Dropping `reply` finalizes the call, so `release()` does not count it a second time.
@@ -231,18 +272,53 @@ impl Held for GrpcState {
     fn lost(&mut self) {}
 
     fn shed(self: Box<Self>) {
-        if let Some(reply) = self.reply {
-            let _ = reply.send(UnaryReply {
-                headers: HeaderMap::new(),
-                trailers: HeaderMap::new(),
-                outcome: Err(ConnectError::unavailable("the worker failed to boot")),
-            });
+        let err = ConnectError::unavailable("the worker failed to boot");
+        match self.reply {
+            Some(Reply::Unary(reply)) => {
+                let _ = reply.send(UnaryReply {
+                    headers: HeaderMap::new(),
+                    trailers: HeaderMap::new(),
+                    outcome: Err(err),
+                });
+            }
+            Some(Reply::Stream(StreamReply {
+                head: Some(head), ..
+            })) => {
+                let _ = head.send(Err(err));
+            }
+            _ => {}
         }
     }
 
     fn class(&self) -> *mut zend_class_entry {
-        // SAFETY: MINIT assigns the class entry in the master before the fork, and nothing writes it after.
-        unsafe { rapira_ce_grpc_unary_call }
+        // SAFETY: MINIT assigns the class entries in the master before the fork, and nothing writes them after.
+        unsafe {
+            match self.req.kind {
+                MethodKind::ServerStreaming => rapira_ce_grpc_server_streaming_call,
+                _ => rapira_ce_grpc_unary_call,
+            }
+        }
+    }
+
+    /// One yielded message of respond(\Generator). The type check comes before the copy: a throw can bail out, and then this frame must hold no owned value.
+    unsafe fn send(&mut self, value: *mut zval) -> work::Sent {
+        unsafe {
+            let value = zend::deref(value);
+            if zend::zval_type(value) != IS_STRING {
+                zend_argument_type_error(
+                    1,
+                    c"must yield strings, %s yielded".as_ptr(),
+                    zend_zval_value_name(value),
+                );
+                return work::Sent::Thrown;
+            }
+            let message = Bytes::copy_from_slice(zend::zstr_bytes((*value).value.str_));
+            if send_core(self, message) {
+                work::Sent::Ok
+            } else {
+                work::Sent::Closed
+            }
+        }
     }
 }
 
@@ -252,6 +328,7 @@ enum Verb {
     Ok,
     Finalized,
     Discarded,
+    HeadersCommitted,
     BadField(&'static CStr),
 }
 
@@ -290,6 +367,15 @@ fn add_core(st: &mut GrpcState, trailer: bool, binary: bool, name: &[u8], value:
     if st.settled() {
         return Verb::Finalized;
     }
+    // The first yield of a streaming response sent the headers. It also fixed the trailers of a stream that ends with success; fail() sends a later trailer.
+    if let Some(Reply::Stream(out)) = st.reply.as_mut()
+        && out.head.is_none()
+    {
+        if !trailer {
+            return Verb::HeadersCommitted;
+        }
+        out.late_trailer = true;
+    }
     let half = if trailer {
         &mut st.trailers
     } else {
@@ -305,7 +391,7 @@ fn add_core(st: &mut GrpcState, trailer: bool, binary: bool, name: &[u8], value:
     Verb::Ok
 }
 
-/// Sends the one outcome of the call, with both metadata halves in wire form.
+/// Sends the one outcome of the call, with both metadata halves in wire form. On a streaming response the outcome is a status: before the head it goes out with both halves, and after the head it ends the stream with every trailer.
 fn finish(st: &mut GrpcState, result: Result<Bytes, ConnectError>) -> Verb {
     if st.cancelled() {
         st.discard();
@@ -314,20 +400,109 @@ fn finish(st: &mut GrpcState, result: Result<Bytes, ConnectError>) -> Verb {
     let Some(reply) = st.reply.take() else {
         return Verb::Finalized;
     };
-    let outcome = UnaryReply {
-        headers: wire(&st.headers),
-        trailers: wire(&st.trailers),
-        outcome: result,
-    };
+    let trailers = wire(&st.trailers);
     // the receiver can drop after the cancelled() check
-    if reply.send(outcome).is_ok() {
-        sb_update(Event::Handled { errored: false });
+    let sent = match (reply, result) {
+        (Reply::Unary(reply), outcome) => reply
+            .send(UnaryReply {
+                headers: wire(&st.headers),
+                trailers,
+                outcome,
+            })
+            .is_ok(),
+        (Reply::Stream(mut out), Err(err)) => match out.head.take() {
+            Some(head) => head
+                .send(Err(err
+                    .with_headers(wire(&st.headers))
+                    .with_trailers(trailers)))
+                .is_ok(),
+            None => push(&out, Part::Fail(err.with_trailers(trailers))),
+        },
+        (Reply::Stream(_), Ok(_)) => unreachable!("only UnaryCall has respond(string)"),
+    };
+    settle(st, sent)
+}
+
+/// Counts the call as handled. A `sent` of false means that the plugin closed the call before the outcome went out.
+fn settle(st: &mut GrpcState, sent: bool) -> Verb {
+    sb_update(Event::Handled { errored: !sent });
+    if sent {
         Verb::Ok
     } else {
         st.discarded = true;
-        sb_update(Event::Handled { errored: true });
         Verb::Discarded
     }
+}
+
+/// The checks of respond(\Generator) before the generator starts.
+fn begin(st: &mut GrpcState) -> Verb {
+    if st.cancelled() {
+        st.discard();
+        return Verb::Discarded;
+    }
+    if st.settled() {
+        return Verb::Finalized;
+    }
+    Verb::Ok
+}
+
+/// Sends the head when it is not out yet, with both metadata halves as they are now. False: the plugin closed the call.
+fn commit(out: &mut StreamReply, headers: &[MetadataField], trailers: &[MetadataField]) -> bool {
+    let Some(head) = out.head.take() else {
+        return true;
+    };
+    head.send(Ok(Head {
+        headers: wire(headers),
+        trailers: wire(trailers),
+    }))
+    .is_ok()
+}
+
+/// Puts one part on the channel of the response stream. On a full channel the PHP thread parks until the plugin takes the part before it, the plugin closes the call, or the deadline of the call passes. False: the part has no destination.
+fn push(out: &StreamReply, part: Part) -> bool {
+    let part = match out.parts.try_send(part) {
+        Ok(()) => return true,
+        Err(TrySendError::Closed(_)) => return false,
+        Err(TrySendError::Full(part)) => part,
+    };
+    let wait = match out.until {
+        Some(until) => Wait::For(until.saturating_duration_since(Instant::now())),
+        None => Wait::Forever,
+    };
+    let room = async { out.parts.reserve().await.ok() };
+    match stream::wait(room, out.parts.closed(), wait) {
+        Step::Item(permit) => {
+            permit.send(part);
+            true
+        }
+        _ => false,
+    }
+}
+
+/// One message of a streaming response. The first message sends the head before it. False: the message has no destination, and the call is discarded.
+fn send_core(st: &mut GrpcState, message: Bytes) -> bool {
+    // respond() or fail() inside the running generator finalized the call, so the generator gets the discard exception at its yield.
+    let Some(Reply::Stream(out)) = st.reply.as_mut() else {
+        return false;
+    };
+    let sent = commit(out, &st.headers, &st.trailers) && push(out, Part::Message(message));
+    if !sent {
+        st.discard();
+    }
+    sent
+}
+
+/// The generator ended: sends the head of a stream with no message, then the end of the stream.
+fn end(st: &mut GrpcState) {
+    // fail() inside the running generator finalized the call
+    let Some(Reply::Stream(mut out)) = st.reply.take() else {
+        return;
+    };
+    let sent = commit(&mut out, &st.headers, &st.trailers) && push(&out, Part::End);
+    if out.late_trailer {
+        tracing::debug!(target: "grpc", "{}: a trailer added after the first yield is not sent", st.req.method);
+    }
+    settle(st, sent);
 }
 
 /// The messages of the two finalize errors name the call, as the Responder.php `@throws` lines do.
@@ -344,6 +519,10 @@ unsafe fn thrown(v: Verb) -> bool {
             Verb::Discarded => zend::throw_exception(
                 rapira_ce_work_discarded_exception,
                 c"the host closed the call first",
+            ),
+            Verb::HeadersCommitted => zend::throw_exception(
+                rapira_ce_grpc_headers_already_committed_error,
+                c"the first yield sent the headers",
             ),
             Verb::BadField(msg) => zend::throw_value_error(msg),
         }
@@ -511,6 +690,24 @@ pub unsafe extern "C" fn rapira_rs_grpc_respond(
     })
 }
 
+/// The start of respond(\Generator): false with an exception pending when the call takes no stream.
+/// # Safety
+/// `held` the slot of a live call; engine active.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_grpc_stream_begin(held: *const HeldPtr) -> bool {
+    guard(false, || unsafe {
+        thrown(begin(&mut *(*held).state::<GrpcState>()))
+    })
+}
+
+/// The generator of respond(\Generator) ended with the call open. Throws nothing.
+/// # Safety
+/// `held` the slot of a live call.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_grpc_stream_end(held: *const HeldPtr) {
+    guard((), || unsafe { end(&mut *(*held).state::<GrpcState>()) });
+}
+
 /// The three properties of a `Rapira\Grpc\Status`: `code` is the value of its StatusCode case. A detail that is not an ErrorDetail gives a TypeError before any state change.
 /// # Safety
 /// `held` the slot of a live call; `message` and `details` live; engine active.
@@ -588,16 +785,20 @@ mod tests {
 
     use super::*;
 
-    fn state(reply: oneshot::Sender<UnaryReply>) -> GrpcState {
-        let req = UnaryCall {
+    fn call(kind: MethodKind) -> Call {
+        Call {
             method: "rapira.test.v1.EchoService/Echo".into(),
+            kind,
             protocol: Protocol::Grpc,
             metadata: HeaderMap::new(),
             deadline: None,
             remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
             message: Bytes::new(),
-        };
-        GrpcState::new(req, reply)
+        }
+    }
+
+    fn state(reply: oneshot::Sender<UnaryReply>) -> GrpcState {
+        GrpcState::new(call(MethodKind::Unary), Reply::Unary(reply))
     }
 
     /// `from_bytes` takes the obs-text bytes that a client can send.
@@ -1278,6 +1479,298 @@ mod tests {
                 }
                 Sent::Nothing => {}
             }
+        }
+    }
+
+    enum Act {
+        Add {
+            trailer: bool,
+            name: &'static [u8],
+            value: &'static [u8],
+            verb: Verb,
+        },
+        Begin(Verb),
+        Message {
+            bytes: &'static [u8],
+            sent: bool,
+        },
+        /// fail() with NOT_FOUND.
+        Fail(Verb),
+        End,
+        /// The plugin closes the call. close() gives the senders the same state as the drop of both receivers.
+        Close,
+    }
+
+    enum WantHead {
+        Nothing,
+        Sent {
+            headers: &'static [(&'static str, &'static str)],
+            trailers: &'static [(&'static str, &'static str)],
+        },
+        /// The status of fail(), with both halves.
+        Failed {
+            headers: &'static [(&'static str, &'static str)],
+            trailers: &'static [(&'static str, &'static str)],
+        },
+    }
+
+    enum WantPart {
+        Message(&'static [u8]),
+        End,
+        /// The status of fail(), with its trailers.
+        Fail(&'static [(&'static str, &'static str)]),
+    }
+
+    #[test]
+    fn a_stream_sends_its_head_once_and_its_parts_in_order() {
+        struct Case {
+            name: &'static str,
+            acts: &'static [Act],
+            head: WantHead,
+            parts: &'static [WantPart],
+            finalized: bool,
+            cancelled: bool,
+        }
+        const HEADER: Act = Act::Add {
+            trailer: false,
+            name: b"x-h",
+            value: b"v",
+            verb: Verb::Ok,
+        };
+        const TRAILER: Act = Act::Add {
+            trailer: true,
+            name: b"x-t",
+            value: b"w",
+            verb: Verb::Ok,
+        };
+        const LATE_TRAILER: Act = Act::Add {
+            trailer: true,
+            name: b"x-late",
+            value: b"1",
+            verb: Verb::Ok,
+        };
+        const A: Act = Act::Message {
+            bytes: b"a",
+            sent: true,
+        };
+        // Sources: StreamingResponder.php, ResponseMetadata.php, HeadersAlreadyCommittedError.php and Work.php of the contract.
+        const CASES: &[Case] = &[
+            Case {
+                name: "the first message sends the head",
+                acts: &[
+                    HEADER,
+                    TRAILER,
+                    Act::Begin(Verb::Ok),
+                    A,
+                    Act::Message {
+                        bytes: b"b",
+                        sent: true,
+                    },
+                    Act::End,
+                ],
+                head: WantHead::Sent {
+                    headers: &[("x-h", "v")],
+                    trailers: &[("x-t", "w")],
+                },
+                parts: &[
+                    WantPart::Message(b"a"),
+                    WantPart::Message(b"b"),
+                    WantPart::End,
+                ],
+                finalized: true,
+                cancelled: false,
+            },
+            Case {
+                name: "a header after the first message",
+                acts: &[
+                    A,
+                    Act::Add {
+                        trailer: false,
+                        name: b"x-h",
+                        value: b"v",
+                        verb: Verb::HeadersCommitted,
+                    },
+                ],
+                head: WantHead::Sent {
+                    headers: &[],
+                    trailers: &[],
+                },
+                parts: &[WantPart::Message(b"a")],
+                finalized: false,
+                cancelled: false,
+            },
+            Case {
+                name: "fail() sends a trailer that came after the first message",
+                acts: &[TRAILER, A, LATE_TRAILER, Act::Fail(Verb::Ok)],
+                head: WantHead::Sent {
+                    headers: &[],
+                    trailers: &[("x-t", "w")],
+                },
+                parts: &[
+                    WantPart::Message(b"a"),
+                    WantPart::Fail(&[("x-t", "w"), ("x-late", "1")]),
+                ],
+                finalized: true,
+                cancelled: false,
+            },
+            Case {
+                name: "a successful end keeps the trailers of the first message",
+                acts: &[TRAILER, A, LATE_TRAILER, Act::End],
+                head: WantHead::Sent {
+                    headers: &[],
+                    trailers: &[("x-t", "w")],
+                },
+                parts: &[WantPart::Message(b"a"), WantPart::End],
+                finalized: true,
+                cancelled: false,
+            },
+            Case {
+                name: "fail() before the first message",
+                acts: &[HEADER, TRAILER, Act::Fail(Verb::Ok)],
+                head: WantHead::Failed {
+                    headers: &[("x-h", "v")],
+                    trailers: &[("x-t", "w")],
+                },
+                parts: &[],
+                finalized: true,
+                cancelled: false,
+            },
+            Case {
+                name: "an end with no message",
+                acts: &[HEADER, TRAILER, Act::End],
+                head: WantHead::Sent {
+                    headers: &[("x-h", "v")],
+                    trailers: &[("x-t", "w")],
+                },
+                parts: &[WantPart::End],
+                finalized: true,
+                cancelled: false,
+            },
+            Case {
+                name: "a message after fail()",
+                acts: &[
+                    A,
+                    Act::Fail(Verb::Ok),
+                    Act::Message {
+                        bytes: b"b",
+                        sent: false,
+                    },
+                    Act::End,
+                ],
+                head: WantHead::Sent {
+                    headers: &[],
+                    trailers: &[],
+                },
+                parts: &[WantPart::Message(b"a"), WantPart::Fail(&[])],
+                finalized: true,
+                cancelled: false,
+            },
+            Case {
+                name: "a second respond()",
+                acts: &[A, Act::End, Act::Begin(Verb::Finalized)],
+                head: WantHead::Sent {
+                    headers: &[],
+                    trailers: &[],
+                },
+                parts: &[WantPart::Message(b"a"), WantPart::End],
+                finalized: true,
+                cancelled: false,
+            },
+            Case {
+                name: "the plugin closed the call before respond()",
+                acts: &[Act::Close, Act::Begin(Verb::Discarded)],
+                head: WantHead::Nothing,
+                parts: &[],
+                finalized: true,
+                cancelled: true,
+            },
+            Case {
+                name: "the plugin closed the call between two messages",
+                acts: &[
+                    A,
+                    Act::Close,
+                    Act::Message {
+                        bytes: b"b",
+                        sent: false,
+                    },
+                ],
+                head: WantHead::Sent {
+                    headers: &[],
+                    trailers: &[],
+                },
+                parts: &[WantPart::Message(b"a")],
+                finalized: true,
+                cancelled: true,
+            },
+        ];
+        for c in CASES {
+            let (head_tx, mut head) = oneshot::channel();
+            // room for every part of a case, so no send parks
+            let (parts_tx, mut parts) = mpsc::channel(8);
+            let reply = StreamReply::new(head_tx, parts_tx, None);
+            let mut st = GrpcState::new(call(MethodKind::ServerStreaming), Reply::Stream(reply));
+            for act in c.acts {
+                match act {
+                    Act::Add {
+                        trailer,
+                        name,
+                        value,
+                        verb,
+                    } => assert_eq!(
+                        &add_core(&mut st, *trailer, false, name, value),
+                        verb,
+                        "{}",
+                        c.name
+                    ),
+                    Act::Begin(verb) => assert_eq!(&begin(&mut st), verb, "{}", c.name),
+                    Act::Message { bytes, sent } => assert_eq!(
+                        send_core(&mut st, Bytes::from_static(bytes)),
+                        *sent,
+                        "{}",
+                        c.name
+                    ),
+                    Act::Fail(verb) => {
+                        let err = ConnectError::not_found("no invoice");
+                        assert_eq!(&finish(&mut st, Err(err)), verb, "{}", c.name);
+                    }
+                    Act::End => end(&mut st),
+                    Act::Close => {
+                        head.close();
+                        parts.close();
+                    }
+                }
+            }
+            assert_eq!(st.is_finalized(), c.finalized, "{}: finalized", c.name);
+            assert_eq!(st.cancelled(), c.cancelled, "{}: cancelled", c.name);
+            drop(st);
+
+            match (&c.head, head.try_recv()) {
+                (WantHead::Nothing, Err(_)) => {}
+                (WantHead::Sent { headers, trailers }, Ok(Ok(got))) => {
+                    assert_eq!(got.headers, map(headers), "{}", c.name);
+                    assert_eq!(got.trailers, map(trailers), "{}", c.name);
+                }
+                (WantHead::Failed { headers, trailers }, Ok(Err(err))) => {
+                    assert_eq!(err.code, ErrorCode::NotFound, "{}", c.name);
+                    assert_eq!(*err.response_headers(), map(headers), "{}", c.name);
+                    assert_eq!(*err.trailers(), map(trailers), "{}", c.name);
+                }
+                _ => panic!("{}: the other head", c.name),
+            }
+            for want in c.parts {
+                match (want, parts.try_recv()) {
+                    (WantPart::Message(bytes), Ok(Part::Message(got))) => {
+                        assert_eq!(got, *bytes, "{}", c.name);
+                    }
+                    (WantPart::End, Ok(Part::End)) => {}
+                    (WantPart::Fail(trailers), Ok(Part::Fail(err))) => {
+                        assert_eq!(err.code, ErrorCode::NotFound, "{}", c.name);
+                        assert_eq!(*err.trailers(), map(trailers), "{}", c.name);
+                    }
+                    _ => panic!("{}: the other part", c.name),
+                }
+            }
+            assert!(parts.try_recv().is_err(), "{}: one part more", c.name);
         }
     }
 }

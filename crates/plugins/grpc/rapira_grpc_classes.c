@@ -11,13 +11,16 @@ zend_class_entry *rapira_ce_grpc_method_info;
 zend_class_entry *rapira_ce_grpc_service_info;
 zend_class_entry *rapira_ce_grpc_context;
 zend_class_entry *rapira_ce_grpc_exception;
-// the unit class; GrpcState::class returns it (src/php/call.rs)
+zend_class_entry *rapira_ce_grpc_headers_already_committed_error;
+// the unit classes; GrpcState::class returns the one of the method kind
+// (src/php/call.rs)
 zend_class_entry *rapira_ce_grpc_unary_call;
+zend_class_entry *rapira_ce_grpc_server_streaming_call;
 
 // the dispatcher surface; Plugin::dispatcher() returns its address (src/lib.rs)
 rapira_plugin rapira_grpc_plugin = {
-    .busy = "this worker holds one unit at a time, and its "
-            "Rapira\\Grpc\\UnaryCall is unfinalized; finalize it first",
+    .busy = "this worker holds one unit at a time, and its call is "
+            "unfinalized; finalize it first",
 };
 
 // own copies: std_object_handlers is shared engine state
@@ -64,8 +67,9 @@ void rapira_grpc_register_classes(void) {
         register_class_Rapira_Grpc_StreamingResponder(grpc_responder);
     zend_class_entry *grpc_unary_call = register_class_Rapira_Grpc_UnaryCall(
         grpc_unary_request, grpc_unary_responder);
-    register_class_Rapira_Grpc_ServerStreamingCall(grpc_unary_request,
-                                                   grpc_streaming_responder);
+    zend_class_entry *grpc_server_streaming_call =
+        register_class_Rapira_Grpc_ServerStreamingCall(
+            grpc_unary_request, grpc_streaming_responder);
     register_class_Rapira_Grpc_ClientStreamingCall(grpc_streaming_request,
                                                    grpc_unary_responder);
     register_class_Rapira_Grpc_BidiStreamingCall(grpc_streaming_request,
@@ -81,8 +85,9 @@ void rapira_grpc_register_classes(void) {
     rapira_ce_grpc_exception =
         register_class_Rapira_Grpc_Exception_GrpcException(
             spl_ce_RuntimeException, rapira_ce_throwable);
-    register_class_Rapira_Grpc_Exception_HeadersAlreadyCommittedError(
-        zend_ce_error, rapira_ce_throwable);
+    rapira_ce_grpc_headers_already_committed_error =
+        register_class_Rapira_Grpc_Exception_HeadersAlreadyCommittedError(
+            zend_ce_error, rapira_ce_throwable);
 
     rapira_grpc_plugin.dispatcher =
         register_class_Rapira_Internal_Grpc_Dispatcher(grpc_dispatcher);
@@ -90,13 +95,20 @@ void rapira_grpc_register_classes(void) {
         register_class_Rapira_Internal_Grpc_DispatcherInfo(grpc_info);
     rapira_ce_grpc_unary_call = register_class_Rapira_Internal_Grpc_UnaryCall(
         grpc_unary_call, grpc_response_metadata);
+    rapira_ce_grpc_server_streaming_call =
+        register_class_Rapira_Internal_Grpc_ServerStreamingCall(
+            grpc_server_streaming_call, grpc_response_metadata);
     rapira_plugin_wire(&rapira_grpc_plugin);
 
+    // the call classes share one object layout
     rapira_grpc_call_handlers = std_object_handlers;
     rapira_grpc_call_handlers.clone_obj = NULL;
     rapira_grpc_call_handlers.offset = offsetof(rapira_grpc_call_obj, std);
     rapira_grpc_call_handlers.free_obj = rapira_grpc_call_free;
     rapira_ce_grpc_unary_call->create_object = rapira_object_create;
     rapira_ce_grpc_unary_call->default_object_handlers =
+        &rapira_grpc_call_handlers;
+    rapira_ce_grpc_server_streaming_call->create_object = rapira_object_create;
+    rapira_ce_grpc_server_streaming_call->default_object_handlers =
         &rapira_grpc_call_handlers;
 }

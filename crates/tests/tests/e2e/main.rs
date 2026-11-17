@@ -16,6 +16,7 @@ mod grpc_auth;
 mod grpc_dispatcher;
 mod grpc_schema;
 mod grpc_server;
+mod grpc_stream;
 mod grpc_values;
 mod harness;
 mod http_values;

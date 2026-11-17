@@ -191,9 +191,10 @@ namespace Rapira\Grpc {
     interface StreamingResponder extends Responder
     {
         /**
-         * Send each yielded string as one message, and return when the generator ends. The headers
-         * are taken at the first yield, the trailers at the end. A throwable from the generator
-         * leaves this method and the call stays unfinalized.
+         * Send each yielded string as one message, and return when the generator ends. The first
+         * yield sends the headers, and it fixes the trailers of a successful stream. fail() sends
+         * every trailer. A stream that ends with no yield sends its headers and all its trailers.
+         * A throwable from the generator leaves this method and the call stays unfinalized.
          *
          * @throws \Rapira\Exception\AlreadyFinalizedError
          * @throws \Rapira\Exception\WorkDiscardedException
@@ -455,6 +456,61 @@ namespace Rapira\Internal\Grpc {
 
         public function headers(): \Rapira\Grpc\Metadata {}
 
+        public function trailers(): \Rapira\Grpc\Metadata {}
+    }
+
+    /**
+     * The extension's implementation of \Rapira\Grpc\ServerStreamingCall and \Rapira\Grpc\Responder\ResponseMetadata. Host-created.
+     * It shares the object layout of UnaryCall, and every method except respond().
+     *
+     * @strict-properties
+     * @not-serializable
+     */
+    final class ServerStreamingCall implements \Rapira\Grpc\ServerStreamingCall, \Rapira\Grpc\Responder\ResponseMetadata
+    {
+        /**
+         * Host-created.
+         *
+         * @implementation-alias rapira_sapi_host_created
+         */
+        private function __construct() {}
+
+        /** @implementation-alias rapira_sapi_is_finalized */
+        public function isFinalized(): bool {}
+
+        /** @implementation-alias rapira_sapi_is_cancelled */
+        public function isCancelled(): bool {}
+
+        /** @implementation-alias Rapira\Internal\Grpc\UnaryCall::getContext */
+        public function getContext(): \Rapira\Grpc\Call\Context {}
+
+        /** @implementation-alias Rapira\Internal\Grpc\UnaryCall::getMessage */
+        public function getMessage(): string {}
+
+        /** @implementation-alias Rapira\Internal\Grpc\UnaryCall::getResponseMetadata */
+        public function getResponseMetadata(): \Rapira\Grpc\Responder\ResponseMetadata {}
+
+        public function respond(\Generator $messages): void {}
+
+        /** @implementation-alias Rapira\Internal\Grpc\UnaryCall::fail */
+        public function fail(\Rapira\Grpc\Status $status): void {}
+
+        /** @implementation-alias Rapira\Internal\Grpc\UnaryCall::addHeader */
+        public function addHeader(string $name, string $value): void {}
+
+        /** @implementation-alias Rapira\Internal\Grpc\UnaryCall::addBinaryHeader */
+        public function addBinaryHeader(string $name, string $bytes): void {}
+
+        /** @implementation-alias Rapira\Internal\Grpc\UnaryCall::addTrailer */
+        public function addTrailer(string $name, string $value): void {}
+
+        /** @implementation-alias Rapira\Internal\Grpc\UnaryCall::addBinaryTrailer */
+        public function addBinaryTrailer(string $name, string $bytes): void {}
+
+        /** @implementation-alias Rapira\Internal\Grpc\UnaryCall::headers */
+        public function headers(): \Rapira\Grpc\Metadata {}
+
+        /** @implementation-alias Rapira\Internal\Grpc\UnaryCall::trailers */
         public function trailers(): \Rapira\Grpc\Metadata {}
     }
 }

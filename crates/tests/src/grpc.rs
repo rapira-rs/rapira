@@ -12,6 +12,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 
 pub const ECHO_SERVICE: &str = "rapira.test.v1.EchoService";
 pub const ECHO_PATH: &str = "/rapira.test.v1.EchoService/Echo";
+/// The server-streaming method of the echo service.
+pub const WATCH_PATH: &str = "/rapira.test.v1.EchoService/Watch";
 
 /// The type URL of the detail that a failed call usually carries.
 pub const ERROR_INFO: &str = "type.googleapis.com/google.rpc.ErrorInfo";
@@ -87,7 +89,8 @@ impl Response {
         self.field("grpc-message")
     }
 
-    fn field(&self, name: &str) -> Option<&str> {
+    /// The trailer `name`, or the header of a trailers-only response.
+    pub fn field(&self, name: &str) -> Option<&str> {
         self.trailers
             .get(name)
             .or_else(|| self.headers.get(name))
@@ -190,6 +193,29 @@ pub fn envelope(message: &[u8]) -> Vec<u8> {
     let mut out = vec![0];
     out.extend_from_slice(&(message.len() as u32).to_be_bytes());
     out.extend_from_slice(message);
+    out
+}
+
+/// One length-prefixed message of a gRPC, gRPC-Web or Connect streaming body.
+#[derive(Debug, PartialEq)]
+pub struct Envelope {
+    pub flags: u8,
+    pub message: Bytes,
+}
+
+/// The envelopes of `body`, in order: a flags byte and a 4-byte big-endian length come before each message.
+pub fn envelopes(mut body: &[u8]) -> Vec<Envelope> {
+    let mut out = Vec::new();
+    while !body.is_empty() {
+        assert!(body.len() >= 5, "a partial envelope prefix: {body:?}");
+        let len = u32::from_be_bytes([body[1], body[2], body[3], body[4]]) as usize;
+        let (message, rest) = body[5..].split_at(len);
+        out.push(Envelope {
+            flags: body[0],
+            message: Bytes::copy_from_slice(message),
+        });
+        body = rest;
+    }
     out
 }
 

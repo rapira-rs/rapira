@@ -23,6 +23,7 @@ extern zend_class_entry *rapira_ce_grpc_protocol;
 extern zend_class_entry *rapira_ce_grpc_status;
 extern zend_class_entry *rapira_ce_grpc_metadata;
 extern zend_class_entry *rapira_ce_grpc_exception;
+extern zend_class_entry *rapira_ce_grpc_headers_already_committed_error;
 
 void rapira_grpc_register_classes(void);
 

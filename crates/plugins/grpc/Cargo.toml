@@ -4,7 +4,7 @@ version = "0.9.2"
 edition.workspace = true
 publish = false
 license = "MIT"
-description = "The grpc plugin of rapira - serves unary gRPC, gRPC-Web and Connect calls from PHP"
+description = "The grpc plugin of rapira - serves unary and server-streaming gRPC, gRPC-Web and Connect calls from PHP"
 
 [lints]
 workspace = true
@@ -24,6 +24,7 @@ connectrpc-health = { workspace = true }
 connectrpc-reflection = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "net", "time"] }
 bytes = { workspace = true }
+futures-util = { workspace = true }
 base64 = { workspace = true }
 tower = { workspace = true }
 ureq = { workspace = true }

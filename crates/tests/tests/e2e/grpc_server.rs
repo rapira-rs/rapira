@@ -15,8 +15,8 @@ use hyper_util::rt::{TokioExecutor, TokioIo};
 use rapira_net::ListenAddr;
 use serde_json::{Value, json};
 use tests::grpc::{
-    Conn, ECHO_PATH, ERROR_INFO, Fields, HI, HI_FRAME, Response, Wire, envelope, fields,
-    status_bytes, status_details, web_trailers,
+    Conn, ECHO_PATH, ERROR_INFO, Fields, HI, HI_FRAME, Response, WATCH_PATH, Wire, envelope,
+    fields, status_bytes, status_details, web_trailers,
 };
 use tests::{fixture, server_log};
 
@@ -43,7 +43,7 @@ enum On {
     Unix,
 }
 
-/// Sources: PROTOCOL-HTTP2 (envelope, `grpc-status`, 12 for an unknown method or encoding), PROTOCOL-WEB (the 0x80 trailer frame), the Connect protocol (unary request, GET for no-side-effects methods, 404 for an unknown procedure), proto3 JSON, and the plugin README (gzip requests, 8 for a message over 4 MiB).
+/// Sources: PROTOCOL-HTTP2 (envelope, `grpc-status`, 12 for an unknown method or encoding), PROTOCOL-WEB (the 0x80 trailer frame), the Connect protocol (unary request, GET for no-side-effects methods, 404 for an unknown procedure, 501 for `unimplemented`), proto3 JSON, and the plugin README (gzip requests, 8 for a message over 4 MiB, UNIMPLEMENTED for a client-streaming method and for a unary request to a server-streaming method).
 #[tokio::test]
 async fn each_protocol_reaches_php_over_the_wire() {
     struct Case<'a> {
@@ -164,17 +164,31 @@ async fn each_protocol_reaches_php_over_the_wire() {
             php: false,
         },
         Case {
-            name: "streaming method",
+            name: "client-streaming method",
             on: On::Tcp,
             wire: Wire::H2,
             method: Method::POST,
-            path: "/rapira.test.v1.EchoService/Watch",
+            path: "/rapira.test.v1.EchoService/Collect",
             headers: grpc,
             body: HI_FRAME,
             status: 200,
             grpc_status: Some("12"),
             content_type: None,
             reply: Some(b""),
+            php: false,
+        },
+        Case {
+            name: "connect unary on a server-streaming method",
+            on: On::Tcp,
+            wire: Wire::Http1,
+            method: Method::POST,
+            path: WATCH_PATH,
+            headers: &[("content-type", "application/proto")],
+            body: HI,
+            status: 501,
+            grpc_status: None,
+            content_type: None,
+            reply: None,
             php: false,
         },
         Case {

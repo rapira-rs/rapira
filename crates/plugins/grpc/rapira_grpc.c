@@ -1,5 +1,6 @@
 #include "rapira_grpc.h"
 #include "ext/spl/spl_array.h"
+#include <Zend/zend_generators.h>
 
 // rust glue (src/php/values.rs): returns false with a PHP exception pending
 extern bool rapira_rs_ctor_grpc_metadata(zend_object *obj, zval *entries);
@@ -18,6 +19,9 @@ extern bool rapira_rs_grpc_add(const rapira_held *held, bool trailer,
                                const char *value, size_t value_len);
 extern bool rapira_rs_grpc_snapshot(const rapira_held *held, bool trailer,
                                     zval *rv);
+extern bool rapira_rs_grpc_stream_begin(const rapira_held *held);
+// throws nothing
+extern void rapira_rs_grpc_stream_end(const rapira_held *held);
 
 // $entries is property slot 0 and the constructor always sets it.
 static zend_always_inline zval *
@@ -268,6 +272,31 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, respond) {
         rapira_rs_grpc_respond(rapira_held_of(Z_OBJ_P(ZEND_THIS)),
                                ZSTR_VAL(message), ZSTR_LEN(message)),
         "respond");
+}
+
+// Sends each yielded string as one message. The generator runs below this C
+// frame (rapira_stream.c).
+ZEND_METHOD(Rapira_Internal_Grpc_ServerStreamingCall, respond) {
+    zend_object *messages;
+    ZEND_PARSE_PARAMETERS_START(1, 1)
+    Z_PARAM_OBJ_OF_CLASS(messages, zend_ce_generator)
+    ZEND_PARSE_PARAMETERS_END();
+
+    rapira_held *held = rapira_held_of(Z_OBJ_P(ZEND_THIS));
+    // a call that the host closed does not start the generator
+    RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_grpc_stream_begin(held), "respond");
+    switch (rapira_stream_run_generator(messages, held)) {
+    case RAPIRA_LOOP_DONE:
+        rapira_rs_grpc_stream_end(held);
+        break;
+    // the host closed the call, so no outcome goes out
+    case RAPIRA_LOOP_CLOSED:
+        break;
+    // a call that the host did not close stays unfinalized, and fail() can
+    // end it
+    case RAPIRA_LOOP_THROWN:
+        RETURN_THROWS();
+    }
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, fail) {

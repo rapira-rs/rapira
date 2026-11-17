@@ -53,6 +53,8 @@ fn services_report_every_configured_method() {
             method("Echo", "unary"),
             method("Get", "unary"),
             method("Watch", "server-streaming"),
+            method("Collect", "client-streaming"),
+            method("Chat", "bidi-streaming"),
         ],
     });
     let listed = services_of(Some(&[ECHO_SERVICE]));
