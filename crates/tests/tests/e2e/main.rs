@@ -25,6 +25,7 @@ mod lifecycle;
 mod listeners;
 mod logging;
 mod mode;
+mod objects;
 mod observability;
 mod observer_teardown_tests;
 mod observer_tests;

@@ -158,4 +158,24 @@ namespace Rapira {
      * sees only public state, and an exception keeps all of its own in private ones.
      */
     function log(string $message, LogLevel $level = LogLevel::Info, array $context = []): void {}
+
+    /**
+     * The live objects of this process, counted per class and keyed by $object::class.
+     * The count references no object. A garbage cycle counts until the collector frees it.
+     *
+     * @return array<class-string, int<1, max>>
+     */
+    function count_objects(): array {}
+
+    /**
+     * The live objects of this process, held weakly: each object maps to null.
+     * The population is that of count_objects(), without the returned map.
+     *
+     * @param string[] $classes Class or interface names, matched with instanceof. An empty
+     *        list matches every object. The names are not autoloaded: a class that is not loaded
+     *        matches no object.
+     * @return \WeakMap<object, null>
+     * @throws \TypeError An entry of $classes is not a string.
+     */
+    function get_objects(array $classes = []): \WeakMap {}
 }
