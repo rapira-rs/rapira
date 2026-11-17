@@ -1,7 +1,7 @@
 //! The `[grpc]` table: its settings, the boot checks, the interceptor list and the `Server` that the master forks with.
 
 use std::net::{Ipv4Addr, SocketAddr};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -12,6 +12,7 @@ use rapira_config::{
 };
 use serde::Deserialize;
 
+use crate::schema::Source;
 use crate::{Config, Schema, Server, prepare};
 
 /// The `[grpc]` table.
@@ -36,7 +37,7 @@ pub struct Section {
 #[derive(Debug)]
 pub struct Settings {
     pub listen: ListenAddr,
-    pub descriptor_set: PathBuf,
+    pub descriptor_set: Source,
     /// The services to serve out of the set; None serves the services of the files that no other file of the set imports.
     pub services: Option<Vec<String>>,
     pub reflection: bool,
@@ -74,8 +75,12 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         ListenAddr::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 50051))),
     )?;
 
-    let Some(descriptor_set) = opt_path(dir, section.descriptor_set.as_deref())? else {
-        bail!("grpc.descriptor_set is required");
+    let descriptor_set = match section.descriptor_set {
+        Some(url) if url.starts_with("http://") || url.starts_with("https://") => Source::Url(url),
+        path => match opt_path(dir, path.as_deref())? {
+            Some(path) => Source::File(path),
+            None => bail!("grpc.descriptor_set is required"),
+        },
     };
 
     let services = section.services;
@@ -195,11 +200,13 @@ impl Server {
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use super::*;
 
     struct Want {
         listen: ListenAddr,
-        descriptor_set: &'static str,
+        descriptor_set: Source,
         services: Option<Vec<String>>,
         reflection: bool,
         default_timeout: Option<Duration>,
@@ -226,7 +233,7 @@ mod tests {
     fn base() -> Want {
         Want {
             listen: ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], 50051))),
-            descriptor_set: "/w/a.binpb",
+            descriptor_set: Source::File("/w/a.binpb".into()),
             services: None,
             reflection: false,
             default_timeout: None,
@@ -264,6 +271,30 @@ mod tests {
                 name: "descriptor_set missing",
                 toml: "[pool]\nentrypoint = \"g.php\"\n".into(),
                 expected: Err("grpc.descriptor_set is required"),
+            },
+            Case {
+                name: "https URL stays as written",
+                toml: "descriptor_set = \"https://example.com/sets/api.binpb\"\n[pool]\nentrypoint = \"g.php\"\n".into(),
+                expected: Ok(Want {
+                    descriptor_set: Source::Url("https://example.com/sets/api.binpb".into()),
+                    ..base()
+                }),
+            },
+            Case {
+                name: "http URL stays as written",
+                toml: "descriptor_set = \"http://example.com/sets/api.binpb\"\n[pool]\nentrypoint = \"g.php\"\n".into(),
+                expected: Ok(Want {
+                    descriptor_set: Source::Url("http://example.com/sets/api.binpb".into()),
+                    ..base()
+                }),
+            },
+            Case {
+                name: "another scheme is a path",
+                toml: "descriptor_set = \"ftp://example.com/api.binpb\"\n[pool]\nentrypoint = \"g.php\"\n".into(),
+                expected: Ok(Want {
+                    descriptor_set: Source::File("/w/ftp://example.com/api.binpb".into()),
+                    ..base()
+                }),
             },
             Case {
                 name: "services empty",
@@ -344,12 +375,7 @@ mod tests {
             match (got, case.expected) {
                 (Ok(g), Ok(want)) => {
                     assert_eq!(g.listen, want.listen, "{}", case.name);
-                    assert_eq!(
-                        g.descriptor_set,
-                        Path::new(want.descriptor_set),
-                        "{}",
-                        case.name
-                    );
+                    assert_eq!(g.descriptor_set, want.descriptor_set, "{}", case.name);
                     assert_eq!(g.services, want.services, "{}", case.name);
                     assert_eq!(g.reflection, want.reflection, "{}", case.name);
                     assert_eq!(g.default_timeout, want.default_timeout, "{}", case.name);

@@ -1,6 +1,9 @@
 //! The descriptor set behind a gRPC pool: what the boot accepts, and the JSON transcoding that Connect clients get from it.
 
+use std::io::{BufRead, BufReader, Write};
+use std::net::TcpListener;
 use std::path::{Path, PathBuf};
+use std::thread::JoinHandle;
 
 use http::Method;
 use serde_json::{Value, json};
@@ -164,6 +167,123 @@ fn load_rejects_a_service_listed_twice() {
             "{}: {log}",
             case.name
         );
+    }
+}
+
+/// A loopback HTTP server that answers one request.
+struct Remote {
+    port: u16,
+    /// Returns the request line when the answer is sent.
+    request_line: JoinHandle<String>,
+}
+
+/// Answers the first request with `status` and `body`.
+fn remote(status: &'static str, body: Vec<u8>) -> Remote {
+    let listener = TcpListener::bind("127.0.0.1:0").expect("bind the image server");
+    let port = listener
+        .local_addr()
+        .expect("the image server address")
+        .port();
+    let request_line = std::thread::spawn(move || {
+        let (mut conn, _) = listener.accept().expect("accept");
+        let mut head = BufReader::new(conn.try_clone().expect("clone the connection"));
+        let mut request_line = String::new();
+        head.read_line(&mut request_line).expect("request line");
+        // The head ends at the empty line.
+        let mut line = String::new();
+        while head.read_line(&mut line).expect("header line") > 2 {
+            line.clear();
+        }
+        write!(
+            conn,
+            "HTTP/1.1 {status}\r\ncontent-length: {}\r\nconnection: close\r\n\r\n",
+            body.len()
+        )
+        .expect("write the head");
+        conn.write_all(&body).expect("write the body");
+        request_line
+    });
+    Remote { port, request_line }
+}
+
+/// The master downloads a `descriptor_set` URL at boot, and the pool routes by the downloaded image.
+///
+/// Expected values: a Buf image input that starts with `http://` is a remote location (https://buf.build/docs/reference/inputs/#image-formats), and the echo of `json_transcodes_by_descriptor`.
+#[tokio::test]
+async fn a_set_loads_from_a_url() {
+    let image = std::fs::read(tests::echo_descriptor_set()).expect("read echo.binpb");
+    let remote = remote("200 OK", image);
+    let url = format!("http://127.0.0.1:{}/sets/echo.binpb", remote.port);
+    let srv = Spawn::grpc(fixture("grpc/wire-worker.php"))
+        .descriptor_set(Path::new(&url))
+        .spawn();
+    assert_eq!(
+        remote.request_line.join().expect("the image server"),
+        "GET /sets/echo.binpb HTTP/1.1\r\n"
+    );
+
+    let mut conn = Conn::open(&listen(&srv), Wire::Http1)
+        .await
+        .expect("connect");
+    let got = conn
+        .send(
+            Method::POST,
+            ECHO_PATH,
+            &[("content-type", "application/json")],
+            br#"{"text":"hi"}"#,
+        )
+        .await
+        .expect("the call");
+    assert_eq!(got.status, 200, "{got:?}");
+    assert_eq!(&got.body[..], br#"{"text":"hi"}"#);
+    drop(conn);
+    stop(srv).await;
+}
+
+/// A URL that the master cannot load fails the boot like a local set does. The log shows the URL without its userinfo and its query, because both can hold credentials.
+///
+/// Expected values: exit 1 as in `load_rejects_a_set_it_cannot_serve`, and the status text of ureq (`http status: 404`).
+#[test]
+fn load_rejects_a_url_it_cannot_load() {
+    struct Case {
+        name: &'static str,
+        status: &'static str,
+        body: &'static [u8],
+        /// The step that fails, as the log names it.
+        step: &'static str,
+        cause: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "status 404",
+            status: "404 Not Found",
+            body: b"",
+            step: "downloading",
+            cause: "http status: 404",
+        },
+        Case {
+            name: "not a set",
+            status: "200 OK",
+            body: &[0xff, 0xff],
+            step: "decoding",
+            cause: "--include_imports",
+        },
+    ];
+    for case in cases {
+        let remote = remote(case.status, case.body.to_vec());
+        let url = format!(
+            "http://user:secret@127.0.0.1:{}/api.binpb?sig=secret",
+            remote.port
+        );
+        let Exited { status, log } = boot_failure(Path::new(&url), &[ECHO_SERVICE]);
+        assert_eq!(status.code(), Some(1), "{}: {log}", case.name);
+        let failed = format!(
+            "{} grpc.descriptor_set http://127.0.0.1:{}/api.binpb: ",
+            case.step, remote.port
+        );
+        assert!(log.contains(&failed), "{}: {log}", case.name);
+        assert!(log.contains(case.cause), "{}: {log}", case.name);
+        assert!(!log.contains("secret"), "{}: {log}", case.name);
     }
 }
 
