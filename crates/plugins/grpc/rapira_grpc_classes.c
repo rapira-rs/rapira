@@ -11,6 +11,8 @@ zend_class_entry *rapira_ce_grpc_method_info;
 zend_class_entry *rapira_ce_grpc_service_info;
 zend_class_entry *rapira_ce_grpc_context;
 zend_class_entry *rapira_ce_grpc_exception;
+// the unit class; GrpcState::class returns it (src/php/call.rs)
+zend_class_entry *rapira_ce_grpc_unary_call;
 
 // the dispatcher surface; Plugin::dispatcher() returns its address (src/lib.rs)
 rapira_plugin rapira_grpc_plugin = {
@@ -86,7 +88,7 @@ void rapira_grpc_register_classes(void) {
         register_class_Rapira_Internal_Grpc_Dispatcher(grpc_dispatcher);
     rapira_grpc_plugin.info =
         register_class_Rapira_Internal_Grpc_DispatcherInfo(grpc_info);
-    rapira_grpc_plugin.unit = register_class_Rapira_Internal_Grpc_UnaryCall(
+    rapira_ce_grpc_unary_call = register_class_Rapira_Internal_Grpc_UnaryCall(
         grpc_unary_call, grpc_response_metadata);
     rapira_plugin_wire(&rapira_grpc_plugin);
 
@@ -94,7 +96,7 @@ void rapira_grpc_register_classes(void) {
     rapira_grpc_call_handlers.clone_obj = NULL;
     rapira_grpc_call_handlers.offset = offsetof(rapira_grpc_call_obj, std);
     rapira_grpc_call_handlers.free_obj = rapira_grpc_call_free;
-    rapira_grpc_plugin.unit->create_object = rapira_object_create;
-    rapira_grpc_plugin.unit->default_object_handlers =
+    rapira_ce_grpc_unary_call->create_object = rapira_object_create;
+    rapira_ce_grpc_unary_call->default_object_handlers =
         &rapira_grpc_call_handlers;
 }

@@ -11,6 +11,7 @@ use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 use crate::callbacks::guard;
 use crate::scoreboard::{Event, count_shed, sb_update};
 use crate::types::Context;
+use crate::zend_class_entry;
 
 pub(crate) const INTAKE_WAIT: Duration = Duration::from_secs(30);
 
@@ -31,6 +32,8 @@ pub trait Held: Send + 'static {
     fn lost(&mut self);
     /// A worker that cannot serve: the plugin's refusal, 503 or UNAVAILABLE.
     fn shed(self: Box<Self>);
+    /// The class of the object that receive() creates for this unit. The plugin registered it in MINIT, so it is never null.
+    fn class(&self) -> *mut zend_class_entry;
 
     /// Work::isFinalized().
     fn is_finalized(&self) -> bool {
@@ -100,7 +103,7 @@ pub unsafe extern "C" fn rapira_rs_held_is_cancelled(held: *const HeldPtr) -> bo
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_held_drop(held: *mut HeldPtr) {
     guard((), || unsafe {
-        // The receive shells allocate the object before the pull: a busy refusal, a timeout, an empty tryReceive() or a closed source frees an object with no unit.
+        // An object that new created holds no unit: the engine refuses the private constructor after the allocation.
         let Some(ptr) = (*held).0.take() else {
             return;
         };
@@ -312,6 +315,9 @@ mod tests {
         fn discard(&mut self) {}
         fn lost(&mut self) {}
         fn shed(self: Box<Self>) {}
+        fn class(&self) -> *mut zend_class_entry {
+            std::ptr::null_mut()
+        }
     }
 
     fn probe() -> Unit {

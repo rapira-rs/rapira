@@ -71,7 +71,6 @@ extern int rapira_mode;
 typedef struct {
     zend_class_entry *dispatcher;
     zend_class_entry *info;
-    zend_class_entry *unit;
     // the error of receive() and tryReceive() while a unit is unfinalized
     const char *busy;
     // RSHUTDOWN calls it on the PHP thread before the request strings are
@@ -117,8 +116,9 @@ extern void rapira_rs_finish_response(void);
 
 // The unit behind a Work object: the first field of the C prefix of every class
 // that receive() hands out. Rust owns the two words (HeldPtr in work.rs); C
-// passes the address and never reads the words. A zeroed rapira_held holds no
-// unit. zend_object_alloc zeroes the prefix, so a fresh object holds no unit.
+// copies them from the receive call into the object and gives them no meaning.
+// A zeroed rapira_held holds no unit. zend_object_alloc zeroes the prefix, so
+// a fresh object holds no unit.
 typedef struct {
     void *words[2];
 } rapira_held;

@@ -427,6 +427,9 @@ mod tests {
         fn discard(&mut self) {}
         fn lost(&mut self) {}
         fn shed(self: Box<Self>) {}
+        fn class(&self) -> *mut crate::zend_class_entry {
+            std::ptr::null_mut()
+        }
     }
 
     /// One worker on this thread: a slot on a board in memory, its quota and its intake.

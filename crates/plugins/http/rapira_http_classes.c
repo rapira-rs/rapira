@@ -12,6 +12,8 @@ zend_class_entry *rapira_ce_http_head_already_written_error;
 zend_class_entry *rapira_ce_http_head_not_written_error;
 zend_class_entry *rapira_ce_http_content_length_exceeded_error;
 zend_class_entry *rapira_ce_http_file_not_sendable_exception;
+// the unit class; ExchangeState::class returns it (src/php/mod.rs)
+zend_class_entry *rapira_ce_http_exchange;
 
 const char *rapira_http_server_name;
 size_t rapira_http_server_name_len;
@@ -76,7 +78,7 @@ void rapira_http_register_classes(void) {
         register_class_Rapira_Internal_Http_Dispatcher(http_dispatcher);
     rapira_http_plugin.info =
         register_class_Rapira_Internal_Http_DispatcherInfo(http_info);
-    rapira_http_plugin.unit =
+    rapira_ce_http_exchange =
         register_class_Rapira_Internal_Http_Exchange(http_exchange);
     rapira_plugin_wire(&rapira_http_plugin);
 
@@ -84,7 +86,7 @@ void rapira_http_register_classes(void) {
     rapira_exchange_handlers.clone_obj = NULL;
     rapira_exchange_handlers.offset = offsetof(rapira_exchange_obj, std);
     rapira_exchange_handlers.free_obj = rapira_exchange_free;
-    rapira_http_plugin.unit->create_object = rapira_object_create;
-    rapira_http_plugin.unit->default_object_handlers =
+    rapira_ce_http_exchange->create_object = rapira_object_create;
+    rapira_ce_http_exchange->default_object_handlers =
         &rapira_exchange_handlers;
 }

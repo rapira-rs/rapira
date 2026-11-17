@@ -16,15 +16,15 @@ use rapira_sapi::work::{Held, HeldPtr, now_unix_f64};
 use rapira_sapi::{
     HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_zval_enum_case,
-    zend, zend_argument_type_error, zend_long, zend_object, zend_string, zend_zval_value_name,
-    zval, zval_ptr_dtor,
+    zend, zend_argument_type_error, zend_class_entry, zend_long, zend_object, zend_string,
+    zend_zval_value_name, zval, zval_ptr_dtor,
 };
 use tokio::sync::oneshot;
 
 use super::{
     rapira_ce_grpc_context, rapira_ce_grpc_error_detail, rapira_ce_grpc_metadata,
     rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind, rapira_ce_grpc_protocol,
-    rapira_ce_grpc_service_info,
+    rapira_ce_grpc_service_info, rapira_ce_grpc_unary_call,
 };
 use crate::{MethodInfo, UnaryCall, UnaryReply};
 
@@ -238,6 +238,11 @@ impl Held for GrpcState {
                 outcome: Err(ConnectError::unavailable("the worker failed to boot")),
             });
         }
+    }
+
+    fn class(&self) -> *mut zend_class_entry {
+        // SAFETY: MINIT assigns the class entry in the master before the fork, and nothing writes it after.
+        unsafe { rapira_ce_grpc_unary_call }
     }
 }
 
