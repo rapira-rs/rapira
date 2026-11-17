@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: 0d9ad957ff0acf6f8d750dcdd2ac0f4d27eb8cd4 */
+ * Stub hash: dacf572e8f867bd7e8174db00a7c957e506e890e */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_rapira_finish_request, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
@@ -21,6 +21,13 @@ ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_Rapira_log, 0, 1, IS_VOID, 0)
 	ZEND_ARG_TYPE_INFO(0, message, IS_STRING, 0)
 	ZEND_ARG_OBJ_INFO_WITH_DEFAULT_VALUE(0, level, Rapira\\LogLevel, 0, "Rapira\\LogLevel::Info")
 	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, context, IS_ARRAY, 0, "[]")
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_Rapira_count_objects, 0, 0, IS_ARRAY, 0)
+ZEND_END_ARG_INFO()
+
+ZEND_BEGIN_ARG_WITH_RETURN_OBJ_INFO_EX(arginfo_Rapira_get_objects, 0, 0, WeakMap, 0)
+	ZEND_ARG_TYPE_INFO_WITH_DEFAULT_VALUE(0, classes, IS_ARRAY, 0, "[]")
 ZEND_END_ARG_INFO()
 
 #define arginfo_class_Rapira_Work_isFinalized arginfo_rapira_finish_request
@@ -69,6 +76,8 @@ ZEND_FUNCTION(Rapira_get_dispatcher);
 ZEND_FUNCTION(Rapira_handle_request);
 ZEND_FUNCTION(Rapira_get_version);
 ZEND_FUNCTION(Rapira_log);
+ZEND_FUNCTION(Rapira_count_objects);
+ZEND_FUNCTION(Rapira_get_objects);
 ZEND_METHOD(Rapira_InetAddress, __construct);
 ZEND_METHOD(Rapira_UnixAddress, __construct);
 ZEND_METHOD(Rapira_Tls, __construct);
@@ -80,6 +89,8 @@ static const zend_function_entry ext_functions[] = {
 	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "handle_request"), zif_Rapira_handle_request, arginfo_Rapira_handle_request, 0, NULL, NULL)
 	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "get_version"), zif_Rapira_get_version, arginfo_Rapira_get_version, 0, NULL, NULL)
 	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "log"), zif_Rapira_log, arginfo_Rapira_log, 0, NULL, NULL)
+	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "count_objects"), zif_Rapira_count_objects, arginfo_Rapira_count_objects, 0, NULL, NULL)
+	ZEND_RAW_FENTRY(ZEND_NS_NAME("Rapira", "get_objects"), zif_Rapira_get_objects, arginfo_Rapira_get_objects, 0, NULL, NULL)
 	ZEND_FE_END
 };
 

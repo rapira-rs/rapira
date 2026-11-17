@@ -118,6 +118,94 @@ ZEND_FUNCTION(Rapira_log) {
     }
 }
 
+// The store also holds engine objects that PHP code never receives, such as
+// the iterator of a foreach. The engine does not register their classes, so
+// these classes are not linked:
+// https://github.com/php/php-src/blob/php-8.5.12/Zend/zend_iterators.c#L60
+static bool rapira_object_is_visible(const zend_object *obj) {
+    return IS_OBJ_VALID(obj) && (obj->ce->ce_flags & ZEND_ACC_LINKED);
+}
+
+ZEND_FUNCTION(Rapira_count_objects) {
+    ZEND_PARSE_PARAMETERS_NONE();
+
+    array_init(return_value);
+    const zend_objects_store *store = &EG(objects_store);
+    for (uint32_t handle = 1; handle < store->top; handle++) {
+        const zend_object *obj = store->object_buckets[handle];
+        if (!rapira_object_is_visible(obj)) {
+            continue;
+        }
+        zval *count = zend_hash_lookup(Z_ARRVAL_P(return_value), obj->ce->name);
+        if (Z_TYPE_P(count) == IS_NULL) {
+            ZVAL_LONG(count, 1);
+        } else {
+            Z_LVAL_P(count)++;
+        }
+    }
+}
+
+ZEND_FUNCTION(Rapira_get_objects) {
+    HashTable *classes = NULL;
+    ZEND_PARSE_PARAMETERS_START(0, 1)
+    Z_PARAM_OPTIONAL
+    Z_PARAM_ARRAY_HT(classes)
+    ZEND_PARSE_PARAMETERS_END();
+
+    // a name that is not loaded has no instance, so it gets no entry
+    HashTable wanted;
+    zend_hash_init(&wanted, 0, NULL, NULL, false);
+    uint32_t names = classes ? zend_hash_num_elements(classes) : 0;
+    if (names != 0) {
+        zval *name;
+        ZEND_HASH_FOREACH_VAL(classes, name) {
+            ZVAL_DEREF(name);
+            if (Z_TYPE_P(name) != IS_STRING) {
+                zend_hash_destroy(&wanted);
+                zend_argument_type_error(
+                    1, "must be an array of class names, %s given",
+                    zend_zval_value_name(name));
+                RETURN_THROWS();
+            }
+            zend_class_entry *ce = zend_lookup_class_ex(
+                Z_STR_P(name), NULL, ZEND_FETCH_CLASS_NO_AUTOLOAD);
+            if (ce) {
+                zend_hash_next_index_insert_ptr(&wanted, ce);
+            }
+        }
+        ZEND_HASH_FOREACH_END();
+    }
+
+    // the engine does not export the WeakMap class entry
+    object_init_ex(return_value, zend_hash_str_find_ptr(EG(class_table),
+                                                        ZEND_STRL("weakmap")));
+    zend_object *map = Z_OBJ_P(return_value);
+    zval null;
+    ZVAL_NULL(&null);
+    const zend_objects_store *store = &EG(objects_store);
+    for (uint32_t handle = 1; handle < store->top; handle++) {
+        zend_object *obj = store->object_buckets[handle];
+        if (!rapira_object_is_visible(obj) || obj == map) {
+            continue;
+        }
+        bool match = names == 0;
+        zend_class_entry *ce;
+        ZEND_HASH_FOREACH_PTR(&wanted, ce) {
+            if (instanceof_function(obj->ce, ce)) {
+                match = true;
+                break;
+            }
+        }
+        ZEND_HASH_FOREACH_END();
+        if (match) {
+            zval key;
+            ZVAL_OBJ(&key, obj);
+            map->handlers->write_dimension(map, &key, &null);
+        }
+    }
+    zend_hash_destroy(&wanted);
+}
+
 // the plugin's root TOML section
 ZEND_FUNCTION(rapira_sapi_dispatcher_name) {
     ZEND_PARSE_PARAMETERS_NONE();
