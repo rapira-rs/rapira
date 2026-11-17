@@ -99,10 +99,10 @@ protoc --include_imports --descriptor_set_out=api.binpb -I proto proto/billing/v
 
 `buf build` includes the imported files by default. `protoc` includes them only with `--include_imports`.
 
-`descriptor_set` is a path or a URL. A value that starts with `http://` or `https://` is a URL, as for a Buf image input: https://buf.build/docs/reference/inputs/#image-formats. The master downloads the set with one GET request at boot. A reload does not download it again.
+`descriptor_set` is a path or a URL. A value that starts with `http://` or `https://` is a URL, as for a Buf image input: https://buf.build/docs/reference/inputs/#image-formats. The master downloads the set with a GET request at boot. A reload does not download it again.
 
-- The download follows up to 10 redirects. A response status of 400 or above fails the boot.
-- HTTPS trusts the certificate store of the system. `SSL_CERT_FILE` and `SSL_CERT_DIR` select another store.
+- The download follows up to 10 redirects. It also follows a redirect from an `https://` URL to an `http://` URL. A response status of 400 or above fails the boot.
+- HTTPS trusts the certificate store of the system. On Linux, `SSL_CERT_FILE` and `SSL_CERT_DIR` replace that store. On macOS, the store is the keychain, and the two variables have no effect.
 - The userinfo of the URL (`https://user:password@host/api.binpb`) goes out as HTTP Basic credentials. The log shows the URL without its userinfo and its query.
 - The download uses the proxy that `ALL_PROXY`, `HTTPS_PROXY` or `HTTP_PROXY` names. `NO_PROXY` lists the hosts that need no proxy.
 - The connection, the response head and the body have a time limit of 30 s each. The set has a size limit of 64 MiB.
