@@ -1299,6 +1299,14 @@ pub fn calls(srv: &Server) -> Vec<Value> {
         .collect()
 }
 
+/// The text of the `plugin grpc` error that a worker logs when its plugin returns an error.
+pub fn plugin_error(srv: &Server) -> Option<String> {
+    server_log::records(&srv.log_file())
+        .into_iter()
+        .find(|c| c.target == "rapira" && c.message.starts_with("plugin grpc"))
+        .map(|c| c.message)
+}
+
 /// The `remote` that PHP reports for a client at `peer`. `Conn::open` connects from an unnamed unix socket, which PHP reports as `unix:NULL`.
 pub fn logged_remote(peer: &Addr) -> String {
     match peer {

@@ -8,7 +8,7 @@ use serde_json::{Value, json};
 use tests::grpc::{Conn, Envelope, Fields, WATCH_PATH, Wire, envelope, envelopes, web_trailers};
 use tests::{fixture, poll, server_log};
 
-use crate::harness::{Server, Spawn, listen, stop};
+use crate::harness::{Server, Spawn, exited, listen, plugin_error, signal, stop};
 
 const DISCARDED: &str = "Rapira\\Exception\\WorkDiscardedException";
 
@@ -775,6 +775,47 @@ async fn a_passed_deadline_ends_the_wait_for_a_client_that_does_not_read() {
     stop(srv).await;
 }
 
+/// A passed deadline closes the call while the generator does not wait at a yield and the client does not read. Sources: PROTOCOL-HTTP2 (`grpc-timeout: 300m` is 300 ms, status 4 is DEADLINE_EXCEEDED), `Work` (`isCancelled()`: the deadline passed; `isFinalized()`: the host committed the call on the deadline) and `StreamingResponder::respond` (the host that closes the call arrives as WorkDiscardedException at the yield).
+#[tokio::test]
+async fn a_passed_deadline_closes_the_call_when_the_client_does_not_read() {
+    let srv = stream_worker();
+    let log = srv.log_file();
+    let mut conn = Conn::open(&listen(&srv), Wire::H2).await.expect("connect");
+    let response = conn
+        .request(
+            Method::POST,
+            WATCH_PATH,
+            &[
+                ("content-type", "application/grpc"),
+                ("te", "trailers"),
+                ("grpc-timeout", "300m"),
+            ],
+            &envelope(&echo("stall")),
+        )
+        .await
+        .unwrap();
+    // The client reads no message, so the first message fills its flow-control window and the second message stops the poll of the response body.
+    let record = log.clone();
+    let next =
+        tokio::task::spawn_blocking(move || server_log::wait_app_record(&record, "next-yield"))
+            .await
+            .expect("the next-yield record");
+    let expired: Value =
+        serde_json::from_str(&server_log::wait_app_record(&log, "expired")).unwrap();
+    assert_eq!(expired, json!({ "finalized": true, "cancelled": true }));
+    let next: Value = serde_json::from_str(&next).unwrap();
+    assert_eq!(next, json!({ "result": DISCARDED }));
+
+    let collected = response.into_body().collect().await.unwrap();
+    let trailers = collected.trailers().cloned().unwrap_or_default();
+    assert_eq!(
+        trailers.get("grpc-status").map(|v| v.as_bytes()),
+        Some(&b"4"[..]),
+        "{trailers:?}"
+    );
+    stop(srv).await;
+}
+
 /// Sources: the contract (`StreamingResponder::respond` throws WorkDiscardedException "without starting the generator" when the host closed the call first) and PROTOCOL-HTTP2 (`grpc-timeout: 200m` is 200 ms, status 4 is DEADLINE_EXCEEDED).
 #[tokio::test]
 async fn respond_on_a_closed_call_does_not_start_the_generator() {
@@ -800,4 +841,29 @@ async fn respond_on_a_closed_call_does_not_start_the_generator() {
         "the generator must not start"
     );
     stop(srv).await;
+}
+
+/// A stream that runs past the drain grace fails the drain. Sources: the case "a call past the grace is cut" of `drain_waits_for_calls_within_the_grace` in grpc_server.rs (`process_control_timeout_secs = 1` gives a drain grace of 500 ms, and a call that the drain cuts gives a plugin error with `grpc drain timed out`).
+#[tokio::test]
+async fn a_stream_past_the_drain_grace_fails_the_drain() {
+    let srv = Spawn::grpc(fixture("grpc/stream-worker.php"))
+        .toml("[supervisor]\nprocess_control_timeout_secs = 1")
+        .json_log()
+        .spawn();
+    let mut conn = Conn::open(&listen(&srv), Wire::H2).await.expect("connect");
+    // The head arrives after the first yield. With no deadline, the probe yields for up to 10 s, and the client holds the stream open.
+    let _stream = conn
+        .request(Method::POST, WATCH_PATH, GRPC, &envelope(&echo("slow")))
+        .await
+        .unwrap();
+
+    signal(srv.pid(), libc::SIGQUIT);
+    let srv = exited(srv).await;
+    let error = plugin_error(&srv);
+    assert!(
+        error
+            .as_ref()
+            .is_some_and(|e| e.contains("grpc drain timed out")),
+        "{error:?}"
+    );
 }

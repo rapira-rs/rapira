@@ -1,6 +1,6 @@
 <?php
 
-// The application side of the server-streaming tests. The request is an EchoRequest, and its text selects the probe. A reply is an EchoResponse, except in the flood probe.
+// The application side of the server-streaming tests. The request is an EchoRequest, and its text selects the probe. A reply is an EchoResponse, except in the flood probe and the first message of the stall probe.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\WorkDiscardedException;
@@ -153,6 +153,27 @@ function serve(ServerStreamingCall $call): void
                 'finalized' => $call->isFinalized(),
                 'cancelled' => $call->isCancelled(),
             ]);
+            return;
+        case 'stall':
+            $call->respond((function () use ($call) {
+                // 8 MiB: more than the connection flow-control window of the test client, 5 MiB (DEFAULT_CONN_WINDOW of the hyper 1.12 HTTP/2 client), so the connection takes no other message while the client does not read
+                yield str_repeat('x', 8 * 1024 * 1024);
+                // hyper takes this message from the body and holds it until the window has room, so it polls the body no more
+                yield reply('1');
+                // the deadline of the call passes during the sleep
+                usleep(600_000);
+                \Rapira\log('expired', context: [
+                    'finalized' => $call->isFinalized(),
+                    'cancelled' => $call->isCancelled(),
+                ]);
+                try {
+                    yield reply('2');
+                    $next = 'none';
+                } catch (WorkDiscardedException $e) {
+                    $next = $e::class;
+                }
+                \Rapira\log('next-yield', context: ['result' => $next]);
+            })());
             return;
         case 'garbage':
             // the second message is no EchoResponse: 0xff starts a field tag that does not end

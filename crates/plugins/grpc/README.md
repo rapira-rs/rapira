@@ -163,7 +163,7 @@ A client sets a timeout with `grpc-timeout` (gRPC and gRPC-Web) or `connect-time
 
 `Context::$deadline` is the deadline as a Unix timestamp, or null when the call has no deadline. When the deadline passes, the client gets DEADLINE_EXCEEDED and `isCancelled()` returns true. A client that cancels the call or closes the connection has the same effect on PHP.
 
-The plugin cannot stop PHP code, so PHP continues to run the call. A later `respond()` or `fail()` throws `Rapira\Exception\WorkDiscardedException`, and the generator of a streaming response gets it at its next `yield`. Check `isCancelled()` during long work. While the client of a stream does not read, `isCancelled()` can stay false after the deadline, and the next `yield` still throws the exception. Set `default_timeout_secs` so that each call has a deadline.
+The plugin cannot stop PHP code, so PHP continues to run the call. A later `respond()` or `fail()` throws `Rapira\Exception\WorkDiscardedException`, and the generator of a streaming response gets it at its next `yield`. Check `isCancelled()` during long work. Set `default_timeout_secs` so that each call has a deadline.
 
 ## Health and reflection
 
@@ -177,7 +177,7 @@ grpcurl -plaintext 127.0.0.1:50051 list
 
 ## Shutdown
 
-On the stop signal the accept loop ends, health reports NOT_SERVING, and open `Watch` streams end. Calls in flight drain within the drain window (see Config). Connections that are open after the drain window are cut. The shutdown reports an error only when a call is still in flight at the end of the window. An open reflection stream, for example an Evans REPL session (https://github.com/ktr0731/evans), holds its connection until the drain window ends.
+On the stop signal the accept loop ends, health reports NOT_SERVING, and open `Watch` streams end. Calls in flight drain within the drain window (see Config). Connections that are open after the drain window are cut. The shutdown reports an error only when a call is still in flight at the end of the window. A streaming response from PHP is in flight until it ends. An open reflection stream, for example an Evans REPL session (https://github.com/ktr0731/evans), holds its connection until the drain window ends.
 
 The listener sends an HTTP/2 keepalive PING to a connection that sends no request, no request data and no PING answer for `keepalive_interval_secs`, and closes the connection when the peer does not answer within `keepalive_timeout_secs`. Both keys are 10 seconds by default. An HTTP/2 peer that is gone without a FIN keeps its connection open for at most the sum of both keys after its last frame. HTTP/1.1 has no PING, so these keys do not apply to a gRPC-Web or Connect client on HTTP/1.1.
 

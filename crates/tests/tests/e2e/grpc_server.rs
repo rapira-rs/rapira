@@ -21,20 +21,12 @@ use tests::grpc::{
 use tests::{fixture, server_log};
 
 use crate::harness::{
-    Server, Spawn, calls, exited, http_raw, listen, logged_remote, scratch_dir, signal, stop,
+    Spawn, calls, exited, http_raw, listen, logged_remote, plugin_error, scratch_dir, signal, stop,
 };
 
 /// Logs a `call` record for each call and answers as the request metadata asks.
 fn wire_worker() -> PathBuf {
     fixture("grpc/wire-worker.php")
-}
-
-/// The text of the `plugin grpc` error that a worker logs when its plugin returns an error.
-fn plugin_error(srv: &Server) -> Option<String> {
-    server_log::records(&srv.log_file())
-        .into_iter()
-        .find(|c| c.target == "rapira" && c.message.starts_with("plugin grpc"))
-        .map(|c| c.message)
 }
 
 #[derive(Clone, Copy)]

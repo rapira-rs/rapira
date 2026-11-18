@@ -1,6 +1,7 @@
 //! The `PhpDispatcher`: one call through the intake to PHP, the JSON transcoding, and the PHP reply, stream or status as a connectrpc response or error.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -18,12 +19,15 @@ use tokio::time::timeout_at;
 use crate::php::GrpcState;
 use crate::php::call::{Reply, StreamReply};
 use crate::schema::{Method, Schema};
+use crate::serve::InFlight;
 use crate::{Call, Part};
 
 /// Routes the unary and server-streaming methods of the configured services to PHP.
 pub(crate) struct PhpDispatcher {
     pub(crate) schema: Arc<Schema>,
     pub(crate) intake: Intake,
+    /// The calls in flight that the drain counts (serve.rs).
+    pub(crate) inflight: Arc<AtomicUsize>,
 }
 
 impl Dispatcher for PhpDispatcher {
@@ -55,8 +59,11 @@ impl Dispatcher for PhpDispatcher {
     ) -> StreamingResult {
         let schema = Arc::clone(&self.schema);
         let intake = self.intake.clone();
+        let inflight = Arc::clone(&self.inflight);
         let path = path.to_owned();
-        Box::pin(server_streaming(schema, intake, path, ctx, request, format))
+        Box::pin(server_streaming(
+            schema, intake, inflight, path, ctx, request, format,
+        ))
     }
 
     fn call_client_streaming(
@@ -211,6 +218,7 @@ async fn unary(
 async fn server_streaming(
     schema: Arc<Schema>,
     intake: Intake,
+    inflight: Arc<AtomicUsize>,
     path: String,
     mut ctx: RequestContext,
     request: Bytes,
@@ -235,6 +243,8 @@ async fn server_streaming(
         Ok(Ok(head)) => head,
         // fail() before the first yield
         Ok(Err(err)) => return Err(err),
+        // PHP discards a call at its deadline, and its check can come before the timer of connectrpc.
+        Err(_) if until.is_some_and(|until| Instant::now() >= until) => return Err(deadline()),
         Err(_) => return Err(lost(&path)),
     };
     let body = Body {
@@ -243,8 +253,9 @@ async fn server_streaming(
         schema,
         path,
         format,
+        _counted: InFlight::start(&inflight),
     };
-    let mut response = Response::stream(stream::unfold(Some(body), Body::step));
+    let mut response = Response::stream(stream::try_unfold(body, Body::next));
     response.headers = head.headers;
     response.trailers = head.trailers;
     if plain_reply {
@@ -261,39 +272,32 @@ struct Body {
     schema: Arc<Schema>,
     path: String,
     format: CodecFormat,
+    /// The handler returns at the head, so the body keeps the call in the count of the drain until the stream ends.
+    _counted: InFlight,
 }
 
 impl Body {
-    /// One item of the response stream, with the body for the next step. An error is the last item. A `None` body ends the stream.
-    async fn step(body: Option<Body>) -> Option<(Result<EncodedBody, ConnectError>, Option<Body>)> {
-        let mut body = body?;
-        let item = body.next().await?;
-        let rest = item.is_ok().then_some(body);
-        Some((item, rest))
-    }
-
-    /// None: PHP ended the stream with success.
-    async fn next(&mut self) -> Option<Result<EncodedBody, ConnectError>> {
+    /// One message of the response stream, with the body for the next step. None: PHP ended the stream with success. An error ends the stream and drops the body.
+    async fn next(mut self) -> Result<Option<(EncodedBody, Self)>, ConnectError> {
         let part = match self.until {
             None => self.parts.recv().await,
             // timeout_at polls recv first, so the check keeps a generator that always has a message ready from a stream past the deadline.
-            Some(until) if Instant::now() >= until => return Some(Err(deadline())),
+            Some(until) if Instant::now() >= until => return Err(deadline()),
             Some(until) => match timeout_at(until.into(), self.parts.recv()).await {
                 Ok(part) => part,
-                Err(_) => return Some(Err(deadline())),
+                Err(_) => return Err(deadline()),
             },
         };
         match part {
             Some(Part::Message(message)) => {
-                Some(encode(&self.schema, &self.path, self.format, message).map(EncodedBody::from))
+                let message = encode(&self.schema, &self.path, self.format, message)?;
+                Ok(Some((EncodedBody::from(message), self)))
             }
-            Some(Part::End) => None,
-            Some(Part::Fail(err)) => Some(Err(err)),
-            // A park of the PHP thread ends at the deadline, and PHP then discards the call.
-            None if self.until.is_some_and(|until| Instant::now() >= until) => {
-                Some(Err(deadline()))
-            }
-            None => Some(Err(lost(&self.path))),
+            Some(Part::End) => Ok(None),
+            Some(Part::Fail(err)) => Err(err),
+            // PHP discards the call at its deadline.
+            None if self.until.is_some_and(|until| Instant::now() >= until) => Err(deadline()),
+            None => Err(lost(&self.path)),
         }
     }
 }

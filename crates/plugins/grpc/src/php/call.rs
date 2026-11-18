@@ -195,7 +195,7 @@ pub(crate) struct StreamReply {
     /// None after the head went out.
     head: Option<oneshot::Sender<Result<Head, ConnectError>>>,
     parts: mpsc::Sender<Part>,
-    /// The deadline of the call. No park waits past it.
+    /// The deadline of the call. No park waits past it, and the call is cancelled from it.
     until: Option<Instant>,
     /// A trailer was added after the head went out. A stream that ends with success does not send it.
     late_trailer: bool,
@@ -248,12 +248,14 @@ impl Held for GrpcState {
         self.reply.is_none()
     }
 
-    /// The plugin dropped the receiver: the deadline passed or the client left.
+    /// The plugin dropped the receiver: the deadline passed or the client left. connectrpc bounds only the handler with the deadline, and the handler of a stream returns at the head, so a stream also checks its deadline here.
     fn cancelled(&self) -> bool {
         self.discarded
             || match &self.reply {
                 Some(Reply::Unary(reply)) => reply.is_closed(),
-                Some(Reply::Stream(out)) => out.parts.is_closed(),
+                Some(Reply::Stream(out)) => {
+                    out.parts.is_closed() || out.until.is_some_and(|until| Instant::now() >= until)
+                }
                 None => false,
             }
     }
@@ -465,6 +467,10 @@ fn push(out: &StreamReply, part: Part) -> bool {
 
 /// One message of a streaming response. The first message sends the head before it. False: the message has no destination, and the call is discarded.
 fn send_core(st: &mut GrpcState, message: Bytes) -> bool {
+    if st.cancelled() {
+        st.discard();
+        return false;
+    }
     // respond() or fail() inside the running generator finalized the call, so the generator gets the discard exception at its yield.
     let Some(Reply::Stream(out)) = st.reply.as_mut() else {
         return false;
@@ -478,6 +484,10 @@ fn send_core(st: &mut GrpcState, message: Bytes) -> bool {
 
 /// The generator ended: sends the head of a stream with no message, then the end of the stream.
 fn end(st: &mut GrpcState) {
+    if st.cancelled() {
+        st.discard();
+        return;
+    }
     // fail() inside the running generator finalized the call
     let Some(Reply::Stream(mut out)) = st.reply.take() else {
         return;
