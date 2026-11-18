@@ -11,7 +11,7 @@ extern bool rapira_rs_stream_send(const rapira_held *held, const char *message,
 bool rapira_stream_run_generator(zend_object *generator,
                                  const rapira_held *held) {
     zend_generator *gen = (zend_generator *)generator;
-    bool closed = false;
+    bool open = true;
 
     // A generator that has not run goes to its first yield, as
     // zend_generator_ensure_initialized does:
@@ -22,7 +22,7 @@ bool rapira_stream_run_generator(zend_object *generator,
         gen->flags |= ZEND_GENERATOR_AT_FIRST_YIELD;
     }
     while (!EG(exception) && gen->execute_data) {
-        if (!closed) {
+        if (open) {
             // During a yield from, the current generator holds the value. A
             // generator that yields by reference holds a reference.
             zval *value = &zend_generator_get_current(gen)->value;
@@ -37,7 +37,7 @@ bool rapira_stream_run_generator(zend_object *generator,
                 zend_generator_resume(gen);
                 continue;
             }
-            closed = true;
+            open = false;
         }
         // Each yield after the close gets a new exception, built as
         // zend_throw_exception builds one. Generator::throw resumes the
@@ -51,5 +51,8 @@ bool rapira_stream_run_generator(zend_object *generator,
                                        "throw", NULL, &discarded);
         zval_ptr_dtor(&discarded);
     }
-    return !closed && !EG(exception);
+    if (EG(exception)) {
+        return false;
+    }
+    return open;
 }
