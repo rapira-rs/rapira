@@ -2,13 +2,14 @@
 
 #include <Zend/zend_generators.h>
 
-// rust glue: Held::send of the unit (work.rs)
-extern int rapira_rs_stream_send(const rapira_held *held, zval *value);
+// rust glue: Held::send of the unit (work.rs). False: the host closed the unit.
+extern bool rapira_rs_stream_send(const rapira_held *held, const char *message,
+                                  size_t len);
 
 // Userland runs only below this C frame, so a bailout from the generator
 // crosses no Rust frame.
 rapira_loop rapira_stream_run_generator(zend_object *generator,
-                                        rapira_held *held) {
+                                        const rapira_held *held) {
     zend_generator *gen = (zend_generator *)generator;
     bool closed = false;
 
@@ -22,13 +23,17 @@ rapira_loop rapira_stream_run_generator(zend_object *generator,
     }
     while (!EG(exception) && gen->execute_data) {
         if (!closed) {
-            // during a yield from, the current generator holds the value
+            // During a yield from, the current generator holds the value. A
+            // generator that yields by reference holds a reference.
             zval *value = &zend_generator_get_current(gen)->value;
-            int sent = rapira_rs_stream_send(held, value);
-            if (sent == RAPIRA_SENT_THROWN) {
+            ZVAL_DEREF(value);
+            if (Z_TYPE_P(value) != IS_STRING) {
+                zend_argument_type_error(1, "must yield strings, %s yielded",
+                                         zend_zval_value_name(value));
                 return RAPIRA_LOOP_THROWN;
             }
-            if (sent == RAPIRA_SENT_OK) {
+            if (rapira_rs_stream_send(held, Z_STRVAL_P(value),
+                                      Z_STRLEN_P(value))) {
                 zend_generator_resume(gen);
                 continue;
             }

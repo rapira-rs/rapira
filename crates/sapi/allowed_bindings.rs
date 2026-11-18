@@ -9,7 +9,6 @@
     "rapira_mode", "RAPIRA_MODE_CLASSIC", "RAPIRA_MODE_WORKER",
     "RAPIRA_MODE_DISPATCHER", "RAPIRA_OK", "RAPIRA_BAILOUT", "RAPIRA_THROW",
     "RAPIRA_HANDLE_STOP", "RAPIRA_HANDLE_CONTINUE", "RAPIRA_HANDLE_RECYCLE",
-    "RAPIRA_SENT_OK", "RAPIRA_SENT_CLOSED", "RAPIRA_SENT_THROWN",
     // the two halves of the linked-libphp version check, and the linked version string
     "PHP_VERSION_ID", "php_version_id", "php_version",
     // MINIT-written class-entry globals the Rust builder reads (static mut)

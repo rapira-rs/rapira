@@ -14,7 +14,7 @@ use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};
 use rapira_sapi::stream::{self, Step, Wait};
-use rapira_sapi::work::{self, Held, HeldPtr, now_unix_f64};
+use rapira_sapi::work::{Held, HeldPtr, now_unix_f64};
 use rapira_sapi::{
     HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_zval_enum_case,
@@ -300,25 +300,9 @@ impl Held for GrpcState {
         }
     }
 
-    /// One yielded message of respond(\Generator). The type check comes before the copy: a throw can bail out, and then this frame must hold no owned value.
-    unsafe fn send(&mut self, value: *mut zval) -> work::Sent {
-        unsafe {
-            let value = zend::deref(value);
-            if zend::zval_type(value) != IS_STRING {
-                zend_argument_type_error(
-                    1,
-                    c"must yield strings, %s yielded".as_ptr(),
-                    zend_zval_value_name(value),
-                );
-                return work::Sent::Thrown;
-            }
-            let message = Bytes::copy_from_slice(zend::zstr_bytes((*value).value.str_));
-            if send_core(self, message) {
-                work::Sent::Ok
-            } else {
-                work::Sent::Closed
-            }
-        }
+    /// One yielded message of respond(\Generator).
+    fn send(&mut self, message: &[u8]) -> bool {
+        send_core(self, Bytes::copy_from_slice(message))
     }
 }
 
