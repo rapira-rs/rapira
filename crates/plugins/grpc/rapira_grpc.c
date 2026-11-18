@@ -285,17 +285,11 @@ ZEND_METHOD(Rapira_Internal_Grpc_ServerStreamingCall, respond) {
     rapira_held *held = rapira_held_of(Z_OBJ_P(ZEND_THIS));
     // a call that the host closed does not start the generator
     RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_grpc_stream_begin(held), "respond");
-    switch (rapira_stream_run_generator(messages, held)) {
-    case RAPIRA_LOOP_DONE:
+    // False needs no action. With an exception pending, a call that the host
+    // did not close stays unfinalized, and fail() can end it. With none, the
+    // host closed the call, so no outcome goes out.
+    if (rapira_stream_run_generator(messages, held)) {
         rapira_rs_grpc_stream_end(held);
-        break;
-    // the host closed the call, so no outcome goes out
-    case RAPIRA_LOOP_CLOSED:
-        break;
-    // a call that the host did not close stays unfinalized, and fail() can
-    // end it
-    case RAPIRA_LOOP_THROWN:
-        RETURN_THROWS();
     }
 }
 

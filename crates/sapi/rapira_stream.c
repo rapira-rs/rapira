@@ -8,8 +8,8 @@ extern bool rapira_rs_stream_send(const rapira_held *held, const char *message,
 
 // Userland runs only below this C frame, so a bailout from the generator
 // crosses no Rust frame.
-rapira_loop rapira_stream_run_generator(zend_object *generator,
-                                        const rapira_held *held) {
+bool rapira_stream_run_generator(zend_object *generator,
+                                 const rapira_held *held) {
     zend_generator *gen = (zend_generator *)generator;
     bool closed = false;
 
@@ -30,7 +30,7 @@ rapira_loop rapira_stream_run_generator(zend_object *generator,
             if (Z_TYPE_P(value) != IS_STRING) {
                 zend_argument_type_error(1, "must yield strings, %s yielded",
                                          zend_zval_value_name(value));
-                return RAPIRA_LOOP_THROWN;
+                return false;
             }
             if (rapira_rs_stream_send(held, Z_STRVAL_P(value),
                                       Z_STRLEN_P(value))) {
@@ -51,8 +51,5 @@ rapira_loop rapira_stream_run_generator(zend_object *generator,
                                        "throw", NULL, &discarded);
         zval_ptr_dtor(&discarded);
     }
-    if (EG(exception)) {
-        return RAPIRA_LOOP_THROWN;
-    }
-    return closed ? RAPIRA_LOOP_CLOSED : RAPIRA_LOOP_DONE;
+    return !closed && !EG(exception);
 }
