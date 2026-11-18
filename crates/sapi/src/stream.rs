@@ -26,10 +26,25 @@ pub fn paused<R>(park: impl FnOnce() -> R) -> R {
     let result = park();
     // A zero value is a timer that was off or that expired: an expired timer already set EG(timed_out).
     if left.it_value.tv_sec != 0 || left.it_value.tv_usec != 0 {
+        #[cfg(target_os = "linux")]
+        less_one_tick(&mut left.it_value);
         // SAFETY: left is a live itimerval, and a null old value is allowed.
         unsafe { libc::setitimer(ZEND_TIMER, &left, std::ptr::null_mut()) };
     }
     result
+}
+
+/// Takes one tick from the time that the timer had left. Linux adds one tick to an ITIMER_PROF value at each arming, so each park would give the script one tick more. https://github.com/torvalds/linux/blob/v7.3/kernel/time/itimer.c#L201-L205 The resolution of a coarse clock is the same tick. https://github.com/torvalds/linux/blob/v7.3/include/vdso/ktime.h#L13
+#[cfg(target_os = "linux")]
+fn less_one_tick(left: &mut libc::timeval) {
+    // SAFETY: the all-zero timespec is a valid value.
+    let mut tick: libc::timespec = unsafe { std::mem::zeroed() };
+    // SAFETY: tick is a live timespec. https://man7.org/linux/man-pages/man2/clock_getres.2.html
+    unsafe { libc::clock_getres(libc::CLOCK_REALTIME_COARSE, &mut tick) };
+    // A value of zero turns the timer off, so a timer with one tick or less left keeps 1 us.
+    let usec = (left.tv_sec * 1_000_000 + left.tv_usec - tick.tv_nsec / 1000).max(1);
+    left.tv_sec = usec / 1_000_000;
+    left.tv_usec = usec % 1_000_000;
 }
 
 /// What ended a park.
