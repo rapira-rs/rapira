@@ -45,6 +45,8 @@ unsafe extern "C" {
     // The execution timer is disarmed while parked in receive() and re-armed with the captured per-cycle budget on unit handout (module.c).
     pub fn rapira_receive_untimed();
     pub fn rapira_receive_timed();
+    // Creates the object of a unit in rv and returns the address of its held word, a rapira_held (rapira_dispatcher.c).
+    pub fn rapira_unit_object(rv: *mut zval, ce: *mut zend_class_entry) -> *mut std::ffi::c_void;
     // C shim (module.c) over rapira_rs_ub_write: raises the client-abort bailout from C so the longjmp does not cross the Rust catch_unwind frame.
     pub fn rapira_ub_write(str_: *const std::os::raw::c_char, len: usize) -> usize;
 

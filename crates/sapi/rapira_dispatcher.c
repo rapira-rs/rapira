@@ -1,13 +1,11 @@
 #include "rapira_sapi.h"
 
-// rust glue
+// rust glue; a verb that reports false has a throw pending, except an empty
+// tryReceive, which reports false with no throw
 extern void rapira_rs_log_call(zend_string *message, zend_object *level,
                                HashTable *context);
-// The class of the pulled unit, with its held word in held. NULL: no unit, and
-// a throw is pending, except an empty tryReceive, which has no throw.
-extern zend_class_entry *rapira_rs_receive(int64_t timeout_us,
-                                           rapira_held *held);
-extern zend_class_entry *rapira_rs_try_receive(rapira_held *held);
+extern bool rapira_rs_receive(int64_t timeout_us, zval *rv);
+extern bool rapira_rs_try_receive(zval *rv);
 extern void rapira_rs_dispatcher_counts(zend_long *pending, zend_long *active);
 extern bool rapira_rs_held_is_finalized(const rapira_held *held);
 extern bool rapira_rs_held_is_cancelled(const rapira_held *held);
@@ -214,12 +212,12 @@ ZEND_FUNCTION(rapira_sapi_dispatcher_name) {
     RETURN_STRINGL(rapira_plugin_name, rapira_plugin_name_len);
 }
 
-// The pull comes first, so the object gets the class of its unit. The cycle
-// slot (exchange/mod.rs) owns the unit until the object holds the held word.
-static void rapira_unit_object(zval *rv, zend_class_entry *ce,
-                               const rapira_held *held) {
+// Rust calls it for the unit that it pulled (exchange/receive.rs), so the
+// object gets the class of its unit. Rust writes the held word at the address
+// that this returns.
+rapira_held *rapira_unit_object(zval *rv, zend_class_entry *ce) {
     object_init_ex(rv, ce);
-    *rapira_held_of(Z_OBJ_P(rv)) = *held;
+    return rapira_held_of(Z_OBJ_P(rv));
 }
 
 ZEND_FUNCTION(rapira_sapi_receive) {
@@ -233,23 +231,18 @@ ZEND_FUNCTION(rapira_sapi_receive) {
         zend_argument_value_error(1, "must be greater than or equal to -1");
         RETURN_THROWS();
     }
-    rapira_held held;
-    zend_class_entry *ce = rapira_rs_receive((int64_t)timeout, &held);
-    RAPIRA_RETURN_THROWS_UNLESS(ce, "receive");
-    rapira_unit_object(return_value, ce, &held);
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_receive((int64_t)timeout, return_value), "receive");
 }
 
 ZEND_FUNCTION(rapira_sapi_try_receive) {
     ZEND_PARSE_PARAMETERS_NONE();
-    rapira_held held;
-    zend_class_entry *ce = rapira_rs_try_receive(&held);
-    if (!ce) {
+    if (!rapira_rs_try_receive(return_value)) {
         if (EG(exception)) {
             RETURN_THROWS();
         }
         RETURN_NULL();
     }
-    rapira_unit_object(return_value, ce, &held);
 }
 
 ZEND_FUNCTION(rapira_sapi_get_info) {
