@@ -5,7 +5,7 @@ use std::time::Duration;
 use http::Method;
 use http_body_util::BodyExt;
 use serde_json::{Value, json};
-use tests::grpc::{Conn, Fields, WATCH_PATH, Wire, envelope, envelopes, web_trailers};
+use tests::grpc::{Conn, Envelope, Fields, WATCH_PATH, Wire, envelope, envelopes, web_trailers};
 use tests::{fixture, poll, server_log};
 
 use crate::harness::{Server, Spawn, listen, stop};
@@ -141,7 +141,7 @@ async fn server_streaming_over_each_protocol() {
     stop(srv).await;
 }
 
-/// Sources: the contract (`StreamingResponder::respond`, `ResponseMetadata`, `HeadersAlreadyCommittedError`), the ruling of rapira-rs/rapira#133 (the first yield sends the headers and fixes the trailers of a successful stream; `fail()` sends every trailer), PROTOCOL-HTTP2 (5 is NOT_FOUND, 13 is INTERNAL, and a trailers-only response has its trailers in the head) and the plugin README (a call that PHP loses ends with INTERNAL `internal error`).
+/// Sources: the contract (`StreamingResponder::respond`, `ResponseMetadata`, `HeadersAlreadyCommittedError`, and `AlreadyFinalizedError` from a second `respond()`), the ruling of rapira-rs/rapira#133 (the first yield sends the headers and fixes the trailers of a successful stream; `fail()` sends every trailer), the ruling that `fail()` inside the running generator finalizes the call and the next yield throws WorkDiscardedException, PROTOCOL-HTTP2 (5 is NOT_FOUND, 13 is INTERNAL, and a trailers-only response has its trailers in the head) and the plugin README (a call that PHP loses ends with INTERNAL `internal error`).
 #[tokio::test]
 async fn server_streaming_outcomes() {
     /// One app record of the probe.
@@ -245,6 +245,34 @@ async fn server_streaming_outcomes() {
             record: None,
         },
         Case {
+            name: "a yield after fail() inside the generator",
+            text: "fail-inside",
+            messages: &["1"],
+            grpc_status: "5",
+            grpc_message: Some("no invoice"),
+            headers: &[],
+            trailers: &[],
+            absent: &[],
+            record: Some(Record {
+                message: "after-fail",
+                context: r#"{"result":"Rapira\\Exception\\WorkDiscardedException"}"#,
+            }),
+        },
+        Case {
+            name: "a second respond()",
+            text: "twice",
+            messages: &["1", "2", "3"],
+            grpc_status: "0",
+            grpc_message: None,
+            headers: &[],
+            trailers: &[],
+            absent: &[],
+            record: Some(Record {
+                message: "second-respond",
+                context: r#"{"result":"Rapira\\Exception\\AlreadyFinalizedError"}"#,
+            }),
+        },
+        Case {
             name: "a fatal error after two messages",
             text: "fatal",
             messages: &["1", "2"],
@@ -310,6 +338,190 @@ async fn server_streaming_outcomes() {
             let want: Value = serde_json::from_str(record.context).expect("valid JSON");
             assert_eq!(context, want, "{}", case.name);
         }
+    }
+    stop(srv).await;
+}
+
+/// The metadata probe and the failure probes over gRPC-Web and Connect. Sources: PROTOCOL-WEB (the trailers are the last body frame, with the flag 0x80), the Connect protocol (a streaming response has the HTTP status 200; its last envelope has the flag 0x02 and holds the EndStreamResponse JSON `{"error": {"code", "message"}, "metadata": {"name": ["value"]}}`; `error` is absent on success; `not_found` is the name of the code NOT_FOUND) and the ruling of rapira-rs/rapira#133 (the first yield fixes the trailers of a successful stream; `fail()` sends every trailer; `fail()` before the first yield sends the headers too).
+#[tokio::test]
+async fn server_streaming_outcomes_over_grpc_web_and_connect() {
+    /// The `error` of a Connect end envelope.
+    struct Error {
+        code: &'static str,
+        message: &'static str,
+    }
+    /// How the protocol ends the stream.
+    enum End {
+        /// A last envelope with the flag 0x80 that holds the trailers.
+        WebFrame,
+        /// A last envelope with the flag 0x02 that holds the EndStreamResponse JSON. None: the JSON has no `error` key.
+        ConnectFrame(Option<Error>),
+    }
+    struct Case {
+        name: &'static str,
+        wire: Wire,
+        headers: Fields,
+        /// The probe of `stream-worker.php`.
+        text: &'static str,
+        /// The texts of the messages before the end.
+        messages: &'static [&'static str],
+        /// Fields of the response head.
+        head: Fields,
+        end: End,
+        /// Fields of the gRPC-Web trailer frame, or the entries of the Connect `metadata`, each with one value.
+        trailers: Fields,
+        /// Names that the trailer frame or the Connect `metadata` does not have.
+        absent: &'static [&'static str],
+    }
+    const WEB: Fields = &[("content-type", "application/grpc-web+proto")];
+    const CONNECT: Fields = &[("content-type", "application/connect+proto")];
+    let cases = [
+        Case {
+            name: "grpc-web meta",
+            wire: Wire::Http1,
+            headers: WEB,
+            text: "meta",
+            messages: &["1", "2"],
+            head: &[("x-h", "v"), ("x-gen", "v")],
+            end: End::WebFrame,
+            trailers: &[("grpc-status", "0"), ("x-t", "w")],
+            absent: &["x-late-t"],
+        },
+        Case {
+            name: "grpc-web throw",
+            wire: Wire::Http1,
+            headers: WEB,
+            text: "throw",
+            messages: &["1", "2"],
+            head: &[],
+            end: End::WebFrame,
+            trailers: &[
+                ("grpc-status", "5"),
+                ("grpc-message", "no invoice"),
+                ("x-t", "w"),
+                ("x-late-t", "w"),
+            ],
+            absent: &[],
+        },
+        Case {
+            name: "connect proto meta",
+            wire: Wire::H2,
+            headers: CONNECT,
+            text: "meta",
+            messages: &["1", "2"],
+            head: &[("x-h", "v"), ("x-gen", "v")],
+            end: End::ConnectFrame(None),
+            trailers: &[("x-t", "w")],
+            absent: &["x-late-t"],
+        },
+        Case {
+            name: "connect proto throw",
+            wire: Wire::H2,
+            headers: CONNECT,
+            text: "throw",
+            messages: &["1", "2"],
+            head: &[],
+            end: End::ConnectFrame(Some(Error {
+                code: "not_found",
+                message: "no invoice",
+            })),
+            trailers: &[("x-t", "w"), ("x-late-t", "w")],
+            absent: &[],
+        },
+        Case {
+            name: "connect proto fail() with no stream",
+            wire: Wire::H2,
+            headers: CONNECT,
+            text: "fail-first",
+            messages: &[],
+            head: &[("x-h", "v")],
+            end: End::ConnectFrame(Some(Error {
+                code: "not_found",
+                message: "no invoice",
+            })),
+            trailers: &[("x-t", "w")],
+            absent: &[],
+        },
+    ];
+
+    let srv = stream_worker();
+    for case in cases {
+        let mut conn = Conn::open(&listen(&srv), case.wire).await.expect("connect");
+        let got = conn
+            .send(
+                Method::POST,
+                WATCH_PATH,
+                case.headers,
+                &envelope(&echo(case.text)),
+            )
+            .await
+            .unwrap_or_else(|e| panic!("{}: {e:#}", case.name));
+
+        assert_eq!(got.status, 200, "{}: {got:?}", case.name);
+        for &(name, value) in case.head {
+            assert_eq!(
+                got.headers.get(name).map(|v| v.as_bytes()),
+                Some(value.as_bytes()),
+                "{}: the header {name}: {got:?}",
+                case.name
+            );
+        }
+        let mut all = envelopes(&got.body);
+        let last = all.pop().expect("an end envelope");
+        match case.end {
+            End::WebFrame => {
+                assert_eq!(last.flags, 0x80, "{}: {last:?}", case.name);
+                let trailers = web_trailers(&got.body);
+                for &(name, value) in case.trailers {
+                    assert_eq!(
+                        trailers.get(name).map(|v| v.as_bytes()),
+                        Some(value.as_bytes()),
+                        "{}: the trailer {name}: {trailers:?}",
+                        case.name
+                    );
+                }
+                for &name in case.absent {
+                    assert_eq!(trailers.get(name), None, "{}: {trailers:?}", case.name);
+                }
+            }
+            End::ConnectFrame(error) => {
+                assert_eq!(last.flags, 0x02, "{}: {last:?}", case.name);
+                let end: Value = serde_json::from_slice(&last.message)
+                    .unwrap_or_else(|e| panic!("{}: {e}: {last:?}", case.name));
+                match error {
+                    None => assert!(end.get("error").is_none(), "{}: {end}", case.name),
+                    Some(error) => {
+                        assert_eq!(end["error"]["code"], error.code, "{}: {end}", case.name);
+                        assert_eq!(
+                            end["error"]["message"], error.message,
+                            "{}: {end}",
+                            case.name
+                        );
+                    }
+                }
+                for &(name, value) in case.trailers {
+                    assert_eq!(
+                        end["metadata"][name],
+                        json!([value]),
+                        "{}: the trailer {name}: {end}",
+                        case.name
+                    );
+                }
+                for &name in case.absent {
+                    assert!(end["metadata"].get(name).is_none(), "{}: {end}", case.name);
+                }
+            }
+        }
+
+        let want: Vec<Envelope> = case
+            .messages
+            .iter()
+            .map(|text| Envelope {
+                flags: 0,
+                message: echo(text).into(),
+            })
+            .collect();
+        assert_eq!(all, want, "{}", case.name);
     }
     stop(srv).await;
 }

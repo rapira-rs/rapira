@@ -104,6 +104,29 @@ function serve(ServerStreamingCall $call): void
             }
             $call->fail(new Status(StatusCode::NotFound, 'no invoice'));
             return;
+        case 'fail-inside':
+            $call->respond((function () use ($call) {
+                yield reply('1');
+                $call->fail(new Status(StatusCode::NotFound, 'no invoice'));
+                try {
+                    yield reply('2');
+                    $next = 'none';
+                } catch (\Throwable $e) {
+                    $next = $e::class;
+                }
+                \Rapira\log('after-fail', context: ['result' => $next]);
+            })());
+            return;
+        case 'twice':
+            $call->respond(count_to_three());
+            try {
+                $call->respond(count_to_three());
+                $second = 'none';
+            } catch (\Throwable $e) {
+                $second = $e::class;
+            }
+            \Rapira\log('second-respond', context: ['result' => $second]);
+            return;
         case 'bad-yield':
             try {
                 $call->respond((function () {

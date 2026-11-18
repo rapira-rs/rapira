@@ -835,6 +835,7 @@ dependencies = [
  "connectrpc",
  "connectrpc-health",
  "connectrpc-reflection",
+ "futures-util",
  "rapira_config",
  "rapira_grpc_auth",
  "rapira_net",

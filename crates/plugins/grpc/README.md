@@ -152,7 +152,7 @@ The pool runs in dispatcher mode only. `\Rapira\get_dispatcher()` returns a `Rap
 
 ### Outcomes
 
-- `fail()` takes the `google.rpc.Status` triple: a code, a message and a list of `ErrorDetail`. For gRPC and gRPC-Web, the plugin sends `grpc-status`, `grpc-message` and `grpc-status-details-bin`. For Connect, the plugin sends the HTTP status of the code and a JSON error body. A Connect detail has the bare type name, for example `google.rpc.ErrorInfo`, and an unpadded base64 value.
+- `fail()` takes the `google.rpc.Status` triple: a code, a message and a list of `ErrorDetail`. For gRPC and gRPC-Web, the plugin sends `grpc-status`, `grpc-message` and `grpc-status-details-bin`. For a unary Connect call, the plugin sends the HTTP status of the code and a JSON error body. A Connect stream has the HTTP status 200, and its end-of-stream message holds the error and the trailers. A Connect detail has the bare type name, for example `google.rpc.ErrorInfo`, and an unpadded base64 value.
 - `fail()` is the only way to send an error status. The plugin does not catch `Rapira\Grpc\Exception\GrpcException`. Catch it and call `$call->fail($e->status)`.
 - A call that PHP does not finalize is lost. The client gets INTERNAL with the message `internal error`, and the plugin logs a warning under the `grpc` target. A lost stream ends with this status after the messages that the client already got. An uncaught throwable also loses the call. The client does not see the message of the throwable.
 - The client gets UNAVAILABLE when the plugin refuses the call before PHP sees it: the intake of the worker stays full for 30 seconds, the pool stops, or the PHP boot of the worker failed.
