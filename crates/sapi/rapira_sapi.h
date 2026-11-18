@@ -133,13 +133,17 @@ static zend_always_inline rapira_held *rapira_held_of(zend_object *obj) {
 // the unit (work.rs)
 extern void rapira_rs_held_drop(rapira_held *held);
 
-// Runs a generator to its end for a plugin method that takes it as argument 1,
-// and gives each yielded string to Held::send of the unit behind held. A yield
-// of another type throws a TypeError (rapira_stream.c). True: the generator
-// ended and the unit is open. False: an exception is pending (exit() is one
-// too), or the host closed the unit.
+// The plugin takes one value that the generator of the unit yielded. False with
+// an exception pending: the plugin refused the value. False with none: the host
+// closed the unit, so the value has no destination.
+typedef bool (*rapira_stream_send_t)(const rapira_held *held, zval *value);
+
+// Runs a generator to its end and gives each yielded value to send
+// (rapira_stream.c). True: the generator ended and the unit is open. False: an
+// exception is pending (exit() is one too), or the host closed the unit.
 bool rapira_stream_run_generator(zend_object *generator,
-                                 const rapira_held *held);
+                                 const rapira_held *held,
+                                 rapira_stream_send_t send);
 
 // The counts of a DispatcherInfo object sit before zend_object std:
 // https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects

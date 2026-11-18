@@ -21,7 +21,8 @@ The grpc plugin of the `rapira` binary. It serves unary and server-streaming RPC
 - The SAPI keeps the `GrpcState` in the call object from `receive()`, answers `isFinalized()` and `isCancelled()` from it, and reclaims it when the object is freed. When the object is freed before the call is settled, the drop of the reply reports INTERNAL to the client.
 - `shed()` answers UNAVAILABLE when the PHP boot of the worker failed.
 - `class()` gives `receive()` the class of the call object, by the kind of the method.
-- `send()` takes one message that the generator of `respond()` yields. The generator loop is `rapira_stream_run_generator` in `crates/sapi/rapira_stream.c`.
+
+`respond()` of a server-streaming call runs its generator in `rapira_stream_run_generator` in `crates/sapi/rapira_stream.c`. The loop gives each yielded value to the callback `grpc_stream_send` in `rapira_grpc.c`. The callback checks that the value is a string and passes its bytes to Rust.
 
 ## Crate layout
 

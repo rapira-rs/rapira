@@ -20,6 +20,9 @@ extern bool rapira_rs_grpc_add(const rapira_held *held, bool trailer,
 extern bool rapira_rs_grpc_snapshot(const rapira_held *held, bool trailer,
                                     zval *rv);
 extern bool rapira_rs_grpc_stream_begin(const rapira_held *held);
+// throws nothing; false: the host closed the call
+extern bool rapira_rs_grpc_stream_send(const rapira_held *held,
+                                       const char *message, size_t len);
 // throws nothing
 extern void rapira_rs_grpc_stream_end(const rapira_held *held);
 
@@ -274,6 +277,18 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, respond) {
         "respond");
 }
 
+// One value that the generator of respond() yielded
+// (rapira_stream_run_generator). The generator is argument 1 of respond().
+static bool grpc_stream_send(const rapira_held *held, zval *value) {
+    if (Z_TYPE_P(value) != IS_STRING) {
+        zend_argument_type_error(1, "must yield strings, %s yielded",
+                                 zend_zval_value_name(value));
+        return false;
+    }
+    return rapira_rs_grpc_stream_send(held, Z_STRVAL_P(value),
+                                      Z_STRLEN_P(value));
+}
+
 // Sends each yielded string as one message. The generator runs below this C
 // frame (rapira_stream.c).
 ZEND_METHOD(Rapira_Internal_Grpc_ServerStreamingCall, respond) {
@@ -288,7 +303,7 @@ ZEND_METHOD(Rapira_Internal_Grpc_ServerStreamingCall, respond) {
     // False needs no action. With an exception pending, a call that the host
     // did not close stays unfinalized, and fail() can end it. With none, the
     // host closed the call, so no outcome goes out.
-    if (rapira_stream_run_generator(messages, held)) {
+    if (rapira_stream_run_generator(messages, held, grpc_stream_send)) {
         rapira_rs_grpc_stream_end(held);
     }
 }

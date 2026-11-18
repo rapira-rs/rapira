@@ -301,11 +301,6 @@ impl Held for GrpcState {
             }
         }
     }
-
-    /// One yielded message of respond(\Generator).
-    fn send(&mut self, message: &[u8]) -> bool {
-        send_core(self, Bytes::copy_from_slice(message))
-    }
 }
 
 /// A core returns a Verb and throws nothing: `thrown` throws after the core dropped its owned state, because `zend_throw_*` can bail out.
@@ -691,6 +686,21 @@ pub unsafe extern "C" fn rapira_rs_grpc_respond(
 pub unsafe extern "C" fn rapira_rs_grpc_stream_begin(held: *const HeldPtr) -> bool {
     guard(false, || unsafe {
         thrown(begin(&mut *(*held).state::<GrpcState>()))
+    })
+}
+
+/// One message that the generator of respond(\Generator) yielded. Throws nothing. False: the host closed the call.
+/// # Safety
+/// `held` the slot of a live call; `message` points at `len` readable bytes.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_grpc_stream_send(
+    held: *const HeldPtr,
+    message: *const c_char,
+    len: usize,
+) -> bool {
+    guard(false, || unsafe {
+        let message = Bytes::copy_from_slice(std::slice::from_raw_parts(message.cast::<u8>(), len));
+        send_core(&mut *(*held).state::<GrpcState>(), message)
     })
 }
 

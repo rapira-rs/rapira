@@ -2,14 +2,11 @@
 
 #include <Zend/zend_generators.h>
 
-// rust glue: Held::send of the unit (work.rs). False: the host closed the unit.
-extern bool rapira_rs_stream_send(const rapira_held *held, const char *message,
-                                  size_t len);
-
 // Userland runs only below this C frame, so a bailout from the generator
 // crosses no Rust frame.
 bool rapira_stream_run_generator(zend_object *generator,
-                                 const rapira_held *held) {
+                                 const rapira_held *held,
+                                 rapira_stream_send_t send) {
     zend_generator *gen = (zend_generator *)generator;
     bool open = true;
 
@@ -27,15 +24,13 @@ bool rapira_stream_run_generator(zend_object *generator,
             // generator that yields by reference holds a reference.
             zval *value = &zend_generator_get_current(gen)->value;
             ZVAL_DEREF(value);
-            if (Z_TYPE_P(value) != IS_STRING) {
-                zend_argument_type_error(1, "must yield strings, %s yielded",
-                                         zend_zval_value_name(value));
-                return false;
-            }
-            if (rapira_rs_stream_send(held, Z_STRVAL_P(value),
-                                      Z_STRLEN_P(value))) {
+            if (send(held, value)) {
                 zend_generator_resume(gen);
                 continue;
+            }
+            // the plugin refused the value
+            if (EG(exception)) {
+                return false;
             }
             open = false;
         }

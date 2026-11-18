@@ -1,4 +1,3 @@
-use std::ffi::c_char;
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 use std::sync::Arc;
@@ -39,11 +38,6 @@ pub trait Held: Send + 'static {
     /// Work::isFinalized().
     fn is_finalized(&self) -> bool {
         self.settled() || self.cancelled()
-    }
-
-    /// One message that the generator of the unit yielded (rapira_stream.c). False: the host closed the unit, so the message has no destination. The default is a unit with no stream.
-    fn send(&mut self, _message: &[u8]) -> bool {
-        false
     }
 }
 
@@ -101,21 +95,6 @@ pub unsafe extern "C" fn rapira_rs_held_is_finalized(held: *const HeldPtr) -> bo
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_held_is_cancelled(held: *const HeldPtr) -> bool {
     guard(false, || unsafe { (*held).get().as_ref().cancelled() })
-}
-
-/// Gives one yielded message to the unit: the generator loop of rapira_stream.c calls it for each yield.
-/// # Safety
-/// As `rapira_rs_held_is_finalized`; `message` points at `len` readable bytes.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_stream_send(
-    held: *const HeldPtr,
-    message: *const c_char,
-    len: usize,
-) -> bool {
-    guard(false, || unsafe {
-        let message = std::slice::from_raw_parts(message.cast::<u8>(), len);
-        (*held).get().as_mut().send(message)
-    })
 }
 
 /// The free_obj of a unit class: reclaims the unit, and an unsettled unit sends its lost outcome. A cycle that died (a fatal error, a timeout) skips the outcome: the plugin reports the worker death when the sender drops.
