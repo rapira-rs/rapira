@@ -7,7 +7,7 @@ pub(crate) use crate::{
     callbacks::guard,
     object_init_ex, rapira_array_init, rapira_ce_closed_exception, rapira_ce_inet_address,
     rapira_ce_timeout_exception, rapira_ce_unix_address, rapira_receive_timed,
-    rapira_receive_untimed,
+    rapira_receive_untimed, rapira_unit_object,
     start::{Pull, Wait, pending_depth, pull},
     types::Addr,
     zend, zval,
