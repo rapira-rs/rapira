@@ -71,7 +71,6 @@ extern int rapira_mode;
 typedef struct {
     zend_class_entry *dispatcher;
     zend_class_entry *info;
-    zend_class_entry *unit;
     // the error of receive() and tryReceive() while a unit is unfinalized
     const char *busy;
     // RSHUTDOWN calls it on the PHP thread before the request strings are

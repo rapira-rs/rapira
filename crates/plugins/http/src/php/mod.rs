@@ -41,6 +41,8 @@ unsafe extern "C" {
     pub static mut rapira_ce_http_head_not_written_error: *mut zend_class_entry;
     pub static mut rapira_ce_http_content_length_exceeded_error: *mut zend_class_entry;
     pub static mut rapira_ce_http_file_not_sendable_exception: *mut zend_class_entry;
+    // The unit class: the class of the object that receive() creates for an ExchangeState.
+    static mut rapira_ce_http_exchange: *mut zend_class_entry;
     // The dispatcher surface of the http plugin (rapira_http_classes.c).
     pub static mut rapira_http_plugin: rapira_plugin;
     pub fn rapira_http_register_classes();
@@ -201,5 +203,10 @@ impl Held for ExchangeState {
     /// The 503 seal of a failed boot.
     fn shed(mut self: Box<Self>) {
         self.fail(503);
+    }
+
+    fn class(&self) -> *mut zend_class_entry {
+        // SAFETY: MINIT assigns the class entry in the master before the fork, and nothing writes it after.
+        unsafe { rapira_ce_http_exchange }
     }
 }

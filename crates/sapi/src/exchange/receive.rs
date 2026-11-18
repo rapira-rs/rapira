@@ -7,10 +7,11 @@ enum RecvMode {
     Try,
 }
 
-/// The C shell allocates the unit object before the pull and frees it when no unit arrives: a unit pulled with no owner would leak its Frame sender and hang the client.
+/// Pulls a unit and creates its object in `rv`: the object has the class of the unit, and this function writes its held word. False when no unit arrives.
+/// The cycle slot owns the unit until the object holds it: a unit with no owner would leak its Frame sender and hang the client.
 /// # Safety
-/// `held` is the held word of a live unit object that holds no unit; engine active on this thread.
-unsafe fn receive_into(held: *mut HeldPtr, mode: RecvMode) -> bool {
+/// `rv` is the return value of the receive shell; engine active on this thread.
+unsafe fn receive_into(rv: *mut zval, mode: RecvMode) -> bool {
     unsafe {
         if let Some(ptr) = UNIT.get()
             && !(*ptr).settled()
@@ -46,8 +47,11 @@ unsafe fn receive_into(held: *mut HeldPtr, mode: RecvMode) -> bool {
                     // SAFETY: plain zend timer bookkeeping; no bailout path.
                     rapira_receive_timed();
                     let ptr = NonNull::from(Box::leak(unit.into_held()));
-                    (*held).0 = Some(ptr);
                     UNIT.set(Some(ptr.as_ptr()));
+                    // A Zend OOM bailout in the allocation longjmps through this frame, so it holds no value with Drop glue; the cycle slot then reclaims the unit.
+                    rapira_unit_object(rv, ptr.as_ref().class())
+                        .cast::<HeldPtr>()
+                        .write(HeldPtr(Some(ptr)));
                     return true;
                 }
                 _ if armed => {
@@ -73,13 +77,13 @@ unsafe fn receive_into(held: *mut HeldPtr, mode: RecvMode) -> bool {
     }
 }
 
-/// True when a unit is attached to `held`. False with an exception set: closed, busy or timeout. tryReceive: false with no exception means no unit is queued, and the shell returns null.
+/// True when `rv` holds the object of a pulled unit. False with an exception set: closed, busy or timeout. tryReceive: false with no exception means no unit is queued, and the shell returns null.
 /// # Safety
-/// `timeout_us >= -1`; `held` is the held word of a live unit object that holds no unit; engine active on this thread (the receive verbs touch the zend timer).
+/// `timeout_us >= -1`; `rv` is the return value of the receive shell; engine active on this thread (the receive verbs touch the zend timer).
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_receive(timeout_us: i64, held: *mut HeldPtr) -> bool {
+pub unsafe extern "C" fn rapira_rs_receive(timeout_us: i64, rv: *mut zval) -> bool {
     guard(false, || unsafe {
-        receive_into(held, RecvMode::Wait(timeout_us))
+        receive_into(rv, RecvMode::Wait(timeout_us))
     })
 }
 
@@ -87,8 +91,8 @@ pub unsafe extern "C" fn rapira_rs_receive(timeout_us: i64, held: *mut HeldPtr) 
 /// # Safety
 /// As `rapira_rs_receive`.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_try_receive(held: *mut HeldPtr) -> bool {
-    guard(false, || unsafe { receive_into(held, RecvMode::Try) })
+pub unsafe extern "C" fn rapira_rs_try_receive(rv: *mut zval) -> bool {
+    guard(false, || unsafe { receive_into(rv, RecvMode::Try) })
 }
 
 /// The intake depth and whether the unit handed out last is unfinalized: the two counts of a DispatcherInfo object.

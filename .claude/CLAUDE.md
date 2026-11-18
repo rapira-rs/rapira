@@ -5,7 +5,7 @@
 - MINIT runs once in the master pre-fork so opcache SHM is inherited. Workers exit rather than tear the module down.
 - Foreground only, no daemonize. Pidfile stays.
 - Allocator is mimalloc v3, without THP.
-- Host logic in Rust via ZEND_API when it needs Rust state, a Rust crate or a rule that Rust code also uses, or when it is hard to do in C. Examples: parsing, protocol state, passing a request to PHP and returning data from C to the host. C for ZPP shells, argument checks, longjmp isolation, macro shims and glue that needs no Rust. Glue examples: the zval memo check and copy in a getter, the property writes of a value constructor. Remove a C to Rust call, or the part of one, that needs no Rust. Do not move other logic into C.
+- Choose the side of each piece of host logic, C or Rust, case by case. Neither side is the default. First compare the options with care: the owner of the data, the pointers and layouts that cross the boundary, the point where a bailout (longjmp) can start, and the number of calls across the boundary. Then take the smallest implementation that is safe. Typical fits, not fixed rules: Rust for Rust state, a Rust crate, a rule that Rust code also uses, and work that is hard in C (parsing, protocol state, passing a request to PHP and returning data from C to the host); C for ZPP shells, argument checks, longjmp isolation, macro shims and glue that needs no Rust (the zval memo check and copy in a getter, the property writes of a value constructor).
 - Pre 1.0: no backwards compatibility. The rules in this list apply to existing code too. Break and rebuild internals when a rule asks for it.
 
 ## PHP contract

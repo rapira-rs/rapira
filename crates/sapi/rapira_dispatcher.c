@@ -4,8 +4,8 @@
 // tryReceive, which reports false with no throw
 extern void rapira_rs_log_call(zend_string *message, zend_object *level,
                                HashTable *context);
-extern bool rapira_rs_receive(int64_t timeout_us, rapira_held *held);
-extern bool rapira_rs_try_receive(rapira_held *held);
+extern bool rapira_rs_receive(int64_t timeout_us, zval *rv);
+extern bool rapira_rs_try_receive(zval *rv);
 extern void rapira_rs_dispatcher_counts(zend_long *pending, zend_long *active);
 extern bool rapira_rs_held_is_finalized(const rapira_held *held);
 extern bool rapira_rs_held_is_cancelled(const rapira_held *held);
@@ -212,7 +212,14 @@ ZEND_FUNCTION(rapira_sapi_dispatcher_name) {
     RETURN_STRINGL(rapira_plugin_name, rapira_plugin_name_len);
 }
 
-// The object exists before the pull, so a unit never waits for an owner.
+// Rust calls it for the unit that it pulled (exchange/receive.rs), so the
+// object gets the class of its unit. Rust writes the held word at the address
+// that this returns.
+rapira_held *rapira_unit_object(zval *rv, zend_class_entry *ce) {
+    object_init_ex(rv, ce);
+    return rapira_held_of(Z_OBJ_P(rv));
+}
+
 ZEND_FUNCTION(rapira_sapi_receive) {
     zend_long timeout = -1;
     ZEND_PARSE_PARAMETERS_START(0, 1)
@@ -224,29 +231,18 @@ ZEND_FUNCTION(rapira_sapi_receive) {
         zend_argument_value_error(1, "must be greater than or equal to -1");
         RETURN_THROWS();
     }
-    zval obj;
-    object_init_ex(&obj, rapira_plugin_current->unit);
-    bool attached =
-        rapira_rs_receive((int64_t)timeout, rapira_held_of(Z_OBJ(obj)));
-    if (!attached) {
-        zval_ptr_dtor(&obj);
-    }
-    RAPIRA_RETURN_THROWS_UNLESS(attached, "receive");
-    RETURN_OBJ(Z_OBJ(obj));
+    RAPIRA_RETURN_THROWS_UNLESS(
+        rapira_rs_receive((int64_t)timeout, return_value), "receive");
 }
 
 ZEND_FUNCTION(rapira_sapi_try_receive) {
     ZEND_PARSE_PARAMETERS_NONE();
-    zval obj;
-    object_init_ex(&obj, rapira_plugin_current->unit);
-    if (!rapira_rs_try_receive(rapira_held_of(Z_OBJ(obj)))) {
-        zval_ptr_dtor(&obj);
+    if (!rapira_rs_try_receive(return_value)) {
         if (EG(exception)) {
             RETURN_THROWS();
         }
         RETURN_NULL();
     }
-    RETURN_OBJ(Z_OBJ(obj));
 }
 
 ZEND_FUNCTION(rapira_sapi_get_info) {
