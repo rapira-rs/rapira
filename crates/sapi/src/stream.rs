@@ -1,9 +1,7 @@
 //! The stream layer that every plugin shares: the park of the PHP thread for an event of the host. The generator loop is in rapira_stream.c.
 
 use std::future::Future;
-use std::pin::pin;
 use std::sync::OnceLock;
-use std::task::Poll;
 
 use tokio::runtime::Handle;
 
@@ -52,28 +50,19 @@ async fn first<T>(
     closed: impl Future<Output = ()>,
     wait: Wait,
 ) -> Step<T> {
-    let mut next = pin!(next);
-    let mut closed = pin!(closed);
-    let mut time = pin!(async {
+    let time = async {
         match wait {
             Wait::Forever => std::future::pending().await,
             Wait::For(d) => tokio::time::sleep(d).await,
             Wait::Never => {}
         }
-    });
-    std::future::poll_fn(|cx| {
-        if closed.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Step::Closed);
-        }
-        if let Poll::Ready(item) = next.as_mut().poll(cx) {
-            return Poll::Ready(item.map_or(Step::End, Step::Item));
-        }
-        if time.as_mut().poll(cx).is_ready() {
-            return Poll::Ready(Step::Timeout);
-        }
-        Poll::Pending
-    })
-    .await
+    };
+    tokio::select! {
+        biased;
+        () = closed => Step::Closed,
+        item = next => item.map_or(Step::End, Step::Item),
+        () = time => Step::Timeout,
+    }
 }
 
 /// Blocks the PHP thread until `closed` completes, `next` completes or the wait ends, in this order of precedence. The PHP thread drives only these futures on the plugin runtime; the IO threads of the runtime move the sockets and the timers.
