@@ -1,9 +1,9 @@
 # syntax=docker/dockerfile:1
 
-# ghcr.io/rapira-rs/rapira:php8.5-zts: ZTS PHP 8.5 and PHP extensions, without rapira.
-# The build context is the repository root:
-#   docker build -f dockerfiles/8.5/zts/Dockerfile --build-arg PHP_VERSION=8.5.<patch> .
-# PHP_VERSION is a php-src release of PHP 8.5.
+# ghcr.io/rapira-rs/php:8.5-zts: ZTS PHP 8.5 with PHP extensions.
+# The build context is the dockerfiles directory:
+#   docker build -f dockerfiles/8.5/zts/Dockerfile --build-arg PHP_VERSION=8.5.<patch> dockerfiles
+# PHP_VERSION is 8.5.13 or a newer php-src release of PHP 8.5.
 
 # The source tarball, made from the signed php-src tag.
 FROM debian:trixie-slim AS php-source
@@ -26,8 +26,8 @@ RUN set -eux; \
     scripts/dev/makedist "php-$PHP_VERSION"; \
     mv "php-$PHP_VERSION.tar.xz" /php.tar.xz
 
-# PHP, built with the 8.5/trixie/cli recipe of https://github.com/docker-library/php.
-FROM debian:trixie-slim AS php
+# PHP, built with the 8.5/trixie/zts recipe of https://github.com/docker-library/php.
+FROM debian:trixie-slim
 
 # APT must not install the PHP packages of Debian.
 RUN set -eux; \
@@ -54,8 +54,8 @@ ENV PHP_CPPFLAGS="$PHP_CFLAGS"
 ENV PHP_LDFLAGS="-Wl,-O1 -pie"
 
 COPY --from=php-source /php.tar.xz /usr/src/php.tar.xz
-COPY dockerfiles/scripts/docker-php-* /usr/local/bin/
-COPY dockerfiles/scripts/LICENSE /usr/local/share/doc/docker-library-php/LICENSE
+COPY scripts/docker-php-* /usr/local/bin/
+COPY scripts/LICENSE /usr/local/share/doc/docker-library-php/LICENSE
 
 # After the build, apt keeps the packages of the libraries that the files in /usr/local link, and removes the other build packages.
 RUN set -eux; \
@@ -135,15 +135,7 @@ RUN set -eux; \
     docker-php-ext-enable sodium; \
     php --version
 
-ENTRYPOINT ["docker-php-entrypoint"]
-CMD ["php", "-a"]
-
-FROM php AS php-extensions
-LABEL org.opencontainers.image.title="Rapira PHP" \
-      org.opencontainers.image.description="ZTS PHP 8.5 and PHP extensions, without the rapira binary" \
-      org.opencontainers.image.url="https://rapira.rs" \
-      org.opencontainers.image.source="https://github.com/rapira-rs/rapira"
-# redis 6.3.0 is not safe on ZTS PHP when threads make Redis objects: https://github.com/phpredis/phpredis/issues/2976
+# The PHP extensions of the Rapira image, without redis: redis 6.3.0 is not safe on ZTS PHP (https://github.com/phpredis/phpredis/issues/2976).
 RUN set -eux; \
     savedAptMark="$(apt-mark showmanual)"; \
     apt-get update; \
@@ -168,3 +160,10 @@ RUN set -eux; \
     apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
     apt-get dist-clean; \
     php --ri "Zend OPcache" > /dev/null
+
+LABEL org.opencontainers.image.title="PHP" \
+      org.opencontainers.image.description="ZTS PHP 8.5 with PHP extensions" \
+      org.opencontainers.image.url="https://rapira.rs" \
+      org.opencontainers.image.source="https://github.com/rapira-rs/rapira"
+ENTRYPOINT ["docker-php-entrypoint"]
+CMD ["php", "-a"]

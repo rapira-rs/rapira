@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 
-# ghcr.io/rapira-rs/rapira:php8.6-zts: ZTS PHP 8.6 and PHP extensions, without rapira.
-# The build context is the repository root:
-#   docker build -f dockerfiles/8.6/zts/Dockerfile --build-arg PHP_VERSION=8.6.<patch> .
+# ghcr.io/rapira-rs/php:8.6-zts: ZTS PHP 8.6 with PHP extensions.
+# The build context is the dockerfiles directory:
+#   docker build -f dockerfiles/8.6/zts/Dockerfile --build-arg PHP_VERSION=8.6.<patch> dockerfiles
 # PHP_VERSION is a php-src release of PHP 8.6.
 
 # The source tarball, made from the signed php-src tag.
@@ -27,7 +27,7 @@ RUN set -eux; \
     mv "php-$PHP_VERSION.tar.xz" /php.tar.xz
 
 # PHP, built with the 8.6/trixie/cli recipe of https://github.com/docker-library/php.
-FROM debian:trixie-slim AS php
+FROM debian:trixie-slim
 
 # APT must not install the PHP packages of Debian.
 RUN set -eux; \
@@ -54,8 +54,8 @@ ENV PHP_CPPFLAGS="$PHP_CFLAGS"
 ENV PHP_LDFLAGS="-Wl,-O1 -pie"
 
 COPY --from=php-source /php.tar.xz /usr/src/php.tar.xz
-COPY dockerfiles/scripts/docker-php-* /usr/local/bin/
-COPY dockerfiles/scripts/LICENSE /usr/local/share/doc/docker-library-php/LICENSE
+COPY scripts/docker-php-* /usr/local/bin/
+COPY scripts/LICENSE /usr/local/share/doc/docker-library-php/LICENSE
 
 # After the build, apt keeps the packages of the libraries that the files in /usr/local link, and removes the other build packages.
 RUN set -eux; \
@@ -129,15 +129,7 @@ RUN set -eux; \
     docker-php-ext-enable sodium; \
     php --version
 
-ENTRYPOINT ["docker-php-entrypoint"]
-CMD ["php", "-a"]
-
-FROM php AS php-extensions
-LABEL org.opencontainers.image.title="Rapira PHP" \
-      org.opencontainers.image.description="ZTS PHP 8.6 and PHP extensions, without the rapira binary" \
-      org.opencontainers.image.url="https://rapira.rs" \
-      org.opencontainers.image.source="https://github.com/rapira-rs/rapira"
-# igbinary 3.2.17RC1 and redis 6.3.0 do not compile on PHP 8.6.
+# The PHP extensions of the Rapira image, without igbinary and redis: their releases igbinary 3.2.17RC1 and redis 6.3.0 do not compile on PHP 8.6.
 RUN set -eux; \
     savedAptMark="$(apt-mark showmanual)"; \
     apt-get update; \
@@ -155,3 +147,10 @@ RUN set -eux; \
     apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
     apt-get dist-clean; \
     php --ri "Zend OPcache" > /dev/null
+
+LABEL org.opencontainers.image.title="PHP" \
+      org.opencontainers.image.description="ZTS PHP 8.6 with PHP extensions" \
+      org.opencontainers.image.url="https://rapira.rs" \
+      org.opencontainers.image.source="https://github.com/rapira-rs/rapira"
+ENTRYPOINT ["docker-php-entrypoint"]
+CMD ["php", "-a"]

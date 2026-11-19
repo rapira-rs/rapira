@@ -7,7 +7,6 @@
 !Cargo.lock
 !src
 !crates
-!dockerfiles/scripts
 
 # Re-excluded after the whitelist: build output lives inside the trees above.
 **/target

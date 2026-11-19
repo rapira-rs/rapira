@@ -1,11 +1,9 @@
 # syntax=docker/dockerfile:1
 
-# ghcr.io/rapira-rs/rapira:php8.6-nts: NTS PHP 8.6, PHP extensions and rapira.
-# The build context is the repository root:
-#   docker build -f dockerfiles/8.6/nts/Dockerfile --build-arg PHP_VERSION=8.6.<patch> .
+# ghcr.io/rapira-rs/php:8.6-nts: NTS PHP 8.6 with PHP extensions.
+# The build context is the dockerfiles directory:
+#   docker build -f dockerfiles/8.6/nts/Dockerfile --build-arg PHP_VERSION=8.6.<patch> dockerfiles
 # PHP_VERSION is a php-src release of PHP 8.6.
-
-FROM rust:1-trixie AS rust
 
 # The source tarball, made from the signed php-src tag.
 FROM debian:trixie-slim AS php-source
@@ -28,8 +26,8 @@ RUN set -eux; \
     scripts/dev/makedist "php-$PHP_VERSION"; \
     mv "php-$PHP_VERSION.tar.xz" /php.tar.xz
 
-# PHP, built with the 8.6/trixie/cli recipe of https://github.com/docker-library/php.
-FROM debian:trixie-slim AS php
+# PHP, built with the 8.6/trixie/cli recipe of https://github.com/docker-library/php, without --enable-zts and --disable-zend-signals.
+FROM debian:trixie-slim
 
 # APT must not install the PHP packages of Debian.
 RUN set -eux; \
@@ -56,8 +54,8 @@ ENV PHP_CPPFLAGS="$PHP_CFLAGS"
 ENV PHP_LDFLAGS="-Wl,-O1 -pie"
 
 COPY --from=php-source /php.tar.xz /usr/src/php.tar.xz
-COPY dockerfiles/scripts/docker-php-* /usr/local/bin/
-COPY dockerfiles/scripts/LICENSE /usr/local/share/doc/docker-library-php/LICENSE
+COPY scripts/docker-php-* /usr/local/bin/
+COPY scripts/LICENSE /usr/local/share/doc/docker-library-php/LICENSE
 
 # After the build, apt keeps the packages of the libraries that the files in /usr/local link, and removes the other build packages.
 RUN set -eux; \
@@ -129,11 +127,7 @@ RUN set -eux; \
     docker-php-ext-enable sodium; \
     php --version
 
-ENTRYPOINT ["docker-php-entrypoint"]
-CMD ["php", "-a"]
-
-FROM php AS php-extensions
-# igbinary 3.2.17RC1 and redis 6.3.0 do not compile on PHP 8.6.
+# The PHP extensions of the Rapira image, without igbinary and redis: their releases igbinary 3.2.17RC1 and redis 6.3.0 do not compile on PHP 8.6.
 RUN set -eux; \
     savedAptMark="$(apt-mark showmanual)"; \
     apt-get update; \
@@ -152,31 +146,9 @@ RUN set -eux; \
     apt-get dist-clean; \
     php --ri "Zend OPcache" > /dev/null
 
-FROM php AS builder
-COPY --from=rust /usr/local/rustup /usr/local/rustup
-COPY --from=rust /usr/local/cargo /usr/local/cargo
-ENV RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends clang libclang-dev; \
-    rm -rf /var/lib/apt/lists/*
-WORKDIR /src
-COPY . .
-ENV RUSTFLAGS="--cfg tokio_unstable -C link-arg=-Wl,-rpath,/usr/local/lib"
-RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
-    set -eux; \
-    cargo build --release --locked --bin rapira; \
-    cp target/release/rapira /usr/local/bin/rapira; \
-    ldd /usr/local/bin/rapira | grep -q '/usr/local/lib/libphp.so'
-
-FROM php-extensions AS runtime
-LABEL org.opencontainers.image.title="Rapira" \
-      org.opencontainers.image.description="Rapira with NTS PHP 8.6 and PHP extensions" \
+LABEL org.opencontainers.image.title="PHP" \
+      org.opencontainers.image.description="NTS PHP 8.6 with PHP extensions" \
       org.opencontainers.image.url="https://rapira.rs" \
-      org.opencontainers.image.source="https://github.com/rapira-rs/rapira" \
-      org.opencontainers.image.licenses="MIT"
-COPY --from=builder /usr/local/bin/rapira /usr/local/bin/rapira
-RUN rapira --version
-CMD ["rapira", "serve", "/app/rapira.toml"]
+      org.opencontainers.image.source="https://github.com/rapira-rs/rapira"
+ENTRYPOINT ["docker-php-entrypoint"]
+CMD ["php", "-a"]
