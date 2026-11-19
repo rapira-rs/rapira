@@ -15,19 +15,14 @@ PHP 8.4 tarballs and packages include `opcache.so` beside `libphp`. Set `zend_ex
 
 ### Docker
 
-Copy Rapira and its PHP library into your application image:
+The image includes Rapira, PHP and common PHP extensions. Add your application:
 
 ```dockerfile
-FROM php:8.5-cli-trixie
-COPY --from=ghcr.io/rapira-rs/rapira:php8.5 / /
-RUN apt-get update \
-    && xargs -r apt-get install -y --no-install-recommends < /usr/local/share/rapira/debian-packages.txt \
-    && rm -rf /var/lib/apt/lists/*
+FROM ghcr.io/rapira-rs/rapira:php8.5-nts
 COPY . /app
-CMD ["rapira", "serve", "/app/rapira.toml"]
 ```
 
-The app directory holds a `rapira.toml`:
+The image starts `rapira serve /app/rapira.toml`. The app directory holds a `rapira.toml`:
 
 ```toml
 [http]
@@ -38,7 +33,7 @@ entrypoint = "/app/public/index.php"
 mode = "classic"
 ```
 
-The payload includes `bcmath`, `intl`, `pdo_pgsql`, `pgsql`, `igbinary`, `redis` with igbinary serialization support, and `sodium`. The package manifest lists their runtime libraries. See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
+The tags are `php8.4-nts`, `php8.5-nts` and `php8.6-nts`. Each image includes `bcmath`, `intl`, `mbstring`, `pdo_pgsql`, `pgsql` and `sodium`. The PHP 8.4 and 8.5 images also include `igbinary` and `redis` with igbinary serialization support. These two extensions have no release for PHP 8.6. Add more extensions with `docker-php-ext-install`, as in the official PHP image. A new PHP patch release starts a new build of each image. The `-zts` tags (`php8.5-zts`) hold thread-safe PHP without `rapira` and without `redis`. See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
 
 ## Usage
 
