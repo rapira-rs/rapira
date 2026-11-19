@@ -162,8 +162,7 @@ RUN set -eux; \
         | sort -u \
         | xargs -r apt-mark manual; \
     apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
-    apt-get dist-clean; \
-    php --ri "Zend OPcache" > /dev/null
+    apt-get dist-clean
 
 LABEL org.opencontainers.image.title="PHP" \
       org.opencontainers.image.description="NTS PHP 8.5 with PHP extensions" \

@@ -133,6 +133,7 @@ RUN set -eux; \
     pecl update-channels; \
     rm -rf /tmp/pear ~/.pearrc; \
     docker-php-ext-enable sodium opcache; \
+    php --ri "Zend OPcache" > /dev/null; \
     php --version
 
 # The PHP extensions of the Rapira image, without redis: redis 6.3.0 is not safe on ZTS PHP (https://github.com/phpredis/phpredis/issues/2976).
@@ -158,8 +159,7 @@ RUN set -eux; \
         | sort -u \
         | xargs -r apt-mark manual; \
     apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
-    apt-get dist-clean; \
-    php --ri "Zend OPcache" > /dev/null
+    apt-get dist-clean
 
 LABEL org.opencontainers.image.title="PHP" \
       org.opencontainers.image.description="ZTS PHP 8.4 with PHP extensions" \

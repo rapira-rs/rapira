@@ -55,12 +55,10 @@ jobs:
         timeout-minutes: 15
         permissions:
             contents: write
-            packages: write
         env:
             GH_TOKEN: ${{ github.token }}
             GH_REPO: ${{ github.repository }}
             TAG: ${{ needs.release-please.outputs.tag_name }}
-            IMAGE: ghcr.io/${{ github.repository }}
             V: ${{ needs.release-please.outputs.version }}
         steps:
             - shell: bash
@@ -70,19 +68,14 @@ jobs:
                     *-*) gh release edit "$TAG" --draft=false --prerelease ;;
                     *) gh release edit "$TAG" --draft=false --latest ;;
                   esac
-            - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-            - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-              with:
-                  registry: ghcr.io
-                  username: ${{ github.actor }}
-                  password: ${{ secrets.GITHUB_TOKEN }}
-            - name: Move the php minor aliases
-              shell: bash
-              run: |
-                  set -euo pipefail
-                  case "$V" in *-*) exit 0 ;; esac
-                  for PHP in 8.4 8.5 8.6; do
-                      docker buildx imagetools create \
-                        -t "$IMAGE:${V%.*}-php$PHP" -t "$IMAGE:php$PHP" \
-                        "$IMAGE:$V-php$PHP"
-                  done
+
+    aliases:
+        needs: [release-please, images, publish]
+        if: ${{ !contains(needs.release-please.outputs.version, '-') }}
+        permissions:
+            contents: read
+            packages: write
+        uses: ./.github/workflows/docker-aliases.yml
+        with:
+            tag: ${{ needs.release-please.outputs.tag_name }}
+            php: ${{ needs.images.outputs.php }}

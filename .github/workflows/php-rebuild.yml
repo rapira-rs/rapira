@@ -26,6 +26,7 @@ concurrency:
 env:
     IMAGE: ghcr.io/${{ github.repository }}
     PHP_IMAGE: ghcr.io/${{ github.repository_owner }}/php
+    PHP_MINORS: "8.4 8.5 8.6"
 
 jobs:
     php-check:
@@ -50,7 +51,7 @@ jobs:
               run: |
                   set -euo pipefail
                   : > images.json
-                  for MINOR in 8.4 8.5 8.6; do
+                  for MINOR in $PHP_MINORS; do
                       NEWEST=$(git ls-remote --tags --refs https://github.com/php/php-src.git "refs/tags/php-$MINOR.*" \
                           | sed -n -E 's|.*refs/tags/php-([0-9]+\.[0-9]+\.[0-9]+)$|\1|p' | sort -V | tail -n 1)
                       [ -n "$NEWEST" ] || { echo "::error::no stable php-src tag for PHP $MINOR"; exit 1; }
@@ -94,18 +95,31 @@ jobs:
                   registry: ghcr.io
                   username: ${{ github.actor }}
                   password: ${{ secrets.GITHUB_TOKEN }}
-            - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+            - id: build
+              uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
               with:
                   context: dockerfiles
                   file: dockerfiles/${{ matrix.image.php }}/${{ matrix.variant }}/Dockerfile
                   build-args: PHP_VERSION=${{ matrix.image.version }}
                   # A build without the cache also installs the newest Debian packages.
                   no-cache: true
-                  push: true
-                  tags: ${{ env.PHP_IMAGE }}:${{ matrix.image.version }}-${{ matrix.variant }}-${{ matrix.arch }}
+                  outputs: type=image,name=${{ env.PHP_IMAGE }},push-by-digest=true,name-canonical=true,push=true
+            # push-by-digest pushes the image without a tag, so the merge takes only the digests of this run:
+            # https://docs.docker.com/build/exporters/image-registry/#synopsis
+            - shell: bash
+              env:
+                  DIGEST: ${{ steps.build.outputs.digest }}
+              run: echo "$DIGEST" > digest
+            - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+              with:
+                  name: digest-${{ matrix.image.php }}-${{ matrix.variant }}-${{ matrix.arch }}
+                  path: digest
+                  retention-days: 1
 
     php-merge:
         needs: [php-check, php-build]
+        # A failed build of one minor must not hold back the tags of the other minors.
+        if: ${{ !cancelled() && needs.php-build.result != 'skipped' }}
         runs-on: ubuntu-26.04
         timeout-minutes: 15
         permissions:
@@ -122,6 +136,9 @@ jobs:
                   registry: ghcr.io
                   username: ${{ github.actor }}
                   password: ${{ secrets.GITHUB_TOKEN }}
+            - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+              with:
+                  pattern: digest-${{ matrix.image.php }}-*
             - shell: bash
               env:
                   MINOR: ${{ matrix.image.php }}
@@ -129,11 +146,14 @@ jobs:
               run: |
                   set -euo pipefail
                   # php-check reads the annotations of <minor>-nts, so that tag moves last.
+                  # A failed build has no digest file, so cat stops the merge before <minor>-nts moves.
                   for VARIANT in zts nts; do
+                      AMD64=$(cat "digest-$MINOR-$VARIANT-amd64/digest")
+                      ARM64=$(cat "digest-$MINOR-$VARIANT-arm64/digest")
                       docker buildx imagetools create -t "$PHP_IMAGE:$VERSION-$VARIANT" -t "$PHP_IMAGE:$MINOR-$VARIANT" \
                         --annotation "index:org.opencontainers.image.version=$VERSION" \
                         --annotation "index:org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
-                        "$PHP_IMAGE:$VERSION-$VARIANT-amd64" "$PHP_IMAGE:$VERSION-$VARIANT-arm64"
+                        "$PHP_IMAGE@$AMD64" "$PHP_IMAGE@$ARM64"
                   done
 
     rapira-check:
@@ -164,7 +184,7 @@ jobs:
                   set -euo pipefail
                   TAG=$(gh release view --json tagName --jq .tagName)
                   SELECTED=""
-                  for MINOR in 8.4 8.5 8.6; do
+                  for MINOR in $PHP_MINORS; do
                       # A release moves php<minor> last. A php<minor> tag without a base annotation comes from a root Dockerfile without the PHP_IMAGE argument.
                       INDEX=$(docker buildx imagetools inspect --raw "$IMAGE:php$MINOR" || true)
                       HAVE=$(jq -r '.annotations["org.opencontainers.image.base.digest"] // empty' <<< "$INDEX")
@@ -197,34 +217,10 @@ jobs:
     rapira-aliases:
         needs: [rapira-check, rapira-images]
         if: ${{ !cancelled() && needs.rapira-images.result == 'success' }}
-        runs-on: ubuntu-26.04
-        timeout-minutes: 15
         permissions:
             contents: read
             packages: write
-        env:
-            GH_TOKEN: ${{ github.token }}
-            GH_REPO: ${{ github.repository }}
-            TAG: ${{ needs.rapira-check.outputs.tag }}
-            V: ${{ needs.rapira-check.outputs.version }}
-            MINORS: ${{ needs.rapira-check.outputs.php }}
-        steps:
-            - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-            - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
-              with:
-                  registry: ghcr.io
-                  username: ${{ github.actor }}
-                  password: ${{ secrets.GITHUB_TOKEN }}
-            - name: Move the php minor aliases
-              shell: bash
-              run: |
-                  set -euo pipefail
-                  if [ "$(gh release view --json tagName --jq .tagName)" != "$TAG" ]; then
-                      echo "A newer release than $TAG is published. Its publish job moves the aliases."
-                      exit 0
-                  fi
-                  for PHP in $MINORS; do
-                      docker buildx imagetools create \
-                        -t "$IMAGE:${V%.*}-php$PHP" -t "$IMAGE:php$PHP" \
-                        "$IMAGE:$V-php$PHP"
-                  done
+        uses: ./.github/workflows/docker-aliases.yml
+        with:
+            tag: ${{ needs.rapira-check.outputs.tag }}
+            php: ${{ needs.rapira-check.outputs.php }}

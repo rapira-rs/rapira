@@ -1,0 +1,52 @@
+# Moves the tags <major.minor>-php<minor> and php<minor> to the images of a release.
+# release-please.yml calls it after the release is published, and php-rebuild.yml after a rebuild.
+name: Docker aliases
+on:
+    workflow_call:
+        inputs:
+            tag:
+                description: "Release tag, such as v0.10.0"
+                type: string
+                required: true
+            php:
+                description: "PHP minors, separated by spaces"
+                type: string
+                required: true
+
+permissions:
+    contents: read
+
+jobs:
+    move:
+        runs-on: ubuntu-26.04
+        timeout-minutes: 15
+        permissions:
+            contents: read
+            packages: write
+        env:
+            GH_TOKEN: ${{ github.token }}
+            GH_REPO: ${{ github.repository }}
+            IMAGE: ghcr.io/${{ github.repository }}
+            TAG: ${{ inputs.tag }}
+            MINORS: ${{ inputs.php }}
+        steps:
+            - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+            - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+            - name: Move the php minor aliases
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if [ "$(gh release view --json tagName --jq .tagName)" != "$TAG" ]; then
+                      echo "A newer release than $TAG is published. Its release run moves the aliases."
+                      exit 0
+                  fi
+                  V=${TAG#v}
+                  for PHP in $MINORS; do
+                      docker buildx imagetools create \
+                        -t "$IMAGE:${V%.*}-php$PHP" -t "$IMAGE:php$PHP" \
+                        "$IMAGE:$V-php$PHP"
+                  done
