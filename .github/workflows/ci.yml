@@ -23,13 +23,13 @@ jobs:
             fail-fast: false
             matrix:
                 os: [ubuntu-26.04, ubuntu-26.04-arm, macos-latest]
-                php: ["8.4", "8.5"]
+                php: ["8.4", "8.5", "8.6"]
         env:
             PHP_PREFIX: ${{ github.workspace }}/.php-embed
             RUST_BACKTRACE: "1"
             NEWRELIC_VERSION: "12.9.0.38"
             NEWRELIC_SHA256: "65cc8abdb4a1b07f8fea3d3279e78063f147994817385103eedf29c30d2f0a64"
-            DDTRACE_VERSION: "1.24.2"
+            DDTRACE_VERSION: "2.0.0"
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with: { persist-credentials: false }
@@ -39,7 +39,8 @@ jobs:
               with:
                   php-version: ${{ matrix.php }}
                   coverage: none
-                  extensions: bcmath, calendar, ctype, curl, dom, exif, ffi, fileinfo, filter, ftp, gettext, iconv, igbinary, imap, intl, mbstring, opcache, openssl, pdo_pgsql, pdo_sqlite, pgsql, phar, posix, redis, session, shmop, simplexml, sockets, sodium, sqlite3, sysvmsg, sysvsem, sysvshm, tokenizer, xml, xmlreader, xmlwriter, zlib
+                  # igbinary 3.2.17RC1 and redis 6.3.0 do not compile on PHP 8.6
+                  extensions: bcmath, calendar, ctype, curl, dom, exif, ffi, fileinfo, filter, ftp, gettext, iconv, imap, intl, mbstring, opcache, openssl, pdo_pgsql, pdo_sqlite, pgsql, phar, posix, session, shmop, simplexml, sockets, sodium, sqlite3, sysvmsg, sysvsem, sysvshm, tokenizer, xml, xmlreader, xmlwriter, zlib${{ matrix.php != '8.6' && ', igbinary, redis' || '' }}
               env:
                   phpts: nts
                   fail-fast: true
@@ -69,7 +70,8 @@ jobs:
                   echo "EXT_DIR=$(php-config --extension-dir)" >> "$GITHUB_ENV"
 
             - name: Install the New Relic PHP agent (Linux, CI only)
-              if: runner.os == 'Linux'
+              # no New Relic agent release has a build for PHP 8.6
+              if: runner.os == 'Linux' && matrix.php != '8.6'
               run: |
                   set -euo pipefail
                   case "$(uname -m)" in
@@ -94,10 +96,12 @@ jobs:
                   set -euo pipefail
                   ARCH=$(uname -m)
                   case "${ARCH}-${PHP_API}" in
-                    x86_64-20240924)  SHA=e76d211c15c3b73c164e9ae403304f65670c064219ec713e2e96a3296342ab77 ;;
-                    x86_64-20250925)  SHA=7ccd7b973865fd1bf7b26a0c93eda8908af1118cece281ec74b5a14b3be1f743 ;;
-                    aarch64-20240924) SHA=1428fc057944728d7a417e3a7e7f6d9c1c5d03b73cc60ea186cb14c8437be9ed ;;
-                    aarch64-20250925) SHA=9e62f3f21062b1720a3da538a5ea270278559941533feabb27f3fc2936d4cb04 ;;
+                    x86_64-20240924)  SHA=7fd3de06c50f5b55c4b518d381b1027f57f96a6c1164b30d6a3e82d4f88fc403 ;;
+                    x86_64-20250925)  SHA=a7898923bae5a79fc6151adab4464486f1edd096bca4cead3842530821233c2f ;;
+                    x86_64-20261112)  SHA=f3c95d8fd640f498b66dd14a8c299a5ea4db682741ca5ce8640771cf6774512d ;;
+                    aarch64-20240924) SHA=c2c9aff447c8087e9a86180b62d92991cd13445dbf2eb7744ace530ff612790d ;;
+                    aarch64-20250925) SHA=556d4f78ae86ad0043742d5b47f11ebb55f1fae7f050cecc83bfe15188ef08bb ;;
+                    aarch64-20261112) SHA=6538e7339418b3f858ab10e9cfd5188dadf1429c281c9d39df451fdd1dc47c25 ;;
                     *) echo "::error::no ddtrace sha256 pinned for ${ARCH}-${PHP_API}"; exit 1 ;;
                   esac
                   url="https://github.com/DataDog/dd-trace-php/releases/download/${DDTRACE_VERSION}/dd-library-php-${DDTRACE_VERSION}-${ARCH}-linux-gnu-${PHP_API}.tar.gz"
@@ -144,19 +148,24 @@ jobs:
                   set -euo pipefail
                   curl -fsSL "https://www.php.net/distributions/php-${PHP_FULL}.tar.gz" -o php.tar.gz
                   tar xf php.tar.gz && cd "php-${PHP_FULL}"
-                  curl -fsSL --retry 3 https://pecl.php.net/get/igbinary-3.2.17RC1.tgz -o igbinary.tgz
-                  curl -fsSL --retry 3 https://pecl.php.net/get/redis-6.3.0.tgz -o redis.tgz
-                  echo '91da821443db125282a6aea039f24588dd28ff5d71e8187f6ecc41165bceafbc  igbinary.tgz' | shasum -a 256 -c -
-                  echo '0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5  redis.tgz' | shasum -a 256 -c -
-                  mkdir -p ext/igbinary ext/redis
-                  tar -xzf igbinary.tgz -C ext/igbinary --strip-components=1
-                  tar -xzf redis.tgz -C ext/redis --strip-components=1
+                  PECL=""
+                  # igbinary 3.2.17RC1 and redis 6.3.0 do not compile on PHP 8.6
+                  if [ "${PHP_FULL%.*}" != "8.6" ]; then
+                    curl -fsSL --retry 3 https://pecl.php.net/get/igbinary-3.2.17RC1.tgz -o igbinary.tgz
+                    curl -fsSL --retry 3 https://pecl.php.net/get/redis-6.3.0.tgz -o redis.tgz
+                    echo '91da821443db125282a6aea039f24588dd28ff5d71e8187f6ecc41165bceafbc  igbinary.tgz' | shasum -a 256 -c -
+                    echo '0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5  redis.tgz' | shasum -a 256 -c -
+                    mkdir -p ext/igbinary ext/redis
+                    tar -xzf igbinary.tgz -C ext/igbinary --strip-components=1
+                    tar -xzf redis.tgz -C ext/redis --strip-components=1
+                    PECL="--enable-igbinary --enable-redis --enable-redis-igbinary"
+                  fi
                   ./buildconf --force
                   export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix libffi)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig:$(brew --prefix libpq)/lib/pkgconfig:$(brew --prefix libsodium)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
                   export CFLAGS="-O2"
                   ./configure --prefix="$PHP_PREFIX" \
                     $(tr '\n' ' ' < "$GITHUB_WORKSPACE/.github/php-configure-flags.txt") \
-                    --enable-igbinary --enable-redis --enable-redis-igbinary \
+                    $PECL \
                     --with-iconv="$(xcrun --show-sdk-path)/usr" \
                     --with-gettext="$(brew --prefix gettext)"
                   make -j"$(getconf _NPROCESSORS_ONLN)"

@@ -35,7 +35,7 @@ Repository administrators can find the activation requirements in [the Vouch set
 - Rust stable - `rust-toolchain.toml` selects the exact channel for you
 - A C compiler (the build compiles `crates/sapi/*.c` and the C method shells of each plugin against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
-- PHP 8.4 or 8.5, **NTS**, built with the embed SAPI (`--enable-embed=shared`). ZTS builds are rejected at compile time.
+- PHP 8.4, 8.5 or 8.6, **NTS**, built with the embed SAPI (`--enable-embed=shared`). ZTS builds are rejected at compile time.
 
 ```sh
 sudo apt install php8.4-dev libphp8.4-embed   # Debian/Ubuntu (deb.sury.org / ppa:ondrej)
@@ -123,7 +123,7 @@ Sign off your commits (`git commit -s`) and fill in the PR template. Bug reports
 
 ## Releases
 
-Releases run through [release-please](https://github.com/googleapis/release-please). Every merge to `main` updates a release pull request with the next version and the changelog. When a maintainer merges that PR, one pipeline run tags the release, builds Linux x86_64/aarch64 and macOS aarch64 artifacts for PHP 8.4 and 8.5, builds the docker images for PHP 8.4, 8.5 and 8.6, and publishes tarballs, `.deb`/`.rpm` packages and checksums to GitHub Releases. If a release run fails, re-run its failed jobs; the release stays a draft until the publish job completes. After a green CI run on `main`, a separate workflow re-points the `nightly-php*` docker tags and, except on the release commit, refreshes the rolling `nightly` prerelease with tarballs.
+Releases run through [release-please](https://github.com/googleapis/release-please). Every merge to `main` updates a release pull request with the next version and the changelog. When a maintainer merges that PR, one pipeline run tags the release, builds Linux x86_64/aarch64 and macOS aarch64 artifacts and the docker images for PHP 8.4, 8.5 and 8.6, and publishes tarballs, `.deb`/`.rpm` packages and checksums to GitHub Releases. If a release run fails, re-run its failed jobs; the release stays a draft until the publish job completes. After a green CI run on `main`, a separate workflow re-points the `nightly-php*` docker tags and, except on the release commit, refreshes the rolling `nightly` prerelease with tarballs.
 
 The `PHP rebuild` workflow builds the PHP images `ghcr.io/rapira-rs/php:<minor>-nts` and `-zts` from the newest signed php-src tag of each minor. Each minor and variant has its Dockerfile in `dockerfiles/<minor>/<variant>/`, with the release manager keys of the minor. Update the keys when a minor gets a new release manager. The root `Dockerfile` builds `rapira` on the NTS PHP image of a minor. The workflow polls php-src every 15 minutes. It builds the PHP images again when a minor gets a new patch release, when a file in `dockerfiles/` changes on `main`, and one time each week for Debian package fixes. Then it builds the Rapira images of the newest release again on the new PHP images.
 
