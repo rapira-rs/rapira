@@ -29,7 +29,8 @@ updates:
           - patch
 
   - package-ecosystem: docker
-    directory: /
+    directories:
+      - /dockerfiles/*/*
     schedule:
       interval: weekly
     commit-message:
