@@ -1,0 +1,115 @@
+# Builds the images of the newest release again when php-src tags a patch release, and one time each week for Debian package fixes.
+# The state is on the image: docker.yml writes the PHP version and the build time as annotations on each index.
+name: PHP rebuild
+on:
+    schedule:
+        # GitHub drops scheduled runs most often at the start of an hour.
+        - cron: "7,22,37,52 * * * *"
+    workflow_dispatch:
+        inputs:
+            force:
+                description: "Build all minors again"
+                type: boolean
+                default: false
+
+permissions:
+    contents: read
+
+concurrency:
+    group: php-rebuild
+    cancel-in-progress: false
+
+env:
+    IMAGE: ghcr.io/${{ github.repository }}
+
+jobs:
+    check:
+        runs-on: ubuntu-26.04
+        timeout-minutes: 5
+        outputs:
+            tag: ${{ steps.check.outputs.tag }}
+            version: ${{ steps.check.outputs.version }}
+            php: ${{ steps.check.outputs.php }}
+        steps:
+            - id: check
+              shell: bash
+              env:
+                  GH_TOKEN: ${{ github.token }}
+                  GH_REPO: ${{ github.repository }}
+                  FORCE: ${{ inputs.force }}
+              run: |
+                  set -euo pipefail
+                  TAG=$(gh release view --json tagName --jq .tagName)
+                  SELECTED=""
+                  for MINOR in 8.4 8.5 8.6; do
+                      # A release moves php<minor>-nts last. The tag does not exist before the first release with these images.
+                      INDEX=$(docker buildx imagetools inspect --raw "$IMAGE:php$MINOR-nts" || true)
+                      HAVE=$(jq -r '.annotations["rs.rapira.php.version"] // empty' <<< "$INDEX")
+                      CREATED=$(jq -r '.annotations["org.opencontainers.image.created"] // empty' <<< "$INDEX")
+                      if [ -z "$HAVE" ]; then
+                          echo "PHP $MINOR: php$MINOR-nts has no PHP version annotation, skip"
+                          continue
+                      fi
+                      NEWEST=$(git ls-remote --tags --refs https://github.com/php/php-src.git "refs/tags/php-$MINOR.*" \
+                          | sed -n -E 's|.*refs/tags/php-([0-9]+\.[0-9]+\.[0-9]+)$|\1|p' | sort -V | tail -n 1)
+                      AGE=$(( $(date +%s) - $(date -d "$CREATED" +%s) ))
+                      HIGHEST=$(printf '%s\n' "$HAVE" "$NEWEST" | sort -V | tail -n 1)
+                      echo "PHP $MINOR: image has $HAVE, built $AGE s ago; php-src has $NEWEST"
+                      if [ "$FORCE" = true ] || [ "$AGE" -ge 604800 ] || [ "$HIGHEST" != "$HAVE" ]; then
+                          SELECTED="$SELECTED $MINOR"
+                      fi
+                  done
+                  {
+                      echo "tag=$TAG"
+                      echo "version=${TAG#v}"
+                      echo "php=${SELECTED# }"
+                  } >> "$GITHUB_OUTPUT"
+
+    images:
+        needs: check
+        if: needs.check.outputs.php != ''
+        permissions:
+            contents: read
+            packages: write
+        uses: ./.github/workflows/docker.yml
+        with:
+            ref: ${{ needs.check.outputs.tag }}
+            version: ${{ needs.check.outputs.version }}
+            php: ${{ needs.check.outputs.php }}
+            no_cache: true
+
+    aliases:
+        needs: [check, images]
+        runs-on: ubuntu-26.04
+        timeout-minutes: 15
+        permissions:
+            contents: read
+            packages: write
+        env:
+            GH_TOKEN: ${{ github.token }}
+            GH_REPO: ${{ github.repository }}
+            TAG: ${{ needs.check.outputs.tag }}
+            V: ${{ needs.check.outputs.version }}
+            MINORS: ${{ needs.check.outputs.php }}
+        steps:
+            - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+            - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+            - name: Move the php minor aliases
+              shell: bash
+              run: |
+                  set -euo pipefail
+                  if [ "$(gh release view --json tagName --jq .tagName)" != "$TAG" ]; then
+                      echo "A newer release than $TAG is published. Its publish job moves the aliases."
+                      exit 0
+                  fi
+                  # The check job reads its state from php<minor>-nts, so that tag moves last.
+                  for PHP in $MINORS; do
+                      for VARIANT in zts nts; do
+                          docker buildx imagetools create -t "$IMAGE:${V%.*}-php$PHP-$VARIANT" "$IMAGE:$V-php$PHP-$VARIANT"
+                          docker buildx imagetools create -t "$IMAGE:php$PHP-$VARIANT" "$IMAGE:$V-php$PHP-$VARIANT"
+                      done
+                  done
