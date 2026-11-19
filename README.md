@@ -18,7 +18,7 @@ PHP 8.4 tarballs and packages include `opcache.so` beside `libphp`. Set `zend_ex
 The image includes Rapira, PHP and common PHP extensions. Add your application:
 
 ```dockerfile
-FROM ghcr.io/rapira-rs/rapira:php8.5-nts
+FROM ghcr.io/rapira-rs/rapira:php8.5
 COPY . /app
 ```
 
@@ -33,7 +33,9 @@ entrypoint = "/app/public/index.php"
 mode = "classic"
 ```
 
-The tags are `php8.4-nts`, `php8.5-nts` and `php8.6-nts`. Each image includes `bcmath`, `intl`, `mbstring`, `pdo_pgsql`, `pgsql` and `sodium`. The PHP 8.4 and 8.5 images also include `igbinary` and `redis` with igbinary serialization support. These two extensions have no release for PHP 8.6. Add more extensions with `docker-php-ext-install`, as in the official PHP image. A new PHP patch release starts a new build of each image. The `-zts` tags (`php8.5-zts`) hold thread-safe PHP without `rapira` and without `redis`. See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
+The tags are `php8.4`, `php8.5` and `php8.6`. Each image includes `bcmath`, `intl`, `mbstring`, `pdo_pgsql`, `pgsql` and `sodium`. The PHP 8.4 and 8.5 images also include `igbinary` and `redis` with igbinary serialization support. No release of these two extensions compiles on PHP 8.6. Add more extensions with `docker-php-ext-install`, as in the official PHP image.
+
+The PHP images without Rapira are `ghcr.io/rapira-rs/php:<minor>-nts` and the thread-safe `ghcr.io/rapira-rs/php:<minor>-zts`, for example `ghcr.io/rapira-rs/php:8.5-nts`. The `-zts` images have no `redis`. When a PHP minor gets a patch release, a workflow builds its PHP images again, and then the Rapira images of the newest release on them. See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
 
 ## Usage
 
