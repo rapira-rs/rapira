@@ -13,6 +13,8 @@ Rapira supports Linux and macOS. Download a build for PHP 8.4, PHP 8.5 or PHP 8.
 
 PHP 8.4 tarballs and packages include `opcache.so` beside `libphp`. Set `zend_extension` to its absolute path in the PHP configuration selected by `PHPRC`. Linux packages use `zend_extension=/usr/lib/rapira/opcache.so`. PHP 8.5 and 8.6 include OPcache in `libphp`. The PHP 8.6 builds have no `igbinary` and `redis`.
 
+The Linux builds for PHP 8.6 need OpenSSL 3.3 or newer, for example Debian 13, Ubuntu 26.04 or RHEL 9.7. Debian 12 and Ubuntu 24.04 have OpenSSL 3.0: use the PHP 8.4 or PHP 8.5 builds there, or update OpenSSL.
+
 ### Docker
 
 The image includes Rapira, PHP and common PHP extensions. Add your application:

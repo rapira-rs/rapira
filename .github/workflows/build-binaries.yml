@@ -344,10 +344,15 @@ jobs:
                   sudo dpkg -i /tmp/nfpm.deb
                   for arch in amd64 arm64; do
                     for minor in 8.4 8.5 8.6; do
+                      # PHP 8.6 links SSL_SESSION_get_time_ex of OpenSSL 3.3 and epoll_pwait2, which RHEL 9 glibc has from 2.34-231 (RHEL 9.7)
+                      case "$minor" in
+                        8.6) openssl_min=3.3 glibc_rpm_min=2.34-231 ;;
+                        *) openssl_min=3.0 glibc_rpm_min=2.34 ;;
+                      esac
                       rm -rf dist/pkgroot-current
                       cp -r "dist/pkgroot-${arch}-php${minor}" dist/pkgroot-current
-                      NFPM_ARCH=$arch PHP_MINOR=$minor nfpm pkg -p deb -f nfpm.yaml -t dist/
-                      NFPM_ARCH=$arch PHP_MINOR=$minor nfpm pkg -p rpm -f nfpm.yaml -t dist/
+                      NFPM_ARCH=$arch PHP_MINOR=$minor OPENSSL_MIN=$openssl_min nfpm pkg -p deb -f nfpm.yaml -t dist/
+                      NFPM_ARCH=$arch PHP_MINOR=$minor OPENSSL_MIN=$openssl_min GLIBC_RPM_MIN=$glibc_rpm_min nfpm pkg -p rpm -f nfpm.yaml -t dist/
                     done
                   done
                   rm -rf dist/pkgroot-*
@@ -380,7 +385,7 @@ jobs:
                   set -euo pipefail
                   for deb in dist/*_amd64.deb dist/*_arm64.deb; do
                     case "$deb" in *_arm64.deb) p=linux/arm64 ;; *) p=linux/amd64 ;; esac
-                    docker run --rm --platform "$p" -v "$PWD/dist:/dist:ro" debian:12 \
+                    docker run --rm --platform "$p" -v "$PWD/dist:/dist:ro" debian:13 \
                       bash -ec "apt-get update -q && apt-get install -yq /dist/$(basename "$deb") && rapira --help"
                   done
                   for rpm in dist/*.x86_64.rpm dist/*.aarch64.rpm; do

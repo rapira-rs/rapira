@@ -36,14 +36,14 @@ overrides:
       - "libc6 (>= 2.34)"
       - "libgcc-s1"
       - "libstdc++6"
-      - "libssl3 | libssl3t64"
+      - "libssl3 (>= ${OPENSSL_MIN}) | libssl3t64 (>= ${OPENSSL_MIN})"
       - "libcurl4 | libcurl4t64"
       - "zlib1g"
   rpm:
     depends:
-      - "glibc >= 2.34"
+      - "glibc >= ${GLIBC_RPM_MIN}"
       - "libgcc"
       - "libstdc++"
-      - "openssl-libs"
+      - "openssl-libs >= 1:${OPENSSL_MIN}"
       - "libcurl"
       - "zlib"
