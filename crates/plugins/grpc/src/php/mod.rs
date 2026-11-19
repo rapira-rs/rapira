@@ -16,8 +16,10 @@ unsafe extern "C" {
     pub static mut rapira_ce_grpc_method_info: *mut zend_class_entry;
     pub static mut rapira_ce_grpc_service_info: *mut zend_class_entry;
     pub static mut rapira_ce_grpc_context: *mut zend_class_entry;
-    // The unit class: the class of the object that receive() creates for a GrpcState.
+    // The unit classes: the class of the object that receive() creates for a GrpcState, by method kind.
     pub static mut rapira_ce_grpc_unary_call: *mut zend_class_entry;
+    pub static mut rapira_ce_grpc_server_streaming_call: *mut zend_class_entry;
+    pub static mut rapira_ce_grpc_headers_already_committed_error: *mut zend_class_entry;
     // The dispatcher surface of the grpc plugin (rapira_grpc_classes.c).
     pub static mut rapira_grpc_plugin: rapira_plugin;
     pub fn rapira_grpc_register_classes();

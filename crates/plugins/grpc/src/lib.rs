@@ -1,4 +1,4 @@
-//! The grpc plugin: unary RPCs of the configured services over gRPC, gRPC-Web and Connect on one listener, answered from PHP in dispatcher mode. The plugin answers health and reflection without PHP.
+//! The grpc plugin: unary and server-streaming RPCs of the configured services over gRPC, gRPC-Web and Connect on one listener, answered from PHP in dispatcher mode. The plugin answers health and reflection without PHP.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -18,7 +18,7 @@ pub mod php;
 pub mod schema;
 mod serve;
 
-use call::{UnaryCall, UnaryReply};
+use call::{Call, Head, Part, UnaryReply};
 pub use php::rapira_grpc_register_classes;
 use schema::{MethodInfo, Schema, set_schema};
 

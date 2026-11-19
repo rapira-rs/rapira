@@ -95,6 +95,8 @@ fn dispatcher_identity_and_services() -> anyhow::Result<()> {
                     method("Echo", "unary"),
                     method("Get", "unary"),
                     method("Watch", "server-streaming"),
+                    method("Collect", "client-streaming"),
+                    method("Chat", "bidi-streaming"),
                 ],
             }],
         })
@@ -309,7 +311,7 @@ const OUTCOME_CASES: &[OutcomeCase] = &[
         }],
         log: Some(AppResult {
             message: "busy",
-            text: "this worker holds one unit at a time, and its Rapira\\Grpc\\UnaryCall is unfinalized",
+            text: "this worker holds one unit at a time, and its call is unfinalized",
         }),
     },
     OutcomeCase {
@@ -328,7 +330,7 @@ const OUTCOME_CASES: &[OutcomeCase] = &[
         }],
         log: Some(AppResult {
             message: "keep-md",
-            text: "this worker holds one unit at a time, and its Rapira\\Grpc\\UnaryCall is unfinalized",
+            text: "this worker holds one unit at a time, and its call is unfinalized",
         }),
     },
     OutcomeCase {

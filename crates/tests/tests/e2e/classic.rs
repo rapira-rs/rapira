@@ -52,6 +52,33 @@ fn exit_in_a_frameless_callback_ends_the_reply_complete() -> anyhow::Result<()> 
     Ok(())
 }
 
+/// A fatal in the header callback of a request without output ends that request, and the same worker serves the next request, as `php -S` does.
+#[test]
+fn header_callback_fatal_keeps_the_worker() -> anyhow::Result<()> {
+    let srv = Spawn::http(
+        Mode::Classic,
+        harness::fixture_path("classic/header-callback-fatal.php"),
+    )
+    .spawn();
+    let before = drain_resp(submit(srv.addr, req("/"))?);
+    drain_resp(submit(srv.addr, req("/?fatal=1"))?);
+    let after = drain_resp(submit(srv.addr, req("/"))?);
+
+    assert_eq!(
+        (before.status(), after.status()),
+        (200, 200),
+        "{}",
+        harness::diagnostics(&srv)
+    );
+    assert_eq!(
+        before.body_string(),
+        after.body_string(),
+        "the worker must not exit after the fatal: {}",
+        harness::diagnostics(&srv)
+    );
+    Ok(())
+}
+
 /// A classic worker enters the entrypoint directory at its start and at each reload, so a userland chdir outlives the request that made it.
 #[test]
 fn classic_mode_keeps_the_working_directory_across_requests() {

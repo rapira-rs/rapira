@@ -1,5 +1,5 @@
 /* This is a generated file, edit the .stub.php file instead.
- * Stub hash: e4205554baabfaa059a130fdebd65b42dcbca52c */
+ * Stub hash: 249e4401470c82666885e635db80229b59af4821 */
 
 ZEND_BEGIN_ARG_WITH_RETURN_TYPE_INFO_EX(arginfo_class_Rapira_Grpc_MethodKind_isStreamingRequest, 0, 0, _IS_BOOL, 0)
 ZEND_END_ARG_INFO()
@@ -168,6 +168,34 @@ ZEND_END_ARG_INFO()
 
 #define arginfo_class_Rapira_Internal_Grpc_UnaryCall_trailers arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_headers
 
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall___construct arginfo_class_Rapira_Internal_Grpc_Dispatcher___construct
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_isFinalized arginfo_class_Rapira_Grpc_MethodKind_isStreamingRequest
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_isCancelled arginfo_class_Rapira_Grpc_MethodKind_isStreamingRequest
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_getContext arginfo_class_Rapira_Grpc_Call_getContext
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_getMessage arginfo_class_Rapira_Grpc_UnaryRequest_getMessage
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_getResponseMetadata arginfo_class_Rapira_Grpc_Responder_getResponseMetadata
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_respond arginfo_class_Rapira_Grpc_StreamingResponder_respond
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_fail arginfo_class_Rapira_Grpc_Responder_fail
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_addHeader arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_addHeader
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_addBinaryHeader arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_addBinaryHeader
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_addTrailer arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_addHeader
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_addBinaryTrailer arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_addBinaryHeader
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_headers arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_headers
+
+#define arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_trailers arginfo_class_Rapira_Grpc_Responder_ResponseMetadata_headers
+
 ZEND_METHOD(Rapira_Grpc_MethodKind, isStreamingRequest);
 ZEND_METHOD(Rapira_Grpc_MethodKind, isStreamingResponse);
 ZEND_METHOD(Rapira_Grpc_ErrorDetail, __construct);
@@ -202,6 +230,7 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, addTrailer);
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, addBinaryTrailer);
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, headers);
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, trailers);
+ZEND_METHOD(Rapira_Internal_Grpc_ServerStreamingCall, respond);
 
 static const zend_function_entry class_Rapira_Grpc_MethodKind_methods[] = {
 	ZEND_ME(Rapira_Grpc_MethodKind, isStreamingRequest, arginfo_class_Rapira_Grpc_MethodKind_isStreamingRequest, ZEND_ACC_PUBLIC)
@@ -335,6 +364,24 @@ static const zend_function_entry class_Rapira_Internal_Grpc_UnaryCall_methods[] 
 	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, addBinaryTrailer, arginfo_class_Rapira_Internal_Grpc_UnaryCall_addBinaryTrailer, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, headers, arginfo_class_Rapira_Internal_Grpc_UnaryCall_headers, ZEND_ACC_PUBLIC)
 	ZEND_ME(Rapira_Internal_Grpc_UnaryCall, trailers, arginfo_class_Rapira_Internal_Grpc_UnaryCall_trailers, ZEND_ACC_PUBLIC)
+	ZEND_FE_END
+};
+
+static const zend_function_entry class_Rapira_Internal_Grpc_ServerStreamingCall_methods[] = {
+	ZEND_RAW_FENTRY("__construct", zif_rapira_sapi_host_created, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall___construct, ZEND_ACC_PRIVATE, NULL, NULL)
+	ZEND_RAW_FENTRY("isFinalized", zif_rapira_sapi_is_finalized, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_isFinalized, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("isCancelled", zif_rapira_sapi_is_cancelled, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_isCancelled, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("getContext", zim_Rapira_Internal_Grpc_UnaryCall_getContext, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_getContext, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("getMessage", zim_Rapira_Internal_Grpc_UnaryCall_getMessage, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_getMessage, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("getResponseMetadata", zim_Rapira_Internal_Grpc_UnaryCall_getResponseMetadata, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_getResponseMetadata, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_ME(Rapira_Internal_Grpc_ServerStreamingCall, respond, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_respond, ZEND_ACC_PUBLIC)
+	ZEND_RAW_FENTRY("fail", zim_Rapira_Internal_Grpc_UnaryCall_fail, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_fail, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("addHeader", zim_Rapira_Internal_Grpc_UnaryCall_addHeader, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_addHeader, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("addBinaryHeader", zim_Rapira_Internal_Grpc_UnaryCall_addBinaryHeader, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_addBinaryHeader, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("addTrailer", zim_Rapira_Internal_Grpc_UnaryCall_addTrailer, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_addTrailer, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("addBinaryTrailer", zim_Rapira_Internal_Grpc_UnaryCall_addBinaryTrailer, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_addBinaryTrailer, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("headers", zim_Rapira_Internal_Grpc_UnaryCall_headers, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_headers, ZEND_ACC_PUBLIC, NULL, NULL)
+	ZEND_RAW_FENTRY("trailers", zim_Rapira_Internal_Grpc_UnaryCall_trailers, arginfo_class_Rapira_Internal_Grpc_ServerStreamingCall_trailers, ZEND_ACC_PUBLIC, NULL, NULL)
 	ZEND_FE_END
 };
 
@@ -851,6 +898,17 @@ static zend_class_entry *register_class_Rapira_Internal_Grpc_UnaryCall(zend_clas
 	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Internal\\Grpc", "UnaryCall", class_Rapira_Internal_Grpc_UnaryCall_methods);
 	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE);
 	zend_class_implements(class_entry, 2, class_entry_Rapira_Grpc_UnaryCall, class_entry_Rapira_Grpc_Responder_ResponseMetadata);
+
+	return class_entry;
+}
+
+static zend_class_entry *register_class_Rapira_Internal_Grpc_ServerStreamingCall(zend_class_entry *class_entry_Rapira_Grpc_ServerStreamingCall, zend_class_entry *class_entry_Rapira_Grpc_Responder_ResponseMetadata)
+{
+	zend_class_entry ce, *class_entry;
+
+	INIT_NS_CLASS_ENTRY(ce, "Rapira\\Internal\\Grpc", "ServerStreamingCall", class_Rapira_Internal_Grpc_ServerStreamingCall_methods);
+	class_entry = zend_register_internal_class_with_flags(&ce, NULL, ZEND_ACC_FINAL|ZEND_ACC_NO_DYNAMIC_PROPERTIES|ZEND_ACC_NOT_SERIALIZABLE);
+	zend_class_implements(class_entry, 2, class_entry_Rapira_Grpc_ServerStreamingCall, class_entry_Rapira_Grpc_Responder_ResponseMetadata);
 
 	return class_entry;
 }

@@ -9,6 +9,7 @@ use std::time::Duration;
 use anyhow::anyhow;
 use buffa_descriptor::generated::descriptor::method_options::IdempotencyLevel;
 use buffa_descriptor::{DescriptorPool, DynamicMessage, MessageIndex, ServiceDescriptor};
+use connectrpc::MethodKind;
 use ureq::tls::{RootCerts, TlsConfig};
 
 /// Where `grpc.descriptor_set` points.
@@ -96,12 +97,13 @@ pub(crate) fn services() -> &'static [ServiceInfo] {
     SCHEMA.get().map_or(&[], |s| s.services())
 }
 
-/// A unary method that rapira routes to PHP.
+/// A method that rapira routes to PHP: unary or server-streaming.
 pub struct Method {
     pub input: MessageIndex,
     pub(crate) output: MessageIndex,
     /// The method has `idempotency_level = NO_SIDE_EFFECTS`, so Connect GET can call it.
     pub(crate) idempotent: bool,
+    pub(crate) kind: MethodKind,
 }
 
 /// The services the plugin answers itself: never routed to PHP.
@@ -112,7 +114,7 @@ const PLUGIN_SERVICES: [&str; 3] = [
 ];
 
 impl Schema {
-    /// Loads the set at `source` and keeps the unary methods of `services` as routes. `None` serves the services of the files that no other file of the set imports.
+    /// Loads the set at `source` and keeps the unary and server-streaming methods of `services` as routes. `None` serves the services of the files that no other file of the set imports.
     pub fn load(source: &Source, services: Option<&[String]>) -> anyhow::Result<Schema> {
         let bytes = match source {
             Source::File(path) => std::fs::read(path)
@@ -243,7 +245,7 @@ impl Schema {
     }
 }
 
-/// The listing of `service`, with its unary methods added to `methods` as routes.
+/// The listing of `service`, with its unary and server-streaming methods added to `methods` as routes.
 fn service_info(
     pool: &DescriptorPool,
     service: &ServiceDescriptor,
@@ -252,15 +254,21 @@ fn service_info(
     let mut infos = Vec::with_capacity(service.methods().len());
     for m in service.methods() {
         let route = format!("{}/{}", service.full_name(), m.name());
-        if m.is_client_streaming() || m.is_server_streaming() {
-            tracing::warn!(target: "grpc", "{route} streams; rapira answers it with UNIMPLEMENTED");
+        if m.is_client_streaming() {
+            tracing::warn!(target: "grpc", "{route} takes a stream of requests; rapira answers it with UNIMPLEMENTED");
         } else {
             let idempotent = m.options().and_then(|o| o.idempotency_level)
                 == Some(IdempotencyLevel::NO_SIDE_EFFECTS);
+            let kind = if m.is_server_streaming() {
+                MethodKind::ServerStreaming
+            } else {
+                MethodKind::Unary
+            };
             let method = Method {
                 input: m.input(),
                 output: m.output(),
                 idempotent,
+                kind,
             };
             methods.insert(route, method);
         }

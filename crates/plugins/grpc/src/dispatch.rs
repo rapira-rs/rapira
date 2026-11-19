@@ -1,33 +1,40 @@
-//! The `PhpDispatcher`: one unary call through the intake to PHP, the JSON transcoding, and the PHP reply or status as a connectrpc response or error.
+//! The `PhpDispatcher`: one call through the intake to PHP, the JSON transcoding, and the PHP reply, stream or status as a connectrpc response or error.
 
 use std::sync::Arc;
+use std::sync::atomic::AtomicUsize;
 use std::time::Instant;
 
 use bytes::Bytes;
 use connectrpc::dispatcher::{RequestStream, StreamingResult, UnaryResult};
 use connectrpc::{
-    CodecFormat, ConnectError, Dispatcher, EncodedBody, EncodedResponse, MethodDescriptor, Payload,
-    Protocol, RequestContext, http,
+    CodecFormat, ConnectError, Dispatcher, EncodedBody, EncodedResponse, EncodedStream,
+    MethodDescriptor, MethodKind, Payload, Protocol, RequestContext, Response, http,
 };
+use futures_util::stream;
 use rapira_sapi::Addr;
 use rapira_sapi::work::{Intake, Unit, now_unix_f64};
-use tokio::sync::oneshot;
+use tokio::sync::{mpsc, oneshot};
+use tokio::time::timeout_at;
 
-use crate::UnaryCall;
 use crate::php::GrpcState;
-use crate::schema::Schema;
+use crate::php::call::{Reply, StreamReply};
+use crate::schema::{Method, Schema};
+use crate::serve::InFlight;
+use crate::{Call, Part};
 
-/// Routes the unary methods of the configured services to PHP.
+/// Routes the unary and server-streaming methods of the configured services to PHP.
 pub(crate) struct PhpDispatcher {
     pub(crate) schema: Arc<Schema>,
     pub(crate) intake: Intake,
+    /// The calls in flight that the drain counts (serve.rs).
+    pub(crate) inflight: Arc<AtomicUsize>,
 }
 
 impl Dispatcher for PhpDispatcher {
     fn lookup(&self, path: &str) -> Option<MethodDescriptor> {
         self.schema
             .method(path)
-            .map(|m| MethodDescriptor::unary(m.idempotent))
+            .map(|m| MethodDescriptor::from_kind(m.kind).with_idempotent(m.idempotent))
     }
 
     fn call_unary(
@@ -45,12 +52,18 @@ impl Dispatcher for PhpDispatcher {
 
     fn call_server_streaming(
         &self,
-        _path: &str,
-        _ctx: RequestContext,
-        _request: Bytes,
-        _format: CodecFormat,
+        path: &str,
+        ctx: RequestContext,
+        request: Bytes,
+        format: CodecFormat,
     ) -> StreamingResult {
-        Box::pin(async { Err(streaming()) })
+        let schema = Arc::clone(&self.schema);
+        let intake = self.intake.clone();
+        let inflight = Arc::clone(&self.inflight);
+        let path = path.to_owned();
+        Box::pin(server_streaming(
+            schema, intake, inflight, path, ctx, request, format,
+        ))
     }
 
     fn call_client_streaming(
@@ -60,7 +73,7 @@ impl Dispatcher for PhpDispatcher {
         _requests: RequestStream,
         _format: CodecFormat,
     ) -> UnaryResult {
-        Box::pin(async { Err(streaming()) })
+        Box::pin(async { Err(request_stream()) })
     }
 
     fn call_bidi_streaming(
@@ -70,25 +83,30 @@ impl Dispatcher for PhpDispatcher {
         _requests: RequestStream,
         _format: CodecFormat,
     ) -> StreamingResult {
-        Box::pin(async { Err(streaming()) })
+        Box::pin(async { Err(request_stream()) })
     }
 }
 
-/// `lookup` reports no streaming method, so connectrpc never calls a streaming handler.
-fn streaming() -> ConnectError {
-    ConnectError::unimplemented("rapira serves unary methods only")
+/// `lookup` reports no method with a request stream, so connectrpc never calls these handlers.
+fn request_stream() -> ConnectError {
+    ConnectError::unimplemented("rapira serves unary and server-streaming methods only")
 }
 
-async fn unary(
+/// Most gRPC clients accept gzip on every call. As in grpc-go, a gRPC reply uses gzip only when the request did: https://github.com/grpc/grpc-go/blob/v1.84.0/server.go#L1408-L1421
+fn plain_reply(ctx: &RequestContext) -> bool {
+    matches!(ctx.protocol(), Some(Protocol::Grpc | Protocol::GrpcWeb))
+        && ctx.header("grpc-encoding").is_none_or(|v| v == "identity")
+}
+
+/// The call of one request: its message as binary protobuf, and the request facts that PHP reads. It takes the headers out of `ctx`.
+fn call(
     schema: &Schema,
-    intake: &Intake,
-    path: String,
-    mut ctx: RequestContext,
-    request: Payload,
+    method: &Method,
+    path: &str,
+    ctx: &mut RequestContext,
+    body: Bytes,
     format: CodecFormat,
-) -> Result<EncodedResponse, ConnectError> {
-    let method = schema.method(&path).expect("lookup found the route");
-    let body = request.encoded()?;
+) -> Result<Call, ConnectError> {
     let message = match format {
         CodecFormat::Proto => body,
         CodecFormat::Json => schema
@@ -101,14 +119,10 @@ async fn unary(
             )));
         }
     };
-    let protocol = ctx.protocol().unwrap_or(Protocol::Connect);
-    // Most gRPC clients accept gzip on every call. As in grpc-go, a gRPC reply uses gzip only when the request did: https://github.com/grpc/grpc-go/blob/v1.84.0/server.go#L1408-L1421
-    let plain_reply = matches!(protocol, Protocol::Grpc | Protocol::GrpcWeb)
-        && ctx.header("grpc-encoding").is_none_or(|v| v == "identity");
-    let bytes = message.len();
-    let call = UnaryCall {
-        method: path.clone(),
-        protocol,
+    Ok(Call {
+        method: path.to_owned(),
+        kind: method.kind,
+        protocol: ctx.protocol().unwrap_or(Protocol::Connect),
         metadata: std::mem::take(ctx.headers_mut()),
         deadline: ctx
             .deadline()
@@ -118,17 +132,63 @@ async fn unary(
             .remove::<Addr>()
             .expect("serve puts an Addr on every connection"),
         message,
-    };
+    })
+}
+
+/// One output message in the format of the client.
+fn encode(
+    schema: &Schema,
+    path: &str,
+    format: CodecFormat,
+    message: Bytes,
+) -> Result<Bytes, ConnectError> {
+    if format != CodecFormat::Json {
+        return Ok(message);
+    }
+    let method = schema.method(path).expect("lookup found the route");
+    match schema.proto_to_json(method, &message) {
+        Ok(json) => Ok(Bytes::from(json)),
+        Err(e) => {
+            tracing::warn!(target: "grpc", "{path}: the reply does not decode: {e:#}");
+            Err(ConnectError::internal("internal error"))
+        }
+    }
+}
+
+/// PHP dropped the call with no outcome.
+fn lost(path: &str) -> ConnectError {
+    tracing::warn!(target: "grpc", "{path}: the app lost the call");
+    ConnectError::internal("internal error")
+}
+
+async fn unary(
+    schema: &Schema,
+    intake: &Intake,
+    path: String,
+    mut ctx: RequestContext,
+    request: Payload,
+    format: CodecFormat,
+) -> Result<EncodedResponse, ConnectError> {
+    let method = schema.method(&path).expect("lookup found the route");
+    // connectrpc gives a Connect unary request to this handler for a method of each kind.
+    if method.kind != MethodKind::Unary {
+        return Err(ConnectError::unimplemented(format!(
+            "{path} is a streaming method"
+        )));
+    }
+    let plain_reply = plain_reply(&ctx);
+    let call = call(schema, method, &path, &mut ctx, request.encoded()?, format)?;
+    let protocol = call.protocol;
+    let bytes = call.message.len();
     let (tx, reply) = oneshot::channel();
-    let call = GrpcState::new(call, tx);
+    let call = GrpcState::new(call, Reply::Unary(tx));
     // A refusal before dispatch: PHP never saw the call.
     if let Err(e) = intake.submit(Unit::Dispatcher(Box::new(call)), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));
     }
     // A closed channel means that PHP lost the call. Dropping this future closes the call for PHP.
     let Ok(reply) = reply.await else {
-        tracing::warn!(target: "grpc", "{path}: the app lost the call");
-        return Err(ConnectError::internal("internal error"));
+        return Err(lost(&path));
     };
     let message = match reply.outcome {
         Ok(message) => message,
@@ -138,16 +198,7 @@ async fn unary(
                 .with_trailers(reply.trailers));
         }
     };
-    let body = match format {
-        CodecFormat::Json => match schema.proto_to_json(method, &message) {
-            Ok(json) => Bytes::from(json),
-            Err(e) => {
-                tracing::warn!(target: "grpc", "{path}: the reply does not decode: {e:#}");
-                return Err(ConnectError::internal("internal error"));
-            }
-        },
-        _ => message,
-    };
+    let body = encode(schema, &path, format, message)?;
     let mut response = EncodedResponse::new(EncodedBody::from(body));
     response.headers = reply.headers;
     response.trailers = reply.trailers;
@@ -162,4 +213,95 @@ async fn unary(
         );
     }
     Ok(response)
+}
+
+async fn server_streaming(
+    schema: Arc<Schema>,
+    intake: Intake,
+    inflight: Arc<AtomicUsize>,
+    path: String,
+    mut ctx: RequestContext,
+    request: Bytes,
+    format: CodecFormat,
+) -> Result<Response<EncodedStream>, ConnectError> {
+    let method = schema.method(&path).expect("lookup found the route");
+    let plain_reply = plain_reply(&ctx);
+    let until = ctx.deadline();
+    let call = call(&schema, method, &path, &mut ctx, request, format)?;
+    let bytes = call.message.len();
+    let (head_tx, head) = oneshot::channel();
+    // The channel holds one message. When the buffers of the connection are full, hyper stops the poll of the body, so the generator waits at its yield.
+    let (parts_tx, parts) = mpsc::channel(1);
+    let reply = StreamReply::new(head_tx, parts_tx, until);
+    let call = GrpcState::new(call, Reply::Stream(reply));
+    // A refusal before dispatch: PHP never saw the call.
+    if let Err(e) = intake.submit(Unit::Dispatcher(Box::new(call)), bytes).await {
+        return Err(ConnectError::unavailable(e.to_string()));
+    }
+    // This future holds both receivers until the head arrives, so its drop closes the call for PHP.
+    let head = match head.await {
+        Ok(Ok(head)) => head,
+        // fail() before the first yield
+        Ok(Err(err)) => return Err(err),
+        // PHP discards a call at its deadline, and its check can come before the timer of connectrpc.
+        Err(_) if until.is_some_and(|until| Instant::now() >= until) => return Err(deadline()),
+        Err(_) => return Err(lost(&path)),
+    };
+    let body = Body {
+        parts,
+        until,
+        schema,
+        path,
+        format,
+        _counted: InFlight::start(&inflight),
+    };
+    let mut response = Response::stream(stream::try_unfold(body, Body::next));
+    response.headers = head.headers;
+    response.trailers = head.trailers;
+    if plain_reply {
+        response.compress = Some(false);
+    }
+    Ok(response)
+}
+
+/// The body of a streaming response after its head: the parts that PHP sends. Its drop closes the call for PHP.
+struct Body {
+    parts: mpsc::Receiver<Part>,
+    /// The deadline of the call. connectrpc bounds only the handler with it, so the body ends the stream there.
+    until: Option<Instant>,
+    schema: Arc<Schema>,
+    path: String,
+    format: CodecFormat,
+    /// The handler returns at the head, so the body keeps the call in the count of the drain until the stream ends.
+    _counted: InFlight,
+}
+
+impl Body {
+    /// One message of the response stream, with the body for the next step. None: PHP ended the stream with success. An error ends the stream and drops the body.
+    async fn next(mut self) -> Result<Option<(EncodedBody, Self)>, ConnectError> {
+        let part = match self.until {
+            None => self.parts.recv().await,
+            // timeout_at polls recv first, so the check keeps a generator that always has a message ready from a stream past the deadline.
+            Some(until) if Instant::now() >= until => return Err(deadline()),
+            Some(until) => match timeout_at(until.into(), self.parts.recv()).await {
+                Ok(part) => part,
+                Err(_) => return Err(deadline()),
+            },
+        };
+        match part {
+            Some(Part::Message(message)) => {
+                let message = encode(&self.schema, &self.path, self.format, message)?;
+                Ok(Some((EncodedBody::from(message), self)))
+            }
+            Some(Part::End) => Ok(None),
+            Some(Part::Fail(err)) => Err(err),
+            // PHP discards the call at its deadline.
+            None if self.until.is_some_and(|until| Instant::now() >= until) => Err(deadline()),
+            None => Err(lost(&self.path)),
+        }
+    }
+}
+
+fn deadline() -> ConnectError {
+    ConnectError::deadline_exceeded("request deadline exceeded while streaming")
 }

@@ -1,6 +1,6 @@
 # rapira_grpc
 
-The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC, gRPC-Web and Connect on one listener. PHP gets each request message as binary protobuf and answers with a binary protobuf message.
+The grpc plugin of the `rapira` binary. It serves unary and server-streaming RPCs from PHP over gRPC, gRPC-Web and Connect on one listener. PHP gets each request message as binary protobuf and answers with binary protobuf messages.
 
 ## How it works
 
@@ -13,13 +13,16 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `Server::from_settings` runs in the master before the fork, with no runtime. It sets the service list that `getServices()` returns, binds the listener with `rapira_net::bind`, and builds the routes that the plugin answers without PHP: health, and reflection when it is on.
 - `serve()` runs in the worker on the plugin thread `rapira-grpc`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the `Intake` to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
 
-`serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. `PhpDispatcher` routes each unary method of a configured service to PHP: it builds a `GrpcState` and submits it to the intake. PHP finalizes the call with `respond()` or `fail()`, and the plugin sends the outcome to the client.
+`serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. `PhpDispatcher` routes each unary and server-streaming method of a configured service to PHP: it builds a `GrpcState` and submits it to the intake. PHP finalizes the call with `respond()` or `fail()`, and the plugin sends the outcome to the client. For a server-streaming method, `respond()` takes a generator, and the plugin sends each message when the generator yields it.
 
 `GrpcState` in `src/php/call.rs` is the dispatcher-mode unit. It implements `rapira_sapi::work::Held`:
 
 - `cancelled()` returns true when the call is closed: the client cancelled it, closed the connection, or the deadline passed. `receive()` skips such a unit.
-- The SAPI keeps the `GrpcState` in the `Rapira\Grpc\UnaryCall` object from `receive()`, answers `isFinalized()` and `isCancelled()` from it, and reclaims it when the object is freed. When the object is freed before the call is settled, the drop of the reply reports INTERNAL to the client.
+- The SAPI keeps the `GrpcState` in the call object from `receive()`, answers `isFinalized()` and `isCancelled()` from it, and reclaims it when the object is freed. When the object is freed before the call is settled, the drop of the reply reports INTERNAL to the client.
 - `shed()` answers UNAVAILABLE when the PHP boot of the worker failed.
+- `class()` gives `receive()` the class of the call object, by the kind of the method.
+
+`respond()` of a server-streaming call runs its generator in `rapira_stream_run_generator` in `crates/sapi/rapira_stream.c`. The loop gives each yielded value to the callback `grpc_stream_send` in `rapira_grpc.c`. The callback checks that the value is a string and passes its bytes to Rust.
 
 ## Crate layout
 
@@ -27,16 +30,16 @@ The grpc plugin of the `rapira` binary. It serves unary RPCs from PHP over gRPC,
 - `build.rs`: compiles the C files with `rapira_php_build::compile` against the PHP headers. `rapira_grpc.h` includes `rapira_sapi.h` by its path in `crates/sapi`.
 - `rapira_grpc.stub.php`: the PHP stub of the `Rapira\Grpc` and `Rapira\Internal\Grpc` classes.
 - `rapira_grpc_arginfo.h`: generated from the stub by `make stubs`. Do not edit it.
-- `rapira_grpc.h`: the C layout of the call object, and the class entries. The call object is also its own response metadata.
+- `rapira_grpc.h`: the C layout of the call object, and the class entries. The two call classes share this layout. The call object is also its own response metadata.
 - `rapira_grpc_classes.c`: the `rapira_grpc_plugin` record, `rapira_grpc_register_classes` and the object handlers of the call. MINIT calls `rapira_grpc_register_classes` after the base classes. The stub aliases the constructors of the internal classes, `name()`, `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters to the shared shells in `crates/sapi/rapira_dispatcher.c`.
 - `rapira_grpc.c`: the constructors of the value classes, the `MethodKind` predicates, the method shell of `getServices()` of the dispatcher, and the method shells of the call, with its `ResponseMetadata` methods.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set, builds the interceptors and binds the listener.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
-- `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, and the PHP outcome as a connectrpc response or error.
+- `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, the PHP outcome as a connectrpc response or error, and the body of a streaming response.
 - `src/schema.rs`: the descriptor set and its `Source` (a file or a URL), the download, the method routes, the JSON transcoding, and the service list of `getServices()`.
-- `src/call.rs`: the `UnaryCall` and `UnaryReply` types.
-- `src/php/`: the Rust behind the PHP methods: the class entries and the declarations of `rapira_grpc_plugin` and `rapira_grpc_register_classes` (`mod.rs`), the `GrpcState` unit with its `Held` impl, the call and its metadata (`call.rs`), and the `Metadata` constructor (`values.rs`).
+- `src/call.rs`: the `Call` that PHP gets, the `UnaryReply`, and the `Head` and `Part` of a streaming response.
+- `src/php/`: the Rust behind the PHP methods: the class entries and the declarations of `rapira_grpc_plugin` and `rapira_grpc_register_classes` (`mod.rs`), the `GrpcState` unit with its `Held` impl, the call, its metadata and its response stream (`call.rs`), and the `Metadata` constructor (`values.rs`).
 
 ## Protocols
 
@@ -46,13 +49,14 @@ Each connection goes to `serve_connection` of [connect-rust](https://github.com/
 - Binary gRPC-Web (`application/grpc-web+proto`). https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-WEB.md
 - Connect with proto or JSON messages. https://connectrpc.com/docs/protocol/
 
-connect-rust handles the framing, the compression, the timeout headers and the error encoding. PHP always gets the binary protobuf encoding of the input message. The plugin transcodes a Connect JSON request to binary protobuf before dispatch, and transcodes the reply back to JSON. The JSON decoder ignores unknown fields, but not an unknown enum value name. A JSON body that does not decode, also one with an enum value name that the descriptor set does not declare, answers INVALID_ARGUMENT, and PHP does not see the call. In binary protobuf, PHP gets an unknown enum value as its number.
+connect-rust handles the framing, the compression, the timeout headers and the error encoding. PHP always gets the binary protobuf encoding of the input message. The plugin transcodes a Connect JSON request to binary protobuf before dispatch, and transcodes each reply message back to JSON. The JSON decoder ignores unknown fields, but not an unknown enum value name. A JSON body that does not decode, also one with an enum value name that the descriptor set does not declare, answers INVALID_ARGUMENT, and PHP does not see the call. In binary protobuf, PHP gets an unknown enum value as its number.
 
-- The boot logs a warning for each streaming method of a configured service.
-- A streaming method, a method of a service the pool does not serve, and an unknown method answer UNIMPLEMENTED. A Connect unary request (`application/proto` or `application/json`) gets the HTTP status 404. A Connect streaming request (`application/connect+proto` or `application/connect+json`) gets the HTTP status 200 with the error in the end-of-stream message.
+- The boot logs a warning for each client-streaming and bidi-streaming method of a configured service.
+- A client-streaming or bidi-streaming method, a method of a service the pool does not serve, and an unknown method answer UNIMPLEMENTED. A Connect unary request (`application/proto` or `application/json`) gets the HTTP status 404. A Connect streaming request (`application/connect+proto` or `application/connect+json`) gets the HTTP status 200 with the error in the end-of-stream message.
+- A server-streaming method takes a gRPC, gRPC-Web or Connect streaming request. A Connect unary request to it answers UNIMPLEMENTED with the HTTP status 501, and PHP does not see the call.
 - A method with `option idempotency_level = NO_SIDE_EFFECTS;` also accepts a Connect GET request. A GET to any other method answers 405.
 - A request can use gzip compression. A request with a different message encoding answers UNIMPLEMENTED.
-- A reply from PHP of 1 KiB or more uses gzip when the client accepts gzip. A gRPC or gRPC-Web reply from PHP uses gzip only when its request did. A successful Connect reply from PHP carries `Vary: Accept-Encoding`. Health and reflection replies use the connect-rust default: gzip from 1 KiB when the client accepts gzip.
+- A reply from PHP of 1 KiB or more uses gzip when the client accepts gzip. A gRPC or gRPC-Web reply from PHP uses gzip only when its request did, also for each message of a streaming response. A successful Connect unary reply from PHP carries `Vary: Accept-Encoding`. Health and reflection replies use the connect-rust default: gzip from 1 KiB when the client accepts gzip.
 
 ## Remote address
 
@@ -118,9 +122,9 @@ By default, the pool serves the services of the files that no other file of the 
 
 ## The PHP side
 
-The pool runs in dispatcher mode only. `\Rapira\get_dispatcher()` returns a `Rapira\Grpc\GrpcDispatcher`, and `receive()` returns a `Rapira\Grpc\UnaryCall`. The other three call kinds do not occur, because the plugin serves no streaming method. The PHP contract is in [rapira-rs/contract](https://github.com/rapira-rs/contract/tree/master/src/Grpc).
+The pool runs in dispatcher mode only. `\Rapira\get_dispatcher()` returns a `Rapira\Grpc\GrpcDispatcher`, and `receive()` returns a `Rapira\Grpc\UnaryCall` for a unary method and a `Rapira\Grpc\ServerStreamingCall` for a server-streaming method. The other two call kinds do not occur, because the plugin serves no method with a request stream. The PHP contract is in [rapira-rs/contract](https://github.com/rapira-rs/contract/tree/master/src/Grpc).
 
-- `getMessage()` returns the request message. `respond($bytes)` sends the response message. `fail(new Status(StatusCode::NotFound, 'no invoice', $details))` sends an error status.
+- `getMessage()` returns the request message. On a `UnaryCall`, `respond($bytes)` sends the response message. On a `ServerStreamingCall`, `respond()` takes a generator (see Streaming responses). `fail(new Status(StatusCode::NotFound, 'no invoice', $details))` sends an error status.
 - `getServices()` lists each configured service with all its methods, streaming methods included.
 - A worker holds one call at a time. `receive()` throws `\Error` while the current call is not finalized.
 - `getContext()` returns a `Rapira\Grpc\Call\Context`. `$method` is `package.Service/Method`. `$protocol` is `Grpc`, `GrpcWeb` or `Connect`. `$remote` is an `InetAddress`, or a `UnixAddress` on a unix socket. `$receivedAt` is the time when the plugin has read the whole request message, before it queues the call.
@@ -133,13 +137,25 @@ The pool runs in dispatcher mode only. `\Rapira\get_dispatcher()` returns a `Rap
 - `getResponseMetadata()` returns the call object, which holds the response headers and trailers. While the app keeps this object, a call that is not finalized stays active: `receive()` throws the busy `\Error`, and the client gets INTERNAL when the last reference goes. `addHeader()` and `addTrailer()` take a text value: printable ASCII (0x20 to 0x7E). An empty value is permitted. The plugin removes the leading and trailing spaces of a text value when it sends it, because an HTTP/2 field value must not start or end with whitespace. https://www.rfc-editor.org/rfc/rfc9113#section-8.2.1
 - `addBinaryHeader()` and `addBinaryTrailer()` take raw bytes and need a name with the `-bin` suffix. The text methods refuse a name with this suffix. The plugin sends a `-bin` value as base64 without padding.
 - A metadata name uses only `0-9`, `a-z`, `_`, `-` and `.`. A reserved name, an invalid name or a bad value throws `\ValueError`. A repeated name adds a value.
-- `respond()` and `fail()` send both halves. For gRPC, the trailers are HTTP/2 trailers. For gRPC-Web, they are in the trailer frame. For Connect, each trailer is a header with the `trailer-` prefix.
+- On a unary call, `respond()` and `fail()` send both halves. For gRPC, the trailers are HTTP/2 trailers. For gRPC-Web, they are in the trailer frame. For Connect, each trailer is a header with the `trailer-` prefix.
+
+### Streaming responses
+
+- `ServerStreamingCall::respond()` takes a `\Generator`. The plugin sends each yielded string as one response message. `respond()` returns when the generator ends, and the client then gets the status OK.
+- The generator runs inside `respond()`, so the worker serves no other call until the stream ends.
+- The plugin queues one message. When the client reads slowly, the buffers of the connection fill, and the `yield` then waits until the connection takes the message before it. A `yield` that returns does not mean that the client has the message.
+- The first `yield` sends the response headers. After it, `addHeader()` and `addBinaryHeader()` throw `Rapira\Grpc\Exception\HeadersAlreadyCommittedError`.
+- The first `yield` also sets the trailers of a stream that ends with OK. A trailer that the app adds after the first `yield` goes out only with `fail()`, which sends every trailer. A generator that ends with no `yield` sends the headers and every trailer. For Connect, the trailers of a stream are in the end-of-stream message.
+- `fail()` ends the stream with an error status. The client keeps the messages that it got before.
+- A throwable from the generator leaves `respond()`, and the call stays open. Catch it and call `fail()`. A yielded value that is not a string throws `\TypeError` in the same way.
+- When the client cancels the call, the connection closes or the deadline passes, the plugin throws `Rapira\Exception\WorkDiscardedException` into the generator at its `yield`, and again at each later `yield`. This also ends a `yield` that waits for a slow client. The `finally` blocks of the generator run. When the generator catches the exception and ends, `respond()` returns normally. When the generator does not catch it, `respond()` throws it. When the call closes after the last `yield`, `respond()` returns normally and sends no outcome, and `isCancelled()` returns true.
+- `respond()` on a call that is already closed throws `WorkDiscardedException` and does not start the generator.
 
 ### Outcomes
 
-- `fail()` takes the `google.rpc.Status` triple: a code, a message and a list of `ErrorDetail`. For gRPC and gRPC-Web, the plugin sends `grpc-status`, `grpc-message` and `grpc-status-details-bin`. For Connect, the plugin sends the HTTP status of the code and a JSON error body. A Connect detail has the bare type name, for example `google.rpc.ErrorInfo`, and an unpadded base64 value.
+- `fail()` takes the `google.rpc.Status` triple: a code, a message and a list of `ErrorDetail`. For gRPC and gRPC-Web, the plugin sends `grpc-status`, `grpc-message` and `grpc-status-details-bin`. For a unary Connect call, the plugin sends the HTTP status of the code and a JSON error body. A Connect stream has the HTTP status 200, and its end-of-stream message holds the error and the trailers. A Connect detail has the bare type name, for example `google.rpc.ErrorInfo`, and an unpadded base64 value.
 - `fail()` is the only way to send an error status. The plugin does not catch `Rapira\Grpc\Exception\GrpcException`. Catch it and call `$call->fail($e->status)`.
-- A call that PHP does not finalize is lost. The client gets INTERNAL with the message `internal error`, and the plugin logs a warning under the `grpc` target. An uncaught throwable also loses the call. The client does not see the message of the throwable.
+- A call that PHP does not finalize is lost. The client gets INTERNAL with the message `internal error`, and the plugin logs a warning under the `grpc` target. A lost stream ends with this status after the messages that the client already got. An uncaught throwable also loses the call. The client does not see the message of the throwable.
 - The client gets UNAVAILABLE when the plugin refuses the call before PHP sees it: the intake of the worker stays full for 30 seconds, the pool stops, or the PHP boot of the worker failed.
 
 ## Deadlines
@@ -148,7 +164,7 @@ A client sets a timeout with `grpc-timeout` (gRPC and gRPC-Web) or `connect-time
 
 `Context::$deadline` is the deadline as a Unix timestamp, or null when the call has no deadline. When the deadline passes, the client gets DEADLINE_EXCEEDED and `isCancelled()` returns true. A client that cancels the call or closes the connection has the same effect on PHP.
 
-The plugin cannot stop PHP code, so PHP continues to run the call. A later `respond()` or `fail()` throws `Rapira\Exception\WorkDiscardedException`. Check `isCancelled()` during long work. Set `default_timeout_secs` so that each call has a deadline.
+The plugin cannot stop PHP code, so PHP continues to run the call. A later `respond()` or `fail()` throws `Rapira\Exception\WorkDiscardedException`, and the generator of a streaming response gets it at its next `yield`. Check `isCancelled()` during long work. Set `default_timeout_secs` so that each call has a deadline.
 
 ## Health and reflection
 
@@ -162,13 +178,13 @@ grpcurl -plaintext 127.0.0.1:50051 list
 
 ## Shutdown
 
-On the stop signal the accept loop ends, health reports NOT_SERVING, and open `Watch` streams end. Calls in flight drain within the drain window (see Config). Connections that are open after the drain window are cut. The shutdown reports an error only when a call is still in flight at the end of the window. An open reflection stream, for example an Evans REPL session (https://github.com/ktr0731/evans), holds its connection until the drain window ends.
+On the stop signal the accept loop ends, health reports NOT_SERVING, and open `Watch` streams end. Calls in flight drain within the drain window (see Config). Connections that are open after the drain window are cut. The shutdown reports an error only when a call is still in flight at the end of the window. A streaming response from PHP is in flight until it ends. An open reflection stream, for example an Evans REPL session (https://github.com/ktr0731/evans), holds its connection until the drain window ends.
 
 The listener sends an HTTP/2 keepalive PING to a connection that sends no request, no request data and no PING answer for `keepalive_interval_secs`, and closes the connection when the peer does not answer within `keepalive_timeout_secs`. Both keys are 10 seconds by default. An HTTP/2 peer that is gone without a FIN keeps its connection open for at most the sum of both keys after its last frame. HTTP/1.1 has no PING, so these keys do not apply to a gRPC-Web or Connect client on HTTP/1.1.
 
 ## Limits
 
-- One worker process serves each connection, and a PHP worker runs one call at a time. A gRPC client usually sends all calls of a channel on one HTTP/2 connection. Such a client gets the throughput of one worker, for all pool sizes. The other calls wait in the intake of that worker. To use more workers, open several connections, or use an L7 load balancer that spreads the calls over several connections.
+- One worker process serves each connection, and a PHP worker runs one call at a time. A gRPC client usually sends all calls of a channel on one HTTP/2 connection. Such a client gets the throughput of one worker, for all pool sizes. The other calls wait in the intake of that worker. A streaming call holds its worker until the stream ends. To use more workers, open several connections, or use an L7 load balancer that spreads the calls over several connections.
 - The message size limit is 4 MiB, and no key changes it. A larger request answers RESOURCE_EXHAUSTED.
 - The listener does not terminate TLS. `Context::$tls` is always null. Put a TLS proxy between the clients and the listener when clients need TLS.
 - The JSON decoder has no element memory limit. A 4 MiB JSON request with many small elements can use several hundred MiB of memory for repeated or map fields, and more than 1 GiB of memory and more than 1 s of CPU for `Struct` or `ListValue` fields, in the worker process. The 4 MiB limit applies after decompression, so a proxy between untrusted clients and the listener must limit the decompressed request size.
@@ -209,7 +225,7 @@ cargo build -p rapira_grpc
 cargo clippy -p rapira_grpc --all-targets
 ```
 
-The tests that need PHP or a socket live in `crates/tests/tests/e2e/` and run the `rapira` binary: `grpc_server.rs` and `grpc_schema.rs` drive this crate over the wire with PHP fixtures in the role of the application, `grpc_dispatcher.rs` and `grpc_values.rs` cover the PHP side, `grpc.rs` covers the `[grpc]` pool of `rapira.toml`, and `grpc_auth.rs` covers the `auth` interceptor. `crates/tests/src/grpc.rs` holds the gRPC, gRPC-Web and Connect clients. `make grpc_fixtures` rebuilds the descriptor sets in `crates/tests/fixtures/grpc/` with a pinned `buf`.
+The tests that need PHP or a socket live in `crates/tests/tests/e2e/` and run the `rapira` binary: `grpc_server.rs`, `grpc_stream.rs` and `grpc_schema.rs` drive this crate over the wire with PHP fixtures in the role of the application, `grpc_dispatcher.rs` and `grpc_values.rs` cover the PHP side, `grpc.rs` covers the `[grpc]` pool of `rapira.toml`, and `grpc_auth.rs` covers the `auth` interceptor. `crates/tests/src/grpc.rs` holds the gRPC, gRPC-Web and Connect clients. `make grpc_fixtures` rebuilds the descriptor sets in `crates/tests/fixtures/grpc/` with a pinned `buf`.
 
 ## License
 

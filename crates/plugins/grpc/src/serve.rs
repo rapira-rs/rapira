@@ -29,15 +29,15 @@ struct Serving {
     health: Arc<StaticChecker>,
     /// Each connection holds a receiver until it ends, so `closed()` resolves when the last connection is gone.
     shutdown: watch::Sender<bool>,
-    /// The calls whose response is not ready yet.
+    /// The calls whose response is not complete: a unary call until its response is ready, and a stream of PHP until its body ends.
     inflight: Arc<AtomicUsize>,
 }
 
 /// Counts one call in flight until it drops, also when the client leaves first.
-struct InFlight(Arc<AtomicUsize>);
+pub(crate) struct InFlight(Arc<AtomicUsize>);
 
 impl InFlight {
-    fn start(count: &Arc<AtomicUsize>) -> Self {
+    pub(crate) fn start(count: &Arc<AtomicUsize>) -> Self {
         count.fetch_add(1, Relaxed);
         Self(Arc::clone(count))
     }
@@ -59,9 +59,11 @@ impl Serving {
         if let Some(max) = config.max_timeout {
             deadlines = deadlines.with_max(max);
         }
+        let inflight = Arc::new(AtomicUsize::new(0));
         let dispatcher = PhpDispatcher {
             schema: Arc::clone(&config.schema),
             intake,
+            inflight: Arc::clone(&inflight),
         };
         // The plugin routes come first, so a configured service cannot hide health or reflection.
         let mut service = ConnectRpcService::new(Chain(router, dispatcher))
@@ -80,7 +82,7 @@ impl Serving {
                 .with_http2_keepalive_timeout(config.keepalive_timeout),
             health,
             shutdown: watch::Sender::new(false),
-            inflight: Arc::new(AtomicUsize::new(0)),
+            inflight,
         }
     }
 

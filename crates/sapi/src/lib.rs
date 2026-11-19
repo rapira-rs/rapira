@@ -12,6 +12,7 @@ pub mod quota;
 mod rapira_worker;
 pub mod scoreboard;
 mod start;
+pub mod stream;
 pub mod types;
 pub mod work;
 pub mod zend;

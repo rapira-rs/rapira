@@ -23,6 +23,8 @@ service EchoService {
     option idempotency_level = NO_SIDE_EFFECTS;
   }
   rpc Watch(EchoRequest) returns (stream EchoResponse);
+  rpc Collect(stream EchoRequest) returns (EchoResponse);
+  rpc Chat(stream EchoRequest) returns (stream EchoResponse);
 }
 
 service OtherService {
