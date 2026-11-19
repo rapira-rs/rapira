@@ -1,3 +1,5 @@
+# php-rebuild.yml on main calls this file to build the newest release again.
+# So this file must always work with the dockerfiles directory of the newest release.
 name: Docker
 on:
     workflow_call:
@@ -14,6 +16,14 @@ on:
                 description: "Extra moving alias prefix for the merged tags, such as nightly"
                 type: string
                 default: ""
+            php:
+                description: "PHP minors to build, separated by spaces"
+                type: string
+                default: "8.4 8.5 8.6"
+            no_cache:
+                description: "Build without the layer cache"
+                type: boolean
+                default: false
     workflow_dispatch:
         inputs:
             ref:
@@ -24,6 +34,10 @@ on:
                 description: "Image version tag, without the v prefix"
                 type: string
                 required: true
+            php:
+                description: "PHP minors to build, separated by spaces"
+                type: string
+                default: "8.4 8.5 8.6"
 
 permissions:
     contents: read
@@ -32,28 +46,44 @@ env:
     IMAGE: ghcr.io/${{ github.repository }}
 
 jobs:
+    resolve:
+        runs-on: ubuntu-26.04
+        timeout-minutes: 5
+        outputs:
+            matrix: ${{ steps.tags.outputs.matrix }}
+        steps:
+            - id: tags
+              shell: bash
+              env:
+                  MINORS: ${{ inputs.php }}
+              run: |
+                  set -euo pipefail
+                  for MINOR in $MINORS; do
+                      # The newest stable php-src tag of the minor.
+                      VERSION=$(git ls-remote --tags --refs https://github.com/php/php-src.git "refs/tags/php-$MINOR.*" \
+                          | sed -n -E 's|.*refs/tags/php-([0-9]+\.[0-9]+\.[0-9]+)$|\1|p' | sort -V | tail -n 1)
+                      [ -n "$VERSION" ] || { echo "::error::no stable php-src tag for PHP $MINOR"; exit 1; }
+                      jq -cn --arg php "$MINOR" --arg version "$VERSION" '{php: $php, version: $version}' >> images.json
+                  done
+                  cat images.json
+                  echo "matrix=$(jq -cs . images.json)" >> "$GITHUB_OUTPUT"
+
     build:
+        needs: resolve
         runs-on: ${{ matrix.runner }}
-        timeout-minutes: 45
+        timeout-minutes: 60
         permissions:
             contents: read
             packages: write
         strategy:
             fail-fast: false
             matrix:
-                php: ["8.4", "8.5"]
+                image: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+                variant: [nts, zts]
                 arch: [amd64, arm64]
                 include:
                     - { arch: amd64, runner: ubuntu-26.04 }
                     - { arch: arm64, runner: ubuntu-26.04-arm }
-                    - {
-                          php: "8.4",
-                          base: "php:8.4-cli-trixie@sha256:d63e8b80cd4c6cfd01cfa7c910522e299cdc7ca1a2b6d6563db48df3c17e6c55",
-                      }
-                    - {
-                          php: "8.5",
-                          base: "php:8.5-cli-trixie@sha256:50956f094e90a716d43bea28087d447555ad80510e386ab8c9c10d8c70d781a9",
-                      }
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
@@ -68,15 +98,16 @@ jobs:
             - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
               with:
                   context: .
-                  target: runtime
-                  build-args: PHP_BASE=${{ matrix.base }}
+                  file: dockerfiles/${{ matrix.image.php }}/${{ matrix.variant }}/Dockerfile
+                  build-args: PHP_VERSION=${{ matrix.image.version }}
+                  no-cache: ${{ inputs.no_cache || false }}
                   push: true
-                  tags: ${{ env.IMAGE }}:${{ inputs.version }}-php${{ matrix.php }}-${{ matrix.arch }}
-                  cache-from: type=gha,scope=${{ matrix.php }}-${{ matrix.arch }}
-                  cache-to: type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.arch }}
+                  tags: ${{ env.IMAGE }}:${{ inputs.version }}-php${{ matrix.image.php }}-${{ matrix.variant }}-${{ matrix.arch }}
+                  cache-from: type=gha,scope=${{ matrix.image.php }}-${{ matrix.variant }}-${{ matrix.arch }}
+                  cache-to: type=gha,mode=max,scope=${{ matrix.image.php }}-${{ matrix.variant }}-${{ matrix.arch }}
 
     merge:
-        needs: build
+        needs: [resolve, build]
         runs-on: ubuntu-26.04
         timeout-minutes: 15
         permissions:
@@ -85,7 +116,8 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                php: ["8.4", "8.5"]
+                image: ${{ fromJSON(needs.resolve.outputs.matrix) }}
+                variant: [nts, zts]
         steps:
             - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
             - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
@@ -95,12 +127,16 @@ jobs:
                   password: ${{ secrets.GITHUB_TOKEN }}
             - shell: bash
               env:
-                  PHP: ${{ matrix.php }}
+                  NAME: php${{ matrix.image.php }}-${{ matrix.variant }}
+                  PHP_VERSION: ${{ matrix.image.version }}
                   V: ${{ inputs.version }}
                   ALIAS: ${{ inputs.alias }}
               run: |
                   set -euo pipefail
-                  TAGS=(-t "$IMAGE:$V-php$PHP")
-                  [ -z "$ALIAS" ] || TAGS+=(-t "$IMAGE:$ALIAS-php$PHP")
+                  TAGS=(-t "$IMAGE:$V-$NAME")
+                  [ -z "$ALIAS" ] || TAGS+=(-t "$IMAGE:$ALIAS-$NAME")
+                  # php-rebuild.yml reads the two annotations.
                   docker buildx imagetools create "${TAGS[@]}" \
-                    "$IMAGE:$V-php$PHP-amd64" "$IMAGE:$V-php$PHP-arm64"
+                    --annotation "index:rs.rapira.php.version=$PHP_VERSION" \
+                    --annotation "index:org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                    "$IMAGE:$V-$NAME-amd64" "$IMAGE:$V-$NAME-arm64"

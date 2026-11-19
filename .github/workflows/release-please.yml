@@ -81,8 +81,10 @@ jobs:
               run: |
                   set -euo pipefail
                   case "$V" in *-*) exit 0 ;; esac
-                  for PHP in 8.4 8.5; do
-                      docker buildx imagetools create \
-                        -t "$IMAGE:${V%.*}-php$PHP" -t "$IMAGE:php$PHP" \
-                        "$IMAGE:$V-php$PHP"
+                  # php-rebuild.yml reads its state from php<minor>-nts, so that tag moves last.
+                  for PHP in 8.4 8.5 8.6; do
+                      for VARIANT in zts nts; do
+                          docker buildx imagetools create -t "$IMAGE:${V%.*}-php$PHP-$VARIANT" "$IMAGE:$V-php$PHP-$VARIANT"
+                          docker buildx imagetools create -t "$IMAGE:php$PHP-$VARIANT" "$IMAGE:$V-php$PHP-$VARIANT"
+                      done
                   done
