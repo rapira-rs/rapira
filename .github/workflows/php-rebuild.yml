@@ -1,14 +1,18 @@
-# Builds the images of the newest release again when php-src tags a patch release, and one time each week for Debian package fixes.
-# The state is on the image: docker.yml writes the PHP version and the build time as annotations on each index.
+# Builds the PHP images when php-src tags a patch release, when dockerfiles/ changes on main, and one time each week for Debian package fixes.
+# Then builds the Rapira images of the newest release again on each new NTS PHP image.
+# The state is on the images: annotations of ghcr.io/<owner>/php:<minor>-nts and of the rapira tag php<minor>.
 name: PHP rebuild
 on:
     schedule:
-        # GitHub drops scheduled runs most often at the start of an hour.
+        # GitHub delays or drops scheduled runs under high load, for example at the start of each hour: https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule
         - cron: "7,22,37,52 * * * *"
+    push:
+        branches: [main]
+        paths: ["dockerfiles/**"]
     workflow_dispatch:
         inputs:
             force:
-                description: "Build all minors again"
+                description: "Build the PHP images of all minors again"
                 type: boolean
                 default: false
 
@@ -21,43 +25,156 @@ concurrency:
 
 env:
     IMAGE: ghcr.io/${{ github.repository }}
+    PHP_IMAGE: ghcr.io/${{ github.repository_owner }}/php
 
 jobs:
-    check:
+    php-check:
         runs-on: ubuntu-26.04
         timeout-minutes: 5
+        permissions:
+            contents: read
+            packages: read
+        outputs:
+            matrix: ${{ steps.check.outputs.matrix }}
+        steps:
+            - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+            - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+            - id: check
+              shell: bash
+              env:
+                  FORCE: ${{ github.event_name == 'push' || inputs.force }}
+              run: |
+                  set -euo pipefail
+                  : > images.json
+                  for MINOR in 8.4 8.5 8.6; do
+                      NEWEST=$(git ls-remote --tags --refs https://github.com/php/php-src.git "refs/tags/php-$MINOR.*" \
+                          | sed -n -E 's|.*refs/tags/php-([0-9]+\.[0-9]+\.[0-9]+)$|\1|p' | sort -V | tail -n 1)
+                      [ -n "$NEWEST" ] || { echo "::error::no stable php-src tag for PHP $MINOR"; exit 1; }
+                      # The merge job moves <minor>-nts last.
+                      INDEX=$(docker buildx imagetools inspect --raw "$PHP_IMAGE:$MINOR-nts" || true)
+                      HAVE=$(jq -r '.annotations["org.opencontainers.image.version"] // empty' <<< "$INDEX")
+                      CREATED=$(jq -r '.annotations["org.opencontainers.image.created"] // empty' <<< "$INDEX")
+                      echo "PHP $MINOR: image has '$HAVE', built '$CREATED'; php-src has $NEWEST"
+                      if [ "$FORCE" = true ] || [ -z "$HAVE" ] \
+                          || [ "$(printf '%s\n' "$HAVE" "$NEWEST" | sort -V | tail -n 1)" != "$HAVE" ] \
+                          || [ $(( $(date +%s) - $(date -d "$CREATED" +%s) )) -ge 604800 ]; then
+                          jq -cn --arg php "$MINOR" --arg version "$NEWEST" '{php: $php, version: $version}' >> images.json
+                      fi
+                  done
+                  echo "matrix=$(jq -cs . images.json)" >> "$GITHUB_OUTPUT"
+
+    php-build:
+        needs: php-check
+        if: needs.php-check.outputs.matrix != '[]'
+        runs-on: ${{ matrix.runner }}
+        timeout-minutes: 45
+        permissions:
+            contents: read
+            packages: write
+        strategy:
+            fail-fast: false
+            matrix:
+                image: ${{ fromJSON(needs.php-check.outputs.matrix) }}
+                variant: [nts, zts]
+                arch: [amd64, arm64]
+                include:
+                    - { arch: amd64, runner: ubuntu-26.04 }
+                    - { arch: arm64, runner: ubuntu-26.04-arm }
+        steps:
+            - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+              with:
+                  persist-credentials: false
+            - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+            - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+            - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+              with:
+                  context: dockerfiles
+                  file: dockerfiles/${{ matrix.image.php }}/${{ matrix.variant }}/Dockerfile
+                  build-args: PHP_VERSION=${{ matrix.image.version }}
+                  # A build without the cache also installs the newest Debian packages.
+                  no-cache: true
+                  push: true
+                  tags: ${{ env.PHP_IMAGE }}:${{ matrix.image.version }}-${{ matrix.variant }}-${{ matrix.arch }}
+
+    php-merge:
+        needs: [php-check, php-build]
+        runs-on: ubuntu-26.04
+        timeout-minutes: 15
+        permissions:
+            contents: read
+            packages: write
+        strategy:
+            fail-fast: false
+            matrix:
+                image: ${{ fromJSON(needs.php-check.outputs.matrix) }}
+        steps:
+            - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+            - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+            - shell: bash
+              env:
+                  MINOR: ${{ matrix.image.php }}
+                  VERSION: ${{ matrix.image.version }}
+              run: |
+                  set -euo pipefail
+                  # php-check reads the annotations of <minor>-nts, so that tag moves last.
+                  for VARIANT in zts nts; do
+                      docker buildx imagetools create -t "$PHP_IMAGE:$VERSION-$VARIANT" -t "$PHP_IMAGE:$MINOR-$VARIANT" \
+                        --annotation "index:org.opencontainers.image.version=$VERSION" \
+                        --annotation "index:org.opencontainers.image.created=$(date -u +%Y-%m-%dT%H:%M:%SZ)" \
+                        "$PHP_IMAGE:$VERSION-$VARIANT-amd64" "$PHP_IMAGE:$VERSION-$VARIANT-arm64"
+                  done
+
+    rapira-check:
+        needs: php-merge
+        if: ${{ !cancelled() }}
+        runs-on: ubuntu-26.04
+        timeout-minutes: 5
+        permissions:
+            contents: read
+            packages: read
         outputs:
             tag: ${{ steps.check.outputs.tag }}
             version: ${{ steps.check.outputs.version }}
             php: ${{ steps.check.outputs.php }}
         steps:
+            - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+            - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
             - id: check
               shell: bash
               env:
                   GH_TOKEN: ${{ github.token }}
                   GH_REPO: ${{ github.repository }}
-                  FORCE: ${{ inputs.force }}
               run: |
                   set -euo pipefail
                   TAG=$(gh release view --json tagName --jq .tagName)
                   SELECTED=""
                   for MINOR in 8.4 8.5 8.6; do
-                      # A release moves php<minor>-nts last. The tag does not exist before the first release with these images.
-                      INDEX=$(docker buildx imagetools inspect --raw "$IMAGE:php$MINOR-nts" || true)
-                      HAVE=$(jq -r '.annotations["rs.rapira.php.version"] // empty' <<< "$INDEX")
-                      CREATED=$(jq -r '.annotations["org.opencontainers.image.created"] // empty' <<< "$INDEX")
+                      # A release moves php<minor> last. A php<minor> tag without a base annotation comes from a root Dockerfile without the PHP_IMAGE argument.
+                      INDEX=$(docker buildx imagetools inspect --raw "$IMAGE:php$MINOR" || true)
+                      HAVE=$(jq -r '.annotations["org.opencontainers.image.base.digest"] // empty' <<< "$INDEX")
                       if [ -z "$HAVE" ]; then
-                          echo "PHP $MINOR: php$MINOR-nts has no PHP version annotation, skip"
+                          echo "PHP $MINOR: php$MINOR has no base annotation, skip"
                           continue
                       fi
-                      NEWEST=$(git ls-remote --tags --refs https://github.com/php/php-src.git "refs/tags/php-$MINOR.*" \
-                          | sed -n -E 's|.*refs/tags/php-([0-9]+\.[0-9]+\.[0-9]+)$|\1|p' | sort -V | tail -n 1)
-                      AGE=$(( $(date +%s) - $(date -d "$CREATED" +%s) ))
-                      HIGHEST=$(printf '%s\n' "$HAVE" "$NEWEST" | sort -V | tail -n 1)
-                      echo "PHP $MINOR: image has $HAVE, built $AGE s ago; php-src has $NEWEST"
-                      if [ "$FORCE" = true ] || [ "$AGE" -ge 604800 ] || [ "$HIGHEST" != "$HAVE" ]; then
-                          SELECTED="$SELECTED $MINOR"
-                      fi
+                      CURRENT=$(docker buildx imagetools inspect "$PHP_IMAGE:$MINOR-nts" --format '{{json .Manifest}}' | jq -er .digest)
+                      echo "PHP $MINOR: php$MINOR is built on $HAVE; $PHP_IMAGE:$MINOR-nts is $CURRENT"
+                      [ "$HAVE" = "$CURRENT" ] || SELECTED="$SELECTED $MINOR"
                   done
                   {
                       echo "tag=$TAG"
@@ -65,21 +182,21 @@ jobs:
                       echo "php=${SELECTED# }"
                   } >> "$GITHUB_OUTPUT"
 
-    images:
-        needs: check
-        if: needs.check.outputs.php != ''
+    rapira-images:
+        needs: rapira-check
+        if: ${{ !cancelled() && needs.rapira-check.outputs.php != '' }}
         permissions:
             contents: read
             packages: write
         uses: ./.github/workflows/docker.yml
         with:
-            ref: ${{ needs.check.outputs.tag }}
-            version: ${{ needs.check.outputs.version }}
-            php: ${{ needs.check.outputs.php }}
-            no_cache: true
+            ref: ${{ needs.rapira-check.outputs.tag }}
+            version: ${{ needs.rapira-check.outputs.version }}
+            php: ${{ needs.rapira-check.outputs.php }}
 
-    aliases:
-        needs: [check, images]
+    rapira-aliases:
+        needs: [rapira-check, rapira-images]
+        if: ${{ !cancelled() && needs.rapira-images.result == 'success' }}
         runs-on: ubuntu-26.04
         timeout-minutes: 15
         permissions:
@@ -88,9 +205,9 @@ jobs:
         env:
             GH_TOKEN: ${{ github.token }}
             GH_REPO: ${{ github.repository }}
-            TAG: ${{ needs.check.outputs.tag }}
-            V: ${{ needs.check.outputs.version }}
-            MINORS: ${{ needs.check.outputs.php }}
+            TAG: ${{ needs.rapira-check.outputs.tag }}
+            V: ${{ needs.rapira-check.outputs.version }}
+            MINORS: ${{ needs.rapira-check.outputs.php }}
         steps:
             - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
             - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
@@ -106,10 +223,8 @@ jobs:
                       echo "A newer release than $TAG is published. Its publish job moves the aliases."
                       exit 0
                   fi
-                  # The check job reads its state from php<minor>-nts, so that tag moves last.
                   for PHP in $MINORS; do
-                      for VARIANT in zts nts; do
-                          docker buildx imagetools create -t "$IMAGE:${V%.*}-php$PHP-$VARIANT" "$IMAGE:$V-php$PHP-$VARIANT"
-                          docker buildx imagetools create -t "$IMAGE:php$PHP-$VARIANT" "$IMAGE:$V-php$PHP-$VARIANT"
-                      done
+                      docker buildx imagetools create \
+                        -t "$IMAGE:${V%.*}-php$PHP" -t "$IMAGE:php$PHP" \
+                        "$IMAGE:$V-php$PHP"
                   done
