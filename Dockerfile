@@ -1,31 +1,13 @@
 # syntax=docker/dockerfile:1
 
-# Dependabot does not update this digest. Change it together with the 8.5 base in .github/workflows/docker.yml at each PHP patch release.
-ARG PHP_BASE=php:8.5-cli-trixie@sha256:50956f094e90a716d43bea28087d447555ad80510e386ab8c9c10d8c70d781a9
+# The Rapira image: rapira on an NTS PHP image from dockerfiles/<minor>/nts.
+# The workflows pass the PHP image of each minor by digest.
+ARG PHP_IMAGE=ghcr.io/rapira-rs/php:8.6-nts
 
 # The tag moves to each stable Rust release, as rust-toolchain.toml and the CI workflows do.
 FROM rust:1-trixie AS rust
 
-FROM ${PHP_BASE} AS php-extensions
-
-RUN set -eux; \
-    apt-get update; \
-    apt-get install -y --no-install-recommends libicu-dev libpq-dev; \
-    docker-php-source extract; \
-    curl -fsSL --retry 3 https://pecl.php.net/get/igbinary-3.2.17RC1.tgz -o /tmp/igbinary.tgz; \
-    curl -fsSL --retry 3 https://pecl.php.net/get/redis-6.3.0.tgz -o /tmp/redis.tgz; \
-    echo '91da821443db125282a6aea039f24588dd28ff5d71e8187f6ecc41165bceafbc  /tmp/igbinary.tgz' | sha256sum -c -; \
-    echo '0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5  /tmp/redis.tgz' | sha256sum -c -; \
-    mkdir -p /usr/src/php/ext/igbinary /usr/src/php/ext/redis; \
-    tar -xzf /tmp/igbinary.tgz -C /usr/src/php/ext/igbinary --strip-components=1; \
-    tar -xzf /tmp/redis.tgz -C /usr/src/php/ext/redis --strip-components=1; \
-    docker-php-ext-install -j"$(nproc)" bcmath intl pdo_pgsql pgsql igbinary; \
-    docker-php-ext-configure redis --enable-redis-igbinary; \
-    docker-php-ext-install -j"$(nproc)" redis; \
-    docker-php-source delete; \
-    rm -rf /var/lib/apt/lists/* /tmp/igbinary.tgz /tmp/redis.tgz
-
-FROM php-extensions AS builder
+FROM ${PHP_IMAGE} AS builder
 
 COPY --from=rust /usr/local/rustup /usr/local/rustup
 COPY --from=rust /usr/local/cargo /usr/local/cargo
@@ -49,47 +31,15 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cp target/release/rapira /usr/local/bin/rapira; \
     ldd /usr/local/bin/rapira | grep -q '/usr/local/lib/libphp.so'
 
-FROM php-extensions AS payload
-
-COPY --from=builder /usr/local/bin/rapira /out/usr/local/bin/rapira
-COPY --from=builder /usr/local/lib/libphp.so /out/usr/local/lib/libphp.so
-
-# PHP 8.4 builds opcache as a shared module and 8.5 links it into libphp, so the copy is conditional.
-RUN set -eux; \
-    ext_dir="$(php-config --extension-dir)"; \
-    for ext in bcmath intl pdo_pgsql pgsql igbinary redis sodium; do \
-        install -D "$ext_dir/$ext.so" "/out$ext_dir/$ext.so"; \
-        install -D -m 0644 "$PHP_INI_DIR/conf.d/docker-php-ext-$ext.ini" \
-                           "/out$PHP_INI_DIR/conf.d/docker-php-ext-$ext.ini"; \
-    done; \
-    if [ -f "$ext_dir/opcache.so" ]; then \
-        install -D "$ext_dir/opcache.so" "/out$ext_dir/opcache.so"; \
-        install -D -m 0644 "$PHP_INI_DIR/conf.d/docker-php-ext-opcache.ini" \
-                           "/out$PHP_INI_DIR/conf.d/docker-php-ext-opcache.ini"; \
-    fi; \
-    php --ri "Zend OPcache" > /dev/null
-
-WORKDIR /out/usr/local/share/rapira
-
-# Records the Debian packages owning shared objects the payload needs from outside /usr/local: https://manpages.debian.org/trixie/dpkg/dpkg-query.1.en.html#S
-RUN find /out/usr/local -type f \( -executable -o -name '*.so' \) -exec ldd '{}' ';' 2>/dev/null \
-        | awk '/=>/ { so = $(NF-1); if (index(so, "/usr/local/") == 1) { next }; gsub("^/(usr/)?", "", so); printf "*%s\n", so }' \
-        | sort -u \
-        | xargs -r dpkg-query --search \
-        | awk 'sub(":$", "", $1) { print $1 }' \
-        | sort -u > debian-packages.txt
-
-RUN php -r 'echo PHP_VERSION, "\n";' > PHP_VERSION.txt
-
-# The staged pair links and runs.
-RUN /out/usr/local/bin/rapira --version
-
-FROM scratch AS runtime
+FROM ${PHP_IMAGE} AS runtime
 
 LABEL org.opencontainers.image.title="Rapira" \
-      org.opencontainers.image.description="rapira binary and libphp.so, staged for COPY --from into your own image" \
+      org.opencontainers.image.description="Rapira with NTS PHP and PHP extensions" \
       org.opencontainers.image.url="https://rapira.rs" \
       org.opencontainers.image.source="https://github.com/rapira-rs/rapira" \
       org.opencontainers.image.licenses="MIT"
 
-COPY --from=payload /out/ /
+COPY --from=builder /usr/local/bin/rapira /usr/local/bin/rapira
+RUN rapira --version
+
+CMD ["rapira", "serve", "/app/rapira.toml"]

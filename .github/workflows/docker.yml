@@ -1,3 +1,5 @@
+# php-rebuild.yml on main calls this file to build the newest release again.
+# So this file must always work with the root Dockerfile of the newest release.
 name: Docker
 on:
     workflow_call:
@@ -14,6 +16,14 @@ on:
                 description: "Extra moving alias prefix for the merged tags, such as nightly"
                 type: string
                 default: ""
+            php:
+                description: "PHP minors to build, separated by spaces"
+                type: string
+                default: "8.4 8.5 8.6"
+        outputs:
+            php:
+                description: "The PHP minors that the run built, separated by spaces"
+                value: ${{ jobs.resolve.outputs.php }}
     workflow_dispatch:
         inputs:
             ref:
@@ -24,15 +34,56 @@ on:
                 description: "Image version tag, without the v prefix"
                 type: string
                 required: true
+            php:
+                description: "PHP minors to build, separated by spaces"
+                type: string
+                default: "8.4 8.5 8.6"
 
 permissions:
     contents: read
 
 env:
     IMAGE: ghcr.io/${{ github.repository }}
+    PHP_IMAGE: ghcr.io/${{ github.repository_owner }}/php
 
 jobs:
+    resolve:
+        runs-on: ubuntu-26.04
+        timeout-minutes: 5
+        permissions:
+            contents: read
+            packages: read
+        outputs:
+            matrix: ${{ steps.base.outputs.matrix }}
+            php: ${{ steps.base.outputs.php }}
+        steps:
+            - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+            - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+              with:
+                  registry: ghcr.io
+                  username: ${{ github.actor }}
+                  password: ${{ secrets.GITHUB_TOKEN }}
+            - id: base
+              shell: bash
+              env:
+                  MINORS: ${{ inputs.php }}
+              run: |
+                  set -euo pipefail
+                  for MINOR in $MINORS; do
+                      # All jobs of a minor build on the same PHP image, named by digest.
+                      NAME="$PHP_IMAGE:$MINOR-nts"
+                      DIGEST=$(docker buildx imagetools inspect "$NAME" --format '{{json .Manifest}}' | jq -er .digest)
+                      jq -cn --arg php "$MINOR" --arg name "$NAME" --arg digest "$DIGEST" \
+                          '{php: $php, name: $name, digest: $digest}' >> images.json
+                  done
+                  cat images.json
+                  {
+                      echo "matrix=$(jq -cs . images.json)"
+                      echo "php=$(jq -rs 'map(.php) | join(" ")' images.json)"
+                  } >> "$GITHUB_OUTPUT"
+
     build:
+        needs: resolve
         runs-on: ${{ matrix.runner }}
         timeout-minutes: 45
         permissions:
@@ -41,19 +92,11 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                php: ["8.4", "8.5"]
+                image: ${{ fromJSON(needs.resolve.outputs.matrix) }}
                 arch: [amd64, arm64]
                 include:
                     - { arch: amd64, runner: ubuntu-26.04 }
                     - { arch: arm64, runner: ubuntu-26.04-arm }
-                    - {
-                          php: "8.4",
-                          base: "php:8.4-cli-trixie@sha256:d63e8b80cd4c6cfd01cfa7c910522e299cdc7ca1a2b6d6563db48df3c17e6c55",
-                      }
-                    - {
-                          php: "8.5",
-                          base: "php:8.5-cli-trixie@sha256:50956f094e90a716d43bea28087d447555ad80510e386ab8c9c10d8c70d781a9",
-                      }
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with:
@@ -69,14 +112,14 @@ jobs:
               with:
                   context: .
                   target: runtime
-                  build-args: PHP_BASE=${{ matrix.base }}
+                  build-args: PHP_IMAGE=${{ matrix.image.name }}@${{ matrix.image.digest }}
                   push: true
-                  tags: ${{ env.IMAGE }}:${{ inputs.version }}-php${{ matrix.php }}-${{ matrix.arch }}
-                  cache-from: type=gha,scope=${{ matrix.php }}-${{ matrix.arch }}
-                  cache-to: type=gha,mode=max,scope=${{ matrix.php }}-${{ matrix.arch }}
+                  tags: ${{ env.IMAGE }}:${{ inputs.version }}-php${{ matrix.image.php }}-${{ matrix.arch }}
+                  cache-from: type=gha,scope=${{ matrix.image.php }}-${{ matrix.arch }}
+                  cache-to: type=gha,mode=max,scope=${{ matrix.image.php }}-${{ matrix.arch }}
 
     merge:
-        needs: build
+        needs: [resolve, build]
         runs-on: ubuntu-26.04
         timeout-minutes: 15
         permissions:
@@ -85,7 +128,7 @@ jobs:
         strategy:
             fail-fast: false
             matrix:
-                php: ["8.4", "8.5"]
+                image: ${{ fromJSON(needs.resolve.outputs.matrix) }}
         steps:
             - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
             - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
@@ -95,12 +138,17 @@ jobs:
                   password: ${{ secrets.GITHUB_TOKEN }}
             - shell: bash
               env:
-                  PHP: ${{ matrix.php }}
+                  PHP: ${{ matrix.image.php }}
+                  BASE_NAME: ${{ matrix.image.name }}
+                  BASE_DIGEST: ${{ matrix.image.digest }}
                   V: ${{ inputs.version }}
                   ALIAS: ${{ inputs.alias }}
               run: |
                   set -euo pipefail
                   TAGS=(-t "$IMAGE:$V-php$PHP")
                   [ -z "$ALIAS" ] || TAGS+=(-t "$IMAGE:$ALIAS-php$PHP")
+                  # php-rebuild.yml compares the base digest with the current PHP image.
                   docker buildx imagetools create "${TAGS[@]}" \
+                    --annotation "index:org.opencontainers.image.base.name=$BASE_NAME" \
+                    --annotation "index:org.opencontainers.image.base.digest=$BASE_DIGEST" \
                     "$IMAGE:$V-php$PHP-amd64" "$IMAGE:$V-php$PHP-arm64"

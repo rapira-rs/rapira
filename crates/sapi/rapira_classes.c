@@ -184,7 +184,14 @@ PHP_RSHUTDOWN_FUNCTION(rapira) {
         zend_end_try();
     }
 #endif
-    php_header();
+    // php_header runs the user header callback. From php-8.4.28 and
+    // php-8.5.13, a bailout that leaves an RSHUTDOWN ends the process:
+    // https://github.com/php/php-src/security/advisories/GHSA-g3vh-838c-65v7
+    // After a bailout here, the cycle end seals the response and forgets the
+    // dispatcher.
+    zend_try { php_header(); }
+    zend_catch { return FAILURE; }
+    zend_end_try();
     rapira_rs_finish_response();
     rapira_dispatcher_release();
     return SUCCESS;
