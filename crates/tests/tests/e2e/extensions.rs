@@ -95,6 +95,27 @@ fn forked_workers_do_not_share_the_sodium_rng() {
     assert_distinct_first_draws("extensions/sodium-rng-worker.php");
 }
 
+/// php_child_init() calls the child_init_func of each started extension once after the fork, for example the reseed of the session GC generator: https://github.com/php/php-src/blob/75679b1eeee47af1cdb0c0a4852e3dd8c7c88e81/main/main.c#L1859-L1870
+#[test]
+fn forked_workers_run_the_child_init_hooks_of_extensions() {
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("extensions/child-init-worker.php"),
+    )
+    .spawn();
+    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    let StatusBody { status, body } = http_get(srv.addr, "/", REQ).expect("GET /");
+    if body == b"skip" {
+        return;
+    }
+    assert_eq!(
+        (status, String::from_utf8_lossy(&body).as_ref()),
+        (200, "count=1"),
+        "{}",
+        diagnostics(&srv)
+    );
+}
+
 fn browscap_ini() -> String {
     format!(
         "browscap = \"{}\"\ndisplay_errors = On\nerror_reporting = E_ALL\nmax_execution_time = 0\nsession.gc_probability = 0\n",

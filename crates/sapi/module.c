@@ -433,12 +433,13 @@ void rapira_clear_last_error(void) {
 // once per process, before sapi_startup
 void rapira_process_init(void) { zend_signal_startup(); }
 
-// re-key the MM heap after fork; 8.5 asserts getpid() == heap->pid at shutdown.
+// php_child_init re-keys the MM heap after fork (8.5 asserts getpid() ==
+// heap->pid at shutdown) and calls the child_init_func of each extension.
 // php_execute_script keeps the current directory over a script run
 // (main/main.c, SAPI_OPTION_NO_CHDIR)
 void rapira_child_init(void) {
 #if PHP_VERSION_ID >= 80500
-    refresh_memory_manager();
+    php_child_init();
 #endif
     SG(options) |= SAPI_OPTION_NO_CHDIR;
 }
