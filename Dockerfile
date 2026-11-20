@@ -1,6 +1,6 @@
 # syntax=docker/dockerfile:1
 
-# The Rapira image: rapira on an NTS PHP image from dockerfiles/<minor>/nts.
+# The Rapira image: rapira and the Rapira PHP extensions on an NTS PHP image of https://github.com/rapira-rs/docker.
 # The workflows pass the PHP image of each minor by digest.
 ARG PHP_IMAGE=ghcr.io/rapira-rs/php:8.6-nts
 
@@ -31,7 +31,52 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cp target/release/rapira /usr/local/bin/rapira; \
     ldd /usr/local/bin/rapira | grep -q '/usr/local/lib/libphp.so'
 
-FROM ${PHP_IMAGE} AS runtime
+# The PHP images have only the extensions of the official PHP image.
+# igbinary 3.2.17RC1 and redis 6.3.0 do not compile on PHP 8.6.
+FROM ${PHP_IMAGE} AS php
+RUN set -eux; \
+    savedAptMark="$(apt-mark showmanual)"; \
+    apt-get update; \
+    case "$PHP_VERSION" in \
+        8.4.*|8.5.*) \
+            apt-get install -y --no-install-recommends libicu-dev libpq-dev; \
+            docker-php-source extract; \
+            curl -fsSL --retry 3 https://pecl.php.net/get/igbinary-3.2.17RC1.tgz -o /tmp/igbinary.tgz; \
+            echo '91da821443db125282a6aea039f24588dd28ff5d71e8187f6ecc41165bceafbc  /tmp/igbinary.tgz' | sha256sum -c -; \
+            mkdir -p /usr/src/php/ext/igbinary; \
+            tar -xzf /tmp/igbinary.tgz -C /usr/src/php/ext/igbinary --strip-components=1; \
+            curl -fsSL --retry 3 https://pecl.php.net/get/redis-6.3.0.tgz -o /tmp/redis.tgz; \
+            echo '0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5  /tmp/redis.tgz' | sha256sum -c -; \
+            mkdir -p /usr/src/php/ext/redis; \
+            tar -xzf /tmp/redis.tgz -C /usr/src/php/ext/redis --strip-components=1; \
+            docker-php-ext-install -j"$(nproc)" bcmath intl pdo_pgsql pgsql igbinary; \
+            docker-php-ext-configure redis --enable-redis-igbinary; \
+            docker-php-ext-install -j"$(nproc)" redis; \
+            docker-php-source delete; \
+            rm /tmp/igbinary.tgz /tmp/redis.tgz; \
+            ;; \
+        8.6.*) \
+            apt-get install -y --no-install-recommends libicu-dev libonig-dev libpq-dev; \
+            docker-php-ext-install -j"$(nproc)" bcmath intl mbstring pdo_pgsql pgsql; \
+            ;; \
+        *) \
+            echo "no Rapira extension set for PHP $PHP_VERSION" >&2; \
+            exit 1; \
+            ;; \
+    esac; \
+    apt-mark auto '.*' > /dev/null; \
+    apt-mark manual $savedAptMark > /dev/null; \
+    find /usr/local -type f -executable -exec ldd '{}' ';' \
+        | awk '/=>/ { so = $(NF-1); if (index(so, "/usr/local/") == 1) { next }; gsub("^/(usr/)?", "", so); printf "*%s\n", so }' \
+        | sort -u \
+        | xargs -rt dpkg-query --search \
+        | awk 'sub(":$", "", $1) { print $1 }' \
+        | sort -u \
+        | xargs -r apt-mark manual; \
+    apt-get purge -y --auto-remove -o APT::AutoRemove::RecommendsImportant=false; \
+    apt-get dist-clean
+
+FROM php AS runtime
 
 LABEL org.opencontainers.image.title="Rapira" \
       org.opencontainers.image.description="Rapira with NTS PHP and PHP extensions" \
