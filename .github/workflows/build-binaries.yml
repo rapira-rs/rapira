@@ -385,7 +385,9 @@ jobs:
                   set -euo pipefail
                   for deb in dist/*_amd64.deb dist/*_arm64.deb; do
                     case "$deb" in *_arm64.deb) p=linux/arm64 ;; *) p=linux/amd64 ;; esac
-                    docker run --rm --platform "$p" -v "$PWD/dist:/dist:ro" debian:13 \
+                    # PHP 8.6 needs OpenSSL 3.3; the other minors are checked on Debian 12 with OpenSSL 3.0
+                    case "$deb" in *-php8.6_*) img=debian:13 ;; *) img=debian:12 ;; esac
+                    docker run --rm --platform "$p" -v "$PWD/dist:/dist:ro" "$img" \
                       bash -ec "apt-get update -q && apt-get install -yq /dist/$(basename "$deb") && rapira --help"
                   done
                   for rpm in dist/*.x86_64.rpm dist/*.aarch64.rpm; do
