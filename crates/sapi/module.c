@@ -254,10 +254,11 @@ static void rapira_reset_super_global(void) {
     zend_hash_str_del_ind(&EG(symbol_table), "_SESSION",
                           sizeof("_SESSION") - 1);
 }
-// A pending throw is uncaught: the user exception handler gets it, else the
-// fatal record. Returns true for the record. exit()/die() in 8.4+ are not
-// bailouts: they land in EG(exception), and this clears them.
-static bool rapira_report_uncaught(void) {
+// A pending throw is uncaught. With call_handler, the user exception handler
+// gets it first. Else, or when it stays pending, it gets the fatal record.
+// Returns true for the record. exit()/die() in 8.4+ are not bailouts: they
+// land in EG(exception), and this clears them.
+static bool rapira_report_uncaught(bool call_handler) {
     if (!EG(exception)) {
         return false;
     }
@@ -266,9 +267,11 @@ static bool rapira_report_uncaught(void) {
         zend_clear_exception();
         return false;
     }
-    zend_try_exception_handler();
-    if (!EG(exception)) {
-        return false;
+    if (call_handler) {
+        zend_try_exception_handler();
+        if (!EG(exception)) {
+            return false;
+        }
     }
     // Throwable path is E_DONT_BAIL and releases the object
     zend_exception_error(EG(exception), E_ERROR);
@@ -294,7 +297,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
 
     // the guard contains a bailout from the userland exception handler
     RAPIRA_GUARD(
-        if (rapira_report_uncaught()) { outcome = RAPIRA_THROW; }, outcome,
+        if (rapira_report_uncaught(true)) { outcome = RAPIRA_THROW; }, outcome,
         observed_base);
 
     // No destructor sweep per unit: it would run __destruct on live objects
@@ -302,7 +305,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     // the internal frame of handle_request is live, so zend_call_function
     // leaves a throw of a shutdown function pending (Zend/zend_execute_API.c)
     RAPIRA_GUARD(
-        if (rapira_report_uncaught()) { outcome = RAPIRA_THROW; }, outcome,
+        if (rapira_report_uncaught(true)) { outcome = RAPIRA_THROW; }, outcome,
         observed_base);
     // freeing the table releases closure captures, which can run __destruct
     RAPIRA_OBSERVER_CLOSE(php_free_shutdown_functions(), observed_base);
@@ -380,17 +383,15 @@ int rapira_request_teardown(void) {
     RAPIRA_GUARD(rapira_reset_session(), outcome, observed_base);
     rapira_rs_finish_response();
     // the internal frame of handle_request is live, so a throw of the
-    // teardown flush or of the save handler stays pending: report it as
-    // rapira_run_handler does. The report follows the seal, so its fatal
-    // record does not cut a streamed body.
+    // teardown flush or of the save handler stays pending. It gets only the
+    // fatal record: after the seal, so the record does not cut a streamed
+    // body, and without the user exception handler, which could start a
+    // session after the session reset.
     RAPIRA_GUARD(
-        if (rapira_report_uncaught() && outcome == RAPIRA_OK) {
+        if (rapira_report_uncaught(false) && outcome == RAPIRA_OK) {
             outcome = RAPIRA_THROW;
         },
         outcome, observed_base);
-    // the exception handler can start a session, and no session RINIT runs
-    // before the next unit
-    RAPIRA_GUARD(rapira_reset_session(), outcome, observed_base);
     RAPIRA_GUARD(rapira_modules_request(false), outcome, observed_base);
     RAPIRA_GUARD(php_output_deactivate(), outcome, observed_base);
     RAPIRA_GUARD(rapira_release_header_callback(), outcome, observed_base);

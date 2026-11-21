@@ -705,17 +705,15 @@ fn a_throw_from_a_shutdown_function_is_uncaught() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The teardown writes the session after the handler returns, and the save handler can throw there. The throw is uncaught, as in php -S: the app exception handler gets it, or the unit fails with a fatal record. The report follows the seal, so the client gets the reply of php -S: status 200 and the whole body, streamed or buffered.
+/// The teardown writes the session after the handler returns, and the save handler can throw there. The response is sealed at that point, so the throw gets the fatal record and fails the unit, and the app exception handler does not run. The client gets the reply of php -S: status 200 and the whole body, streamed or buffered.
 #[test]
 fn a_throw_from_the_session_write_is_uncaught() -> anyhow::Result<()> {
     struct Case {
         name: &'static str,
         /// php.ini lines after the shared file.
         ini: &'static str,
-        /// The app exception handler that the fixture sets before the loop: "none", "log", or "session_start" (log, then start a session).
+        /// The app exception handler that the fixture sets before the loop: "none" or "log".
         exception_handler: &'static str,
-        /// Units on the one worker. Each body reports session_status() at the start of its unit.
-        requests: u64,
         uncaught: Vec<tracing::Level>,
         /// The contexts of the app records of the exception handler.
         handled: Vec<&'static str>,
@@ -726,7 +724,6 @@ fn a_throw_from_the_session_write_is_uncaught() -> anyhow::Result<()> {
             name: "a streamed body and no exception handler: a fatal record and a failed unit",
             ini: "output_buffering = 0",
             exception_handler: "none",
-            requests: 1,
             uncaught: vec![tracing::Level::ERROR],
             handled: vec![],
             failed: 1,
@@ -735,32 +732,17 @@ fn a_throw_from_the_session_write_is_uncaught() -> anyhow::Result<()> {
             name: "a buffered body and no exception handler: a fatal record and a failed unit",
             ini: "output_buffering = 4096",
             exception_handler: "none",
-            requests: 1,
             uncaught: vec![tracing::Level::ERROR],
             handled: vec![],
             failed: 1,
         },
         Case {
-            name: "an exception handler set before the loop takes it",
+            name: "an exception handler set before the loop does not run",
             ini: "output_buffering = 4096",
             exception_handler: "log",
-            requests: 1,
-            uncaught: vec![],
-            handled: vec![r#"{"message":"session write failed"}"#],
-            failed: 0,
-        },
-        Case {
-            name: "a session that the exception handler starts ends with its unit",
-            // after the head is sent, session_start() fails when it must send a cookie or cache headers
-            ini: "output_buffering = 4096\nsession.use_cookies = 0\nsession.cache_limiter =",
-            exception_handler: "session_start",
-            requests: 2,
-            uncaught: vec![],
-            handled: vec![
-                r#"{"message":"session write failed"}"#,
-                r#"{"message":"session write failed"}"#,
-            ],
-            failed: 0,
+            uncaught: vec![tracing::Level::ERROR],
+            handled: vec![],
+            failed: 1,
         },
     ];
     let shared = std::fs::read_to_string(fixture("ini/shared/php.ini"))?;
@@ -777,17 +759,14 @@ fn a_throw_from_the_session_write_is_uncaught() -> anyhow::Result<()> {
             "[observability]\nlisten = \"{observability}\"\n[observability.metrics]"
         ))
         .spawn();
-        let mut responses = Vec::new();
-        for _ in 0..case.requests {
-            responses.push(drain_resp(submit(srv.addr, req("/"))?));
-        }
+        let resp = drain_resp(submit(srv.addr, req("/"))?);
         // the slot counts the unit after its response goes out
         let failed = poll(Duration::from_secs(10), || {
             let body = http_get(observability, "/metrics", Duration::from_secs(10))
                 .ok()?
                 .body;
             let samples = tests::metrics::samples(&String::from_utf8_lossy(&body));
-            if samples.get(r#"rapira_requests_total{pool="http"}"#) != Some(&case.requests) {
+            if samples.get(r#"rapira_requests_total{pool="http"}"#) != Some(&1) {
                 return None;
             }
             samples
@@ -796,22 +775,10 @@ fn a_throw_from_the_session_write_is_uncaught() -> anyhow::Result<()> {
         });
         srv.stop();
 
-        for (unit, resp) in responses.iter().enumerate() {
-            let body = resp.body_string();
-            assert_eq!(
-                resp.status(),
-                200,
-                "{} unit {unit}: status (body {body:?})",
-                case.name
-            );
-            // PHP_SESSION_NONE: php -S runs the session RINIT for each request
-            assert_eq!(body, "session_status=1", "{} unit {unit}: body", case.name);
-            assert!(
-                resp.ended && !resp.truncated,
-                "{} unit {unit}: truncated",
-                case.name
-            );
-        }
+        let body = resp.body_string();
+        assert_eq!(resp.status(), 200, "{}: status (body {body:?})", case.name);
+        assert_eq!(body, "session_status=1", "{}: body", case.name);
+        assert!(resp.ended && !resp.truncated, "{}: truncated", case.name);
         let logged = server_log::records(&srv.log_file());
         assert_eq!(
             php_levels(&logged, "Uncaught RuntimeException: session write failed"),
