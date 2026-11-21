@@ -1,4 +1,4 @@
-//! The [http] table: its settings, the boot checks and the Server that the master forks with.
+//! This module has the settings of the [http] table, the boot checks and the Server that the master forks with.
 
 use std::fs::{OpenOptions, remove_file};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -63,15 +63,15 @@ pub struct Settings {
     pub max_body_size: usize,
     pub write_timeout: Duration,
     pub keepalive_timeout: Duration,
-    /// The multipart limits of a dispatcher pool. None in the other modes.
+    /// The multipart limits of a dispatcher pool. It is None in the other modes.
     pub uploads: Option<Limits>,
-    /// sendFile() containment root; falls back to the entrypoint directory.
+    /// The containment root of sendFile(). The default is the entrypoint directory.
     pub sendfile_root: PathBuf,
     pub static_files: Option<rapira_static_files::Settings>,
     pub pool: PoolSettings,
 }
 
-/// Boot checks run here: entrypoint file, uploads dir, static root.
+/// The boot checks run here: the entrypoint file, the uploads dir and the static root.
 pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
     let settings = settings(section, dir)?;
     check_entrypoint("http.pool", &settings.pool.entrypoint)?;
@@ -84,7 +84,7 @@ pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
     Ok(settings)
 }
 
-/// The settings of `section`. Reads no file.
+/// Returns the settings of `section`. It reads no file.
 fn settings(section: Section, dir: &Path) -> Result<Settings> {
     let listen = parse_listen(
         "http",
@@ -209,7 +209,7 @@ fn resolve_uploads(section: UploadsSection, config_dir: &Path) -> Result<Limits>
 }
 
 fn check_static_root(root: &Path) -> Result<()> {
-    // is_dir() folds every stat error into false; metadata keeps the errno visible.
+    // is_dir() returns false for every stat error, and metadata keeps the errno visible.
     let meta = std::fs::metadata(root)
         .map_err(|e| anyhow!("http.static.root {} is not accessible: {e}", root.display()))?;
     ensure!(
@@ -217,7 +217,7 @@ fn check_static_root(root: &Path) -> Result<()> {
         "http.static.root {} is not a directory",
         root.display()
     );
-    // Serving needs search permission, not read; resolving the dot entry inside the root proves it.
+    // The middleware needs search permission on the root, not read permission. A stat of the dot entry inside the root proves it.
     std::fs::metadata(root.join("."))
         .map_err(|e| anyhow!("http.static.root {} is not accessible: {e}", root.display()))?;
     Ok(())
@@ -249,7 +249,7 @@ impl Server {
 
         let config = Config {
             listen: settings.listen,
-            // Leaked once at boot: every request borrows it until the process exits.
+            // The plugin leaks it once at boot, because every request borrows it until the process exits.
             server_name: Box::leak(settings.server_name.into_boxed_str()),
             server_port: settings.server_port,
             max_body_size: settings.max_body_size,
@@ -280,7 +280,7 @@ mod tests {
         error: &'static str,
     }
 
-    /// The list is the activation switch: every configured section must be listed, every listed name must be known, configured, and unique.
+    /// The list turns a middleware on. Every configured section must be in the list. Every listed name must be known, configured and unique.
     #[test]
     fn middleware_list_and_tables_must_agree() {
         let cases = [
@@ -527,7 +527,7 @@ mod tests {
         }
     }
 
-    /// Every knob resolves with unit conversion and a config-relative dir.
+    /// Every setting resolves with unit conversion and a config-relative dir.
     #[test]
     fn uploads_resolve_in_dispatcher_mode_only() {
         let cases = [
@@ -581,7 +581,7 @@ mod tests {
         want: Option<StaticSettings>,
     }
 
-    /// The root resolves config-relative like every other path key; forbid defaults to the PHP source guard. The resolver validates shape only. The middleware constructor normalizes the case.
+    /// The root resolves relative to the config dir like every other path key. The default forbid list is `[".php"]`, which guards the PHP sources. The resolver checks only the shape. The middleware constructor normalizes the case.
     #[test]
     fn static_middleware_resolves() {
         let cases = [

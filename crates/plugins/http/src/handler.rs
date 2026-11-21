@@ -1,4 +1,4 @@
-//! One request: the admission checks, the middleware chain, the body read, the submit to the intake and the response head.
+//! This module serves one request. It has the admission checks, the middleware chain, the body read, the submit to the intake and the response head.
 
 use std::convert::Infallible;
 use std::pin::Pin;
@@ -26,7 +26,7 @@ pub(crate) struct Shared {
     pub cfg: Config,
     pub intake: Intake,
     pub inflight: Arc<AtomicUsize>,
-    /// The worker drains: every response closes its connection, so the client sends its next request to another worker.
+    /// True while the worker drains. Every response then closes its connection, so the client sends its next request to another worker.
     pub closing: AtomicBool,
 }
 
@@ -53,14 +53,14 @@ struct ReqState {
 pub(crate) struct RespBody {
     kind: BodyKind,
     guard: Arc<InflightRequest>,
-    /// Armed by [`respond`] once every middleware has returned.
+    /// [`respond`] arms it once every middleware has returned.
     transport: Option<Declared>,
 }
 
 struct Declared {
-    /// Declared body bytes still to pass through.
+    /// The declared body bytes that have not passed yet.
     remaining: u64,
-    /// The connection state, read when the last byte passes.
+    /// The connection state. The body reads it when the last byte passes.
     closed: tokio::sync::watch::Receiver<bridge::ConnectionState>,
 }
 
@@ -133,7 +133,7 @@ pub(crate) async fn respond(
 ) -> http::Response<RespBody> {
     let method = req.method().clone();
     let mut response = handle(handler, chain, req).await;
-    // Read after the request: one that ends during the drain must close its connection too.
+    // The function reads the flag after the request, because a request that ends during the drain must close its connection too.
     if handler.shared.closing.load(Ordering::Acquire) {
         response.headers_mut().insert(
             http::header::CONNECTION,
@@ -156,10 +156,10 @@ pub(crate) async fn respond(
     response
 }
 
-/// The body length hyper will frame, in the order hyper's h1 encoder (`proto/h1/role.rs`, `Server::encode`) decides it:
+/// Returns the body length that hyper frames, in the order that hyper's h1 encoder (`proto/h1/role.rs`, `Server::encode`) uses:
 /// zero when the method or status forbids a body, else the content-length header, else zero for an ended stream, else the exact size hint.
-/// `None` means chunked, which needs no record: a chunked PHP reply ends only after PHP sends End.
-/// The ended-stream check also survives body combinators that drop the size hint.
+/// `None` means chunked, which needs no record, because a chunked PHP reply ends only after PHP sends End.
+/// The ended-stream check also works with body combinators that drop the size hint.
 fn framed_length(method: &http::Method, response: &http::Response<RespBody>) -> Option<u64> {
     let status = response.status();
     // hyper never polls the body here, whatever the headers say (Server::can_have_body).
@@ -230,7 +230,7 @@ async fn handle(
     let body: middleware::Body = incoming.map_err(BoxError::from).boxed_unsync();
     let req = middleware::Request::from_parts(parts, body);
 
-    // The awaited future is the boxed one that call returns: the compiler cannot prove Send for a held Oneshot over this request type.
+    // The awaited future is the boxed one that call returns, because the compiler cannot prove Send for a held Oneshot over this request type.
     // https://github.com/rust-lang/rust/issues/110338
     let Ok(ready) = chain.ready().await;
     let Ok(res) = ready.call(req).await;
@@ -274,7 +274,7 @@ impl Conn {
         })
     }
 
-    /// The configured middleware around [`Conn::serve`]. None without middleware.
+    /// Returns the configured middleware around [`Conn::serve`], or None without middleware.
     pub(crate) fn chain(self: &Arc<Self>) -> Option<Service> {
         let layers = &self.shared.cfg.middleware;
         if layers.is_empty() {
@@ -330,7 +330,7 @@ where
 {
     let cfg = &shared.cfg;
     let mut collected: Vec<Bytes> = Vec::new();
-    // A kept frame holds hyper's whole read buffer, and hyper then reads the next frame into a new buffer of at least 8 KiB. A client that sends a body in small reads would make the worker allocate many times the body size, so frames below KEEP_FRAME_MIN are copied into one buffer with their neighbors.
+    // A kept frame holds hyper's whole read buffer, and hyper then reads the next frame into a new buffer of at least 8 KiB. A client that sends a body in small reads can make the worker allocate many times the body size. So the host copies each frame below KEEP_FRAME_MIN into one buffer with its neighbors.
     let mut small: Vec<u8> = Vec::new();
     let mut received = 0;
     loop {
@@ -345,7 +345,7 @@ where
         match frame {
             None => break,
             Some(Ok(frame)) => {
-                // Non-data frames (request trailers) are dropped: PHP has no surface for them.
+                // The host drops non-data frames, that is, request trailers, because PHP has no API for them.
                 let Ok(data) = frame.into_data() else {
                     continue;
                 };
@@ -400,7 +400,7 @@ where
             content_length,
             bodiless,
         },
-        // Every producer sends the head first, so a body frame here means the head is gone.
+        // Every producer sends the head first, so a body frame here means that the head is missing.
         Some(Frame::End { .. } | Frame::Chunk(_) | Frame::File { .. }) => {
             tracing::error!(target: "http", "php produced no response head");
             return refused(http::StatusCode::BAD_GATEWAY, guard);
@@ -410,8 +410,8 @@ where
     let status = match http::StatusCode::from_u16(status) {
         Ok(s) if s.as_u16() >= 200 => s,
         _ => {
-            // hyper reacts to a service-supplied 1xx by rewriting it to 500 and erroring
-            // the connection; a 502 head keeps the connection coherent.
+            // hyper rewrites a 1xx status from the service to 500 and fails the
+            // connection. A 502 head keeps the connection coherent.
             tracing::error!(
                 target: "http",
                 "php committed status {status} as final; this plugin cannot forward it - serving 502"
@@ -453,7 +453,7 @@ where
     res
 }
 
-/// Polls `fut` once and arms the timer only when it is pending: a ready future needs no timer.
+/// Polls `fut` once and arms the timer only when it is pending. A ready future needs no timer.
 async fn timeout_lazy<F: Future>(
     dur: Duration,
     fut: F,
@@ -465,10 +465,10 @@ async fn timeout_lazy<F: Future>(
     }
 }
 
-/// Cap 16 lets a buffered Head+Chunk+End trio queue without parking the PHP thread and keeps a 1 MiB body in 64 KiB writes to about one park; tokio allocates one 32-slot block for any cap up to 32.
+/// A cap of 16 lets a buffered Head, Chunk and End queue without a park of the PHP thread. It also keeps a 1 MiB body in 64 KiB writes to about one park. tokio allocates one 32-slot block for any cap up to 32.
 const FRAME_CAP: usize = 16;
 
-/// A body frame at or above this size travels as hyper delivered it; a smaller frame is copied into one buffer with its neighbors. hyper reads up to 400 KiB per frame on a fast link, so a bulk body keeps its frames.
+/// A body frame at or above this size travels as hyper delivered it. The host copies a smaller frame into one buffer with its neighbors. hyper reads up to 400 KiB per frame on a fast link, so a bulk body keeps its frames.
 const KEEP_FRAME_MIN: usize = 64 << 10;
 
 /// Both refusals come before dispatch: the multipart parse, then the intake.
@@ -479,7 +479,7 @@ async fn submit(
     let bytes = request.body.len();
     let multipart = parse_multipart(&mut request, shared.cfg.uploads.as_ref()).await?;
     let (tx, reply) = tokio::sync::mpsc::channel(FRAME_CAP);
-    // The classic and worker modes get their CGI view built here, on the transport thread.
+    // The host builds the CGI view of the classic and worker modes here, on the IO thread.
     let unit = if shared.cfg.superglobals {
         Unit::Cgi(Box::new(rapira_sapi::types::Context::new(request, tx)))
     } else {
@@ -489,12 +489,12 @@ async fn submit(
     Ok(reply)
 }
 
-/// The largest multipart body that the IO thread parses. The parse and the spool writes keep a thread for about 0.1 to 0.25 ms per MiB, and each file part adds one file create of about 15 us on xfs. During that time the other connections on that IO thread wait.
+/// The largest multipart body that the IO thread parses. The parse and the spool writes use a thread for about 0.1 to 0.25 ms per MiB, and each file part adds one file create of about 15 us on xfs. During that time the other connections on that IO thread wait.
 const INLINE_PARSE_MAX: usize = 256 << 10;
 
 /// Parses a multipart body before submit, so a rejected body never reaches the pending and active counters. `limits` is None outside dispatcher mode.
-/// A body up to INLINE_PARSE_MAX is parsed on the IO thread, which saves the switch to the blocking pool. A larger body is parsed on the blocking pool.
-/// A parsed body takes the raw chunks out of `req`, so they are freed after the parse.
+/// The IO thread parses a body up to INLINE_PARSE_MAX, which saves the switch to the blocking pool. The blocking pool parses a larger body.
+/// The parse takes the raw chunks out of `req`, so the host frees them after the parse.
 async fn parse_multipart(
     req: &mut Request,
     limits: Option<&multipart::Limits>,
@@ -502,7 +502,7 @@ async fn parse_multipart(
     let Some(limits) = limits else {
         return Ok(None);
     };
-    // Content-Type is a singleton field: with repeated lines, the plugin and a PHP consumer could split the body on different boundaries. https://www.rfc-editor.org/rfc/rfc9110#section-8.3
+    // Content-Type is a singleton field. With repeated lines, the plugin and a PHP consumer could split the body on different boundaries. https://www.rfc-editor.org/rfc/rfc9110#section-8.3
     let lines = req.headers.get_all(CONTENT_TYPE);
     if lines.iter().nth(1).is_some() && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
     {
@@ -590,7 +590,7 @@ mod tests {
         assert_eq!(trace(&res), ["a-in", "b-in", "b-out", "a-out"]);
     }
 
-    /// Pending for `left` polls, then ready. Each pending poll wakes the task at once.
+    /// A future that is pending for `left` polls, then ready. Each pending poll wakes the task at once.
     struct ReadyAfter {
         left: Option<u32>,
     }
@@ -610,7 +610,7 @@ mod tests {
         }
     }
 
-    /// Outside a runtime `tokio::time::timeout` panics: a ready future must complete without it.
+    /// Outside a runtime, `tokio::time::timeout` panics, so a ready future must complete without it.
     #[test]
     fn timeout_lazy_ready_future_needs_no_timer() {
         let mut fut = std::pin::pin!(timeout_lazy(

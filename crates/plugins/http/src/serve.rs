@@ -80,8 +80,8 @@ impl Serving {
         });
     }
 
-    /// Waits out the connections in flight. The acceptor is already gone.
-    /// A connection closes after its next response, so a request on an idle keep-alive connection still gets an answer. An idle connection that gets no request is held until the window ends: an LB keep-alive pool makes every stop last the whole window.
+    /// Waits for the connections in flight to end. The acceptor is already gone.
+    /// A connection closes after its next response, so a request on an idle keep-alive connection still gets an answer. The drain holds an idle connection that gets no request until the grace period ends. So the idle keep-alive connections of a load balancer make every stop last the whole grace period.
     async fn drain(self, fatal: Option<anyhow::Error>, grace: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + grace;
         self.shared.closing.store(true, Ordering::Release);
@@ -122,7 +122,7 @@ impl Serving {
 
 impl Serve for Serving {
     fn spawn_tcp(&self, stream: tokio::net::TcpStream, peer: std::net::SocketAddr) {
-        // On macOS getsockname fails with EINVAL on a socket that has been shut down: https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/getsockname.2.html
+        // On macOS, getsockname fails with EINVAL on a socket that is shut down. https://developer.apple.com/library/archive/documentation/System/Conceptual/ManPages_iPhoneOS/man2/getsockname.2.html
         let server = match stream.local_addr() {
             Ok(server) => server,
             Err(e) => {
@@ -157,7 +157,7 @@ pub(crate) fn serve(mut config: Config, prepared: PreparedListener, worker: Work
     let serving = Serving::start(intake, config);
     let fatal = acceptor.run(&handle, &serving);
     let drained = handle.block_on(serving.drain(fatal, drain_grace));
-    // The dir goes when the plugin drain ends. A spooled file of an exchange that still runs past the drain is lost with it.
+    // The plugin removes the dir when its drain ends. A spooled file of an exchange that still runs after the drain is removed with it.
     if let Some(dir) = &spool_dir
         && let Err(e) = std::fs::remove_dir_all(dir)
     {

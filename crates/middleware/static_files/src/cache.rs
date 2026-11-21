@@ -313,15 +313,15 @@ impl CachingBackend {
         };
         let meta = CachedMeta::new(&file.metadata()?);
 
-        // The path became a directory between the stat and the open. `open` on a directory
-        // succeeds on Unix, and the read then fails. The backend must therefore report an
-        // error before `ServeDir` writes a head.
+        // The path became a directory between the stat and the open. On Unix, open succeeds
+        // on a directory, and the read then fails. The backend must therefore report an error
+        // before ServeDir writes a head.
         // https://man7.org/linux/man-pages/man2/open.2.html
         if meta.is_dir {
             return Err(io::Error::from(io::ErrorKind::IsADirectory));
         }
 
-        // `ServeDir` streams a file that the cache cannot store.
+        // ServeDir streams a file that the cache cannot store.
         if meta.len > MAX_FILE || !self.lock().make_room(&path, meta.len, Instant::now()) {
             return Ok(Self::stream(file, meta));
         }

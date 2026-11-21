@@ -1,7 +1,7 @@
 #include "rapira_http.h"
 #include "rapira_http_arginfo.h"
 
-// rust glue (src/php/respond.rs)
+// Rust defines this function in src/php/respond.rs.
 extern void rapira_rs_http_quiesce(void);
 
 zend_class_entry *rapira_ce_http_multipart;
@@ -12,27 +12,27 @@ zend_class_entry *rapira_ce_http_head_already_written_error;
 zend_class_entry *rapira_ce_http_head_not_written_error;
 zend_class_entry *rapira_ce_http_content_length_exceeded_error;
 zend_class_entry *rapira_ce_http_file_not_sendable_exception;
-// the unit class; ExchangeState::class returns it (src/php/mod.rs)
+// The unit class. ExchangeState::class returns it (src/php/mod.rs).
 zend_class_entry *rapira_ce_http_exchange;
 
 const char *rapira_http_server_name;
 size_t rapira_http_server_name_len;
 zend_long rapira_http_server_port;
 
-// the dispatcher surface; Plugin::dispatcher() returns its address (src/lib.rs)
+// The plugin record. Plugin::dispatcher() returns its address (src/lib.rs).
 rapira_plugin rapira_http_plugin = {
     .busy = "this worker holds one unit at a time, and its "
             "Rapira\\Http\\Exchange is unfinalized; finalize it first",
     .quiesce = rapira_rs_http_quiesce,
 };
 
-// own copy: std_object_handlers is shared engine state
+// The handlers are a copy, because std_object_handlers is shared engine state.
 static zend_object_handlers rapira_exchange_handlers;
 
-// free_obj hands the unit back to Rust
+// free_obj gives the unit back to Rust.
 static void rapira_exchange_free(zend_object *std) {
     rapira_rs_held_drop(&rapira_exchange_from(std)->held);
-    // no-op on IS_UNDEF (getRequest never called)
+    // This does nothing on IS_UNDEF, that is, when getRequest was never called.
     zval_ptr_dtor(&rapira_exchange_from(std)->request);
 
     zend_object_std_dtor(std);

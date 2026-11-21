@@ -1,4 +1,4 @@
-//! getRequest(): builds the Rapira\Http\Request object once per exchange.
+//! getRequest() builds the Rapira\Http\Request object once per exchange.
 
 use std::os::unix::ffi::OsStrExt;
 use std::sync::OnceLock;
@@ -96,7 +96,7 @@ unsafe fn build_multipart(dst: *mut zval, body: &MultipartBody) {
     }
 }
 
-/// Builds the Request into `memo`, the request memo of the exchange object. The C shell keeps the memo check. False means a throw is pending; a caught panic returns false without one and the C shell throws instead.
+/// Builds the Request into `memo`, the request memo of the exchange object. The C shell keeps the memo check. False means a throw is pending; a caught panic returns false without one, and the C shell then throws.
 /// # Safety
 /// `held` is the held word of a live exchange that receive() attached; `memo` is writable and IS_UNDEF.
 #[unsafe(no_mangle)]

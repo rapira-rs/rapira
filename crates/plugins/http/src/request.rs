@@ -6,7 +6,7 @@ use rapira_sapi::types::Chunks;
 use crate::Config;
 use crate::middleware::Peer;
 
-/// The body stays raw: the handler parses multipart.
+/// The body stays raw, because the handler parses multipart.
 pub fn build(
     parts: http::request::Parts,
     authority: Option<Vec<u8>>,
@@ -22,16 +22,16 @@ pub fn build(
     };
     Request {
         method: parts.method.as_str().to_owned(),
-        // Origin-form view for every target form. Display restores the leading slash
-        // that an authority-only absolute-form omits ("http://h?q" -> "/?q"). It keeps
-        // "*" unchanged.
+        // The origin-form view for every target form. Display restores the leading
+        // slash that an authority-only absolute-form omits, so "http://h?q" gives
+        // "/?q". It keeps "*" unchanged.
         // https://github.com/hyperium/http/blob/v1.5.0/src/uri/path.rs#L277-L291
         uri: parts
             .uri
             .path_and_query()
             .map(|pq| pq.to_string())
             .unwrap_or_else(|| "/".to_owned()),
-        // Reconstructed request-target for the absolute and authority forms. hyper hands out only the parsed Uri, not the raw bytes.
+        // The request-target, rebuilt for the absolute and authority forms. hyper gives only the parsed Uri, not the raw bytes.
         // For the origin and asterisk forms the target equals uri, which PHP uses when this is None.
         target: parts
             .uri

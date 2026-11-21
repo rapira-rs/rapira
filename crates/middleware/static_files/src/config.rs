@@ -25,8 +25,9 @@ pub fn resolve(section: Section, dir: &Path) -> anyhow::Result<Settings> {
     };
     let forbid = section.forbid.unwrap_or_else(|| vec![".php".to_owned()]);
     for entry in &forbid {
-        // A separator or whitespace can never suffix-match a file name. Such an entry would
-        // silently make the guard useless.
+        // A file name holds no separator, so an entry with a separator never matches.
+        // An entry with whitespace matches only a file name with the same whitespace.
+        // Such an entry would silently make the guard useless.
         if entry.len() < 2
             || !entry.starts_with('.')
             || entry.contains('/')
