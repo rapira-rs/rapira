@@ -8,7 +8,7 @@ use tests::{drain_resp_deadline, fixture, poll, req};
 
 use crate::harness::{
     Exited, MASTER_EXIT_FAILBOOT, MASTER_EXIT_OK, Spawn, assert_exit_code, diagnostics, listen,
-    signal,
+    signal, wait_log_contains,
 };
 
 // A worker that fatals before its receive loop must 503 the queued unit, and the graceful stop must not wait on a boot that retries forever.
@@ -205,6 +205,51 @@ fn max_boot_failures_zero_keeps_a_worker_that_never_boots() -> anyhow::Result<()
         None,
         "the master keeps running\n{}",
         diagnostics(&srv)
+    );
+    Ok(())
+}
+
+// An idle keep-alive connection holds the drain of an unhealthy worker open for the whole drain grace. The worker boots no more after the unhealthy flag: it sheds the units that arrive and exits when the drain ends. process_control_timeout_secs = 4 gives a drain grace of 2 s, longer than the 1 s boot wait after the second failed boot.
+#[test]
+fn an_unhealthy_worker_boots_no_more_while_a_connection_holds_its_drain() -> anyhow::Result<()> {
+    let mut srv = Spawn::http(
+        Mode::Worker,
+        fixture("failboot_worker_tests/logged-failboot-worker.php"),
+    )
+    .http_pool("max_boot_failures = 2")
+    .toml("[supervisor]\nprocess_control_timeout_secs = 4")
+    .spawn();
+    let read = Duration::from_secs(10);
+    // The first boot record starts the 500 ms wait, so the GET arrives before the second failed boot flags the worker.
+    assert!(
+        wait_log_contains(&srv, "boot attempt", read),
+        "no boot\n{}",
+        diagnostics(&srv)
+    );
+    // The connection stays open until the end of the test.
+    let mut conn = crate::harness::Conn::open(srv.addr, read)?;
+    conn.send(b"GET / HTTP/1.1\r\nHost: e2e\r\n\r\n")?;
+    let head = conn.read_head(read)?;
+    assert_eq!(
+        (
+            head.status,
+            head.fields.iter().find(|(k, _)| k == "connection")
+        ),
+        (503, None),
+        "a kept-alive 503 of the boot wait\n{}",
+        diagnostics(&srv)
+    );
+
+    let status = srv.wait_exit(Duration::from_secs(20));
+    assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
+    let log = std::fs::read_to_string(srv.log_file())?;
+    let Some((_, after)) = log.split_once("worker keeps failing to boot; flagged unhealthy") else {
+        panic!("the worker stays healthy\n{log}");
+    };
+    assert_eq!(
+        after.matches("boot attempt").count(),
+        0,
+        "boots after the unhealthy flag\n{log}"
     );
     Ok(())
 }

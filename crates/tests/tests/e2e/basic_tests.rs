@@ -1,10 +1,12 @@
 use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use http::{Method, Version};
 use rapira_sapi::plugin::Mode;
+use std::net::SocketAddr;
+use std::time::Duration;
 use tests::wire::submit;
-use tests::{StatusBody, drain, drain_resp, fixture, req, server_log};
+use tests::{StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
-use crate::harness::{Server, Spawn, diagnostics, scratch_dir, slot_line};
+use crate::harness::{Server, Spawn, diagnostics, free_port, http_get, scratch_dir, slot_line};
 
 #[test]
 fn fibers_stress_classic() -> anyhow::Result<()> {
@@ -699,6 +701,98 @@ fn a_throw_from_a_shutdown_function_is_uncaught() -> anyhow::Result<()> {
             "{} (captured: {logged:?})",
             case.name
         );
+    }
+    Ok(())
+}
+
+/// The teardown writes the session after the handler returns, and the save handler can throw there. The response is sealed at that point, so the throw gets the fatal record and fails the unit, and the app exception handler does not run. The client gets the reply of php -S: status 200 and the whole body, streamed or buffered.
+#[test]
+fn a_throw_from_the_session_write_is_uncaught() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        /// php.ini lines after the shared file.
+        ini: &'static str,
+        /// The app exception handler that the fixture sets before the loop: "none" or "log".
+        exception_handler: &'static str,
+        uncaught: Vec<tracing::Level>,
+        /// The contexts of the app records of the exception handler.
+        handled: Vec<&'static str>,
+        failed: u64,
+    }
+    let cases = [
+        Case {
+            name: "a streamed body and no exception handler: a fatal record and a failed unit",
+            ini: "output_buffering = 0",
+            exception_handler: "none",
+            uncaught: vec![tracing::Level::ERROR],
+            handled: vec![],
+            failed: 1,
+        },
+        Case {
+            name: "a buffered body and no exception handler: a fatal record and a failed unit",
+            ini: "output_buffering = 4096",
+            exception_handler: "none",
+            uncaught: vec![tracing::Level::ERROR],
+            handled: vec![],
+            failed: 1,
+        },
+        Case {
+            name: "an exception handler set before the loop does not run",
+            ini: "output_buffering = 4096",
+            exception_handler: "log",
+            uncaught: vec![tracing::Level::ERROR],
+            handled: vec![],
+            failed: 1,
+        },
+    ];
+    let shared = std::fs::read_to_string(fixture("ini/shared/php.ini"))?;
+    for case in &cases {
+        let observability = SocketAddr::from(([127, 0, 0, 1], free_port()));
+        let mut srv = Spawn::http(
+            Mode::Worker,
+            fixture("basic_tests/session-write-throw-worker.php"),
+        )
+        .php_ini(&format!("{shared}\ndisplay_errors = Off\n{}\n", case.ini))
+        .env("APP_EXCEPTION_HANDLER", case.exception_handler)
+        .json_log()
+        .toml(&format!(
+            "[observability]\nlisten = \"{observability}\"\n[observability.metrics]"
+        ))
+        .spawn();
+        let resp = drain_resp(submit(srv.addr, req("/"))?);
+        // the slot counts the unit after its response goes out
+        let failed = poll(Duration::from_secs(10), || {
+            let body = http_get(observability, "/metrics", Duration::from_secs(10))
+                .ok()?
+                .body;
+            let samples = tests::metrics::samples(&String::from_utf8_lossy(&body));
+            if samples.get(r#"rapira_requests_total{pool="http"}"#) != Some(&1) {
+                return None;
+            }
+            samples
+                .get(r#"rapira_requests_failed_total{pool="http"}"#)
+                .copied()
+        });
+        srv.stop();
+
+        let body = resp.body_string();
+        assert_eq!(resp.status(), 200, "{}: status (body {body:?})", case.name);
+        assert_eq!(body, "session_status=1", "{}: body", case.name);
+        assert!(resp.ended && !resp.truncated, "{}: truncated", case.name);
+        let logged = server_log::records(&srv.log_file());
+        assert_eq!(
+            php_levels(&logged, "Uncaught RuntimeException: session write failed"),
+            case.uncaught,
+            "{} (captured: {logged:?})",
+            case.name
+        );
+        assert_eq!(
+            server_log::app_contexts(&srv.log_file(), "handled"),
+            case.handled,
+            "{}",
+            case.name
+        );
+        assert_eq!(failed, Some(case.failed), "{}: failed units", case.name);
     }
     Ok(())
 }

@@ -44,16 +44,13 @@ pub struct Server {
 }
 
 /// Runs in the master before the fork, with no runtime.
-fn prepare(config: &Config) -> Result<PreparedListener> {
+fn prepare(config: &Config) {
     // Before the fork: the PHP thread of a worker can read the identity at boot, before serve() runs.
     php::set_server_identity(config.server_name, config.server_port);
     php::set_sendfile_root(config.sendfile_root.clone());
     if let Some(uploads) = &config.uploads {
         multipart::sweep_spool_dirs(&uploads.dir);
     }
-    let prepared = rapira_net::bind(&config.listen)?;
-    tracing::info!(target: "http", "prepared listener on {}", prepared.addr());
-    Ok(prepared)
 }
 
 impl Plugin for Server {
