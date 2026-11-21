@@ -41,7 +41,6 @@ Repository administrators can find the activation requirements in [the Vouch set
 sudo apt install php8.4-dev libphp8.4-embed   # Debian/Ubuntu (deb.sury.org / ppa:ondrej)
 sudo dnf install php-devel php-embedded       # Fedora
 sudo pacman -S php php-embed                  # Arch
-sudo apk add php84-dev php84-embed            # Alpine
 ```
 
 macOS notes and building PHP from source - including the exact configure line used for releases (`.github/php-configure-flags.txt`) - are covered in [build from source](https://rapira.rs/docs/intro/build-from-source).
