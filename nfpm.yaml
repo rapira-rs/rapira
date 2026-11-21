@@ -44,6 +44,6 @@ overrides:
       - "glibc >= ${GLIBC_RPM_MIN}"
       - "libgcc"
       - "libstdc++"
-      - "openssl-libs >= 1:${OPENSSL_MIN}"
+      - "libssl.so.3(OPENSSL_${OPENSSL_MIN}.0)(64bit)"
       - "libcurl"
       - "zlib"

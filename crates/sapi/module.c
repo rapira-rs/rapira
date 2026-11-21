@@ -254,10 +254,11 @@ static void rapira_reset_super_global(void) {
     zend_hash_str_del_ind(&EG(symbol_table), "_SESSION",
                           sizeof("_SESSION") - 1);
 }
-// A pending throw is uncaught: the user exception handler gets it, else the
-// fatal record. Returns true for the record. exit()/die() in 8.4+ are not
-// bailouts: they land in EG(exception), and this clears them.
-static bool rapira_report_uncaught(void) {
+// A pending throw is uncaught. With call_handler, the user exception handler
+// gets it first. Else, or when it stays pending, it gets the fatal record.
+// Returns true for the record. exit()/die() in 8.4+ are not bailouts: they
+// land in EG(exception), and this clears them.
+static bool rapira_report_uncaught(bool call_handler) {
     if (!EG(exception)) {
         return false;
     }
@@ -266,9 +267,11 @@ static bool rapira_report_uncaught(void) {
         zend_clear_exception();
         return false;
     }
-    zend_try_exception_handler();
-    if (!EG(exception)) {
-        return false;
+    if (call_handler) {
+        zend_try_exception_handler();
+        if (!EG(exception)) {
+            return false;
+        }
     }
     // Throwable path is E_DONT_BAIL and releases the object
     zend_exception_error(EG(exception), E_ERROR);
@@ -294,7 +297,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
 
     // the guard contains a bailout from the userland exception handler
     RAPIRA_GUARD(
-        if (rapira_report_uncaught()) { outcome = RAPIRA_THROW; }, outcome,
+        if (rapira_report_uncaught(true)) { outcome = RAPIRA_THROW; }, outcome,
         observed_base);
 
     // No destructor sweep per unit: it would run __destruct on live objects
@@ -302,7 +305,7 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
     // the internal frame of handle_request is live, so zend_call_function
     // leaves a throw of a shutdown function pending (Zend/zend_execute_API.c)
     RAPIRA_GUARD(
-        if (rapira_report_uncaught()) { outcome = RAPIRA_THROW; }, outcome,
+        if (rapira_report_uncaught(true)) { outcome = RAPIRA_THROW; }, outcome,
         observed_base);
     // freeing the table releases closure captures, which can run __destruct
     RAPIRA_OBSERVER_CLOSE(php_free_shutdown_functions(), observed_base);
@@ -361,7 +364,7 @@ static void rapira_release_header_callback(void) {
 
 // per-request sapi teardown (main/main.c:1985,2002,2031)
 int rapira_request_teardown(void) {
-    int bailed = RAPIRA_OK;
+    int outcome = RAPIRA_OK;
     // the VM stack is popped when handle_request returns, so close frames here
     zend_execute_data *observed_base = EG(current_observed_frame);
 
@@ -373,16 +376,26 @@ int rapira_request_teardown(void) {
             php_output_end_all();
             php_header();
         },
-        bailed, observed_base);
+        outcome, observed_base);
     // the session write comes before the response: a store without a lock
     // serves the old session to a request that starts when the response
     // arrives
-    RAPIRA_GUARD(rapira_reset_session(), bailed, observed_base);
+    RAPIRA_GUARD(rapira_reset_session(), outcome, observed_base);
     rapira_rs_finish_response();
-    RAPIRA_GUARD(rapira_modules_request(false), bailed, observed_base);
-    RAPIRA_GUARD(php_output_deactivate(), bailed, observed_base);
-    RAPIRA_GUARD(rapira_release_header_callback(), bailed, observed_base);
-    RAPIRA_GUARD(sapi_deactivate(), bailed, observed_base);
+    // the internal frame of handle_request is live, so a throw of the
+    // teardown flush or of the save handler stays pending. It gets only the
+    // fatal record: after the seal, so the record does not cut a streamed
+    // body, and without the user exception handler, which could start a
+    // session after the session reset.
+    RAPIRA_GUARD(
+        if (rapira_report_uncaught(false) && outcome == RAPIRA_OK) {
+            outcome = RAPIRA_THROW;
+        },
+        outcome, observed_base);
+    RAPIRA_GUARD(rapira_modules_request(false), outcome, observed_base);
+    RAPIRA_GUARD(php_output_deactivate(), outcome, observed_base);
+    RAPIRA_GUARD(rapira_release_header_callback(), outcome, observed_base);
+    RAPIRA_GUARD(sapi_deactivate(), outcome, observed_base);
 
     zend_try { zend_unset_timeout(); }
     zend_end_try();
@@ -390,7 +403,7 @@ int rapira_request_teardown(void) {
     // teardown can run __destruct; a pending throw surfaces in the next unit.
     // The release can run a __destruct that bails out.
     RAPIRA_GUARD(
-        if (EG(exception)) { zend_clear_exception(); }, bailed, observed_base);
+        if (EG(exception)) { zend_clear_exception(); }, outcome, observed_base);
 
     // _zend_bailout leaves gc_protect engaged, disabling GC for the next unit
     gc_protect(false);
@@ -401,7 +414,7 @@ int rapira_request_teardown(void) {
     SG(request_info).current_user = NULL;
     SG(request_info).content_type_dup = NULL;
 
-    return bailed;
+    return outcome;
 }
 
 // A kept last error pins objects and trips core_globals_dtor (main.c:2102).
@@ -574,7 +587,7 @@ extern const char *rapira_rs_authorization(void);
 
 // Hands the body to PHP as a read-only memory stream over one string that the
 // parts fill in one pass; rapira_release_temporary_streams frees the stream
-// between units. post_read and read_post_bytes keep php://input off read_post.
+// between units. post_read keeps php://input off read_post.
 static void rapira_install_body(void) {
     size_t len = rapira_rs_raw_body_len();
     if (len == 0) {
@@ -592,7 +605,6 @@ static void rapira_install_body(void) {
     // the stream holds its own reference (main/streams/memory.c)
     zend_string_release(body);
     SG(request_info).request_body = stream;
-    SG(read_post_bytes) = (int64_t)len;
     SG(post_read) = 1;
 }
 

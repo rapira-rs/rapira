@@ -141,7 +141,7 @@ mode = "dispatcher"
 rapira serve rapira.toml
 ```
 
-See [examples](examples/) for routing, streaming, and asynchronous dispatch.
+See [examples](examples/) for routing and streaming.
 
 ### gRPC
 

@@ -1,6 +1,6 @@
 # Examples
 
-One file per run mode - two for the dispatcher. Use an installed `rapira`, or build one with `cargo build` and take `target/debug/rapira`.
+One file per run mode. Use an installed `rapira`, or build one with `cargo build` and take `target/debug/rapira`.
 
 The shipped file runs `dispatcher-sync.php`. To run another example, set `http.pool.entrypoint` and `http.pool.mode` in `examples/rapira.toml` or in a copy of it:
 
@@ -13,9 +13,8 @@ rapira serve examples/rapira.toml
 | `classic.php`          | `classic`    | one script execution per request                                         |
 | `worker.php`           | `worker`     | resident script, a handler closure runs per request                      |
 | `dispatcher-sync.php`  | `dispatcher` | resident script, one request at a time on a blocking `receive()`         |
-| `dispatcher-async.php` | `dispatcher` | resident script, a fiber per request with `tryReceive()` between resumes |
 
-All of them listen on 127.0.0.1:8000 by default. Classic and worker answer any path; the dispatcher examples route:
+All of them listen on 127.0.0.1:8000 by default. Classic and worker answer any path; the dispatcher example routes:
 
 ```sh
 curl http://127.0.0.1:8000/                # hello

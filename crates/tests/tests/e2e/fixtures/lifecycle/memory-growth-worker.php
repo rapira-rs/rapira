@@ -1,5 +1,5 @@
 <?php
-// ?grow=N keeps N more MiB of written memory for the life of the process, then holds the request for 1.5 s: longer than one master tick.
+// ?grow=N keeps N more MiB of written memory for the life of the process, then holds the request for 1.5 s: longer than one master tick. ?hold_ms=M sets the hold to M ms.
 
 use Rapira\Exception\ClosedException;
 
@@ -12,7 +12,7 @@ try {
         parse_str(parse_url($ex->getRequest()->target, PHP_URL_QUERY) ?: '', $q);
         if (isset($q['grow'])) {
             $kept[] = str_repeat('x', (int) $q['grow'] << 20);
-            usleep(1_500_000);
+            usleep((int) ($q['hold_ms'] ?? 1500) * 1000);
         }
         $ex->writeHead(200, ['content-type' => ['text/plain']]);
         $ex->writeBody('ok');
