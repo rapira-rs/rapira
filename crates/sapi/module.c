@@ -574,7 +574,7 @@ extern const char *rapira_rs_authorization(void);
 
 // Hands the body to PHP as a read-only memory stream over one string that the
 // parts fill in one pass; rapira_release_temporary_streams frees the stream
-// between units. post_read and read_post_bytes keep php://input off read_post.
+// between units. post_read keeps php://input off read_post.
 static void rapira_install_body(void) {
     size_t len = rapira_rs_raw_body_len();
     if (len == 0) {
@@ -592,7 +592,6 @@ static void rapira_install_body(void) {
     // the stream holds its own reference (main/streams/memory.c)
     zend_string_release(body);
     SG(request_info).request_body = stream;
-    SG(read_post_bytes) = (int64_t)len;
     SG(post_read) = 1;
 }
 
