@@ -269,7 +269,8 @@ pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
             Cycle::Failed => {
                 failures += 1;
                 // The count starts at 1, so a limit of 0 never matches.
-                if failures == max_boot_failures {
+                let unhealthy = failures == max_boot_failures;
+                if unhealthy {
                     error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
                     crate::quota::fire_unhealthy();
                 }
@@ -278,7 +279,12 @@ pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
                 let retry_at = Instant::now() + retry_delay;
                 retry_delay = (retry_delay * 2).min(BOOT_RETRY_MAX);
                 loop {
-                    let wait = retry_at.saturating_duration_since(Instant::now());
+                    // An unhealthy worker boots no more: it sheds units until the drain closes the intake.
+                    let wait = if unhealthy {
+                        BOOT_RETRY_MAX
+                    } else {
+                        retry_at.saturating_duration_since(Instant::now())
+                    };
                     if wait.is_zero() {
                         break;
                     }
@@ -288,6 +294,7 @@ pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
                             unit.shed();
                             sb_update(scoreboard::Event::Shed);
                         }
+                        Pull::NoUnit if unhealthy => {}
                         // The wait ended, or a reload arrived: the next boot starts.
                         Pull::NoUnit => break,
                     }
