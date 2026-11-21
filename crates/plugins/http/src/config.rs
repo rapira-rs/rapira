@@ -59,7 +59,8 @@ pub struct UploadsSection {
 pub struct Settings {
     pub listen: ListenAddr,
     pub server_name: String,
-    pub server_port: u16,
+    /// None: the port of the bound address, 80 on a unix socket.
+    pub server_port: Option<u16>,
     pub max_body_size: usize,
     pub write_timeout: Duration,
     pub keepalive_timeout: Duration,
@@ -91,14 +92,6 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         section.listen.as_deref(),
         ListenAddr::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 8000))),
     )?;
-
-    let server_port = match section.server_port {
-        Some(p) => p,
-        None => match &listen {
-            ListenAddr::Tcp(addr) => addr.port(),
-            ListenAddr::Unix(_) => 80,
-        },
-    };
 
     let max_body_size_mb = section.max_body_size_mb.map_or(8, NonZero::get);
     let max_body_size = max_body_size_mb
@@ -148,7 +141,7 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         server_name: section
             .server_name
             .unwrap_or_else(|| "localhost".to_owned()),
-        server_port,
+        server_port: section.server_port,
         max_body_size,
         write_timeout,
         keepalive_timeout,
@@ -247,11 +240,17 @@ impl Server {
             middleware.push(rapira_static_files::StaticFiles::new(st.root, st.forbid).layer());
         }
 
+        let prepared = rapira_net::bind(&settings.listen).context("plugin http: prepare failed")?;
+        tracing::info!(target: "http", "prepared listener on {}", prepared.addr());
         let config = Config {
-            listen: settings.listen,
+            // The bound address: a listen port 0 lets the kernel pick the port.
+            listen: prepared.addr().clone(),
             // Leaked once at boot: every request borrows it until the process exits.
             server_name: Box::leak(settings.server_name.into_boxed_str()),
-            server_port: settings.server_port,
+            server_port: settings.server_port.unwrap_or(match prepared.addr() {
+                ListenAddr::Tcp(addr) => addr.port(),
+                ListenAddr::Unix(_) => 80,
+            }),
             max_body_size: settings.max_body_size,
             write_timeout: settings.write_timeout,
             superglobals: settings.pool.mode != Mode::Dispatcher,
@@ -260,7 +259,7 @@ impl Server {
             uploads: settings.uploads,
             sendfile_root: settings.sendfile_root,
         };
-        let prepared = prepare(&config).context("plugin http: prepare failed")?;
+        prepare(&config);
         Ok(Self { config, prepared })
     }
 }
@@ -414,7 +413,6 @@ mod tests {
 
     struct Want {
         listen: &'static str,
-        server_port: u16,
         max_body_size: usize,
         sendfile_root: &'static str,
     }
@@ -423,7 +421,6 @@ mod tests {
     fn base() -> Want {
         Want {
             listen: "127.0.0.1:8000",
-            server_port: 8000,
             max_body_size: 8 * 1024 * 1024,
             sendfile_root: "/w",
         }
@@ -444,11 +441,10 @@ mod tests {
                 want: base(),
             },
             ResolveCase {
-                name: "tcp listen sets the server port",
+                name: "tcp listen",
                 toml: "listen = \"0.0.0.0:9000\"\n[pool]\nentrypoint = \"a.php\"\n",
                 want: Want {
                     listen: "0.0.0.0:9000",
-                    server_port: 9000,
                     ..base()
                 },
             },
@@ -457,16 +453,14 @@ mod tests {
                 toml: "listen = \":9000\"\n[pool]\nentrypoint = \"a.php\"\n",
                 want: Want {
                     listen: "0.0.0.0:9000",
-                    server_port: 9000,
                     ..base()
                 },
             },
             ResolveCase {
-                name: "unix listen serves port 80",
+                name: "unix listen",
                 toml: "listen = \"unix:/run/r.sock\"\n[pool]\nentrypoint = \"a.php\"\n",
                 want: Want {
                     listen: "unix:/run/r.sock",
-                    server_port: 80,
                     ..base()
                 },
             },
@@ -498,7 +492,6 @@ mod tests {
         for case in cases {
             let got = settings_of(case.toml).unwrap_or_else(|e| panic!("{}: {e}", case.name));
             assert_eq!(got.listen.to_string(), case.want.listen, "{}", case.name);
-            assert_eq!(got.server_port, case.want.server_port, "{}", case.name);
             assert_eq!(got.max_body_size, case.want.max_body_size, "{}", case.name);
             assert_eq!(
                 got.sendfile_root,
@@ -641,7 +634,6 @@ mod tests {
         let section: Section = file["http"].clone().try_into().expect("[http] parses");
         let http = settings(section, Path::new("/srv/app")).expect("[http] resolves");
         assert_eq!(http.listen.to_string(), "127.0.0.1:8000");
-        assert_eq!(http.server_port, 8000);
         assert_eq!(
             http.pool.entrypoint,
             Path::new("/srv/app/dispatcher-sync.php")
