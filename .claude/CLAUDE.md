@@ -30,7 +30,7 @@
 - Do not assert that a port refuses connections after a stop: another process can bind the free port.
 - New tests use worker or dispatcher mode, rarely classic.
 - Check PHP behavior with php-src or a short script.
-- Use Docker to test PHP minors other than the system PHP. Use the `ghcr.io/rapira-rs/php:<minor>-nts` image. It includes NTS PHP with `libphp.so` and the PHP headers. Add Rust from the `rust` image that `Dockerfile` names. Install `clang`, `libclang-dev` and `procps` (`worker_pids` in `harness.rs` needs `ps`). Set `RUSTFLAGS="--cfg tokio_unstable -L native=/usr/local/lib"` and `LD_LIBRARY_PATH=/usr/local/lib`. Use a target directory outside the checkout.
+- Use Docker to test PHP minors other than the system PHP. Build the test image from the `php` stage of `Dockerfile` on a PHP image from [rapira-rs/docker](https://github.com/rapira-rs/docker): `docker build --target php --build-arg PHP_IMAGE=ghcr.io/rapira-rs/php:<minor>-nts .`. It includes NTS PHP with `libphp.so`, the PHP headers and the PHP extensions of the Rapira image. Add Rust from the `rust` image that `Dockerfile` names. Install `clang`, `libclang-dev` and `procps` (`worker_pids` in `harness.rs` needs `ps`). Set `RUSTFLAGS="--cfg tokio_unstable -L native=/usr/local/lib"` and `LD_LIBRARY_PATH=/usr/local/lib`. Use a target directory outside the checkout.
 - The container runs PHP as root and lacks some CI tools. These differences can cause failures. Run a failing test on `main` in the same container before you report it.
 
 `make test` (test_nts then test_e2e), `make test_nts`, `make test_e2e`, `make coverage`, `make stubs`. All derived from `php-config`, no hardcoded distro paths.

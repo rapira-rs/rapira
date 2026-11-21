@@ -37,7 +37,7 @@ mode = "classic"
 
 The tags are `php8.4`, `php8.5` and `php8.6`. Each image includes `bcmath`, `intl`, `mbstring`, `pdo_pgsql`, `pgsql` and `sodium`. The PHP 8.4 and 8.5 images also include `igbinary` and `redis` with igbinary serialization support. No release of these two extensions compiles on PHP 8.6. Add more extensions with `docker-php-ext-install`, as in the official PHP image.
 
-The PHP images without Rapira are `ghcr.io/rapira-rs/php:<minor>-nts` and the thread-safe `ghcr.io/rapira-rs/php:<minor>-zts`, for example `ghcr.io/rapira-rs/php:8.5-nts`. The `-zts` images have no `redis`. When a PHP minor gets a patch release, a workflow builds its PHP images again, and then the Rapira images of the newest release on them. See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
+The PHP images without Rapira are `ghcr.io/rapira-rs/php:<minor>-nts` and the thread-safe `ghcr.io/rapira-rs/php:<minor>-zts`, for example `ghcr.io/rapira-rs/php:8.5-nts`. They come from [rapira-rs/docker](https://github.com/rapira-rs/docker), on Debian and Alpine, with the PHP extensions of the official PHP image. When a PHP minor gets a patch release, its PHP images are built again, and then the Rapira images of the newest release on them. See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
 
 ## Usage
 
