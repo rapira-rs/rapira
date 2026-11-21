@@ -71,7 +71,7 @@ mod tests {
     struct Case {
         name: &'static str,
         toml: &'static str,
-        /// None: the file parses.
+        /// None for a file that parses.
         error: Option<&'static str>,
     }
 

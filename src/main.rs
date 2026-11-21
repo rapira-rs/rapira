@@ -76,7 +76,7 @@ impl PoolRun {
     }
 }
 
-/// Signals are blocked first: USR1/USR2/HUP terminate by default until the master installs its handlers.
+/// Blocks signals first, because USR1, USR2 and HUP end the process by default until the master installs its handlers.
 fn main() -> anyhow::Result<()> {
     rapira_master::block_early_signals();
     // Transparent huge pages put the allocator regions on 2 MiB pages and increase the memory use of each worker. The call runs before PHP MINIT, and the forked workers inherit the setting. https://man7.org/linux/man-pages/man2/PR_SET_THP_DISABLE.2const.html
@@ -131,7 +131,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
     if let Some(observability) = settings.observability {
         pools.push(observability::pool_run(observability)?);
     }
-    // The constructor of each plugin binds its listener. An address that an earlier pool bound fails there: that pool keeps its listener open.
+    // The constructor of each plugin binds its listener. An address that an earlier pool bound fails there, because that pool keeps its listener open.
     // http pool-------
     if let Some(http) = settings.http {
         let pool: PoolSettings = http.pool.clone();
@@ -150,7 +150,7 @@ fn serve(args: ServeArgs) -> anyhow::Result<()> {
 
     let pool_cfgs: Vec<PoolConfig> = pools.iter().map(PoolRun::config).collect();
 
-    // MINIT once, after every pool bound its listeners. Every linked plugin registers its classes, whatever pools are configured.
+    // MINIT runs once, after every pool bound its listeners. Every linked plugin registers its classes, whatever pools are configured.
     let module: rapira_sapi::PhpModule = rapira_sapi::boot_master(&PLUGIN_REGISTERS)?;
 
     // forks ------------------------------------------------------------------

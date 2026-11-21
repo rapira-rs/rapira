@@ -33,7 +33,7 @@ impl Pool {
         }
     }
 
-    /// Requests completed without error: Acquire pairs with the worker's Release on `handled` (stored after `errors`) so a shed 503 never counts as a success.
+    /// Requests completed without error. Acquire pairs with the worker's Release on `handled`, which the worker stores after `errors`, so a shed 503 never counts as a success.
     fn total_successful(&self) -> u64 {
         let mut total: u64 = 0;
         for s in self.board {
@@ -76,7 +76,7 @@ impl Pool {
         }
     }
 
-    /// Sends SIGQUIT to every worker and cancels every scheduled respawn: no worker starts during a stop.
+    /// Sends SIGQUIT to every worker and cancels every scheduled respawn, so no worker starts during a stop.
     pub(crate) fn begin_stop(&mut self) {
         self.signal_all(libc::SIGQUIT);
         for s in &mut self.slot_states {
@@ -90,7 +90,7 @@ impl Pool {
         }
     }
 
-    /// A boot failure only for a pool that never served and has no serving worker: a worker that never boots must not take down a pool that booted.
+    /// Returns a boot failure only for a pool that never served and has no serving worker. A worker that never boots must not stop a pool that booted.
     pub(crate) fn on_child_exit(
         &mut self,
         w: WorkerProc,
@@ -290,7 +290,7 @@ mod tests {
         });
 
         assert!(bury(&mut pools, 2_000_000_009, 0).is_none());
-        // Raw wait status: exit code 89 in bits 8..16.
+        // Raw wait status with exit code 89 in bits 8..16.
         let buried =
             bury(&mut pools, 2_000_000_002, 89 << 8).expect("the second pool owns the pid");
 

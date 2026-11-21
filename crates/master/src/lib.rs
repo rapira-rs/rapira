@@ -17,9 +17,9 @@ mod signals;
 pub use lifeline::spawn_lifeline_watch;
 pub use signals::{block_early_signals, wait_worker_signal};
 
-/// Exit 0: the worker drained. Outside a stop the master forks a replacement at once, without backoff. The worker emits these codes and the master consumes them; any other code is a crash.
+/// The worker exits with 0 after it drains. Outside a stop the master forks a replacement at once, without backoff. The worker emits these codes and the master consumes them; any other code is a crash.
 pub const WORKER_EXIT_DRAINED: i32 = 0;
-/// Self-reported unhealthy: respawn with backoff. While the pool has no serving worker, no handled request and no recycle, it is a boot failure.
+/// The worker reports that it is unhealthy, and the master respawns it with backoff. While the pool has no serving worker, no handled request and no recycle, it is a boot failure.
 pub const WORKER_EXIT_UNHEALTHY: i32 = 89;
 /// Exit code the caller uses when [`run`] returns a boot-failure error.
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
@@ -30,9 +30,9 @@ pub struct PoolConfig {
     pub name: &'static str,
     /// Worker count. The master keeps this many workers running.
     pub processes: usize,
-    /// Wall-clock bound on one request: the worker is TERM-killed, then KILLed, and replaced. Zero disables.
+    /// Wall-clock limit of one request. After it, the master sends TERM, then KILL, to the worker and replaces it. Zero disables the limit.
     pub request_terminate_timeout: Duration,
-    /// RSS of one worker in MiB: above it the worker is QUIT-drained and replaced. Zero disables.
+    /// RSS limit of one worker in MiB. Above it, the master sends QUIT to the worker and replaces the worker after its drain. Zero disables the limit.
     pub max_memory_mb: u64,
 }
 
@@ -40,14 +40,14 @@ pub struct PoolConfig {
 pub struct MasterConfig {
     /// One entry per pool, in the order that `WorkerEnv::pool` indexes.
     pub pools: Vec<PoolConfig>,
-    /// Stop QUIT to TERM escalation grace.
+    /// The time from the QUIT of a stop to the TERM of the stop escalation.
     pub process_control_timeout: Duration,
-    /// Written at start, removed when [`run`] returns.
+    /// [`run`] writes it at start and removes it when it returns.
     pub pidfile: Option<PathBuf>,
 }
 
 impl MasterConfig {
-    /// One slot per worker; pools contiguous in `pools` order. Names the pool that pushes the total past the cap.
+    /// One slot per worker, with the pools next to each other in `pools` order. The error names the pool that pushes the total past the cap.
     fn regions(&self) -> anyhow::Result<Vec<PoolRegion>> {
         let mut regions: Vec<PoolRegion> = Vec::with_capacity(self.pools.len());
         let mut base: usize = 0;
@@ -71,11 +71,11 @@ impl MasterConfig {
     }
 }
 
-/// Handed to the worker closure in the child, after post-fork hygiene.
+/// The worker closure gets it in the child, after the child closes the master fds and resets the master signals.
 pub struct WorkerEnv {
     /// Index of the pool this worker belongs to, into `MasterConfig::pools`.
     pub pool: usize,
-    /// Read end of the master lifeline: EOF means the master died, so drain.
+    /// Read end of the master lifeline. EOF means that the master died, so the worker drains.
     pub lifeline: std::io::PipeReader,
     /// The slot of this worker on the board.
     pub slot_view: &'static SharedSlot,
@@ -90,13 +90,13 @@ pub struct WorkerEnv {
 /// Why [`run`] returned; the caller picks the exit status from it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StopReason {
-    /// No worker is left: each one drained or the stop escalation ended it. The caller tears down PHP and exits 0.
+    /// No worker is left, because each one drained or the stop escalation ended it. The caller tears down PHP and exits 0.
     Drained,
-    /// TERM or INT while stopping: the caller exits 130 without PHP teardown.
+    /// TERM or INT came during a stop. The caller exits 130 without PHP teardown.
     Forced,
 }
 
-/// Returns in the parent on a clean or forced stop, or with an error when `poll` fails or a worker of a pool that never served exits unhealthy. In a forked child it never returns: the worker closure runs and the child `_exit`s.
+/// Returns in the parent on a clean or forced stop, or with an error when `poll` fails or a worker of a pool that never served exits unhealthy. In a forked child it never returns, because the worker closure runs and the child `_exit`s.
 pub fn run(
     cfg: MasterConfig,
     worker: impl FnMut(WorkerEnv) -> i32 + 'static,
@@ -105,7 +105,7 @@ pub fn run(
     let board = rapira_scoreboard::create(regions.last().map_or(0, |r| r.slots.end))
         .context("scoreboard mmap failed")?;
     let reloads = rapira_scoreboard::create_reloads().context("reload count mmap failed")?;
-    // Built once per boot and never freed, as the board: every forked child reads the same regions.
+    // Like the board, built once per boot and never freed, because every forked child reads the same regions.
     let regions: &'static [PoolRegion] = regions.leak();
     let self_pipe: signals::SelfPipe = signals::install_master_signals()?;
     let (lifeline_rd, lifeline_wr) = std::io::pipe().context("lifeline pipe")?;

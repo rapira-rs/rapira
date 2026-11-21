@@ -6,7 +6,7 @@ use rapira_master::{WORKER_EXIT_DRAINED, WORKER_EXIT_UNHEALTHY, WorkerEnv};
 use rapira_sapi::plugin::{Plugin, Stopper, run_plugin};
 use rapira_sapi::{Rapira, StartedWorker};
 
-/// Returns the process exit code for the master's fork bracket; never runs PHP module teardown, MSHUTDOWN stays with the master.
+/// Returns the process exit code to `Forker::spawn`. It never runs the PHP module teardown. MSHUTDOWN stays with the master.
 pub fn worker_body(
     env: WorkerEnv,
     plugin: Box<dyn Plugin>,
@@ -14,9 +14,9 @@ pub fn worker_body(
     grace: Duration,
     drain_grace: Duration,
 ) -> i32 {
-    // SAFETY: single-threaded here, before the PHP worker thread exists.
+    // SAFETY: the process is single-threaded here, before the PHP worker thread exists.
     unsafe { rapira_sapi::rapira_child_init() };
-    // A start check: a worker that cannot enter the entrypoint directory exits. Each app start and each classic reload enter the directory again.
+    // A worker that cannot enter the entrypoint directory exits at start. Each app start and each classic reload enter the directory again.
     let entrypoint_dir: &Path = pool
         .entrypoint
         .parent()
@@ -61,7 +61,7 @@ pub fn worker_body(
     }
 }
 
-/// Accepts the worker signals that the fork bracket left blocked: USR2 runs `restart`, the first QUIT or INT runs `stop`, a second force-exits 131.
+/// Accepts the worker signals that `Forker::spawn` left blocked: USR2 runs `restart`, the first QUIT or INT runs `stop`, and a second one forces the exit with code 131.
 pub fn spawn_signal_thread(
     stop: impl FnOnce() + Send + 'static,
     restart: impl Fn() + Send + 'static,

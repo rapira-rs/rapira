@@ -11,13 +11,13 @@ use crate::pool::Pool;
 use crate::process::{Forker, reap_all};
 use crate::{MasterConfig, StopReason, WORKER_EXIT_DRAINED};
 
-/// Milliseconds until `next`, rounded up so a sub-millisecond remainder never busy-spins `poll` with a 0 timeout. At most 1000: `next` is never later than the 1 s tick.
+/// Milliseconds until `next`, rounded up so a sub-millisecond remainder never busy-spins `poll` with a 0 timeout. At most 1000, because `next` is never later than the 1 s tick.
 fn poll_timeout_ms(next: Instant, now: Instant) -> c_int {
     let d = next.saturating_duration_since(now);
     d.as_nanos().div_ceil(1_000_000) as c_int
 }
 
-/// The master-wide part: signals, the stop escalation and the routing to the pools. Every per-pool decision lives in [`Pool`].
+/// The master-wide part: signals, the stop escalation and the routing to the pools. Every per-pool decision is in [`Pool`].
 pub(crate) struct Master {
     pools: Vec<Pool>,
     spawner: Forker,
@@ -56,7 +56,7 @@ impl Master {
             }
             SignalAction::Reload => {
                 self.spawner.reloads.add_sent();
-                // Each worker restarts its app on its own.
+                // Each worker does the reload on its own.
                 for p in &self.pools {
                     p.signal_all(libc::SIGUSR2);
                 }
@@ -101,7 +101,7 @@ impl Master {
         }
         if now >= self.next_tick {
             self.next_tick = now + Duration::from_secs(1);
-            // Nothing runs while the master stops: the stop escalation bounds every worker.
+            // The watchdog and the memory limit do not run during a stop, because the stop escalation bounds every worker.
             if !self.pctl.is_stopping() {
                 for p in &mut self.pools {
                     p.maintenance_tick();
@@ -150,7 +150,7 @@ impl Master {
             let mut got_chld: bool = false;
             if n > 0 && (pfd.revents & libc::POLLIN) != 0 {
                 let mut buf = [0u8; 64];
-                // Drain the nonblocking self-pipe: WouldBlock (empty) or an error ends the loop.
+                // Read all bytes from the nonblocking self-pipe. WouldBlock on an empty pipe, or an error, ends the loop.
                 while let Ok(len @ 1..) = (&self.spawner.self_pipe.rd).read(&mut buf) {
                     for &b in &buf[..len] {
                         if b == libc::SIGCHLD as u8 {

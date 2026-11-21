@@ -21,7 +21,7 @@ impl fmt::Display for ListenAddr {
 impl FromStr for ListenAddr {
     type Err = anyhow::Error;
 
-    /// The `:port` check runs before the `SocketAddr` parse: an IPv6 literal contains ':' but never leads with one.
+    /// The `:port` check runs before the `SocketAddr` parse, because an IPv6 literal contains ':' but never starts with one.
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let s = s.trim();
         if let Some(path) = s.strip_prefix("unix:") {

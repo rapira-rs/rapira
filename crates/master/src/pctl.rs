@@ -30,7 +30,7 @@ impl Pctl {
         matches!(self, Pctl::Stopping { .. })
     }
 
-    /// TERM, INT or QUIT in Normal starts a graceful stop and arms the first escalation at `stop_deadline`. While stopping, TERM or INT forces the stop and QUIT is ignored.
+    /// TERM, INT or QUIT in Normal starts a stop and sets the first escalation at `stop_deadline`. During a stop, TERM or INT forces the stop, and QUIT has no effect.
     pub fn on_signal(&mut self, signo: c_int, stop_deadline: Instant) -> SignalAction {
         match signo {
             libc::SIGTERM | libc::SIGINT | libc::SIGQUIT => match *self {
@@ -60,7 +60,7 @@ impl Pctl {
         }
     }
 
-    /// Runs only at the stop deadline: sets the next deadline one second after `now` and returns the signal for every worker of every pool.
+    /// Runs only at the stop deadline. It sets the next deadline one second after `now` and returns the signal for every worker of every pool.
     pub fn escalate(&mut self, now: Instant) -> c_int {
         let Pctl::Stopping { next, deadline } = self else {
             unreachable!("stop escalation outside a stop");

@@ -84,9 +84,9 @@ impl<L: AsRawFd> Listener<L> {
                 // Another worker can take the connection before this accept runs.
                 Err(e) if e.kind() == io::ErrorKind::WouldBlock => continue,
                 // Every other result moves this worker behind the others. A rotation failure
-                // leaves the listener unregistered, so it is wrapped as `ErrorKind::Other`,
-                // which the accept loop treats as fatal. The stream accepted in that call closes:
-                // for a valid listener only ENOMEM or ENOSPC fail the rotation, and these can
+                // leaves the listener unregistered, so the error goes out as ErrorKind::Other,
+                // which the accept loop treats as fatal. The stream accepted in that call closes.
+                // For a valid listener only ENOMEM or ENOSPC fail the rotation, and these can
                 // also fail the tokio registration of the stream.
                 result => {
                     self.rotate().map_err(io::Error::other)?;
@@ -108,9 +108,9 @@ impl<L: AsRawFd> Listener<L> {
         }
     }
 
-    /// A thread blocked in epoll_wait is what makes EPOLLEXCLUSIVE hand one connection
-    /// to one worker: the kernel walks the socket wait queue and stops at the first
-    /// waiter it wakes. A worker that a signal ends while its thread waits here can take the
+    /// A thread blocked in epoll_wait lets EPOLLEXCLUSIVE give one connection to one
+    /// worker. The kernel walks the socket wait queue and stops at the first waiter it
+    /// wakes. A worker that a signal ends while its thread waits here can take the
     /// wakeup of one connection with it, and that connection waits in the accept queue until
     /// the next connection wakes another worker.
     fn listener_control(&self, operation: libc::c_int) -> io::Result<()> {
