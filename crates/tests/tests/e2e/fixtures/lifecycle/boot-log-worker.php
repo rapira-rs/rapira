@@ -1,5 +1,5 @@
 <?php
-// Logs each boot and the end of each app instance: a probe for app restarts inside one worker process.
+// Logs each boot and the end of each app instance. The tests use it to see each recycle inside one worker process.
 
 use Rapira\Exception\ClosedException;
 

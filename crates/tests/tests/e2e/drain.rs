@@ -5,7 +5,7 @@ use std::time::Duration;
 const READ: Duration = Duration::from_secs(10);
 const REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: e2e\r\n\r\n";
 
-/// One keep-alive exchange on `conn`: the response head, then its body by content-length.
+/// Runs one keep-alive exchange on `conn` and returns the response head. The body is read by content-length.
 fn exchange(conn: &mut Conn) -> std::io::Result<Head> {
     conn.send(REQUEST)?;
     let head = conn.read_head(READ)?;
@@ -23,7 +23,7 @@ fn field<'a>(head: &'a Head, name: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// A stopping worker keeps the connections it holds: a request on each gets a complete response with `connection: close`, and the worker exits once they are closed.
+/// A stopping worker keeps the connections it holds. A request on each gets a complete response with `connection: close`, and the worker exits after they close.
 #[test]
 fn a_stopping_worker_answers_requests_on_the_connections_it_holds() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php")).spawn();
@@ -64,13 +64,13 @@ fn a_stopping_worker_answers_requests_on_the_connections_it_holds() {
             .unwrap_or_else(|e| panic!("new connection {i}: {e}\n{}", diagnostics(&srv)));
         assert_eq!(head.status, 200, "new connection {i}");
     }
-    // Well under the 25 s drain grace: the drain ends when the last connection closes.
+    // The 10 s wait is well under the 25 s drain grace period. It is enough because the drain ends when the last connection closes.
     wait_workers(&srv, READ, "a new worker after the drain", |p| {
         p.len() == 1 && p[0] != pid
     });
 }
 
-/// One Connect unary call to EchoService/Echo on `conn`.
+/// Sends one Connect unary call to EchoService/Echo on `conn`.
 async fn connect_call(conn: &mut tests::grpc::Conn) -> tests::grpc::Response {
     let exchange = conn.send(
         http::Method::POST,

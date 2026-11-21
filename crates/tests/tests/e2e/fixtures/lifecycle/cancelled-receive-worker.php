@@ -12,7 +12,7 @@ try {
         if ($ex->getRequest()->target === '/events') {
             $ex->writeHead(200, ['content-type' => ['text/event-stream']]);
             $ex->writeBody("data: connected\n\n", eos: false);
-            // Bounded, so a stuck test fails on the state assertion instead of a read timeout.
+            // The wait has a limit, so a stuck test fails on the state assertion and not on a read timeout.
             $deadline = microtime(true) + 20;
             while (!$ex->isCancelled() && microtime(true) < $deadline) {
                 usleep(1_000);

@@ -4,7 +4,7 @@ use tests::{StatusBody, drain, fixture, req};
 
 use crate::harness::Spawn;
 
-/// The plugin classes extend the base ones, so the order base then parts must hold in MINIT.
+/// The plugin classes extend the base classes, so MINIT must register the base classes before the plugin classes.
 #[test]
 fn every_plugin_class_exists_after_boot_with_both_parts() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("registry/classes.php")).spawn();

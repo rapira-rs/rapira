@@ -136,7 +136,7 @@ fn two_pools_on_one_address_fail_the_boot() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// One worker takes every connection. The connections after the first wait in the backlog while the worker moves its listener entry to the tail of the wait queue after each accept, and no new connection arrives to wake it again.
+/// One worker takes every connection. The connections after the first wait in the backlog. After each accept, the worker moves its listener entry to the tail of the wait queue, and no new connection arrives to wake it again.
 #[test]
 fn queued_connections_survive_each_accept() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path(ECHO)).spawn();
@@ -180,7 +180,7 @@ fn signals_during_the_boot_do_not_stop_the_master() {
     let mut ini = std::fs::read_to_string(&ini)
         .unwrap_or_else(|e| panic!("read {}: {e}", ini.display()))
         + &format!("\nopcache.preload = {}\n", preload.display());
-    // PHP needs opcache.preload_user under uid 0; `root` keeps the preload in the master process, where the signals must land: https://www.php.net/manual/en/opcache.configuration.php#ini.opcache.preload-user
+    // PHP needs opcache.preload_user under uid 0. The value root keeps the preload in the master process, where the signals must arrive: https://www.php.net/manual/en/opcache.configuration.php#ini.opcache.preload-user
     if unsafe { libc::geteuid() } == 0 {
         ini.push_str("opcache.preload_user = root\n");
     }

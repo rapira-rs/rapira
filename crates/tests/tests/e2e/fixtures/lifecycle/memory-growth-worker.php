@@ -1,5 +1,5 @@
 <?php
-// ?grow=N keeps N more MiB of written memory for the life of the process, then holds the request for 1.5 s: longer than one master tick.
+// ?grow=N keeps N more MiB of written memory for the life of the process, then holds the request for 1.5 s, which is longer than one master tick.
 
 use Rapira\Exception\ClosedException;
 

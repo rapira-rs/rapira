@@ -6,7 +6,7 @@ $handler = static function (): void {
 	}
 	if (($_GET['boom'] ?? '') === '1') {
 		ini_set('display_errors', '0');
-		// the ctor throws on open failure; query() on bad SQL only warns
+		// the constructor throws when the open fails, and query() with bad SQL only warns
 		new SQLite3('/nonexistent-dir-xyz/db.sqlite');
 		return;
 	}

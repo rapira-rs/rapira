@@ -2,7 +2,7 @@
 
 use Rapira\Exception\ClosedException;
 
-// The dispatcher twin of worker/held-worker.php: counts the units of this app instance and holds each one until the release file exists.
+// The dispatcher-mode version of worker/held-worker.php. It counts the units of this app instance and holds each one until the release file exists.
 $runs = 0;
 $d = \Rapira\get_dispatcher();
 try {

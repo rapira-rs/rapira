@@ -77,7 +77,7 @@ fn killed_worker_respawns() {
     }
 }
 
-/// Workers ignore SIGUSR1, and SIGUSR2 only asks them to restart their app, so `pkill -USR2 rapira` does not stop them. Classic mode starts PHP again for each request, and PHP sets its signal handlers again at each start.
+/// Workers ignore SIGUSR1, and SIGUSR2 only asks them to recycle their app, so `pkill -USR2 rapira` does not stop them. Classic mode starts PHP again for each request, and PHP sets its signal handlers again at each start.
 #[test]
 fn workers_ignore_usr_signals() {
     struct Case {
@@ -120,7 +120,7 @@ fn workers_ignore_usr_signals() {
     }
 }
 
-// After the master exits its workers reparent away and `worker_pids` cannot see them, so poll the captured pids directly.
+// After the master exits, its workers reparent and worker_pids cannot see them, so poll the captured pids directly.
 fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
     poll(timeout, || {
         // SAFETY: kill(pid, 0) only probes existence; ESRCH means gone.
@@ -264,7 +264,7 @@ fn killed_master_leaves_workers_to_drain() {
     }
 }
 
-/// max_requests = 2 is a quota of 3. A served unit uses the quota, but a queued unit whose client left does not: after A and two such units, the count probe still reaches the app instance that served A.
+/// max_requests = 2 is a quota of 3. A served unit uses the quota, but a queued unit whose client left does not. After A and two such units, the count probe still reaches the app instance that served A.
 #[test]
 fn queued_clients_gone_do_not_use_the_max_requests_quota() -> anyhow::Result<()> {
     struct Case {
@@ -315,7 +315,7 @@ fn queued_clients_gone_do_not_use_the_max_requests_quota() -> anyhow::Result<()>
     Ok(())
 }
 
-/// max_requests = 2 is a quota of 3, so the storm restarts the app many times. Each restart boots the app again in the same process, and no request fails.
+/// max_requests = 2 is a quota of 3, so the storm recycles the app many times. Each recycle boots the app again in the same process, and no request fails.
 #[test]
 fn max_requests_restarts_the_app_without_losing_requests() {
     struct Case {
@@ -434,7 +434,7 @@ fn a_worker_above_max_memory_is_replaced() {
         .expect("GET / after the replacement")
         .status;
     assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    // Three master ticks: a new worker under the limit is not drained.
+    // Three master ticks pass, and a new worker under the limit is not drained.
     std::thread::sleep(Duration::from_secs(3));
     assert_eq!(
         worker_pids(srv.pid()),
@@ -444,7 +444,7 @@ fn a_worker_above_max_memory_is_replaced() {
     );
 }
 
-/// A top-level `[pool]` table is a parse error: the pool belongs under `[http.pool]`.
+/// A top-level `[pool]` table is a parse error, because the pool belongs under `[http.pool]`.
 #[test]
 fn a_top_level_pool_table_refuses_to_boot() {
     let Exited { status, log } =
@@ -456,7 +456,7 @@ fn a_top_level_pool_table_refuses_to_boot() {
     assert!(log.contains("unknown field `pool`"), "\n{log}");
 }
 
-/// The entrypoint is fixed for the pool's lifetime, so the master proves it is readable at boot.
+/// The entrypoint is fixed for the lifetime of the pool, so the master checks at boot that it is readable.
 #[test]
 fn a_missing_entrypoint_refuses_to_boot() {
     let Exited { status, log } =
@@ -487,7 +487,7 @@ fn an_unreadable_entrypoint_refuses_to_boot() {
     assert!(log.contains("is not readable"), "\n{log}");
 }
 
-/// A gen-0 pool whose boot always fails stops the master with exit code 70. No request is necessary: each worker runs the boot again on its own, and the fifth failed boot flags it unhealthy. Two workers: a worker that fails its boot does not count as serving.
+/// A gen-0 pool whose boot always fails stops the master with exit code 70. No request is necessary, because each worker runs the boot again on its own, and the fifth failed boot flags it unhealthy. The pool has two workers, and a worker that fails its boot does not count as serving.
 #[test]
 fn master_failboot_exits_70() {
     let mut srv = Spawn::http(Mode::Dispatcher, fixture_path("lifecycle/fatal-worker.php"))
@@ -540,7 +540,7 @@ fn a_worker_that_never_boots_next_to_a_serving_worker_keeps_the_master_up() {
     );
 }
 
-/// A worker-mode bootstrap that never calls handle_request() must failboot the master, not hang or shed 503s forever.
+/// A worker-mode entrypoint that never calls handle_request() must make the master exit as a failed boot. The server must not hang or shed 503s forever.
 #[test]
 fn worker_bootstrap_that_never_serves_failboots() {
     let mut srv = Spawn::http(
@@ -560,7 +560,7 @@ fn worker_bootstrap_that_never_serves_failboots() {
     assert_exit_code(Some(status), MASTER_EXIT_FAILBOOT, &srv);
 }
 
-/// A client that walks away mid-handler must not take the worker down: the abort ends only that unit, and the next request is served.
+/// A client that leaves in the middle of the handler must not stop the worker. The abort ends only that unit, and the next request is served.
 #[test]
 fn worker_survives_client_leaving() {
     let srv = Spawn::http(Mode::Worker, fixture_path("lifecycle/hold-worker.php")).spawn();
@@ -580,7 +580,7 @@ fn worker_survives_client_leaving() {
     assert_eq!(body, b"ok", "\n{}", diagnostics(&srv));
 }
 
-/// An unfinalized exchange whose client left is finalized, so `activeCount()` no longer counts it. The next `receive()` discards it, and the discard is logged.
+/// An unfinalized exchange whose client left is finalized, so `activeCount()` does not count it. The next `receive()` discards it, and the discard is logged.
 #[test]
 fn cancelled_exchange_is_discarded_by_next_receive() {
     let srv = Spawn::http(
@@ -658,7 +658,7 @@ fn repeated_request_fields_reach_php_combined() {
     );
 }
 
-/// A wire name carrying `_` or `.` must never reach the CGI variable a `-` name owns; the SAPI's cgi_header_name rewrites `.` to `_`.
+/// A wire name with `_` or `.` must never reach the CGI variable of a `-` name. The SAPI function cgi_header_name rewrites `.` to `_`.
 #[test]
 fn alias_names_never_reach_a_cgi_variable() {
     let srv = Spawn::http(
@@ -686,7 +686,7 @@ fn alias_names_never_reach_a_cgi_variable() {
     );
 }
 
-/// The accumulate-loop cap: with no declared length the 413 fires when the streamed body crosses max_body_size.
+/// The cap of the accumulate loop. With no declared length, the 413 comes when the streamed body crosses max_body_size.
 #[test]
 fn chunked_body_over_the_cap_answers_413() {
     let srv = Spawn::http(
@@ -718,7 +718,7 @@ fn chunked_body_over_the_cap_answers_413() {
     assert_eq!(status, 413, "\n{}", diagnostics(&srv));
 }
 
-/// An under-cap chunked body dispatches normally, pinning that the cap check is not over-eager.
+/// An under-cap chunked body dispatches normally. This shows that the cap check is not too strict.
 #[test]
 fn chunked_body_under_the_cap_is_served() {
     let srv = Spawn::http(
@@ -805,7 +805,7 @@ fn expect_100_continue_gets_the_interim_then_the_response() {
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
 }
 
-/// A refused request must never see a 100: admission rejects before the body is ever polled.
+/// A refused request must never see a 100, because admission rejects it before the first poll of the body.
 #[test]
 fn expect_100_continue_is_skipped_when_the_request_is_refused() {
     let srv = Spawn::http(
@@ -833,7 +833,7 @@ fn expect_100_continue_is_skipped_when_the_request_is_refused() {
     );
 }
 
-/// A final 1xx from PHP cannot go on the wire: hyper would rewrite it to a 500 and error the connection, so the plugin serves 502.
+/// A final 1xx from PHP cannot go on the wire. hyper would rewrite it to a 500 and fail the connection, so the plugin serves 502.
 #[test]
 fn final_interim_status_becomes_502() {
     let srv = Spawn::http(
@@ -879,7 +879,7 @@ fn a_second_host_field_line_answers_400() {
     assert_eq!(code, 400, "\n{}", diagnostics(&srv));
 }
 
-/// `header("Status: 404")` must become the response code, not a literal field on a 200: php-src's sapi_header_op passes it through verbatim and the origin server converts it (RFC 3875 §6.2.1).
+/// `header("Status: 404")` must become the response code, not a literal field on a 200. The php-src function sapi_header_op passes it through verbatim, and the origin server converts it (RFC 3875 §6.2.1).
 #[test]
 fn status_field_sets_the_code_and_never_reaches_the_client() {
     let srv = Spawn::http(
@@ -1052,7 +1052,7 @@ fn head_keeps_the_declared_content_length() {
     }
 }
 
-/// The method token is case-sensitive, so `head` is an extension method, not HEAD: the app's body reaches the client.
+/// The method token is case-sensitive, so `head` is an extension method, not HEAD. The body that the app writes reaches the client.
 /// RFC 9110 §9.1: https://www.rfc-editor.org/rfc/rfc9110#section-9.1
 #[test]
 fn lowercase_head_is_not_head() {
@@ -1095,7 +1095,7 @@ fn lowercase_head_is_not_head() {
     }
 }
 
-/// Host-side multipart over the wire: a non-UTF-8 boundary round-trips, the spool file dies with finalization, malformed framing answers 400 and an over-limit file part 413.
+/// Host-side multipart over the wire: a non-UTF-8 boundary round-trips, the spool file goes at finalization, malformed framing answers 400 and an over-limit file part 413.
 #[test]
 fn dispatcher_multipart_over_the_wire() {
     let srv = Spawn::http(

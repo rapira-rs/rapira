@@ -41,7 +41,7 @@ fn ulps(a: f64, b: f64, single: bool) -> u64 {
     ord(a).abs_diff(ord(b))
 }
 
-/// A float or a double field. An absent field is 0.
+/// Reads a float or a double field. An absent field is 0.
 fn float(msg: &DynamicMessage, number: u32) -> f64 {
     match msg.field_by_number(number) {
         None => 0.0,

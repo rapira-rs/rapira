@@ -6,7 +6,7 @@ $handler = static function (): void {
 		return;
 	}
 	if (($_GET['step'] ?? '') === 'leak') {
-		// the 1-second bound keeps a wrong lexical-rejection assumption from stalling the suite
+		// if imap_open does not reject the mailbox name lexically, the 1-second timeout limits the stall of the suite
 		imap_timeout(IMAP_OPENTIMEOUT, 1);
 		@imap_open('{}INBOX', 'u', 'p');
 		// imap_last_error() does not clear the stack.

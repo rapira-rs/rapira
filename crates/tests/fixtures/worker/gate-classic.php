@@ -9,7 +9,7 @@ try {
     echo 'message: ', $e->getMessage(), "\n";
 }
 
-// ZPP runs before the mode gate: a non-callable is a TypeError everywhere.
+// ZPP runs before the mode gate, so a non-callable is a TypeError in every mode.
 try {
     \Rapira\handle_request('nope');
 } catch (\TypeError) {

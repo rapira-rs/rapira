@@ -11,7 +11,7 @@ use crate::harness::{
     signal,
 };
 
-// A worker that fatals before its receive loop must 503 the queued unit, and the graceful stop must not wait on a boot that retries forever.
+// A worker with a fatal error before its receive loop must answer the queued unit with 503, and the SIGQUIT stop must not wait for a boot that retries forever.
 #[test]
 fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
     let mut srv = Spawn::http(
@@ -85,7 +85,7 @@ fn failboot_grpc_worker_sheds_with_unavailable() -> anyhow::Result<()> {
     Ok(())
 }
 
-// A request during the wait after a failed boot gets 503 and starts no boot: the next boot starts when the wait ends. The 5 failed boots of the default max_boot_failures have 4 waits between them (0.5, 1, 2 and 4 s), so the 4 requests do not shorten the time to the unhealthy flag. The flag stops the worker, and the master stops with exit code 70 because the pool never served.
+// A request during the wait after a failed boot gets 503 and starts no boot. The next boot starts when the wait ends. The 5 failed boots of the default max_boot_failures have 4 waits between them (0.5, 1, 2 and 4 s), so the 4 requests do not shorten the time to the unhealthy flag. The flag stops the worker, and the master stops with exit code 70 because the pool never served.
 #[test]
 fn requests_during_the_boot_wait_get_503_and_start_no_boot() -> anyhow::Result<()> {
     let started = Instant::now();

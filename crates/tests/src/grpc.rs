@@ -26,7 +26,7 @@ pub const HI_FRAME: &[u8] = &[0x00, 0x00, 0x00, 0x00, 0x04, 0x0a, 0x02, 0x68, 0x
 
 pub use crate::{Fields, fields};
 
-/// The `google.rpc.Status` of NOT_FOUND `no invoice` with one detail: `url` packing `0a 01 78`.
+/// The `google.rpc.Status` of NOT_FOUND `no invoice` with one detail. The detail is an `Any` with the type URL `url` and the value `0a 01 78`.
 ///
 /// Sources: `google/rpc/status.proto` (code 1, message 2, details 3) and `google/protobuf/any.proto` (type_url 1, value 2).
 pub fn status_bytes(url: &str) -> Vec<u8> {
@@ -203,7 +203,7 @@ pub struct Envelope {
     pub message: Bytes,
 }
 
-/// The envelopes of `body`, in order: a flags byte and a 4-byte big-endian length come before each message.
+/// The envelopes of `body`, in order. A flags byte and a 4-byte big-endian length come before each message.
 pub fn envelopes(mut body: &[u8]) -> Vec<Envelope> {
     let mut out = Vec::new();
     while !body.is_empty() {

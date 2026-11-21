@@ -5,13 +5,13 @@ class Track
 	public static int $done = 0;
 }
 
-// the test drops the receiver after 'held'; the sleep lets the drop land before the write
+// the test drops the receiver after 'held', and the sleep lets the drop complete before the write
 function write_after_leave(): void
 {
 	\Rapira\log('held');
 	usleep(300000);
-	echo "payload\n"; // aborted write: the SAPI ends the unit
-	Track::$done++; // must not run when the client disconnected
+	echo "payload\n"; // this write finds the client gone, so the SAPI ends the unit
+	Track::$done++; // must not run after the client disconnects
 }
 
 final class WriteOnDestruct
@@ -27,7 +27,7 @@ $handler = static function (): void {
 	header('Content-Type: text/plain');
 	switch ($_GET['case'] ?? '') {
 		case 'probe':
-			// (int): php-src master returns bool, PHP 8 returns int. https://github.com/php/php-src/commit/8639e7522a33309b1ed9d096c4a90204e2e50d1a
+			// The (int) cast is necessary because php-src master returns bool and PHP 8 returns int. https://github.com/php/php-src/commit/8639e7522a33309b1ed9d096c4a90204e2e50d1a
 			echo "served=", Track::$served, " done=", Track::$done, " aborted=", (int) connection_aborted();
 			return;
 		case 'echo':

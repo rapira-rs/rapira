@@ -6,9 +6,9 @@ use tracing::Level;
 
 use crate::harness::Spawn;
 
-/// Runs `script` in classic mode and returns its `app` records and its `php` messages; the fixture must echo `logged` last, so a script that died half way cannot masquerade as one that logged nothing.
+/// Runs `script` in classic mode and returns its `app` records and its `php` messages. The fixture must echo `logged` last, so a fixture that stops half way does not look like one that logged nothing.
 fn app_records(script: &str) -> AppLog {
-    // Every level of the `app` and `php` targets reaches the log.
+    // Every level of the tracing targets app and php reaches the log.
     let mut srv = Spawn::http(Mode::Classic, fixture(script))
         .json_log()
         .rust_log("info,app=trace,php=trace")
@@ -22,7 +22,7 @@ fn app_records(script: &str) -> AppLog {
     server_log::app_records(&srv.log_file())
 }
 
-/// The one `app` record `script` must leave; asserting the count fails the test on a stray extra record instead of ignoring it.
+/// Returns the one `app` record that `script` must leave. The count check fails the test on a stray extra record and does not ignore it.
 fn app_record(script: &str) -> AppRecord {
     let records = app_records(script).records;
     assert_eq!(
@@ -33,7 +33,7 @@ fn app_record(script: &str) -> AppRecord {
     records.into_iter().next().expect("checked above")
 }
 
-/// Every LogLevel case reaches the matching tracing level; an omitted argument lands on Info.
+/// Every LogLevel case reaches the matching tracing level; an omitted argument gives Info.
 #[test]
 fn log_levels_map_onto_tracing_levels() {
     #[derive(Debug, PartialEq)]
@@ -84,7 +84,7 @@ fn log_levels_map_onto_tracing_levels() {
     );
 }
 
-/// Absent and empty contexts carry no field at all rather than an empty JSON object.
+/// Absent and empty contexts carry no field, not an empty JSON object.
 #[test]
 fn log_context_is_json_encoded() {
     let records = app_records("app_logger/app-logger-context.php").records;
@@ -117,7 +117,7 @@ fn log_context_is_json_encoded() {
     }
 }
 
-/// PSR-3's `['exception' => $e]` stays diagnosable: Throwable state lives in private properties.
+/// The PSR-3 context `['exception' => $e]` stays diagnosable. The Throwable state is in private properties.
 #[test]
 fn log_context_carries_a_throwable() {
     let AppRecord {
@@ -224,7 +224,7 @@ fn log_context_encodes_common_php_values() {
     );
 }
 
-/// createFromDateString() DateIntervals encode as `from_string`/`date_string`, not y/m/d.
+/// createFromDateString() DateIntervals encode as `from_string` and `date_string`, not as y, m and d.
 #[test]
 fn app_logger_dateinterval_easy() {
     let AppRecord {
@@ -245,7 +245,7 @@ fn app_logger_dateinterval_easy() {
     );
 }
 
-/// Cycles are cut at the back-edge and raise no PHP diagnostic.
+/// Reference cycles are cut at the back-edge and raise no PHP diagnostic.
 #[test]
 fn cycles_are_broken_without_a_diagnostic() {
     let AppLog {
@@ -293,7 +293,7 @@ fn log_survives_a_throwing_json_serializer() {
     assert!(ctx.contains(r#""bomb":null"#), "got: {ctx:?}");
 }
 
-/// exit() inside a serializer is an unwind-exit, not a serialization failure: log() must not eat it.
+/// exit() inside a serializer is an unwind-exit, not a serialization failure, so log() must not suppress it.
 #[test]
 fn log_preserves_exit_from_a_serializer() {
     let srv = Spawn::http(

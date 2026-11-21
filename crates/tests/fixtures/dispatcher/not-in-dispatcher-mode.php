@@ -9,7 +9,7 @@ try {
     echo 'message: ', $e->getMessage(), "\n";
 }
 
-// The RuntimeException family is userland-constructible and must stay catchable by its stock parent.
+// App code can construct the RuntimeException family, and catch (\RuntimeException) must still catch it.
 try {
     throw new \Rapira\Exception\TimeoutException('elapsed');
 } catch (\RuntimeException $e) {

@@ -298,19 +298,19 @@ fn hex(bytes: &[u8]) -> String {
 /// Sources: the protobuf encoding (field 1 string "hi" is 0a 02 68 69, field 2 Timestamp{seconds: 1} is 12 02 08 01, field 3 packed repeated int32 is 1a, the varint length, then one varint per element), proto3 JSON (a repeated int32 is an array of numbers, defaults are omitted, unknown fields are ignored) and the Connect protocol (400 for a request that does not decode, 500 for a reply that does not).
 #[tokio::test]
 async fn json_transcodes_by_descriptor() {
-    // buffa charges the size of its Value type, at least 64 bytes, per element against a 32 MiB budget for untrusted input, so at most 524,288 elements fit. The reply is the application's, so the budget does not apply to it.
-    // grpc/wire-worker.php replies with this many elements for `x-reply: many-ids`.
+    // buffa charges the size of its Value type, at least 64 bytes, per element against a 32 MiB budget for untrusted input, so at most 524,288 elements fit. The reply comes from the app, so the budget does not apply to it.
+    // grpc/wire-worker.php replies with this many elements when the x-reply value is many-ids.
     const IDS: usize = 600_000;
     let many_ids_json = format!(r#"{{"ids":[{}1]}}"#, "1,".repeat(IDS - 1));
     struct Case<'a> {
         name: &'static str,
-        /// The `x-reply` value that selects the bytes PHP replies with. None: PHP echoes the message.
+        /// The `x-reply` value that selects the bytes PHP replies with. None means that PHP echoes the message.
         answer: Option<&'static str>,
         request: &'a [u8],
         status: u16,
-        /// The bytes PHP gets. None: PHP never sees the call.
+        /// The bytes PHP gets. None means that PHP never sees the call.
         sent: Option<&'a [u8]>,
-        /// None: not checked.
+        /// None means that the test does not check the reply.
         reply: Option<&'a [u8]>,
     }
     let cases = [

@@ -4,7 +4,7 @@ use tests::{StatusBody, drain, fixture, req};
 
 use crate::harness::Spawn;
 
-/// Pins that Http value objects construct and refuse readonly reassignment, wrong arity, and a bad address union.
+/// Checks that the Http value objects construct, and that they refuse a readonly reassignment, a wrong arity and a bad address union.
 #[test]
 fn value_objects_construct_and_refuse() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("http_values/construct.php")).spawn();

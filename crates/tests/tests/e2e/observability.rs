@@ -1,4 +1,4 @@
-//! The `[observability]` endpoint: the process without PHP that serves `GET /metrics`, `GET /livez` and `GET /readyz`.
+//! Tests the `[observability]` endpoint. It is the process without PHP that serves `GET /metrics`, `GET /livez` and `GET /readyz`.
 
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -17,7 +17,7 @@ use crate::harness::{
 use crate::harness::{kill_master_as_subreaper, wait_child_exit};
 
 const REQ: Duration = Duration::from_secs(10);
-/// Dispatcher mode. `/` answers `ok:<pid>`, and `/?hang=1` holds the PHP thread forever.
+/// A dispatcher-mode fixture. `/` answers `ok:<pid>`, and `/?hang=1` holds the PHP thread forever.
 const HANG: &str = "lifecycle/hang-worker.php";
 const PROBE_TYPE: &str = "text/plain; charset=utf-8";
 const METRICS_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -40,7 +40,7 @@ struct ObservedServer {
     observability: SocketAddr,
 }
 
-/// One `[http]` pool of one worker over `fixture`, with `pool` keys in `[http.pool]` and an `[observability]` listener on a free port. `tables` follows the `listen` key: more `[observability]` keys, the sub-tables and other tables.
+/// Spawns one `[http]` pool of one worker over `fixture`, with `pool` keys in `[http.pool]` and an `[observability]` listener on a free port. `tables` follows the `listen` key: more `[observability]` keys, the sub-tables and other tables.
 fn spawn(fixture: &str, pool: &str, tables: &str) -> ObservedServer {
     let observability = SocketAddr::from(([127, 0, 0, 1], free_port()));
     let srv = Spawn::http(Mode::Dispatcher, fixture_path(fixture))
@@ -52,7 +52,7 @@ fn spawn(fixture: &str, pool: &str, tables: &str) -> ObservedServer {
     ObservedServer { srv, observability }
 }
 
-/// One `GET` on its own connection.
+/// Sends one `GET` on its own connection.
 fn get(addr: SocketAddr, path: &str) -> Resp {
     let mut rx = submit(addr, req(path)).unwrap_or_else(|e| panic!("GET {path}: {e}"));
     drain_resp_deadline(&mut rx, Instant::now() + REQ)
@@ -101,7 +101,7 @@ fn scrape_until(
     }
 }
 
-/// Three requests on one worker. The endpoint reports them for the `http` pool and leaves out the observability pool.
+/// The test sends three requests to one worker. The endpoint reports them for the `http` pool and leaves out the observability pool.
 #[test]
 fn a_scrape_reports_the_pool() {
     let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
@@ -132,7 +132,7 @@ fn a_scrape_reports_the_pool() {
     assert_eq!(value(&samples, &build), 1);
 }
 
-/// With only `[observability.metrics]`, each other route answers 404, the probes too.
+/// With only `[observability.metrics]`, each other route answers 404, including the probes.
 #[test]
 fn only_get_metrics_is_served() {
     struct Case {
@@ -236,7 +236,7 @@ fn a_booting_worker_is_starting_and_not_ready_until_its_first_pull() {
     assert_eq!((resp.status(), resp.body_string().as_str()), (200, "ok\n"));
 }
 
-/// A worker whose boot fails stays starting: the host's shed pull does not count as the app's first pull. The 503 shows that the host shed the request in its shed pull. The slot stays starting through the re-boot and the next shed pull.
+/// A worker whose boot fails stays starting, because the shed pull of the host does not count as the first pull of the app. The 503 shows that the host shed the request in its shed pull. The slot stays starting through the re-boot and the next shed pull.
 #[test]
 fn a_worker_whose_boot_fails_stays_starting() {
     // No failure limit: with the default limit, the server stops 7.5 s after the first failed boot.
@@ -316,7 +316,7 @@ fn a_failed_reboot_stays_starting() {
         "\n{}",
         diagnostics(&srv)
     );
-    // Longer than the 1 s limit plus the 1 s tick of the watchdog.
+    // The sleep is longer than the 1 s limit plus the 1 s tick of the watchdog.
     std::thread::sleep(Duration::from_millis(2500));
     let samples = scrape(observability);
     assert_eq!(
@@ -348,7 +348,7 @@ fn an_observability_listener_on_the_http_address_fails_the_boot() {
     );
 }
 
-/// The master sends a USR2 reload to every pool. The observability process has no app to restart, so it keeps running.
+/// The master sends a USR2 reload to every pool. The observability process has no app to recycle, so it keeps running.
 #[test]
 fn a_reload_leaves_the_observability_process_alone() {
     let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
@@ -368,7 +368,7 @@ fn a_reload_leaves_the_observability_process_alone() {
     assert_eq!(after, before, "the processes stay\n{}", diagnostics(&srv));
 }
 
-/// Linux only: the endpoint reads `/proc/<pid>/smaps_rollup` of each live worker.
+/// Linux only. The endpoint reads `/proc/<pid>/smaps_rollup` of each live worker.
 #[cfg(target_os = "linux")]
 #[test]
 fn each_live_worker_reports_its_memory() {
@@ -435,7 +435,7 @@ fn a_killed_worker_counts_as_crashed() {
     });
 }
 
-/// The held request takes the only PHP thread, so the next two requests wait in the worker queue. The held request never ends, so a 1 s control timeout ends the stop at the end of the test.
+/// The held request takes the only PHP thread, so the next two requests wait in the intake. The held request never ends, so a 1 s control timeout ends the stop at the end of the test.
 #[test]
 fn requests_behind_a_held_worker_count_as_queued() {
     let ObservedServer { srv, observability } = spawn(

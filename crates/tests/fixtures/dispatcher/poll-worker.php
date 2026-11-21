@@ -1,6 +1,6 @@
 <?php
 
-// Serves through tryReceive(), then receive(1s) once a request flips the mode.
+// Serves through tryReceive(), then through receive() with a 1 s timeout after a request changes the mode.
 
 $d = \Rapira\get_dispatcher();
 $mode = 'try';

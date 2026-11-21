@@ -11,14 +11,14 @@ function nest(int $depth): int
 		return fib(12);
 	}
 	$inner = new Fiber(fn(): int => nest($depth - 1));
-	$inner->start();                      // inner runs to completion, never suspends
+	$inner->start();                      // the inner fiber runs to its end and never suspends
 	return $inner->getReturn();
 }
 
 $handler = static function (): void {
 	$sum = 0;
 
-	// 300 independent fibers, each suspending twice: every start/resume crosses the fiber<->worker stack boundary.
+	// 300 independent fibers suspend twice each. Each start and each resume crosses the boundary between the fiber stack and the worker stack.
 	for ($i = 0; $i < 300; $i++) {
 		$f = new Fiber(function (): int {
 			$a = fib(14);                 // recursion runs on the fiber's own stack
@@ -33,7 +33,7 @@ $handler = static function (): void {
 	}
 	// sum = 300 * 755 = 226500
 
-	// 25 nested fibers keep 25 fiber stacks live at once; adds 144.
+	// 25 nested fibers keep 25 fiber stacks alive at the same time. This adds 144.
 	$sum += nest(25);
 
 	header('Content-Type: text/plain');

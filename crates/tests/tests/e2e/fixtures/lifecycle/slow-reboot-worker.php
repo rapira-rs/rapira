@@ -1,5 +1,5 @@
 <?php
-// Every boot takes 2 s, and ?slow takes 2 s: a long last request, then a long boot of the next app instance.
+// Every boot takes 2 s, and ?slow takes 2 s. This gives a long last request, then a long boot of the next app instance.
 
 use Rapira\Exception\ClosedException;
 

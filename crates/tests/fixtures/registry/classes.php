@@ -1,5 +1,5 @@
 <?php
-// One line per name: "yes" when the class table holds it. class_exists() is false for an interface, so interface_exists() covers the interfaces.
+// One line per name, with "yes" when the class table holds it. class_exists() is false for an interface, so interface_exists() covers the interfaces.
 $handler = static function (): void {
     header('Content-Type: text/plain');
     foreach ([

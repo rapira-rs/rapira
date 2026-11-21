@@ -1,6 +1,6 @@
 <?php
 
-// Probe toggles ride on the request target: this mode has no superglobals.
+// The request target carries the probe toggles, because this mode has no superglobals.
 
 $d = \Rapira\get_dispatcher();
 try {
@@ -8,7 +8,7 @@ try {
         $ex = $d->receive();
         parse_str(parse_url($ex->getRequest()->target, PHP_URL_QUERY) ?: '', $q);
         if (isset($q['spin'])) {
-            // never finalizes: the per-unit budget must kill it (timeout_tests.rs)
+            // this unit is never finalized, so the per-unit budget must kill it (timeout_tests.rs)
             while (true) {
             }
         }

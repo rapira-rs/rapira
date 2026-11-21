@@ -1,4 +1,4 @@
-//! An HTTP/1 request head through the admission checks, the request build and the `$uri` of the dispatcher mode.
+//! Passes an HTTP/1 request head through the admission checks, the request build and the `$uri` of the dispatcher mode.
 //! The first byte selects the superglobals and the scheme. The rest is the request head.
 
 #![no_main]
@@ -171,7 +171,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     // Request::$uri: the listener scheme, the authority or else the listener address, and the path. OPTIONS * gives the root.
     let uri_abs = uri_abs(&built);
     let a = authority.as_deref().unwrap_or(SERVER.as_bytes());
-    // rapira puts any Host value into $uri, so $uri is checked only for an authority that http::Uri accepts.
+    // rapira puts any Host value into $uri, so the target checks $uri only for an authority that http::Uri accepts.
     if http::uri::Authority::try_from(a).is_ok() {
         let u = Uri::try_from(uri_abs.as_str()).unwrap_or_else(|e| panic!("$uri {uri_abs}: {e}"));
         assert_eq!(

@@ -1,4 +1,4 @@
-//! Request headers to `Context::$metadata` of a gRPC call. The input is one `name:value` field per line.
+//! Checks the conversion of request headers to `Context::$metadata` of a gRPC call. The input is one `name:value` field per line.
 //! The target gets the expected metadata from the contract and the gRPC spec, and compares it with the metadata from rapira.
 
 #![no_main]
@@ -41,9 +41,9 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             }
             // Split on "," first, then decode base64 with or without padding: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
             for piece in v.split(|&b| b == b',') {
-                // RFC 9110 OWS around a list element: https://www.rfc-editor.org/rfc/rfc9110#section-5.6.1
+                // Trim the RFC 9110 OWS around a list element: https://www.rfc-editor.org/rfc/rfc9110#section-5.6.1
                 let piece = piece.trim_ascii();
-                // rapira also accepts a padding that is shorter than the canonical one: BIN_DECODE uses DecodePaddingMode::Indifferent.
+                // rapira also accepts a padding that is shorter than the canonical one, because BIN_DECODE uses DecodePaddingMode::Indifferent.
                 let end = piece.iter().rposition(|&b| b != b'=').map_or(0, |i| i + 1);
                 let (b64, padding) = piece.split_at(end);
                 if padding.len() > (4 - b64.len() % 4) % 4 {

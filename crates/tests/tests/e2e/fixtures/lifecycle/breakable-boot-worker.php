@@ -1,5 +1,5 @@
 <?php
-// Every boot throws while broken.flag exists next to it: a deploy that breaks the boot, reloaded in place.
+// Every boot throws while broken.flag exists next to this file. This simulates a deploy that breaks the boot and is reloaded in place.
 
 use Rapira\Exception\ClosedException;
 

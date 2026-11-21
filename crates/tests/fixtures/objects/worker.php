@@ -11,7 +11,7 @@ class Unused {}
 // A static property holds the objects of a case, as a leak does. The optimizer can remove an object that only an unread local holds.
 final class Held { public static array $objects = []; }
 
-// isset() and offsetExists() answer false for a null value, so the check is a walk.
+// isset() and offsetExists() return false for a null value, so has() walks the map.
 function has(\WeakMap $map, object $wanted): bool
 {
     foreach ($map as $object => $_) {

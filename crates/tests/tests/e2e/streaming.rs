@@ -13,7 +13,7 @@ use crate::harness::{
 
 const T: Duration = Duration::from_secs(10);
 
-/// `flush()` puts the head on the wire ahead of the 400ms-late first event.
+/// `flush()` sends the head before the first event, which comes 400 ms late.
 #[test]
 fn sse_head_and_events_reach_the_wire_incrementally() {
     let srv = Spawn::http(
@@ -77,7 +77,7 @@ fn chunked_stream_preserves_keepalive() {
     assert_eq!(status, 200);
 }
 
-/// A PHP-committed 1xx never reaches the wire: the plugin drops interim heads, so the first head block is the final 200 and the response is otherwise untouched.
+/// A 1xx that PHP commits never reaches the wire. The plugin drops interim heads, so the first head block is the final 200, and the rest of the response stays unchanged.
 #[test]
 fn interim_heads_never_reach_the_wire() {
     let srv = Spawn::http(
@@ -116,7 +116,7 @@ fn http10_gets_no_interim_and_no_chunked() {
     assert_eq!(rest, b"hello");
 }
 
-/// A declared length must not hold the head hostage: the head+first-chunk coalescing window is bounded.
+/// A declared length must not hold back the head without limit. The window that coalesces the head and the first chunk is bounded.
 #[test]
 fn declared_length_head_beats_a_slow_body() {
     let srv = Spawn::http(
@@ -160,7 +160,7 @@ fn file_completion_does_not_cancel_php() {
     assert_completed_response_finalizes("/file", &vec![b'f'; 100_000]);
 }
 
-/// A HEAD reply is complete once its head is flushed: a close after that must not cancel PHP.
+/// A HEAD reply is complete once its head is flushed. A close after that must not cancel PHP.
 #[test]
 fn head_completion_does_not_cancel_php() {
     let srv = Spawn::http(
@@ -353,7 +353,7 @@ fn reset_during_buffered_write_cancels_php() {
     );
 }
 
-/// An over-long body is cut to the declared content-length, keeping framing keepalive-safe. A piece of 16 KiB or more is cut in place, a smaller piece is copied.
+/// An over-long body is cut to the declared content-length, so the framing stays safe for keep-alive. A piece of 16 KiB or more is cut in place, and a smaller piece is copied.
 #[test]
 fn content_length_exceeded_serves_the_declared_prefix() {
     struct Case {
@@ -401,7 +401,7 @@ fn content_length_exceeded_serves_the_declared_prefix() {
     }
 }
 
-/// A client that walks away mid-stream surfaces as WorkDiscardedException in the worker.
+/// A client that leaves mid-stream gives a WorkDiscardedException in the worker.
 #[test]
 fn client_abort_discards_the_unit() {
     let srv = Spawn::http(
@@ -422,7 +422,7 @@ fn client_abort_discards_the_unit() {
     );
 }
 
-/// A worker dying mid-stream must not fake a clean end: no chunked terminator arrives.
+/// A worker that dies mid-stream must not look like a clean end. No chunked terminator arrives.
 #[test]
 fn worker_death_mid_stream_truncates_the_response() {
     let srv = Spawn::http(
@@ -477,7 +477,7 @@ fn sendfile_streams_from_disk_with_length() {
     assert!(rest.iter().all(|&b| b == b'z'), "file bytes intact");
 }
 
-/// Trailers are dropped on h1: no trailer bytes in the epilogue, connection stays reusable.
+/// Trailers are dropped on h1. The epilogue has no trailer bytes, and the connection stays reusable.
 #[test]
 fn trailers_are_dropped_on_h1_and_the_response_ends_cleanly() {
     let srv = Spawn::http(
@@ -646,7 +646,7 @@ fn a_slow_client_reads_the_pieces_of_an_app_instance_that_ended() {
     }
 }
 
-/// A client that reads nothing after the head: the write timeout closes the connection, and the cut body has no chunked terminator. max_requests = 1 is a quota of 2, so the app instance ends after the large unit, and the next boot comes after the cut.
+/// A client reads nothing after the head. The write timeout closes the connection, and the cut body has no chunked terminator. max_requests = 1 is a quota of 2, so the app instance ends after the large unit, and the next boot comes after the cut.
 /// With 64 KiB pieces, the PHP thread waits on the full frame channel until the cut. The 1 MiB pieces fit in the channel, and the IO thread holds the first 8 of them in place (the 8 MiB cap), so the cycle end waits for the cut.
 #[test]
 fn the_write_timeout_cuts_a_stalled_client_before_the_app_instance_ends() {

@@ -21,7 +21,7 @@ fn php_ini_in_the_working_directory_is_ignored() {
     );
 }
 
-/// Control for the test above: proves the fixture does read the ini, so a green cwd test is not vacuous.
+/// Control for the test above. It proves that the fixture reads the ini, so a passing cwd test is not vacuous.
 #[test]
 fn the_same_file_applies_through_phprc() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path("ini/precision.php"))

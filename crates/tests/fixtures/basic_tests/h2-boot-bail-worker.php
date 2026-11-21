@@ -1,5 +1,5 @@
 <?php
-// the bootstrap opens a session whose save handler fatals on first write, so the worker's first rapira_request_teardown() bails while flushing it; the persistent counter in sys_get_temp_dir() lets the served request report its cycle, which reads "2" once the bailout recycles and re-bootstraps
+// the boot opens a session whose save handler causes a fatal error on the first write, so the first rapira_request_teardown() of the worker bails out when it flushes the session. The persistent counter in sys_get_temp_dir() lets the served request report its cycle. It reads "2" after the bailout causes a recycle and the boot runs again
 $dir = sys_get_temp_dir();
 $sentinel = $dir . '/rapira_h2_sentinel_' . getmypid();
 $boot = $dir . '/rapira_h2_boot_' . getmypid();
@@ -21,7 +21,7 @@ $save = new BoomOnce();
 $save->sentinel = $sentinel;
 session_set_save_handler($save);
 session_start();
-$_SESSION['k'] = 'v'; // dirty the session so the flush actually writes
+$_SESSION['k'] = 'v'; // change the session so that the flush writes it
 
 $handler = static function () use ($boot): void {
     echo (int) file_get_contents($boot);

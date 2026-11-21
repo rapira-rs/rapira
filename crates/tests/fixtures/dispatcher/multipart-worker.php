@@ -16,7 +16,7 @@ try {
             'class=' . $b::class,
             'counts=' . count($b->fields) . '/' . count($b->files),
         ];
-        // per-index: a swapped or misaligned part must show up in the output
+        // one set of lines per index, so a swapped or misaligned part must show in the output
         foreach ($b->fields as $i => $f) {
             $lines[] = "field$i=" . $f->name . '=' . $f->value;
             $lines[] = "field$i-cd=" . var_export(isset($f->headers['content-disposition']), true);

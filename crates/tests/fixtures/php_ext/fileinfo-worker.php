@@ -6,7 +6,7 @@ $handler = static function (): void {
 	}
 	if (($_GET['boom'] ?? '') === '1') {
 		ini_set('display_errors', '0');
-		// the OO ctor throws on a missing magic db; finfo_open() only warns
+		// the finfo constructor throws on a missing magic database, and finfo_open() only warns
 		new finfo(FILEINFO_NONE, '/nonexistent-dir-xyz/magic.mgc');
 		return;
 	}

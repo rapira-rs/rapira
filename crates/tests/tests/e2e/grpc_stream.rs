@@ -1,4 +1,4 @@
-//! Server-streaming calls over the wire, with `grpc/stream-worker.php` in the role of the application: the four wire forms, the header and trailer rules, the outcomes, a slow client, a client reset and the deadline.
+//! Server-streaming calls over the wire, with `grpc/stream-worker.php` as the app: the four wire forms, the header and trailer rules, the outcomes, a slow client, a client reset and the deadline.
 
 use std::time::Duration;
 
@@ -14,7 +14,7 @@ const DISCARDED: &str = "Rapira\\Exception\\WorkDiscardedException";
 
 const GRPC: Fields = &[("content-type", "application/grpc"), ("te", "trailers")];
 
-/// The text of the request selects what the application yields.
+/// The text of the request selects what the app yields.
 fn stream_worker() -> Server {
     Spawn::grpc(fixture("grpc/stream-worker.php"))
         .json_log()
@@ -157,7 +157,7 @@ async fn server_streaming_outcomes() {
         /// The text of each message, in order.
         messages: &'static [&'static str],
         grpc_status: &'static str,
-        /// None: the response has no `grpc-message`.
+        /// None when the response has no `grpc-message`.
         grpc_message: Option<&'static str>,
         /// Fields of the response head.
         headers: Fields,
@@ -354,7 +354,7 @@ async fn server_streaming_outcomes_over_grpc_web_and_connect() {
     enum End {
         /// A last envelope with the flag 0x80 that holds the trailers.
         WebFrame,
-        /// A last envelope with the flag 0x02 that holds the EndStreamResponse JSON. None: the JSON has no `error` key.
+        /// A last envelope with the flag 0x02 that holds the EndStreamResponse JSON. None when the JSON has no `error` key.
         ConnectFrame(Option<Error>),
     }
     struct Case {
@@ -674,7 +674,7 @@ async fn a_passed_deadline_ends_the_stream() {
         name: &'static str,
         /// The probe of `stream-worker.php`.
         text: &'static str,
-        /// The text of the first message. None: the response has no message.
+        /// The text of the first message. None when the response has no message.
         first: Option<&'static str>,
     }
     let cases = [

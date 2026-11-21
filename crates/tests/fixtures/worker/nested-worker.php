@@ -1,5 +1,5 @@
 <?php
-// the nesting guard must refuse before the inner call can steal a unit or rebind the live request.
+// the nesting guard must refuse before the inner call can take a unit or rebind the current request.
 $handler = static function (): void {
     try {
         \Rapira\handle_request(static function (): void {});

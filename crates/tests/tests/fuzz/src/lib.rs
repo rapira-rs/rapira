@@ -11,14 +11,14 @@ use rapira_http::multipart::{MultipartBody, UploadedFile};
 /// The largest input of connect_json and multipart_echo. The CI runs use the same -max_len.
 pub const MAX_LEN: usize = 4096;
 
-/// One spool dir for all runs. A parsed body removes its spooled files when it drops.
+/// Returns one spool dir for all runs. A parsed body removes its spooled files when it drops.
 pub fn spool_dir() -> PathBuf {
     let dir = std::env::temp_dir().join("rapira-fuzz-spool");
     std::fs::create_dir_all(&dir).expect("creating the spool dir");
     dir
 }
 
-/// The body in up to 8 parts. Each split position is the little-endian u16 of the two bytes at index 0, 97, 194 and so on, modulo len + 1; a position of 0 or len gives an empty part, which the view accepts and the transport never delivers.
+/// Splits the body into up to 8 parts. Each split position is the little-endian u16 of the two bytes at index 0, 97, 194 and so on, modulo len + 1; a position of 0 or len gives an empty part, which the view accepts and the transport never delivers.
 pub fn split(body: &[u8]) -> Vec<Bytes> {
     let mut at = Vec::new();
     for i in (0..body.len().saturating_sub(1)).step_by(97).take(7) {
@@ -78,7 +78,7 @@ pub fn assert_same_parse(
     }
 }
 
-/// One `name:value` field per line. A line that the http crate rejects as a field is left out.
+/// Builds a header map from one `name:value` field per line. A line that the http crate rejects as a field is left out.
 pub fn header_map(data: &[u8]) -> HeaderMap {
     data.split(|&b| b == b'\n')
         .filter_map(|line| {

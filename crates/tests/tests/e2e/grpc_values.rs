@@ -3,7 +3,7 @@ use tests::{fixture, server_log};
 
 use crate::harness::{BOOT, Spawn, diagnostics, wait_log_contains};
 
-// Expected values come from the Rapira\Grpc contract classes, and the Metadata messages from the userland body of its constructor.
+// Expected values come from the Rapira\Grpc contract classes, and the Metadata messages from the PHP body of its constructor.
 const CASES: &[(&str, &str)] = &[
     (
         "metadata rejects an empty key",
@@ -106,7 +106,7 @@ fn value_types_follow_the_contract() {
     let mut srv = Spawn::http(Mode::Dispatcher, fixture("grpc/values.php"))
         .json_log()
         .spawn();
-    // The worker runs the script once when it starts. The stop comes after the last case of the script, so the log holds every record.
+    // The worker runs the entrypoint once when it starts. The stop comes after the last case, so the log holds every record.
     let last = "context keeps a null tls";
     assert!(
         wait_log_contains(&srv, last, BOOT),

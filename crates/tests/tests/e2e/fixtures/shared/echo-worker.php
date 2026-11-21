@@ -1,5 +1,5 @@
 <?php
-// Resident worker: each request echoes the serving pid, a continuity probe.
+// A resident worker. Each response holds the pid of the worker that serves it, so the tests can check continuity.
 
 use Rapira\Exception\ClosedException;
 

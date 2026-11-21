@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-/// One log record. PHP diagnostics are asserted on level and target, not just text.
+/// One log record. Tests assert PHP diagnostics on the level and the target, and not only on the text.
 #[derive(Debug)]
 pub struct Captured {
     pub level: tracing::Level,
@@ -27,7 +27,7 @@ pub struct AppRecord {
     pub context: String,
 }
 
-/// The `result` field of a record's context as text; a JSON string stays bare.
+/// The `result` field of a record's context as text. A JSON string comes out without its quotes.
 fn result_text(ctx: &Value) -> String {
     match &ctx["result"] {
         Value::String(s) => s.clone(),
@@ -127,14 +127,14 @@ pub fn app_results(log: &Path, message: &str) -> Vec<String> {
         .collect()
 }
 
-/// One `case` record per (name, expected result) row, and no stray one; every mismatch is listed at once.
+/// Asserts one `case` record per (name, expected result) row and no other `case` record. The panic lists every mismatch at once.
 pub fn assert_case_records(log: &Path, cases: &[(&str, &str)]) {
     let all = records(log);
     let count = all
         .iter()
         .filter(|c| c.target == "app" && c.message == "case")
         .count();
-    // A fixture that probes one case at a time logs `case {name, result}`; this is name to result.
+    // A fixture that probes one case at a time logs case {name, result}. This map holds the result of each name.
     let results: HashMap<String, String> = all
         .iter()
         .filter(|c| c.target == "app" && c.message == "case")

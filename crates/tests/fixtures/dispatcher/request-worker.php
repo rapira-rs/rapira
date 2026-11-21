@@ -3,7 +3,7 @@
 // Echoes every Request field into the response body for the field-mapping tests.
 
 $d = \Rapira\get_dispatcher();
-// the error message of a userland write to an initialized readonly property
+// returns the error message of a PHP write to an initialized readonly property
 $denied = static function (object $o, string $prop): string {
     try {
         $o->$prop = 'x';
@@ -16,7 +16,7 @@ try {
     while (true) {
         $ex = $d->receive();
         $req = $ex->getRequest();
-        // the memo: repeated calls hand back the same instance
+        // the memo makes repeated calls return the same instance
         $again = $ex->getRequest();
         $lines = [
             'method=' . $req->method,
@@ -24,13 +24,13 @@ try {
             'target-hex=' . bin2hex($req->target),
             'authority=' . var_export($req->authority, true),
             'protocol=' . $req->protocol,
-            // repeats stay separate list entries, wire order
+            // repeated fields stay separate list entries in wire order
             'x-probe=' . implode('|', $req->headers['x-probe'] ?? []),
-            // an all-digit field name must land as an integer key (symtable)
+            // an all-digit field name must become an integer key, as in a PHP symtable
             'h123=' . implode(',', $req->headers[123] ?? []),
             // a single-letter name must stay a string key
             'h-single=' . implode(',', $req->headers['a'] ?? []),
-            // '-'-leading names pin the symtable prefilter's one-byte overread
+            // names that start with '-' test the symtable prefilter, which reads the byte after a leading '-'
             'h-dash=' . implode(',', $req->headers['-'] ?? []),
             'h-neg=' . implode(',', $req->headers['-1'] ?? []),
             'memo-same=' . var_export($req === $again, true),

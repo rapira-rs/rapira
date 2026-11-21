@@ -16,7 +16,7 @@ fn post(body: Vec<u8>) -> http::Request<Vec<u8>> {
     r
 }
 
-// PHP core ignores ub_write's return value, so the SAPI must end the unit itself. The abort ends only that unit: the worker keeps its boot state, and the aborted status does not leak into the next request.
+// PHP core ignores ub_write's return value, so the SAPI must end the unit itself. The abort ends only that unit. The worker keeps its boot state, and the aborted status does not leak into the next request.
 #[test]
 fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     struct Case {
@@ -55,7 +55,7 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
             body: b2,
         } = drain(submit(srv.addr, req("/?case=probe"))?);
 
-        // served=2: the aborted unit and the probe ran in one boot
+        // The aborted unit and the probe ran in one boot, so served is 2.
         assert_eq!(
             (s2, b2.as_str()),
             (200, "served=2 done=0 aborted=0"),
@@ -66,7 +66,7 @@ fn client_disconnect_aborts_request() -> anyhow::Result<()> {
     Ok(())
 }
 
-// sapi_deactivate_module() only NULLs SG(request_info).request_body, so without a sweep every POST in a resident worker grows EG(regular_list) by one temp stream.
+// sapi_deactivate_module() only sets SG(request_info).request_body to NULL, so without a sweep every POST in a resident worker grows EG(regular_list) by one temp stream.
 #[test]
 fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("general_tests/resources-worker.php")).spawn();
@@ -90,7 +90,7 @@ fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     Ok(())
 }
 
-// The worker path must run userland set_exception_handler like zend_execute_scripts does, and a handled exception must not raise a 500 or a scoreboard error.
+// The worker path must run the handler of set_exception_handler as zend_execute_scripts does, and a handled exception must not raise a 500 or a scoreboard error.
 #[test]
 fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     let srv = Spawn::http(
@@ -171,7 +171,7 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
 
 const READ: Duration = Duration::from_secs(10);
 
-/// One keep-alive GET on `conn`: the body by content-length.
+/// Sends one keep-alive GET on `conn` and returns the body, read by content-length.
 fn keep_alive_get(conn: &mut Conn, path: &str) -> String {
     conn.send(format!("GET {path} HTTP/1.1\r\nHost: e2e\r\n\r\n").as_bytes())
         .expect("send");

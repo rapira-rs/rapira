@@ -1,6 +1,6 @@
 <?php
 
-// Probe toggles ride on the request target: this mode has no superglobals.
+// The request target carries the probe toggles, because this mode has no superglobals.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\WorkDiscardedException;
@@ -42,7 +42,7 @@ try {
 			continue;
 		}
 		if ($probe === "cl-exceeded") {
-			// tens copies of "0123456789" under a declared length of cl bytes
+			// writes `tens` copies of "0123456789" with a declared length of `cl` bytes
 			$ex->writeHead(200, ["content-length" => [$q["cl"] ?? "5"]]);
 			try {
 				$ex->writeBody(str_repeat("0123456789", (int) ($q["tens"] ?? 1)));
@@ -52,7 +52,7 @@ try {
 		}
 		if ($probe === "discard") {
 			$ex->writeHead(200);
-			$ex->flush(); // the test reads this head, then walks away
+			$ex->flush(); // the test reads this head, then disconnects
 			usleep(300_000);
 			try {
 				$ex->writeBody("x", eos: false);

@@ -1,6 +1,6 @@
 <?php
 
-// Monolog testIgnoresRecursiveObjectReferences / testCanNormalizeReferences: both cycles must break without a diagnostic and without losing siblings.
+// The cases of the Monolog tests testIgnoresRecursiveObjectReferences and testCanNormalizeReferences. Both reference cycles must break with no diagnostic and no loss of siblings.
 $foo = new \stdClass();
 $bar = new \stdClass();
 $foo->bar = $bar;

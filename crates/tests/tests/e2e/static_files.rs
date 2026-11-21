@@ -412,7 +412,7 @@ fn static_files_route_each_request_over_the_wire() {
     assert_eq!(body, b"method=POST body=p");
 
     // RFC 9110 section 15.5.17, https://www.rfc-editor.org/rfc/rfc9110#section-15.5.17.
-    // The field carries unsatisfied-range `"*/" complete-length` (section 14.4,
+    // The field carries unsatisfied-range "*/" complete-length (section 14.4,
     // https://www.rfc-editor.org/rfc/rfc9110#section-14.4).
     let raw = http_get_raw(srv.addr, "/data.bin", &[("Range", "bytes=100-200")], T)
         .expect("unsatisfiable range");
@@ -783,8 +783,8 @@ fn cached_entries_answer_until_they_go_stale() {
 
     assert_eq!(split_response(&get("/swap.css", &[])).body, b"bbbbbb");
 
-    // A HEAD revalidation reads only the metadata. The body must survive it, so the GET after
-    // the delete still answers from memory.
+    // A HEAD revalidation reads only the metadata. The cached body must stay after it, so the
+    // GET after the delete still answers from memory.
     assert_eq!(split_response(&head("/kept.bin")).status, 200);
     std::fs::remove_file(root.join("kept.bin")).expect("remove kept.bin");
     let raw = get("/kept.bin", &[]);

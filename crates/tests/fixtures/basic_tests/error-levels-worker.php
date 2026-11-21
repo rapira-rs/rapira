@@ -1,5 +1,5 @@
 <?php
-// the engine fills PG(last_error_*) whatever the mask is, so the teardown log is the only place error_reporting() can still be honoured; set at bootstrap because worker mode restores INI per cycle, not per unit
+// the engine fills PG(last_error_*) for any mask, so only the teardown log can still apply error_reporting(). The boot sets it, because worker mode restores INI per cycle, not per unit
 error_reporting(E_ALL & ~E_DEPRECATED & ~E_USER_DEPRECATED);
 
 $handler = static function (): void {
@@ -11,7 +11,7 @@ $handler = static function (): void {
 			trigger_error('REPORTED-WARNING', E_USER_WARNING);
 			break;
 		case 'boom':
-			// an uncaught throw reaches php_error_cb as E_ERROR without bailing out, and trigger_error(E_USER_ERROR) would emit its own deprecation on 8.4+
+			// an uncaught throw reaches php_error_cb as E_ERROR with no bailout, and trigger_error(E_USER_ERROR) would emit its own deprecation on 8.4+
 			throw new \RuntimeException('REPORTED-FATAL');
 		case 'silent-fatal':
 			error_reporting(0);
@@ -30,7 +30,7 @@ $handler = static function (): void {
 			});
 			break;
 		case 'logged':
-			// unmasked, and with log_errors the SAPI log callback reports it as well
+			// error_reporting(E_ALL) unmasks it, and with log_errors the SAPI log callback reports it too
 			error_reporting(E_ALL);
 			ini_set('log_errors', '1');
 			trigger_error('LOGGED-DEPRECATION', E_USER_DEPRECATED);

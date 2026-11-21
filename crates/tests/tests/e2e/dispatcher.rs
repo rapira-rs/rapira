@@ -31,13 +31,13 @@ fn get_dispatcher_outside_dispatcher_mode_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Dispatcher singleton identity, interface chain, and blocked clone, reported through the app log.
+/// The app log reports the identity of the dispatcher singleton, its interface chain and the blocked clone.
 #[test]
 fn worker_singleton() -> anyhow::Result<()> {
     let mut srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/worker-singleton.php"))
         .json_log()
         .spawn();
-    // The worker runs the script once when it starts. The stop comes after the record, so the log holds every record.
+    // The worker runs the entrypoint once when it starts. The stop comes after the record, so the log holds every record.
     server_log::wait_app_record(&srv.log_file(), "dispatcher");
     srv.stop();
     let ctx = server_log::dispatcher_record(&srv.log_file())?;
@@ -54,7 +54,7 @@ fn worker_singleton() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A fatal in the cycle-end header callback must not leave a freed dispatcher for the next cycle: the same worker serves the next request.
+/// A fatal in the cycle-end header callback must not leave a freed dispatcher for the next cycle. The same worker serves the next request.
 #[test]
 fn header_callback_fatal_keeps_the_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(
@@ -76,7 +76,7 @@ fn header_callback_fatal_keeps_the_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `new` on the Internal classes must be refused by the private constructor.
+/// The private constructor must refuse `new` on the Internal classes.
 #[test]
 fn host_created_only() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("dispatcher/host-created-only.php")).spawn();

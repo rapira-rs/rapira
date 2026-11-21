@@ -14,7 +14,7 @@ use Rapira\Grpc\Status;
 use Rapira\Grpc\StatusCode;
 use Rapira\InetAddress;
 
-// Every class is touched inside a case, so a missing class fails its case and not the script.
+// Only the cases use the classes, so a missing class fails its case and not the boot.
 $sample = static fn (): Metadata => new Metadata(['x-a' => ['1', '2'], 'x-b-bin' => ["\x00\xff"]]);
 $context = static fn (mixed $remote): Context => new Context(
     'rapira.test.v1.EchoService/Echo',
@@ -26,7 +26,7 @@ $context = static fn (mixed $remote): Context => new Context(
     1.0,
 );
 
-// The class and the message of the contract's constructor body.
+// Returns the class and the message of the error from the constructor body that the contract defines.
 $rejects = static function (array $entries): string {
     try {
         new Metadata($entries);
@@ -149,7 +149,7 @@ $cases = [
         'name' => 'dispatcher needs the host',
         'run' => fn () => (new \ReflectionClass(\Rapira\Internal\Grpc\Dispatcher::class))->newInstanceWithoutConstructor()::class,
     ],
-    // Only a streaming response commits the headers before the finalization, and the host has the unary call only.
+    // Only a streaming response commits the headers before the finalization, and grpc_stream.rs tests that path. This case checks the class only.
     [
         'name' => 'HeadersAlreadyCommittedError is an Error and a RapiraThrowable',
         'run' => static function (): string {
@@ -187,7 +187,7 @@ $cases = [
     ],
 ];
 
-// No response to write into here, so the results travel out through the app log.
+// The boot has no unit to answer, so the results go to the app log.
 foreach ($cases as $case) {
     try {
         $result = $case['run']();
@@ -197,7 +197,7 @@ foreach ($cases as $case) {
     \Rapira\log('case', context: ['name' => $case['name'], 'result' => $result]);
 }
 
-// The pull makes the boot succeed, so the worker runs the script once. The script ends when the server stops.
+// The pull makes the boot succeed, so the worker runs the entrypoint once. The cycle ends when the server stops.
 try {
     \Rapira\get_dispatcher()->receive();
 } catch (\Rapira\Exception\ClosedException) {

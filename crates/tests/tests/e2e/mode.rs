@@ -4,7 +4,7 @@ use tests::{StatusBody, drain, drain_resp, fixture, req, server_log};
 
 use crate::harness::Spawn;
 
-/// The mode is fixed for the process: each unit over the resident loop gets the same Worker case.
+/// The mode is fixed for the process, so each unit in the resident loop gets the same Worker case.
 #[test]
 fn worker_mode_answers_worker_for_every_unit() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("mode/worker.php")).spawn();
@@ -20,13 +20,13 @@ fn worker_mode_answers_worker_for_every_unit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Dispatcher mode has no response to write into, so the answer travels out through the app log.
+/// Dispatcher mode has no response to write into, so the test reads the answer from the app log.
 #[test]
 fn dispatcher_mode_answers_dispatcher() -> anyhow::Result<()> {
     let mut srv = Spawn::http(Mode::Dispatcher, fixture("mode/dispatcher.php"))
         .json_log()
         .spawn();
-    // The worker runs the script once when it starts. The stop comes after the record, so the log holds every record.
+    // The worker runs the entrypoint once when it starts. The stop comes after the record, so the log holds every record.
     server_log::wait_app_record(&srv.log_file(), "mode");
     srv.stop();
 
@@ -51,7 +51,7 @@ fn dispatcher_mode_answers_dispatcher() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Classic mode answers as well. No other mode can cover this: the answer is the mode itself.
+/// Classic mode answers as well. No other mode can cover this case, because the answer is the mode itself.
 #[test]
 fn classic_mode_answers_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("mode/classic.php")).spawn();

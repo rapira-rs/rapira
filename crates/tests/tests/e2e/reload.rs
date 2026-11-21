@@ -6,7 +6,7 @@ use tests::server_log::{app_contexts, records, wait_app_record};
 use tests::wire::submit;
 use tests::{StatusBody, drain, poll, req};
 
-/// USR2 restarts the app inside every worker: the listener and the worker processes stay, and no request fails.
+/// USR2 recycles the app inside every worker. The listener and the worker processes stay, and no request fails.
 #[test]
 fn usr2_reload_restarts_the_apps_while_serving() {
     let srv = Spawn::http(
@@ -49,7 +49,7 @@ fn usr2_reload_restarts_the_apps_while_serving() {
     );
 }
 
-/// SIGUSR2 to a worker that waits for work restarts its app without a request, in the same process.
+/// SIGUSR2 to a worker that waits for work recycles its app without a request, in the same process.
 #[test]
 fn usr2_restarts_an_idle_app() {
     let srv = Spawn::http(
@@ -122,9 +122,9 @@ struct DeployCase {
     /// The fixture in `deploy/` that each release folder gets as its entrypoint.
     entrypoint: &'static str,
     deploy: Deploy,
-    /// A reload right before the deploy, so the deploy reload comes less than opcache.revalidate_freq (2 s) after an app boot.
+    /// A reload before the deploy, so the deploy reload comes less than opcache.revalidate_freq (2 s) after an app boot.
     reload_first: bool,
-    /// opcache.validate_timestamps: 0 is the usual production value.
+    /// The opcache.validate_timestamps value. 0 is the usual production value.
     validate_timestamps: u8,
 }
 
@@ -135,7 +135,7 @@ fn seen(srv: &Server) -> String {
     got.body
 }
 
-/// Writes `contents` to `path` with a modification time of one hour ago: OPcache caches a file only when it is older than opcache.file_update_protection (2 s), as the files of a real deploy are.
+/// Writes `contents` to `path` with a modification time of one hour ago. OPcache caches a file only when it is older than opcache.file_update_protection (2 s), as the files of a real deploy are.
 fn write_old(path: &Path, contents: &str) {
     std::fs::write(path, contents).unwrap_or_else(|e| panic!("write {}: {e}", path.display()));
     std::fs::File::options()
@@ -145,7 +145,7 @@ fn write_old(path: &Path, contents: &str) {
         .unwrap_or_else(|e| panic!("set the time of {}: {e}", path.display()));
 }
 
-/// `releases/1` and `releases/2` under `dir`, each with the entrypoint, release.php and release.txt, and `current` pointing at release 1. Returns the real path of each release folder: getcwd() reports it.
+/// `releases/1` and `releases/2` under `dir`, each with the entrypoint, release.php and release.txt, and `current` pointing at release 1. Returns the real path of each release folder, as getcwd() reports it.
 fn stage_releases(dir: &Path, entrypoint: &str) -> [String; 2] {
     let source = std::fs::read_to_string(fixture_path(&format!("deploy/{entrypoint}")))
         .expect("read the deploy fixture");
@@ -524,7 +524,7 @@ fn wait_for_code_2(srv: &Server, within: Duration) {
 #[test]
 fn a_reload_after_a_failed_boot_runs_the_fixed_release() {
     let dir: PathBuf = scratch_dir();
-    // No failure limit: with the default limit, the worker process ends at the fifth failed boot.
+    // No failure limit, because with the default limit the worker process ends at the fifth failed boot.
     let Some(srv) = breakable_server(&dir, "max_boot_failures = 0") else {
         return;
     };
@@ -565,14 +565,14 @@ fn a_reload_after_a_failed_boot_runs_the_fixed_release() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A reload that finds no live worker process. Under steady traffic a worker whose boot fails ends as unhealthy, and the master forks the next one after a growing delay. That worker has no reload entry: its boot reads the reload count and makes the reset call before the app starts, and it runs the fixed release, also with opcache.validate_timestamps = 0.
+/// A reload that finds no live worker process. Under steady traffic a worker whose boot fails ends as unhealthy, and the master forks the next one after a growing delay. That worker has no reload entry. Its boot reads the reload count and makes the reset call before the app starts, and it runs the fixed release, also with opcache.validate_timestamps = 0.
 #[test]
 fn a_reload_with_no_live_worker_runs_the_fixed_release() {
     let dir: PathBuf = scratch_dir();
     let Some(srv) = breakable_server(&dir, "") else {
         return;
     };
-    // Steady traffic during the failed boots: each request gets 503. The fifth failed boot ends the worker process.
+    // Steady traffic during the failed boots. Each request gets 503. The fifth failed boot ends the worker process.
     let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let traffic = {
         let stop = std::sync::Arc::clone(&stop);
@@ -666,7 +666,7 @@ fn an_entrypoint_that_does_not_resolve_answers_503_until_a_reload_after_the_fix(
     let [release_1, release_2] = stage_releases(&dir, "dispatcher.php");
     let entrypoint = dir.join("current").join("dispatcher.php");
     let srv = Spawn::http_entrypoint(Mode::Dispatcher, &entrypoint.display().to_string())
-        // No failure limit: with the default limit, the worker process ends 7.5 s after the first failed boot.
+        // No failure limit, because with the default limit the worker process ends 7.5 s after the first failed boot.
         .http_pool("max_boot_failures = 0")
         .json_log()
         .spawn();
@@ -776,7 +776,7 @@ fn pin_two_workers(srv: &Server) -> Option<[Conn; 2]> {
     pinned.try_into().ok()
 }
 
-/// One GET on a kept connection: the status and the body.
+/// One GET on a kept connection. Returns the status and the body.
 fn get_on(c: &mut Conn, path: &str) -> StatusBody<String> {
     let t = Duration::from_secs(30);
     c.send(format!("GET {path} HTTP/1.1\r\nHost: e2e\r\n\r\n").as_bytes())
@@ -795,7 +795,7 @@ fn get_on(c: &mut Conn, path: &str) -> StatusBody<String> {
     }
 }
 
-/// A second reload while both workers serve long requests. An app can end with its reload entry still in the queue, so the next app of that worker takes the entry after the OPcache restart of the first reload has run. One reset per reload keeps that app from scheduling a restart that no app leaves for.
+/// A second reload while both workers serve long requests. An app can end with its reload entry still in the queue, so the next app of that worker takes the entry after the OPcache restart of the first reload has run. One reset per reload keeps that app from scheduling a second OPcache restart. No reload follows that restart, so no app ends to let it run.
 #[test]
 fn two_reloads_during_long_requests_leave_opcache_on_in_every_worker() {
     let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
@@ -897,7 +897,7 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
     let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
         .expect("read the shared php.ini");
     // 223 hash slots and a waste threshold of 84 KB (1 % of 8 MB) make OPcache schedule a restart by itself.
-    // php-src counts the force timeout in whole seconds: with 2, a kill can start 1 to 2 s after the schedule, after the boots that follow the schedule and before the 3 s request ends.
+    // php-src counts the force timeout in whole seconds. With 2, a kill can start 1 to 2 s after the schedule, after the boots that follow the schedule and before the 3 s request ends.
     let ini = format!(
         "{shared}\nopcache.memory_consumption = 8\nopcache.interned_strings_buffer = 1\n\
          opcache.max_accelerated_files = 200\nopcache.max_wasted_percentage = 1\n\

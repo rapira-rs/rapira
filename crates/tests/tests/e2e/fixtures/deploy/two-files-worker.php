@@ -1,5 +1,5 @@
 <?php
-// Each release folder of the deploy test gets a copy. The boot fails while extra.php is missing: a cause outside OPcache.
+// Each release folder of the deploy test gets a copy. The boot fails while extra.php is missing. This cause is outside OPcache.
 $release = require __DIR__ . '/release.php';
 if (!is_file(__DIR__ . '/extra.php')) {
     \Rapira\log('boot failed');

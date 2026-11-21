@@ -58,14 +58,14 @@ fn fibers_stress_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The host releases a pending exception after the unit, and the destructor of that exception fatals. The bailout stays inside the C helper: the unit keeps its reply, the app instance recycles, and the same worker serves the next request.
+/// The host releases a pending exception after the unit, and the destructor of that exception raises a fatal error. The bailout stays inside the C helper: the unit keeps its reply, the app instance recycles, and the same worker serves the next request.
 #[test]
 fn worker_survives_a_fatal_in_a_released_exception() -> anyhow::Result<()> {
     struct Case {
         name: &'static str,
         query: &'static str,
         status: u16,
-        /// The start of the body: display_errors appends the fatal text when the output is still open.
+        /// The start of the body. display_errors appends the fatal text when the output is still open.
         body: fn(u32) -> String,
     }
     let cases = [
@@ -175,7 +175,7 @@ fn worker_survives_teardown_bailout() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A memory_limit fatal error ends the app instance with a heap that has no free slot for the next small allocation. The host reads the OPcache state at the app end, and a bailout of that read stays inside the C helper: the same worker boots the app again and serves the next request.
+/// A memory_limit fatal error ends the app instance with a heap that has no free slot for the next small allocation. The host reads the OPcache state at the app end, and a bailout of that read stays inside the C helper, so the same worker boots the app again and serves the next request.
 #[test]
 fn worker_survives_a_memory_limit_fatal_error() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/memory-limit-worker.php")).spawn();
@@ -298,7 +298,7 @@ fn server_variables() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// SERVER_PROTOCOL follows the version of each request: one worker serves the cases in sequence.
+/// SERVER_PROTOCOL follows the version of each request. One worker serves the cases in sequence.
 #[test]
 fn server_protocol_follows_the_request_version() -> anyhow::Result<()> {
     struct Case {
@@ -513,7 +513,7 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
 
 #[test]
 fn scoreboard_counts_classic() -> anyhow::Result<()> {
-    // A classic worker runs one entrypoint, so each script gets its own worker.
+    // A classic worker runs one entrypoint, so each entrypoint gets its own worker.
     let counts = |script: &str, requests: usize| -> anyhow::Result<Slot> {
         let srv = Spawn::http(Mode::Classic, fixture(script)).spawn();
         for _ in 0..requests {
@@ -627,7 +627,7 @@ fn php_diagnostics_log_at_their_error_type_level() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Fatals are exempt from the error_reporting(0) mask: the recycle they cause still has to be explained.
+/// Fatal errors are exempt from the error_reporting(0) mask, because the recycle they cause still needs an explanation.
 #[test]
 fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
     let mut srv = error_levels_worker();
@@ -643,14 +643,14 @@ fn masked_fatal_still_logs_at_error() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A throw that a shutdown function of the unit leaves is uncaught, as in the CLI: the user exception handler gets it, or it fails the unit as an uncaught throw from the handler does. The body began in the handler, so a failed unit ends cut.
+/// A throw that a shutdown function of the unit leaves is uncaught, as in the CLI. The exception handler of the app gets it, or it fails the unit as an uncaught throw from the handler does. The body began in the handler, so a failed unit ends cut.
 #[test]
 fn a_throw_from_a_shutdown_function_is_uncaught() -> anyhow::Result<()> {
     struct Case {
         name: &'static str,
         step: &'static str,
         mark: &'static str,
-        /// The start of the body: display_errors appends the fatal text.
+        /// The start of the body. display_errors appends the fatal text.
         body: &'static str,
         truncated: bool,
         levels: Vec<tracing::Level>,
@@ -664,7 +664,7 @@ fn a_throw_from_a_shutdown_function_is_uncaught() -> anyhow::Result<()> {
             truncated: true,
             levels: vec![tracing::Level::ERROR],
         },
-        // last: its exception handler stays set for the later units of the app instance
+        // This case is last, because its exception handler stays set for the later units of the app instance.
         Case {
             name: "the exception handler takes it: no record",
             step: "shutdown-handled",
@@ -809,7 +809,7 @@ fn error_get_last_cleared_between_worker_requests() -> anyhow::Result<()> {
 #[test]
 fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() -> anyhow::Result<()>
 {
-    // The fixture keeps its cycle counter and sentinel in sys_get_temp_dir(), which is TMPDIR: an empty dir per run.
+    // The fixture keeps its cycle counter and sentinel in sys_get_temp_dir(), which is TMPDIR, an empty dir for each run.
     let tmp = scratch_dir();
     let srv = Spawn::http(Mode::Worker, fixture("basic_tests/h2-boot-bail-worker.php"))
         .env("TMPDIR", tmp.to_str().expect("utf-8 scratch dir"))
@@ -890,14 +890,14 @@ fn worker_finish_request_flush_bailout_recycles() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Classic keeps early flush: pre-finish output ships, post-finish output is dropped, and the script keeps running.
+/// Classic mode keeps the early flush. The output before the finish is sent, the output after it is dropped, and the entrypoint keeps running.
 #[test]
 fn classic_finish_request() -> anyhow::Result<()> {
     let mut srv = Spawn::http(Mode::Classic, fixture("shared/finish-request-classic.php"))
         .json_log()
         .spawn();
     let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
-    // The graceful stop waits for the script, which keeps running after the early flush.
+    // The SIGQUIT stop waits for the entrypoint, which keeps running after the early flush.
     srv.stop();
 
     assert_eq!(status, 200);

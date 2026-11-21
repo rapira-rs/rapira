@@ -13,9 +13,9 @@ http = { workspace = true }
 rapira_sapi = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "net"] }
 tracing = { workspace = true }
-# server.log records (src/server_log.rs).
+# The server.log readers (src/server_log.rs) use it.
 serde_json = "1"
-# The wire clients (src/wire.rs, src/grpc.rs): hyper clients for HTTP/1.1, gRPC, gRPC-Web and Connect.
+# The wire clients (src/wire.rs, src/grpc.rs) are hyper clients for HTTP/1.1, gRPC, gRPC-Web and Connect.
 rapira_net = { workspace = true }
 base64 = { workspace = true }
 http-body-util = { workspace = true }
@@ -23,12 +23,13 @@ hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
-# E2E harness (tests/e2e): process control for the spawned rapira binary.
+# The E2E tests (tests/e2e) use it for process control of the spawned rapira binary.
 libc = { workspace = true }
 
-# The spawn-the-binary E2E suite forks worker processes and runs request storms;
-# gated behind a feature so `cargo test --workspace` skips it. Run it isolated
-# (build the rapira bin first): cargo test -p tests --test e2e --features e2e
+# The E2E suite spawns the rapira binary, which forks worker processes, and sends
+# many concurrent requests. The e2e feature gates it, so `cargo test --workspace`
+# skips it. Build the rapira binary first. Then run the suite alone, for example:
+# cargo test -p tests --test e2e --features e2e
 [features]
 e2e = []
 

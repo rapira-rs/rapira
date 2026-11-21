@@ -24,7 +24,7 @@ fn post(
     r
 }
 
-/// The `app`-target messages of `log` starting with `prefix`, in order.
+/// The `app`-target messages of `log` that start with `prefix`, in order.
 fn app_messages(log: &Path, prefix: &str) -> Vec<String> {
     server_log::records(log)
         .into_iter()
@@ -33,7 +33,7 @@ fn app_messages(log: &Path, prefix: &str) -> Vec<String> {
         .collect()
 }
 
-/// POST form body parses into $_POST while the query string populates $_GET.
+/// A POST form body parses into $_POST, and the query string populates $_GET.
 #[test]
 fn post_superglobals_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("ported_tests/post-superglobals.php")).spawn();
@@ -60,7 +60,7 @@ fn post_superglobals_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// $_GET/$_POST must be rebuilt per worker request - no stale values.
+/// $_GET and $_POST must be rebuilt for each worker request, with no stale values.
 #[test]
 fn post_superglobals_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(
@@ -110,7 +110,7 @@ fn post_superglobals_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// $_REQUEST merges GET + POST under the default variables_order/request_order.
+/// $_REQUEST merges GET and POST under the default variables_order and request_order.
 #[test]
 fn request_merge_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("ported_tests/request-merge.php")).spawn();
@@ -161,7 +161,7 @@ fn request_merge_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A jit autoglobal first touched only in a later request must still build fresh, not stale.
+/// A jit autoglobal that is first used in a later request must still be built fresh, not stale.
 #[test]
 fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("ported_tests/jit-request-worker.php")).spawn();
@@ -196,7 +196,7 @@ fn jit_request_superglobal_rearm_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The Cookie header feeds $_COOKIE fresh on every worker request.
+/// The Cookie header fills a fresh $_COOKIE on every worker request.
 #[test]
 fn cookies_refresh_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("ported_tests/cookies-worker.php")).spawn();
@@ -299,7 +299,7 @@ fn session_cookie_roundtrip_worker() -> anyhow::Result<()> {
     session_roundtrip(Mode::Worker, "ported_tests/session-count-worker.php")
 }
 
-/// A userland save handler registered during request 1 must still serve request 2.
+/// A save handler that the app registers during request 1 must still serve request 2.
 #[test]
 fn session_handler_registered_midstream_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(
@@ -382,7 +382,7 @@ fn session_preloop_handler_preserved_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// header() edges: no-space colon trims, a colon-less line never becomes a header, http_response_code sticks, and the set rebuilds per worker request.
+/// header() edge cases: a colon with no space trims, a line without a colon never becomes a header, http_response_code stays, and the set rebuilds for each worker request.
 #[test]
 fn response_header_edges_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("ported_tests/headers-worker.php")).spawn();
@@ -441,7 +441,7 @@ fn headers_list_and_expose_php_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Worker requests must also carry the expose_php X-Powered-By header a full per-request startup adds.
+/// Worker requests must also carry the expose_php X-Powered-By header that a full per-request startup adds.
 #[test]
 fn headers_list_and_expose_php_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(
@@ -477,7 +477,7 @@ fn flush_output_arrives_complete_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A raw status line drives the head status.
+/// A raw status line sets the head status.
 #[test]
 fn raw_status_line_204_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("ported_tests/only-headers.php")).spawn();
@@ -491,7 +491,7 @@ fn raw_status_line_204_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A 6MB body with no content type travels intact through php://input, leaving the next request unaffected.
+/// A 6 MB body with no content type goes intact through php://input, and the next request is not affected.
 #[test]
 fn large_post_body_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(
@@ -591,7 +591,7 @@ fn multipart_upload_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// $_FILES has no self-healing create callback, so without a per-request dtor of TRACK_VARS_FILES a no-upload request re-exposes the previous upload.
+/// $_FILES has no create callback that rebuilds it, so without a per-request destructor of TRACK_VARS_FILES a request with no upload shows the previous upload again.
 #[test]
 fn files_superglobal_does_not_leak_between_worker_requests() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("ported_tests/upload-worker.php")).spawn();
@@ -646,7 +646,7 @@ fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Per-unit teardown must not destruct bootstrap-resident objects and must keep object-store handles reusable across units.
+/// Per-unit teardown must not destruct the objects that the boot created, and must keep object-store handles reusable across units.
 #[test]
 fn no_destructor_sweep_between_units_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(
@@ -861,7 +861,7 @@ fn boot_global_object_survives_requests() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A truncated response must not carry a synthesized Content-Length: its absence is what lets clients detect the cut.
+/// A truncated response must not carry a synthesized Content-Length, because its absence lets clients detect the cut.
 #[test]
 fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/output-then-throw-worker.php")).spawn();
@@ -872,7 +872,7 @@ fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// exit() ends a classic script cleanly: complete response, not an error.
+/// exit() ends a classic cycle cleanly. The response is complete and is not an error.
 #[test]
 fn exit_after_output_is_complete_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(
@@ -905,7 +905,7 @@ fn throw_after_output_truncates_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Streams opened before the worker loop keep identity and read position: between-request cleanup must not touch live resources.
+/// Streams opened before the worker loop keep identity and read position. The cleanup between requests must not touch live resources.
 #[test]
 fn preloop_streams_survive_requests_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("ported_tests/file-stream-worker.php")).spawn();
@@ -975,7 +975,7 @@ fn latin1_header_value_passes_through() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Content-Type must reach php-src byte for byte: a lossily decoded boundary leaves rfc1867 hunting for one the body never contains and the upload vanishes.
+/// Content-Type must reach php-src byte for byte. With a lossily decoded boundary, rfc1867 searches for a boundary that the body never contains, and the upload is missing.
 #[test]
 fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     let mut srv = Spawn::http(Mode::Worker, fixture("ported_tests/upload-worker.php")).spawn();
@@ -997,7 +997,7 @@ fn multipart_upload_non_utf8_boundary_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// sapi_header_op screens only CR, LF and NUL, so dropping the headers it lets through must not cost the status, the other headers, or the body.
+/// sapi_header_op screens only CR, LF and NUL, so dropping the headers it lets through must not lose the status, the other headers or the body.
 #[test]
 fn unrepresentable_header_does_not_sink_the_response_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("ported_tests/bad-header-worker.php")).spawn();
@@ -1026,7 +1026,7 @@ fn request_bodies_worker() -> anyhow::Result<()> {
         post_last: &'static str,
         refused: bool,
     }
-    // The body stays off the disk: an unwritable temp directory must not discard it.
+    // The body stays off the disk, so an unwritable temp directory must not discard it.
     const NO_TMP: &str = "sys_temp_dir = /nonexistent\nupload_tmp_dir = /nonexistent";
     // n fields of 240 bytes, then z=end as the last field.
     let form = |n: usize| -> Vec<u8> {
@@ -1095,7 +1095,7 @@ fn request_bodies_worker() -> anyhow::Result<()> {
         let resp = drain_resp(submit(srv.addr, request)?);
         let got = resp.body_string();
 
-        // A byte compare: the lossy text maps each non-UTF-8 byte of a body to the same U+FFFD.
+        // The test compares bytes, because the lossy text maps each non-UTF-8 byte of a body to the same U+FFFD.
         let mut expected = format!(
             "{}|{}|{}|",
             case.post_count,

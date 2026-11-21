@@ -5,7 +5,7 @@ use tests::poll;
 use tests::server_log;
 use tracing::Level;
 
-/// `[log] format = "json"` shapes every record while `RUST_LOG` still owns the filter.
+/// `[log] format = "json"` sets the format of every record, and `RUST_LOG` still sets the filter.
 #[test]
 fn json_format_shapes_the_log() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
@@ -40,7 +40,7 @@ fn json_format_shapes_the_log() {
     .unwrap_or_else(|| panic!("no JSON banner line in server.log\n{}", diagnostics(&srv)));
 }
 
-/// Default `[log]` on a redirected (non-tty) stderr emits no ANSI escapes.
+/// The default `[log]` emits no ANSI escapes on a redirected stderr that is not a tty.
 #[test]
 fn plain_format_is_uncolored_when_redirected() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php")).spawn();
@@ -62,7 +62,7 @@ fn plain_format_is_uncolored_when_redirected() {
     .unwrap_or_else(|| panic!("no plain banner line in server.log\n{}", diagnostics(&srv)));
 }
 
-/// `[log.targets] php = "warn"` surfaces PHP diagnostics that `level = "error"` alone hides.
+/// `[log.targets] php = "warn"` shows the PHP diagnostics that `level = "error"` alone hides.
 #[test]
 fn log_targets_php_restores_php_diagnostics() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path("logging/warn-worker.php"))
@@ -96,7 +96,7 @@ fn log_targets_php_restores_php_diagnostics() {
     );
 }
 
-/// `RUST_LOG` replaces the configured filter wholesale, so `RUST_LOG=info` beats `level = "error"`.
+/// `RUST_LOG` replaces the whole configured filter, so `RUST_LOG=info` takes precedence over `level = "error"`.
 #[test]
 fn rust_log_replaces_the_config_filter() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path("logging/warn-worker.php"))
@@ -117,7 +117,7 @@ fn rust_log_replaces_the_config_filter() {
 const MARKS: &str = "logging_mv/marks-worker.php";
 const BANNER: &str = "rapira_core v";
 
-/// A RUST_LOG with a directive replaces the `[log]` filter spec; a missing or blank one leaves the spec in charge, and a `[log.targets]` key matches as a target prefix.
+/// A RUST_LOG with a directive replaces the `[log]` filter spec. A missing or blank one keeps the spec, and a `[log.targets]` key matches as a target prefix.
 #[test]
 fn log_filter_source_and_target_prefix() {
     struct Case {
@@ -211,7 +211,7 @@ fn json_record_shape() {
     assert_eq!(v["fields"]["context"], r#"{"answer":42}"#, "{v}");
     assert_eq!(v["target"], "app", "{v}");
     assert_eq!(v["level"], "INFO", "{v}");
-    // SystemTime timer: RFC 3339 UTC with exactly microseconds.
+    // The SystemTime timer writes RFC 3339 UTC with microsecond precision.
     let ts = v["timestamp"].as_str().expect("timestamp");
     assert_eq!(ts.len(), "2026-01-01T00:00:00.000000Z".len(), "{ts}");
     assert_eq!(&ts[19..20], ".", "{ts}");

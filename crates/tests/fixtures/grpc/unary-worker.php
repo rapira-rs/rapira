@@ -1,6 +1,6 @@
 <?php
 
-// The message bytes select the probe: a gRPC call has no request target.
+// The message bytes select the probe, because a gRPC call has no request target.
 
 use Rapira\Exception\AlreadyFinalizedError;
 use Rapira\Exception\ClosedException;
@@ -76,7 +76,7 @@ function serve(GrpcDispatcher $d, UnaryCall $call): void
             $call->respond('busy');
             return;
         case 'drop':
-            unset($call); // never finalized: the plugin loses this call
+            unset($call); // the app never finalizes this call, so the call is lost
             return;
         case 'keep-md':
             $md = $call->getResponseMetadata();
@@ -86,7 +86,7 @@ function serve(GrpcDispatcher $d, UnaryCall $call): void
             } catch (\Error $e) {
                 \Rapira\log('keep-md', context: ['result' => $e->getMessage()]);
             }
-            return; // the return frees $md, the last reference to the call: the plugin loses this call
+            return; // the return frees $md, the last reference to the call, so the call is lost
         case 'throw':
             throw new \RuntimeException('uncaught');
         case 'info':
@@ -140,7 +140,7 @@ function serve(GrpcDispatcher $d, UnaryCall $call): void
             probe('add after respond', fn () => $md->addHeader('x-late', 'v'));
             return;
         case 'cancel':
-            \Rapira\log('got'); // the call is out; the test may drop the receiver
+            \Rapira\log('got'); // the app holds the call, and the test may drop the receiver after this record
             for ($i = 0; $i < 1000 && !$call->isCancelled(); $i++) {
                 usleep(10_000);
             }
@@ -159,7 +159,7 @@ function serve(GrpcDispatcher $d, UnaryCall $call): void
 
 $d = \Rapira\get_dispatcher();
 
-// A call queued before the boot comes out of tryReceive(); the tests wait for this record before they call.
+// tryReceive() returns a call that was queued before the boot. The tests wait for this record before they send a call.
 $first = $d->tryReceive();
 \Rapira\log('try', context: ['result' => $first === null ? 'NULL' : $first::class]);
 if ($first !== null) {

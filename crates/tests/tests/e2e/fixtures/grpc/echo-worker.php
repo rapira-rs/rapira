@@ -1,7 +1,7 @@
 <?php
 
-// Serves rapira.test.v1.EchoService. The `text` field of EchoRequest selects the probe:
-// for a text shorter than 128 bytes the message is `0a <length> <text>`.
+// Serves rapira.test.v1.EchoService. The `text` field of EchoRequest selects the probe.
+// For a text shorter than 128 bytes, the message is `0a <length> <text>`.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\WorkDiscardedException;
