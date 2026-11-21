@@ -182,7 +182,7 @@ fn wait_for_the_classic_reload(srv: &Server) {
     );
 }
 
-/// A reload after a deploy moves the pool to release 2: its code, its working directory, its relative file reads and the root of sendFile().
+/// A reload after a deploy moves the pool to release 2: its code, its working directory, its relative file reads and the root of sendFile(). The OPcache reset of the reload logs no WARN record of a scheduled restart.
 #[test]
 fn a_reload_after_a_deploy_runs_the_new_release() {
     let cases = [
@@ -328,6 +328,20 @@ fn a_reload_after_a_deploy_runs_the_new_release() {
         assert!(
             moved.is_some(),
             "{}: after the deploy and the reload\n want: {want}\n last: {last}\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+        let restarts: Vec<String> = records(&srv.log_file())
+            .into_iter()
+            .filter(|r| {
+                r.level == tracing::Level::WARN
+                    && r.message.starts_with("OPcache scheduled a restart")
+            })
+            .map(|r| r.message)
+            .collect();
+        assert!(
+            restarts.is_empty(),
+            "{}: no WARN record of a scheduled OPcache restart\n got: {restarts:?}\n{}",
             case.name,
             diagnostics(&srv)
         );

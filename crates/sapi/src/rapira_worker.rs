@@ -516,49 +516,4 @@ mod tests {
             assert_eq!(text(&got), text(&case.want), "{}", case.name);
         }
     }
-
-    #[test]
-    fn the_restart_hook_stores_no_reason_while_a_reset_is_due() {
-        struct Case {
-            name: &'static str,
-            reload_sent: bool,
-            reset_recorded: bool,
-            /// The record that the hook leaves after a call with reason 2.
-            want: i32,
-        }
-        let cases = [
-            Case {
-                name: "no reload",
-                reload_sent: false,
-                reset_recorded: false,
-                want: 2,
-            },
-            Case {
-                name: "a reload, and no reset call has returned",
-                reload_sent: true,
-                reset_recorded: false,
-                want: NO_RESTART,
-            },
-            Case {
-                name: "a reload, and a reset call has returned",
-                reload_sent: true,
-                reset_recorded: true,
-                want: 2,
-            },
-        ];
-        for case in &cases {
-            let reloads = rapira_scoreboard::create_reloads().expect("map the reload count");
-            if case.reload_sent {
-                reloads.add_sent();
-            }
-            if case.reset_recorded {
-                reloads.record_reset(reloads.reset_due().expect("a reset is due"));
-            }
-            RELOADS.set(Some(reloads));
-            unsafe { opcache_restart_scheduled(2) };
-            // A swap right after the hook: the pull test of this crate reads the same value and signals the parent process when it finds a reason.
-            let got = OPCACHE_SCHEDULED.swap(NO_RESTART, Ordering::Relaxed);
-            assert_eq!(got, case.want, "{}", case.name);
-        }
-    }
 }
