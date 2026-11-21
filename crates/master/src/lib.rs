@@ -19,7 +19,7 @@ pub use signals::{block_early_signals, wait_worker_signal};
 
 /// The worker exits with 0 after it drains. Outside a stop the master forks a replacement at once, without backoff. The worker emits these codes and the master consumes them; any other code is a crash.
 pub const WORKER_EXIT_DRAINED: i32 = 0;
-/// The worker reports that it is unhealthy, and the master respawns it with backoff. While the pool has no serving worker, no handled request and no recycle, it is a boot failure.
+/// The worker reports that it is unhealthy, and the master respawns it with backoff. While the pool has no serving worker, no successful request and no recycle, it is a boot failure.
 pub const WORKER_EXIT_UNHEALTHY: i32 = 89;
 /// Exit code the caller uses when [`run`] returns a boot-failure error.
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
@@ -30,7 +30,7 @@ pub struct PoolConfig {
     pub name: &'static str,
     /// Worker count. The master keeps this many workers running.
     pub processes: usize,
-    /// Wall-clock limit of one request. After it, the master sends TERM, then KILL, to the worker and replaces it. Zero disables the limit.
+    /// Wall-clock limit of one request, counted from its pull. After it, the master sends TERM, then KILL, to the worker and replaces it. Zero disables the limit.
     pub request_terminate_timeout: Duration,
     /// RSS limit of one worker in MiB. Above it, the master sends QUIT to the worker and replaces the worker after its drain. Zero disables the limit.
     pub max_memory_mb: u64,

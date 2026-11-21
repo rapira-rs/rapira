@@ -12,7 +12,7 @@ pub const SLOT_IDLE: u32 = 2;
 pub const SLOT_ACTIVE: u32 = 3;
 pub const SLOT_DRAINING: u32 = 4; // The worker started its own exit, which is not complete yet.
 
-/// Each field has one writer at a time. The worker writes the IDLE, ACTIVE and DRAINING states, the STARTING state after a failed boot cycle, the request counters, `pending` and `failed_on_full_queue`. The master writes the STARTING and FREE states, and `pid` at spawn and at clear. It writes `pending` and the exit counters only while no worker owns the slot, that is, after the reap and before the next spawn.
+/// Each field has one writing process at a time. The worker writes the IDLE, ACTIVE and DRAINING states, the STARTING state after a failed boot cycle, the request counters, `pending` and `failed_on_full_queue`. The master writes the STARTING and FREE states, and `pid` at spawn and at clear. It writes `pending` and the exit counters only while no worker owns the slot, that is, after the reap and before the next spawn. In the worker, the IO threads and the PHP thread both change `pending` with atomic operations.
 #[repr(C, align(64))]
 pub struct SharedSlot {
     pub state: AtomicU32,
@@ -55,7 +55,7 @@ pub fn now_millis() -> u64 {
     ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000
 }
 
-/// The reloads of the whole server. OPcache is one cache for every pool, so one worker of any pool resets it for each reload.
+/// The reloads of the whole server. OPcache is one cache for every pool, so a worker of any pool can make the reset for a reload.
 pub struct Reloads {
     /// The reloads that the master sent.
     sent: AtomicU64,

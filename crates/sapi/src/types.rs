@@ -17,7 +17,7 @@ pub enum Frame {
         head: ResponseHead,
         /// Some holds the framing that the consumer must apply. None lets the consumer choose, and on HTTP/1.1 it chooses chunked.
         content_length: Option<u64>,
-        /// A 204, 304 or 101 response, or a HEAD request, has no body bytes and no framing fields on the wire.
+        /// A 204, 304 or 101 response, or a HEAD request, has no body bytes on the wire. A HEAD response keeps the Content-Length that the app declared, and the others have no framing fields.
         bodiless: bool,
     },
     Chunk(Bytes),

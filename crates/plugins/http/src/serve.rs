@@ -81,7 +81,7 @@ impl Serving {
     }
 
     /// Waits for the connections in flight to end. The acceptor is already gone.
-    /// A connection closes after its next response, so a request on an idle keep-alive connection still gets an answer. The drain holds an idle connection that gets no request until the grace period ends. So the idle keep-alive connections of a load balancer make every stop last the whole grace period.
+    /// A connection closes after its next response, so a request on an idle keep-alive connection still gets an answer. The drain holds an idle connection that gets no request until the grace period or its keepalive_timeout ends. So the idle keep-alive connections of a load balancer can make a stop last the whole grace period.
     async fn drain(self, fatal: Option<anyhow::Error>, grace: Duration) -> Result<()> {
         let deadline = tokio::time::Instant::now() + grace;
         self.shared.closing.store(true, Ordering::Release);

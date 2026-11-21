@@ -1,6 +1,6 @@
 <?php
 
-// The app side of the server-streaming tests. The request is an EchoRequest, and its text selects the probe. A reply is an EchoResponse, except in the flood probe and the first message of the stall probe.
+// The app side of the server-streaming tests. The request is an EchoRequest, and its text selects the probe. A reply is an EchoResponse, except in the flood probe, the first message of the stall probe and the second message of the garbage probe.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\WorkDiscardedException;

@@ -1,5 +1,5 @@
 # This file is a whitelist. Anything not listed here stays out of the build
-# context, so a file that exists on one machine only can never change the build.
+# context, so a local file outside the listed paths cannot change the build.
 # .cargo/config.toml is one such file. It pins PHP_CONFIG to a local path, and
 # cargo applies non-forced [env] entries when the variable is unset.
 *

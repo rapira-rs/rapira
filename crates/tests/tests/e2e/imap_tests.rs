@@ -19,7 +19,7 @@ fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<Resp>> {
         .collect()
 }
 
-/// MINIT stores FG(default_socket_timeout) into c-client once (PECL imap php_imap.c, SET_*TIMEOUT). No request can change the imap socket timeouts.
+/// MINIT stores FG(default_socket_timeout) into c-client once (PECL imap php_imap.c, SET_*TIMEOUT). An ini_set of default_socket_timeout in a request does not change the imap socket timeouts.
 #[test]
 fn imap_timeout_is_snapshotted_at_minit() -> anyhow::Result<()> {
     let out = run("imap_tests/imap-timeout-worker.php", &["/", "/"])?;

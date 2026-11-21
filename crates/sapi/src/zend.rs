@@ -196,7 +196,7 @@ pub unsafe fn instanceof(ce: *const zend_class_entry, base: *const zend_class_en
 }
 
 /// # Safety
-/// `s` is a live zend_string, and the borrow must not outlive it.
+/// `s` is a live zend_string. Its bytes must not change, and the borrow must not outlive it.
 pub unsafe fn zstr_bytes<'a>(s: *const zend_string) -> &'a [u8] {
     unsafe { std::slice::from_raw_parts((*s).val.as_ptr().cast::<u8>(), (*s).len) }
 }

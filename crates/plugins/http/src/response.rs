@@ -14,7 +14,7 @@ pub(crate) fn empty_body() -> Body {
         .boxed_unsync()
 }
 
-/// hyper closes the connection after a refusal with an unread body, but it announces nothing. An ingress with a catch-all cache rule would store the refusal.
+/// hyper closes the connection after a refusal with an unread body, but it announces nothing, so the refusal sends `Connection: close`. Without `no-store`, an ingress with a catch-all cache rule would store the refusal.
 pub(crate) fn error_response(status: http::StatusCode) -> Response {
     let mut res = http::Response::new(empty_body());
     *res.status_mut() = status;
