@@ -1,5 +1,5 @@
 <?php
-// Synchronous dispatcher: receive() blocks the thread, so the worker handles one request at a time.
+// A synchronous dispatcher. receive() blocks the thread, so the worker handles one exchange at a time.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\RapiraThrowable;
@@ -54,10 +54,10 @@ while (true) {
         } catch (\Throwable) {
         }
     } catch (ClosedException) {
-        // No more work for this app instance: leave the loop.
+        // The dispatcher has no more units for this app instance, so leave the loop.
         break;
     } catch (RapiraThrowable) {
-        // The http plugin closed the exchange first - nothing to answer, move on.
+        // The http plugin closed the exchange first. Nothing needs an answer, so continue with the next exchange.
     } catch (\Throwable $e) {
         try {
             $ex->writeHead(500, ['content-type' => ['text/plain']]);
