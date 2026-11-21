@@ -1,4 +1,4 @@
-//! The grpc plugin: unary and server-streaming RPCs of the configured services over gRPC, gRPC-Web and Connect on one listener, answered from PHP in dispatcher mode. The plugin answers health and reflection without PHP.
+//! The grpc plugin. It serves unary and server-streaming calls of the configured services over gRPC, gRPC-Web and Connect on one listener. PHP answers them in dispatcher mode. The plugin answers health and reflection without PHP.
 
 use std::sync::Arc;
 use std::time::Duration;
@@ -33,7 +33,7 @@ pub(crate) struct Config {
     pub max_timeout: Option<Duration>,
     /// Idle time before the listener sends an HTTP/2 PING.
     pub keepalive_interval: Duration,
-    /// Wait for the PING ACK. A peer that is gone without a FIN sends no ACK, so its connection closes within the sum of both values and does not hold a later drain.
+    /// The wait for the PING ACK. A peer that is gone without a FIN sends no ACK. So its connection closes within the sum of both values and does not hold a later drain.
     pub keepalive_timeout: Duration,
     /// The configured order. The first interceptor runs first.
     pub interceptors: Vec<Arc<dyn connectrpc::Interceptor>>,

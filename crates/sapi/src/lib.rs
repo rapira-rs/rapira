@@ -23,7 +23,7 @@ pub use bindings::*;
 pub use start::{PhpModule, Rapira, StartedWorker, boot_master, linked_php_version};
 pub use types::{Addr, Frame, Request};
 
-// bindgen names the Zend SUCCESS/FAILURE constants differently across php-src versions, so the values are hardcoded.
+// bindgen names the Zend SUCCESS and FAILURE constants differently across php-src versions, so the values are hardcoded.
 pub const SUCCESS: c_int = 0;
 pub const FAILURE: c_int = -1;
 
@@ -36,26 +36,26 @@ unsafe extern "C" {
     pub fn rapira_process_init();
     pub fn rapira_child_init();
     pub fn rapira_release_temporary_streams();
-    // Holds boot-registered shutdown functions until cycle end (module.c).
+    // Holds the shutdown functions of the boot until the cycle ends (module.c).
     pub fn rapira_stash_boot_shutdown_functions();
     pub fn rapira_request_activate() -> c_int;
-    // The post readers that hand PHP the buffered body; runs after every MINIT (module.c).
+    // Registers the post readers that give PHP the buffered body. It runs after every MINIT (module.c).
     pub fn rapira_register_post_reader();
     pub fn rapira_request_shutdown() -> c_int;
-    // The execution timer is disarmed while parked in receive() and re-armed with the captured per-cycle budget on unit handout (module.c).
+    // rapira_receive_untimed disarms the execution timer while the app waits in receive(). rapira_receive_timed arms it again with the captured per-cycle budget when the host hands out a unit (module.c).
     pub fn rapira_receive_untimed();
     pub fn rapira_receive_timed();
     // Creates the object of a unit in rv and returns the address of its held word, a rapira_held (rapira_dispatcher.c).
     pub fn rapira_unit_object(rv: *mut zval, ce: *mut zend_class_entry) -> *mut std::ffi::c_void;
-    // C shim (module.c) over rapira_rs_ub_write: raises the client-abort bailout from C so the longjmp does not cross the Rust catch_unwind frame.
+    // A C shim (module.c) over rapira_rs_ub_write. It raises the client-abort bailout from C, so the longjmp does not cross the Rust catch_unwind frame.
     pub fn rapira_ub_write(str_: *const std::os::raw::c_char, len: usize) -> usize;
 
     pub fn rapira_run_handler(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> c_int;
-    // Flags 1, 2 and 4: OPcache serves this app instance, a restart is pending, a restart runs now; -1: no OPcache. Writes last_restart_time (module.c).
+    // Returns -1 with no OPcache. Otherwise it returns a set of flags: 1 when OPcache serves this app instance, 2 when a restart is pending, 4 when a restart runs now. Writes last_restart_time (module.c).
     pub fn rapira_opcache_state(last_restart: *mut zend_long) -> c_int;
     // Calls opcache_reset() (module.c).
     pub fn rapira_opcache_reset();
-    // A permanent interned string: PHP never refcounts or frees it (wrapper.c).
+    // Returns a permanent interned string, which PHP never refcounts or frees (wrapper.c).
     pub fn rapira_permanent_string(s: *const std::os::raw::c_char, len: usize) -> *mut zend_string;
 
     pub static mut rapira_module_entry: zend_module_entry;

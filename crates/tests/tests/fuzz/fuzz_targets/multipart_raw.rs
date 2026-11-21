@@ -1,4 +1,4 @@
-//! Raw bytes through the multipart parser of the dispatcher mode. The bytes before the first LF are the Content-Type value and the rest is the body. The calls follow parse_multipart in crates/plugins/http/src/handler.rs. The body parses as one part and split into parts, and the two results must agree.
+//! Passes raw bytes through the multipart parser of the dispatcher mode. The bytes before the first LF are the Content-Type value and the rest is the body. The calls follow parse_multipart in crates/plugins/http/src/handler.rs. The target parses the body once as one part and once split into parts, and the two results must agree.
 
 #![no_main]
 
@@ -26,7 +26,7 @@ fn rejected(Rejection { status, reason }: Rejection, allowed: &[u16]) {
     );
 }
 
-/// One entry per name, names compared byte for byte, each entry with a value, and at most max_part_headers field lines in all.
+/// Asserts one entry per name, with names compared byte for byte, a value in each entry, and at most max_part_headers field lines in all.
 fn assert_grouped(headers: &[HeaderValues], l: &Limits) {
     let mut lines = 0;
     for (i, h) in headers.iter().enumerate() {

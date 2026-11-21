@@ -17,13 +17,13 @@ zend_class_entry *rapira_ce_grpc_headers_already_committed_error;
 zend_class_entry *rapira_ce_grpc_unary_call;
 zend_class_entry *rapira_ce_grpc_server_streaming_call;
 
-// the dispatcher surface; Plugin::dispatcher() returns its address (src/lib.rs)
+// the plugin record; Plugin::dispatcher() returns its address (src/lib.rs)
 rapira_plugin rapira_grpc_plugin = {
     .busy = "this worker holds one unit at a time, and its call is "
             "unfinalized; finalize it first",
 };
 
-// own copies: std_object_handlers is shared engine state
+// a private copy, because std_object_handlers is shared engine state
 static zend_object_handlers rapira_grpc_call_handlers;
 
 // free_obj hands the call back to Rust

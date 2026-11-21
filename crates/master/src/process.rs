@@ -1,4 +1,4 @@
-//! Worker processes: the fork bracket, the reap and its verdicts, the respawn backoff and the RSS read.
+//! Worker processes: the fork and its signal mask, the reap and its verdicts, the respawn backoff and the RSS read.
 
 use std::os::fd::AsRawFd;
 use std::time::{Duration, Instant};
@@ -21,9 +21,9 @@ pub(crate) struct WorkerProc {
     pub pid: libc::pid_t,
     pub slot: usize,
     pub spawned_at: Instant,
-    /// The request watchdog sent SIGTERM: a SIGTERM or SIGKILL exit is a timeout kill, not a crash.
+    /// The request watchdog sent SIGTERM, so a SIGTERM or SIGKILL exit is a timeout kill, not a crash.
     pub timeout_kill: bool,
-    /// The memory limit sent SIGQUIT: the worker drains, so the limit does not signal it again.
+    /// The memory limit sent SIGQUIT. The worker drains, so the limit does not signal it again.
     pub memory_drain: bool,
 }
 
@@ -47,7 +47,7 @@ impl SlotState {
         self.respawn_at = Some(now + delay);
     }
 
-    /// Schedules a respawn now and ends the streak: the worker drained or the watchdog ended it.
+    /// Schedules a respawn now and ends the streak, for a worker that drained or that the watchdog ended.
     pub fn schedule_immediate(&mut self, now: Instant) {
         self.crash_streak = 0;
         self.respawn_at = Some(now);
@@ -108,7 +108,7 @@ pub(crate) fn bury(pools: &mut [Pool], pid: libc::pid_t, status: c_int) -> Optio
     None
 }
 
-/// Drains `waitpid` fully so every child ready at this point is buried in one pass. Each crash outside a stop gets an error record; a stop ends workers with signals and forced exits on purpose.
+/// Calls `waitpid` until it returns no child, so every child ready at this point is buried in one pass. Each crash outside a stop gets an error record. A stop ends workers with signals and forced exits on purpose.
 pub(crate) fn reap_all(pools: &mut [Pool], now: Instant, stopping: bool) -> anyhow::Result<()> {
     loop {
         let mut status: c_int = 0;
@@ -143,7 +143,7 @@ pub(crate) fn reap_all(pools: &mut [Pool], now: Instant, stopping: bool) -> anyh
     }
 }
 
-/// The resident set of `pid` in bytes: the second field of `/proc/<pid>/statm`, in pages. https://man7.org/linux/man-pages/man5/proc_pid_statm.5.html
+/// The resident set of `pid` in bytes. It reads the second field of `/proc/<pid>/statm`, which is in pages. https://man7.org/linux/man-pages/man5/proc_pid_statm.5.html
 #[cfg(target_os = "linux")]
 pub(crate) fn rss(pid: libc::pid_t) -> Option<u64> {
     let statm = std::fs::read_to_string(format!("/proc/{pid}/statm")).ok()?;
@@ -164,7 +164,7 @@ pub(crate) fn rss(pid: libc::pid_t) -> Option<u64> {
     (n == size).then_some(info.pti_resident_size)
 }
 
-/// The result is not checked: a pid that is already gone is reaped on the next SIGCHLD.
+/// Ignores the result. The next SIGCHLD reaps a pid that is already gone.
 pub(crate) fn kill(pid: libc::pid_t, sig: c_int) {
     // SAFETY: kill takes no pointers.
     unsafe { libc::kill(pid, sig) };
@@ -175,7 +175,7 @@ pub(crate) struct Forker {
     pub self_pipe: SelfPipe,
     /// Read end; `spawn` clones it for the lifeline thread of each child.
     pub lifeline_rd: std::io::PipeReader,
-    /// Never written: its close at master exit is what signals master death to every worker's `lifeline_rd`.
+    /// Nothing writes it. Its close at master exit signals master death to the `lifeline_rd` of every worker.
     pub lifeline_wr: std::io::PipeWriter,
     /// The whole board, for every `WorkerEnv`.
     pub board: &'static [SharedSlot],
@@ -187,25 +187,25 @@ pub(crate) struct Forker {
 }
 
 impl Forker {
-    /// Forks one worker of pool `pool` and returns its pid. The child runs the worker closure and `_exit`s with its code, so no master Drop (pidfile unlink, PHP shutdown) runs in a child.
+    /// Forks one worker of pool `pool` and returns its pid. The child runs the worker closure and `_exit`s with its code, so no master Drop runs in a child, for example the pidfile unlink or the PHP shutdown.
     pub(crate) fn spawn(
         &mut self,
         pool: usize,
         slot_view: &'static SharedSlot,
     ) -> std::io::Result<libc::pid_t> {
-        // A copy of the read end for the lifeline thread of the child: EOF on it means the master died. The parent closes its copy when this function returns.
+        // A copy of the read end for the lifeline thread of the child. EOF on it means the master died. The parent closes its copy when this function returns.
         let lifeline_rd = self.lifeline_rd.try_clone()?;
 
-        // The child inherits this mask, so the master signals stay blocked until the child resets their handlers. Otherwise a signal in that window runs the master handler in the child, which writes a second byte into the shared self-pipe: a Ctrl-C would reach the master twice and force the stop.
+        // The child inherits this mask, so the master signals stay blocked until the child resets their handlers. Otherwise a signal in that window runs the master handler in the child, which writes a second byte into the shared self-pipe. Then a Ctrl-C reaches the master twice and forces the stop.
         let block: libc::sigset_t = sigset(&MASTER_SIGNALS);
-        // SAFETY: zeroed sigset_t is fully overwritten by sigprocmask's out-param.
+        // SAFETY: the out-param of sigprocmask overwrites all of the zeroed sigset_t.
         let mut old: libc::sigset_t = unsafe { std::mem::zeroed() };
-        // SAFETY: block/old are live sigset_ts.
+        // SAFETY: block and old are live sigset_ts.
         unsafe { libc::sigprocmask(libc::SIG_BLOCK, &block, &mut old) };
 
         // SAFETY: fork in a single-threaded master, so no other thread holds a lock the child inherits.
         match unsafe { libc::fork() } {
-            // Child: it becomes the worker and never returns from this arm.
+            // The child becomes the worker and never returns from this arm.
             0 => {
                 // SAFETY: all calls below are async-signal-safe or operate on fds we own.
                 unsafe {
@@ -222,17 +222,17 @@ impl Forker {
                     // USR1 asks the master for a status log and means nothing to a worker. Its default action ends the process, so the worker ignores it.
                     libc::signal(libc::SIGUSR1, libc::SIG_IGN);
 
-                    // The process name that ps and top (and btop) show. https://man7.org/linux/man-pages/man2/PR_SET_NAME.2const.html
+                    // The process name that ps, top and btop show. https://man7.org/linux/man-pages/man2/PR_SET_NAME.2const.html
                     #[cfg(target_os = "linux")]
                     libc::prctl(libc::PR_SET_NAME, c"rapira-worker".as_ptr());
 
                     // This mask replaces the inherited one. Only the worker signals stay blocked, for the sigwait thread of the worker (wait_worker_signal). Every other signal is unblocked.
-                    // USR2 keeps SIG_DFL: POSIX lets a kernel discard an ignored signal even while it is blocked. https://pubs.opengroup.org/onlinepubs/9799919799/functions/V2_chap02.html#tag_16_04_01
+                    // USR2 keeps SIG_DFL, because POSIX lets a kernel discard an ignored signal even while it is blocked. https://pubs.opengroup.org/onlinepubs/9799919799/functions/V2_chap02.html#tag_16_04_01
                     let hold = sigset(&WORKER_SIGNALS);
                     libc::sigprocmask(libc::SIG_SETMASK, &hold, std::ptr::null_mut());
                 }
 
-                // The child still has the stack frames of the master from the fork. A panic stops here: unwinding into those frames would run master Drops in the child.
+                // The child still has the stack frames of the master from the fork. A panic stops here, because an unwind into those frames would run master Drops in the child.
                 let outcome = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                     (self.worker)(WorkerEnv {
                         pool,
@@ -261,7 +261,7 @@ impl Forker {
                 unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
                 Err(std::io::Error::last_os_error())
             }
-            // Parent: pid is the new worker. A master signal that came during the fork is handled after the mask goes back.
+            // In the parent, pid is the new worker. A master signal that came during the fork is handled after the mask goes back.
             pid => {
                 // SAFETY: restore the pre-fork mask.
                 unsafe { libc::sigprocmask(libc::SIG_SETMASK, &old, std::ptr::null_mut()) };
@@ -275,7 +275,7 @@ impl Forker {
 mod tests {
     use super::*;
 
-    // Raw wait-status encoding (BSD-derived, shared by Linux and macOS): exit code in bits 8..16, signal in the low 7 bits.
+    // Raw wait-status encoding of Linux and macOS, from BSD: the exit code in bits 8..16, the signal in the low 7 bits.
     fn exited(code: i32) -> c_int {
         code << 8
     }

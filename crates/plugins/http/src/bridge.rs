@@ -1,4 +1,4 @@
-//! The reply body that streams the PHP frames and the sendFile slices, the request in flight with the flush record of its delivery, the drain that keeps a delivered reply from a cancel, and the write timeout.
+//! This module has the reply body, which streams the PHP frames and the sendFile slices. It also has the request in flight with the flush record of its delivery, the drain that protects a delivered reply from a cancel, and the write timeout.
 
 use std::future::Future;
 use std::pin::Pin;
@@ -17,16 +17,16 @@ use crate::middleware::BoxError;
 #[derive(Default)]
 pub(crate) struct ConnectionState {
     pub(crate) closed: bool,
-    /// Completed flushes of the connection, counted by [`TimedIo`].
+    /// The number of completed flushes of the connection. [`TimedIo`] counts them.
     flushes: u64,
 }
 
-/// One request in flight on the worker, shared by the response body, the PHP reply and the drain task.
-/// It counts the request until the last holder drops, and it holds the flush record of the delivery:
-/// a connection close cancels PHP only while the last response byte is not flushed to the socket.
+/// One request in flight on the worker. The response body, the PHP reply and the drain task share it.
+/// It counts the request until the last holder drops. It also holds the flush record of the delivery,
+/// so a connection close cancels PHP only while the last response byte is not flushed to the socket.
 pub(crate) struct InflightRequest {
     counter: Arc<AtomicUsize>,
-    /// Connection flush count when the last response byte was handed to hyper.
+    /// The flush count of the connection when the host gave the last response byte to hyper.
     end_flush: OnceLock<u64>,
 }
 
@@ -44,8 +44,8 @@ impl InflightRequest {
         self.end_flush.get_or_init(|| conn.borrow().flushes);
     }
 
-    /// True once a flush after the record wrote the last response byte to the socket.
-    /// A flush counts only after hyper wrote its whole buffer (hyper proto/h1/io.rs, Buffered::poll_flush), so an idle flush cannot stand for a delivery.
+    /// Returns true once a flush after the record wrote the last response byte to the socket.
+    /// A flush counts only after hyper wrote its whole buffer (hyper proto/h1/io.rs, Buffered::poll_flush), so an idle flush cannot mark a delivery.
     fn delivered(&self, state: &ConnectionState) -> bool {
         self.end_flush
             .get()
@@ -248,7 +248,7 @@ impl hyper::body::Body for ReplyBody {
 
 impl Drop for ReplyBody {
     fn drop(&mut self) {
-        // A length-delimited HTTP body can finish before PHP sends End: https://www.rfc-editor.org/rfc/rfc9112#section-6.3
+        // A length-delimited HTTP body can finish before PHP sends End. https://www.rfc-editor.org/rfc/rfc9112#section-6.3
         if self.declared_cl == Some(self.sent)
             && self.guard.end_flush.get().is_some()
             && let Some(reply) = self.reply.take()
@@ -258,14 +258,14 @@ impl Drop for ReplyBody {
     }
 }
 
-/// Consumes the reply to End. A connection close cancels the reply unless the response was delivered by then.
+/// Consumes the reply up to End. A connection close cancels the reply unless the response was delivered by then.
 /// After the delivery the drain holds the reply until PHP sends End, so a delivered response never reports cancellation to PHP.
 pub(crate) fn spawn_drain(
     mut reply: Receiver<Frame>,
     mut closed: watch::Receiver<ConnectionState>,
     guard: Arc<InflightRequest>,
 ) {
-    // A buffered reply usually queues End next, so consume it here. A classic or worker HEAD reply with output queues a Chunk first and takes the task.
+    // A buffered reply usually queues End next, so this function consumes it here. A classic or worker HEAD reply with output queues a Chunk first and goes to the task.
     let mut cx = Context::from_waker(std::task::Waker::noop());
     if let Poll::Ready(Some(Frame::End { .. }) | None) = reply.poll_recv(&mut cx) {
         return;
@@ -501,7 +501,7 @@ mod tests {
         assert!(data(&mut b).await.unwrap().is_err());
     }
 
-    /// The terminal error must let hyper flush first: one Pending pass with a wake, then the error.
+    /// The terminal error must let hyper flush first. The first poll returns Pending and wakes the task, and the second poll returns the error.
     #[test]
     fn error_is_gated_behind_one_flush_pass() {
         use hyper::body::Body as _;
@@ -527,7 +527,7 @@ mod tests {
         assert!(matches!(second, Poll::Ready(Some(Err(_)))));
     }
 
-    /// Dropping the body drops the reply synchronously: the client-gone signal for PHP.
+    /// A drop of the body drops the reply synchronously. This is the client-gone signal for PHP.
     #[test]
     fn dropping_the_body_cancels_php() {
         let OpenReply { reply, events } = open_reply(vec![chunk("head-flushed")]);
@@ -571,7 +571,7 @@ mod tests {
             Duration::from_secs(30),
             watch::channel(ConnectionState::default()).0,
         );
-        // The paused clock auto-advances once every task is idle, firing the deadline.
+        // The paused clock auto-advances once every task is idle, and the deadline fires.
         let err =
             std::future::poll_fn(|cx| hyper::rt::Write::poll_write(Pin::new(&mut io), cx, b"x"))
                 .await
@@ -581,7 +581,7 @@ mod tests {
 
     struct Drain {
         inflight: Arc<AtomicUsize>,
-        /// Weak: the drain task stays the only owner of the request count.
+        /// A weak reference, so the drain task stays the only owner of the request count.
         guard: Weak<InflightRequest>,
         events: mpsc::Sender<Frame>,
         state: watch::Sender<ConnectionState>,
@@ -651,7 +651,7 @@ mod tests {
         assert_eq!(d.inflight.load(Ordering::Acquire), 0);
     }
 
-    /// A flush past the record wrote the last byte to the socket: a later close must not cancel the reply.
+    /// A flush past the record wrote the last byte to the socket, so a later close must not cancel the reply.
     #[tokio::test(start_paused = true)]
     async fn flushed_drain_survives_a_later_close() {
         let d = parked_drain().await;
@@ -673,7 +673,7 @@ mod tests {
         assert_eq!(d.inflight.load(Ordering::Acquire), 0);
     }
 
-    /// A flush at the record is not past it: a close then cancels the reply.
+    /// A flush at the record is not past it, so a close then cancels the reply.
     #[tokio::test]
     async fn drain_cancels_when_the_close_beats_the_flush() {
         let d = parked_drain().await;
@@ -686,7 +686,7 @@ mod tests {
         assert_eq!(d.inflight.load(Ordering::Acquire), 0);
     }
 
-    /// One chunk and no End, the shape of an unfinalized PHP exchange; the sender closes when the reply is dropped.
+    /// A reply with one chunk and no End, the shape of an unfinalized PHP exchange. The sender closes when the reply drops.
     fn parked_source() -> OpenReply {
         open_reply(vec![chunk("abc")])
     }
@@ -708,7 +708,7 @@ mod tests {
             .expect("an unflushed drain must cancel on close");
     }
 
-    /// The buffered path queues End behind the last chunk: drop consumes it without a drain task.
+    /// The buffered path queues End behind the last chunk, so the drop consumes it without a drain task.
     #[tokio::test]
     async fn queued_end_is_consumed_at_drop_without_a_task() {
         let guard = guard();
@@ -757,7 +757,7 @@ mod tests {
             .expect("the drain task must consume End");
     }
 
-    /// Without a record the bytes never reached hyper: dropping the body cancels PHP at once.
+    /// Without a record, the bytes never reached hyper, so a drop of the body cancels PHP at once.
     #[tokio::test]
     async fn completed_body_without_a_record_cancels_php() {
         let OpenReply { reply, events } = parked_source();

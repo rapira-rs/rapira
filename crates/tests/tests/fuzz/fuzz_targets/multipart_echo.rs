@@ -1,4 +1,4 @@
-//! Encodes generated parts the way a browser does, parses the body, and compares the result with the parts byte for byte. The body parses as one part and split into parts, and the two results must agree.
+//! Encodes generated parts the way a browser does, parses the body, and compares the result with the parts byte for byte. The target parses the body once as one part and once split into parts, and the two results must agree.
 
 #![no_main]
 

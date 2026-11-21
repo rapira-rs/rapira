@@ -1,4 +1,4 @@
-//! sendFile(): the root check and the file slice frame.
+//! This module implements sendFile(), with the root check and the file slice frame.
 
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -26,7 +26,7 @@ pub(crate) fn set_sendfile_root(root: PathBuf) {
     let _ = SENDFILE_ROOT.set(root);
 }
 
-/// Whether `canonical` is under the root. The first call of an app instance resolves the root, so after a symlink deploy and a reload the root follows the code to the new release.
+/// Returns true when `canonical` is under the root. The first call of an app instance resolves the root. After a symlink deploy and a reload, the root therefore resolves into the new release.
 fn under_root(canonical: &Path) -> bool {
     let cycle = rapira_sapi::exchange::cycle();
     CYCLE_ROOT.with_borrow_mut(|resolved| {
@@ -89,7 +89,7 @@ fn open_send_file(
 }
 
 /// # Safety
-/// As `send_frame`.
+/// The rules of `send_frame` apply.
 pub(super) unsafe fn send_file_core(
     st: &mut ExchangeState,
     path: &[u8],
@@ -122,7 +122,7 @@ pub(super) unsafe fn send_file_core(
 }
 
 /// # Safety
-/// `held` the slot of a live exchange; `path` points at `path_len` readable bytes (ZPP-owned); `offset >= 0`; `length >= 1` unless `length_is_null`; engine active on this thread.
+/// `held` is the slot of a live exchange. `path` points at `path_len` readable bytes that ZPP owns. `offset >= 0`, and `length >= 1` unless `length_is_null`. The engine is active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_send_file(
     held: *const HeldPtr,

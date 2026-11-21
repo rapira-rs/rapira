@@ -2,7 +2,7 @@
 
 #include <Zend/zend_generators.h>
 
-// Userland runs only below this C frame, so a bailout from the generator
+// PHP code runs only below this C frame, so a bailout from the generator
 // crosses no Rust frame.
 bool rapira_stream_run_generator(zend_object *generator,
                                  const rapira_held *held,

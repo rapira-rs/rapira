@@ -1,5 +1,5 @@
 <?php
-// handle_request() must refuse dispatcher mode before touching the shared intake; serving afterwards proves the refusal was clean.
+// handle_request() must refuse dispatcher mode before it touches the shared intake. The units served after that prove that the refusal was clean.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\NotInWorkerModeError;

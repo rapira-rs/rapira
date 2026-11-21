@@ -21,7 +21,7 @@ use crate::{
 
 thread_local! {
     static UNIT_RX: RefCell<Option<UnitRx>> = const { RefCell::new(None) };
-    /// A pull of this cycle took a unit: a fatal error after that is an app failure, not a boot failure.
+    /// A pull of this cycle took a unit, so a fatal error after that is an app failure, not a boot failure.
     pub(crate) static RECEIVED: Cell<bool> = const { Cell::new(false) };
     /// A pull of this cycle saw the intake closed.
     pub(crate) static CLOSED_SEEN: Cell<bool> = const { Cell::new(false) };
@@ -31,7 +31,7 @@ struct UnitRx {
     rx: Receiver<Entry>,
     /// The `pending` field of this worker's scoreboard slot.
     pending: &'static AtomicU64,
-    /// Classic mode runs every unit in a new cycle, so a reload has no app instance to restart: the pull resolves the entrypoint again and enters its directory.
+    /// Classic mode runs every unit in a new cycle, so a reload has no app instance to recycle. The pull resolves the entrypoint again and enters its directory.
     classic: bool,
     /// The configured entrypoint, with its symlinks.
     entrypoint: PathBuf,
@@ -58,7 +58,7 @@ impl UnitRx {
         got
     }
 
-    /// A pulled unit leaves `pending` and gives back its body bytes.
+    /// A pulled unit leaves `pending`.
     fn take(&self, unit: Unit) -> Unit {
         self.pending.fetch_sub(1, Ordering::Relaxed);
         unit
@@ -80,7 +80,7 @@ pub struct Rapira {
     worker: JoinHandle<()>,
 }
 
-/// Jitter avoids lockstep recycling. The hash mixes in the pid because every child inherits the same seed from the pre-fork master.
+/// The jitter makes the workers recycle at different times. The hash mixes in the pid, because every worker inherits the same seed from the pre-fork master.
 fn effective_quota(max_requests: u64) -> u64 {
     if max_requests == 0 {
         return 0;
@@ -99,11 +99,11 @@ pub struct StartedWorker {
     pub intake: Intake,
 }
 
-/// Zend structs are bound by bindgen at build time, so a libphp from another PHP minor is an ABI mismatch (`sapi_startup` handed a differently shaped struct), not a load error.
+/// bindgen binds the Zend structs at build time, so a libphp from another PHP minor is an ABI mismatch, not a load error. `sapi_startup` then gets a struct of a different shape.
 fn check_linked_php() -> anyhow::Result<()> {
-    // SAFETY: php_version_id() returns a compile-time constant and touches no engine state, so this is valid pre-startup.
+    // SAFETY: php_version_id() returns a compile-time constant and touches no engine state, so this call is valid before the startup.
     let linked = unsafe { php_version_id() };
-    // A PHP_VERSION_ID is major * 10000 + minor * 100 + patch, so `/ 100` drops the patch: https://www.php.net/manual/en/function.phpversion.php
+    // A PHP_VERSION_ID is major * 10000 + minor * 100 + patch, so a division by 100 drops the patch. https://www.php.net/manual/en/function.phpversion.php
     anyhow::ensure!(
         linked / 100 == PHP_VERSION_ID / 100,
         "linked libphp is PHP {} (PHP_VERSION_ID {linked}), but this rapira was built against PHP_VERSION_ID {PHP_VERSION_ID}. \
@@ -115,23 +115,23 @@ fn check_linked_php() -> anyhow::Result<()> {
 
 /// The PHP_VERSION string of the linked libphp.
 pub fn linked_php_version() -> String {
-    // SAFETY: php_version() returns a static NUL-terminated string and touches no engine state, so this is valid pre-startup.
+    // SAFETY: php_version() returns a static NUL-terminated string and touches no engine state, so this call is valid before the startup.
     unsafe { CStr::from_ptr(php_version()) }
         .to_string_lossy()
         .into_owned()
 }
 
-/// MINIT once in the master. Base classes first, then each register function in order.
+/// Runs MINIT once in the master. MINIT registers the base classes first, then calls each register function in order.
 pub fn boot_master(register: &'static [unsafe extern "C" fn()]) -> anyhow::Result<PhpModule> {
     check_linked_php()?;
-    // SAFETY: the master writes them once, before MINIT reads them. register is 'static, so the pointer stays valid. Option<unsafe extern "C" fn()>, the element type bindgen gives, has the layout of the fn pointer.
+    // SAFETY: the master writes them once, before MINIT reads them. register is 'static, so the pointer stays valid. Option<unsafe extern "C" fn()>, the element type bindgen gives, has the layout of the function pointer.
     unsafe {
         rapira_plugin_registers = register.as_ptr().cast();
         rapira_plugin_register_count = register.len();
     }
     let mut module: _sapi_module_struct = module::build_sapi_module();
     let started: bool = unsafe {
-        // The Rust runtime sets SIGPIPE to SIG_IGN before main, so a write to a closed peer returns EPIPE: https://doc.rust-lang.org/beta/unstable-book/compiler-flags/on-broken-pipe.html
+        // The Rust runtime sets SIGPIPE to SIG_IGN before main, so a write to a closed peer returns EPIPE. https://doc.rust-lang.org/beta/unstable-book/compiler-flags/on-broken-pipe.html
         rapira_process_init();
         sapi_startup(&mut module);
         php_module_startup(&mut module, &raw mut rapira_module_entry) == SUCCESS
@@ -148,8 +148,8 @@ pub fn boot_master(register: &'static [unsafe extern "C" fn()]) -> anyhow::Resul
 }
 
 impl Rapira {
-    /// `pool`: the settings of the pool. Its `entrypoint` is the script of every request in classic mode, the worker script otherwise. Its `max_requests` gives classic mode no quota, and the other modes a quota with a jitter.
-    /// `slot`: the scoreboard slot this worker reports into. `reloads`: the reload count of the server. `stopper` stops the plugin when PHP turns unhealthy. `plugin`: the plugin of the pool; in dispatcher mode, its name and its record are the dispatcher surface that PHP sees.
+    /// `pool` holds the settings of the pool. In classic mode, the app runs its `entrypoint` once per unit. In the other modes, the app runs it once per cycle. Its `max_requests` gives classic mode no quota, and the other modes a quota with a jitter.
+    /// `slot` is the scoreboard slot that this worker writes. `reloads` is the reload count of the server. `stopper` stops the plugin when PHP turns unhealthy. `plugin` is the plugin of the pool. In dispatcher mode, PHP sees its name and its record as the dispatcher.
     /// On return, the calling thread blocks SIGPROF, and every thread it starts inherits the block.
     pub fn start_worker(
         pool: PoolSettings,
@@ -166,7 +166,7 @@ impl Rapira {
             env,
             ..
         } = pool;
-        // Classic mode runs every unit in a new cycle, so max_requests has nothing to restart there.
+        // Classic mode runs every unit in a new cycle, so max_requests has nothing to recycle there.
         let max_requests = if mode == Mode::Classic {
             0
         } else {
@@ -195,7 +195,7 @@ impl Rapira {
         unsafe {
             zend_accel_schedule_restart_hook = Some(crate::rapira_worker::opcache_restart_scheduled)
         };
-        // SAFETY: the process has one thread here: the PHP thread, the lifeline thread, the plugin threads and the signal thread start later. The master checked every pair before the fork, so set_var cannot panic.
+        // SAFETY: the process has one thread here, because the PHP thread, the lifeline thread, the plugin threads and the signal thread start later. The master checked every pair before the fork, so set_var cannot panic.
         for (name, value) in &env {
             unsafe { std::env::set_var(name, value) };
         }
@@ -223,7 +223,7 @@ impl Rapira {
             })
             .expect("spawn the PHP thread");
 
-        // The max_execution_time timer sends SIGPROF to the process. The PHP thread exists and keeps the signal open; every thread started after this block inherits the block.
+        // The max_execution_time timer sends SIGPROF to the process. The PHP thread exists and keeps the signal unblocked; every thread started after this block inherits the block.
         // SAFETY: set is a live sigset_t.
         unsafe {
             let mut set: libc::sigset_t = std::mem::zeroed();
@@ -238,7 +238,7 @@ impl Rapira {
         }
     }
 
-    /// Waits for the PHP thread after the plugin stopped. The thread ends once every Intake clone is dropped, and the plugin drops its clone with its runtime. Returns true when PHP turned unhealthy.
+    /// Waits for the PHP thread after the plugin stops. The thread ends once every Intake clone is dropped, and the plugin drops its clone with its runtime. Returns true when PHP turned unhealthy.
     pub fn join(self) -> bool {
         info!(target: "rapira", "shutting down, joining the PHP thread");
         let deadline = Instant::now() + Duration::from_secs(5);
@@ -254,7 +254,7 @@ impl Rapira {
     }
 }
 
-/// NTS inits module and request on different threads, so the call stack is re-initialized on this thread: https://github.com/php/php-src/pull/9104
+/// NTS initializes the module and the request on different threads, so this function initializes the call stack again on this thread. https://github.com/php/php-src/pull/9104
 fn worker_main(mode: Mode, entrypoint: PathBuf, max_boot_failures: u32, rx: UnitRx) {
     UNIT_RX.with_borrow_mut(|slot| *slot = Some(rx));
     loop {
@@ -300,14 +300,14 @@ pub enum Wait {
 /// The result of a pull.
 pub(crate) enum Pull {
     Unit(Unit),
-    /// The app instance takes no more units: its quota is used up, or the intake closed.
+    /// The app instance takes no more units, because its quota is used up or the intake closed.
     Closed,
     /// No unit arrived within the wait.
     NoUnit,
 }
 
 /// The app pull of every mode. It applies the app rules: the quota, a reload, the OPcache restart, a cancelled unit and the cycle flags. A timed pull keeps one deadline across the entries it skips.
-/// Idle covers only the park: control returns to PHP as Active on every arm, or the master watchdog skips a worker spinning after a no-unit return. A polling worker must refresh last_activity_ms, or the watchdog TERMs it as a stuck request (`Pool::watchdog_tick`).
+/// Idle covers only the park. Control returns to PHP as Active on every arm, or the master watchdog skips a worker that spins after a no-unit return. A worker that polls must refresh last_activity_ms, or the watchdog sends it SIGTERM as a stuck request (`Pool::watchdog_tick`).
 pub(crate) fn pull(wait: Wait) -> Pull {
     UNIT_RX.with_borrow(|slot| {
         let Some(unit_r) = slot.as_ref() else {
@@ -349,7 +349,7 @@ pub(crate) fn pull(wait: Wait) -> Pull {
                 Ok(Entry::Unit { unit, .. }) => {
                     let unit = unit_r.take(unit);
                     if unit.cancelled() {
-                        // Counted like a shed unit: the app never served it, so the max_requests quota does not tick.
+                        // The host counts it as a shed unit. The app never served it, so the max_requests quota does not tick.
                         sb_update(Event::Shed);
                         continue;
                     }
@@ -366,7 +366,7 @@ pub(crate) fn pull(wait: Wait) -> Pull {
                     info!(target: "rapira", "reload requested; restarting the app");
                     quota::exhaust();
                 }
-                // The poll woke up before the wait ended: the next turn looks at the restart.
+                // The poll woke up before the wait ended, so the next turn looks at the restart.
                 Err(RecvTimeoutError::Timeout)
                     if poll.is_some()
                         && !matches!(wait, Wait::Never)
@@ -389,7 +389,7 @@ pub(crate) fn pull_unit_to_shed(timeout: Duration) -> Pull {
         };
         match unit_r.recv(Some(timeout)) {
             Ok(Entry::Unit { unit, .. }) => Pull::Unit(unit_r.take(unit)),
-            // A reload during a failed boot: the next boot starts at once.
+            // After a reload during a failed boot, the next boot starts at once.
             Ok(Entry::RestartApp) | Err(RecvTimeoutError::Timeout) => Pull::NoUnit,
             Err(RecvTimeoutError::Disconnected) => Pull::Closed,
         }
@@ -412,7 +412,7 @@ mod tests {
     use crate::scoreboard::sb_set;
     use crate::work::Held;
 
-    /// A unit on the intake. `cancelled`: its client left.
+    /// A unit on the intake. `cancelled` is true when its client left.
     struct Probe {
         cancelled: bool,
     }
@@ -479,7 +479,7 @@ mod tests {
             /// A CGI unit whose client left.
             CgiGone,
             Reload,
-            /// The app served one unit: the quota ticks.
+            /// The app served one unit, so the quota ticks.
             Served,
             /// Every intake clone is dropped.
             Close,

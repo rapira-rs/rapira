@@ -58,8 +58,8 @@ void rapira_init_call_stack(void) {
 #endif
 }
 
-// A string that lives until the process exits: PHP never refcounts or frees an interned string.
-// The flags match zend_add_interned_string (Zend/zend_string.c). The hash is set once here, as zend_new_interned_string_permanent does, so no request computes it.
+// Returns a string that lives until the process exits, because PHP never refcounts or frees an interned string.
+// The flags match zend_add_interned_string (Zend/zend_string.c). This function sets the hash once, as zend_new_interned_string_permanent does, so no request computes it.
 zend_string *rapira_permanent_string(const char *s, size_t len) {
     zend_string *str = zend_string_init(s, len, true);
     zend_string_hash_val(str);

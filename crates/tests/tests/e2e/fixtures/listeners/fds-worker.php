@@ -1,5 +1,5 @@
 <?php
-// Resident worker: each response lists the descriptors of a child process that the worker starts.
+// A resident worker. Each response lists the descriptors of a child process that the worker starts.
 
 use Rapira\Exception\ClosedException;
 

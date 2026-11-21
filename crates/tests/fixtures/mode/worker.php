@@ -1,5 +1,5 @@
 <?php
-// The boot answer is captured once, then every unit re-asks: the case must stay identical.
+// The boot gets the mode once, then every unit asks again. The case must stay the same.
 $boot = \Rapira\get_mode();
 $handler = static function () use ($boot): void {
     $mode = \Rapira\get_mode();

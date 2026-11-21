@@ -1,4 +1,4 @@
-//! The auth interceptor of the grpc plugin: a call needs one authorization value with a configured bearer token, and the health service needs none.
+//! The auth interceptor of the grpc plugin. A call needs one authorization value with a configured bearer token. The health service needs none.
 
 mod config;
 
@@ -45,7 +45,7 @@ impl Interceptor for Auth {
         if head.path().starts_with(HEALTH) || self.accepts(head.headers()) {
             return Ok(());
         }
-        // A 401 must carry a challenge: https://www.rfc-editor.org/rfc/rfc9110#section-15.5.2
+        // A 401 must carry a challenge. See https://www.rfc-editor.org/rfc/rfc9110#section-15.5.2
         let mut challenge = HeaderMap::new();
         challenge.insert(WWW_AUTHENTICATE, HeaderValue::from_static("Bearer"));
         Err(
@@ -55,7 +55,7 @@ impl Interceptor for Auth {
     }
 }
 
-/// The text after `Bearer 1*SP`. `parse` checks the b64token grammar of the configured tokens, so a value with other characters matches none. https://www.rfc-editor.org/rfc/rfc6750#section-2.1
+/// Returns the text after `Bearer 1*SP`. `parse` checks the b64token grammar of the configured tokens, so a value with other characters matches none. https://www.rfc-editor.org/rfc/rfc6750#section-2.1
 fn bearer_token(value: &[u8]) -> Option<&[u8]> {
     let (scheme, rest) = value.split_at_checked(6)?;
     if !scheme.eq_ignore_ascii_case(b"Bearer") {
@@ -79,7 +79,7 @@ fn same(a: &[u8], b: &[u8]) -> bool {
     a.len() == b.len() && a.iter().zip(b).fold(0, |diff, (x, y)| diff | (x ^ y)) == 0
 }
 
-/// One token per line. Blank lines and `#` lines are skipped. An error names the line, never its text.
+/// Reads one token per line and skips blank lines and `#` lines. An error names the line, never its text.
 fn parse(text: &str) -> anyhow::Result<Vec<String>> {
     let mut tokens = Vec::new();
     for (i, line) in text.lines().enumerate() {
@@ -182,7 +182,7 @@ mod tests {
         }
     }
 
-    /// Expected values: RFC 6750 §2.1 (`credentials = "Bearer" 1*SP b64token`) and RFC 9110 §11.1 (the scheme is case-insensitive). The interceptor accepts exactly one `authorization` value.
+    /// Expected values: RFC 6750 §2.1 (`credentials = "Bearer" 1*SP b64token`) and RFC 9110 §11.1, which makes the scheme case-insensitive. The interceptor accepts exactly one `authorization` value.
     #[test]
     fn authorization_is_checked() {
         struct Case {

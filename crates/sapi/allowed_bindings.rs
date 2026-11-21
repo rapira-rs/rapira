@@ -17,44 +17,44 @@
     "rapira_ce_timeout_exception", "rapira_ce_closed_exception",
     "zend_argument_type_error",
     "rapira_ce_work_discarded_exception",
-    // the plugin globals the Rust boot and worker start write (static mut), and the record type of the dispatcher surface
+    // the plugin globals the Rust boot and worker start write (static mut), and the type of the plugin record that describes the dispatcher
     "rapira_plugin", "rapira_plugin_current", "rapira_plugin_name", "rapira_plugin_name_len",
     "rapira_plugin_registers", "rapira_plugin_register_count",
     // the FOREACH macros are header-only, so the array walk uses the exported position API
     "zend_hash_internal_pointer_reset_ex", "zend_hash_get_current_key_ex",
     "zend_hash_get_current_data_ex", "zend_hash_move_forward_ex", "HashPosition",
     "IS_NULL", "IS_ARRAY", "IS_REFERENCE",
-    // zend_throw_error/zend_value_error/zend_type_error are varargs, called with a fixed format
+    // zend_throw_error, zend_value_error and zend_type_error are varargs, so the callers give a fixed format
     "zend_throw_error", "zend_value_error", "zend_type_error", "zend_throw_exception",
     // instanceof_function is inline; only its slow path is exported
     "instanceof_function_slow", "zend_zval_value_name", "IS_OBJECT",
     "zend_read_property", "zend_get_exception_base", "zend_ce_throwable", "php_json_encode",
     "smart_str", "PHP_JSON_PARTIAL_OUTPUT_ON_ERROR",
-    // add_assoc_str/add_index_zval/smart_str_free are inline: these are their exported carriers and shim
+    // add_assoc_str, add_index_zval and smart_str_free are inline, so the Rust side calls these exported functions and this shim
     "add_assoc_stringl_ex", "zend_hash_index_update", "rapira_smart_str_free",
-    // zend_update_property*: the EG(fake_scope) swap inside is what initializes readonly props
+    // the EG(fake_scope) swap inside zend_update_property* initializes readonly props
     "object_init_ex", "zend_update_property", "zend_update_property_stringl",
     "zend_update_property_long", "zend_update_property_double", "zend_update_property_null",
-    // array_init_size is a macro -> rapira_array_init shim in wrapper.c
+    // array_init_size is a macro, so wrapper.c has the rapira_array_init shim
     "rapira_array_init",
-    // zend_array_is_list is inline -> rapira_array_is_list shim in wrapper.c
+    // zend_array_is_list is inline, so wrapper.c has the rapira_array_is_list shim
     "rapira_array_is_list",
-    // zend_string_addref and zend_string_release are inline -> shims in wrapper.c
+    // zend_string_addref and zend_string_release are inline, so wrapper.c has shims for them
     "rapira_zstr_addref", "rapira_zstr_release",
-    // ZVAL_OBJ_COPY is a macro -> rapira_zval_enum_case shim in wrapper.c
+    // ZVAL_OBJ_COPY is a macro, so wrapper.c has the rapira_zval_enum_case shim
     "rapira_zval_enum_case",
     // zend_hash_str_find_ptr is inline; prop_offset (zend.rs) calls its exported half
     "zend_hash_str_find",
-    // $_SERVER registration: ZVAL_STRINGL_FAST is a macro -> rapira_register_known_stringl and rapira_hash_update_stringl shims in wrapper.c
+    // for the $_SERVER registration, ZVAL_STRINGL_FAST is a macro, so wrapper.c has the rapira_register_known_stringl and rapira_hash_update_stringl shims
     "rapira_register_known_stringl", "rapira_hash_update_stringl", "zend_hash_extend", "php_import_environment_variables",
     "zend_is_auto_global_str", "zend_hash_update",
-    // slot writes of declared properties (zend.rs): ZVAL_STRINGL and ZVAL_NEW_STR are macros -> rapira_zval_stringl and rapira_zval_string_alloc shims in wrapper.c
+    // for the slot writes of declared properties (zend.rs), ZVAL_STRINGL and ZVAL_NEW_STR are macros, so wrapper.c has the rapira_zval_stringl and rapira_zval_string_alloc shims
     "zend_property_info", "rapira_zval_stringl", "rapira_zval_string_alloc", "IS_LONG", "IS_DOUBLE", "IS_PROP_UNINIT", "IS_PROP_REINITABLE",
     // zend_symtable_str_update is inline; add_assoc_zval_ex is its exported caller (zend_API.c)
     "add_assoc_zval_ex", "add_next_index_stringl", "add_next_index_object",
     "zval_add_ref",
-    "zend_object", "zend_class_entry", "zval_ptr_dtor", // zval_ptr_dtor_nogc is inline-only -> use zval_ptr_dtor
-    // zend_string_init is inline-only; the exported interner fn-pointer covers startup-time strings
+    "zend_object", "zend_class_entry", "zval_ptr_dtor", // zval_ptr_dtor_nogc is inline-only, so the Rust side uses zval_ptr_dtor
+    // zend_string_init is inline-only; the exported interner function pointer covers startup-time strings
     "zend_hash_str_update", "zend_string_init_interned",
     // the realpath cache of the process (Zend/zend_virtual_cwd.c); each app start empties it
     "realpath_cache_clean",

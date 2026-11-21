@@ -9,7 +9,7 @@ use std::{
     ptr::{null, null_mut},
 };
 
-/// The script paths of the current app instance. In classic mode, the paths of the requests since the worker start or the last reload.
+/// The script paths of the current app instance. In classic mode, they are the paths of the requests since the worker start or the last reload.
 pub(crate) struct ScriptPaths {
     /// `SG(request_info).path_translated` points at it while a unit runs.
     pub(crate) filename: CString,
@@ -20,10 +20,10 @@ pub(crate) struct ScriptPaths {
     pub(crate) server_document_root: *mut zend_string,
 }
 
-/// Declares `ServerStrings` and its constructor: one permanent interned string for each field.
+/// Declares `ServerStrings` and its constructor. The constructor makes one permanent interned string for each field.
 macro_rules! server_strings {
     ($($field:ident: $text:literal,)*) => {
-        /// The `$_SERVER` strings that are the same for every request of the worker, as permanent interned strings: PHP inserts one with no hash, no allocation and no copy. They live until the worker process exits.
+        /// The `$_SERVER` strings that are the same for every request of the worker, as permanent interned strings. PHP inserts each one with no hash, no allocation and no copy. They live until the worker process exits.
         pub(crate) struct ServerStrings {
             $(pub(crate) $field: *mut zend_string,)*
         }
@@ -87,13 +87,13 @@ thread_local! {
     static SCRIPT: Cell<*mut ScriptPaths> = const { Cell::new(null_mut()) };
     /// The env pairs of the pool as permanent interned strings, from `intern_server_env`.
     pub(crate) static SERVER_ENV: Cell<&'static [(*mut zend_string, *mut zend_string)]> = const { Cell::new(&[]) };
-    /// From `intern_server_strings`.
+    /// Set by `intern_server_strings`.
     static SERVER_STRINGS: Cell<Option<&'static ServerStrings>> = const { Cell::new(None) };
     /// The identity strings of the last request, from `server_identity`.
     static SERVER_IDENTITY: Cell<Option<ServerIdentity>> = const { Cell::new(None) };
 }
 
-/// A permanent interned copy of `bytes`: PHP never refcounts or frees it, so it lives until the worker process exits, and the process exits without module teardown.
+/// Returns a permanent interned copy of `bytes`. PHP never refcounts or frees it, so it lives until the worker process exits, and the process exits without module teardown.
 fn permanent(bytes: &[u8]) -> *mut zend_string {
     // SAFETY: the pointer and the length come from a live slice, and the shim copies the bytes.
     unsafe { rapira_permanent_string(bytes.as_ptr().cast(), bytes.len()) }
@@ -189,7 +189,7 @@ pub(crate) fn enter_entrypoint_dir() {
 }
 
 /// # Safety
-/// Aliases per-thread `SG(server_context)`; sound only while a worker services one request at a time, and the reference must not be held across another `ctx()` call.
+/// The result aliases the per-thread `SG(server_context)`. It is sound only while a worker serves one request at a time. Do not hold the reference across another `ctx()` call.
 pub unsafe fn ctx<'a>() -> Option<&'a mut Context> {
     unsafe { (sapi_globals.server_context as *mut Context).as_mut() }
 }
@@ -222,7 +222,7 @@ pub(crate) fn unbind_server_context() {
     }
 }
 
-/// Must run after sapi_activate, which hard-resets proto_num to 1000 (main/SAPI.c:448).
+/// Must run after sapi_activate, which resets proto_num to 1000 (main/SAPI.c:448).
 pub(crate) unsafe fn apply_proto_num(ctx: &Context) {
     let proto_num = match ctx.req.protocol {
         "HTTP/1.0" => 1000,
@@ -232,7 +232,7 @@ pub(crate) unsafe fn apply_proto_num(ctx: &Context) {
     unsafe { sapi_globals.request_info.proto_num = proto_num };
 }
 
-/// Resets `http_response_code` because the engine keeps the previous request's status (reset commented out in main/SAPI.c:435-437).
+/// Resets `http_response_code`, because the engine keeps the status of the previous request. The reset in main/SAPI.c:435-437 is commented out.
 pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     let reqc = &ctx.c;
     let sg = &raw mut sapi_globals;

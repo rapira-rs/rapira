@@ -2,7 +2,7 @@
 
 declare(strict_types=1);
 
-// The unit reaches a method as a call argument, and the state verbs feed a branch there.
+// A method gets the unit as an argument, and a branch there uses the state verbs.
 final readonly class Server
 {
     public function __construct(private \Rapira\Http\HttpDispatcher $dispatcher)

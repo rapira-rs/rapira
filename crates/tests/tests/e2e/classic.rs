@@ -79,11 +79,11 @@ fn header_callback_fatal_keeps_the_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A classic worker enters the entrypoint directory at its start and at each reload, so a userland chdir outlives the request that made it.
+/// A classic worker enters the entrypoint directory at its start and at each reload, so a chdir by the app stays in effect after the request that made it.
 #[test]
 fn classic_mode_keeps_the_working_directory_across_requests() {
     let srv = Spawn::http(Mode::Classic, harness::fixture_path("classic/cwd.php")).spawn();
-    // getcwd() reports the resolved path, and the scratch dir can sit under a symlinked temp dir.
+    // getcwd() reports the resolved path, and the scratch directory can be under a symlinked temp directory.
     let entrypoint_dir =
         std::fs::canonicalize(srv.dir.join("http")).expect("canonicalize the entrypoint dir");
     let entrypoint_dir = entrypoint_dir.to_string_lossy().into_owned();

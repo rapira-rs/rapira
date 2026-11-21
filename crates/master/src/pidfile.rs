@@ -1,4 +1,4 @@
-//! The master pidfile: written at start, removed on drop.
+//! The master pidfile. `PidFile::write` writes it at start, and the drop removes it.
 
 use std::io;
 use std::path::{Path, PathBuf};

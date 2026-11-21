@@ -39,7 +39,7 @@ impl fmt::Display for Source {
 
 /// The body of a GET request for `url`. The master calls it before the fork.
 fn download(url: &str) -> Result<Vec<u8>, ureq::Error> {
-    // Phase timeouts keep the host lookup on this thread: with a total or a resolve timeout, ureq resolves the host on a helper thread, and the master has one thread.
+    // Phase timeouts keep the host lookup on this thread. A total or a resolve timeout makes ureq resolve the host on a helper thread, and the master must stay single-threaded before the fork.
     let timeout = Some(Duration::from_secs(30));
     let agent = ureq::Agent::config_builder()
         .timeout_connect(timeout)
@@ -64,7 +64,7 @@ fn download(url: &str) -> Result<Vec<u8>, ureq::Error> {
 /// The services of a FileDescriptorSet that rapira serves.
 pub struct Schema {
     pool: Arc<DescriptorPool>,
-    /// Keyed `package.Service/Method`, the request path without its leading slash.
+    /// The key is `package.Service/Method`, the request path without its leading slash.
     methods: HashMap<String, Method>,
     services: Vec<ServiceInfo>,
 }
@@ -106,7 +106,7 @@ pub struct Method {
     pub(crate) kind: MethodKind,
 }
 
-/// The services the plugin answers itself: never routed to PHP.
+/// The services that the plugin answers itself. The plugin never routes them to PHP.
 const PLUGIN_SERVICES: [&str; 3] = [
     connectrpc_health::HEALTH_SERVICE_NAME,
     connectrpc_reflection::SERVER_REFLECTION_SERVICE_NAME,
@@ -223,12 +223,12 @@ impl Schema {
         &self.pool
     }
 
-    /// The route for `path` (`package.Service/Method`). Streaming and unlisted methods have none.
+    /// The route for `path` (`package.Service/Method`). Methods with a request stream and unlisted methods have none.
     pub fn method(&self, path: &str) -> Option<&Method> {
         self.methods.get(path)
     }
 
-    /// Unknown fields are dropped. An unknown enum value name fails the decode.
+    /// Drops unknown fields. An unknown enum value name fails the decode.
     pub fn json_to_proto(&self, m: &Method, json: &[u8]) -> anyhow::Result<Vec<u8>> {
         let json = std::str::from_utf8(json)?;
         let msg =
@@ -237,7 +237,7 @@ impl Schema {
     }
 
     pub fn proto_to_json(&self, m: &Method, bytes: &[u8]) -> anyhow::Result<Vec<u8>> {
-        // The application produces the reply, so the element memory limit for untrusted input does not apply. to_json decodes an Any payload again under the default limit.
+        // The app produces the reply, so the element memory limit for untrusted input does not apply. to_json decodes an Any payload again under the default limit.
         let opts = buffa::DecodeOptions::new().with_element_memory_limit(usize::MAX);
         let msg =
             DynamicMessage::decode_with_options(Arc::clone(&self.pool), m.output, bytes, &opts)?;
@@ -290,7 +290,7 @@ fn service_info(
 mod tests {
     use super::*;
 
-    /// Expected values: of `scheme://userinfo@host:port/path?query#fragment`, a message shows the scheme, the host, the port and the path. The userinfo and the query can hold credentials. https://www.rfc-editor.org/rfc/rfc3986#section-3
+    /// Expected values: a message shows the scheme, the host, the port and the path of `scheme://userinfo@host:port/path?query#fragment`. The userinfo and the query can hold credentials. https://www.rfc-editor.org/rfc/rfc3986#section-3
     #[test]
     fn a_message_shows_a_url_without_its_credential_parts() {
         struct Case {

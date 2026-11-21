@@ -10,7 +10,7 @@ use tests::{StatusBody, drain, drain_resp, drain_resp_deadline, fixture, poll, r
 
 use crate::harness::{Spawn, free_port, http_get, slot_line};
 
-/// Superglobals are rebuilt per unit over the resident loop: query state must not leak.
+/// Superglobals are rebuilt for each unit in the resident loop. Query state must not leak.
 #[test]
 fn worker_serves_with_per_unit_superglobals() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("worker/hello-worker.php")).spawn();
@@ -33,7 +33,7 @@ fn worker_serves_with_per_unit_superglobals() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Closing the intake makes handle_request() return false: the post-loop code runs exactly once.
+/// Closing the intake makes handle_request() return false, and the post-loop code runs exactly once.
 #[test]
 fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
     let mut srv = Spawn::http(Mode::Worker, fixture("worker/drain-worker.php"))
@@ -50,7 +50,7 @@ fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Classic mode: the gate throws `NotInWorkerModeError`, and ZPP rejects a non-callable ahead of it.
+/// In classic mode the gate throws `NotInWorkerModeError`, and ZPP rejects a non-callable before it.
 #[test]
 fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("worker/gate-classic.php")).spawn();
@@ -69,7 +69,7 @@ fn handle_request_outside_worker_mode_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Dispatcher mode: the gate refuses before the shared intake is touched, so no unit is stolen.
+/// In dispatcher mode the gate refuses before it touches the shared intake, so no unit is taken.
 #[test]
 fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
     let mut srv = Spawn::http(
@@ -98,7 +98,7 @@ fn handle_request_in_dispatcher_mode_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// exit() inside a handler ships that response and leaves the resident loop and its state alive.
+/// exit() inside a handler sends that response and leaves the resident loop and its state alive.
 #[test]
 fn exit_in_a_handler_survives_the_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("worker/exit-worker.php")).spawn();
@@ -111,7 +111,7 @@ fn exit_in_a_handler_survives_the_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A self-stopping loop classifies Recycle: the next unit re-bootstraps and is still served.
+/// A loop that stops itself is classified as Recycle. The app boots again for the next unit, and that unit is still served.
 #[test]
 fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
     let mut srv = Spawn::http(Mode::Worker, fixture("worker/one-turn-worker.php"))
@@ -129,7 +129,7 @@ fn self_stopping_loop_recycles_and_serves_again() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A bootstrap that never calls handle_request() sheds 503 instead of hanging or answering 200.
+/// When the entrypoint never calls handle_request(), the host sheds the request with 503. The request does not hang or get 200.
 #[test]
 fn never_looping_script_sheds_503() -> anyhow::Result<()> {
     // No failure limit: with the default limit, the server stops 7.5 s after the first failed boot.
@@ -143,7 +143,7 @@ fn never_looping_script_sheds_503() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Bootstrap $_ENV survives late compilation: php_auto_globals_create_env dtors the array before checking variables_order.
+/// The $_ENV of the boot survives late compilation. php_auto_globals_create_env destroys the array before it checks variables_order.
 #[test]
 fn bootstrap_env_survives_late_compilation() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("worker/env-worker.php")).spawn();
@@ -154,7 +154,7 @@ fn bootstrap_env_survives_late_compilation() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `Location:` on a POST answers 303: sapi_activate resets proto_num, so a missing re-apply degrades it to 302.
+/// A `Location:` header in the reply to a POST gives 303. sapi_activate resets proto_num, so a missing re-apply changes the status to 302.
 #[test]
 fn post_location_redirects_303_in_worker_mode() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("worker/location-worker.php")).spawn();
@@ -180,7 +180,7 @@ fn post_location_redirects_303_in_classic_mode() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A client that vanishes while queued is discarded before handout: the handler must not run and recycle the worker.
+/// The unit of a client that leaves while queued is discarded before handout. The handler must not run and recycle the worker.
 #[test]
 fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("worker/held-worker.php"))
@@ -207,7 +207,7 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Classic mode also discards a queued unit whose client left: the script runs for A only, and B counts like a shed unit.
+/// Classic mode also discards a queued unit whose client left. The entrypoint runs for A only, and B counts like a shed unit.
 #[test]
 fn classic_queued_client_gone_is_discarded_before_the_script_runs() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("worker/held-classic.php"))
@@ -279,7 +279,7 @@ fn waiting_bodies_share_a_byte_budget() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// handle_request() from inside its own handler is refused: no deadlock, and the outer unit completes.
+/// A handle_request() call from inside its own handler is refused. There is no deadlock, and the outer unit completes.
 #[test]
 fn nested_handle_request_is_refused() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("worker/nested-worker.php")).spawn();

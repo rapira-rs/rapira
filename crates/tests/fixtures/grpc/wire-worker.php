@@ -1,9 +1,9 @@
 <?php
 
-// The application side of the wire tests. Each call logs a `call` record with its request facts, then the request metadata selects the outcome:
+// The app side of the wire tests. Each call logs a `call` record with its request facts. Then the request metadata selects the outcome:
 // x-halves: the response carries the header x-h: v and the trailers x-t: w and x-b-bin 01 02.
-// x-fail: the call fails with NOT_FOUND `no invoice` and one detail of this type URL that packs 0a 01 78.
-// x-reply: `ff` replies the byte ff, `many-ids` replies EchoResponse.ids with 600,000 elements of 1, `none` drops the call with no outcome.
+// x-fail: the call fails with NOT_FOUND `no invoice` and one detail with this type URL and the value 0a 01 78.
+// x-reply: `ff` replies with the byte ff, `many-ids` replies with EchoResponse.ids of 600,000 elements of 1, and `none` gives the call no outcome.
 // With no x-fail and no x-reply, the call replies with its request message.
 
 use Rapira\Exception\ClosedException;
@@ -50,7 +50,7 @@ function serve(UnaryCall $call): void
             $call->respond("\x1a\xc0\xcf\x24" . str_repeat("\x01", 600_000));
             return;
         case 'none':
-            return; // never finalized: the plugin loses this call
+            return; // the app never finalizes this call, so the call is lost
     }
     $call->respond($call->getMessage());
 }

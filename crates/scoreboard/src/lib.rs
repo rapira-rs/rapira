@@ -10,9 +10,9 @@ pub const SLOT_FREE: u32 = 0;
 pub const SLOT_STARTING: u32 = 1;
 pub const SLOT_IDLE: u32 = 2;
 pub const SLOT_ACTIVE: u32 = 3;
-pub const SLOT_DRAINING: u32 = 4; // worker-initiated exit pending
+pub const SLOT_DRAINING: u32 = 4; // The worker started its own exit, which is not complete yet.
 
-/// Each field has one writer at a time. The worker writes the IDLE, ACTIVE and DRAINING states, the STARTING state after a failed boot cycle, the request counters, `pending` and `failed_on_full_queue`. The master writes the STARTING and FREE states, and `pid` at spawn and at clear. It writes `pending` and the exit counters only while no worker owns the slot: after the reap and before the next spawn.
+/// Each field has one writing process at a time. The worker writes the IDLE, ACTIVE and DRAINING states, the STARTING state after a failed boot cycle, the request counters, `pending` and `failed_on_full_queue`. The master writes the STARTING and FREE states, and `pid` at spawn and at clear. It writes `pending` and the exit counters only while no worker owns the slot, that is, after the reap and before the next spawn. In the worker, the IO threads and the PHP thread both change `pending` with atomic operations.
 #[repr(C, align(64))]
 pub struct SharedSlot {
     pub state: AtomicU32,
@@ -22,14 +22,14 @@ pub struct SharedSlot {
     pub recycles: AtomicU64,
     /// [`now_millis`] when the worker last went ACTIVE. The request watchdog measures the request age from it.
     pub last_activity_ms: AtomicU64,
-    /// Units that the IO runtime handed to the worker queue, or that wait for room in a full queue, and that the PHP thread has not pulled yet.
+    /// Units that the IO runtime handed to the intake, or that wait for room in a full intake, and that the PHP thread has not pulled yet.
     pub pending: AtomicU64,
     /// Worker exits per verdict. The master counts them.
     pub exits_drained: AtomicU64,
     pub exits_unhealthy: AtomicU64,
     pub exits_timeout: AtomicU64,
     pub exits_crashed: AtomicU64,
-    /// Units that found the worker queue full and never entered it. An IO thread of the worker counts them.
+    /// Units that found the intake full and never entered it. An IO thread of the worker counts them.
     pub failed_on_full_queue: AtomicU64,
 }
 
@@ -55,7 +55,7 @@ pub fn now_millis() -> u64 {
     ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000
 }
 
-/// The reloads of the whole server: OPcache is one cache for every pool, so one worker of any pool resets it for each reload.
+/// The reloads of the whole server. OPcache is one cache for every pool, so a worker of any pool can make the reset for a reload.
 pub struct Reloads {
     /// The reloads that the master sent.
     sent: AtomicU64,
@@ -63,8 +63,8 @@ pub struct Reloads {
     reset: AtomicU64,
 }
 
-/// Master-side. The mmap happens once, pre-fork, so the addresses are identical in every forked child.
-/// Callers pass a bounded count: the master derives it from its pool regions, which stop at `SB_MAX_SLOTS`.
+/// Master-side. The mmap happens once, pre-fork, so the addresses are the same in every forked child.
+/// Callers pass a bounded count, because the master derives it from its pool regions, which stop at `SB_MAX_SLOTS`.
 pub fn create(nslots: usize) -> std::io::Result<&'static [SharedSlot]> {
     // SAFETY: every field of SharedSlot is an atomic integer, for which zero is valid.
     unsafe { map_zeroed(nslots) }
@@ -98,14 +98,14 @@ unsafe fn map_zeroed<T>(count: usize) -> std::io::Result<&'static [T]> {
     }
 }
 
-// The record publishes that a reset call has returned: Acquire in reset_due and AcqRel in record_reset, so a worker that skips its call sees the effects of the call that the record names.
+// The record publishes that a reset call has returned. reset_due loads with Acquire and record_reset writes with AcqRel, so a worker that skips its call sees the effects of the call that the record names.
 impl Reloads {
     /// Master-side, before it signals the pools.
     pub fn add_sent(&self) {
         self.sent.fetch_add(1, Relaxed);
     }
 
-    /// Worker-side, before each app boot and each classic request, at each app end and in the OPcache restart hook: the `sent` value to reset for, or `None` when a reset call for it has returned already.
+    /// Worker-side, before each app boot and each classic request, at each app end and in the OPcache restart hook. Returns the `sent` value to reset for, or `None` when a reset call for it has returned already.
     pub fn reset_due(&self) -> Option<u64> {
         let sent = self.sent.load(Relaxed);
         (self.reset.load(Acquire) < sent).then_some(sent)
@@ -118,7 +118,7 @@ impl Reloads {
 }
 
 impl SharedSlot {
-    /// Serving is IDLE or ACTIVE: under load a replacement may never be observed IDLE between requests.
+    /// Serving means IDLE or ACTIVE. Under load, a replacement may never show IDLE between requests.
     pub fn serving(&self) -> bool {
         matches!(self.state.load(Relaxed), SLOT_IDLE | SLOT_ACTIVE)
     }
@@ -128,7 +128,7 @@ impl SharedSlot {
         self.state.store(SLOT_STARTING, Relaxed);
     }
 
-    /// Master-side, after the slot's worker is reaped. The queue of the dead worker is gone, so `pending` goes to 0. The slot can then go to a new fork.
+    /// Master-side, after the slot's worker is reaped. The intake of the dead worker is gone, so `pending` goes to 0. The slot can then go to a new fork.
     pub fn clear(&self) {
         self.pid.store(0, Relaxed);
         self.pending.store(0, Relaxed);

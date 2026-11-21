@@ -1,4 +1,4 @@
-// A file that supplies only an option, such as google/api/annotations.proto.
+// This file supplies only an option, like google/api/annotations.proto.
 syntax = "proto3";
 
 package rapira.test.options.v1;

@@ -41,7 +41,7 @@ unsafe fn add_prop(
     }
 }
 
-/// Throwable state lives in private props, invisible to json_encode: flatten it explicitly.
+/// The state of a Throwable is in private props, which json_encode does not see, so this function flattens it into an array.
 unsafe fn flatten_throwable(dst: *mut zval, ex: *mut zend_object, depth: i32) {
     unsafe {
         rapira_array_init(dst, 6);
@@ -75,7 +75,7 @@ unsafe fn flatten_throwable(dst: *mut zval, ex: *mut zend_object, depth: i32) {
     }
 }
 
-/// A Zend bailout longjmps through this frame, so it holds no value with Drop glue: the returned Vec is created after the last bailing call.
+/// A Zend bailout longjmps through this frame, so it holds no value with Drop glue. The function creates the returned Vec after the last call that can bail out.
 unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
     unsafe {
         let mut rebuilt: zval = std::mem::zeroed();
@@ -119,7 +119,7 @@ unsafe fn context_json(context: *mut HashTable) -> Vec<u8> {
 }
 
 /// # Safety
-/// `message` a live zend_string; `level` NULL or a LogLevel case; `context` NULL or a live array, all ZPP-owned for the call with the engine active.
+/// `message` is a live zend_string. `level` is NULL or a LogLevel case. `context` is NULL or a live array. ZPP owns all three for the call, and the engine is active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_log_call(
     message: *mut zend_string,

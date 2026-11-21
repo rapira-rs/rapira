@@ -12,7 +12,7 @@ pub struct Build {
     pub php_version: String,
 }
 
-/// Prometheus 3 fails a scrape without a known content type: https://prometheus.io/docs/prometheus/latest/migration/#scrape-protocols
+/// Prometheus 3 fails a scrape without a known content type. See https://prometheus.io/docs/prometheus/latest/migration/#scrape-protocols
 pub(crate) const CONTENT_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
 
 /// A family with one sample for each pool.
@@ -33,7 +33,7 @@ struct MemoryFamily {
     value: fn(&Memory) -> Option<u64>,
 }
 
-/// The text format: each family is one group, with the HELP and TYPE lines first. All label values are fixed ASCII strings, so nothing needs escaping. https://prometheus.io/docs/instrumenting/exposition_formats/#prometheus-text-format
+/// Writes the text format. Each family is one group, with the HELP and TYPE lines first. All label values are fixed ASCII strings, so nothing needs escaping. https://prometheus.io/docs/instrumenting/exposition_formats/#prometheus-text-format
 pub(crate) fn render(pools: &[PoolStats], build: &Build) -> String {
     let mut out = String::new();
 

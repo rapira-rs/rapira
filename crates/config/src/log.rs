@@ -44,7 +44,7 @@ pub struct LogSettings {
     pub targets: BTreeMap<String, LogLevel>,
 }
 
-/// Target names are open-ended module paths, so keys are pinned to the shape EnvFilter parses as a plain target: anything else is filter grammar (`[`, `,`, `=`) and would be reinterpreted.
+/// Target names are open-ended module paths, so a key must have the shape that EnvFilter parses as a plain target. Any other shape contains filter grammar, for example `[`, `,` or `=`, that EnvFilter would interpret.
 pub fn resolve_log(settings: LogSettings) -> anyhow::Result<LogSettings> {
     for name in settings.targets.keys() {
         let mut chars = name.chars();
@@ -73,7 +73,7 @@ mod tests {
         error: &'static str,
     }
 
-    /// The filter string is assembled from the target keys, so a key carrying filter syntax would inject directives (`"php=trace,tokio" = "debug"` reads as two).
+    /// The filter string comes from the target keys, so a key with filter syntax would inject directives. For example, `"php=trace,tokio" = "debug"` reads as two.
     #[test]
     fn log_errors_name_the_key() {
         let cases = [

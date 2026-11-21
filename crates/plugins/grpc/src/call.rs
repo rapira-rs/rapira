@@ -5,7 +5,7 @@ use connectrpc::http::HeaderMap;
 use connectrpc::{ConnectError, MethodKind};
 use rapira_sapi::types::Addr;
 
-/// One RPC with one request message. `message` is the binary protobuf encoding of the method's input message.
+/// One call with one request message. `message` is the binary protobuf encoding of the method's input message.
 pub(crate) struct Call {
     /// `package.Service/Method`, without a leading slash.
     pub method: String,
@@ -19,7 +19,7 @@ pub(crate) struct Call {
     pub message: Bytes,
 }
 
-/// The outcome of a unary RPC. The metadata is in wire form: `-bin` values are unpadded base64.
+/// The outcome of a unary call. The metadata is in wire form, where `-bin` values are unpadded base64.
 pub(crate) struct UnaryReply {
     pub headers: HeaderMap,
     pub trailers: HeaderMap,

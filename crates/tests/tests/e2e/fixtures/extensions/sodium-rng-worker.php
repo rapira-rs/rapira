@@ -1,5 +1,5 @@
 <?php
-// Each worker caches one randombytes_buf() draw taken right after the fork; no two workers may return the same draw.
+// Each worker caches one randombytes_buf() draw taken right after the fork. Two workers must not return the same draw.
 
 use Rapira\Exception\ClosedException;
 

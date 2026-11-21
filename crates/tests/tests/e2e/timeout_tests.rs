@@ -17,7 +17,7 @@ fn timeout_ini() -> String {
         .expect("read timeout.php.ini")
 }
 
-/// Pins that receive() disarms the execution timer while parked: a worker parked past the 1s budget still serves instead of fataling and being 503-shed.
+/// Checks that receive() disarms the execution timer while it is parked. A worker parked past the 1 s budget still serves, with no timeout fatal and no 503 shed.
 #[test]
 fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/echo-loop-worker.php"))
@@ -37,7 +37,7 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Pins the budget around a write that parks on a full frame channel. The budget counts CPU time, so a sleep before the park uses none of it, and the park keeps the time that the timer had left.
+/// Checks the budget around a write that parks on a full frame channel. The budget counts CPU time, so a sleep before the park uses none of it, and the park keeps the time that the timer had left.
 /// The budget is 3 s. The client reads nothing for 1.5 s after the sleep, so the stream parks.
 #[test]
 fn parked_write_keeps_the_unused_budget() -> anyhow::Result<()> {
@@ -98,7 +98,7 @@ fn parked_write_keeps_the_unused_budget() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Pins that the budget re-armed at unit handout still fires: a spinning unit is killed before its response head, the plugin answers it 502, and the recycled worker keeps serving.
+/// Checks that the budget, re-armed when the unit is handed out, still fires. A spinning unit is killed before its response head, the plugin answers it with 502, and the recycled worker keeps serving.
 #[test]
 fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php"))
@@ -127,7 +127,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Pins that the per-unit re-arm with reset_signals=0 still delivers SIGPROF: a spin on a later unit in the same cycle is killed, not left running.
+/// Checks that the per-unit re-arm with reset_signals=0 still delivers SIGPROF. A spin on a later unit in the same cycle is killed and does not keep running.
 #[test]
 fn max_execution_time_fires_on_rearmed_units() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("timeout_tests/timeout-worker.php"))
@@ -158,7 +158,7 @@ fn max_execution_time_fires_on_rearmed_units() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Pins that a unit that waits on a socket keeps its worker under static-file load. The execution timer counts the CPU time of all threads of the process, so the IO threads use up the budget during the wait. The hard timeout must not end the worker process.
+/// Checks that a unit that waits on a socket keeps its worker under static-file load. The execution timer counts the CPU time of all threads of the process, so the IO threads use up the budget during the wait. The hard timeout must not end the worker process.
 #[test]
 fn socket_wait_under_static_load_keeps_the_worker() -> anyhow::Result<()> {
     let backend = TcpListener::bind("127.0.0.1:0")?;
@@ -224,7 +224,7 @@ fn socket_wait_under_static_load_keeps_the_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Pins the budget of a unit that is already queued when receive() is called: the spin is killed with the timeout fatal, a unit that fits the budget completes after a unit that used most of its own, and a 0 budget stays untimed after set_time_limit().
+/// Checks the budget of a unit that is already queued when receive() is called: the spin is killed with the timeout fatal, a unit that fits the budget completes after a unit that used most of its own, and a 0 budget stays untimed after set_time_limit().
 #[test]
 fn queued_unit_gets_a_fresh_budget() -> anyhow::Result<()> {
     struct Case {
@@ -266,7 +266,7 @@ fn queued_unit_gets_a_fresh_budget() -> anyhow::Result<()> {
             .spawn();
 
         let first = submit(srv.addr, req(c.first))?;
-        // Two connections reach the worker in any order, so the second request goes out once the first unit runs: slot state 3 is SLOT_ACTIVE.
+        // Two connections reach the worker in any order, so the second request goes out once the first unit runs. Slot state 3 is SLOT_ACTIVE.
         slot_line(&srv, "state 3 ");
         let mut queued = submit(srv.addr, req(c.queued))?;
         assert_eq!(

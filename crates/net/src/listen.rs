@@ -11,7 +11,7 @@ pub use rapira_config::ListenAddr;
 /// The backlog of every master-bound listener. The master binds before the fork, and the workers inherit the queue. The kernel caps the value at `net.core.somaxconn`. https://man7.org/linux/man-pages/man2/listen.2.html
 const LISTEN_BACKLOG: i32 = 65535;
 
-/// Exactly one closer per process: the master holds its copy for its whole life so respawned workers keep inheriting it, a worker hands its copy to the adopter.
+/// Each process has exactly one closer. The master holds its copy until `rapira_master::run` returns, so respawned workers inherit it. A worker gives its copy to the adopter.
 #[derive(Debug)]
 pub struct PreparedListener {
     pub(crate) fd: OwnedFd,
@@ -24,7 +24,7 @@ impl PreparedListener {
     }
 }
 
-/// Runs before any fork and before a runtime exists: sync syscalls only. Sets O_NONBLOCK: tokio's `from_std` requires it, and the Linux acceptor needs `accept` to return WouldBlock when another worker takes the connection.
+/// Runs before any fork and before a runtime exists, so it uses sync syscalls only. Sets O_NONBLOCK, because tokio's `from_std` requires it, and the Linux acceptor needs `accept` to return WouldBlock when another worker takes the connection.
 pub fn bind(addr: &ListenAddr) -> anyhow::Result<PreparedListener> {
     match addr {
         ListenAddr::Tcp(addr) => bind_tcp(*addr),
@@ -54,7 +54,7 @@ fn bind_tcp(addr: SocketAddr) -> anyhow::Result<PreparedListener> {
     })
 }
 
-/// The connect probe guards against unlinking a live socket: WouldBlock means a full backlog on a live peer, not an absent one. Mode 0o666 because the containing directory is the real access gate and an unprivileged client (the reverse proxy in front of this process) must be able to connect without uid/gid matching.
+/// The connect probe prevents the unlink of a live socket. WouldBlock means a full backlog on a live peer, not an absent one. The mode is 0o666, because the directory that contains the socket controls the access, and an unprivileged client must be able to connect without a uid or gid match. The reverse proxy in front of this process is such a client.
 fn bind_unix(path: &Path) -> anyhow::Result<PreparedListener> {
     let probe = Socket::new(Domain::UNIX, Type::STREAM, None)?;
     probe.set_nonblocking(true)?;

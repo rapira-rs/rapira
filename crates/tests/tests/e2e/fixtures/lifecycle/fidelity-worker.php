@@ -1,6 +1,6 @@
 <?php
 
-// Probe toggles ride on the request target: this mode has no superglobals.
+// The request target carries the probe toggles, because this mode has no superglobals.
 
 $d = \Rapira\get_dispatcher();
 try {
@@ -18,7 +18,7 @@ try {
 				}
 			}
 			$lines = ["x-probe=" . implode("|", $vals)];
-			// a dispatcher pool has no $_SERVER mapping to protect: underscore names pass through as received
+			// a dispatcher pool has no $_SERVER mapping to protect, so underscore names pass through as received
 			$lines[] =
 				"x_forwarded_for=" .
 				implode("|", $req->headers["x_forwarded_for"] ?? []);

@@ -12,7 +12,7 @@ class GetMessage extends \Exception
 
     public function __get($name)
     {
-        // Built at run time: opcache folds a constant string into an interned string, which has no refcount to leak.
+        // The string is built at run time, because opcache folds a constant string into an interned string, which has no refcount to leak.
         return "computed $name";
     }
 }
@@ -33,7 +33,7 @@ try {
             'get' => new GetMessage(),
             'hook' => new HookedMessage('m'),
         };
-        // Warm-up: the first call allocates state that later calls reuse.
+        // The first call allocates state that later calls reuse, so it runs before the measurement.
         \Rapira\log('probe', \Rapira\LogLevel::Error, ['e' => $e]);
         $before = memory_get_usage();
         for ($i = 0; $i < 1000; $i++) {

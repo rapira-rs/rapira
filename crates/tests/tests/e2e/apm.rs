@@ -1,4 +1,4 @@
-//! CI-only APM suites: Linux CI installs newrelic.so and ddtrace.so into the extension dir without enabling them; each suite loads its agent through its own php.ini and skips when the .so is absent.
+//! APM suites for CI only. Linux CI installs newrelic.so and ddtrace.so into the extension dir and does not enable them. Each suite loads its agent through its own php.ini and skips when the .so is absent.
 
 use std::collections::BTreeSet;
 use std::process::Command;
@@ -15,10 +15,10 @@ use crate::harness::{
 const REQ: Duration = Duration::from_secs(10);
 const BOOT_POOL: Duration = Duration::from_secs(20);
 
-/// A pool with the agent loaded: the 40-char dummy license passes the length-only local validation, and `dont_launch = 3` stops every daemon fork.
+/// Starts a pool with the agent loaded. The 40-char dummy license passes the local validation, which checks only the length, and `dont_launch = 3` stops every daemon fork.
 fn newrelic_srv(processes: usize, extra_toml: &str) -> Option<Server> {
     let so = php_extension("newrelic.so")?;
-    // the relative log files resolve against the scratch dir: the master starts there, and the agent opens its log once at MINIT
+    // The relative log files resolve against the scratch dir, because the master starts there and the agent opens its log once at MINIT.
     let ini = format!(
         "extension = \"{}\"\n\
          newrelic.enabled = 1\n\
@@ -79,7 +79,7 @@ fn assert_no_daemon(srv: &Server) {
     );
 }
 
-/// Every newrelic MINIT branch returns SUCCESS and all newrelic_* functions register unconditionally: the pool must keep serving with no daemon and a dummy license.
+/// Every newrelic MINIT branch returns SUCCESS and all newrelic_* functions register unconditionally, so the pool must keep serving with no daemon and a dummy license.
 #[test]
 fn newrelic_loads_and_the_pool_keeps_serving() {
     let Some(srv) = newrelic_srv(2, "") else {
@@ -149,7 +149,7 @@ fn newrelic_launches_no_daemon_under_the_pool() {
     assert_no_daemon(&srv);
 }
 
-/// The agent swaps zend_error_cb at late init but chains to the original: the 500, the recovery on the same interpreter, and the logged message must all survive.
+/// The agent swaps zend_error_cb at late init but chains to the original. The 500, the recovery on the same interpreter and the logged message must all survive.
 #[test]
 fn newrelic_uncaught_throw_path_is_unchanged() {
     let Some(srv) = newrelic_srv(1, "") else {
@@ -175,7 +175,7 @@ fn newrelic_uncaught_throw_path_is_unchanged() {
     );
 }
 
-/// max_requests = 2 is a quota of 3, so six probes cross an app restart: the agent keeps serving in the next request cycle of the same process.
+/// max_requests = 2 is a quota of 3, so six probes cross a recycle. The agent keeps serving in the next cycle of the same process.
 #[test]
 fn newrelic_survives_an_app_restart() {
     let Some(srv) = newrelic_srv(1, "max_requests = 2") else {
@@ -187,7 +187,7 @@ fn newrelic_survives_an_app_restart() {
     }
 }
 
-/// No datadog.* keys: the SAPI check disables the tracer before sidecar, telemetry, or remote-config setup, so there is nothing to configure until upstream adds rapira to the list.
+/// The config has no datadog.* keys. The SAPI check disables the tracer before the sidecar, telemetry and remote-config setup, so there is nothing to configure until upstream adds rapira to the list.
 fn ddtrace_srv(processes: usize) -> Option<Server> {
     let so = php_extension("ddtrace.so")?;
     let ini = format!("extension = \"{}\"\ndisplay_errors = Off\n", so.display());
@@ -216,7 +216,7 @@ fn dd_pid(body: &str) -> u32 {
         .unwrap_or_else(|_| panic!("bad pid in {body:?}"))
 }
 
-/// Neither of rapira's SAPI names is in the tracer's compatible list: MINIT must disable tracing and still load the extension; an `enabled` failure here means upstream added rapira.
+/// Neither rapira SAPI name is in the compatible list of the tracer, so MINIT must disable tracing and still load the extension. An `enabled` failure here means that upstream added rapira.
 #[test]
 fn ddtrace_self_disables_under_the_rapira_sapi() {
     let Some(srv) = ddtrace_srv(2) else { return };

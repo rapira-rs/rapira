@@ -1,4 +1,4 @@
-//! The Rust behind the PHP classes of the http plugin: the class entries and the exchange state.
+//! This module has the Rust code behind the PHP classes of the http plugin: the class entries and the exchange state.
 
 use std::{
     ffi::{CStr, c_char},
@@ -31,7 +31,7 @@ mod tests;
 
 pub(crate) use sendfile::set_sendfile_root;
 
-// Class entries of the http stub; rapira_http_register_classes assigns them in MINIT (rapira_http.h).
+// The class entries of the http stub. rapira_http_register_classes assigns them in MINIT (rapira_http.h).
 unsafe extern "C" {
     pub static mut rapira_ce_http_multipart: *mut zend_class_entry;
     pub static mut rapira_ce_http_form_field: *mut zend_class_entry;
@@ -41,9 +41,9 @@ unsafe extern "C" {
     pub static mut rapira_ce_http_head_not_written_error: *mut zend_class_entry;
     pub static mut rapira_ce_http_content_length_exceeded_error: *mut zend_class_entry;
     pub static mut rapira_ce_http_file_not_sendable_exception: *mut zend_class_entry;
-    // The unit class: the class of the object that receive() creates for an ExchangeState.
+    // The unit class. It is the class of the object that receive() creates for an ExchangeState.
     static mut rapira_ce_http_exchange: *mut zend_class_entry;
-    // The dispatcher surface of the http plugin (rapira_http_classes.c).
+    // The record of the http plugin (rapira_http_classes.c).
     pub static mut rapira_http_plugin: rapira_plugin;
     pub fn rapira_http_register_classes();
     // The server identity that DispatcherInfo::serverName() and serverPort() return (rapira_http.h).
@@ -62,9 +62,9 @@ pub(crate) fn set_server_identity(name: &'static str, port: u16) {
     }
 }
 
-/// The head locks on the first head or body write: a body write sends an implicit 200 head first.
+/// The head locks on the first head or body write. A body write sends an implicit 200 head first.
 enum Phase {
-    /// No head written.
+    /// No head is written.
     Open,
     /// `writeHead()` stored the final head, and it is not sent.
     Committed(ResponseHead),
@@ -76,7 +76,7 @@ enum Phase {
     Discarded,
 }
 
-/// Contract spelling for `Request::$protocol`: HTTP/2, not the CGI HTTP/2.0.
+/// Returns the contract spelling of `Request::$protocol`, for example HTTP/2, not the CGI HTTP/2.0.
 fn protocol_php(protocol: &str) -> &str {
     match protocol {
         "HTTP/2.0" => "HTTP/2",
@@ -117,18 +117,18 @@ pub fn uri_abs(req: &Request) -> String {
 }
 
 pub struct ExchangeState {
-    // multipart above sender: declaration drop order unlinks the spool files before the frame sender closes
-    /// The parsed multipart body. The parse takes the raw chunks out of `req`, so `req.body` is empty when this is `Some`; with `None`, `req.body` holds the raw body. seal(),discard_unit() and fail() unlink the spool files; SpooledFile::drop removes a file that a bailout (fatal or timeout) leaves behind.
+    // The multipart field comes before sender, so the drop in declaration order unlinks the spool files before the frame sender closes.
+    /// The parsed multipart body. The parse takes the raw chunks out of `req`, so `req.body` is empty when this is `Some`. With `None`, `req.body` holds the raw body. seal(), discard_unit() and fail() unlink the spool files. SpooledFile::drop removes a file that a bailout after a fatal error or a timeout leaves behind.
     multipart: Option<MultipartBody>,
     req: Request,
     sender: Option<Sender<Frame>>,
-    /// Filled by the first `getRequest()`. The state keeps the owned `$uri` because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
+    /// The first `getRequest()` fills it. The state keeps the owned `$uri` because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
     uri_abs: Option<String>,
     phase: Phase,
     declared_cl: Option<u64>,
-    /// Bytes accepted toward `declared_cl`: bodiless units count too, so a HEAD handler hits the same errors.
+    /// The bytes accepted toward `declared_cl`. Bodiless units count too, so a HEAD handler gets the same errors.
     sent_body: u64,
-    /// 204, 304, 101, or a HEAD request: chunks are accepted and dropped.
+    /// True for 204, 304, 101 or a HEAD request. The state then accepts chunks and drops them.
     bodiless: bool,
 }
 
@@ -156,7 +156,7 @@ impl ExchangeState {
         }
     }
 
-    /// The seal of a unit PHP does not answer: a `status` head and an End when no head was sent, else a truncated End.
+    /// The seal of a unit that PHP does not answer. It sends a `status` head and an End when no head was sent, else a truncated End.
     fn fail(&mut self, status: u16) {
         self.unlink_spools();
         let Some(tx) = self.sender.take() else {
@@ -195,12 +195,12 @@ impl Held for ExchangeState {
         respond::discard_unit(self);
     }
 
-    /// The 500 seal.
+    /// Seals the unit with a 500.
     fn lost(&mut self) {
         self.fail(500);
     }
 
-    /// The 503 seal of a failed boot.
+    /// Seals the unit with a 503 after a failed boot.
     fn shed(mut self: Box<Self>) {
         self.fail(503);
     }

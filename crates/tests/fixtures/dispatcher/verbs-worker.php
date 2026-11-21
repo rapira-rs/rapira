@@ -1,6 +1,6 @@
 <?php
 
-// Probe toggles ride on the request target: this mode has no superglobals.
+// The request target carries the probe toggles, because this mode has no superglobals.
 
 use Rapira\Exception\AlreadyFinalizedError;
 use Rapira\Http\Exception\HeadAlreadyWrittenError;
@@ -84,7 +84,7 @@ try {
             continue;
         }
         if ($probe === 'empty-chunk') {
-            $ex->writeBody('', eos: false); // does nothing: no head commits
+            $ex->writeBody('', eos: false); // does nothing, and the head is not committed
             $ex->writeHead(404);
             $ex->writeBody('body');
             continue;
@@ -136,7 +136,7 @@ try {
             } catch (HeadAlreadyWrittenError $e) {
                 \Rapira\log('101-locked', context: ['class' => $e::class]);
             }
-            // accepted and dropped: a 1xx response has no body
+            // writeBody() accepts this body and drops it, because a 1xx response has no body
             $ex->writeBody('dropped');
             continue;
         }
@@ -160,17 +160,17 @@ try {
             continue;
         }
         if ($probe === 'lose') {
-            unset($ex); // never finalized: the plugin must fail this unit and keep serving
+            unset($ex); // the unit is lost, so the plugin must fail it and keep serving
             continue;
         }
         if ($probe === 'lose-mid') {
             $ex->writeHead(200);
             $ex->writeBody('partial', eos: false);
-            unset($ex); // head already on the wire: the plugin can only truncate
+            unset($ex); // the head is already on the wire, so the plugin can only truncate the response
             continue;
         }
         if ($probe === 'bail-with-unit') {
-            @trigger_error('bail with unit out', E_USER_ERROR); // bailout: the unit dies with the cycle
+            @trigger_error('bail with unit out', E_USER_ERROR); // this bails out, and the unit ends with the cycle
             continue;
         }
         if ($probe === 'head204') {
@@ -180,10 +180,10 @@ try {
         }
         if ($probe === 'exit') {
             $ex->writeBody('bye');
-            exit(0); // served > 0: the SAPI must recycle and keep serving
+            exit(0); // with served > 0, the SAPI must recycle and keep serving
         }
         if ($probe === 'spin') {
-            // never finalizes: the re-armed per-unit budget must kill this (timeout_tests.rs)
+            // this unit is never finalized, so the re-armed per-unit budget must kill it (timeout_tests.rs)
             while (true) {
             }
         }

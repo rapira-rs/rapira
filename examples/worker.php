@@ -1,5 +1,5 @@
 <?php
-// Booted once per worker; the handler runs for every request.
+// The worker runs this file at start and again after each recycle. The handler runs for every request.
 $booted = date(DATE_ATOM);
 
 $handler = static function () use ($booted): void {

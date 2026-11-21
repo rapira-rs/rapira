@@ -1,11 +1,11 @@
 <?php
-// The destructor of a pending exception fatals when the host releases the exception after the unit.
+// The destructor of a pending exception causes a fatal error when the host releases the exception after the unit.
 
 class FatalOnRelease extends \RuntimeException
 {
     public function __destruct()
     {
-        trigger_error('fatal while the exception is released', E_USER_ERROR); // E_USER_ERROR -> zend_bailout
+        trigger_error('fatal while the exception is released', E_USER_ERROR); // E_USER_ERROR leads to zend_bailout
     }
 }
 

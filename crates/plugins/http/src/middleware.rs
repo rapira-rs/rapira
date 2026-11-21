@@ -10,10 +10,10 @@ pub type Body = http_body_util::combinators::UnsyncBoxBody<hyper::body::Bytes, B
 pub type Request = http::Request<Body>;
 pub type Response = http::Response<Body>;
 pub type Service = tower::util::BoxCloneService<Request, Response, Infallible>;
-/// One middleware: a layer over the plugin's inner service. Applied outermost first in config order.
+/// One middleware, that is, a layer over the plugin's inner service. The chain applies the layers in config order, with the first one outermost.
 ///
 /// A middleware that rebuilds the request must keep the request extensions. It must not
-/// retain them past the call: they carry the peer and private state that counts the request in flight.
+/// keep them after the call, because they carry the peer and the private state that counts the request in flight.
 pub type Layer = tower::util::BoxCloneServiceLayer<Service, Request, Response, Infallible>;
 
 /// The peer of the connection. It travels to the inner service in the private request state.

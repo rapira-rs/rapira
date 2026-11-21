@@ -9,7 +9,7 @@ use serde::Deserialize;
 #[serde(deny_unknown_fields)]
 pub struct Section {
     pub listen: String,
-    /// Idle keep-alive connections close after this many seconds. 60 by default, as in [http].
+    /// Idle keep-alive connections close after this many seconds. The default is 60, as in [http].
     pub keepalive_timeout_secs: Option<u64>,
     /// Turns on `GET /metrics`.
     pub metrics: Option<Endpoints>,
@@ -58,7 +58,7 @@ mod tests {
     struct Case {
         name: &'static str,
         section: Section,
-        /// None: the section resolves.
+        /// The expected error, or None when the section resolves.
         error: Option<&'static str>,
     }
 

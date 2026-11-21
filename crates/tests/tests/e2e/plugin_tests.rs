@@ -7,7 +7,7 @@ use tests::{Resp, drain_resp_async, fixture, req};
 
 use crate::harness::Spawn;
 
-/// One request on its own connection, drained to its end.
+/// Sends one request on its own connection and reads the response to its end.
 async fn exchange(addr: SocketAddr, uri: &str) -> anyhow::Result<Resp> {
     Ok(drain_resp_async(submit_async(addr, req(uri)).await?).await)
 }
@@ -28,7 +28,7 @@ fn check(res: &Resp, want: &str) -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Two concurrent requests; distinct bodies prove both ran.
+/// Sends two concurrent requests. Distinct bodies prove that both ran.
 #[tokio::test]
 async fn classic_mode_serves_exchanges() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("plugin_tests/driver-classic.php")).spawn();

@@ -1,9 +1,9 @@
-//! The admission checks before the middleware chain: Host, the field names of the CGI view and the declared body length.
+//! This module has the admission checks before the middleware chain: Host, the field names of the CGI view and the declared body length.
 
 use http::Version;
 use http::header::{CONTENT_LENGTH, HOST, HeaderMap, HeaderName};
 
-/// A refusal before dispatch: PHP never saw the request.
+/// A refusal before dispatch. PHP never saw the request.
 #[derive(Debug)]
 pub struct Rejection {
     pub status: http::StatusCode,
@@ -25,12 +25,12 @@ impl Rejection {
     }
 }
 
-/// The CGI view maps `-` and `.` to `_`, so `X_Forwarded_For` and `X.Forwarded.For` would land on the `HTTP_X_FORWARDED_FOR` of `X-Forwarded-For`. nginx and Apache drop such names too.
+/// The CGI view maps `-` and `.` to `_`, so `X_Forwarded_For` and `X.Forwarded.For` would give the same `HTTP_X_FORWARDED_FOR` as `X-Forwarded-For`. nginx and Apache drop such names too.
 pub(crate) fn is_safe_field_name(name: &str) -> bool {
     name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-/// The authority of the request: the one Host value; an empty one counts as missing. HTTP/1.1 requires one, and a second Host line is a 400 in every version. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
+/// Returns the authority of the request, that is, the one Host value. An empty value counts as missing. HTTP/1.1 requires one, and a second Host line is a 400 in every version. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 fn authority(headers: &HeaderMap, http11: bool) -> Result<Option<Vec<u8>>, &'static str> {
     let mut lines = headers.get_all(HOST).iter();
     let first = lines.next();
@@ -57,7 +57,7 @@ pub fn drop_unsafe_field_names(headers: &mut HeaderMap) {
     }
 }
 
-/// Admission checks in dispatch order; Ok carries the authority for the PHP request.
+/// Runs the admission checks in dispatch order. Ok carries the authority for the PHP request.
 pub fn check_request(
     parts: &mut http::request::Parts,
     superglobals: bool,

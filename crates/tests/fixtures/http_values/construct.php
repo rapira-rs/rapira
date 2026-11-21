@@ -42,7 +42,7 @@ echo $req->body->files[0]->clientFilename, ' ', $req->body->files[0]->size, "\n"
 echo $req->tls->negotiatedProtocol, ' ', var_export($req->tls->certSerial, true), "\n";
 echo $req->authority, ' ', $req->receivedAt, "\n";
 
-// tls: null is a legal Request (plain-HTTP listener) - must construct, not crash.
+// A null tls is legal for a Request from a plain-HTTP listener, so the constructor must accept it and not crash.
 $plain = new Request('GET', '/', '/', null, 'HTTP/1.1', [], '', $remote, $server, null, 1.0);
 echo 'tls-null: ', var_export($plain->tls, true), "\n";
 
@@ -53,7 +53,7 @@ try {
     echo "readonly: enforced\n";
 }
 
-// the arity rejection is what proves the constructor exists at all
+// the arity error proves that the constructor exists
 try {
     new Request('GET');
     echo "partial accepted\n";

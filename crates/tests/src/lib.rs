@@ -9,7 +9,7 @@ pub mod metrics;
 pub mod server_log;
 pub mod wire;
 
-/// Absolute path to a PHP fixture shipped with this crate (robust to the test's cwd).
+/// The absolute path of a PHP fixture in this crate. The path does not depend on the cwd of the test.
 pub fn fixture(name: &str) -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("fixtures")
@@ -35,7 +35,7 @@ pub fn req(uri: &str) -> http::Request<Vec<u8>> {
         .expect("a valid test request")
 }
 
-/// Calls `check` every 50 ms until it returns Some or `within` has passed; None = the deadline passed.
+/// Calls `check` every 50 ms until it returns Some or `within` has passed. Returns None when `within` has passed.
 pub fn poll<T>(within: Duration, mut check: impl FnMut() -> Option<T>) -> Option<T> {
     let end = Instant::now() + within;
     loop {
@@ -54,19 +54,19 @@ pub fn echo_descriptor_set() -> PathBuf {
     fixture("grpc/echo.binpb")
 }
 
-/// A response stream collected to its `End` (or to the producer dying).
+/// A response stream collected until its `End`, or until the producer stops.
 #[derive(Debug, Default)]
 pub struct Resp {
     pub head: Option<rapira_sapi::types::ResponseHead>,
     pub content_length: Option<u64>,
     pub body: Vec<u8>,
     pub truncated: bool,
-    /// An `End` frame arrived; false = the producer died first.
+    /// An `End` frame arrived. False when the producer stopped first.
     pub ended: bool,
 }
 
 impl Resp {
-    /// 0 = no head (producer died, or the response never recorded one).
+    /// The status, or 0 when the producer stopped before a head or the response never recorded one.
     pub fn status(&self) -> u16 {
         self.head.as_ref().map_or(0, |h| h.status)
     }
@@ -80,7 +80,7 @@ impl Resp {
         String::from_utf8_lossy(&self.body).into_owned()
     }
 
-    /// Fold one frame in; true when the stream is over.
+    /// Folds one frame in. Returns true when the stream is over.
     pub fn fold(&mut self, frame: Frame) -> bool {
         match frame {
             Frame::Head {
@@ -105,7 +105,7 @@ impl Resp {
     }
 }
 
-/// Poll for a first frame until `deadline`: None = nothing arrived in time, a producer that died with no frames yields `Resp::default()`.
+/// Polls for a first frame until `deadline`. Returns None when nothing arrives in time, and `Resp::default()` when the producer stops with no frames.
 pub fn drain_resp_deadline(
     rx: &mut mpsc::Receiver<Frame>,
     deadline: std::time::Instant,
@@ -151,7 +151,7 @@ pub struct StatusBody<B> {
     pub body: B,
 }
 
-/// Drain to the status and the body as text; status is 0 when no head was produced.
+/// Reads the stream to its end and returns the status and the body as text. The status is 0 when no head arrived.
 pub fn drain(rx: mpsc::Receiver<Frame>) -> StatusBody<String> {
     let r = drain_resp(rx);
     StatusBody {

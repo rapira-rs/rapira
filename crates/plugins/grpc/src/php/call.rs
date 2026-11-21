@@ -1,4 +1,4 @@
-//! The `GrpcState` work unit, the request Metadata and Context, the services list, and the Rust behind the methods of UnaryCall, ServerStreamingCall and ResponseMetadata.
+//! The `GrpcState` unit, the request Metadata and Context, the services list, and the Rust behind the methods of UnaryCall, ServerStreamingCall and ResponseMetadata.
 
 use std::ffi::{CStr, c_char};
 use std::time::Instant;
@@ -33,7 +33,7 @@ use super::{
 use crate::{Call, Head, MethodInfo, Part, UnaryReply};
 
 /// # Safety
-/// `dst` writable; engine active on this thread.
+/// `dst` is writable. The engine is active on this thread.
 unsafe fn method_info(dst: *mut zval, m: &MethodInfo) {
     unsafe {
         let ce = rapira_ce_grpc_method_info;
@@ -55,9 +55,9 @@ unsafe fn method_info(dst: *mut zval, m: &MethodInfo) {
     }
 }
 
-/// `getServices()`: a new `list<ServiceInfo>` on each call.
+/// Implements `getServices()`. It builds a new `list<ServiceInfo>` each time.
 /// # Safety
-/// `rv` writable; engine active on this thread.
+/// `rv` is writable. The engine is active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_services(rv: *mut zval) -> bool {
     guard(false, || unsafe {
@@ -90,7 +90,7 @@ pub struct MetadataField {
     pub values: Vec<Vec<u8>>,
 }
 
-/// Request `-bin` values use the standard alphabet with or without padding. Implementations "MUST accept padded and un-padded values": https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
+/// Request `-bin` values use the standard alphabet with or without padding. Implementations "MUST accept padded and un-padded values". See https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
 const BIN_DECODE: GeneralPurpose = GeneralPurpose::new(
     &alphabet::STANDARD,
     GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
@@ -123,7 +123,7 @@ pub(crate) fn is_binary(name: &[u8]) -> bool {
     name.ends_with(b"-bin")
 }
 
-/// `Context::$metadata`: the application keys, with `-bin` values decoded. A text value that is not printable or an undecodable `-bin` value is dropped, and a key with no values left is absent.
+/// Builds `Context::$metadata` from the keys that the transport does not own, with `-bin` values decoded. It drops a text value that is not printable and an undecodable `-bin` value. A key with no values left is absent.
 /// A `-bin` value is split on "," first: "Implementations must split Binary-Headers on "," before decoding the Base64-encoded values." https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
 /// The optional whitespace around "," follows the HTTP list rule. https://www.rfc-editor.org/rfc/rfc9110#section-5.6.1
 pub fn context_metadata(headers: &HeaderMap) -> Vec<MetadataField> {
@@ -163,8 +163,8 @@ pub fn context_metadata(headers: &HeaderMap) -> Vec<MetadataField> {
     out
 }
 
-/// Response metadata in wire form. `-bin` values are base64 without padding: implementations "should emit un-padded values" (PROTOCOL-HTTP2 Requests).
-/// A text value loses its edge spaces: an HTTP/2 field value "MUST NOT start or end with an ASCII whitespace character" (https://www.rfc-editor.org/rfc/rfc9113#section-8.2.1), and for gRPC "it may be stripped" (PROTOCOL-HTTP2 Requests).
+/// Response metadata in wire form. `-bin` values are base64 without padding, because implementations "should emit un-padded values" (PROTOCOL-HTTP2 Requests).
+/// A text value loses its edge spaces. An HTTP/2 field value "MUST NOT start or end with an ASCII whitespace character" (https://www.rfc-editor.org/rfc/rfc9113#section-8.2.1), and for gRPC "it may be stripped" (PROTOCOL-HTTP2 Requests).
 fn wire(fields: &[MetadataField]) -> HeaderMap {
     let mut map = HeaderMap::new();
     for MetadataField { name, values } in fields {
@@ -195,7 +195,7 @@ pub(crate) struct StreamReply {
     /// None after the head went out.
     head: Option<oneshot::Sender<Result<Head, ConnectError>>>,
     parts: mpsc::Sender<Part>,
-    /// The deadline of the call. No park waits past it, and the call is cancelled from it.
+    /// The deadline of the call. No park waits past it. From that time on, the call is cancelled.
     until: Option<Instant>,
     /// A trailer was added after the head went out. A stream that ends with success does not send it.
     late_trailer: bool,
@@ -219,7 +219,7 @@ impl StreamReply {
 pub(crate) struct GrpcState {
     req: Call,
     received_at: f64,
-    /// None after the outcome went out or the call was discarded: the call is then finalized.
+    /// None after the outcome went out or the call was discarded. The call is then finalized.
     reply: Option<Reply>,
     discarded: bool,
     headers: Vec<MetadataField>,
@@ -229,7 +229,7 @@ pub(crate) struct GrpcState {
 }
 
 impl GrpcState {
-    /// One call on the intake. A dropped `reply` means that PHP lost the call; dropping its receivers closes the call for PHP.
+    /// One call on the intake. A dropped `reply` means that PHP lost the call. The drop of its receivers closes the call for PHP.
     pub(crate) fn new(req: Call, reply: Reply) -> Self {
         Self {
             req,
@@ -248,7 +248,7 @@ impl Held for GrpcState {
         self.reply.is_none()
     }
 
-    /// The plugin dropped the receiver: the deadline passed or the client left. connectrpc bounds only the handler with the deadline, and the handler of a stream returns at the head, so a stream also checks its deadline here.
+    /// The plugin dropped the receiver because the deadline passed or the client left. connectrpc bounds only the handler with the deadline. The handler of a stream returns at the head, so a stream also checks its deadline here.
     fn cancelled(&self) -> bool {
         self.discarded
             || match &self.reply {
@@ -260,7 +260,7 @@ impl Held for GrpcState {
             }
     }
 
-    /// Dropping `reply` finalizes the call, so `release()` does not count it a second time.
+    /// The drop of `reply` finalizes the call, so `release()` does not count it a second time.
     fn discard(&mut self) {
         if self.settled() {
             return;
@@ -303,7 +303,7 @@ impl Held for GrpcState {
     }
 }
 
-/// A core returns a Verb and throws nothing: `thrown` throws after the core dropped its owned state, because `zend_throw_*` can bail out.
+/// A core returns a Verb and throws nothing. `thrown` throws after the core dropped its owned state, because `zend_throw_*` can bail out.
 #[derive(Debug, PartialEq)]
 enum Verb {
     Ok,
@@ -313,13 +313,13 @@ enum Verb {
     BadField(&'static CStr),
 }
 
-/// Validates one response metadata entry, then adds it to its half. The entry is checked before the state, so a bad entry gives a ValueError on a finalized call too.
+/// Validates one response metadata entry, then adds it to its half. It checks the entry before the state, so a bad entry gives a ValueError on a finalized call too.
 fn add_core(st: &mut GrpcState, trailer: bool, binary: bool, name: &[u8], value: &[u8]) -> Verb {
     // from_bytes lower-cases the name
     let Ok(name) = HeaderName::from_bytes(name) else {
         return Verb::BadField(c"the metadata name is not a valid header name");
     };
-    // Header-Name: https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
+    // The Header-Name rule. See https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
     if !name
         .as_str()
         .bytes()
@@ -372,7 +372,7 @@ fn add_core(st: &mut GrpcState, trailer: bool, binary: bool, name: &[u8], value:
     Verb::Ok
 }
 
-/// Sends the one outcome of the call, with both metadata halves in wire form. On a streaming response the outcome is a status: before the head it goes out with both halves, and after the head it ends the stream with every trailer.
+/// Sends the one outcome of the call, with both metadata halves in wire form. On a streaming response the outcome is a status. Before the head, it goes out with both halves. After the head, it ends the stream with every trailer.
 fn finish(st: &mut GrpcState, result: Result<Bytes, ConnectError>) -> Verb {
     if st.cancelled() {
         st.discard();
@@ -427,7 +427,7 @@ fn begin(st: &mut GrpcState) -> Verb {
     Verb::Ok
 }
 
-/// Sends the head when it is not out yet, with both metadata halves as they are now. False: the plugin closed the call.
+/// Sends the head when it is not out yet, with both metadata halves as they are now. Returns false when the plugin closed the call.
 fn commit(out: &mut StreamReply, headers: &[MetadataField], trailers: &[MetadataField]) -> bool {
     let Some(head) = out.head.take() else {
         return true;
@@ -439,7 +439,7 @@ fn commit(out: &mut StreamReply, headers: &[MetadataField], trailers: &[Metadata
     .is_ok()
 }
 
-/// Puts one part on the channel of the response stream. On a full channel the PHP thread parks until the plugin takes the part before it, the plugin closes the call, or the deadline of the call passes. False: the part has no destination.
+/// Puts one part on the channel of the response stream. On a full channel the PHP thread parks until the plugin takes the part before it, the plugin closes the call, or the deadline of the call passes. Returns false when the part has no destination.
 fn push(out: &StreamReply, part: Part) -> bool {
     let part = match out.parts.try_send(part) {
         Ok(()) => return true,
@@ -460,7 +460,7 @@ fn push(out: &StreamReply, part: Part) -> bool {
     }
 }
 
-/// One message of a streaming response. The first message sends the head before it. False: the message has no destination, and the call is discarded.
+/// Sends one message of a streaming response. The first message sends the head before it. Returns false when the message has no destination. The call is then discarded.
 fn send_core(st: &mut GrpcState, message: Bytes) -> bool {
     if st.cancelled() {
         st.discard();
@@ -477,7 +477,7 @@ fn send_core(st: &mut GrpcState, message: Bytes) -> bool {
     sent
 }
 
-/// The generator ended: sends the head of a stream with no message, then the end of the stream.
+/// After the generator ends, sends the head of a stream with no message, then the end of the stream.
 fn end(st: &mut GrpcState) {
     if st.cancelled() {
         st.discard();
@@ -496,7 +496,7 @@ fn end(st: &mut GrpcState) {
 
 /// The messages of the two finalize errors name the call, as the Responder.php `@throws` lines do.
 /// # Safety
-/// Engine active; can bail out on OOM.
+/// The engine is active. This function can bail out on OOM.
 unsafe fn thrown(v: Verb) -> bool {
     unsafe {
         match v {
@@ -521,7 +521,7 @@ unsafe fn thrown(v: Verb) -> bool {
 
 /// A `Rapira\Grpc\Metadata` object over `fields`.
 /// # Safety
-/// `dst` writable; engine active on this thread.
+/// `dst` is writable. The engine is active on this thread.
 unsafe fn build_metadata(dst: *mut zval, fields: &[MetadataField]) {
     unsafe {
         let mut entries: zval = std::mem::zeroed();
@@ -552,7 +552,7 @@ fn protocol_case(protocol: Protocol) -> &'static CStr {
 
 /// The listener does not terminate TLS, so `$tls` is null.
 /// # Safety
-/// `dst` writable; engine active on this thread.
+/// `dst` is writable. The engine is active on this thread.
 unsafe fn build_context(dst: *mut zval, st: &mut GrpcState) {
     unsafe {
         let req = &st.req;
@@ -589,9 +589,9 @@ unsafe fn build_context(dst: *mut zval, st: &mut GrpcState) {
     }
 }
 
-/// A string property of an ErrorDetail. None when the property is not an initialized string.
+/// A string property of an ErrorDetail. It is None when the property is not an initialized string.
 /// # Safety
-/// `obj` a live ErrorDetail; the borrow must not outlive it.
+/// `obj` is a live ErrorDetail. The borrow must not outlive it.
 unsafe fn detail_prop<'a>(obj: *mut zend_object, name: &CStr) -> Option<&'a [u8]> {
     unsafe {
         let mut rv: zval = std::mem::zeroed();
@@ -600,10 +600,10 @@ unsafe fn detail_prop<'a>(obj: *mut zend_object, name: &CStr) -> Option<&'a [u8]
     }
 }
 
-/// `Status::$details` as connectrpc details, or the first item that is not an ErrorDetail. The value is unpadded base64.
+/// Converts `Status::$details` to connectrpc details, or returns the first item that is not an ErrorDetail. The value is unpadded base64.
 /// A Connect detail carries the bare type name. gRPC and gRPC-Web keep the `google.protobuf.Any` type URL whole, because connectrpc adds `type.googleapis.com/` only to a name without a `/`.
 /// # Safety
-/// `details` a live array.
+/// `details` is a live array.
 unsafe fn read_details(
     details: *mut HashTable,
     protocol: Protocol,
@@ -639,7 +639,7 @@ unsafe fn read_details(
 
 /// The state keeps the message; the C shell copies it once per call object.
 /// # Safety
-/// `held` the slot of a live call; `len` writable.
+/// `held` is the slot of a live call. `len` is writable.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_message(
     held: *const HeldPtr,
@@ -654,7 +654,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_message(
 
 /// Builds the Context into `memo`, the context memo of the call object. The C shell keeps the memo check.
 /// # Safety
-/// `held` is the held word of a live call that receive() attached; `memo` is writable and IS_UNDEF; engine active.
+/// `held` is the held word of a live call that receive() attached. `memo` is writable and IS_UNDEF. The engine is active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_context(held: *const HeldPtr, memo: *mut zval) -> bool {
     guard(false, || unsafe {
@@ -666,7 +666,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_context(held: *const HeldPtr, memo: *mut
 }
 
 /// # Safety
-/// `held` the slot of a live call; `message` points at `len` readable bytes; engine active.
+/// `held` is the slot of a live call. `message` points at `len` readable bytes. The engine is active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_respond(
     held: *const HeldPtr,
@@ -679,9 +679,9 @@ pub unsafe extern "C" fn rapira_rs_grpc_respond(
     })
 }
 
-/// The start of respond(\Generator): false with an exception pending when the call takes no stream.
+/// Starts respond(\Generator). Returns false with an exception pending when the call takes no stream.
 /// # Safety
-/// `held` the slot of a live call; engine active.
+/// `held` is the slot of a live call. The engine is active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_stream_begin(held: *const HeldPtr) -> bool {
     guard(false, || unsafe {
@@ -689,9 +689,9 @@ pub unsafe extern "C" fn rapira_rs_grpc_stream_begin(held: *const HeldPtr) -> bo
     })
 }
 
-/// One message that the generator of respond(\Generator) yielded. Throws nothing. False: the host closed the call.
+/// Sends one message that the generator of respond(\Generator) yielded. Throws nothing. Returns false when the host closed the call.
 /// # Safety
-/// `held` the slot of a live call; `message` points at `len` readable bytes.
+/// `held` is the slot of a live call. `message` points at `len` readable bytes.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_stream_send(
     held: *const HeldPtr,
@@ -704,17 +704,17 @@ pub unsafe extern "C" fn rapira_rs_grpc_stream_send(
     })
 }
 
-/// The generator of respond(\Generator) ended with the call open. Throws nothing.
+/// Runs when the generator of respond(\Generator) ends with the call open. Throws nothing.
 /// # Safety
-/// `held` the slot of a live call.
+/// `held` is the slot of a live call.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_stream_end(held: *const HeldPtr) {
     guard((), || unsafe { end(&mut *(*held).state::<GrpcState>()) });
 }
 
-/// The three properties of a `Rapira\Grpc\Status`: `code` is the value of its StatusCode case. A detail that is not an ErrorDetail gives a TypeError before any state change.
+/// Takes the three properties of a `Rapira\Grpc\Status`. `code` is the value of its StatusCode case. A detail that is not an ErrorDetail gives a TypeError before any state change.
 /// # Safety
-/// `held` the slot of a live call; `message` and `details` live; engine active.
+/// `held` is the slot of a live call. `message` and `details` are live. The engine is active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_fail(
     held: *const HeldPtr,
@@ -743,7 +743,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_fail(
 }
 
 /// # Safety
-/// `held` the slot of a live call; `name` and `value` point at their readable bytes; engine active.
+/// `held` is the slot of a live call. `name` and `value` point at their readable bytes. The engine is active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_add(
     held: *const HeldPtr,
@@ -769,7 +769,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_add(
 
 /// What one half holds so far, with raw `-bin` values.
 /// # Safety
-/// `held` the slot of a live call; `rv` writable; engine active.
+/// `held` is the slot of a live call. `rv` is writable. The engine is active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_snapshot(
     held: *const HeldPtr,
@@ -1463,7 +1463,7 @@ mod tests {
                     };
                     assert_eq!(got.headers, map(headers), "{}", c.name);
                     assert_eq!(got.trailers, map(trailers), "{}", c.name);
-                    // ConnectError has no PartialEq: compare its code, message and details.
+                    // ConnectError has no PartialEq, so the test compares its code, message and details.
                     match (got.outcome, result) {
                         (Ok(message), Ok(want)) => assert_eq!(message, *want, "{}", c.name),
                         (Err(err), Err(want)) => {

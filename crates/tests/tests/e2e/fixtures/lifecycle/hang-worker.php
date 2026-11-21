@@ -1,5 +1,5 @@
 <?php
-// ?hang=1 blocks the request forever in native sleep: the master's request_terminate_timeout watchdog must kill the worker.
+// ?hang=1 blocks the request forever in native sleep, so the request_terminate_timeout watchdog of the master must kill the worker.
 
 use Rapira\Exception\ClosedException;
 

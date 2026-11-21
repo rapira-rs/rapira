@@ -15,17 +15,17 @@ use rapira_sapi::{Addr, plugin::Mode};
 use serde_json::Value;
 use tests::{StatusBody, poll, server_log};
 
-/// Connect budget for a freshly spawned master (CI macOS worst case).
+/// The connect timeout for a newly spawned master. The value covers the worst case on CI macOS.
 pub const BOOT: Duration = Duration::from_secs(30);
 
-/// Master could not bring up a serviceable gen-0 pool.
+/// The master could not start a gen-0 pool that can serve.
 pub const MASTER_EXIT_FAILBOOT: i32 = 70;
 pub const MASTER_EXIT_OK: i32 = 0;
 
-/// Must outlast supervisor.process_control_timeout (30s): after it the master escalates a stuck worker QUIT/TERM/KILL and still exits 0.
+/// Must be longer than the default supervisor.process_control_timeout of 30s. After that timeout, the master sends TERM and then KILL to a stuck worker, and still exits 0.
 pub const STOP_BUDGET: Duration = Duration::from_secs(45);
 
-/// A running master and the scratch dir holding its config and log.
+/// A running master and the scratch dir that holds its config and log.
 pub struct Server {
     pub child: Child,
     /// The TCP listener of the first pool. When every pool listens on a unix socket, nothing listens here.
@@ -45,7 +45,7 @@ impl Server {
         self.dir.join("server.log")
     }
 
-    /// Stops the master gracefully and waits for its exit, so the log holds the last record of every worker. The scratch dir stays until the drop.
+    /// Sends SIGQUIT to the master and waits for its exit, so the log holds the last record of every worker. The scratch dir stays until the drop.
     pub fn stop(&mut self) {
         signal(self.pid(), libc::SIGQUIT);
         let status = self.wait_exit(STOP_BUDGET);
@@ -53,7 +53,7 @@ impl Server {
     }
 
     pub fn wait_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
-        // A try_wait error ends the poll: transpose gives Some(Err), and Result::ok maps it to None.
+        // A try_wait error ends the poll, because transpose gives Some(Err). Result::ok then maps the error to None.
         poll(timeout, || self.child.try_wait().transpose()).and_then(Result::ok)
     }
 
@@ -63,7 +63,7 @@ impl Server {
 }
 
 impl Drop for Server {
-    /// Signals and snapshots only while the master is unreaped: a reaped pid can be reused.
+    /// Signals and snapshots only while the master is unreaped, because the kernel can reuse a reaped pid.
     fn drop(&mut self) {
         if self.child.try_wait().ok().flatten().is_none() {
             signal(self.child.id(), libc::SIGTERM);
@@ -84,7 +84,7 @@ impl Drop for Server {
     }
 }
 
-/// The bin belongs to the root package, so CARGO_BIN_EXE is unset here: locate it in the nearest directory above the test binary that holds it, or via `RAPIRA_BIN`, a name on PATH or a path. A relative path becomes absolute, because the master starts in the scratch dir.
+/// The bin belongs to the root package, so CARGO_BIN_EXE is unset here. `RAPIRA_BIN` gives the bin as a name on PATH or as a path. Without it, the function finds the bin in the nearest directory above the test binary that holds it. A relative path becomes absolute, because the master starts in the scratch dir.
 fn rapira_bin() -> PathBuf {
     if let Ok(p) = std::env::var("RAPIRA_BIN") {
         if !p.contains('/') {
@@ -129,7 +129,7 @@ fn tcp(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
-/// Spawns until a listener accepts a connection, on a fresh port each time: the port that `render` gets, or the unix socket when no pool listens on TCP.
+/// Spawns on a fresh port each time until a listener accepts a connection. The listener is the port that `render` gets, or the unix socket when no pool listens on TCP.
 fn spawn_ready(spawn: &Spawn, dir: PathBuf, render: &dyn Fn(u16) -> String) -> Server {
     let mut last_log = String::new();
     for _ in 0..3 {
@@ -197,7 +197,7 @@ pub struct Exited {
     pub log: String,
 }
 
-/// One spawn that must exit. [`Exited::log`] holds the whole log, not the tail: with `RUST_BACKTRACE` set, the backtrace after the error line is longer than the tail window.
+/// One spawn that must exit. [`Exited::log`] holds the whole log and not only the tail. With `RUST_BACKTRACE` set, the backtrace after the error line is longer than the tail window.
 fn exit_of(spawn: &Spawn, dir: PathBuf, render: &dyn Fn(u16) -> String) -> Exited {
     let Attempt { child, addr } = spawn_attempt(spawn, &dir, render);
     let mut srv = Server {
@@ -277,7 +277,7 @@ pub struct Spawn {
     /// False leaves PHPRC unset, so PHP reads its compiled-in php.ini.
     phprc: bool,
     env: Vec<(String, String)>,
-    /// The RUST_LOG filter; None removes RUST_LOG from the environment, so the `[log]` section owns the filter.
+    /// The RUST_LOG filter; None removes RUST_LOG from the environment, so the `[log]` section sets the filter.
     rust_log: Option<String>,
 }
 
@@ -355,13 +355,13 @@ impl Spawn {
         self
     }
 
-    /// The `[http]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
+    /// The `[http]` pool listens on `listen`. A TCP address here is not a readiness target, so [`Spawn::spawn`] waits for another pool.
     pub fn http_listen(mut self, listen: ListenAddr) -> Spawn {
         self.http_listen = Some(listen);
         self
     }
 
-    /// The `[grpc]` pool listens on `listen`. A TCP address here is not a readiness target: [`Spawn::spawn`] then waits for another pool.
+    /// The `[grpc]` pool listens on `listen`. A TCP address here is not a readiness target, so [`Spawn::spawn`] waits for another pool.
     pub fn grpc_listen(mut self, listen: ListenAddr) -> Spawn {
         self.grpc_listen = Some(listen);
         self
@@ -431,7 +431,7 @@ impl Spawn {
         self
     }
 
-    /// Leaves PHPRC unset: PHP reads its compiled-in php.ini, and the `php.ini` in the scratch dir is only a file in the cwd of the master.
+    /// Leaves PHPRC unset. PHP then reads its compiled-in php.ini, and the `php.ini` in the scratch dir is only a file in the cwd of the master.
     pub fn no_phprc(mut self) -> Spawn {
         self.phprc = false;
         self
@@ -449,7 +449,7 @@ impl Spawn {
         self
     }
 
-    /// Removes RUST_LOG from the environment, so the `[log]` section owns the filter.
+    /// Removes RUST_LOG from the environment, so the `[log]` section sets the filter.
     pub fn no_rust_log(mut self) -> Spawn {
         self.rust_log = None;
         self
@@ -530,7 +530,7 @@ impl Spawn {
             }
         });
         move |port| {
-            // The spawn waits for `port`, so it goes to the first pool without a listen address.
+            // The spawn waits for port, so it goes to the first pool without a listen address.
             let mut port = Some(port);
             let mut config = String::new();
             if let Some(StagedHttp { mode, entrypoint }) = &http {
@@ -591,7 +591,7 @@ fn stage_dir(dir: &Path, sub: &str, fixture: &Path) -> String {
     format!("{sub}/{name}")
 }
 
-/// Connect-only readiness: the master binds the listen socket before forking, so a successful connect means it booted far enough to serve.
+/// Waits until a connect succeeds and the master still runs. The master binds the listen socket before the fork, so a successful connect means that it booted far enough to serve.
 fn wait_for_listener(listen: &ListenAddr, child: &mut Child, timeout: Duration) -> bool {
     let end = Instant::now() + timeout;
     while Instant::now() < end {
@@ -613,7 +613,7 @@ fn wait_for_listener(listen: &ListenAddr, child: &mut Child, timeout: Duration) 
     false
 }
 
-/// HTTP/1.1 GET with `Connection: close`: the body is close-delimited, so no chunked or keep-alive parsing is needed.
+/// An HTTP/1.1 GET with `Connection: close`. The body is close-delimited, so the client needs no chunked or keep-alive parsing.
 pub fn http_get(
     addr: SocketAddr,
     path: &str,
@@ -636,7 +636,7 @@ pub fn http_get_with_headers(
     })
 }
 
-/// The whole response, head included: for assertions about which fields reached the client.
+/// The whole response with its head, for assertions about which fields reached the client.
 pub fn http_get_raw(
     addr: SocketAddr,
     path: &str,
@@ -664,7 +664,7 @@ pub fn http_get_raw(
     Ok(raw)
 }
 
-/// As [`http_raw`], returning the unparsed response bytes for asserting on the header block itself.
+/// Like [`http_raw`], but returns the unparsed response bytes, for assertions on the header block itself.
 pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io::Result<Vec<u8>> {
     let mut s = TcpStream::connect_timeout(&addr, timeout)?;
     s.set_read_timeout(Some(timeout))?;
@@ -676,7 +676,7 @@ pub fn http_raw_bytes(addr: SocketAddr, request: &[u8], timeout: Duration) -> io
     Ok(raw)
 }
 
-/// A caller-controlled request: no implicit Host or Connection line.
+/// Sends a request that the caller writes in full. The client adds no Host or Connection line.
 pub fn http_raw(
     addr: SocketAddr,
     request: &[u8],
@@ -700,7 +700,7 @@ pub fn serving_pid(srv: &Server) -> u32 {
         .unwrap_or_else(|| panic!("unexpected body {body:?}"))
 }
 
-/// Sibling of [`http_get`] with a body; `content_type` is bytes because a multipart boundary is opaque octets and obs-text is legal in a field value.
+/// A POST like [`http_get`], with a body. `content_type` is bytes, because a multipart boundary is opaque octets and obs-text is legal in a field value.
 pub fn http_post(
     addr: SocketAddr,
     path: &str,
@@ -749,12 +749,12 @@ pub fn parse_status_and_body(raw: &[u8]) -> io::Result<StatusBody<&[u8]>> {
     })
 }
 
-/// A request body of `len` bytes where byte i is i % 251: a dropped or reordered transport chunk changes the bytes.
+/// A request body of `len` bytes where byte i is i % 251. A dropped or reordered transport chunk changes the bytes.
 pub fn patterned(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
-/// Direct children of `master`; the `ps` field syntax is valid on both procps and BSD ps, and `Z` is excluded so a dead-but-unreaped worker is not counted.
+/// The direct children of `master`. The `ps` field syntax is valid on procps and BSD ps. The `Z` state does not count, so a dead but unreaped worker is not in the list.
 pub fn worker_pids(master: u32) -> Vec<u32> {
     let out = match Command::new("ps")
         .args(["-axo", "pid=,ppid=,state="])
@@ -781,7 +781,7 @@ pub fn worker_pids(master: u32) -> Vec<u32> {
     pids
 }
 
-/// Poll `worker_pids` until `pred` holds; panic with diagnostics on deadline.
+/// Polls `worker_pids` until `pred` holds. Panics with diagnostics at the deadline.
 pub fn wait_workers(
     srv: &Server,
     deadline: Duration,
@@ -841,7 +841,7 @@ pub fn kill_master_as_subreaper(srv: &mut Server) {
     assert!(status.is_some(), "master survived SIGKILL");
 }
 
-/// Per-thread outcome counters: `refused` means the listener closed, `failed` means a non-200 response, a hang, or a corrupt reply; connection drops only record `last_err` (the balancer retries those).
+/// Per-thread outcome counters. `refused` means the listener closed, and `failed` means a non-200 response, a hang, or a corrupt reply. A connection drop counts in `dropped` and not in `failed`, because the balancer retries a dropped connection. It also records `last_err`.
 #[derive(Default)]
 pub struct Tally {
     pub ok: u64,
@@ -852,13 +852,13 @@ pub struct Tally {
     pub last_err: Option<String>,
 }
 
-/// A pool of threads hammering the server until [`Storm::halt`].
+/// Threads that send requests to the server until [`Storm::halt`].
 pub struct Storm {
     stop: Arc<AtomicBool>,
     threads: Vec<JoinHandle<Tally>>,
 }
 
-/// Launch `threads` workers, each looping `GET /` until halted; only 200 counts ok.
+/// Starts `threads` threads. Each thread sends `GET /` in a loop until the halt. Only a 200 counts as ok.
 pub fn storm(addr: SocketAddr, threads: usize) -> Storm {
     let stop = Arc::new(AtomicBool::new(false));
     let handles = (0..threads)
@@ -936,7 +936,7 @@ pub fn assert_exit_code(status: Option<ExitStatus>, expected: i32, srv: &Server)
     }
 }
 
-/// Worker pids + `ps` subtree + server-log tail, for failure messages.
+/// The worker pids, the `ps` subtree and the server-log tail, for failure messages.
 pub fn diagnostics(srv: &Server) -> String {
     let master = srv.child.id();
     format!(
@@ -1072,7 +1072,7 @@ pub fn assert_only_workers(srv: &Server, workers: &[u32]) {
     }
 }
 
-/// Poll `path` until every needle appears; on deadline Err carries the file state.
+/// Polls `path` until every needle appears. At the deadline, the Err holds the file state.
 pub fn wait_file_contains_all(
     path: &Path,
     needles: &[String],
@@ -1108,7 +1108,7 @@ pub struct Head {
     pub fields: Vec<(String, String)>,
 }
 
-/// An open connection for incremental reads: the read-to-EOF helpers would block until the stream ends.
+/// An open connection for incremental reads. The read-to-EOF helpers block until the stream ends.
 pub struct Conn {
     s: TcpStream,
     buf: Vec<u8>,
@@ -1132,7 +1132,7 @@ impl Conn {
         self.s.flush()
     }
 
-    /// The client walking away mid-response.
+    /// Closes both directions of the connection, as a client that leaves in the middle of a response.
     pub fn leave(self) {
         let _ = self.s.shutdown(std::net::Shutdown::Both);
     }
@@ -1141,7 +1141,7 @@ impl Conn {
         &self.buf[self.consumed..]
     }
 
-    /// Pull bytes until `pat` shows up past the consumed mark (or `deadline`).
+    /// Reads bytes until `pat` appears after the consumed mark, or until `deadline` passes.
     fn fill_until(&mut self, pat: &[u8], deadline: Duration) -> io::Result<usize> {
         let end = std::time::Instant::now() + deadline;
         loop {
@@ -1174,7 +1174,7 @@ impl Conn {
         }
     }
 
-    /// Read one head block; interim heads are separate blocks, so call again for the next one.
+    /// Reads one head block. Interim heads are separate blocks, so call again for the next one.
     pub fn read_head(&mut self, deadline: Duration) -> io::Result<Head> {
         let head_end = self.fill_until(b"\r\n\r\n", deadline)?;
         let head = &self.buf[self.consumed..head_end];
@@ -1198,14 +1198,14 @@ impl Conn {
         Ok(Head { status, fields })
     }
 
-    /// Block until `pat` is on the wire while the response is still open; consumes through it.
+    /// Blocks until `pat` is on the wire while the response is still open. Consumes the bytes up to the end of `pat`.
     pub fn read_body_until(&mut self, pat: &[u8], deadline: Duration) -> io::Result<()> {
         let pos = self.fill_until(pat, deadline)?;
         self.consumed = pos + pat.len();
         Ok(())
     }
 
-    /// Read exactly `n` bytes: content-length framing on a connection that stays open.
+    /// Reads exactly `n` bytes, for content-length framing on a connection that stays open.
     pub fn read_n(&mut self, n: usize, deadline: Duration) -> io::Result<Vec<u8>> {
         let end = std::time::Instant::now() + deadline;
         while self.unread().len() < n {
@@ -1232,7 +1232,7 @@ impl Conn {
         Ok(out)
     }
 
-    /// Drain to EOF and return everything unread.
+    /// Reads to EOF and returns everything unread.
     pub fn read_remaining(&mut self, deadline: Duration) -> io::Result<Vec<u8>> {
         let end = std::time::Instant::now() + deadline;
         loop {
@@ -1255,7 +1255,7 @@ impl Conn {
     }
 }
 
-/// Poll `server.log` for `needle`, bounded.
+/// Polls `server.log` for `needle` until `deadline`.
 pub fn wait_log_contains(srv: &Server, needle: &str, deadline: Duration) -> bool {
     let path = srv.dir.join("server.log");
     poll(deadline, || {
@@ -1315,7 +1315,7 @@ pub fn logged_remote(peer: &Addr) -> String {
     }
 }
 
-/// Waits off the test runtime for the master to exit 0, so the clients on the runtime keep running through the drain.
+/// Waits on a blocking thread for the master to exit 0, so the clients on the test runtime keep running during the drain.
 pub async fn exited(mut srv: Server) -> Server {
     tokio::task::spawn_blocking(move || {
         let status = srv.wait_exit(STOP_BUDGET);
@@ -1326,7 +1326,7 @@ pub async fn exited(mut srv: Server) -> Server {
     .expect("the wait task")
 }
 
-/// A graceful stop: SIGQUIT, then [`exited`].
+/// Sends SIGQUIT, then waits in [`exited`].
 pub async fn stop(srv: Server) -> Server {
     signal(srv.pid(), libc::SIGQUIT);
     exited(srv).await

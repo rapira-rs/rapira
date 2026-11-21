@@ -1,5 +1,5 @@
 <?php
-// Two boot registrations, one post-loop registration: cycle end runs the boot entries first, then the late one.
+// Two registrations in the boot and one after the loop. The cycle end runs the boot entries first, then the late one.
 register_shutdown_function(static function (): void {
     \Rapira\log('sd boot-a');
 });

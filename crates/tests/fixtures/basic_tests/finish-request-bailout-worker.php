@@ -9,8 +9,8 @@ $handler = static function (): void {
             trigger_error('fatal in flush', E_USER_ERROR); // bails out of php_output_end_all
         });
         echo 'buffered';
-        \rapira_finish_request();   // the flush runs the ob handler -> fatal
-        echo 'resumed-after-fatal'; // must never run: the bailout ends the unit
+        \rapira_finish_request();   // the flush runs the ob handler, which causes the fatal error
+        echo 'resumed-after-fatal'; // must never run, because the bailout ends the unit
         return;
     }
     header('Content-Type: text/plain');

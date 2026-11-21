@@ -16,7 +16,7 @@ use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::ptr::{null, null_mut};
 
 // Only this catch_unwind turns a panic inside PHP into a failed request and a
-// recycled worker instead of a process abort. The build enforces the strategy.
+// recycle, so the process does not abort. The build checks the panic strategy.
 // https://doc.rust-lang.org/reference/conditional-compilation.html#panic
 #[cfg(panic = "abort")]
 compile_error!("rapira_sapi needs panic = \"unwind\": callbacks::guard relies on catch_unwind");
@@ -30,7 +30,7 @@ pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
 
 pub const MAX_BUFFERED_BODY: usize = 1 << 30;
 
-/// http_response_code is an app-controlled c_int; clamping keeps the u16 cast from wrapping.
+/// http_response_code is a c_int that the app controls, so the clamp stops a wrap of the u16 cast.
 fn head_status(h: &sapi_headers_struct) -> u16 {
     if h.http_response_code != 0 {
         h.http_response_code.clamp(100, 599) as u16
@@ -74,9 +74,9 @@ fn split_header_line(line: &[u8]) -> Option<(HeaderName, HeaderValue)> {
     Some((name, value))
 }
 
-/// Separator joining repeats of `name`; `None` marks a singleton field, where the first line wins and the rest are dropped.
-/// Combining is legal only for comma-list fields: https://www.rfc-editor.org/rfc/rfc9110#section-5.3
-/// `Cookie` rejoins on `"; "`: https://www.rfc-editor.org/rfc/rfc6265#section-4.2.1
+/// The separator that joins the repeats of `name`. `None` marks a singleton field, which keeps the first line and drops the rest.
+/// A join is legal only for comma-list fields. https://www.rfc-editor.org/rfc/rfc9110#section-5.3
+/// `Cookie` lines join on `"; "`. https://www.rfc-editor.org/rfc/rfc6265#section-4.2.1
 fn field_line_separator(name: &HeaderName) -> Option<&'static [u8]> {
     static SINGLETON: [HeaderName; 6] = [
         AUTHORIZATION,
@@ -198,7 +198,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
 
         Some(len)
     })
-    // None: guard caught a panic in the body.
+    // None means that guard caught a panic in the body.
     .unwrap_or_else(|| {
         unsafe { *aborted = true };
         0
@@ -206,7 +206,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
 }
 
 /// # Safety
-/// A SAPI callback invoked by PHP. `h` must be a valid `*mut sapi_headers_struct`
+/// A SAPI callback that PHP calls. `h` must be a valid `*mut sapi_headers_struct`
 pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
     guard(SAPI_HEADER_SEND_FAILED as c_int, || {
         let ctx = unsafe {
@@ -239,7 +239,7 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
 pub extern "C" fn rapira_rs_raw_body_len() -> usize {
     with_ctx(0, |ctx| ctx.req.body.len())
 }
-/// Part `index` of the raw body of the bound request, for the post readers in module.c: writes its address into `part` and returns its length; 0 past the last part (no part is empty).
+/// Gives part `index` of the raw body of the bound request to the post readers in module.c. It writes the address of the part into `part` and returns its length. It returns 0 past the last part. No part is empty, so 0 marks the end.
 /// # Safety
 /// `part` must point at a writable `*const c_char`
 #[unsafe(no_mangle)]
@@ -252,7 +252,7 @@ pub unsafe extern "C" fn rapira_rs_raw_body_part(index: usize, part: *mut *const
         bytes.len()
     })
 }
-/// The Authorization field of the bound request, for php_handle_auth_data in rapira_activate (module.c); NULL with no bound request or no field.
+/// Returns the Authorization field of the bound request for php_handle_auth_data in rapira_activate (module.c). Returns NULL when no request is bound or the field is absent.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_authorization() -> *const c_char {
     with_ctx(null(), |ctx| {
@@ -281,7 +281,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             track_vars_array,
         );
     };
-    // No bound request: the boot run of the entrypoint in worker and dispatcher mode, and the request that makes the OPcache reset call.
+    // No request is bound in two cases: the boot run of the entrypoint in worker and dispatcher mode, and the request that makes the OPcache reset call.
     if unsafe { ctx() }.is_none() {
         guard((), || unsafe {
             register_boot_variables(track_vars_array, put_bytes)
@@ -295,18 +295,18 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         let size = SERVER_VARS_MAX + ctx.req.headers.keys_len() as u32 + server_env.len() as u32;
         let ht = unsafe { (*track_vars_array).value.arr };
         unsafe { zend_hash_extend(ht, size, false) };
-        // A permanent interned name and value: the insert takes no hash, no allocation and no copy.
+        // Inserts a permanent interned name and value. The insert takes no hash, no allocation and no copy.
         let put_interned = |name: *mut zend_string, value: *mut zend_string| unsafe {
             let mut v: zval = std::mem::zeroed();
             v.value.str_ = value;
             v.u1.type_info = IS_STRING;
             zend_hash_update(ht, name, &mut v);
         };
-        // A permanent interned name and a value of this request, which PHP copies.
+        // Inserts a permanent interned name and a value of this request, which PHP copies.
         let put = |name: *mut zend_string, value: &[u8]| unsafe {
             rapira_hash_update_stringl(ht, name, value.as_ptr().cast(), value.len());
         };
-        // The env pairs of the pool go in first: the request variables below win over a pair with the same name.
+        // The env pairs of the pool go in first, so the request variables below override a pair with the same name.
         // Each name goes in as written. The environment import of PHP skips a name with a space, '.' or '[', and it stores an all-digit name as an integer key. Such a name is therefore different in the boot $_SERVER.
         for &(name, value) in server_env {
             put_interned(name, value);
@@ -386,7 +386,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
     })
 }
 
-/// The variables of `php entrypoint.php`, in its order: the process environment, then the entrypoint path, which wins over an environment variable of the same name.
+/// The variables of `php entrypoint.php`, in its order: the process environment, then the entrypoint path, which overrides an environment variable of the same name.
 /// https://github.com/php/php-src/blob/php-8.5.11/sapi/cli/php_cli.c#L316-L347
 unsafe fn register_boot_variables(track_vars_array: *mut zval, put: impl Fn(&CStr, &[u8])) {
     unsafe {
@@ -536,7 +536,7 @@ mod tests {
         }
     }
 
-    /// `HTTP_*` registration is last-write-wins: each name registers once, in the order of its first line.
+    /// The `HTTP_*` registration is last-write-wins. Each name registers once, in the order of its first line.
     #[test]
     fn cgi_header_vars_register_each_name_once() {
         let headers = map(&[

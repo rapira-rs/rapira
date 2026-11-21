@@ -90,7 +90,7 @@ struct Attached {
     reply: tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>,
 }
 
-/// Channel is sized for a full event trio so seal never parks with no reader.
+/// The channel has room for the Head, Chunk and End frames, so seal never parks with no reader.
 fn state_of(req: Request) -> Attached {
     let (tx, rx) = tokio::sync::mpsc::channel(64);
     Attached {
@@ -103,7 +103,7 @@ fn state() -> Attached {
     state_of(base_req())
 }
 
-/// A 304 head drops accepted body chunks at seal, like 204 and HEAD.
+/// A 304 head drops the accepted body chunks, like 204 and HEAD.
 #[test]
 fn seal_drops_the_body_for_304() {
     let Attached {
@@ -123,7 +123,7 @@ fn seal_drops_the_body_for_304() {
     assert!(body.is_empty(), "304 carries no body");
 }
 
-/// Contract: an empty chunk without eos does nothing - no head commits.
+/// The contract says that an empty chunk without eos does nothing. No head commits.
 #[test]
 fn empty_non_eos_chunk_commits_nothing() {
     let Attached {
@@ -151,7 +151,7 @@ fn protocol_uses_the_contract_spelling() {
     assert_eq!(protocol_php("HTTP/2.0"), "HTTP/2");
 }
 
-/// `uri_abs` takes the host of `$uri` from the authority. With no authority, it uses the `Display` of the server socket address (IPv6 in brackets with its scope id) or, for a unix server, `server_name:server_port`.
+/// `uri_abs` takes the host of `$uri` from the authority. With no authority, it uses the `Display` of the server socket address, which puts an IPv6 address in brackets with its scope id. For a unix server, it uses `server_name:server_port`.
 #[test]
 fn uri_abs_spells_the_uri() {
     struct Case {
@@ -302,7 +302,7 @@ fn head_frame_length_follows_the_write_shape() {
     }
 }
 
-/// Over-declared length sends the fitting prefix and seals untruncated, so later writes see Finalized.
+/// A write past the declared length sends the prefix that fits and seals without truncation, so later writes get Finalized.
 #[test]
 fn content_length_exceeded_sends_the_prefix_and_seals() {
     use rapira_sapi::types::Frame;
@@ -369,7 +369,7 @@ fn interim_head_sends_nothing_and_leaves_the_final_head_open() {
     assert_eq!(v, Verb::Ok, "the final-head slot stays open");
 }
 
-/// A gone client discards the unit once and the latch stays sticky: finalized plus cancelled.
+/// When the client is gone, the state discards the unit once, and the unit stays discarded. The unit is then finalized and cancelled.
 #[test]
 fn gone_client_discards_once_and_stays_discarded() {
     let Attached {
@@ -410,7 +410,7 @@ fn flush_emits_the_implicit_head_once() {
     assert!(rx.try_recv().is_err(), "a repeat flush is a no-op");
 }
 
-/// A committed 101 is bodiless: chunks are accepted and dropped.
+/// A committed 101 is bodiless, so the state accepts chunks and drops them.
 #[test]
 fn a_101_head_drops_body_chunks() {
     use rapira_sapi::types::Frame;
@@ -434,7 +434,7 @@ fn a_101_head_drops_body_chunks() {
     );
 }
 
-/// `writeTrailers()` ends the response with an End frame: a headless call is HeadNotWritten, a repeat call Finalized.
+/// `writeTrailers()` ends the response with an End frame. A call without a head gets HeadNotWritten, and a repeat call gets Finalized.
 #[test]
 fn trailers_finalize_with_a_committed_head() {
     use rapira_sapi::types::Frame;
@@ -525,14 +525,14 @@ fn describe(frame: rapira_sapi::types::Frame) -> String {
     }
 }
 
-/// The frames of a lost unit, one whose object is gone before the response ended: a 500 head when none was sent, a truncated End after one was.
+/// The frames of a lost unit, that is, a unit whose object is gone before the response ended. The unit gets a 500 head when no head was sent, and a truncated End after a head was sent.
 #[test]
 fn a_lost_unit_fails_or_truncates_the_reply() {
     enum Before {
         Nothing,
-        /// writeHead(200) with no body: the head is committed, not sent.
+        /// writeHead(200) with no body. The head is committed, not sent.
         HeadCommitted,
-        /// A streamed chunk: the head is sent.
+        /// A streamed chunk. The head is sent.
         HeadSent,
     }
     struct Case {
@@ -596,7 +596,7 @@ fn a_lost_unit_fails_or_truncates_the_reply() {
     }
 }
 
-/// The frames of a shed unit, one the worker cannot serve: the 503 head and an End, bodiless for a HEAD request.
+/// The frames of a shed unit, that is, a unit that the worker cannot serve. The unit gets the 503 head and an End, bodiless for a HEAD request.
 #[test]
 fn a_shed_unit_gets_the_503_seal() {
     struct Case {

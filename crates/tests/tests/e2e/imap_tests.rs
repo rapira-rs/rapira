@@ -19,7 +19,7 @@ fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<Resp>> {
         .collect()
 }
 
-/// MINIT stores FG(default_socket_timeout) into c-client once (PECL imap php_imap.c, SET_*TIMEOUT): no request can change the imap socket timeouts.
+/// MINIT stores FG(default_socket_timeout) into c-client once (PECL imap php_imap.c, SET_*TIMEOUT). An ini_set of default_socket_timeout in a request does not change the imap socket timeouts.
 #[test]
 fn imap_timeout_is_snapshotted_at_minit() -> anyhow::Result<()> {
     let out = run("imap_tests/imap-timeout-worker.php", &["/", "/"])?;
@@ -42,7 +42,7 @@ fn imap_timeout_is_snapshotted_at_minit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The per-unit RSHUTDOWN reports each undrained entry as an E_NOTICE through the SAPI log_message hook; the log is read after the stop, so it holds every record of the worker.
+/// The per-unit RSHUTDOWN reports each undrained entry as an E_NOTICE through the SAPI log_message hook. The test reads the log after the stop, so the log holds every record of the worker.
 #[test]
 fn imap_undrained_error_reaches_the_log() -> anyhow::Result<()> {
     let name = "imap_tests/imap-errors-worker.php";

@@ -4,7 +4,7 @@ use tests::{StatusBody, drain, fixture, req};
 
 use crate::harness::Spawn;
 
-/// `count_objects()` and `get_objects()` read the object store of the worker. Each case is one request: the fixture builds the objects and answers one line.
+/// `count_objects()` and `get_objects()` read the object store of the worker. Each case is one request. The fixture builds the objects and answers with one line.
 #[test]
 fn object_functions_report_the_live_objects() -> anyhow::Result<()> {
     struct Case {

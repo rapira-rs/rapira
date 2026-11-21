@@ -14,13 +14,13 @@ pub struct PoolSettings {
     pub entrypoint: PathBuf,
     pub processes: usize,
     pub mode: Mode,
-    /// Requests a worker serves before recycling itself (with jitter); 0 = unlimited.
+    /// Requests a worker serves before it recycles its app, with jitter. 0 means no limit.
     pub max_requests: u64,
-    /// RSS of one worker in MiB above which the master drains the worker and forks a new one; 0 = unlimited.
+    /// RSS of one worker in MiB above which the master drains the worker and forks a new one. 0 means no limit.
     pub max_memory_mb: u64,
-    /// Failed boots in sequence after which a worker stops as unhealthy; 0 = unlimited.
+    /// Failed boots in sequence after which a worker stops as unhealthy. 0 means no limit.
     pub max_boot_failures: u32,
-    /// Wall-clock bound on a single request; zero = disabled.
+    /// Wall-clock limit of one request. The clock starts again at each pull that reaches the intake, also when the pull finds no unit. Time in the intake does not count. Zero disables the limit.
     pub request_terminate_timeout: Duration,
     /// Variables each worker sets before its PHP thread starts. `resolve_pool` rejects the names and values that `std::env::set_var` panics on (https://doc.rust-lang.org/std/env/fn.set_var.html#panics).
     pub env: BTreeMap<String, String>,
@@ -45,7 +45,7 @@ impl fmt::Display for Mode {
     }
 }
 
-/// The `pool` table of a plugin. Embedded by name: serde does not support `#[serde(flatten)]` alongside `deny_unknown_fields`.
+/// The `pool` table of a plugin. A plugin embeds it by name, because serde does not support `#[serde(flatten)]` together with `deny_unknown_fields`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PoolSection {

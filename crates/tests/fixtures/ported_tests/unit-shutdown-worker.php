@@ -1,5 +1,5 @@
 <?php
-// A shutdown function registered during a unit runs at the end of that unit, exactly once. The boot-registered one runs at cycle end.
+// A shutdown function registered during a unit runs once, at the end of that unit. The boot-registered one runs at cycle end.
 $bootFired = 0;
 $unitFired = 0;
 register_shutdown_function(static function () use (&$bootFired): void {

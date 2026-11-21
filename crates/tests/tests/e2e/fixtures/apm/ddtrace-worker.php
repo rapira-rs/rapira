@@ -1,5 +1,5 @@
 <?php
-// The compatible-SAPI gate (ext/datadog.c; names in components/sapi/sapi.c) has neither "fastcgi" (8.4) nor "rapira" (8.5): MINIT disables tracing and still returns SUCCESS.
+// The compatible-SAPI check (ext/datadog.c, names in components/sapi/sapi.c) lists neither "fastcgi" (8.4) nor "rapira" (8.5), so MINIT disables tracing and still returns SUCCESS.
 // https://docs.datadoghq.com/tracing/trace_collection/compatibility/php/
 $handler = static function (): void {
 	// phpinfo() renders the disable flag as the "Datadog tracing support" row; ini_get('ddtrace.disable') does not show it

@@ -392,7 +392,7 @@ jobs:
                   done
                   for rpm in dist/*.x86_64.rpm dist/*.aarch64.rpm; do
                     case "$rpm" in *.aarch64.rpm) p=linux/arm64 ;; *) p=linux/amd64 ;; esac
-                    # Fedora 45 has OpenSSL 4 in openssl-libs; libssl.so.3 is in openssl3-libs
+                    # Fedora 45 has OpenSSL 4 in openssl-libs. libssl.so.3 is in openssl3-libs.
                     for img in rockylinux/rockylinux:9 fedora:45; do
                       docker run --rm --platform "$p" -v "$PWD/dist:/dist:ro" "$img" \
                         bash -ec "dnf install -yq /dist/$(basename "$rpm") && rapira --help"

@@ -22,7 +22,7 @@ pub enum Event {
     Idle,
     Active,
     Draining,
-    /// A boot cycle ended without a pull of the app. The slot shows STARTING until the app pulls. After the drain decision, the slot shows DRAINING.
+    /// A boot cycle ends without a pull of the app. The slot shows STARTING until the app pulls. After the drain decision, the slot shows DRAINING.
     BootFailed,
 }
 
@@ -61,7 +61,7 @@ pub fn sb_update(event: Event) {
     }
 }
 
-/// The drain decision: the slot shows DRAINING, and the later Idle and BootFailed stores keep it. A request in flight keeps ACTIVE for the request watchdog until its Idle store. It takes the slot, because only the PHP thread sets `SB`.
+/// Stores the drain decision. The slot shows DRAINING, and the later Idle and BootFailed stores keep it. A request in flight keeps ACTIVE for the request watchdog until its Idle store. The function takes the slot, because only the PHP thread sets `SB`.
 pub fn drain(s: &SharedSlot) {
     DRAINING.store(true, Relaxed);
     let _ = s.state.try_update(Release, Relaxed, |state| {
@@ -82,7 +82,7 @@ fn draining_or(state: u32) -> u32 {
 mod tests {
     use super::*;
 
-    /// The slot shows draining after the worker decided to exit. A request in flight stays active until its next pull. One test holds all cases, because the drain decision is process-wide.
+    /// The slot shows draining after the worker decides to exit. A request in flight stays active until its next pull. One test holds all cases, because the drain decision is process-wide.
     #[test]
     fn the_slot_shows_draining_after_the_drain_decision() {
         enum Step {

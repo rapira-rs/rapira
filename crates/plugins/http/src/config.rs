@@ -1,4 +1,4 @@
-//! The [http] table: its settings, the boot checks and the Server that the master forks with.
+//! This module has the settings of the [http] table, the boot checks and the Server that the master forks with.
 
 use std::fs::{OpenOptions, remove_file};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -59,20 +59,20 @@ pub struct UploadsSection {
 pub struct Settings {
     pub listen: ListenAddr,
     pub server_name: String,
-    /// None: the port of the bound address, 80 on a unix socket.
+    /// With None, the server port is the port of the bound address, or 80 on a unix socket.
     pub server_port: Option<u16>,
     pub max_body_size: usize,
     pub write_timeout: Duration,
     pub keepalive_timeout: Duration,
-    /// The multipart limits of a dispatcher pool. None in the other modes.
+    /// The multipart limits of a dispatcher pool. It is None in the other modes.
     pub uploads: Option<Limits>,
-    /// sendFile() containment root; falls back to the entrypoint directory.
+    /// The containment root of sendFile(). The default is the entrypoint directory.
     pub sendfile_root: PathBuf,
     pub static_files: Option<rapira_static_files::Settings>,
     pub pool: PoolSettings,
 }
 
-/// Boot checks run here: entrypoint file, uploads dir, static root.
+/// The boot checks run here: the entrypoint file, the uploads dir and the static root.
 pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
     let settings = settings(section, dir)?;
     check_entrypoint("http.pool", &settings.pool.entrypoint)?;
@@ -85,7 +85,7 @@ pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
     Ok(settings)
 }
 
-/// The settings of `section`. Reads no file.
+/// Returns the settings of `section`. It reads no file.
 fn settings(section: Section, dir: &Path) -> Result<Settings> {
     let listen = parse_listen(
         "http",
@@ -202,7 +202,7 @@ fn resolve_uploads(section: UploadsSection, config_dir: &Path) -> Result<Limits>
 }
 
 fn check_static_root(root: &Path) -> Result<()> {
-    // is_dir() folds every stat error into false; metadata keeps the errno visible.
+    // is_dir() returns false for every stat error, and metadata keeps the errno visible.
     let meta = std::fs::metadata(root)
         .map_err(|e| anyhow!("http.static.root {} is not accessible: {e}", root.display()))?;
     ensure!(
@@ -210,7 +210,7 @@ fn check_static_root(root: &Path) -> Result<()> {
         "http.static.root {} is not a directory",
         root.display()
     );
-    // Serving needs search permission, not read; resolving the dot entry inside the root proves it.
+    // The middleware needs search permission on the root, not read permission. A stat of the dot entry inside the root proves it.
     std::fs::metadata(root.join("."))
         .map_err(|e| anyhow!("http.static.root {} is not accessible: {e}", root.display()))?;
     Ok(())
@@ -243,9 +243,9 @@ impl Server {
         let prepared = rapira_net::bind(&settings.listen).context("plugin http: prepare failed")?;
         tracing::info!(target: "http", "prepared listener on {}", prepared.addr());
         let config = Config {
-            // The bound address: a listen port 0 lets the kernel pick the port.
+            // The bound address, because the kernel picks the port for a listen port 0.
             listen: prepared.addr().clone(),
-            // Leaked once at boot: every request borrows it until the process exits.
+            // The plugin leaks it once at boot, because every request borrows it until the process exits.
             server_name: Box::leak(settings.server_name.into_boxed_str()),
             server_port: settings.server_port.unwrap_or(match prepared.addr() {
                 ListenAddr::Tcp(addr) => addr.port(),
@@ -279,7 +279,7 @@ mod tests {
         error: &'static str,
     }
 
-    /// The list is the activation switch: every configured section must be listed, every listed name must be known, configured, and unique.
+    /// The list turns a middleware on. Every configured section must be in the list. Every listed name must be known, configured and unique.
     #[test]
     fn middleware_list_and_tables_must_agree() {
         let cases = [
@@ -520,7 +520,7 @@ mod tests {
         }
     }
 
-    /// Every knob resolves with unit conversion and a config-relative dir.
+    /// Every setting resolves with unit conversion and a config-relative dir.
     #[test]
     fn uploads_resolve_in_dispatcher_mode_only() {
         let cases = [
@@ -574,7 +574,7 @@ mod tests {
         want: Option<StaticSettings>,
     }
 
-    /// The root resolves config-relative like every other path key; forbid defaults to the PHP source guard. The resolver validates shape only. The middleware constructor normalizes the case.
+    /// The root resolves relative to the config dir like every other path key. The default forbid list is `[".php"]`, which guards the PHP sources. The resolver checks only the shape. The middleware constructor normalizes the case.
     #[test]
     fn static_middleware_resolves() {
         let cases = [

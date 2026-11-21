@@ -2,11 +2,11 @@
 #include "ext/spl/spl_array.h"
 #include <Zend/zend_generators.h>
 
-// rust glue (src/php/values.rs): returns false with a PHP exception pending
+// rust glue (src/php/values.rs); returns false with a PHP exception pending
 extern bool rapira_rs_ctor_grpc_metadata(zend_object *obj, zval *entries);
 
-// rust glue (src/php/call.rs): message returns a plain value; the others
-// return false with a PHP exception pending
+// rust glue (src/php/call.rs); message returns a plain value, and the
+// others return false with a PHP exception pending
 extern bool rapira_rs_grpc_services(zval *rv);
 extern const char *rapira_rs_grpc_message(const rapira_held *held, size_t *len);
 extern bool rapira_rs_grpc_context(const rapira_held *held, zval *memo);
@@ -20,7 +20,7 @@ extern bool rapira_rs_grpc_add(const rapira_held *held, bool trailer,
 extern bool rapira_rs_grpc_snapshot(const rapira_held *held, bool trailer,
                                     zval *rv);
 extern bool rapira_rs_grpc_stream_begin(const rapira_held *held);
-// throws nothing; false: the host closed the call
+// throws nothing; returns false when the host closed the call
 extern bool rapira_rs_grpc_stream_send(const rapira_held *held,
                                        const char *message, size_t len);
 // throws nothing
@@ -77,8 +77,8 @@ static void grpc_status_props(zend_object *obj, zval *code,
 }
 
 // Writes message in the exception base scope, as Exception::__construct does.
-// Writes the readonly status in the GrpcException scope, so a userland
-// subclass can call parent::__construct().
+// Writes the readonly status in the GrpcException scope, so a subclass in
+// the app can call parent::__construct().
 static void grpc_exception_props(zend_object *obj, zval *code,
                                  zend_string *message, zval *details) {
     zend_update_property_str(zend_get_exception_base(obj), obj,
@@ -277,7 +277,7 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, respond) {
         "respond");
 }
 
-// One value that the generator of respond() yielded
+// Sends one value that the generator of respond() yielded
 // (rapira_stream_run_generator). The generator is argument 1 of respond().
 static bool grpc_stream_send(const rapira_held *held, zval *value) {
     if (Z_TYPE_P(value) != IS_STRING) {
@@ -314,7 +314,7 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, fail) {
     Z_PARAM_OBJECT_OF_CLASS(status, rapira_ce_grpc_status)
     ZEND_PARSE_PARAMETERS_END();
 
-    // The constructor always sets $code, $message and $details: slots 0 to 2.
+    // The constructor always sets $code, $message and $details in slots 0 to 2.
     zend_object *obj = Z_OBJ_P(status);
     zend_object *code = Z_OBJ_P(OBJ_PROP_NUM(obj, 0));
     RAPIRA_RETURN_THROWS_UNLESS(

@@ -181,16 +181,16 @@ fn redis_success() -> anyhow::Result<()> {
     success("php_ext/redis-worker.php", "redis:ok")
 }
 
-/// Pins that OPcache started under our SAPI name, which PHP <= 8.4 gates on an allowlist (see build_sapi_module).
+/// Checks that OPcache started under the rapira SAPI name. OPcache <= 8.4 starts only for the SAPI names on an allowlist. See build_sapi_module.
 #[test]
 fn opcache_success() -> anyhow::Result<()> {
     success("php_ext/opcache-worker.php", "opcache:enabled")
 }
 
-/// ext/openssl has no RINIT or RSHUTDOWN (openssl.c), in php-fpm and in rapira alike, so an undrained error in the persistent ring outlives its request.
+/// ext/openssl has no RINIT or RSHUTDOWN (openssl.c), in php-fpm and in rapira alike, so an undrained error in the persistent ring stays after its request.
 #[test]
 fn openssl_error_ring_outlives_the_request() -> anyhow::Result<()> {
-    // the first drain starts the test from an empty ring
+    // The first drain starts the test from an empty ring.
     let out = run(
         "php_ext/openssl-worker.php",
         &[
@@ -209,7 +209,7 @@ fn openssl_error_ring_outlives_the_request() -> anyhow::Result<()> {
         "leak request must succeed (got: {:?})",
         out[1]
     );
-    // the PEM reader leaves one PEM_R_NO_START_LINE entry; only the routine and reason substrings are stable across OpenSSL 1.1.1 and 3.x
+    // The PEM reader leaves one PEM_R_NO_START_LINE entry. Only the routine and reason substrings are the same in OpenSSL 1.1.1 and 3.x.
     assert!(
         out[2].body_string().starts_with("openssl:drained:1:"),
         "the next request must drain exactly one error (got: {:?})",
@@ -258,7 +258,7 @@ fn openssl_error_ring_overwrites_the_oldest() -> anyhow::Result<()> {
 fn browscap_unset_exception() -> anyhow::Result<()> {
     exception("php_ext/browscap-worker.php", "browscap:false")
 }
-/// The `browscap` ini is PHP_INI_SYSTEM and unset here: get_browser() must warn and return false (browscap.c).
+/// The `browscap` ini is PHP_INI_SYSTEM and unset here, so get_browser() must warn and return false (browscap.c).
 #[test]
 fn browscap_unset_warns() -> anyhow::Result<()> {
     let out = run("php_ext/browscap-worker.php", &["/"])?;

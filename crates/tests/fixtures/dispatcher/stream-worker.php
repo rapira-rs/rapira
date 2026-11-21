@@ -1,6 +1,6 @@
 <?php
 
-// Probe toggles ride on the request target: this mode has no superglobals.
+// The request target carries the probe toggles, because this mode has no superglobals.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\WorkDiscardedException;
@@ -39,7 +39,7 @@ try {
             continue;
         }
         if ($probe === 'discard') {
-            \Rapira\log('discard-held'); // the unit is out; the test may drop the receiver
+            \Rapira\log('discard-held'); // the app holds the unit, and the test may drop the receiver after this record
             usleep(200_000);
             try {
                 $ex->writeBody('into the void', eos: false);
@@ -102,7 +102,7 @@ try {
             try {
                 $ex->sendFile('/definitely/not/here');
             } catch (FileNotSendableException) {
-                // raised before anything was written: a 404 is still possible
+                // sendFile() throws before it writes anything, so a 404 is still possible
                 $ex->writeHead(404);
                 $ex->writeBody('nope');
             }
@@ -147,7 +147,7 @@ try {
         }
         if ($probe === 'declared-cl') {
             $ex->writeHead(200, ['content-length' => ['10']]);
-            // under-run: legal here, the plugin closes the connection
+            // a body shorter than the declared length is legal here, and the plugin closes the connection
             $ex->writeBody('abc');
             continue;
         }

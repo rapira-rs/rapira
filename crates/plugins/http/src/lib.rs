@@ -1,4 +1,4 @@
-//! The http plugin: HTTP/1.1 on the configured listener, every request answered from PHP.
+//! The http plugin. It serves HTTP/1.1 on the configured listener, and PHP answers every request.
 
 use std::path::PathBuf;
 use std::time::Duration;
@@ -30,11 +30,11 @@ pub struct Config {
     pub superglobals: bool,
     pub write_timeout: Duration,
     pub keepalive_timeout: Duration,
-    /// `[http].middleware` in config order, the first listed outermost.
+    /// `[http].middleware` in config order. The first entry is outermost.
     pub middleware: Vec<middleware::Layer>,
-    /// Multipart limits of a dispatcher pool; None in the other modes, which feed php-src's own rfc1867 through read_post. `serve` replaces `dir` with the worker's own spool dir under it.
+    /// The multipart limits of a dispatcher pool. It is None in the other modes, which give the body to the rfc1867 parser of php-src through read_post. `serve` replaces `dir` with the worker's own spool dir under it.
     pub uploads: Option<multipart::Limits>,
-    /// sendFile() containment root.
+    /// The containment root of sendFile().
     pub sendfile_root: PathBuf,
 }
 
@@ -45,7 +45,7 @@ pub struct Server {
 
 /// Runs in the master before the fork, with no runtime.
 fn prepare(config: &Config) {
-    // Before the fork: the PHP thread of a worker can read the identity at boot, before serve() runs.
+    // This runs before the fork, because the PHP thread of a worker can read the identity at boot, before serve() runs.
     php::set_server_identity(config.server_name, config.server_port);
     php::set_sendfile_root(config.sendfile_root.clone());
     if let Some(uploads) = &config.uploads {

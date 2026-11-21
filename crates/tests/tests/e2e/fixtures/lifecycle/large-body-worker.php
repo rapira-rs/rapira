@@ -1,5 +1,5 @@
 <?php
-// probe=large writes 10 MiB as 160 writes of one 64 KiB string. probe=fatal writes the same pieces with eos false and then calls an undefined function. probe=stall writes 12 MiB as 12 writes of one 1 MiB string, the last with eos true: the 14 frames fit in the frame channel, so the writes never wait. Any other target gets the instance id.
+// probe=large writes 10 MiB as 160 writes of one 64 KiB string. probe=fatal writes the same pieces with eos false and then calls an undefined function. probe=stall writes 12 MiB as 12 writes of one 1 MiB string, the last with eos true. The 14 frames fit in the frame channel, so the writes never wait. Any other target gets the instance id.
 // The pieces repeat the instance id, so a piece that a later app instance overwrote shows in the body.
 
 use Rapira\Exception\ClosedException;

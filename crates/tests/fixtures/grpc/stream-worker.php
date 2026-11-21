@@ -1,6 +1,6 @@
 <?php
 
-// The application side of the server-streaming tests. The request is an EchoRequest, and its text selects the probe. A reply is an EchoResponse, except in the flood probe and the first message of the stall probe.
+// The app side of the server-streaming tests. The request is an EchoRequest, and its text selects the probe. A reply is an EchoResponse, except in the flood probe, the first message of the stall probe and the second message of the garbage probe.
 
 use Rapira\Exception\ClosedException;
 use Rapira\Exception\WorkDiscardedException;
@@ -20,14 +20,14 @@ function tail(): \Generator
     yield reply('3');
 }
 
-// 1, then 2 and 3 from a delegate generator.
+// Yields 1, then yields 2 and 3 from a delegate generator.
 function count_to_three(): \Generator
 {
     yield reply('1');
     yield from tail();
 }
 
-// Waits $startUs, yields 1, then yields one x each 10 ms. It ends when $catches yields threw because the host closed the call.
+// Waits $startUs microseconds, yields 1, then yields one x each 10 ms. It returns after $catches yields throw because the host closed the call.
 function slow(int $startUs, int $catches): \Generator
 {
     try {
@@ -76,7 +76,7 @@ function serve(ServerStreamingCall $call): void
         case 'empty':
             $md->addHeader('x-h', 'v');
             $md->addTrailer('x-t', 'w');
-            // a generator that ends with no yield
+            // the generator ends with no yield
             $call->respond((function () {
                 yield from [];
             })());
@@ -139,7 +139,7 @@ function serve(ServerStreamingCall $call): void
             $call->fail(new Status(StatusCode::Internal, 'bad yield'));
             return;
         case 'flood':
-            // 200 messages of 64 KiB: more than the flow-control window of the client
+            // 200 messages of 64 KiB are more than the flow-control window of the client
             try {
                 $call->respond((function () {
                     for ($i = 0; $i < 200; $i++) {
@@ -156,7 +156,7 @@ function serve(ServerStreamingCall $call): void
             return;
         case 'stall':
             $call->respond((function () use ($call) {
-                // 8 MiB: more than the connection flow-control window of the test client, 5 MiB (DEFAULT_CONN_WINDOW of the hyper 1.12 HTTP/2 client), so the connection takes no other message while the client does not read
+                // 8 MiB is more than the 5 MiB connection flow-control window of the test client, which is DEFAULT_CONN_WINDOW of the hyper 1.12 HTTP/2 client. So the connection takes no other message while the client does not read
                 yield str_repeat('x', 8 * 1024 * 1024);
                 // hyper takes this message from the body and holds it until the window has room, so it polls the body no more
                 yield reply('1');
@@ -176,20 +176,20 @@ function serve(ServerStreamingCall $call): void
             })());
             return;
         case 'garbage':
-            // the second message is no EchoResponse: 0xff starts a field tag that does not end
+            // the second message is not an EchoResponse, because 0xff starts a field tag that does not end
             $call->respond((function () {
                 yield reply('1');
                 yield "\xff";
             })());
             return;
         case 'drop':
-            // no outcome: the call is lost when its object goes
+            // the call gets no outcome, so it is lost when its object is released
             return;
         case 'fatal':
             $call->respond((function () {
                 yield reply('1');
                 yield reply('2');
-                eval('function reply() {}'); // a second declaration: a fatal error, and the engine bails out
+                eval('function reply() {}'); // a second declaration is a fatal error, and the engine bails out
             })());
             return;
         case 'slow':

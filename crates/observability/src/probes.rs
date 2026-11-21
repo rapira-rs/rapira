@@ -1,6 +1,6 @@
 use rapira_scoreboard::{PoolRegion, SharedSlot};
 
-/// The pools in `pools` without a worker that can serve: no slot of the pool is idle or active.
+/// Returns the pools in `pools` without a worker that can serve. In such a pool, no slot is idle or active.
 pub(crate) fn unready(board: &[SharedSlot], pools: &[PoolRegion]) -> Vec<&'static str> {
     pools
         .iter()

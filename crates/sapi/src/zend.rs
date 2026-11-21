@@ -20,7 +20,7 @@ pub fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
 }
 
 /// # Safety
-/// `ce` a registered class; `obj` alive; the property declared on `ce`.
+/// `ce` is a registered class, `obj` is alive, and `ce` declares the property.
 pub unsafe fn prop_stringl(
     ce: *mut zend_class_entry,
     obj: *mut zend_object,
@@ -73,9 +73,9 @@ pub unsafe fn prop_double(ce: *mut zend_class_entry, obj: *mut zend_object, name
     unsafe { zend_update_property_double(ce, obj, name.as_ptr(), name.count_bytes(), v) }
 }
 
-/// `zend_update_property` addrefs `zv`; the caller keeps its ref and dtors it.
+/// `zend_update_property` addrefs `zv`; the caller keeps its ref and releases it.
 /// # Safety
-/// As `prop_stringl`; `zv` initialized.
+/// As `prop_stringl`, and `zv` is initialized.
 pub unsafe fn prop_zval(
     ce: *mut zend_class_entry,
     obj: *mut zend_object,
@@ -87,7 +87,7 @@ pub unsafe fn prop_zval(
 
 /// The slot offset of the property `name` declared on `ce`. Panics when `ce` declares no such property.
 /// # Safety
-/// `ce` a registered class.
+/// `ce` is a registered class.
 pub unsafe fn prop_offset(ce: *mut zend_class_entry, name: &CStr) -> u32 {
     unsafe {
         let zv = crate::zend_hash_str_find(
@@ -102,7 +102,7 @@ pub unsafe fn prop_offset(ce: *mut zend_class_entry, name: &CStr) -> u32 {
 
 /// Moves `value` into the property slot at `offset` (OBJ_PROP in Zend/zend_object_handlers.h) and clears IS_PROP_UNINIT and IS_PROP_REINITABLE, as the first write in zend_std_write_property does. The slot takes the caller's ref.
 /// # Safety
-/// `obj` a new object whose slot at `offset` is uninitialized; `value` holds the declared type of the property.
+/// `obj` is a new object whose slot at `offset` is uninitialized, and `value` holds the declared type of the property.
 pub unsafe fn slot_init(obj: *mut zend_object, offset: u32, value: *const zval) {
     unsafe {
         let slot = obj.byte_add(offset as usize).cast::<zval>();
@@ -113,7 +113,7 @@ pub unsafe fn slot_init(obj: *mut zend_object, offset: u32, value: *const zval) 
 }
 
 /// # Safety
-/// As `slot_init`; the property type accepts a string.
+/// As `slot_init`, and the property type accepts a string.
 pub unsafe fn slot_stringl(obj: *mut zend_object, offset: u32, bytes: &[u8]) {
     unsafe {
         let mut v: zval = std::mem::zeroed();
@@ -124,11 +124,11 @@ pub unsafe fn slot_stringl(obj: *mut zend_object, offset: u32, bytes: &[u8]) {
 
 /// Copies the parts of `chunks` in order into one new string and moves the string into the slot at `offset`.
 /// # Safety
-/// As `slot_init`; the property type accepts a string.
+/// As `slot_init`, and the property type accepts a string.
 pub unsafe fn slot_string_from_chunks(obj: *mut zend_object, offset: u32, chunks: &Chunks) {
     unsafe {
         let mut v: zval = std::mem::zeroed();
-        // NULL for an empty body: then there are no parts and the loop does not run.
+        // The shim returns NULL for an empty body. Then there are no parts, and the loop does not run.
         let dst = rapira_zval_string_alloc(&mut v, chunks.len()).cast::<u8>();
         let mut at = 0;
         for part in chunks.parts() {
@@ -140,7 +140,7 @@ pub unsafe fn slot_string_from_chunks(obj: *mut zend_object, offset: u32, chunks
 }
 
 /// # Safety
-/// As `slot_init`; the property type accepts a string and null.
+/// As `slot_init`, and the property type accepts a string and null.
 pub unsafe fn slot_str_or_null(obj: *mut zend_object, offset: u32, bytes: Option<&[u8]>) {
     unsafe {
         match bytes {
@@ -151,7 +151,7 @@ pub unsafe fn slot_str_or_null(obj: *mut zend_object, offset: u32, bytes: Option
 }
 
 /// # Safety
-/// As `slot_init`; the property type accepts null.
+/// As `slot_init`, and the property type accepts null.
 pub unsafe fn slot_null(obj: *mut zend_object, offset: u32) {
     unsafe {
         let mut v: zval = std::mem::zeroed();
@@ -161,7 +161,7 @@ pub unsafe fn slot_null(obj: *mut zend_object, offset: u32) {
 }
 
 /// # Safety
-/// As `slot_init`; the property type is int.
+/// As `slot_init`, and the property type is int.
 pub unsafe fn slot_long(obj: *mut zend_object, offset: u32, n: i64) {
     unsafe {
         let mut v: zval = std::mem::zeroed();
@@ -172,7 +172,7 @@ pub unsafe fn slot_long(obj: *mut zend_object, offset: u32, n: i64) {
 }
 
 /// # Safety
-/// As `slot_init`; the property type is float.
+/// As `slot_init`, and the property type is float.
 pub unsafe fn slot_double(obj: *mut zend_object, offset: u32, d: f64) {
     unsafe {
         let mut v: zval = std::mem::zeroed();
@@ -183,32 +183,32 @@ pub unsafe fn slot_double(obj: *mut zend_object, offset: u32, d: f64) {
 }
 
 /// # Safety
-/// Engine booted on this thread.
+/// The engine is started on this thread.
 pub unsafe fn exception_pending() -> bool {
     unsafe { !executor_globals.exception.is_null() }
 }
 
-/// instanceof_function is inline; this is its two-halves replication.
+/// instanceof_function is inline, so this function repeats its two halves: the identity check and the exported slow path.
 /// # Safety
-/// Both class entries registered.
+/// Both class entries are registered.
 pub unsafe fn instanceof(ce: *const zend_class_entry, base: *const zend_class_entry) -> bool {
     ce == base || unsafe { crate::instanceof_function_slow(ce, base) }
 }
 
 /// # Safety
-/// `s` a live zend_string; the borrow must not outlive it.
+/// `s` is a live zend_string. Its bytes must not change, and the borrow must not outlive it.
 pub unsafe fn zstr_bytes<'a>(s: *const zend_string) -> &'a [u8] {
     unsafe { std::slice::from_raw_parts((*s).val.as_ptr().cast::<u8>(), (*s).len) }
 }
 
 /// # Safety
-/// `zv` readable.
+/// `zv` is readable.
 pub unsafe fn zval_type(zv: *const zval) -> u32 {
     unsafe { u32::from((*zv).u1.v.type_) }
 }
 
 /// # Safety
-/// `zv` a live zval; a reference's payload stays owned by the reference.
+/// `zv` is a live zval. The reference keeps the ownership of its payload.
 pub unsafe fn deref(zv: *mut zval) -> *mut zval {
     unsafe {
         if zval_type(zv) == IS_REFERENCE {
@@ -219,9 +219,9 @@ pub unsafe fn deref(zv: *mut zval) -> *mut zval {
     }
 }
 
-/// The engine writes a `__get` or hook result into `rv` and returns a pointer into it, so `rv` must outlive the returned pointer. Never NULL: an unset property gives `EG(uninitialized_zval)`.
+/// The engine writes a `__get` or hook result into `rv` and returns a pointer into it, so `rv` must outlive the returned pointer. The pointer is never NULL, because an unset property gives `EG(uninitialized_zval)`.
 /// # Safety
-/// `ce` a registered class; `obj` alive; engine active.
+/// `ce` is a registered class, `obj` is alive, and the engine is active.
 pub unsafe fn read_prop(
     ce: *mut zend_class_entry,
     obj: *mut zend_object,
@@ -240,7 +240,7 @@ pub unsafe fn read_prop(
     }
 }
 
-// HASH_KEY_IS_STRING is a #define on 8.4 and an enum constant on 8.5, so it is hardcoded and compared through i64::from in `Entries::next`.
+// HASH_KEY_IS_STRING is a #define on 8.4 and an enum constant on 8.5, so the value is hardcoded and Entries::next compares it through i64::from.
 const HASH_KEY_IS_STRING: i64 = 1;
 
 /// The key of one HashTable entry. `Str` is the engine-owned key string and lives as long as the table.
@@ -262,7 +262,7 @@ pub struct Entries {
 }
 
 /// # Safety
-/// `ht` a live array that outlives the walk.
+/// `ht` is a live array that outlives the walk.
 pub unsafe fn entries(ht: *mut HashTable) -> Entries {
     let mut pos: HashPosition = 0;
     unsafe { zend_hash_internal_pointer_reset_ex(ht, &mut pos) };
@@ -272,7 +272,7 @@ pub unsafe fn entries(ht: *mut HashTable) -> Entries {
 impl Iterator for Entries {
     type Item = Entry;
 
-    /// `&raw mut self.pos`: the pos parameter is *mut on PHP 8.4 and *const on 8.5.
+    /// The call passes `&raw mut self.pos`, because the pos parameter is *mut on PHP 8.4 and *const on 8.5.
     fn next(&mut self) -> Option<Self::Item> {
         unsafe {
             let entry = zend_hash_get_current_data_ex(self.ht, &raw mut self.pos);
@@ -297,7 +297,7 @@ impl Iterator for Entries {
 }
 
 /// # Safety
-/// Engine active on this thread; can bailout on OOM like any allocating call.
+/// The engine is active on this thread. The call can bail out on OOM, as any call that allocates can.
 pub unsafe fn throw_error(msg: &CStr) {
     unsafe {
         zend_throw_error(std::ptr::null_mut(), c"%s".as_ptr(), msg.as_ptr());
@@ -313,7 +313,7 @@ pub unsafe fn throw_value_error(msg: &CStr) {
 }
 
 /// # Safety
-/// As `throw_error`; `ce` a registered exception class.
+/// As `throw_error`, and `ce` is a registered exception class.
 pub unsafe fn throw_exception(ce: *mut zend_class_entry, msg: &CStr) {
     unsafe {
         zend_throw_exception(ce, msg.as_ptr(), 0);

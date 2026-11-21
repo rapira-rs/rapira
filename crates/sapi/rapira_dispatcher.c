@@ -1,7 +1,8 @@
 #include "rapira_sapi.h"
 
-// rust glue; a verb that reports false has a throw pending, except an empty
-// tryReceive, which reports false with no throw
+// Rust functions. rapira_rs_receive and rapira_rs_try_receive return false with
+// a throw pending, except an empty tryReceive, which returns false with no
+// throw
 extern void rapira_rs_log_call(zend_string *message, zend_object *level,
                                HashTable *context);
 extern bool rapira_rs_receive(int64_t timeout_us, zval *rv);
@@ -26,7 +27,7 @@ ZEND_FUNCTION(Rapira_get_version) {
     RETURN_STRINGL(RAPIRA_VERSION, sizeof(RAPIRA_VERSION) - 1);
 }
 
-// rapira_mode is set once before the PHP thread starts (start.rs), so the case is stable for the process
+// start.rs sets rapira_mode once before the PHP thread starts, so the case is stable for the process
 ZEND_FUNCTION(Rapira_get_mode) {
     ZEND_PARSE_PARAMETERS_NONE();
 
@@ -91,7 +92,8 @@ ZEND_FUNCTION(Rapira_handle_request) {
     int action = rapira_rs_handle_request(&fci, &fcc);
     rapira_in_handle_request = false;
     if (action == RAPIRA_HANDLE_RECYCLE) {
-        // response sealed in Rust; unwind so no PHP runs post-longjmp
+        // Rust sealed the response. Unwind, so that no PHP code runs after the
+        // longjmp
         zend_bailout();
     }
     RETURN_BOOL(action == RAPIRA_HANDLE_CONTINUE);
@@ -104,14 +106,14 @@ ZEND_FUNCTION(Rapira_log) {
     ZEND_PARSE_PARAMETERS_START(1, 3)
     Z_PARAM_STR(message)
     Z_PARAM_OPTIONAL
-    // the log level is a PHP enum: parsed as an object of that class
+    // the log level is a PHP enum, so ZPP parses it as an object of that class
     Z_PARAM_OBJECT_OF_CLASS(level, rapira_ce_log_level)
     Z_PARAM_ARRAY_HT(context)
     ZEND_PARSE_PARAMETERS_END();
 
     rapira_rs_log_call(message, level ? Z_OBJ_P(level) : NULL, context);
 
-    // log() never throws: drop an exception from a context jsonSerialize()
+    // log() never throws, so drop an exception from a context jsonSerialize()
     if (EG(exception) && !zend_is_unwind_exit(EG(exception)) &&
         !zend_is_graceful_exit(EG(exception))) {
         zend_clear_exception();
@@ -206,7 +208,7 @@ ZEND_FUNCTION(Rapira_get_objects) {
     zend_hash_destroy(&wanted);
 }
 
-// the plugin's root TOML section
+// the name of the root TOML section of the plugin
 ZEND_FUNCTION(rapira_sapi_dispatcher_name) {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_STRINGL(rapira_plugin_name, rapira_plugin_name_len);

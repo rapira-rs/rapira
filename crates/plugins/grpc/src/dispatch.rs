@@ -92,13 +92,13 @@ fn request_stream() -> ConnectError {
     ConnectError::unimplemented("rapira serves unary and server-streaming methods only")
 }
 
-/// Most gRPC clients accept gzip on every call. As in grpc-go, a gRPC reply uses gzip only when the request did: https://github.com/grpc/grpc-go/blob/v1.84.0/server.go#L1408-L1421
+/// Most gRPC clients accept gzip on every call. As in grpc-go, a gRPC reply uses gzip only when the request did. See https://github.com/grpc/grpc-go/blob/v1.84.0/server.go#L1408-L1421
 fn plain_reply(ctx: &RequestContext) -> bool {
     matches!(ctx.protocol(), Some(Protocol::Grpc | Protocol::GrpcWeb))
         && ctx.header("grpc-encoding").is_none_or(|v| v == "identity")
 }
 
-/// The call of one request: its message as binary protobuf, and the request facts that PHP reads. It takes the headers out of `ctx`.
+/// Builds the call of one request: its message as binary protobuf, and the request facts that PHP reads. It takes the headers out of `ctx`.
 fn call(
     schema: &Schema,
     method: &Method,
@@ -135,7 +135,7 @@ fn call(
     })
 }
 
-/// One output message in the format of the client.
+/// Encodes one output message in the format of the client.
 fn encode(
     schema: &Schema,
     path: &str,
@@ -155,7 +155,7 @@ fn encode(
     }
 }
 
-/// PHP dropped the call with no outcome.
+/// Logs and returns the error for a lost call. PHP dropped the call with no outcome.
 fn lost(path: &str) -> ConnectError {
     tracing::warn!(target: "grpc", "{path}: the app lost the call");
     ConnectError::internal("internal error")
@@ -182,11 +182,11 @@ async fn unary(
     let bytes = call.message.len();
     let (tx, reply) = oneshot::channel();
     let call = GrpcState::new(call, Reply::Unary(tx));
-    // A refusal before dispatch: PHP never saw the call.
+    // The intake refuses the call before dispatch, so PHP never sees it.
     if let Err(e) = intake.submit(Unit::Dispatcher(Box::new(call)), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));
     }
-    // A closed channel means that PHP lost the call. Dropping this future closes the call for PHP.
+    // A closed channel means that PHP lost the call. The drop of this future closes the call for PHP.
     let Ok(reply) = reply.await else {
         return Err(lost(&path));
     };
@@ -205,7 +205,7 @@ async fn unary(
     if plain_reply {
         response.compress = Some(false);
     }
-    // A Connect reply is compressed when the client accepts it, so a cache keys a Connect GET reply on Accept-Encoding: https://www.rfc-editor.org/rfc/rfc9110#section-12.5.5
+    // A Connect reply is compressed when the client accepts it, so a cache keys a Connect GET reply on Accept-Encoding. See https://www.rfc-editor.org/rfc/rfc9110#section-12.5.5
     if protocol == Protocol::Connect {
         response.headers.append(
             http::header::VARY,
@@ -234,7 +234,7 @@ async fn server_streaming(
     let (parts_tx, parts) = mpsc::channel(1);
     let reply = StreamReply::new(head_tx, parts_tx, until);
     let call = GrpcState::new(call, Reply::Stream(reply));
-    // A refusal before dispatch: PHP never saw the call.
+    // The intake refuses the call before dispatch, so PHP never sees it.
     if let Err(e) = intake.submit(Unit::Dispatcher(Box::new(call)), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));
     }
@@ -264,7 +264,7 @@ async fn server_streaming(
     Ok(response)
 }
 
-/// The body of a streaming response after its head: the parts that PHP sends. Its drop closes the call for PHP.
+/// The body of a streaming response after its head. It holds the parts that PHP sends. Its drop closes the call for PHP.
 struct Body {
     parts: mpsc::Receiver<Part>,
     /// The deadline of the call. connectrpc bounds only the handler with it, so the body ends the stream there.
@@ -277,11 +277,11 @@ struct Body {
 }
 
 impl Body {
-    /// One message of the response stream, with the body for the next step. None: PHP ended the stream with success. An error ends the stream and drops the body.
+    /// Returns one message of the response stream, with the body for the next step. Returns None when PHP ended the stream with success. An error ends the stream and drops the body.
     async fn next(mut self) -> Result<Option<(EncodedBody, Self)>, ConnectError> {
         let part = match self.until {
             None => self.parts.recv().await,
-            // timeout_at polls recv first, so the check keeps a generator that always has a message ready from a stream past the deadline.
+            // timeout_at polls recv first, so this check ends the stream at the deadline even when the generator always has a message ready.
             Some(until) if Instant::now() >= until => return Err(deadline()),
             Some(until) => match timeout_at(until.into(), self.parts.recv()).await {
                 Ok(part) => part,

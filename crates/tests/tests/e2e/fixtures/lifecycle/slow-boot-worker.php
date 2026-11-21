@@ -1,5 +1,5 @@
 <?php
-// Sleeps 3 s before its first receive(): the slot shows starting until the first pull.
+// Sleeps 3 s before its first receive(), so the slot shows starting until the first pull.
 
 use Rapira\Exception\ClosedException;
 

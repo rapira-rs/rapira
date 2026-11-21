@@ -1,5 +1,5 @@
 <?php
-// The agent takes the web path (the SAPI name is not "cli") and must load, register its API, and leave the request cycle unchanged with no daemon and no valid license.
+// The SAPI name is not "cli", so the agent takes the web path. It must load, register its API and leave the request cycle unchanged with no daemon and no valid license.
 $handler = static function (): void {
 	if (($_GET['boom'] ?? '') === '1') {
 		throw new RuntimeException('newrelic-worker: uncaught');

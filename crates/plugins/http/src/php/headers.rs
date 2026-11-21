@@ -84,7 +84,7 @@ pub(super) fn parse_content_length(v: &[u8]) -> Option<u64> {
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.6.2
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.5
 /// # Safety
-/// `ht` NULL or a live array; entries stay ZPP-owned.
+/// `ht` is NULL or a live array. ZPP owns the entries.
 pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<HeaderMap, &'static CStr> {
     let mut map = HeaderMap::new();
     if ht.is_null() {

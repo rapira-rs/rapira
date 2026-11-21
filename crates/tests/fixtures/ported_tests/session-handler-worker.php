@@ -35,7 +35,7 @@ class ArrayHandler implements \SessionHandlerInterface
 		return 0;
 	}
 
-	// PHP 8.6 deprecates save handlers without create_sid()/validateId() (required in 9.0)
+	// PHP 8.6 deprecates save handlers without create_sid() and validateId(). PHP 9.0 requires them.
 	public function create_sid(): string
 	{
 		return bin2hex(random_bytes(8));
@@ -57,7 +57,7 @@ $handler = static function (): void {
 		echo "REGISTERED save_handler=", ini_get('session.save_handler');
 		return;
 	}
-	// no registration here: request 1's handler must still be installed
+	// this request registers no handler, so the handler of request 1 must still be installed
 	$err = '';
 	set_error_handler(static function (int $no, string $msg) use (&$err): bool {
 		$err .= $msg;

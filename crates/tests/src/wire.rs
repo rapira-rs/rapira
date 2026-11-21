@@ -34,7 +34,7 @@ pub fn submit(
 
 /// Sends `req` to `addr` on a new connection and returns once the connection is open.
 /// The receiver gets `Head`, one `Chunk` per body frame, and `End`; a body error is `End { truncated: true }`, and no frame means that no response head arrived.
-/// Dropping the receiver closes the connection at once.
+/// When the caller drops the receiver, the connection closes at once.
 pub async fn submit_async(
     addr: SocketAddr,
     req: http::Request<Vec<u8>>,
@@ -67,7 +67,7 @@ async fn exchange(
             forward(response, head_only, tx).await;
         }
     };
-    // The connection ends once `sender` is gone with the reply, so both futures finish.
+    // The reply future owns sender. When the reply ends, sender drops and the connection ends, so both futures finish.
     let _ = tokio::join!(conn, reply);
 }
 

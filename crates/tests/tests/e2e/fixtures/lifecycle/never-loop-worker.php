@@ -1,3 +1,3 @@
 <?php
-// Boots and returns without ever calling handle_request(): a boot failure.
+// The entrypoint returns and never calls handle_request(), so this is a boot failure.
 \Rapira\log('booted');

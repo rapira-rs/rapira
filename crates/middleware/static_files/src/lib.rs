@@ -41,7 +41,7 @@ impl StaticFiles {
             entry.make_ascii_lowercase();
         }
         Self {
-            // The URL space belongs to PHP: a directory URL is the app's route, not an
+            // The URL space belongs to PHP, so a directory URL is the app's route, not an
             // implicit index.html.
             dir: ServeDir::with_backend(root, CachingBackend::default())
                 .append_index_html_on_directories(false)
@@ -61,8 +61,8 @@ impl StaticFiles {
         if decoded.split('/').any(|segment| segment.starts_with('.')) {
             return false;
         }
-        // The last non-empty segment is the served file; the component walk drops trailing
-        // separators, so `/index.php%2F` still names index.php here.
+        // The last non-empty segment is the served file. The component walk drops trailing
+        // separators, so /index.php%2F still names index.php here.
         let file = decoded
             .rsplit('/')
             .find(|s| !s.is_empty())
@@ -91,7 +91,7 @@ fn is_miss(e: &std::io::Error) -> bool {
 }
 
 impl StaticFiles {
-    /// The middleware as a tower layer over the http plugin's inner service.
+    /// Returns the middleware as a tower layer over the http plugin's inner service.
     pub fn layer(
         self,
     ) -> BoxCloneServiceLayer<Inner, http::Request<Body>, http::Response<Body>, Infallible> {
@@ -117,7 +117,7 @@ impl StaticFiles {
         let mut dir = self.dir.clone();
         let mut served = dir.try_call(probe(&req)).await;
         // ServeDir does not check If-Range. A validator other than the current strong ETag gets
-        // the whole file: https://www.rfc-editor.org/rfc/rfc9110#section-13.1.5
+        // the whole file. https://www.rfc-editor.org/rfc/rfc9110#section-13.1.5
         if let Ok(res) = &served
             && res.headers().contains_key(header::CONTENT_RANGE)
             && let Some(validator) = req.headers().get(header::IF_RANGE)

@@ -1,5 +1,5 @@
 <?php
-// Serves one request and returns; every later boot returns at once: a failed re-boot after the app served.
+// Serves one request and returns. Every later boot returns at once. This simulates a failed boot after the app served.
 
 $flag = __DIR__ . '/served.flag';
 if (file_exists($flag)) {

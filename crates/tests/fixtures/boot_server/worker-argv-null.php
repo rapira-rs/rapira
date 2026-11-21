@@ -1,5 +1,5 @@
 <?php
-// null has no refcount: a $_SERVER built from the $argv global after this line crashes the worker
+// null has no refcount, so a $_SERVER built from the $argv global after this line crashes the worker
 $argv = null;
 $boot = require __DIR__ . '/values.php';
 $handler = static function () use ($boot): void {

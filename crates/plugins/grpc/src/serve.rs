@@ -137,7 +137,7 @@ impl Serving {
         });
     }
 
-    /// Waits out the connections in flight. The acceptor is already gone.
+    /// Waits for the connections in flight to close. The acceptor is already gone.
     async fn drain(self, fatal: Option<anyhow::Error>, grace: Duration) -> Result<()> {
         // StaticChecker::shutdown only sets NOT_SERVING. A Watch stream ends only when its service is removed, and an open stream holds its connection until the grace ends.
         self.health.shutdown();
@@ -179,7 +179,7 @@ impl Serve for Serving {
     }
 }
 
-/// A gRPC error carries its whole status in the trailers. connectrpc also copies the code and the message into the head, and a client that takes the status from the head, such as tonic, then drops the details and the trailers: https://github.com/connectrpc/connect-rust/issues/286. Only that copy puts these fields in a head, because PHP cannot set a `grpc-` field.
+/// A gRPC error carries its whole status in the trailers. connectrpc also copies the code and the message into the head. A client that takes the status from the head, such as tonic, then drops the details and the trailers. See https://github.com/connectrpc/connect-rust/issues/286. Only that copy puts these fields in a head, because PHP cannot set a `grpc-` field.
 fn status_in_trailers(
     mut response: http::Response<ConnectRpcBody>,
 ) -> http::Response<ConnectRpcBody> {

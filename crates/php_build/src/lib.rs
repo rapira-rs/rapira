@@ -17,7 +17,7 @@ pub struct PhpVersion {
     pub minor: u32,
 }
 
-/// Runs `php-config` (or `$PHP_CONFIG`) and fails with its stderr when it cannot run.
+/// Runs `$PHP_CONFIG`, or `php-config` when it is unset, and fails with its stderr when it cannot run.
 pub fn discover() -> anyhow::Result<Php> {
     let includes: Vec<String> = php_config("--includes")?
         .split_whitespace()

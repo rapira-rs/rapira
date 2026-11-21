@@ -1,4 +1,4 @@
-//! The stream layer that every plugin shares: the park of the PHP thread for an event of the host. The generator loop is in rapira_stream.c.
+//! The stream layer that every plugin shares. It parks the PHP thread until the host has an event. The generator loop is in rapira_stream.c.
 
 use std::future::Future;
 use std::sync::OnceLock;
@@ -16,15 +16,15 @@ const ZEND_TIMER: libc::c_int = libc::ITIMER_REAL;
 #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
 const ZEND_TIMER: libc::c_int = libc::ITIMER_PROF;
 
-/// Runs `park` with the execution timer paused, then restores the time that the timer had left. A parked thread never reaches an opcode boundary, and on NTS a second expiry would `_exit(124)`. Call it on the PHP thread: the timer belongs to the process.
+/// Runs `park` with the execution timer paused, then restores the time that the timer had left. A parked thread never reaches an opcode boundary, and on NTS a second expiry would `_exit(124)`. Call it on the PHP thread, because the timer belongs to the process.
 pub fn paused<R>(park: impl FnOnce() -> R) -> R {
-    // SAFETY: the all-zero itimerval is a valid value: a timer that is off.
+    // SAFETY: the all-zero itimerval is a valid value. It is a timer that is off.
     let off: libc::itimerval = unsafe { std::mem::zeroed() };
     let mut left = off;
     // SAFETY: both pointers are live itimerval values. https://man7.org/linux/man-pages/man2/setitimer.2.html
     unsafe { libc::setitimer(ZEND_TIMER, &off, &mut left) };
     let result = park();
-    // A zero value is a timer that was off or that expired: an expired timer already set EG(timed_out).
+    // A zero value is a timer that was off or that expired. An expired timer has already set EG(timed_out).
     if left.it_value.tv_sec != 0 || left.it_value.tv_usec != 0 {
         #[cfg(target_os = "linux")]
         less_one_tick(&mut left.it_value);
@@ -34,7 +34,7 @@ pub fn paused<R>(park: impl FnOnce() -> R) -> R {
     result
 }
 
-/// Takes one tick from the time that the timer had left. Linux adds one tick to an ITIMER_PROF value at each arming, so each park would give the script one tick more. https://github.com/torvalds/linux/blob/v7.3/kernel/time/itimer.c#L201-L205 The resolution of a coarse clock is the same tick. https://github.com/torvalds/linux/blob/v7.3/include/vdso/ktime.h#L13
+/// Takes one tick from the time that the timer had left. Linux adds one tick to an ITIMER_PROF value at each arming, so each park would give the app one tick more. https://github.com/torvalds/linux/blob/v7.3/kernel/time/itimer.c#L201-L205 The resolution of a coarse clock is the same tick. https://github.com/torvalds/linux/blob/v7.3/include/vdso/ktime.h#L13
 #[cfg(target_os = "linux")]
 fn less_one_tick(left: &mut libc::timeval) {
     // SAFETY: the all-zero timespec is a valid value.
@@ -55,7 +55,7 @@ pub enum Step<T> {
     End,
     /// The host closed the unit.
     Closed,
-    /// No item within the wait.
+    /// No item arrives within the wait.
     Timeout,
 }
 
@@ -80,7 +80,7 @@ async fn first<T>(
     }
 }
 
-/// Blocks the PHP thread until `closed` completes, `next` completes or the wait ends, in this order of precedence. The PHP thread drives only these futures on the plugin runtime; the IO threads of the runtime move the sockets and the timers.
+/// Blocks the PHP thread until `closed` completes, `next` completes or the wait ends, in this order of precedence. The PHP thread drives only these futures on the plugin runtime; the IO threads of the runtime handle the sockets and the timers.
 pub fn wait<T>(
     next: impl Future<Output = Option<T>>,
     closed: impl Future<Output = ()>,
@@ -99,13 +99,13 @@ mod tests {
 
     use super::*;
 
-    /// Expected values: the decided order of a park is the close first, then the item, then the time. A wait of zero polls each future once.
+    /// The decided order of a park gives the expected values: the close first, then the item, then the time. A wait of zero polls each future once.
     #[tokio::test(start_paused = true)]
     async fn the_first_event_of_a_park_follows_the_order_close_item_time() {
         struct Case {
             name: &'static str,
             closed: bool,
-            /// None: no item is ready.
+            /// None means that no item is ready.
             next: Option<Option<u8>>,
             wait: Wait,
             expected: Step<u8>,

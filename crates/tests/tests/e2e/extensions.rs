@@ -32,7 +32,7 @@ fn rng_draw(body: &str) -> RngDraw {
     }
 }
 
-/// No two workers may emit identical first draws; the cached draw also pins that the entrypoint top level runs once per worker.
+/// No two workers may emit identical first draws. The cached draw also proves that the top level of the entrypoint runs once per worker.
 fn assert_distinct_first_draws(fixture: &str) {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path(fixture))
         .processes(4)
@@ -67,7 +67,7 @@ fn assert_distinct_first_draws(fixture: &str) {
             break;
         }
     }
-    // accept scheduling may starve a worker (seen on macOS); two distinct pids prove the claim
+    // Accept scheduling may starve a worker, as seen on macOS. Two distinct pids prove the claim.
     assert!(
         per_pid.len() >= 2,
         "at least two workers must answer\n{}",
@@ -130,7 +130,7 @@ fn browscap_probe(srv: &Server, ua: &str) -> String {
     String::from_utf8_lossy(&body).into_owned()
 }
 
-/// The `browscap` ini is PHP_INI_SYSTEM: MINIT parses the file once into persistent memory, in the master before the fork.
+/// The `browscap` ini is PHP_INI_SYSTEM. MINIT parses the file once into persistent memory, in the master before the fork.
 #[test]
 fn get_browser_uses_browscap_and_isolates_user_agent_requests() {
     let srv = Spawn::http(Mode::Worker, fixture_path("browscap/browscap-worker.php"))
@@ -205,7 +205,7 @@ fn table_and_pid(body: &str) -> BrowscapReply {
     }
 }
 
-/// One MINIT parse in the master serves every worker: identical answers from distinct pids, request after request.
+/// One MINIT parse in the master serves every worker. Distinct pids give identical answers, request after request.
 #[test]
 fn browscap_table_is_shared_and_stable_across_workers() {
     let srv = Spawn::http(Mode::Worker, fixture_path("browscap/browscap-worker.php"))
@@ -226,7 +226,7 @@ fn browscap_table_is_shared_and_stable_across_workers() {
             break;
         }
     }
-    // accept scheduling may starve a worker (seen on macOS); two distinct pids prove the claim
+    // Accept scheduling may starve a worker, as seen on macOS. Two distinct pids prove the claim.
     assert!(
         pids.len() >= 2,
         "at least two workers must answer\n{}",

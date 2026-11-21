@@ -27,7 +27,7 @@ pub struct Server {
 }
 
 impl Server {
-    /// Master side, before the fork: binds the listener.
+    /// Binds the listener. The master calls this before the fork.
     pub fn new(settings: Settings, build: Build) -> Result<Server> {
         let prepared = rapira_net::bind(&settings.listen)?;
         tracing::info!(target: "observability", "prepared listener on {}", prepared.addr());
@@ -40,7 +40,7 @@ impl Server {
         })
     }
 
-    /// In the observability process. Serves the routes of the configured sub-tables until `stop` turns true, then waits for the requests in flight within `drain_grace`. `pools` are the pools that the metrics and `/readyz` report.
+    /// Runs in the observability process. Serves the routes of the configured sub-tables until `stop` turns true, then waits for the requests in flight within `drain_grace`. `pools` are the pools that the metrics and `/readyz` report.
     pub fn serve(
         self,
         board: &'static [SharedSlot],
@@ -73,7 +73,7 @@ impl Server {
         };
         let fatal = acceptor.run(rt.handle(), &serving);
         let Serving { graceful, .. } = serving;
-        // `tokio::time::timeout` panics outside a runtime context, so the call runs inside `block_on`.
+        // tokio::time::timeout panics outside a runtime context, so the call runs inside block_on.
         let drained =
             rt.block_on(async { tokio::time::timeout(drain_grace, graceful.shutdown()).await });
         if drained.is_err() {
@@ -94,7 +94,7 @@ struct Routes {
 }
 
 impl Routes {
-    /// One pass over the board, then one `/proc` read for each live worker.
+    /// Reads the board in one pass, then reads `/proc` once for each live worker.
     fn metrics_text(&self) -> String {
         let mut pools = stats::board_stats(self.board, self.pools);
         for worker in pools.iter_mut().flat_map(|p| p.workers.iter_mut()) {

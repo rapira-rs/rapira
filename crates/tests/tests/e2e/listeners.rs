@@ -20,7 +20,7 @@ const REQ: Duration = Duration::from_secs(10);
 const ECHO: &str = "shared/echo-worker.php";
 const GRPC_ECHO: &str = "grpc/echo-worker.php";
 
-/// With no server_port, PHP sees the port of the bound address, as `php -S 127.0.0.1:0` does, and port 80 on a unix socket. With port 0 the kernel picks the port: the `prepared listener on` record of the master and the `listening on` record of the worker name that port, and the server answers there.
+/// With no server_port, PHP sees the port of the bound address, as `php -S 127.0.0.1:0` does, and port 80 on a unix socket. With port 0, the kernel picks the port. The `prepared listener on` record of the master and the `listening on` record of the worker name that port, and the server answers there.
 #[test]
 fn the_default_server_port_is_the_bound_port() {
     struct Case {
@@ -31,7 +31,7 @@ fn the_default_server_port_is_the_bound_port() {
         listen: ListenAddr,
         /// The text before the port in the body line that names it.
         before_port: &'static str,
-        /// The port that PHP sees. None: the port that the kernel picked.
+        /// The port that PHP sees, or None for the port that the kernel picked.
         port: Option<u16>,
     }
     let dir = scratch_dir();
@@ -224,7 +224,7 @@ fn two_pools_on_one_address_fail_the_boot() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// One worker takes every connection. The connections after the first wait in the backlog while the worker moves its listener entry to the tail of the wait queue after each accept, and no new connection arrives to wake it again.
+/// One worker takes every connection. The connections after the first wait in the backlog. After each accept, the worker moves its listener entry to the tail of the wait queue, and no new connection arrives to wake it again.
 #[test]
 fn queued_connections_survive_each_accept() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path(ECHO)).spawn();
@@ -268,7 +268,7 @@ fn signals_during_the_boot_do_not_stop_the_master() {
     let mut ini = std::fs::read_to_string(&ini)
         .unwrap_or_else(|e| panic!("read {}: {e}", ini.display()))
         + &format!("\nopcache.preload = {}\n", preload.display());
-    // PHP needs opcache.preload_user under uid 0; `root` keeps the preload in the master process, where the signals must land: https://www.php.net/manual/en/opcache.configuration.php#ini.opcache.preload-user
+    // PHP needs opcache.preload_user under uid 0. The value root keeps the preload in the master process, where the signals must arrive: https://www.php.net/manual/en/opcache.configuration.php#ini.opcache.preload-user
     if unsafe { libc::geteuid() } == 0 {
         ini.push_str("opcache.preload_user = root\n");
     }

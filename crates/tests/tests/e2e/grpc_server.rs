@@ -1,4 +1,4 @@
-//! The rapira_grpc server over the wire, with `grpc/wire-worker.php` in the role of the application: the three protocols, statuses and metadata, what PHP sees, deadlines, the plugin routes, and the drain.
+//! The rapira_grpc server over the wire, with `grpc/wire-worker.php` as the app: the three protocols, statuses and metadata, what PHP sees, deadlines, the plugin routes, and the drain.
 
 use std::convert::Infallible;
 use std::io::{self, Read, Write};
@@ -49,7 +49,7 @@ async fn each_protocol_reaches_php_over_the_wire() {
         status: u16,
         grpc_status: Option<&'static str>,
         content_type: Option<&'static str>,
-        /// None: not checked.
+        /// None skips the check.
         reply: Option<&'a [u8]>,
         /// The call reaches PHP.
         php: bool,
@@ -527,7 +527,7 @@ async fn reply_compression_follows_the_client() {
 async fn statuses_and_metadata_encode_per_protocol() {
     struct Case {
         name: &'static str,
-        /// PHP fails the call with NOT_FOUND and a detail of this type URL. None: PHP echoes the message. Both carry the halves.
+        /// PHP fails the call with NOT_FOUND and a detail of this type URL. With None, PHP echoes the message. In both cases, PHP also sets the header `x-h` and the trailers `x-t` and `x-b-bin`.
         fails_with: Option<&'static str>,
         wire: Wire,
         content_type: &'static str,
@@ -536,9 +536,9 @@ async fn statuses_and_metadata_encode_per_protocol() {
         headers: Fields,
         /// The status fields: HTTP trailers for gRPC, the 0x80 frame for gRPC-Web.
         trailers: Fields,
-        /// The type URL of the detail that `grpc-status-details-bin` carries. None: no such field.
+        /// The type URL of the detail that `grpc-status-details-bin` carries. None when the response has no such field.
         details: Option<&'static str>,
-        /// None: not checked.
+        /// None skips the check.
         reply: Option<&'static [u8]>,
     }
     const ACME: &str = "example.com/acme.Detail";
@@ -741,9 +741,9 @@ async fn php_failures_map_to_statuses() {
         grpc_status: Option<&'static str>,
         /// The `code` of a Connect error body.
         connect_code: Option<&'static str>,
-        /// The `grpc-message` field or the Connect `message`. None: not checked.
+        /// The `grpc-message` field or the Connect `message`. None skips the check.
         message: Option<&'static str>,
-        /// None: not checked.
+        /// None skips the check.
         reply: Option<&'static [u8]>,
     }
     let cases = [
@@ -1140,7 +1140,7 @@ async fn health_and_reflection_answer_from_the_plugin() {
     stop(reflecting).await;
 }
 
-/// A graceful stop ends the plugin with no error, and the worker drops every intake clone.
+/// A stop with SIGQUIT ends the plugin with no error, and the worker drops every intake clone.
 #[tokio::test]
 async fn shutdown_joins_the_server_and_drops_every_intake_clone() {
     let srv = Spawn::grpc(wire_worker()).json_log().spawn();
@@ -1159,11 +1159,11 @@ async fn shutdown_joins_the_server_and_drops_every_intake_clone() {
 async fn drain_waits_for_calls_within_the_grace() {
     struct Case {
         name: &'static str,
-        /// PHP answers the call this long after the stop. None: PHP holds the call past the grace.
+        /// PHP answers the call this long after the stop. With None, PHP holds the call past the grace.
         answer_after: Option<Duration>,
         process_control_timeout_secs: u64,
         grpc_status: Option<&'static str>,
-        /// A text of the plugin error. None: the plugin stops clean.
+        /// A text of the plugin error. None when the plugin stops clean.
         shutdown: Option<&'static str>,
     }
     let cases = [
@@ -1191,7 +1191,7 @@ async fn drain_waits_for_calls_within_the_grace() {
             .json_log()
             .spawn();
         let marker = srv.dir.join("marker");
-        // `hold:` answers once the marker exists; `cancel` holds the call until the plugin drops it.
+        // PHP answers a "hold:" call once the marker exists, and holds a "cancel" call until the plugin drops it.
         let (message, reached) = match case.answer_after {
             Some(_) => (format!("hold:{}", marker.display()), "held"),
             None => ("cancel".to_owned(), "got"),
@@ -1231,10 +1231,10 @@ async fn drain_waits_for_calls_within_the_grace() {
     }
 }
 
-/// Source: the `StaticChecker` docs: `shutdown` only sets NOT_SERVING, and a `Watch` stream ends when its service is removed.
+/// Source: the `StaticChecker` docs. `shutdown` only sets NOT_SERVING, and a `Watch` stream ends when its service is removed.
 #[tokio::test]
 async fn drain_ends_health_watch_streams() {
-    // `process_control_timeout_secs = 4` gives a drain grace of 2 s.
+    // process_control_timeout_secs = 4 gives a drain grace of 2 s.
     let grace = Duration::from_secs(2);
     let srv = Spawn::grpc(wire_worker())
         .toml("[supervisor]\nprocess_control_timeout_secs = 4")

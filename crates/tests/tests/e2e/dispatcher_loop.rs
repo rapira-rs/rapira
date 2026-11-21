@@ -17,7 +17,7 @@ use crate::harness::{
     signal, slot_line, wait_log_contains, worker_pids,
 };
 
-/// Read budget of a raw socket exchange.
+/// The read timeout of a raw socket exchange.
 const READ: Duration = Duration::from_secs(10);
 
 fn verbs_probe(query: &str) -> anyhow::Result<StatusBody<String>> {
@@ -41,7 +41,7 @@ fn raw_exchange(
     })
 }
 
-/// Two sequential units through the echo loop, then the graceful stop must land as `ClosedException` in the parked `receive()`.
+/// Two sequential units go through the echo loop. Then the stop must reach the waiting `receive()` as `ClosedException`.
 #[test]
 fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     let mut srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/echo-loop-worker.php"))
@@ -73,7 +73,7 @@ fn exchange_serves_sequential_requests() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `tryReceive()`/`receive(0)`/`receive(50ms)` on an empty-but-open channel must report null/timeout, never Closed.
+/// `tryReceive()`, `receive(0)` and `receive(50ms)` on an empty but open channel must report null or a timeout, never Closed.
 #[test]
 fn recv_probes_on_an_empty_channel() -> anyhow::Result<()> {
     let mut srv = Spawn::http(
@@ -206,7 +206,7 @@ fn verb_edges_throw_their_documented_classes() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The polling verbs' success paths: a unit comes out of `tryReceive()`, and out of `receive(1s)` after the fixture flips modes.
+/// The success paths of the polling verbs. A unit comes out of `tryReceive()`, and after a `mode=timed` request it comes out of `receive(1s)`.
 #[test]
 fn try_and_timed_receive_serve_units() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/poll-worker.php")).spawn();
@@ -239,7 +239,7 @@ fn interim_head_leaves_the_final_head_open() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// 101 is the carve-out in the 1xx interim rule: it commits as the final head and locks out later `writeHead()`.
+/// 101 is the exception to the 1xx interim rule. It commits as the final head and blocks a later `writeHead()`.
 /// The plugin cannot forward a final 1xx, so the client gets a 502 with no body.
 #[test]
 fn writehead_101_commits_as_final() -> anyhow::Result<()> {
@@ -255,7 +255,7 @@ fn writehead_101_commits_as_final() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Buffered chunks concatenate and the first commits the implicit 200: a later `writeHead()` must throw instead of restamping the status.
+/// Buffered chunks concatenate, and the first chunk commits the implicit 200. A later `writeHead()` must throw and must not change the status.
 #[test]
 fn chunked_body_buffers_and_locks_the_head() -> anyhow::Result<()> {
     let StatusBody { status, body } = verbs_probe("/?probe=chunks")?;
@@ -266,7 +266,7 @@ fn chunked_body_buffers_and_locks_the_head() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Multi-value lists flatten to one field line per value, and PHP references at both nesting levels are seen through.
+/// Multi-value lists flatten to one field line per value, and PHP references at both nesting levels resolve to their values.
 #[test]
 fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php")).spawn();
@@ -281,7 +281,7 @@ fn multi_value_and_reference_headers_flatten() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `receive()` while a unit is unfinalized throws the single-flight `\Error` instead of deadlocking the worker on itself.
+/// `receive()` while a unit is unfinalized throws the single-flight `\Error`, so the worker does not deadlock on itself.
 #[test]
 fn receive_while_unfinalized_throws() -> anyhow::Result<()> {
     let StatusBody { status, body } = verbs_probe("/?probe=busy")?;
@@ -295,7 +295,7 @@ fn receive_while_unfinalized_throws() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An Exchange dropped without finalizing fails that unit only: the plugin answers 500 and the worker serves the next unit.
+/// A lost Exchange fails that unit only. The plugin answers 500, and the worker serves the next unit.
 #[test]
 fn lost_exchange_fails_that_unit_only() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php")).spawn();
@@ -321,7 +321,7 @@ fn lost_exchange_fails_that_unit_only() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A unit that dies with the cycle is a worker death, not a loss: the reply closes with no head, so the plugin answers 502, not the 500 of a lost unit.
+/// A unit that ends with the cycle is a worker death, not a lost unit. The reply closes with no head, so the plugin answers 502 and not the 500 of a lost unit.
 #[test]
 fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php")).spawn();
@@ -342,7 +342,7 @@ fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// An Exchange lost after the head reached the wire cannot become a 500: the plugin ends the stream truncated so the client detects it.
+/// An Exchange lost after the head reached the wire cannot become a 500. The plugin ends the stream truncated, so the client detects the loss.
 #[test]
 fn lost_mid_stream_exchange_truncates() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php")).spawn();
@@ -411,7 +411,7 @@ fn spooled_files(srv: &Server) -> Vec<PathBuf> {
     .unwrap_or_else(read)
 }
 
-/// A lost unit holding a plugin-parsed multipart body must unlink its spool the moment the exchange dies.
+/// A lost unit that holds a plugin-parsed multipart body must unlink its spool as soon as the exchange ends.
 #[test]
 fn lost_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
     let srv = uploads_server("dispatcher/verbs-worker.php");
@@ -437,7 +437,7 @@ fn lost_multipart_unit_unlinks_its_spool() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `exit()` after serving must land as `Cycle::Recycle`: the script re-runs instead of shedding as a boot failure.
+/// `exit()` after serving must end as `Cycle::Recycle` and must not count as a boot failure. The worker runs the entrypoint again.
 #[test]
 fn exit_after_serving_recycles_the_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/verbs-worker.php")).spawn();
@@ -480,7 +480,7 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
     const TARGET: &str = "http://example.test/path%2Fa?x=1";
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php")).spawn();
 
-    // A raw socket, so the test knows the client address that PHP gets as `remote`.
+    // A raw socket, so the test knows the client address that PHP gets as the remote property.
     let stream = TcpStream::connect(srv.addr)?;
     stream.set_read_timeout(Some(READ))?;
     let remote = stream.local_addr()?;
@@ -569,7 +569,7 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
         .http_extra("server_port = 8080")
         .spawn();
 
-    // An unbound client socket, so the server gets no peer path. HTTP/1.0 with no Host takes the `$uri` fallback.
+    // An unbound client socket, so the server gets no peer path. HTTP/1.0 with no Host takes the $uri fallback.
     let stream = UnixStream::connect(&sock)?;
     stream.set_read_timeout(Some(READ))?;
     let StatusBody { status, body } = raw_exchange(stream, b"GET / HTTP/1.0\r\n\r\n")?;
@@ -648,7 +648,7 @@ fn multipart_body_reaches_php_and_spools_die_at_seal() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Two fields and two files: the graph must pair each part with its own headers, spool path, and size by index.
+/// Two fields and two files. The graph must pair each part with its own headers, spool path and size by index.
 #[test]
 fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     let srv = uploads_server("dispatcher/multipart-worker.php");
@@ -693,7 +693,7 @@ fn multipart_parts_stay_index_aligned() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// hyper delivers a 1 MiB body in several frames, so the parse reads a file part across the frame seams. PHP must get the same field values and file bytes that the client sent.
+/// hyper delivers a 1 MiB body in several frames, so the parse reads a file part across the frame boundaries. PHP must get the same field values and file bytes that the client sent.
 #[test]
 fn multipart_file_part_across_frames_keeps_its_bytes() -> anyhow::Result<()> {
     let srv = uploads_server("dispatcher/multipart-worker.php");
@@ -738,7 +738,7 @@ fn multipart_file_part_across_frames_keeps_its_bytes() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, a file part in a body over 256 KiB (parsed on the blocking pool) reaches PHP, an empty name is a 400, and a field over the limit after a file part is a 413.
+/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, a file part in a body over 256 KiB reaches PHP after the parse on the blocking pool, an empty name is a 400, and a field over the limit after a file part is a 413.
 /// Part header names keep the case that the client sent, and the values of one name keep their line order (contract FormField and UploadedFile `$headers`).
 /// No spool file outlives its request, also when a later part rejects the body after a file part was spooled.
 #[test]
@@ -1006,7 +1006,7 @@ fn killed_worker_spool_dir_goes_when_its_replacement_starts() -> anyhow::Result<
     Ok(())
 }
 
-/// A malformed or over-limit multipart body answers before dispatch and never reaches PHP; an accepted body reaches PHP raw. Sources: RFC 7578 (multipart/form-data needs a boundary), RFC 9110 §8.3 (content-type is a singleton field).
+/// A malformed or over-limit multipart body gets its answer before dispatch and never reaches PHP; an accepted body reaches PHP raw. Sources: RFC 7578 (multipart/form-data needs a boundary), RFC 9110 §8.3 (content-type is a singleton field).
 #[test]
 fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
     struct Case {
@@ -1014,7 +1014,7 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
         method: &'static str,
         content_type: &'static [&'static str],
         body: Vec<u8>,
-        /// None: the request reaches PHP with `body` unparsed.
+        /// None when the request reaches PHP with `body` unparsed.
         status: Option<u16>,
     }
     const MULTIPART: &str = "multipart/form-data; boundary=B";
@@ -1115,7 +1115,7 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
         );
         if case.status.is_none() {
             // echo-loop-worker.php cannot print a parsed Multipart, so a parsed body fails the status check above.
-            // A byte compare: the lossy text maps each non-UTF-8 byte of a body to the same U+FFFD.
+            // A byte compare, because the lossy text maps each non-UTF-8 byte of a body to the same U+FFFD.
             let mut want = format!("method={} body=", case.method).into_bytes();
             want.extend_from_slice(&case.body);
             assert!(resp.body == want, "{}: {body:.300}", case.name);
@@ -1131,7 +1131,7 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `getInfo()` while handling: the outstanding unit counts as active and was already decremented from `pending` at pull.
+/// `getInfo()` during the handling of a unit. The outstanding unit counts as active, and the pull already took it out of `pending`.
 #[test]
 fn get_info_counts_the_outstanding_unit() -> anyhow::Result<()> {
     let StatusBody { status, body } = verbs_probe("/?probe=info")?;
@@ -1139,14 +1139,14 @@ fn get_info_counts_the_outstanding_unit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// `getInfo()` reports the `server_name` and `server_port` of the `http` section: the configured values, else `localhost` and the listen port.
+/// `getInfo()` reports the `server_name` and `server_port` of the `http` section. These are the configured values, or else `localhost` and the listen port.
 #[test]
 fn get_info_reports_the_server_identity() -> anyhow::Result<()> {
     struct Case {
         name: &'static str,
         http_extra: &'static str,
         want_name: &'static str,
-        /// `None`: the listen port.
+        /// `None` for the listen port.
         want_port: Option<u16>,
     }
     let cases = [
@@ -1180,7 +1180,7 @@ fn get_info_reports_the_server_identity() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Every worker reads the server identity at boot, before its first `receive()`: the first boot of each worker sees the configured values, and no boot fails on them.
+/// Every worker reads the server identity at boot, before its first `receive()`. The first boot of each worker sees the configured values, and no boot fails on them.
 #[test]
 fn get_info_reports_the_server_identity_at_boot() -> anyhow::Result<()> {
     const WORKERS: usize = 16;
@@ -1367,7 +1367,7 @@ fn content_length_exceeded_sends_the_fitting_prefix() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Dropping the receiver mid-unit makes the next write throw WorkDiscardedException, the unit report cancelled and finalized, and the worker keep serving.
+/// When the client drops the receiver in the middle of a unit, the next write throws WorkDiscardedException. The unit then reports cancelled and finalized, and the worker keeps serving.
 #[test]
 fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/stream-worker.php"))
@@ -1392,7 +1392,7 @@ fn dropped_client_discards_the_unit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A declared content-length rides the head as the framing. On an under-run the plugin cuts the body, and nothing is PHP-visible.
+/// A declared content-length goes with the head frame as the framing. On an under-run, the plugin cuts the body, and PHP sees nothing of it.
 #[test]
 fn declared_content_length_rides_the_head_frame() -> anyhow::Result<()> {
     let StreamProbe {
@@ -1432,7 +1432,7 @@ fn with_path_header(query: &str, path: &Path) -> http::Request<Vec<u8>> {
     rq
 }
 
-/// A one-shot sendFile: the head carries a real content-length and the file bytes ride a File frame.
+/// A one-shot sendFile. The head carries a real content-length, and the file bytes go in a File frame.
 #[test]
 fn sendfile_one_shot_carries_the_file_length() -> anyhow::Result<()> {
     let srv = sendfile_server();
@@ -1449,7 +1449,7 @@ fn sendfile_one_shot_carries_the_file_length() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A range response is the handler's own 206 plus content-range with the slice passed as offset/length; sendFile applies no HTTP semantics.
+/// A range response is the 206 of the handler with a content-range, and the slice goes to sendFile as offset and length. sendFile applies no HTTP semantics.
 #[test]
 fn sendfile_slice_serves_the_named_bytes() -> anyhow::Result<()> {
     let srv = sendfile_server();
@@ -1476,7 +1476,7 @@ fn sendfile_missing_file_still_answers_404() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A path outside the configured root is not sendable, symlinks resolved.
+/// A path outside the configured root is not sendable. The check resolves symlinks first.
 #[test]
 fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
     let srv = sendfile_server();
@@ -1638,14 +1638,14 @@ fn sendfile_past_the_declared_length_writes_nothing() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A file that shrinks after sendFile() committed its slice ends the body with an error: the chunked body has no last chunk, and the plugin logs the cut. The bytes before the error are a prefix of the file up to the cut. The error gives hyper one flush pass, so a client that reads slowly can get fewer bytes than the file holds.
+/// A file that shrinks after sendFile() committed its slice ends the body with an error. The chunked body has no last chunk, and the plugin logs the cut. The bytes before the error are a prefix of the file up to the cut. The error gives hyper one flush pass, so a client that reads slowly can get fewer bytes than the file holds.
 #[test]
 fn sendfile_of_a_shrunken_file_ends_short() -> anyhow::Result<()> {
     const SIZE: u64 = 64 * 1024 * 1024;
     const CUT: u64 = 32 * 1024 * 1024;
     let srv = sendfile_server();
     let path = srv.dir.join("shrinking");
-    // A sparse file: the size costs no memory.
+    // A sparse file, so the size costs no memory.
     std::fs::File::create(&path)?.set_len(SIZE)?;
     let marker = srv.dir.join("shrinking.shrunk");
 
@@ -1714,7 +1714,7 @@ fn trailers_end_a_streamed_response() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A trailers-only response keeps real length framing: content-length 0, not empty chunked.
+/// A trailers-only response keeps real length framing. It has content-length 0 and no empty chunked body.
 #[test]
 fn trailers_only_response_keeps_length_framing() -> anyhow::Result<()> {
     let StreamProbe {

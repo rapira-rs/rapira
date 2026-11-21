@@ -63,7 +63,7 @@ fn dispatcher_records(srv: &Server, n: usize) -> Vec<Value> {
 #[test]
 fn dispatcher_identity_and_services() -> anyhow::Result<()> {
     let mut srv = Spawn::grpc(fixture("grpc/identity.php")).json_log().spawn();
-    // The worker runs the script once when it starts. The stop comes after the record, so the log holds every record.
+    // The worker runs the entrypoint once when it starts. The stop comes after the record, so the log holds every record.
     server_log::wait_app_record(&srv.log_file(), "dispatcher");
     srv.stop();
     let ctx = server_log::dispatcher_record(&srv.log_file())?;
@@ -104,7 +104,7 @@ fn dispatcher_identity_and_services() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The gRPC service list stays with its own worker: the master sets it for the `[grpc]` pool before the fork, and the worker of the `[http]` pool still gets the HTTP dispatcher.
+/// The gRPC service list stays with its own worker. The master sets it for the `[grpc]` pool before the fork, and the worker of the `[http]` pool still gets the HTTP dispatcher.
 #[test]
 fn an_http_worker_after_a_grpc_worker_keeps_the_http_dispatcher() {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/worker-singleton.php"))
@@ -122,7 +122,7 @@ fn an_http_worker_after_a_grpc_worker_keeps_the_http_dispatcher() {
     assert_eq!(http[0]["class"], "Rapira\\Internal\\Http\\Dispatcher");
 }
 
-/// What a unary call over gRPC gives the client, less the transport fields.
+/// What a unary call over gRPC gives the client, without the transport fields.
 #[derive(Debug, PartialEq)]
 struct Outcome {
     grpc_status: Option<String>,
@@ -172,7 +172,7 @@ enum Want {
         /// The type URL of the one detail.
         type_url: &'static str,
     },
-    /// PHP drops the call without an outcome: the plugin answers INTERNAL `internal error`.
+    /// The app releases the call without an outcome, and the plugin answers INTERNAL `internal error`.
     Lost,
 }
 
@@ -218,7 +218,7 @@ impl Want {
         }
     }
 
-    /// The `google.rpc.Status` that grpc-status-details-bin must carry. None: not checked.
+    /// The `google.rpc.Status` that grpc-status-details-bin must carry. None means that the test does not check it.
     fn details(&self) -> Option<Vec<u8>> {
         match self {
             Self::Status { type_url, .. } => Some(status_bytes(type_url)),
@@ -247,7 +247,7 @@ struct OutcomeCase {
     log: Option<AppResult>,
 }
 
-// Expected values: the contract (Work.php, Responder.php, Status.php, ResponseMetadata.php) and RFC 4648: 01 02 is `AQI`.
+// Expected values: the contract (Work.php, Responder.php, Status.php, ResponseMetadata.php) and RFC 4648: 01 02 is AQI.
 const OUTCOME_CASES: &[OutcomeCase] = &[
     OutcomeCase {
         name: "respond echoes the message",
@@ -404,10 +404,10 @@ struct ContextCase {
     name: &'static str,
     on: On,
     wire: Wire,
-    /// Every request field: the content type selects the protocol, and the rest is metadata.
+    /// Every request field. The content type selects the protocol, and the other fields are metadata.
     headers: Fields,
     body: &'static [u8],
-    /// The seconds of the request timeout. None: the request sends none.
+    /// The seconds of the request timeout. None means that the request sends no timeout.
     timeout: Option<f64>,
     /// The response body.
     reply: &'static [u8],
@@ -415,8 +415,8 @@ struct ContextCase {
     expected: &'static str,
 }
 
-// Expected values: Call/Context.php, PROTOCOL-WEB (the 0x80 trailer frame), and RFC 4648: `AP8` and `AP8=` both decode to 00 ff.
-// The client sends `host` itself, so the case adds none.
+// Expected values: Call/Context.php, PROTOCOL-WEB (the 0x80 trailer frame), and RFC 4648: AP8 and AP8= both decode to 00 ff.
+// The client sends the host field itself, so the case adds none.
 const CONTEXT_CASES: &[ContextCase] = &[
     ContextCase {
         name: "inet peer with a deadline",
@@ -562,7 +562,7 @@ async fn response_metadata_is_call_scoped() {
     server_log::assert_case_records(&srv.log_file(), METADATA_CASES);
 }
 
-/// The client resets the call while PHP holds it, so the plugin closes the call: Work.php (cancelled, finalized) and Responder.php (WorkDiscardedException, "The host closed the call first").
+/// The client resets the call while PHP holds it, so the plugin closes the call. Expected values: Work.php (cancelled, finalized) and Responder.php (WorkDiscardedException, "The host closed the call first").
 #[tokio::test]
 async fn cancel_is_visible_to_php() {
     let srv = unary_worker();

@@ -5,7 +5,7 @@ use tests::{StatusBody, drain, fixture, req};
 
 use crate::harness::Spawn;
 
-/// An env pair of the pool wins over an inherited variable of the same name. Each request `$_SERVER` gets the pairs, and a request variable with the same name wins. A change to a pair in one request does not reach the next request of the worker.
+/// An env pair of the pool wins over an inherited variable of the same name. The `$_SERVER` of each request gets the pairs, and a request variable with the same name wins. A change to a pair in one request does not reach the next request of the worker.
 #[test]
 fn pool_env_reaches_the_worker() -> anyhow::Result<()> {
     struct Case {

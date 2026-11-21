@@ -8,7 +8,7 @@ $fill = static function (): void {
     $big = "$dir/big.php";
     for ($v = 0; $v < 2; $v++) {
         file_put_contents($big, "<?php\n\$x = [];\n" . str_repeat("\$x[] = $v * 7;\n", 2000) . "return \$x;\n");
-        // a new mtime: OPcache drops the cached copy, and its memory counts as wasted
+        // with a new mtime, OPcache drops the cached copy, and its memory counts as wasted
         touch($big, time() + 10 * $v);
         clearstatcache();
         include $big;

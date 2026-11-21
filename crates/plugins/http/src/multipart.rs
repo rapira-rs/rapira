@@ -1,4 +1,4 @@
-//! The multipart/form-data parser of dispatcher mode and the spool dirs of the workers. https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
+//! This module has the multipart/form-data parser of dispatcher mode and the spool dirs of the workers. https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -8,10 +8,10 @@ use memchr::memmem;
 
 use crate::check::Rejection;
 
-/// `unlink` is the one remover: seal calls it at finalize; Drop removes a file that a bailout (fatal or timeout) leaves behind.
+/// `unlink` is the only remover. seal calls it at finalize, and Drop removes a file that a bailout after a fatal error or a timeout leaves behind.
 pub struct SpooledFile {
     pub path: PathBuf,
-    /// Set by the first `unlink`: a recycled file name is never removed twice.
+    /// The first `unlink` sets it, so a reused file name is never removed twice.
     unlinked: bool,
 }
 
@@ -52,12 +52,12 @@ pub struct FormField {
 pub struct UploadedFile {
     pub name: Vec<u8>,
     pub client_filename: Vec<u8>,
-    /// content-type verbatim; an empty or OWS-only value maps to None upstream.
+    /// The content-type value, verbatim. The parser maps an empty or OWS-only value to None.
     pub client_media_type: Option<Vec<u8>>,
     /// One entry per name in first-seen order.
     pub headers: Vec<HeaderValues>,
     pub file: SpooledFile,
-    /// Bytes written to disk; a 64-bit zend_long is assumed at the FFI edge.
+    /// The number of bytes written to disk. The FFI edge assumes a 64-bit zend_long.
     pub size: u64,
 }
 
@@ -76,17 +76,17 @@ pub struct Limits {
     pub max_part_headers: usize,
 }
 
-/// Creates the spool dir of this worker process under `base`, owner-only. The master at boot and each worker at its start sweep the dirs whose process is gone.
+/// Creates the spool dir of this worker process under `base`, with owner-only access. The master at boot and each worker at its start sweep the dirs whose process is gone.
 pub(crate) fn create_worker_spool_dir(base: &Path) -> anyhow::Result<PathBuf> {
     use std::os::unix::fs::DirBuilderExt;
     let dir = base.join(format!("rapira-spool-{}", std::process::id()));
-    // A dir with this pid is left by a killed worker that had the same pid.
+    // A killed worker that had the same pid leaves a dir with this pid.
     let _ = std::fs::remove_dir_all(&dir);
     std::fs::DirBuilder::new()
         .mode(0o700)
         .create(&dir)
         .map_err(|e| anyhow::anyhow!("creating spool dir {}: {e}", dir.display()))?;
-    // systemd-tmpfiles does not age a dir with a BSD lock. The fd stays open until the worker exits: https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html#Age
+    // systemd-tmpfiles does not age a dir with a BSD lock. The fd stays open until the worker exits. https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html#Age
     if let Ok(lock) = std::fs::File::open(&dir)
         && lock.lock_shared().is_ok()
     {
@@ -95,7 +95,7 @@ pub(crate) fn create_worker_spool_dir(base: &Path) -> anyhow::Result<PathBuf> {
     Ok(dir)
 }
 
-/// kill(pid, 0) probes existence without signaling: ESRCH means the owner is gone, EPERM means it runs under another uid. https://man7.org/linux/man-pages/man2/kill.2.html
+/// kill(pid, 0) checks that the process exists and sends no signal. ESRCH means that the owner is gone, and EPERM means that it runs under another uid. https://man7.org/linux/man-pages/man2/kill.2.html
 fn spool_dir_reclaimable(name: &str) -> bool {
     let Some(pid) = name
         .strip_prefix("rapira-spool-")
@@ -149,7 +149,7 @@ pub fn is_multipart(content_type: &[u8]) -> bool {
         .eq_ignore_ascii_case(b"multipart/form-data")
 }
 
-/// Case-insensitive, quoted form unquoted, unquoted form terminated by `,`, as php-src does: https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L707-L751
+/// Reads the boundary parameter as php-src does. The parameter name is case-insensitive. A quoted value loses its quotes, and a `,` ends an unquoted value. https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L707-L751
 pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
     for seg in content_type.split(|&b| b == b';').skip(1) {
         let Some(eq) = memchr::memchr(b'=', seg) else {
@@ -275,7 +275,7 @@ struct DelimHit {
     close: bool,
 }
 
-/// A delimiter must start a line; a line merely beginning with the boundary bytes is content, so the scan continues at the next line. The scan is linear in the body: a run of boundary bytes inside a line is skipped in one step.
+/// A delimiter must start a line. A line that only begins with the boundary bytes is content, so the scan continues at the next line. The scan is linear in the body, because it skips a run of boundary bytes inside a line in one step.
 fn next_delimiter(
     view: &View<'_>,
     mut from: usize,
@@ -286,7 +286,7 @@ fn next_delimiter(
         if i == 0 || view.get(i - 1) == Some(b'\n') {
             let mut j = i + dlen;
             if view.starts_with(j, b"--") {
-                // after the dashes a close-delimiter allows only transport padding and a line ending or end of body, RFC 2046 §5.1.1
+                // After the dashes, a close-delimiter allows only transport padding and a line ending or the end of the body (RFC 2046 §5.1.1).
                 let mut k = j + 2;
                 while matches!(view.get(k), Some(b' ' | b'\t')) {
                     k += 1;
@@ -325,7 +325,7 @@ fn next_delimiter(
     None
 }
 
-/// Parses a non-empty body from the parts that the transport delivered; the empty-body case lands on the contract's string arm (`$body === ''`) instead.
+/// Parses a non-empty body from the parts that the transport delivered. An empty body takes the string arm of the contract (`$body === ''`).
 /// https://www.rfc-editor.org/rfc/rfc7578
 pub fn parse(body: &[Bytes], boundary: &[u8], limits: &Limits) -> Result<MultipartBody, Rejection> {
     let view = View::new(body);
@@ -348,7 +348,7 @@ pub fn parse(body: &[Bytes], boundary: &[u8], limits: &Limits) -> Result<Multipa
         }
         let ending = next_delimiter(&view, part_start, &finder, delim.len())
             .ok_or_else(|| bad("no closing boundary line"))?;
-        // the line terminator preceding a delimiter line belongs to the delimiter, not the part, RFC 2046 §5.1.1
+        // The line terminator before a delimiter line belongs to the delimiter, not to the part (RFC 2046 §5.1.1).
         let mut part_end = ending.line_start;
         if part_end > part_start && view.get(part_end - 1) == Some(b'\n') {
             part_end -= 1;
@@ -371,7 +371,7 @@ struct Disposition {
     filename: Option<Vec<u8>>,
 }
 
-/// Reads the name and filename parameters whatever the disposition type says, as php-src does: https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L804-L815
+/// Reads the name and filename parameters whatever the disposition type says, as php-src does. https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L804-L815
 fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
     let mut name: Option<Vec<u8>> = None;
     let mut filename: Option<Vec<u8>> = None;
@@ -392,7 +392,7 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
                 match v.get(k) {
                     None => return Err(bad("unterminated quoted-string in content-disposition")),
                     Some(b'"') => break (out, k + 1),
-                    // php-src unescapes only \\ and \" and keeps every other '\': https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L495
+                    // php-src unescapes only \\ and \" and keeps every other '\'. https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L495
                     // A '\' at the end of a value escapes the closing quote, as in php-src.
                     Some(b'\\') if matches!(v.get(k + 1), Some(b'\\' | b'"')) => {
                         out.push(v[k + 1]);
@@ -485,7 +485,7 @@ fn parse_part(
         Err(httparse::Error::TooManyHeaders) => {
             return Err(over("part headers over max_part_headers"));
         }
-        // httparse enforces RFC 9110 token field names, stricter than rfc1867.c
+        // httparse accepts only RFC 9110 token field names. This is stricter than rfc1867.c.
         Err(_) => return Err(bad("unparseable part header section")),
     };
 
@@ -610,7 +610,7 @@ mod tests {
         assert!(mb.fields.is_empty() && mb.files.is_empty());
     }
 
-    /// A close-delimiter is `--boundary--` plus padding and a line ending or end of body, RFC 2046 §5.1.1.
+    /// A close-delimiter is `--boundary--`, then padding and a line ending or the end of the body (RFC 2046 §5.1.1).
     #[test]
     fn close_dashes_with_trailing_junk_are_content_not_close() {
         let body = b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nbefore\r\n--B--junk\r\nafter\r\n--B--";
@@ -906,7 +906,7 @@ mod tests {
         }
     }
 
-    /// Each split of a body gives the result of the one-part body: at every position, and into single-byte parts.
+    /// Each split of a body gives the result of the one-part body. The test splits at every position and into single-byte parts.
     #[test]
     fn split_bodies_parse_the_same() {
         struct Case {

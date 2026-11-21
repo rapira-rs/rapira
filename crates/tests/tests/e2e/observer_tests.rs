@@ -4,7 +4,7 @@ use tests::{drain, fixture, req};
 
 use crate::harness::Spawn;
 
-// Observer API registers only at module startup, so these tests boot with their own ini; without --enable-zend-test the observer stays disabled (https://github.com/php/php-src/pull/5857).
+// The observer API registers only at module startup, so these tests start the server with their own ini. Without --enable-zend-test the observer stays disabled (https://github.com/php/php-src/pull/5857).
 const OBSERVER_INI: &str = concat!(
     env!("CARGO_MANIFEST_DIR"),
     "/fixtures/ini/observer_tests/observer.ini"

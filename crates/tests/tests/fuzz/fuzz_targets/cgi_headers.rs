@@ -1,4 +1,4 @@
-//! Request headers through the unsafe field name drop to the `HTTP_*` variables of `$_SERVER` in the classic and worker modes. The input is one `name:value` field per line.
+//! Passes request headers through the unsafe field name drop to the `HTTP_*` variables of `$_SERVER` in the classic and worker modes. The input is one `name:value` field per line.
 
 #![no_main]
 

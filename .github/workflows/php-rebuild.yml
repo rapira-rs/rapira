@@ -1,10 +1,10 @@
 # Builds the Rapira images of the newest release again on each new NTS PHP image.
 # https://github.com/rapira-rs/docker builds the PHP images ghcr.io/<owner>/php.
-# The state is on the images: the base annotations of the rapira tag php<minor>.
+# The images hold the state, in the base annotations of the rapira tag php<minor>.
 name: PHP rebuild
 on:
     schedule:
-        # GitHub delays or drops scheduled runs under high load, for example at the start of each hour: https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule
+        # GitHub delays or drops scheduled runs under high load, for example at the start of each hour. https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#schedule
         - cron: "7,22,37,52 * * * *"
     workflow_dispatch:
 

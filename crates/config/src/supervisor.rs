@@ -11,7 +11,7 @@ pub struct SupervisorSettings {
 }
 
 impl SupervisorSettings {
-    /// The master sends QUIT at t=0 and SIGTERM at `process_control_timeout`, which is SIG_DFL in the child, so the margin is the drain's only room to finish.
+    /// The master sends QUIT at t=0 and SIGTERM at `process_control_timeout`. SIGTERM has SIG_DFL in the child, so the drain must end before it. The plugin drains for the returned time, and the margin after it leaves the worker time to exit before SIGTERM.
     pub fn drain_grace(&self) -> Duration {
         const MARGIN: Duration = Duration::from_secs(5);
         let margin = MARGIN.min(self.process_control_timeout / 2);

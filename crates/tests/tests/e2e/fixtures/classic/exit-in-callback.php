@@ -1,5 +1,5 @@
 <?php
-// PHP calls the exception handler and the shutdown functions with no frame on the stack, so exit() in them ends the script with a bailout.
+// PHP calls the exception handler and the shutdown functions with no frame on the stack, so exit() in them ends the cycle with a bailout.
 
 switch ($_GET['exit'] ?? '') {
     case 'handler':

@@ -1,5 +1,5 @@
 <?php
-// Fails its boot until up.flag exists next to it: a dependency that is down at the start and comes up later.
+// The boot fails until up.flag exists next to this file. This simulates a dependency that is down at the start and comes up later.
 
 use Rapira\Exception\ClosedException;
 

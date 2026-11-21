@@ -1,4 +1,4 @@
-//! writeHead(), writeBody(), writeTrailers(), flush(), the frames they send and the strings that the IO thread reads in place.
+//! This module implements writeHead(), writeBody(), writeTrailers() and flush(). It also has the frames that these methods send and the strings that the IO thread reads in place.
 
 use std::cell::{Cell, RefCell};
 use std::sync::Arc;
@@ -9,7 +9,7 @@ use rapira_sapi::{rapira_zstr_addref, rapira_zstr_release, stream, zend_string};
 use super::headers::{forbidden_trailer, split_framing, walk_head_table};
 use super::*;
 
-/// A core returns a Verb and throws nothing: `throw_verb` throws after the core dropped its owned state, because `zend_throw_*` can bail out.
+/// A core returns a Verb and throws nothing. `throw_verb` throws after the core dropped its owned state, because `zend_throw_*` can bail out.
 #[derive(Debug, PartialEq)]
 pub(super) enum Verb {
     Ok,
@@ -22,9 +22,9 @@ pub(super) enum Verb {
     HeadNotWritten,
 }
 
-/// Throws the exception of `v`. True for `Verb::Ok`, which throws nothing.
+/// Throws the exception of `v`. Returns true for `Verb::Ok`, which throws nothing.
 /// # Safety
-/// Engine active; can bailout on OOM.
+/// The engine is active. The call can bail out on OOM.
 pub(super) unsafe fn throw_verb(v: Verb) -> bool {
     unsafe {
         match v {
@@ -60,9 +60,9 @@ pub(super) unsafe fn throw_verb(v: Verb) -> bool {
 
 pub(super) struct Closed;
 
-/// On a full channel, park with the execution timer paused (`stream::paused`).
+/// On a full channel, the thread parks with the execution timer paused (`stream::paused`).
 /// # Safety
-/// Engine active on this thread.
+/// The engine is active on this thread.
 pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
     let Some(tx) = st.sender.as_ref() else {
         return Err(Closed);
@@ -70,12 +70,12 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
     let sent = match tx.try_send(frame) {
         Ok(()) => Ok(()),
         Err(TrySendError::Closed(_)) => Err(Closed),
-        // Only Closed ends the park: a slow consumer is backpressure, not cancellation.
+        // Only Closed ends the park, because a slow consumer is backpressure, not cancellation.
         Err(TrySendError::Full(frame)) => {
             stream::paused(|| tx.blocking_send(frame).map_err(|_| Closed))
         }
     };
-    // A frame pushed while the receiver drops stays in the channel until the last Sender drops (tokio Rx::drop drains once). The drop of the Sender here frees it, so a lent string cannot hold the cycle end.
+    // A frame pushed while the receiver drops stays in the channel until the last Sender drops, because tokio Rx::drop drains the channel only once. The drop of the Sender here frees the frame, so a lent string cannot delay the cycle end.
     if sent.is_ok() && tx.is_closed() {
         st.sender = None;
         return Err(Closed);
@@ -83,9 +83,9 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
     sent
 }
 
-/// `finalizing_len` is the one-shot body length used only when nothing streamed before: a declared content-length wins, and a bodiless response gets none.
+/// `finalizing_len` is the body length of a one-shot response. It applies only when nothing streamed before. A declared content-length takes precedence, and a bodiless response ignores `finalizing_len`.
 /// # Safety
-/// As `send_frame`.
+/// The rules of `send_frame` apply.
 pub(super) unsafe fn emit_head(
     st: &mut ExchangeState,
     finalizing_len: Option<u64>,
@@ -118,7 +118,7 @@ pub(super) unsafe fn emit_head(
     }
 }
 
-/// Setting `Phase::Discarded` here prevents a second count of the unit in `release()`. The discard also releases the strings that the IO thread no longer reads.
+/// The function sets `Phase::Discarded`, so `release()` does not count the unit a second time. The discard also releases the strings that the IO thread no longer reads.
 pub(super) fn discard_unit(st: &mut ExchangeState) {
     // SAFETY: every caller runs on the PHP thread with the engine active.
     unsafe { release_done() };
@@ -133,7 +133,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
 }
 
 /// # Safety
-/// As `send_frame`.
+/// The rules of `send_frame` apply.
 pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState) -> Verb {
     if st.cancelled() {
         discard_unit(st);
@@ -154,7 +154,7 @@ pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState) -> Verb {
 }
 
 /// # Safety
-/// `held` the slot of a live exchange; `trailers` a live, ZPP-owned array; engine active.
+/// `held` is the slot of a live exchange. `trailers` is a live array that ZPP owns. The engine is active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
     held: *const HeldPtr,
@@ -183,7 +183,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
 }
 
 /// # Safety
-/// As `send_frame`.
+/// The rules of `send_frame` apply.
 pub(super) unsafe fn write_head_core(
     st: &mut ExchangeState,
     status: u16,
@@ -196,7 +196,7 @@ pub(super) unsafe fn write_head_core(
     if !matches!(st.phase, Phase::Open) {
         return Verb::HeadWritten;
     }
-    // The contract calls an interim head advisory, and HTTP/1.1 from PHP carries none: the plugin drops it here.
+    // The contract calls an interim head advisory. HTTP/1.1 from PHP carries no interim head, so the plugin drops it here.
     if status != 101 && (100..200).contains(&status) {
         return Verb::Ok;
     }
@@ -209,7 +209,7 @@ pub(super) unsafe fn write_head_core(
         status,
         headers: split.headers,
     });
-    // 1xx carries no body either (RFC 9112 §6.3), so a committed 101 drops chunks like 204/304. https://www.rfc-editor.org/rfc/rfc9112#section-6.3
+    // A 1xx response carries no body (RFC 9112 §6.3), the same as 204 and 304. A committed 101 therefore drops its chunks. https://www.rfc-editor.org/rfc/rfc9112#section-6.3
     if matches!(status, 204 | 304 | 101) {
         st.bodiless = true;
     }
@@ -217,7 +217,7 @@ pub(super) unsafe fn write_head_core(
 }
 
 /// # Safety
-/// `held` the slot of a live exchange; `headers` NULL or a live, ZPP-owned array.
+/// `held` is the slot of a live exchange. `headers` is NULL or a live array that ZPP owns.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_write_head(
     held: *const HeldPtr,
@@ -244,14 +244,14 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_head(
     })
 }
 
-/// The smallest writeBody piece that the IO thread reads in place; a smaller piece is copied. A measurement sets the value.
+/// The smallest writeBody piece that the IO thread reads in place. The host copies a smaller piece. The value comes from a measurement.
 const ZERO_COPY_MIN: usize = 16 << 10;
 
-/// The most bytes of PHP strings that the IO thread holds in place at once; above it a piece is copied. It bounds what memory_limit sees for borrowed strings and how long the cycle end waits for slow clients: at most the cap at the client's read speed.
+/// The maximum number of PHP string bytes that the IO thread holds in place at one time. Above it, the host copies a piece. It limits what memory_limit sees for borrowed strings. It also limits the wait of the cycle end for a slow client to the time that the client needs to read the cap.
 const BORROW_CAP: usize = 8 << 20;
 
 /// # Safety
-/// `st` valid; `s` a live string; engine active.
+/// `st` is valid. `s` is a live string. The engine is active.
 pub(super) unsafe fn write_body_core(
     st: &mut ExchangeState,
     s: *mut zend_string,
@@ -272,7 +272,7 @@ pub(super) unsafe fn write_body_core(
     unsafe {
         send_body(st, len as u64, eos, |n| {
             let n = n as usize;
-            // A cut piece lends the whole string: the slice keeps all of it alive.
+            // A cut piece lends the whole string, because the slice keeps all of it alive.
             if len >= ZERO_COPY_MIN && lending() && lent_bytes() + len <= BORROW_CAP {
                 Frame::Chunk(borrow(s, len).slice(..n))
             } else {
@@ -284,7 +284,7 @@ pub(super) unsafe fn write_body_core(
 
 /// Sends `len` body bytes and seals on `eos`. `frame(n)` builds the frame of the first `n` bytes; a write past the declared content-length sends the part that fits and seals.
 /// # Safety
-/// As `send_frame`.
+/// The rules of `send_frame` apply.
 pub(super) unsafe fn send_body(
     st: &mut ExchangeState,
     len: u64,
@@ -319,7 +319,7 @@ pub(super) unsafe fn send_body(
 }
 
 /// # Safety
-/// `held` the slot of a live exchange; `s` a live string that ZPP holds for the call; engine active.
+/// `held` is the slot of a live exchange. `s` is a live string that ZPP holds for the call. The engine is active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_write_body(
     held: *const HeldPtr,
@@ -333,7 +333,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
 }
 
 /// # Safety
-/// As `send_frame`.
+/// The rules of `send_frame` apply.
 pub(super) unsafe fn seal(st: &mut ExchangeState) {
     unsafe { release_done() };
     st.unlink_spools();
@@ -344,7 +344,7 @@ pub(super) unsafe fn seal(st: &mut ExchangeState) {
 }
 
 /// # Safety
-/// As `send_frame`.
+/// The rules of `send_frame` apply.
 pub(super) unsafe fn flush_core(st: &mut ExchangeState) -> Verb {
     if st.cancelled() {
         discard_unit(st);
@@ -363,7 +363,7 @@ pub(super) unsafe fn flush_core(st: &mut ExchangeState) -> Verb {
 }
 
 /// # Safety
-/// `held` the slot of a live exchange; engine active on this thread.
+/// `held` is the slot of a live exchange. The engine is active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_flush(held: *const HeldPtr) -> bool {
     guard(false, || unsafe {
@@ -393,11 +393,11 @@ impl AsRef<[u8]> for Borrowed {
 thread_local! {
     /// The strings of this PHP thread that the IO thread can still read.
     static LENT: RefCell<Vec<Borrowed>> = const { RefCell::new(Vec::new()) };
-    /// The cycle whose quiesce ran: user code that a later RSHUTDOWN runs (a session save handler) copies, because the memory manager frees the request strings before the next quiesce.
+    /// The cycle whose quiesce ran. App code that a later RSHUTDOWN runs, for example a session save handler, copies its pieces, because the memory manager frees the request strings before the next quiesce.
     static QUIESCED_CYCLE: Cell<u64> = const { Cell::new(0) };
 }
 
-/// A piece can be lent: the cycle is not past its quiesce.
+/// A piece can be lent while the cycle is not past its quiesce.
 fn lending() -> bool {
     rapira_sapi::exchange::cycle() != QUIESCED_CYCLE.get()
 }
@@ -406,9 +406,9 @@ fn lent_bytes() -> usize {
     LENT.with_borrow(|lent| lent.iter().map(|b| b.len).sum())
 }
 
-/// A frame body that reads `s` in place; the new reference keeps `s` alive until release_done().
+/// Returns a frame body that reads `s` in place. The new reference keeps `s` alive until release_done().
 /// # Safety
-/// `s` a live string of `len` bytes; engine active on this thread.
+/// `s` is a live string of `len` bytes. The engine is active on this thread.
 unsafe fn borrow(s: *mut zend_string, len: usize) -> Bytes {
     unsafe { rapira_zstr_addref(s) };
     let alive = Arc::new(());
@@ -419,7 +419,7 @@ unsafe fn borrow(s: *mut zend_string, len: usize) -> Bytes {
 
 /// Releases the strings that the IO thread no longer reads. write_body_core, seal and discard_unit call it first, so a long response releases its strings while it runs. Arc::get_mut loads the count with Acquire, so the reads of the IO thread come before the release.
 /// # Safety
-/// Engine active on this thread.
+/// The engine is active on this thread.
 unsafe fn release_done() {
     LENT.with_borrow_mut(|lent| {
         for b in lent.extract_if(.., |b| Arc::get_mut(&mut b.alive).is_some()) {
@@ -428,9 +428,9 @@ unsafe fn release_done() {
     });
 }
 
-/// The quiesce hook of the http plugin record (rapira_http_classes.c): waits until the IO thread reads no lent string, then releases them. A warn record about every 5 s names what the IO thread still holds.
+/// The quiesce hook of the http plugin record in rapira_http_classes.c. It waits until the IO thread reads no lent string, then releases the strings. A warn record about every 5 s names what the IO thread still holds.
 /// # Safety
-/// Engine active on this thread.
+/// The engine is active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_http_quiesce() {
     guard((), || unsafe {
@@ -442,7 +442,7 @@ pub unsafe extern "C" fn rapira_rs_http_quiesce() {
                 return;
             }
             if polls == 0 {
-                // the request watchdog does not count the wait as a stuck request
+                // The request watchdog does not count the wait as a stuck request.
                 sb_update(Event::Idle);
             }
             if polls % 5000 == 4999 {

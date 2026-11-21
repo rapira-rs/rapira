@@ -56,7 +56,7 @@ impl Acceptor {
         let tcp: bool = matches!(addr, ListenAddr::Tcp(_));
         // On other OSes from_std registers the tokio listener with the reactor of rt.
         let _guard = rt.enter();
-        // bind set O_NONBLOCK: both acceptors need an accept that does not block.
+        // bind set O_NONBLOCK, because both acceptors need an accept that does not block.
         let socket = if tcp {
             let std = std::net::TcpListener::from(fd);
             #[cfg(target_os = "linux")]
@@ -81,8 +81,8 @@ impl Acceptor {
     }
 
     /// Runs the accept loop on the calling thread until the stop flag is set. A blocked
-    /// accept is what lets the kernel hand each connection to one worker. Returns the
-    /// listener failure, if any. The listener is closed when this returns.
+    /// accept lets the kernel give each connection to one worker. Returns the listener
+    /// failure, if any. The listener is closed when this returns.
     #[cfg(target_os = "linux")]
     pub fn run(self, rt: &Handle, serve: &impl Serve) -> Option<anyhow::Error> {
         // tokio::spawn and from_std reach the runtime the connections run on.
@@ -140,7 +140,7 @@ impl Acceptor {
 
 // Linux accept() forwards pending network errors of the new connection, so only errnos
 // that prove listener state are fatal. https://man7.org/linux/man-pages/man2/accept.2.html
-// `ErrorKind::Other` never carries an errno; it is the wrapped rotation failure, after
+// ErrorKind::Other never carries an errno. It is the wrapped rotation failure, after
 // which the listener is unregistered.
 fn is_fatal_accept(e: &std::io::Error) -> bool {
     e.kind() == std::io::ErrorKind::Other

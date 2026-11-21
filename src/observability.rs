@@ -17,13 +17,13 @@ pub fn pool_run(settings: rapira_observability::config::Settings) -> anyhow::Res
     Ok(PoolRun::Observability { server })
 }
 
-/// Returns the process exit code for the master's fork bracket. The process runs no PHP.
+/// Returns the process exit code to `Forker::spawn`. The process runs no PHP.
 pub fn observability_body(
     env: WorkerEnv,
     server: rapira_observability::Server,
     drain_grace: Duration,
 ) -> i32 {
-    // The process name identifies the observability process: https://man7.org/linux/man-pages/man2/PR_SET_NAME.2const.html
+    // The process name identifies the observability process. https://man7.org/linux/man-pages/man2/PR_SET_NAME.2const.html
     #[cfg(target_os = "linux")]
     // SAFETY: prctl reads a NUL-terminated static string that fits the 16-byte limit.
     unsafe {
@@ -35,7 +35,7 @@ pub fn observability_body(
         .store(rapira_scoreboard::SLOT_IDLE, Release);
     rapira_master::spawn_lifeline_watch(env.lifeline);
     let (stop_tx, stop_rx) = tokio::sync::watch::channel(false);
-    // The master sends a reload to every pool, and this process has no app to restart.
+    // The master sends a reload to every pool. This process has no app, so the reload does nothing.
     crate::worker::spawn_signal_thread(
         move || {
             stop_tx.send_replace(true);
