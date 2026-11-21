@@ -209,7 +209,7 @@ fn max_boot_failures_zero_keeps_a_worker_that_never_boots() -> anyhow::Result<()
     Ok(())
 }
 
-// An idle keep-alive connection holds the drain of an unhealthy worker open for the whole drain grace. The worker boots no more after the unhealthy flag: it sheds the units that arrive and exits when the drain ends. process_control_timeout_secs = 4 gives a drain grace of 2 s, longer than the 1 s boot wait after the second failed boot.
+// An idle keep-alive connection holds the drain of an unhealthy worker open for the whole drain grace. The worker does not boot again after the unhealthy flag. It sheds the units that arrive and exits when the drain ends. process_control_timeout_secs = 4 gives a drain grace of 2 s, which is longer than the 1 s boot wait after the second failed boot.
 #[test]
 fn an_unhealthy_worker_boots_no_more_while_a_connection_holds_its_drain() -> anyhow::Result<()> {
     let mut srv = Spawn::http(

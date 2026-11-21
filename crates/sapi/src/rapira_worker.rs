@@ -279,7 +279,7 @@ pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
                 let retry_at = Instant::now() + retry_delay;
                 retry_delay = (retry_delay * 2).min(BOOT_RETRY_MAX);
                 loop {
-                    // An unhealthy worker boots no more: it sheds units until the drain closes the intake.
+                    // An unhealthy worker does not boot again. It sheds units until the drain closes the intake.
                     let wait = if unhealthy {
                         BOOT_RETRY_MAX
                     } else {

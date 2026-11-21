@@ -61,7 +61,7 @@ pub fn sb_update(event: Event) {
     }
 }
 
-/// The drain decision: the slot shows DRAINING, and the later Idle and BootFailed stores keep it. A request in flight keeps ACTIVE for the request watchdog until its Idle store. It takes the slot, because only the PHP thread sets `SB`.
+/// Stores the drain decision. The slot shows DRAINING, and the later Idle and BootFailed stores keep it. A request in flight keeps ACTIVE for the request watchdog until its Idle store. The function takes the slot, because only the PHP thread sets `SB`.
 pub fn drain(s: &SharedSlot) {
     DRAINING.store(true, Relaxed);
     let _ = s.state.try_update(Release, Relaxed, |state| {

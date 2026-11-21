@@ -20,7 +20,7 @@ const REQ: Duration = Duration::from_secs(10);
 const ECHO: &str = "shared/echo-worker.php";
 const GRPC_ECHO: &str = "grpc/echo-worker.php";
 
-/// With no server_port, PHP sees the port of the bound address, as `php -S 127.0.0.1:0` does, and port 80 on a unix socket. With port 0 the kernel picks the port: the `prepared listener on` record of the master and the `listening on` record of the worker name that port, and the server answers there.
+/// With no server_port, PHP sees the port of the bound address, as `php -S 127.0.0.1:0` does, and port 80 on a unix socket. With port 0, the kernel picks the port. The `prepared listener on` record of the master and the `listening on` record of the worker name that port, and the server answers there.
 #[test]
 fn the_default_server_port_is_the_bound_port() {
     struct Case {
@@ -31,7 +31,7 @@ fn the_default_server_port_is_the_bound_port() {
         listen: ListenAddr,
         /// The text before the port in the body line that names it.
         before_port: &'static str,
-        /// The port that PHP sees. None: the port that the kernel picked.
+        /// The port that PHP sees, or None for the port that the kernel picked.
         port: Option<u16>,
     }
     let dir = scratch_dir();

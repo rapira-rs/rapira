@@ -705,7 +705,7 @@ fn a_throw_from_a_shutdown_function_is_uncaught() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The teardown writes the session after the handler returns, and the save handler can throw there. The response is sealed at that point, so the throw gets the fatal record and fails the unit, and the app exception handler does not run. The client gets the reply of php -S: status 200 and the whole body, streamed or buffered.
+/// The teardown writes the session after the handler returns, and the save handler can throw there. The host sealed the response before that, so the throw gets the fatal record and fails the unit. The app exception handler does not run. The client gets the reply of php -S: status 200 and the whole body, streamed or buffered.
 #[test]
 fn a_throw_from_the_session_write_is_uncaught() -> anyhow::Result<()> {
     struct Case {

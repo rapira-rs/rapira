@@ -59,7 +59,7 @@ pub struct UploadsSection {
 pub struct Settings {
     pub listen: ListenAddr,
     pub server_name: String,
-    /// None: the port of the bound address, 80 on a unix socket.
+    /// With None, the server port is the port of the bound address, or 80 on a unix socket.
     pub server_port: Option<u16>,
     pub max_body_size: usize,
     pub write_timeout: Duration,

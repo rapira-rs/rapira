@@ -398,9 +398,9 @@ int rapira_request_teardown(void) {
     rapira_rs_finish_response();
     // the internal frame of handle_request is live, so a throw of the
     // teardown flush or of the save handler stays pending. It gets only the
-    // fatal record: after the seal, so the record does not cut a streamed
-    // body, and without the user exception handler, which could start a
-    // session after the session reset.
+    // fatal record. The record comes after the seal, so it does not cut a
+    // streamed body. The user exception handler does not run, because it
+    // could start a session after the session reset.
     RAPIRA_GUARD(
         if (rapira_report_uncaught(false) && outcome == RAPIRA_OK) {
             outcome = RAPIRA_THROW;

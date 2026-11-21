@@ -1175,7 +1175,7 @@ fn request_parse_body_worker() -> anyhow::Result<()> {
     ];
 
     let shared = std::fs::read_to_string(fixture("ini/shared/php.ini"))?;
-    // enable_post_data_reading = 0 leaves a POST body to request_parse_body(), as a PUT or a PATCH body.
+    // enable_post_data_reading = 0 leaves a POST body to request_parse_body(), like a PUT or a PATCH body.
     let srv = Spawn::http(Mode::Worker, fixture("ported_tests/parse-body-worker.php"))
         .php_ini(&format!(
             "{shared}\npost_max_size = 8M\nupload_max_filesize = 8M\nenable_post_data_reading = 0\n"
