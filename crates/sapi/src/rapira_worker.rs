@@ -352,7 +352,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     let teardown = unsafe { rapira_request_teardown() };
 
     let recycle: bool = [outcome, flushed, teardown].contains(&(RAPIRA_BAILOUT as c_int));
-    let errored: bool = recycle || outcome == RAPIRA_THROW as c_int;
+    let errored: bool = recycle || [outcome, teardown].contains(&(RAPIRA_THROW as c_int));
 
     log_and_clear_last_error();
     sb_update(scoreboard::Event::Handled { errored });

@@ -361,7 +361,7 @@ static void rapira_release_header_callback(void) {
 
 // per-request sapi teardown (main/main.c:1985,2002,2031)
 int rapira_request_teardown(void) {
-    int bailed = RAPIRA_OK;
+    int outcome = RAPIRA_OK;
     // the VM stack is popped when handle_request returns, so close frames here
     zend_execute_data *observed_base = EG(current_observed_frame);
 
@@ -373,16 +373,28 @@ int rapira_request_teardown(void) {
             php_output_end_all();
             php_header();
         },
-        bailed, observed_base);
+        outcome, observed_base);
     // the session write comes before the response: a store without a lock
     // serves the old session to a request that starts when the response
     // arrives
-    RAPIRA_GUARD(rapira_reset_session(), bailed, observed_base);
+    RAPIRA_GUARD(rapira_reset_session(), outcome, observed_base);
     rapira_rs_finish_response();
-    RAPIRA_GUARD(rapira_modules_request(false), bailed, observed_base);
-    RAPIRA_GUARD(php_output_deactivate(), bailed, observed_base);
-    RAPIRA_GUARD(rapira_release_header_callback(), bailed, observed_base);
-    RAPIRA_GUARD(sapi_deactivate(), bailed, observed_base);
+    // the internal frame of handle_request is live, so a throw of the
+    // teardown flush or of the save handler stays pending: report it as
+    // rapira_run_handler does. The report follows the seal, so its fatal
+    // record does not cut a streamed body.
+    RAPIRA_GUARD(
+        if (rapira_report_uncaught() && outcome == RAPIRA_OK) {
+            outcome = RAPIRA_THROW;
+        },
+        outcome, observed_base);
+    // the exception handler can start a session, and no session RINIT runs
+    // before the next unit
+    RAPIRA_GUARD(rapira_reset_session(), outcome, observed_base);
+    RAPIRA_GUARD(rapira_modules_request(false), outcome, observed_base);
+    RAPIRA_GUARD(php_output_deactivate(), outcome, observed_base);
+    RAPIRA_GUARD(rapira_release_header_callback(), outcome, observed_base);
+    RAPIRA_GUARD(sapi_deactivate(), outcome, observed_base);
 
     zend_try { zend_unset_timeout(); }
     zend_end_try();
@@ -390,7 +402,7 @@ int rapira_request_teardown(void) {
     // teardown can run __destruct; a pending throw surfaces in the next unit.
     // The release can run a __destruct that bails out.
     RAPIRA_GUARD(
-        if (EG(exception)) { zend_clear_exception(); }, bailed, observed_base);
+        if (EG(exception)) { zend_clear_exception(); }, outcome, observed_base);
 
     // _zend_bailout leaves gc_protect engaged, disabling GC for the next unit
     gc_protect(false);
@@ -401,7 +413,7 @@ int rapira_request_teardown(void) {
     SG(request_info).current_user = NULL;
     SG(request_info).content_type_dup = NULL;
 
-    return bailed;
+    return outcome;
 }
 
 // A kept last error pins objects and trips core_globals_dtor (main.c:2102).
