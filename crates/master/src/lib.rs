@@ -30,7 +30,7 @@ pub struct PoolConfig {
     pub name: &'static str,
     /// Worker count. The master keeps this many workers running.
     pub processes: usize,
-    /// Wall-clock limit of one request, counted from its pull. After it, the master sends TERM, then KILL, to the worker and replaces it. Zero disables the limit.
+    /// Wall-clock limit of one request. The clock starts again at each pull, also at a pull that returns no unit. After the limit, the master sends TERM to the worker, and KILL on a later tick if the worker is still active. The master replaces the worker after its exit. Zero disables the limit.
     pub request_terminate_timeout: Duration,
     /// RSS limit of one worker in MiB. Above it, the master sends QUIT to the worker and replaces the worker after its drain. Zero disables the limit.
     pub max_memory_mb: u64,

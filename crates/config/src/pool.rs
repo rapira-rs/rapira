@@ -20,7 +20,7 @@ pub struct PoolSettings {
     pub max_memory_mb: u64,
     /// Failed boots in sequence after which a worker stops as unhealthy. 0 means no limit.
     pub max_boot_failures: u32,
-    /// Wall-clock limit of one request, counted from its pull. Time in the intake does not count. Zero disables the limit.
+    /// Wall-clock limit of one request. The clock starts again at each pull, also at a pull that returns no unit. Time in the intake does not count. Zero disables the limit.
     pub request_terminate_timeout: Duration,
     /// Variables each worker sets before its PHP thread starts. `resolve_pool` rejects the names and values that `std::env::set_var` panics on (https://doc.rust-lang.org/std/env/fn.set_var.html#panics).
     pub env: BTreeMap<String, String>,
