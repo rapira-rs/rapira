@@ -9,7 +9,7 @@ const WARNINGS: u32 = E_WARNING | E_CORE_WARNING | E_COMPILE_WARNING | E_USER_WA
 const NOTICES: u32 = E_NOTICE | E_USER_NOTICE;
 const DEPRECATIONS: u32 = E_DEPRECATED | E_USER_DEPRECATED;
 
-/// `tracing::event!` needs a const level and target, so the runtime level fans out over five arms.
+/// `tracing::event!` needs a const level and target, so the macro matches the runtime level in five arms.
 macro_rules! event_at {
     ($target:literal, $lvl:expr, $($arg:tt)+) => {
         match $lvl {
@@ -30,7 +30,7 @@ pub(crate) struct Severity {
     pub label: &'static str,
 }
 
-/// A masked non-fatal drops to `Trace` rather than vanishing; fatals ignore the mask. https://www.php.net/manual/en/function.error-reporting.php
+/// A masked non-fatal drops to `Trace` and keeps its record. Fatals ignore the mask. https://www.php.net/manual/en/function.error-reporting.php
 pub(crate) fn error_type_to_level(err_type: c_int, mask: c_int) -> Severity {
     let (err_type, mask) = (err_type as u32, mask as u32);
     let (level, label) = match err_type {
@@ -49,7 +49,7 @@ pub(crate) fn error_type_to_level(err_type: c_int, mask: c_int) -> Severity {
     Severity { level, label }
 }
 
-/// Syslog priorities LOG_EMERG(0)..LOG_DEBUG(7); php-src reports deprecations at LOG_INFO (main/main.c:1443-1446).
+/// Maps a syslog priority, from LOG_EMERG (0) to LOG_DEBUG (7), to a tracing level. php-src reports deprecations at LOG_INFO (main/main.c:1443-1446).
 pub(crate) fn syslog_to_level(syslog_lev: c_int) -> tracing::Level {
     match syslog_lev {
         0..=3 => tracing::Level::ERROR,
@@ -114,7 +114,7 @@ mod tests {
         assert_eq!((level, label), (Level::WARN, "Unknown error"));
     }
 
-    /// The boundaries are a contract with `[log] level`; LOG_INFO lands below `Info` because php-src reports deprecations there.
+    /// The boundaries are a contract with `[log] level`; LOG_INFO maps below `Info` because php-src reports deprecations there.
     #[test]
     fn syslog_severities_keep_their_boundaries() {
         for (priority, want) in [
@@ -131,14 +131,14 @@ mod tests {
         }
     }
 
-    /// A priority off the scale reports at `Info` rather than being dropped or raised to an error.
+    /// A priority off the scale reports at `Info`. It is not dropped and not raised to an error.
     #[test]
     fn an_out_of_range_syslog_priority_falls_back_to_info() {
         assert_eq!(syslog_to_level(8), Level::INFO);
         assert_eq!(syslog_to_level(-1), Level::INFO);
     }
 
-    /// Both tables sort a deprecation below `Info`, so `[log] level = "info"` does not surface deprecations.
+    /// Both tables sort a deprecation below `Info`, so `[log] level = "info"` does not show deprecations.
     #[test]
     fn both_paths_sort_deprecations_below_info() {
         let Severity { level, label } = level_of(E_DEPRECATED, E_DEPRECATED);

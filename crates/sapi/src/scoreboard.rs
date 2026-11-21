@@ -19,7 +19,7 @@ pub enum Event {
     Idle,
     Active,
     Draining,
-    /// A boot cycle ended without a pull of the app. The slot shows STARTING until the app pulls. After the drain decision, the slot shows DRAINING.
+    /// A boot cycle ends without a pull of the app. The slot shows STARTING until the app pulls. After the drain decision, the slot shows DRAINING.
     BootFailed,
 }
 
@@ -67,7 +67,7 @@ fn draining_or(state: u32) -> u32 {
 mod tests {
     use super::*;
 
-    /// A failed boot cycle shows starting, and draining after the worker decided to exit.
+    /// A failed boot cycle shows starting, and draining after the worker decides to exit.
     #[test]
     fn a_failed_boot_cycle_shows_draining_after_the_drain_decision() {
         struct Case {

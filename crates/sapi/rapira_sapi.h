@@ -28,7 +28,7 @@
 #include <ext/spl/spl_exceptions.h>
 #include <ext/standard/head.h>
 
-// injected by rapira_php_build::compile
+// rapira_php_build::compile defines it
 #ifndef RAPIRA_VERSION
 #define RAPIRA_VERSION "0.0.0-dev"
 #endif
@@ -37,9 +37,9 @@
 void rapira_array_init(zval *zv, uint32_t size);
 void rapira_smart_str_free(smart_str *s);
 bool rapira_array_is_list(HashTable *ht);
-// ZVAL_OBJ_COPY is a macro; the shim writes the case `name` of the enum `ce` into `dst` with a new reference
+// ZVAL_OBJ_COPY is a macro; the shim looks up the case called name in the enum class ce and writes it into dst with a new reference
 void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name);
-// ZVAL_STRINGL is a macro; the shim writes a new non-interned string into `zv`
+// ZVAL_STRINGL is a macro; the shim writes a new non-interned string into zv
 void rapira_zval_stringl(zval *zv, const char *s, size_t len);
 // ZVAL_NEW_STR and ZVAL_EMPTY_STRING are macros; the shim writes a new string of
 // len bytes into zv and returns its buffer for the caller to fill. For len 0 it
@@ -49,16 +49,16 @@ char *rapira_zval_string_alloc(zval *zv, size_t len);
 // release one reference, and an interned string gets neither
 void rapira_zstr_addref(zend_string *s);
 void rapira_zstr_release(zend_string *s);
-// ZVAL_STRINGL_FAST is a macro; the shim registers the string `val` as `name` through php_register_known_variable.
-// `name` must be non-empty and non-numeric, have no NUL, ' ', '.' or '[', and not be "this" or "GLOBALS".
+// ZVAL_STRINGL_FAST is a macro; the shim registers the variable called name with the string value val through php_register_known_variable.
+// The name must be non-empty and non-numeric, have no NUL, ' ', '.' or '[', and not be "this" or "GLOBALS".
 void rapira_register_known_stringl(const char *name, size_t name_len,
                                    const char *val, size_t val_len,
                                    zval *track_vars_array);
-// ZVAL_STRINGL_FAST is a macro; the shim stores the string `val` in `ht` under `key` through zend_hash_update.
+// ZVAL_STRINGL_FAST is a macro; the shim stores the string value val in the hash table ht under key through zend_hash_update.
 void rapira_hash_update_stringl(HashTable *ht, zend_string *key,
                                 const char *val, size_t val_len);
 
-// Mode in rapira_config (crates/config/src/pool.rs), mapped in start.rs (start_worker) - keep in sync
+// The Mode enum of rapira_config (crates/config/src/pool.rs). start_worker (start.rs) maps it to these values. Keep both in sync.
 enum {
     RAPIRA_MODE_CLASSIC = 0,
     RAPIRA_MODE_WORKER = 1,
@@ -66,16 +66,17 @@ enum {
 };
 extern int rapira_mode;
 
-// The dispatcher surface of a plugin. Each plugin defines one record; its
-// register function assigns the classes in MINIT.
+// The plugin record. Each plugin defines one; its register function assigns the
+// classes in MINIT.
 typedef struct {
     zend_class_entry *dispatcher;
     zend_class_entry *info;
     // the error of receive() and tryReceive() while a unit is unfinalized
     const char *busy;
-    // RSHUTDOWN calls it on the PHP thread before the request strings are
-    // freed: the plugin waits until its IO thread holds no request string,
-    // then releases the strings. NULL when the plugin lends nothing.
+    // RSHUTDOWN calls it on the PHP thread before the memory manager frees the
+    // request strings. The plugin waits until its IO thread holds no request
+    // string, then releases the strings. It is NULL when the plugin lends
+    // nothing.
     void (*quiesce)(void);
 } rapira_plugin;
 // The plugin of this worker's pool. In dispatcher mode, start_worker
@@ -86,7 +87,8 @@ extern const rapira_plugin *rapira_plugin_current;
 extern const char *rapira_plugin_name;
 extern size_t rapira_plugin_name_len;
 // A plugin register function calls it after it assigns the classes of the
-// record: the Dispatcher and DispatcherInfo classes get the shared handlers.
+// record. It gives the shared handlers to the Dispatcher and DispatcherInfo
+// classes.
 void rapira_plugin_wire(const rapira_plugin *plugin);
 // The plugin register functions that MINIT calls after the base classes, in
 // array order; boot_master (start.rs) writes them once in the master.
@@ -114,38 +116,40 @@ void rapira_dispatcher_forget(void);
 // the seal of the current CGI reply (rapira_worker.rs)
 extern void rapira_rs_finish_response(void);
 
-// The unit behind a Work object: the first field of the C prefix of every class
-// that receive() hands out. Rust owns the two words (HeldPtr in work.rs); C
-// passes the address and never reads the words. A zeroed rapira_held holds no
+// The unit behind a Work object. It is the first field of the C prefix of every
+// class that receive() hands out. Rust owns the two words (HeldPtr in work.rs);
+// C passes the address and never reads the words. A zeroed rapira_held holds no
 // unit. zend_object_alloc zeroes the prefix, so a fresh object holds no unit.
 typedef struct {
     void *words[2];
 } rapira_held;
 
-// The held word of a unit object: the prefix starts handlers.offset bytes
-// before the object (rapira_object_create), and the held word is its first
-// field.
+// Returns the held word of a unit object. The prefix starts handlers.offset
+// bytes before the object (rapira_object_create), and the held word is its
+// first field.
 static zend_always_inline rapira_held *rapira_held_of(zend_object *obj) {
     return (rapira_held *)((char *)obj - obj->handlers->offset);
 }
 
-// free_obj of a unit class passes the held word of the object: Rust reclaims
-// the unit (work.rs)
+// free_obj of a unit class passes the held word of the object, and Rust
+// reclaims the unit (work.rs)
 extern void rapira_rs_held_drop(rapira_held *held);
 
-// The plugin takes one value that the generator of the unit yielded. False with
-// an exception pending: the plugin refused the value. False with none: the host
-// closed the unit, so the value has no destination.
+// The plugin takes one value that the generator of the unit yielded. It returns
+// false with an exception pending when the plugin refused the value. It returns
+// false with no exception when the host closed the unit, so the value has no
+// destination.
 typedef bool (*rapira_stream_send_t)(const rapira_held *held, zval *value);
 
 // Runs a generator to its end and gives each yielded value to send
-// (rapira_stream.c). True: the generator ended and the unit is open. False: an
-// exception is pending (exit() is one too), or the host closed the unit.
+// (rapira_stream.c). Returns true when the generator ended and the unit is
+// open. Returns false when an exception is pending or the host closed the unit.
+// An exit() is a pending exception too.
 bool rapira_stream_run_generator(zend_object *generator,
                                  const rapira_held *held,
                                  rapira_stream_send_t send);
 
-// The counts of a DispatcherInfo object sit before zend_object std:
+// The counts of a DispatcherInfo object are before zend_object std:
 // https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
 typedef struct {
     zend_long pending;
@@ -178,8 +182,8 @@ zend_object *rapira_object_create(zend_class_entry *ce);
 // called from PHP_MINIT_FUNCTION
 void rapira_register_classes(void);
 // Checks the Rapira\InetAddress|Rapira\UnixAddress union that arginfo cannot
-// enforce: internal arg types are debug-only. Returns false with a TypeError
-// pending.
+// enforce, because PHP checks the arg types of internal functions only in debug
+// builds. Returns false with a TypeError pending.
 bool rapira_address_arg(zval *zv, uint32_t num);
 // writes the string property name, or null when value is NULL
 static zend_always_inline void
@@ -191,8 +195,8 @@ rapira_prop_str_or_null(zend_class_entry *ce, zend_object *obj,
         zend_update_property_null(ce, obj, name, name_len);
     }
 }
-// called from start.rs after php_module_startup: the post readers that hand
-// PHP the buffered body (module.c)
+// called from start.rs after php_module_startup. It registers the post readers
+// that hand the buffered body to PHP (module.c)
 void rapira_register_post_reader(void);
 
 // The Dispatcher, DispatcherInfo and Work methods that every plugin shares, and
@@ -210,8 +214,9 @@ ZEND_FUNCTION(rapira_sapi_is_cancelled);
 ZEND_FUNCTION(rapira_sapi_dispatcher_construct);
 ZEND_FUNCTION(rapira_sapi_host_created);
 
-// Returns from the internal function when `call` reports false. Rust throws
-// before it reports false; the backstop covers a missing throw.
+// Returns from the internal function when call reports false. Rust throws
+// before it reports false, and the zend_throw_error here covers a missing
+// throw.
 #define RAPIRA_RETURN_THROWS_UNLESS(call, what)                                \
     do {                                                                       \
         if (!(call)) {                                                         \

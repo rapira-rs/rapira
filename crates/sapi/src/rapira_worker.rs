@@ -27,7 +27,7 @@ thread_local! {
     /// The next handle_request() call tears down the boot request first.
     static FIRST_CALL: Cell<bool> = const { Cell::new(true) };
     static RECYCLE: Cell<bool> = const { Cell::new(false) };
-    /// The app instance runs with OPcache off until the OPcache restart has run: the last_restart_time that the pull waits to see change.
+    /// Set while the app instance runs with OPcache off until the OPcache restart has run. It holds the last_restart_time that the pull waits to see change.
     pub(crate) static OPCACHE_WAIT: Cell<Option<zend_long>> = const { Cell::new(None) };
     /// The last_restart_time at the end of the previous app instance of this thread.
     static PREVIOUS_END: Cell<Option<zend_long>> = const { Cell::new(None) };
@@ -46,7 +46,7 @@ const OPCACHE_RESTARTING: c_int = 4;
 
 /// The wait after the first failed boot of a sequence. Each further failed boot doubles it, up to `BOOT_RETRY_MAX`.
 const BOOT_RETRY_BASE: Duration = Duration::from_millis(500);
-/// The longest wait between two boots. The boot repeats without a request: a load balancer that reads `/readyz` sends no requests to a pool that is not ready.
+/// The longest wait between two boots. The boot repeats without a request, because a load balancer that reads `/readyz` sends no requests to a pool that is not ready.
 const BOOT_RETRY_MAX: Duration = Duration::from_secs(5);
 
 enum Cycle {
@@ -61,8 +61,8 @@ pub enum WorkerExit {
     Restart,
 }
 
-/// Starts the boot request with the argv of `php entrypoint.php` and builds $_SERVER before the script runs, as the CLI does.
-/// argc is 0 again after this: with argc set, each later $_SERVER build adds a reference to the $argv global, and that crashes when $argv holds null, an int or [].
+/// Starts the boot request with the argv of `php entrypoint.php` and builds $_SERVER before the entrypoint runs, as the CLI does.
+/// After this, argc is 0 again. With argc set, each later $_SERVER build adds a reference to the $argv global, and that crashes when $argv holds null, an int or [].
 /// https://github.com/php/php-src/blob/php-8.5.11/sapi/cli/php_cli.c#L941
 /// https://github.com/php/php-src/blob/php-8.5.11/main/php_variables.c#L881-L887
 fn boot_request_startup() -> bool {
@@ -135,9 +135,9 @@ fn run_cycle(script: &Path) -> Cycle {
 /// What an app boot does about OPcache.
 enum OpcacheBoot {
     Run,
-    /// OPcache is on and a restart is pending: this app instance holds the usage lock, so it leaves at its first pull.
+    /// OPcache is on and a restart is pending. This app instance holds the usage lock, so it leaves at its first pull.
     LeaveAtFirstPull,
-    /// OPcache is off for this app instance: it leaves when last_restart_time is no longer `seen`.
+    /// OPcache is off for this app instance. It leaves when last_restart_time is not `seen`.
     Wait {
         seen: zend_long,
     },
@@ -198,7 +198,7 @@ pub(crate) fn opcache_restart_ran() -> bool {
 }
 
 /// OPcache calls it on the PHP thread that schedules a restart, inside OPcache with its lock held and before it marks the restart pending, so it only stores the reason.
-/// It stores nothing while the reset of a reload is due: every app restarts for that reload, so the restart can run with no report.
+/// It stores nothing while the reset of a reload is due. Every app restarts for that reload, so the OPcache restart can run with no report.
 pub(crate) unsafe extern "C" fn opcache_restart_scheduled(reason: c_int) {
     if RELOADS.get().is_some_and(|r| r.reset_due().is_some()) {
         return;
@@ -206,7 +206,7 @@ pub(crate) unsafe extern "C" fn opcache_restart_scheduled(reason: c_int) {
     OPCACHE_SCHEDULED.store(reason, Ordering::Relaxed);
 }
 
-/// The restart runs only when no app holds OPcache, so the master reloads every pool. SIGUSR2 is the reload of the master, the parent of every worker.
+/// The restart runs only when no app holds OPcache, so the master reloads every pool. SIGUSR2 to the master, the parent of every worker, starts the reload.
 pub(crate) fn reload_for_opcache_restart() {
     let reason = OPCACHE_SCHEDULED.swap(NO_RESTART, Ordering::Relaxed);
     if reason == NO_RESTART {
@@ -219,14 +219,14 @@ pub(crate) fn reload_for_opcache_restart() {
         _ => "opcache_reset()",
     };
     warn!(target: "rapira", "OPcache scheduled a restart ({why}); every app restarts so that the restart can run");
-    // SAFETY: plain syscalls.
+    // SAFETY: these are plain syscalls.
     unsafe { libc::kill(libc::getppid(), libc::SIGUSR2) };
 }
 
 /// When a reset is due, makes the reset call in a request of its own that runs no script. OPcache takes the usage lock at the first cached compile of a request (persistent_compile_file in ext/opcache/ZendAccelerator.c), and a restart that runs before that lock empties the strings of a script that the request then loads. The next request starts with the restart pending or done.
 /// Returns false when the shutdown of that request bailed.
 pub(crate) fn reset_opcache_before_request() -> bool {
-    // Read before the request starts: when no reset is due, a reset call for every reload so far has returned.
+    // Read this before the request starts. When no reset is due, a reset call for every reload so far has returned.
     if RELOADS.get().is_none_or(|r| r.reset_due().is_none()) {
         return true;
     }
@@ -239,7 +239,7 @@ pub(crate) fn reset_opcache_before_request() -> bool {
 }
 
 /// A reload empties OPcache, as a PHP-FPM reload does. A worker calls opcache_reset() only when no reset call for the last reload has returned, and it records its call after the call. A call that finds a restart pending schedules nothing.
-/// A call from a request that holds no usage lock can schedule a second restart for one reload: it waits for the lock of OPcache while another call schedules the first restart and a third request runs it. opcache_restart_scheduled keeps the record of that second restart, and the next pull asks the master for a reload, except the pull after a failed boot.
+/// A call from a request that holds no usage lock can schedule a second restart for one reload. It waits for the lock of OPcache while another call schedules the first restart and a third request runs it. opcache_restart_scheduled keeps the record of that second restart, and the next pull asks the master for a reload, except the pull after a failed boot.
 /// Needs an active request: the end of each app instance in worker and dispatcher mode, and the request of reset_opcache_before_request in every mode.
 fn reset_opcache_if_due() {
     let Some(reloads) = RELOADS.get() else {
@@ -251,7 +251,7 @@ fn reset_opcache_if_due() {
     }
 }
 
-/// `max_boot_failures`: the failed boots in sequence after which the worker stops as unhealthy; 0 is no limit.
+/// `max_boot_failures` is the number of failed boots in sequence after which the worker stops as unhealthy. 0 means no limit.
 pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
     let mut failures: u32 = 0;
     let mut retry_delay = BOOT_RETRY_BASE;
@@ -274,7 +274,7 @@ pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
                     crate::quota::fire_unhealthy();
                 }
                 sb_update(scoreboard::Event::BootFailed);
-                // One deadline for the whole wait: the units that arrive get shed, and they do not move the next boot.
+                // One deadline covers the whole wait. The host sheds the units that arrive, and they do not delay the next boot.
                 let retry_at = Instant::now() + retry_delay;
                 retry_delay = (retry_delay * 2).min(BOOT_RETRY_MAX);
                 loop {
@@ -288,7 +288,7 @@ pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
                             unit.shed();
                             sb_update(scoreboard::Event::Shed);
                         }
-                        // The wait ended, or a reload arrived: the next boot starts.
+                        // The wait ended, or a reload arrived, so the next boot starts.
                         Pull::NoUnit => break,
                     }
                 }
@@ -300,7 +300,7 @@ pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
 }
 
 /// # Safety
-/// Called from the C handle_request shell on the resident worker thread inside its active request, with valid `fci`/`fcc`. The unbind here is the only one per unit. It also covers the caught-panic path, where SG(server_context) would otherwise point at a freed unit.
+/// Called from the C handle_request shell on the resident worker thread inside its active request, with valid `fci` and `fcc`. The unbind here is the only one per unit. It also covers the caught-panic path, where SG(server_context) would otherwise point at a freed unit.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_handle_request(
     fci: *mut zend_fcall_info,
@@ -311,7 +311,7 @@ pub extern "C" fn rapira_rs_handle_request(
     action as c_int
 }
 
-/// Flushes before rapira_request_teardown: the real head (status, cookies, php_error_cb's 500) lives in SG(sapi_headers), which teardown destroys.
+/// Flushes before rapira_request_teardown, because SG(sapi_headers) holds the real head and teardown destroys it. The real head has the status, the cookies and the 500 of php_error_cb.
 fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> u32 {
     let Some(mut ctx) = next_unit() else {
         return if RECYCLE.get() {
@@ -357,7 +357,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     }
 }
 
-/// The first call tears down the bootstrap request php_request_startup() left behind, before any unit is served.
+/// The first call tears down the boot request that php_request_startup() left open, before the app serves a unit.
 fn next_unit() -> Option<Box<Context>> {
     if FIRST_CALL.take() {
         if unsafe { rapira_request_teardown() } == RAPIRA_BAILOUT as c_int {
@@ -365,13 +365,13 @@ fn next_unit() -> Option<Box<Context>> {
             RECYCLE.set(true);
             return None;
         }
-        // hide boot registrations from the per-unit shutdown pass; they run at cycle end
+        // hide the shutdown functions of the boot from the per-unit shutdown pass; they run at the cycle end
         unsafe { rapira_stash_boot_shutdown_functions() };
     }
     log_and_clear_last_error();
     match pull(Wait::Forever) {
         Pull::Unit(unit) => Some(unit.into_cgi()),
-        // The app instance takes no more units: handle_request() returns false, and the worker stays.
+        // The app instance takes no more units. handle_request() returns false, and the worker stays.
         Pull::Closed | Pull::NoUnit => None,
     }
 }
@@ -389,7 +389,7 @@ pub extern "C" fn rapira_rs_finish_response() {
     });
 }
 
-/// clear_last_error() keeps last_error_type/lineno set (main/main.c:1307-1316) so the message pointer is the only "slot filled" signal, and php_error_cb applies EG(error_reporting) only after filling it (main/main.c:1394-1411).
+/// clear_last_error() keeps last_error_type and last_error_lineno set (main/main.c:1307-1316), so only the message pointer shows a filled slot. php_error_cb applies EG(error_reporting) only after it fills the slot (main/main.c:1394-1411).
 /// The record covers the last diagnostic that php_error_cb did not log: EG(error_reporting) at this call masks its type, log_errors is 0, or error_log is set.
 /// The check reads the mask at this call. When @ or a temporary error_reporting() call masked the diagnostic and the code restored the mask before this call, the diagnostic gets no record. PHP does not log it either.
 fn log_and_clear_last_error() {
@@ -488,7 +488,7 @@ mod tests {
                 previous_end: Some(7),
                 want: OpcacheBoot::Wait { seen: 7 },
             },
-            // Known limit: a boot inside a restart can read this state, and the app then runs without OPcache until its next start.
+            // This case is a known limit. A boot inside a restart can read this state, and the app then runs without OPcache until its next start.
             Case {
                 name: "off, and no restart ran after the previous app instance",
                 state: 0,
@@ -549,7 +549,7 @@ mod tests {
             }
             RELOADS.set(Some(reloads));
             unsafe { opcache_restart_scheduled(2) };
-            // A swap right after the hook: the pull test of this crate reads the same value and signals the parent process when it finds a reason.
+            // The test swaps right after the hook, because the pull test of this crate reads the same value and signals the parent process when it finds a reason.
             let got = OPCACHE_SCHEDULED.swap(NO_RESTART, Ordering::Relaxed);
             assert_eq!(got, case.want, "{}", case.name);
         }

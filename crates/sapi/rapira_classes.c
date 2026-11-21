@@ -21,17 +21,17 @@ zend_class_entry *rapira_ce_inet_address;
 zend_class_entry *rapira_ce_unix_address;
 zend_class_entry *rapira_ce_tls;
 
-// own copies: std_object_handlers is shared engine state. A plugin's
-// Dispatcher class gets std handlers without clone, and its DispatcherInfo
-// class gets the rapira_dispatcher_info_obj layout.
+// This file keeps its own copies, because std_object_handlers is shared engine
+// state. A plugin's Dispatcher class gets the std handlers without clone, and
+// its DispatcherInfo class gets the rapira_dispatcher_info_obj layout.
 static zend_object_handlers rapira_dispatcher_handlers;
 static zend_object_handlers rapira_info_handlers;
 
 void (*const *rapira_plugin_registers)(void);
 size_t rapira_plugin_register_count;
 
-// create_object for a class whose default_object_handlers set .offset: the C
-// prefix sits before std, and zend_object_alloc zeroes it
+// create_object for a class whose default_object_handlers set .offset. The C
+// prefix is before std, and zend_object_alloc zeroes it
 // (Zend/zend_objects_API.h), so NULL and IS_UNDEF fields need no assignment.
 zend_object *rapira_object_create(zend_class_entry *ce) {
     size_t offset = ce->default_object_handlers->offset;
@@ -138,7 +138,8 @@ void rapira_register_classes(void) {
     rapira_ce_unix_address = register_class_Rapira_UnixAddress();
     rapira_ce_tls = register_class_Rapira_Tls();
 
-    // clone_obj = NULL: engine throws on clone (Zend/zend_vm_def.h:6050-6056)
+    // with clone_obj NULL, the engine throws on clone
+    // (Zend/zend_vm_def.h:6050-6056)
     rapira_dispatcher_handlers = std_object_handlers;
     rapira_dispatcher_handlers.clone_obj = NULL;
 
@@ -170,21 +171,21 @@ PHP_MINIT_FUNCTION(rapira) {
 // output flush and the timer stop, and before the memory manager shutdown:
 // https://github.com/php/php-src/blob/php-8.5.11/main/main.c#L1974-L2050
 // A write to a held unit from a later RSHUTDOWN would lend a string that the
-// memory manager then frees, so user code there must not write.
+// memory manager then frees, so app code there must not write.
 PHP_RSHUTDOWN_FUNCTION(rapira) {
     if (rapira_plugin_current != NULL &&
         rapira_plugin_current->quiesce != NULL) {
         rapira_plugin_current->quiesce();
     }
 #ifdef HAVE_PHP_SESSION
-    // the session RSHUTDOWN runs after this one (zend_collect_module_handlers):
-    // write the session before the response leaves
+    // the session RSHUTDOWN runs after this one (zend_collect_module_handlers),
+    // so write the session before the response leaves
     if (PS(session_status) == php_session_active) {
         zend_try { php_session_flush(1); }
         zend_end_try();
     }
 #endif
-    // php_header runs the user header callback. From php-8.4.28 and
+    // php_header runs the header callback of the app. From php-8.4.28 and
     // php-8.5.13, a bailout that leaves an RSHUTDOWN ends the process:
     // https://github.com/php/php-src/security/advisories/GHSA-g3vh-838c-65v7
     // After a bailout here, the cycle end seals the response and forgets the
@@ -197,7 +198,7 @@ PHP_RSHUTDOWN_FUNCTION(rapira) {
     return SUCCESS;
 }
 
-// The module entry lives here: ext_functions is file-static in
+// The module entry is in this file, because ext_functions is file-static in
 // rapira_arginfo.h, and only this file includes it.
 // clang-format off
 zend_module_entry rapira_module_entry = {

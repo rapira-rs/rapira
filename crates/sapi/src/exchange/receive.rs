@@ -7,10 +7,10 @@ enum RecvMode {
     Try,
 }
 
-/// Pulls a unit and creates its object in `rv`: the object has the class of the unit, and this function writes its held word. False when no unit arrives.
-/// The cycle slot owns the unit until the object holds it: a unit with no owner would leak its Frame sender and hang the client.
+/// Pulls a unit and creates its object in `rv`. The object has the class of the unit, and this function writes its held word. Returns false when no unit arrives.
+/// The cycle slot owns the unit until the object holds it, because a unit with no owner would leak its Frame sender and hang the client.
 /// # Safety
-/// `rv` is the return value of the receive shell; engine active on this thread.
+/// `rv` is the return value of the receive shell, and the engine is active on this thread.
 unsafe fn receive_into(rv: *mut zval, mode: RecvMode) -> bool {
     unsafe {
         if let Some(ptr) = UNIT.get()
@@ -32,7 +32,7 @@ unsafe fn receive_into(rv: *mut zval, mode: RecvMode) -> bool {
         // The timer of the previous unit still runs. A queued unit re-arms it, so disarm it only before a wait.
         let mut armed = matches!(mode, RecvMode::Wait(t) if t != 0);
         if !armed {
-            // SAFETY: plain zend timer bookkeeping on this thread; no bailout path.
+            // SAFETY: the call is plain zend timer bookkeeping on this thread and has no bailout path.
             rapira_receive_untimed();
         }
         loop {
@@ -44,7 +44,7 @@ unsafe fn receive_into(rv: *mut zval, mode: RecvMode) -> bool {
             };
             match pull(wait) {
                 Pull::Unit(unit) => {
-                    // SAFETY: plain zend timer bookkeeping; no bailout path.
+                    // SAFETY: the call is plain zend timer bookkeeping and has no bailout path.
                     rapira_receive_timed();
                     let ptr = NonNull::from(Box::leak(unit.into_held()));
                     UNIT.set(Some(ptr.as_ptr()));
@@ -56,10 +56,10 @@ unsafe fn receive_into(rv: *mut zval, mode: RecvMode) -> bool {
                 }
                 _ if armed => {
                     armed = false;
-                    // SAFETY: plain zend timer bookkeeping; no bailout path.
+                    // SAFETY: the call is plain zend timer bookkeeping and has no bailout path.
                     rapira_receive_untimed();
                 }
-                // The app instance takes no more units: it sees the source closed, and the worker stays.
+                // The app instance takes no more units. It sees the source closed, and the worker stays.
                 Pull::Closed => {
                     zend::throw_exception(rapira_ce_closed_exception, CLOSED);
                     return false;
@@ -77,9 +77,9 @@ unsafe fn receive_into(rv: *mut zval, mode: RecvMode) -> bool {
     }
 }
 
-/// True when `rv` holds the object of a pulled unit. False with an exception set: closed, busy or timeout. tryReceive: false with no exception means no unit is queued, and the shell returns null.
+/// Returns true when `rv` holds the object of a pulled unit. Returns false with an exception set for these cases: closed, busy or timeout. For tryReceive, false with no exception means that no unit is queued, and the shell returns null.
 /// # Safety
-/// `timeout_us >= -1`; `rv` is the return value of the receive shell; engine active on this thread (the receive verbs touch the zend timer).
+/// `timeout_us >= -1`. `rv` is the return value of the receive shell. The receive functions touch the zend timer, so the engine must be active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_receive(timeout_us: i64, rv: *mut zval) -> bool {
     guard(false, || unsafe {
@@ -87,7 +87,7 @@ pub unsafe extern "C" fn rapira_rs_receive(timeout_us: i64, rv: *mut zval) -> bo
     })
 }
 
-/// As `rapira_rs_receive`; never blocks.
+/// As `rapira_rs_receive`, but it never blocks.
 /// # Safety
 /// As `rapira_rs_receive`.
 #[unsafe(no_mangle)]
@@ -95,9 +95,9 @@ pub unsafe extern "C" fn rapira_rs_try_receive(rv: *mut zval) -> bool {
     guard(false, || unsafe { receive_into(rv, RecvMode::Try) })
 }
 
-/// The intake depth and whether the unit handed out last is unfinalized: the two counts of a DispatcherInfo object.
+/// Writes the two counts of a DispatcherInfo object: the intake depth, and whether the unit handed out last is unfinalized.
 /// # Safety
-/// `pending` and `active` writable; engine active on this thread.
+/// `pending` and `active` are writable, and the engine is active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_dispatcher_counts(pending: *mut i64, active: *mut i64) {
     guard((), || unsafe {

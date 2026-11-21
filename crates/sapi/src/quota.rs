@@ -6,10 +6,10 @@ use tracing::info;
 use crate::plugin::Stopper;
 use crate::scoreboard::{Event, sb_update};
 
-/// The worker stops because PHP keeps failing to boot.
+/// The worker stops because PHP failed to boot `max_boot_failures` times in sequence.
 static UNHEALTHY: AtomicBool = AtomicBool::new(false);
 
-/// The units the current app instance may take: it takes no more once `served` reaches `max`.
+/// The units that the current app instance may take. It takes no more units when `served` reaches `max`.
 #[derive(Default)]
 struct QuotaState {
     served: u64,
@@ -21,7 +21,7 @@ thread_local! {
     static Q: RefCell<QuotaState> = RefCell::new(QuotaState::default());
 }
 
-/// Install on the PHP worker thread before the first unit. `max_requests` 0 is no limit.
+/// Installs the quota on the PHP worker thread before the first unit. A `max_requests` of 0 means no limit.
 pub(crate) fn install(max_requests: u64, stopper: Stopper) {
     Q.with_borrow_mut(|q| {
         *q = QuotaState {
@@ -50,7 +50,7 @@ pub(crate) fn exhausted() -> bool {
     Q.with_borrow(|q| q.served >= q.max)
 }
 
-/// A reload: the current app instance takes no more units.
+/// On a reload, the current app instance takes no more units.
 pub(crate) fn exhaust() {
     Q.with_borrow_mut(|q| q.served = q.max);
 }

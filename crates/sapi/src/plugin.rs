@@ -25,9 +25,9 @@ pub trait Plugin: Send + 'static {
     fn name(&self) -> &'static str;
     /// The pool modes this plugin serves. The root refuses another mode at boot.
     fn modes(&self) -> &'static [Mode];
-    /// The address of the plugin's C record (`rapira_plugin` in rapira_sapi.h): the dispatcher surface receive() serves in dispatcher mode.
+    /// The address of the plugin record (`rapira_plugin` in rapira_sapi.h). In dispatcher mode, PHP calls receive() on the dispatcher that the record describes.
     fn dispatcher(&self) -> *const rapira_plugin;
-    /// Worker side, on the plugin thread. Returns after the stop signal and the drain.
+    /// Runs in the worker, on the plugin thread. Returns after the stop signal and the drain.
     fn serve(self: Box<Self>, worker: Worker) -> anyhow::Result<()>;
 }
 
@@ -80,7 +80,7 @@ impl Running {
     }
 }
 
-/// Sets the stop flag from a plain thread: it needs no runtime. A stop before [`run_plugin`] also reaches the plugin.
+/// Sets the stop flag. It needs no runtime, so a plain thread can call it. A stop before [`run_plugin`] also reaches the plugin.
 #[derive(Clone, Default)]
 pub struct Stopper {
     flag: watch::Sender<bool>,
@@ -111,7 +111,7 @@ struct JoinEvents {
 
 #[derive(Default)]
 struct JoinState {
-    /// The first stop: the grace of the join counts from here.
+    /// The time of the first stop. The grace of the join counts from this time.
     stopped_at: Option<Instant>,
     /// The plugin thread ended.
     ended: bool,
@@ -174,7 +174,7 @@ pub fn run_plugin(
         .spawn(move || {
             let _ended = ended;
             let result = plugin.serve(worker);
-            // The runtime drops here, on a plain thread: a drop in an async context panics.
+            // The runtime drops here, on a plain thread, because a drop in an async context panics.
             drop(rt);
             result
         })

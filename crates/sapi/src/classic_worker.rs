@@ -14,15 +14,15 @@ pub(crate) fn classic_worker() {
     }
 }
 
-// run_script is also false for exit()/die(), so only a recorded fatal error marks a failure.
+// run_script is also false for exit() and die(), so only a recorded fatal error marks a failure.
 fn classic_executor(ctx: &mut Context) -> Event {
-    // Before the client context is bound: the request that makes the reset call has no client and runs no script.
+    // The reset comes before bind_server_context, because the request that makes the reset call has no client and runs no script.
     crate::rapira_worker::reset_opcache_before_request();
     bind_server_context(ctx);
     let errored = unsafe {
         populate_request_context(ctx);
         if php_request_startup() == FAILURE {
-            // Before the shutdown: the php_header() in RSHUTDOWN would commit a 200 head first.
+            // The refusal comes before the shutdown, because the php_header() in RSHUTDOWN would commit a 200 head first.
             ctx.refuse(500);
             rapira_request_shutdown();
             unbind_server_context();

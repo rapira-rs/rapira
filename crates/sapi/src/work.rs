@@ -21,21 +21,21 @@ pub(crate) const INTAKE_SLOTS: usize = 1024;
 /// The body bytes that one worker holds for the units that PHP has not taken yet.
 const BODY_BUDGET: usize = 64 << 20;
 
-/// A dispatcher-mode unit, from submit to free_obj: the plugin state behind the object receive() hands to PHP.
+/// A dispatcher-mode unit from submit to free_obj. It is the plugin state behind the object that receive() hands to PHP.
 pub trait Held: Send + 'static {
     /// The worker committed the outcome, or discarded the unit.
     fn settled(&self) -> bool;
-    /// The unit takes no outcome: the client left, or the plugin closed the unit. Work::isCancelled(). The pull skips a queued unit that is cancelled.
+    /// The unit takes no outcome, because the client left or the plugin closed the unit. Work::isCancelled() returns this value. The pull skips a queued unit that is cancelled.
     fn cancelled(&self) -> bool;
     fn discard(&mut self);
-    /// The object of an unsettled unit is gone: what the client gets in place of the outcome. The drop shell skips it when the cycle died.
+    /// Sends what the client gets in place of the outcome when the object of an unsettled unit is gone. The drop shell skips it when the cycle died.
     fn lost(&mut self);
-    /// A worker that cannot serve: the plugin's refusal, 503 or UNAVAILABLE.
+    /// Sheds the unit with the refusal of the plugin, 503 or UNAVAILABLE, when the worker cannot serve it.
     fn shed(self: Box<Self>);
     /// The class of the object that receive() creates for this unit. The plugin registered it in MINIT, so it is never null.
     fn class(&self) -> *mut zend_class_entry;
 
-    /// Work::isFinalized().
+    /// Work::isFinalized() returns this value.
     fn is_finalized(&self) -> bool {
         self.settled() || self.cancelled()
     }
@@ -53,7 +53,7 @@ pub(crate) unsafe fn release(ptr: *mut dyn Held) -> Box<dyn Held> {
     st
 }
 
-/// The unit behind a Work object: the first field of the C prefix of every unit class (rapira_held in rapira_sapi.h). zend_object_alloc zeroes the prefix, so a fresh object holds None.
+/// The unit behind a Work object. It is the first field of the C prefix of every unit class (rapira_held in rapira_sapi.h). zend_object_alloc zeroes the prefix, so a fresh object holds None.
 #[repr(transparent)]
 pub struct HeldPtr(pub(crate) Option<NonNull<dyn Held>>);
 
@@ -81,7 +81,7 @@ impl HeldPtr {
     }
 }
 
-/// Work::isFinalized().
+/// Work::isFinalized() returns this value.
 /// # Safety
 /// `held` is the held word of a live unit object that receive() attached.
 #[unsafe(no_mangle)]
@@ -89,7 +89,7 @@ pub unsafe extern "C" fn rapira_rs_held_is_finalized(held: *const HeldPtr) -> bo
     guard(false, || unsafe { (*held).get().as_ref().is_finalized() })
 }
 
-/// Work::isCancelled().
+/// Work::isCancelled() returns this value.
 /// # Safety
 /// As `rapira_rs_held_is_finalized`.
 #[unsafe(no_mangle)]
@@ -97,13 +97,13 @@ pub unsafe extern "C" fn rapira_rs_held_is_cancelled(held: *const HeldPtr) -> bo
     guard(false, || unsafe { (*held).get().as_ref().cancelled() })
 }
 
-/// The free_obj of a unit class: reclaims the unit, and an unsettled unit sends its lost outcome. A cycle that died (a fatal error, a timeout) skips the outcome: the plugin reports the worker death when the sender drops.
+/// The free_obj of a unit class. It reclaims the unit, and an unsettled unit sends its lost outcome. A cycle that died, for example after a fatal error or a timeout, skips the outcome. The plugin then reports the worker death when the sender drops.
 /// # Safety
-/// `held` is the held word of the object that free_obj got; engine active on this thread.
+/// `held` is the held word of the object that free_obj got, and the engine is active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_held_drop(held: *mut HeldPtr) {
     guard((), || unsafe {
-        // An object that new created holds no unit: the engine refuses the private constructor after the allocation.
+        // An object that new created holds no unit, because the engine refuses the private constructor after the allocation.
         let Some(ptr) = (*held).0.take() else {
             return;
         };
@@ -121,7 +121,7 @@ pub enum Unit {
 }
 
 impl Unit {
-    /// The client left while the unit was queued: the pull skips it.
+    /// The client left while the unit was queued, so the pull skips it.
     pub(crate) fn cancelled(&self) -> bool {
         match self {
             Self::Cgi(ctx) => ctx.sender.as_ref().is_none_or(|tx| tx.is_closed()),
@@ -129,7 +129,7 @@ impl Unit {
         }
     }
 
-    /// A worker that cannot serve: 503 for a CGI unit, the plugin's refusal for a dispatcher unit.
+    /// Sheds the unit when the worker cannot serve it: 503 for a CGI unit, the refusal of the plugin for a dispatcher unit.
     pub(crate) fn shed(self) {
         match self {
             Self::Cgi(mut ctx) => ctx.refuse(503),
@@ -145,7 +145,7 @@ impl Unit {
         }
     }
 
-    /// Dispatcher mode: the unit behind the object.
+    /// In dispatcher mode, returns the unit behind the object.
     pub(crate) fn into_held(self) -> Box<dyn Held> {
         match self {
             Self::Dispatcher(held) => held,
@@ -156,13 +156,13 @@ impl Unit {
 
 /// One entry of the intake.
 pub(crate) enum Entry {
-    /// A unit, its body bytes in the budget and its slot. The pull drops both permits: the bytes go back, and the oldest waiting submit gets the slot.
+    /// A unit, its body bytes in the budget and its slot. The pull drops both permits, so the bytes go back and the oldest waiting submit gets the slot.
     Unit {
         unit: Unit,
         _bytes: OwnedSemaphorePermit,
         _slot: OwnedSemaphorePermit,
     },
-    /// A reload: the app instance takes no more units, and the next one takes the rest.
+    /// A reload. The app instance takes no more units, and the next one takes the rest.
     RestartApp,
 }
 
@@ -196,7 +196,7 @@ pub fn now_unix_f64() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// The queue from a plugin thread to the PHP thread. Clone per plugin task.
+/// The queue from a plugin thread to the PHP thread. Clone it for each plugin task.
 #[derive(Clone)]
 pub struct Intake {
     tx: Sender<Entry>,
@@ -249,8 +249,8 @@ impl Intake {
         }
     }
 
-    /// `bytes` is the body size of the unit. A multipart body that the plugin parsed keeps its file parts in spool files and its other parts in memory. submit refuses a body that does not fit the free budget immediately, because the body stays in memory or in the spool dir while it waits. A spool dir on tmpfs is also memory.
-    /// pending is incremented before the send: the consumer decrements as soon as it wakes, so the reverse order could wrap the counter below zero.
+    /// `bytes` is the body size of the unit. A multipart body that the plugin parsed keeps its file parts in spool files and its other parts in memory. submit at once refuses a body that does not fit the free budget, because the body stays in memory or in the spool dir while it waits. A spool dir on tmpfs is also memory.
+    /// submit increments pending before the send, because the consumer decrements it as soon as it wakes. The reverse order could wrap the counter below zero.
     pub async fn submit(&self, unit: Unit, bytes: usize) -> Result<(), Refused> {
         // A body larger than the budget takes all of it.
         let Ok(held) =
@@ -290,7 +290,7 @@ impl Intake {
     }
 
     /// Sends the reload signal through the intake, so it also wakes a PHP thread that waits for work.
-    /// It is no unit: it takes no slot and no budget, and no counter sees it, so it enters a full intake at once.
+    /// It is not a unit. It takes no slot and no budget, and no counter sees it, so it enters a full intake at once.
     pub(crate) fn restart_app(&self) -> Result<(), Refused> {
         self.tx
             .send(Entry::RestartApp)
@@ -366,7 +366,7 @@ mod tests {
         );
     }
 
-    /// A reload enters a full intake at once: it is a signal, not a unit, so it never waits for a unit to leave and no counter sees it.
+    /// A reload enters a full intake at once. It is a signal, not a unit, so it never waits for a unit to leave and no counter sees it.
     #[tokio::test(flavor = "current_thread")]
     async fn a_reload_enters_a_full_intake_at_once() {
         let (tx, _rx) = channel();
@@ -405,14 +405,14 @@ mod tests {
             handled: u64,
             errors: u64,
             failed_on_full_queue: u64,
-            /// Beyond the INTAKE_SLOTS units that fill the intake.
+            /// The pending units beyond the INTAKE_SLOTS units that fill the intake.
             pending: u64,
         }
         struct Case {
             name: &'static str,
             /// What happens 1 s into the wait.
             during: During,
-            /// None: the client left, so the submit gives no result.
+            /// None means that the client left, so the submit gives no result.
             result: Option<Result<(), Refused>>,
             want: Counts,
         }
@@ -455,7 +455,7 @@ mod tests {
                 name: "room frees during the wait",
                 during: During::RoomFrees,
                 result: Some(Ok(())),
-                // The unit is in the queue. Only the pull of the PHP thread subtracts it from `pending`.
+                // The unit is in the queue. Only the pull of the PHP thread subtracts it from pending.
                 want: Counts {
                     handled: 0,
                     errors: 0,

@@ -13,7 +13,7 @@ const C_FILES: &[&str] = &[
     "rapira_stream.c",
 ];
 
-// bindgen panics on php-src master's `preserve_none` opcode handlers, so `_zend_op` stays opaque: https://clang.llvm.org/docs/AttributeReference.html#preserve-none
+// bindgen panics on the preserve_none opcode handlers of php-src master, so _zend_op stays opaque. https://clang.llvm.org/docs/AttributeReference.html#preserve-none
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-check-cfg=cfg(php84)");
     println!("cargo:rustc-check-cfg=cfg(php85)");
@@ -65,7 +65,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-// libclang 19+ does not infer the macOS SDK path: without -isysroot the parse cannot find <stdlib.h>.
+// libclang 19+ does not infer the macOS SDK path. Without -isysroot, the parse cannot find <stdlib.h>.
 #[cfg(target_os = "macos")]
 fn macos_sysroot(bindings: bindgen::Builder) -> bindgen::Builder {
     if let Ok(out) = std::process::Command::new("xcrun")

@@ -4,7 +4,7 @@ use std::{
     ptr::{null, null_mut},
 };
 
-/// Runs before php.ini is parsed (main/php_ini.c:420) so an explicit user value still wins; startup-stage interned strings are permanent, so config_zval_dtor's release is a no-op.
+/// Runs before PHP parses php.ini (main/php_ini.c:420), so an explicit user value overrides these defaults. The interned strings of the startup stage are permanent, so the release in config_zval_dtor does nothing.
 unsafe extern "C" fn ini_defaults(configuration_hash: *mut HashTable) {
     for (name, value) in [
         (c"display_errors", c"0"),
@@ -29,7 +29,7 @@ unsafe extern "C" fn ini_defaults(configuration_hash: *mut HashTable) {
     }
 }
 
-/// On 8.4 the SAPI name must be "fastcgi": OPcache <= 8.4 starts only for names on accel_find_sapi()'s allowlist, removed in 8.5 (https://github.com/php/php-src/commit/3088d6406847dd425dd43122f5de57cc97aa4408).
+/// On 8.4 the SAPI name must be "fastcgi", because OPcache <= 8.4 starts only for the names on the allowlist of accel_find_sapi(). PHP 8.5 removes that allowlist (https://github.com/php/php-src/commit/3088d6406847dd425dd43122f5de57cc97aa4408).
 pub(crate) fn build_sapi_module() -> sapi_module_struct {
     sapi_module_struct {
         #[cfg(php84)]

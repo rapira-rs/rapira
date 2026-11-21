@@ -11,20 +11,20 @@ pub enum Addr {
     Unix(Option<PathBuf>),
 }
 
-/// A well-formed response stream is `Head? (Chunk|File)* End?`; a channel closing without `End` means the producer died.
+/// A well-formed response stream is `Head? (Chunk|File)* End?`; a channel that closes without `End` means that the producer died.
 pub enum Frame {
     Head {
         head: ResponseHead,
-        /// Some: the framing the consumer must apply; None: the consumer chooses (chunked on HTTP/1.1).
+        /// Some holds the framing that the consumer must apply. None lets the consumer choose, and on HTTP/1.1 it chooses chunked.
         content_length: Option<u64>,
-        /// 204, 304, 101 or a HEAD request: no body bytes and no framing fields on the wire.
+        /// A 204, 304 or 101 response, or a HEAD request, has no body bytes and no framing fields on the wire.
         bodiless: bool,
     },
     Chunk(Bytes),
     File {
         file: std::fs::File,
         offset: u64,
-        /// Never zero: a producer does not emit an empty slice.
+        /// Never zero, because a producer does not emit an empty slice.
         len: u64,
     },
     End {
@@ -32,7 +32,7 @@ pub enum Frame {
     },
 }
 
-/// The raw body as the transport delivered it: one part per received data frame, empty frames left out. Each consumer makes its one copy from the parts.
+/// The raw body as the transport delivered it. It has one part per received data frame, and it leaves out empty frames. Each consumer makes its one copy from the parts.
 #[derive(Default)]
 pub struct Chunks {
     parts: Vec<Bytes>,
@@ -69,7 +69,7 @@ impl Chunks {
     }
 }
 
-/// read_post reads through this. A read fills the buffer across the part seams: sapi_read_post_block takes a short read as the end of the body.
+/// read_post reads through this. A read fills the buffer across the part boundaries, because sapi_read_post_block takes a short read as the end of the body.
 /// https://github.com/php/php-src/blob/php-8.5.11/main/SAPI.c#L232-L252
 impl std::io::Read for Chunks {
     fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
@@ -93,16 +93,16 @@ impl std::io::Read for Chunks {
 pub struct Request {
     pub method: String,
     pub uri: String,
-    /// Request-target bytes; a plugin can reconstruct them from its parsed URI. None falls back to `uri`'s bytes.
+    /// The request-target bytes. A plugin can rebuild them from its parsed URI. None uses the bytes of `uri`.
     pub target: Option<Vec<u8>>,
-    /// Byte-for-byte as the client named it; None = the client named none.
+    /// The authority byte for byte as the client named it. None means that the client named none.
     pub authority: Option<Vec<u8>>,
     pub https: bool,
-    /// Wire/CGI spelling ("HTTP/2.0"); mapped to the contract spelling at the exchange view.
+    /// The wire and CGI spelling, for example "HTTP/2.0". The exchange view maps it to the contract spelling.
     pub protocol: &'static str,
     pub remote: Addr,
     pub server: Addr,
-    /// Configured CGI SERVER_NAME/SERVER_PORT, also the $uri synthesis fallback.
+    /// The configured CGI SERVER_NAME and SERVER_PORT. They are also the fallback for the $uri synthesis.
     pub server_name: &'static str,
     pub server_port: u16,
     pub headers: HeaderMap,
@@ -117,7 +117,7 @@ pub struct ResponseHead {
     pub headers: HeaderMap,
 }
 
-/// CGI `Status` pseudo-field: php-src passes it as a plain header line.
+/// The CGI `Status` pseudo-field. php-src passes it as a plain header line.
 /// https://www.rfc-editor.org/rfc/rfc3875#section-6.3.3
 static STATUS: HeaderName = HeaderName::from_static("status");
 
@@ -129,7 +129,7 @@ fn status_field_code(value: &[u8]) -> Option<u16> {
     (100..=599).contains(&code).then_some(code)
 }
 
-/// Owns the $_SERVER-facing strings so `register_server_variables` only borrows: that frame may not hold owned Rust values, a bailout longjmp over pending drops is UB.
+/// Owns the strings for $_SERVER, so `register_server_variables` only borrows them. That frame must not hold owned Rust values, because a bailout longjmp over pending drops is UB.
 pub struct ReqC {
     pub method: CString,
     pub query: CString,
@@ -153,7 +153,7 @@ fn cgi_addr_strings(addr: &Addr) -> CgiAddr {
             addr: sa.ip().to_string(),
             port: sa.port().to_string(),
         },
-        // REMOTE_ADDR must hold a hostnumber (RFC 3875 §4.1.8); loopback stands in for a unix peer.
+        // REMOTE_ADDR must hold a hostnumber (RFC 3875 §4.1.8), so a unix peer gets the loopback address.
         // https://www.rfc-editor.org/rfc/rfc3875#section-4.1.8
         Addr::Unix(_) => CgiAddr {
             addr: "127.0.0.1".to_owned(),
@@ -162,7 +162,7 @@ fn cgi_addr_strings(addr: &Addr) -> CgiAddr {
     }
 }
 
-/// A NUL byte cannot cross the CGI boundary; the value degrades to empty.
+/// A NUL byte cannot cross the CGI boundary, so the value becomes empty.
 fn cgi_cstring(field: &str, bytes: &[u8]) -> CString {
     CString::new(bytes).unwrap_or_else(|_| {
         tracing::warn!(target: "rapira", "{field} carries a NUL byte; registered empty");
@@ -171,7 +171,7 @@ fn cgi_cstring(field: &str, bytes: &[u8]) -> CString {
 }
 
 impl ReqC {
-    /// Cookie repeats rejoin on "; ", the cookie-string form php-src's parser expects.
+    /// Cookie repeats join on "; ", the cookie-string form that the php-src parser expects.
     pub fn build(r: &Request) -> Self {
         let mut joined = Vec::new();
         let cookie: Option<CString> =
@@ -211,7 +211,7 @@ impl ReqC {
 pub enum StreamState {
     NotSent,
     HeadSent,
-    /// Body output began during the handler, not the teardown flush.
+    /// Body output starts during the handler, not during the teardown flush.
     BodyStreamed,
 }
 
@@ -222,14 +222,14 @@ pub struct Context {
     pub(crate) head: Option<ResponseHead>,
     pub(crate) body: Vec<u8>,
     pub(crate) stream: StreamState,
-    /// The teardown flush runs: its output does not count as a streamed body.
+    /// True while the teardown flush runs. Its output does not count as a streamed body.
     pub(crate) tearing_down: bool,
-    /// The cycle's verdict before the C shutdown, read by the seal inside it.
+    /// The error result of the cycle before the C shutdown. The seal inside the shutdown reads it.
     pub(crate) errored: bool,
 }
 
 impl Context {
-    /// Builds the CGI view here: the http plugin calls it on the transport thread.
+    /// Builds the CGI view here, because the http plugin calls it on the IO thread.
     pub fn new(req: Request, sender: Sender<Frame>) -> Self {
         let c = ReqC::build(&req);
         Self {
@@ -244,7 +244,7 @@ impl Context {
         }
     }
 
-    /// The seal of a cycle: a failure gets a 500 head when none was sent, and a body cut mid-stream gets no content-length.
+    /// The seal of a cycle. A failure gets a 500 head when none was sent, and a body cut mid-stream gets no content-length.
     pub(crate) fn end(&mut self, errored: bool) {
         let truncated = errored && self.stream == StreamState::BodyStreamed;
         if errored && self.stream == StreamState::NotSent {
@@ -277,7 +277,7 @@ impl Context {
         self.stream = StreamState::HeadSent;
     }
 
-    /// Seals the buffered response as Head+Chunk+End; a truncated body gets no content-length, so the client can detect the cut.
+    /// Seals the buffered response as Head, Chunk and End; a truncated body gets no content-length, so the client can detect the cut.
     pub(crate) fn finish(&mut self, truncated: bool) {
         let Some(tx) = self.sender.take() else {
             return;
@@ -312,7 +312,7 @@ impl Context {
     }
 }
 
-/// Blocks only on a full channel: `blocking_send` runs a `block_on` on every call.
+/// Blocks only on a full channel, because `blocking_send` runs a `block_on` on every call.
 fn send(tx: &Sender<Frame>, frame: Frame) {
     if let Err(TrySendError::Full(frame)) = tx.try_send(frame) {
         let _ = tx.blocking_send(frame);
@@ -330,7 +330,7 @@ pub(crate) mod tests {
         assert_eq!(status_field_code(b"  503   "), Some(503));
     }
 
-    /// An unparseable or out-of-range value leaves the status alone; the caller drops the field either way.
+    /// An unparseable or out-of-range value leaves the status unchanged; the caller drops the field in both cases.
     #[test]
     fn status_field_code_rejects_implausible_values() {
         assert_eq!(status_field_code(b""), None);
@@ -530,7 +530,7 @@ pub(crate) mod tests {
         }
     }
 
-    /// The `Status:` field sets the code, never reaches the client, and matches case-insensitively since php-src passes the script's own spelling.
+    /// The `Status:` field sets the code, never reaches the client, and matches case-insensitively, because php-src passes the spelling of the app.
     #[test]
     fn commit_head_consumes_the_status_field() {
         let head = head_of(200, &[("status", "404 Not Found"), ("X-Keep", "kept")]);
@@ -539,7 +539,7 @@ pub(crate) mod tests {
         assert!(head.headers.contains_key("x-keep"));
     }
 
-    /// An unparseable `Status:` is still consumed (forwarding it would put a literal `Status:` field on the wire) without inventing a code.
+    /// The host still removes an unparseable `Status:` and invents no code. A forwarded `Status:` would put a literal `Status:` field on the wire.
     #[test]
     fn commit_head_drops_an_unparseable_status_without_changing_the_code() {
         let head = head_of(201, &[("Status", "NotFound")]);
@@ -553,7 +553,7 @@ pub(crate) mod tests {
         assert_eq!(head_of(500, &[("Status", "404")]).status, 404);
     }
 
-    /// A read fills the buffer across the part seams and is short only at the end of the body.
+    /// A read fills the buffer across the part boundaries and is short only at the end of the body.
     #[test]
     fn chunks_read_in_order_across_the_parts() {
         use std::io::Read;

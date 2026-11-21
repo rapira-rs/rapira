@@ -16,7 +16,7 @@ pub(crate) use crate::{
 mod receive;
 
 thread_local! {
-    /// The Box pointer of the unit handed out last, so paths where free_obj never runs (bailout) can still reclaim it.
+    /// The Box pointer of the unit handed out last, so a path where free_obj never runs, such as a bailout, can still reclaim it.
     pub(crate) static UNIT: Cell<Option<*mut dyn Held>> = const { Cell::new(None) };
     /// The count of the cycles this PHP thread ran, 1 in the first cycle.
     static CYCLE: Cell<u64> = const { Cell::new(0) };
@@ -41,7 +41,7 @@ pub(crate) fn cycle_reset() {
     crate::start::RECEIVED.set(false);
 }
 
-/// Reclaim a unit free_obj never saw (shutdown bailout / allocation bailout).
+/// Reclaims a unit that free_obj never saw, after a shutdown bailout or an allocation bailout.
 pub(crate) fn reclaim_current() {
     if let Some(ptr) = UNIT.get() {
         // SAFETY: the pointer came from Box::leak in receive, and rapira_rs_held_drop clears the cycle slot before it reclaims.
@@ -77,9 +77,9 @@ pub fn ip_text(ip: IpAddr, buf: &mut [u8; 39]) -> &str {
     std::str::from_utf8(&buf[..len]).expect("an IP text is ASCII")
 }
 
-/// add_assoc_zval_ex moves the list ref in: the hash-update family never addrefs.
+/// add_assoc_zval_ex takes over the list ref, because the hash-update functions never addref.
 /// # Safety
-/// `dst` a live array; engine active on this thread.
+/// `dst` is a live array, and the engine is active on this thread.
 pub unsafe fn add_list<'v>(
     dst: *mut zval,
     key: *const c_char,
@@ -111,7 +111,7 @@ static INET_SLOTS: OnceLock<[u32; 2]> = OnceLock::new();
 static UNIX_SLOT: OnceLock<u32> = OnceLock::new();
 
 /// # Safety
-/// `dst` writable; engine active on this thread.
+/// `dst` is writable, and the engine is active on this thread.
 pub unsafe fn build_address(dst: *mut zval, addr: &Addr) {
     unsafe {
         match addr {
