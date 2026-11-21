@@ -41,13 +41,13 @@ pub struct Settings {
     /// The services to serve out of the set; None serves the services of the files that no other file of the set imports.
     pub services: Option<Vec<String>>,
     pub reflection: bool,
-    /// Deadline for a call that sends no timeout.
+    /// The deadline for a call that sends no timeout.
     pub default_timeout: Option<Duration>,
-    /// Upper bound on the deadline a client asks for.
+    /// The upper bound on the deadline that a client asks for.
     pub max_timeout: Option<Duration>,
     /// Idle time before the listener sends an HTTP/2 PING.
     pub keepalive_interval: Duration,
-    /// Wait for the PING ACK before the listener closes the connection.
+    /// The wait for the PING ACK before the listener closes the connection.
     pub keepalive_timeout: Duration,
     /// The configured order. The first interceptor runs first.
     pub interceptors: Vec<Interceptor>,
@@ -60,7 +60,7 @@ pub enum Interceptor {
     Auth(rapira_grpc_auth::Settings),
 }
 
-/// Boot checks run here: entrypoint file.
+/// Resolves `section` and runs the boot check of the entrypoint file.
 pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
     let settings = settings(section, dir)?;
     check_entrypoint("grpc.pool", &settings.pool.entrypoint)?;
@@ -396,13 +396,13 @@ mod tests {
         }
     }
 
-    /// Expected values: the four list-and-table rules of `[http].middleware` (duplicate, unknown name, entry without a table, table without an entry), applied to `[grpc].interceptors`.
+    /// Expected values: the four list-and-table rules of `[http].middleware`, applied to `[grpc].interceptors`. The rules cover a duplicate, an unknown name, an entry without a table and a table without an entry.
     #[test]
     fn interceptor_list_and_tables_must_agree() {
         struct Case {
             name: &'static str,
             toml: String,
-            /// Ok: the tokens file of each auth interceptor, in list order.
+            /// Ok holds the tokens file of each auth interceptor, in list order.
             expected: Result<&'static [&'static str], &'static str>,
         }
         let cases = [

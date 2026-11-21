@@ -1,4 +1,4 @@
-//! The constructor of the value class Metadata: its rules share `call::printable` and `call::is_binary` with the protocol code.
+//! The constructor of the value class Metadata. Its rules share `call::printable` and `call::is_binary` with the protocol code.
 
 use std::ffi::c_int;
 
@@ -10,7 +10,7 @@ use rapira_sapi::{
 
 /// Throws the contract's TypeError for `key`.
 /// # Safety
-/// Engine active on this thread.
+/// The engine is active on this thread.
 unsafe fn not_a_list(key: &[u8]) {
     unsafe {
         zend_type_error(
@@ -21,10 +21,10 @@ unsafe fn not_a_list(key: &[u8]) {
     }
 }
 
-/// Throws and returns false on the first entry that breaks the Metadata rules, in the order of the contract's constructor body: the key is non-empty lower-case ASCII, it maps to a list, and each value is a string, printable ASCII (0x20-0x7E) under a key without the `-bin` suffix.
+/// Throws and returns false on the first entry that breaks the Metadata rules. The checks follow the order of the contract's constructor body: the key is non-empty lower-case ASCII, it maps to a list, and each value is a string, printable ASCII (0x20-0x7E) under a key without the `-bin` suffix.
 /// A canonical decimal key such as "123" is an int key in a PHP array; its decimal text passes the key rule and has no `-bin` suffix.
 /// # Safety
-/// `ht` a live array; entries stay ZPP-owned.
+/// `ht` is a live array. Its entries stay ZPP-owned.
 unsafe fn metadata_valid(ht: *mut HashTable) -> bool {
     unsafe {
         for zend::Entry { key, val: list } in zend::entries(ht) {
@@ -65,7 +65,7 @@ unsafe fn metadata_valid(ht: *mut HashTable) -> bool {
 }
 
 /// # Safety
-/// `obj` is under construction; `entries` a live array zval, ZPP-owned for the call.
+/// `obj` is under construction. `entries` is a live array zval, ZPP-owned while the constructor runs.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_ctor_grpc_metadata(
     obj: *mut zend_object,

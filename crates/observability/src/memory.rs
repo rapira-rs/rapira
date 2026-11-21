@@ -5,7 +5,7 @@ pub(crate) struct Memory {
     pub pss: Option<u64>,
 }
 
-/// Reads `/proc/<pid>/smaps_rollup`: https://docs.kernel.org/filesystems/proc.html#process-specific-subdirectories. Both values are None when the process is gone or the file cannot be read.
+/// Reads `/proc/<pid>/smaps_rollup`. See https://docs.kernel.org/filesystems/proc.html#process-specific-subdirectories. Both values are None when the process is gone or the file cannot be read.
 #[cfg(target_os = "linux")]
 pub(crate) fn read(pid: u32) -> Memory {
     std::fs::read_to_string(format!("/proc/{pid}/smaps_rollup"))
@@ -18,7 +18,7 @@ pub(crate) fn read(_pid: u32) -> Memory {
     Memory::default()
 }
 
-/// The `Rss:` and `Pss:` lines. The kernel writes the values in kB.
+/// Parses the `Rss:` and `Pss:` lines. The kernel writes the values in kB.
 #[cfg(any(target_os = "linux", test))]
 fn parse(text: &str) -> Memory {
     let field = |name: &str| {

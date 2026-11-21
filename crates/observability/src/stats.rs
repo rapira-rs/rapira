@@ -35,13 +35,13 @@ pub(crate) const STATES: [StateLabel; 4] = [
 /// Exit reasons in output order. `PoolStats::exits` holds the counts in this order.
 pub(crate) const EXIT_REASONS: [&str; 4] = ["drained", "unhealthy", "timeout", "crashed"];
 
-/// A live worker: a slot with a pid other than 0 and a state other than FREE.
+/// A live worker. Its slot has a pid other than 0 and a state other than FREE.
 #[derive(Debug, PartialEq)]
 pub(crate) struct Worker {
     /// The slot index in the pool.
     pub index: usize,
     pub pid: u32,
-    /// Filled after the board read. Both values are None until the read, or when the read fails.
+    /// The `/proc` read after the board read sets it. Both values are None until that read, or when that read fails.
     pub memory: Memory,
 }
 
@@ -67,7 +67,7 @@ pub(crate) fn board_stats(board: &[SharedSlot], pools: &[PoolRegion]) -> Vec<Poo
     pools.iter().map(|pool| pool_stats(board, pool)).collect()
 }
 
-/// Counters and the queue sum over all slots of the pool: a slot keeps the counts of every worker that it held, and `clear` empties the queue of a dead worker.
+/// Sums the counters and the queue over all slots of the pool. A slot keeps the counts of every worker that it held, and `clear` empties the queue of a dead worker.
 fn pool_stats(board: &[SharedSlot], region: &PoolRegion) -> PoolStats {
     let mut stats = PoolStats {
         name: region.name,
@@ -109,7 +109,7 @@ fn pool_stats(board: &[SharedSlot], region: &PoolRegion) -> PoolStats {
 mod tests {
     use super::*;
 
-    /// Slots 0 to 3 belong to an http pool of 4 workers, and slots 4 to 7 to a grpc pool of 4 workers. Each pair of states has different counts in at least one pool, and each grpc exit reason has its own count, so a swap of two states or two exit reasons fails the test.
+    /// Slots 0 to 3 belong to an http pool of 4 workers, and slots 4 to 7 to a grpc pool of 4 workers. Each pair of states has different counts in at least one pool. Each grpc exit reason has its own count. So a swap of two states or two exit reasons fails the test.
     #[test]
     fn board_stats_sums_each_pool() {
         let board = rapira_scoreboard::create(8).unwrap();
@@ -118,7 +118,7 @@ mod tests {
             slot(i).state.store(state, Relaxed);
             slot(i).pid.store(pid, Relaxed);
         };
-        // http slot 0: an active worker.
+        // http slot 0 has an active worker.
         place(0, SLOT_ACTIVE, 201);
         slot(0).handled.store(10, Relaxed);
         slot(0).errors.store(1, Relaxed);
@@ -126,10 +126,10 @@ mod tests {
         slot(0).recycles.store(1, Relaxed);
         slot(0).exits_crashed.store(1, Relaxed);
         slot(0).failed_on_full_queue.store(4, Relaxed);
-        // http slot 1: an idle worker.
+        // http slot 1 has an idle worker.
         place(1, SLOT_IDLE, 202);
         slot(1).handled.store(5, Relaxed);
-        // http slot 2: free. Its counts stay in the totals.
+        // http slot 2 is free. Its counts stay in the totals.
         place(2, SLOT_FREE, 0);
         slot(2).handled.store(7, Relaxed);
         slot(2).errors.store(2, Relaxed);

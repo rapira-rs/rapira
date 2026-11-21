@@ -1,4 +1,4 @@
-//! The observability process: a process without PHP that the master forks and supervises as a pool of one. It serves the Prometheus metrics and the livez and readyz probes. `/metrics` and `/readyz` read the worker scoreboard at each request.
+//! The observability process runs without PHP. The master forks and supervises it as a pool of one. It serves the Prometheus metrics and the livez and readyz probes. `/metrics` and `/readyz` read the worker scoreboard at each request.
 
 pub mod config;
 mod memory;
