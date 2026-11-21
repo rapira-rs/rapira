@@ -331,6 +331,14 @@ fn a_reload_after_a_deploy_runs_the_new_release() {
             case.name,
             diagnostics(&srv)
         );
+        // A restart reason that the hook keeps reaches the log at the next pull, so one more request runs that pull.
+        assert_eq!(
+            seen(&srv),
+            want,
+            "{}: one more request after the reload\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
         let restarts: Vec<String> = records(&srv.log_file())
             .into_iter()
             .filter(|r| {
