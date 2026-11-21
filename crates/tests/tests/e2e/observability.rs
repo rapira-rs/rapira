@@ -10,8 +10,8 @@ use tests::wire::submit;
 use tests::{Resp, StatusBody, drain_resp_deadline, poll, req};
 
 use crate::harness::{
-    Exited, Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_raw, php_version,
-    rapira_version, serving_pid, signal, wait_log_contains, wait_workers, worker_pids,
+    Conn, Exited, Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_raw,
+    php_version, rapira_version, serving_pid, signal, wait_log_contains, wait_workers, worker_pids,
 };
 #[cfg(target_os = "linux")]
 use crate::harness::{kill_master_as_subreaper, wait_child_exit};
@@ -329,6 +329,56 @@ fn a_failed_reboot_stays_starting() {
         "starting, active and timeout exits\n{samples:#?}\n{}",
         diagnostics(&srv)
     );
+}
+
+/// A worker above max_memory_mb shows draining, and its pool is not ready, while it drains. The master tick sends the stop signal after the request that grew the memory or during it. The idle keep-alive connection holds the drain for the drain grace.
+#[test]
+fn a_worker_in_a_memory_drain_is_draining_and_not_ready() {
+    struct Case {
+        name: &'static str,
+        grow: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "the stop signal arrives in an idle worker",
+            // The request ends a few ms after the growth, so the master tick almost always finds the worker idle.
+            grow: "/?grow=160&hold_ms=0",
+        },
+        Case {
+            name: "the stop signal arrives during a request",
+            // The hold of 1.5 s is longer than one master tick. The slot shows draining from the next pull.
+            grow: "/?grow=160",
+        },
+    ];
+    for case in cases {
+        let ObservedServer { srv, observability } = spawn(
+            "lifecycle/memory-growth-worker.php",
+            "max_memory_mb = 128",
+            "[observability.metrics]\n[observability.probes]",
+        );
+        // A served request shows that the worker accepted the connection, so the connection holds the drain.
+        let mut idle = Conn::open(srv.addr, REQ).expect("connect");
+        idle.send(b"GET / HTTP/1.1\r\nHost: e2e\r\n\r\n")
+            .expect("send GET /");
+        let head = idle.read_head(REQ).expect("the response head");
+        assert_eq!(head.status, 200, "{}\n{}", case.name, diagnostics(&srv));
+        let code = http_get(srv.addr, case.grow, REQ).expect(case.name).status;
+        assert_eq!(code, 200, "{}\n{}", case.name, diagnostics(&srv));
+        scrape_until(
+            &srv,
+            observability,
+            &format!("{}: a draining worker", case.name),
+            |s| value(s, &workers("draining")) == 1,
+        );
+        let resp = get(observability, "/readyz");
+        assert_eq!(
+            (resp.status(), resp.body_string().as_str()),
+            (503, "pool http: no ready worker\n"),
+            "{}\n{}",
+            case.name,
+            diagnostics(&srv)
+        );
+    }
 }
 
 /// The master binds every listener in one boot, the observability listener first. The http pool then fails on the shared address.

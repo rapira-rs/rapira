@@ -20,23 +20,101 @@ const REQ: Duration = Duration::from_secs(10);
 const ECHO: &str = "shared/echo-worker.php";
 const GRPC_ECHO: &str = "grpc/echo-worker.php";
 
-/// Port 0 lets the kernel pick the port. The log names the port that the listener got, and the server answers there. The spawn waits for the `[grpc]` pool.
+/// With no server_port, PHP sees the port of the bound address, as `php -S 127.0.0.1:0` does, and port 80 on a unix socket. With port 0 the kernel picks the port: the `prepared listener on` record of the master and the `listening on` record of the worker name that port, and the server answers there.
 #[test]
-fn port_zero_serves_on_the_logged_port() {
-    let srv = Spawn::http(Mode::Dispatcher, fixture_path(ECHO))
-        .http_listen(ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], 0))))
-        .with_grpc(fixture_path(GRPC_ECHO))
-        .spawn();
-    let addr = logged_http_addr(&srv);
-    assert_ne!(addr.port(), 0, "\n{}", diagnostics(&srv));
+fn the_default_server_port_is_the_bound_port() {
+    struct Case {
+        name: &'static str,
+        mode: Mode,
+        fixture: &'static str,
+        path: &'static str,
+        listen: ListenAddr,
+        /// The text before the port in the body line that names it.
+        before_port: &'static str,
+        /// The port that PHP sees. None: the port that the kernel picked.
+        port: Option<u16>,
+    }
+    let dir = scratch_dir();
+    let port_zero = ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], 0)));
+    let cases = [
+        Case {
+            name: "port 0 dispatcher serverPort()",
+            mode: Mode::Dispatcher,
+            fixture: "dispatcher/verbs-worker.php",
+            path: "/?probe=server",
+            listen: port_zero.clone(),
+            before_port: "name=localhost port=",
+            port: None,
+        },
+        Case {
+            name: "port 0 worker SERVER_PORT",
+            mode: Mode::Worker,
+            fixture: "shared/server-variables.php",
+            path: "/",
+            listen: port_zero,
+            before_port: "[SERVER_PORT] => ",
+            port: None,
+        },
+        Case {
+            name: "unix dispatcher serverPort()",
+            mode: Mode::Dispatcher,
+            fixture: "dispatcher/verbs-worker.php",
+            path: "/?probe=server",
+            listen: ListenAddr::Unix(dir.join("http.sock")),
+            before_port: "name=localhost port=",
+            port: Some(80),
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(case.mode, tests::fixture(case.fixture))
+            .http_listen(case.listen.clone())
+            // A TCP listen address is not a readiness target, so the spawn waits for the [grpc] pool.
+            .with_grpc(fixture_path(GRPC_ECHO))
+            .spawn();
+        let (picked, response) = match &case.listen {
+            ListenAddr::Tcp(_) => {
+                let addr = logged_http_addr(&srv);
+                (Some(addr), http_get(addr, case.path, REQ))
+            }
+            ListenAddr::Unix(sock) => (None, unix_get(sock, case.path)),
+        };
+        let StatusBody { status, body } = response.unwrap_or_else(|e| {
+            panic!(
+                "{}: GET {}: {e}\n{}",
+                case.name,
+                case.path,
+                diagnostics(&srv)
+            )
+        });
+        let body = String::from_utf8_lossy(&body);
+        assert_eq!(status, 200, "{}: {body}\n{}", case.name, diagnostics(&srv));
+        let port = case.port.or(picked.map(|addr| addr.port()));
+        let want = format!(
+            "{}{}",
+            case.before_port,
+            port.expect("a case with no port listens on TCP")
+        );
+        assert!(
+            body.lines().any(|line| line.trim() == want),
+            "{}: no line {want:?} in\n{body}",
+            case.name
+        );
 
-    let StatusBody { status: code, body } =
-        http_get(addr, "/", REQ).expect("GET / on the logged port");
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    assert!(
-        String::from_utf8_lossy(&body).starts_with("ok:"),
-        "{body:?}"
-    );
+        if let Some(addr) = picked {
+            let listening = format!("http: listening on http://{addr}");
+            let logged = poll(BOOT, || {
+                let log = std::fs::read_to_string(srv.log_file()).unwrap_or_default();
+                log.contains(&listening).then_some(())
+            });
+            assert!(
+                logged.is_some(),
+                "{}: no {listening:?} record\n{}",
+                case.name,
+                diagnostics(&srv)
+            );
+        }
+    }
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 /// The listener is close-on-exec, so a child process that PHP starts holds no socket of the worker. Fds 0 to 2 come from the shell of the fixture.
@@ -83,14 +161,24 @@ fn unix_socket_file_mode_live_refusal_and_stale_reclaim() {
     let Exited { status, log } = spawn().boot_failure();
     assert!(!status.success(), "{status:?}\n{log}");
     assert!(log.contains("already listening"), "{log}");
-    assert_eq!(unix_status(&sock), 200, "\n{}", diagnostics(&live));
+    assert_eq!(
+        unix_get(&sock, "/").expect("GET / over the socket").status,
+        200,
+        "\n{}",
+        diagnostics(&live)
+    );
 
     live.stop();
     assert!(sock.exists(), "a stopped master leaves its socket file");
 
     let next = spawn().spawn();
     assert_eq!(mode(&sock), 0o666);
-    assert_eq!(unix_status(&sock), 200, "\n{}", diagnostics(&next));
+    assert_eq!(
+        unix_get(&sock, "/").expect("GET / over the socket").status,
+        200,
+        "\n{}",
+        diagnostics(&next)
+    );
     drop(next);
     let _ = std::fs::remove_dir_all(&dir);
 }
@@ -262,17 +350,15 @@ fn mode(path: &Path) -> u32 {
         & 0o777
 }
 
-/// The status code of one HTTP/1.0 `GET /` over the unix socket `sock`.
-fn unix_status(sock: &Path) -> u16 {
-    let mut stream =
-        UnixStream::connect(sock).unwrap_or_else(|e| panic!("connect {}: {e}", sock.display()));
-    stream.set_read_timeout(Some(REQ)).expect("read timeout");
-    stream
-        .write_all(b"GET / HTTP/1.0\r\n\r\n")
-        .expect("write the request");
+/// One HTTP/1.0 GET of `target` over the unix socket `sock`.
+fn unix_get(sock: &Path, target: &str) -> std::io::Result<StatusBody<Vec<u8>>> {
+    let mut stream = UnixStream::connect(sock)?;
+    stream.set_read_timeout(Some(REQ))?;
+    write!(stream, "GET {target} HTTP/1.0\r\n\r\n")?;
     let mut raw = Vec::new();
-    stream.read_to_end(&mut raw).expect("read the response");
-    parse_status_and_body(&raw)
-        .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&raw)))
-        .status
+    stream.read_to_end(&mut raw)?;
+    parse_status_and_body(&raw).map(|StatusBody { status, body }| StatusBody {
+        status,
+        body: body.to_vec(),
+    })
 }

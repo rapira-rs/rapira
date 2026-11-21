@@ -44,7 +44,13 @@ pub fn worker_body(
     let outcome: anyhow::Result<()> =
         run_plugin(plugin, intake, stopper.clone(), grace, drain_grace).and_then(|running| {
             let restarter = stopper.clone();
-            spawn_signal_thread(move || stopper.stop(), move || restarter.restart_app());
+            spawn_signal_thread(
+                move || {
+                    rapira_sapi::scoreboard::drain(env.slot_view);
+                    stopper.stop();
+                },
+                move || restarter.restart_app(),
+            );
             running.join()
         });
     if let Err(e) = &outcome {

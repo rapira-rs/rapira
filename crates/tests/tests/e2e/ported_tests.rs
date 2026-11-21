@@ -1122,3 +1122,79 @@ fn request_bodies_worker() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// request_parse_body() reads a body above half of post_max_size whole. The expected lines are the output of php -S 8.5.12 with the same php.ini.
+#[test]
+fn request_parse_body_worker() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        method: Method,
+        content_type: &'static str,
+        body: Vec<u8>,
+        /// A line per field of $post, then a line per part of $files.
+        expected: &'static str,
+    }
+    const MULTIPART: &str = "multipart/form-data; boundary=RAPIRA";
+    // A 5 MiB file part, then a plain field that rfc1867 reads only after the whole file.
+    let mut multipart = b"--RAPIRA\r\nContent-Disposition: form-data; name=\"file\"; filename=\"a.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n".to_vec();
+    multipart.resize(multipart.len() + (5 << 20), b'x');
+    multipart.extend_from_slice(
+        b"\r\n--RAPIRA\r\nContent-Disposition: form-data; name=\"note\"\r\n\r\nend\r\n--RAPIRA--\r\n",
+    );
+    let mut form = b"a=".to_vec();
+    form.resize(form.len() + (5 << 20), b'x');
+    let cases = [
+        Case {
+            name: "a multipart PUT with a 5 MiB file",
+            method: Method::PUT,
+            content_type: MULTIPART,
+            body: multipart.clone(),
+            expected: "post note 3\nfile file 0 5242880\n",
+        },
+        Case {
+            name: "a multipart PATCH with a 5 MiB file",
+            method: Method::PATCH,
+            content_type: MULTIPART,
+            body: multipart.clone(),
+            expected: "post note 3\nfile file 0 5242880\n",
+        },
+        Case {
+            name: "a multipart POST with a 5 MiB file",
+            method: Method::POST,
+            content_type: MULTIPART,
+            body: multipart,
+            expected: "post note 3\nfile file 0 5242880\n",
+        },
+        Case {
+            name: "a urlencoded PUT with a 5 MiB field",
+            method: Method::PUT,
+            content_type: "application/x-www-form-urlencoded",
+            body: form,
+            expected: "post a 5242880\n",
+        },
+    ];
+
+    let shared = std::fs::read_to_string(fixture("ini/shared/php.ini"))?;
+    // enable_post_data_reading = 0 leaves a POST body to request_parse_body(), as a PUT or a PATCH body.
+    let srv = Spawn::http(Mode::Worker, fixture("ported_tests/parse-body-worker.php"))
+        .php_ini(&format!(
+            "{shared}\npost_max_size = 8M\nupload_max_filesize = 8M\nenable_post_data_reading = 0\n"
+        ))
+        .spawn();
+    let mut mismatches = Vec::new();
+    for case in cases {
+        let mut request = req("/");
+        *request.method_mut() = case.method;
+        request
+            .headers_mut()
+            .insert(CONTENT_TYPE, HeaderValue::from_static(case.content_type));
+        *request.body_mut() = case.body;
+        let resp = drain_resp(submit(srv.addr, request)?);
+        let got = (resp.status(), resp.body_string());
+        if got != (200, case.expected.to_owned()) {
+            mismatches.push(format!("{}: got {got:?}", case.name));
+        }
+    }
+    assert!(mismatches.is_empty(), "{mismatches:#?}");
+    Ok(())
+}

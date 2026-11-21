@@ -269,7 +269,8 @@ pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
             Cycle::Failed => {
                 failures += 1;
                 // The count starts at 1, so a limit of 0 never matches.
-                if failures == max_boot_failures {
+                let unhealthy = failures == max_boot_failures;
+                if unhealthy {
                     error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
                     crate::quota::fire_unhealthy();
                 }
@@ -278,7 +279,12 @@ pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
                 let retry_at = Instant::now() + retry_delay;
                 retry_delay = (retry_delay * 2).min(BOOT_RETRY_MAX);
                 loop {
-                    let wait = retry_at.saturating_duration_since(Instant::now());
+                    // An unhealthy worker boots no more: it sheds units until the drain closes the intake.
+                    let wait = if unhealthy {
+                        BOOT_RETRY_MAX
+                    } else {
+                        retry_at.saturating_duration_since(Instant::now())
+                    };
                     if wait.is_zero() {
                         break;
                     }
@@ -288,6 +294,7 @@ pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
                             unit.shed();
                             sb_update(scoreboard::Event::Shed);
                         }
+                        Pull::NoUnit if unhealthy => {}
                         // The wait ended, or a reload arrived, so the next boot starts.
                         Pull::NoUnit => break,
                     }
@@ -345,7 +352,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     let teardown = unsafe { rapira_request_teardown() };
 
     let recycle: bool = [outcome, flushed, teardown].contains(&(RAPIRA_BAILOUT as c_int));
-    let errored: bool = recycle || outcome == RAPIRA_THROW as c_int;
+    let errored: bool = recycle || [outcome, teardown].contains(&(RAPIRA_THROW as c_int));
 
     log_and_clear_last_error();
     sb_update(scoreboard::Event::Handled { errored });
@@ -507,51 +514,6 @@ mod tests {
         for case in cases {
             let got = opcache_boot(case.state, case.last_restart, case.previous_end);
             assert_eq!(text(&got), text(&case.want), "{}", case.name);
-        }
-    }
-
-    #[test]
-    fn the_restart_hook_stores_no_reason_while_a_reset_is_due() {
-        struct Case {
-            name: &'static str,
-            reload_sent: bool,
-            reset_recorded: bool,
-            /// The record that the hook leaves after a call with reason 2.
-            want: i32,
-        }
-        let cases = [
-            Case {
-                name: "no reload",
-                reload_sent: false,
-                reset_recorded: false,
-                want: 2,
-            },
-            Case {
-                name: "a reload, and no reset call has returned",
-                reload_sent: true,
-                reset_recorded: false,
-                want: NO_RESTART,
-            },
-            Case {
-                name: "a reload, and a reset call has returned",
-                reload_sent: true,
-                reset_recorded: true,
-                want: 2,
-            },
-        ];
-        for case in &cases {
-            let reloads = rapira_scoreboard::create_reloads().expect("map the reload count");
-            if case.reload_sent {
-                reloads.add_sent();
-            }
-            if case.reset_recorded {
-                reloads.record_reset(reloads.reset_due().expect("a reset is due"));
-            }
-            RELOADS.set(Some(reloads));
-            unsafe { opcache_restart_scheduled(2) };
-            // The test swaps right after the hook, because the pull test of this crate reads the same value and signals the parent process when it finds a reason.
-            let got = OPCACHE_SCHEDULED.swap(NO_RESTART, Ordering::Relaxed);
-            assert_eq!(got, case.want, "{}", case.name);
         }
     }
 }

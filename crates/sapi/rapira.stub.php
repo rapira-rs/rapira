@@ -153,7 +153,7 @@ namespace Rapira {
     function get_version(): string {}
 
     /**
-     * Queued to the host under the `app` target. Never blocks, never throws.
+     * The calling thread writes the record to the host log under the `app` target. It waits while the log reader does not read. Never throws.
      * A \Throwable under any key of $context is serialized structurally: json_encode()
      * sees only public state, and an exception keeps all of its own in private ones.
      */
