@@ -70,7 +70,9 @@ mode = "classic"
 rapira serve rapira.toml
 ```
 
-Each classic request starts in the entrypoint directory. A `chdir()` lasts for that request. In worker and dispatcher modes, the new directory stays in effect until the app restarts. A relative `sendFile()` path starts in the PHP working directory.
+Each classic request starts in the entrypoint directory. In worker and dispatcher modes, a `chdir()` applies to later units of the same app instance. A relative `sendFile()` path starts in the PHP working directory.
+
+At the end of a classic request or an app instance, PHP restores the directory it saved before running the entrypoint. This is usually the directory where Rapira started. PHP then runs [shutdown callbacks](https://www.php.net/manual/en/function.register-shutdown-function.php#refsect1-function.register-shutdown-function-notes) and final destructors. On NTS, a `chdir()` during shutdown can affect the next request's shutdown directory. A callback registered inside a worker request handler runs at the end of that unit, in the app's current directory. Use an absolute path in shutdown code, for example `__DIR__ . '/var/last.log'`.
 
 On ZTS, each PHP thread has its own working directory. `proc_open()` without a `$cwd` starts the child in the directory where Rapira started. Pass `getcwd()` as `$cwd` to use the app's directory. `exec()`, `shell_exec()` and `popen()` use the PHP working directory.
 

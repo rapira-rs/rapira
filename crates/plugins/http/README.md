@@ -125,6 +125,8 @@ The boot `$_SERVER` and `$_ENV` (when `variables_order` contains `E`) import the
 
 Native libraries and child processes read the process environment. Pass an explicit environment to `proc_open()` if the child needs a pool value. A name that is empty or contains `=` or NUL, or a value that contains NUL, fails the boot.
 
+A pool `TMPDIR` or a `putenv()` call can change the value of `getenv('TMPDIR')`. To select the PHP temporary directory that `sys_get_temp_dir()` returns, set [`sys_temp_dir`](https://www.php.net/manual/en/filesystem.configuration.php#ini.sys-temp-dir) in `php.ini` or set `TMPDIR` before starting Rapira. The INI setting takes precedence. For dispatcher uploads, set `dir` in `[http.uploads]`.
+
 Each of these errors in the middleware list fails the boot with exit code 1:
 
 - `http.middleware lists "<name>" twice`
