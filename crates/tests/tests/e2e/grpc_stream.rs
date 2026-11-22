@@ -758,6 +758,46 @@ async fn the_pool_timeout_recycles_a_stream_without_a_client_deadline() -> anyho
     Ok(())
 }
 
+/// A pool timeout releases the worker while its first client still holds the unread response.
+#[tokio::test]
+async fn the_pool_timeout_releases_an_unread_stream_for_the_next_call() -> anyhow::Result<()> {
+    let srv = Spawn::grpc(fixture("grpc/stream-worker.php"))
+        .grpc_pool("request_terminate_timeout_secs = 1")
+        .json_log()
+        .spawn();
+    let addr = listen(&srv);
+    let mut first = Conn::open(&addr, Wire::H2).await?;
+    let held = first
+        .request(Method::POST, WATCH_PATH, GRPC, &envelope(&echo("flood")))
+        .await?;
+    let mut second = Conn::open(&addr, Wire::H2).await?;
+    let next = tokio::time::timeout(
+        Duration::from_secs(5),
+        second.grpc(WATCH_PATH, &[], &envelope(&echo("count"))),
+    )
+    .await??;
+    assert_eq!(next.grpc_status(), Some("0"), "{next:?}");
+    assert_eq!(
+        next.body.as_ref(),
+        [
+            envelope(&echo("1")),
+            envelope(&echo("2")),
+            envelope(&echo("3"))
+        ]
+        .concat()
+    );
+    crate::harness::slot_line(&srv, "recycles=1 ");
+    let body = held.into_body().collect().await?;
+    assert_eq!(
+        body.trailers()
+            .and_then(|t| t.get("grpc-status"))
+            .map(|v| v.as_bytes()),
+        Some(&b"13"[..])
+    );
+    stop(srv).await;
+    Ok(())
+}
+
 /// A wait of the generator at a yield ends at the deadline of the call, so a client that does not read cannot hold the worker. Sources: PROTOCOL-HTTP2 (`grpc-timeout: 300m` is 300 ms, status 4 is DEADLINE_EXCEEDED), `StreamingResponder::respond` (the generator gets WorkDiscardedException at its yield, and `respond()` throws it when the generator does not catch it) and `Work` (a call that the host closed is finalized and cancelled).
 #[tokio::test]
 async fn a_passed_deadline_ends_the_wait_for_a_client_that_does_not_read() {

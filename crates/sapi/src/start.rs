@@ -245,9 +245,9 @@ pub(crate) unsafe fn run_script(script: &CStr) -> bool {
     }
 }
 
-/// How long a pull waits for a unit, or a park for its event.
+/// How long a pull waits for a unit.
 #[derive(Clone, Copy)]
-pub enum Wait {
+pub(crate) enum Wait {
     Forever,
     For(Duration),
     Never,
