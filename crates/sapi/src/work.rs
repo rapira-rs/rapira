@@ -2,23 +2,23 @@ use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 use std::sync::Arc;
 use std::sync::atomic::Ordering;
-use std::sync::mpsc::Sender;
 use std::time::Duration;
 
-use rapira_scoreboard::SharedSlot;
+use crossbeam_channel::{Receiver, Sender, unbounded};
+use rapira_scoreboard::Pool;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::callbacks::guard;
-use crate::scoreboard::{Event, count_shed, sb_update};
+use crate::scoreboard::{Event, sb_update};
 use crate::types::Context;
 use crate::zend_class_entry;
 
 pub(crate) const INTAKE_WAIT: Duration = Duration::from_secs(30);
 
-/// The units one worker holds for PHP.
+/// The number of slots in one pool queue.
 pub(crate) const INTAKE_SLOTS: usize = 1024;
 
-/// The body bytes that one worker holds for the units that PHP has not taken yet.
+/// The body bytes that one pool holds for pending units.
 const BODY_BUDGET: usize = 64 << 20;
 
 /// A dispatcher-mode unit from submit to free_obj. It is the plugin state behind the object that receive() hands to PHP.
@@ -154,16 +154,11 @@ impl Unit {
     }
 }
 
-/// One entry of the intake.
-pub(crate) enum Entry {
-    /// A unit, its body bytes in the budget and its slot. The pull drops both permits, so the bytes go back and the oldest waiting submit gets the slot.
-    Unit {
-        unit: Unit,
-        _bytes: OwnedSemaphorePermit,
-        _slot: OwnedSemaphorePermit,
-    },
-    /// A reload. The app instance takes no more units, and the next one takes the rest.
-    RestartApp,
+/// The pull releases both permits when it takes the unit.
+pub(crate) struct Entry {
+    pub(crate) unit: Unit,
+    _bytes: OwnedSemaphorePermit,
+    _slot: OwnedSemaphorePermit,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -196,70 +191,71 @@ pub fn now_unix_f64() -> f64 {
         .unwrap_or(0.0)
 }
 
-/// The queue from a plugin thread to the PHP thread. Clone it for each plugin task.
+/// The submit end of the pool queue. Each plugin task can hold a clone.
 #[derive(Clone)]
 pub struct Intake {
     tx: Sender<Entry>,
-    /// The scoreboard slot of this worker.
-    slot: &'static SharedSlot,
-    /// The body bytes of the units between submit and the PHP thread. All clones share it.
+    stats: Arc<Pool>,
+    /// The bytes of the pending units.
     budget: Arc<Semaphore>,
-    /// The units between submit and the PHP thread, at most INTAKE_SLOTS. A submit that finds no slot waits without a poll; the semaphore wakes the waiters in arrival order.
+    /// The semaphore wakes the waiting submitters in arrival order.
     slots: Arc<Semaphore>,
 }
 
-/// Keeps one unit in `pending` during the hand-off. A drop before `disarm` subtracts the unit from `pending`. If the unit found the queue full, the drop also adds 1 to `failed_on_full_queue`.
-struct PendingGuard {
-    slot: Option<&'static SharedSlot>,
-    /// The unit found every slot taken.
+/// Counts a pending unit until the send succeeds or the submitter leaves.
+struct PendingGuard<'a> {
+    stats: Option<&'a Pool>,
     found_full: bool,
 }
 
-impl PendingGuard {
-    fn arm(slot: &'static SharedSlot) -> Self {
-        slot.pending.fetch_add(1, Ordering::Relaxed);
+impl<'a> PendingGuard<'a> {
+    fn arm(stats: &'a Pool) -> Self {
+        stats.pending.fetch_add(1, Ordering::Relaxed);
         Self {
-            slot: Some(slot),
+            stats: Some(stats),
             found_full: false,
         }
     }
     fn disarm(mut self) {
-        self.slot = None;
+        self.stats = None;
     }
 }
 
-impl Drop for PendingGuard {
+impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
-        if let Some(slot) = self.slot.take() {
-            slot.pending.fetch_sub(1, Ordering::Relaxed);
+        if let Some(stats) = self.stats {
+            stats.pending.fetch_sub(1, Ordering::Relaxed);
             if self.found_full {
-                slot.failed_on_full_queue.fetch_add(1, Ordering::Relaxed);
+                stats.failed_on_full_queue.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 }
 
 impl Intake {
-    pub(crate) fn new(tx: Sender<Entry>, slot: &'static SharedSlot) -> Self {
-        Self {
-            tx,
-            slot,
-            budget: Arc::new(Semaphore::new(BODY_BUDGET)),
-            slots: Arc::new(Semaphore::new(INTAKE_SLOTS)),
-        }
+    pub(crate) fn new(stats: Arc<Pool>) -> (Self, Receiver<Entry>) {
+        let (tx, rx) = unbounded();
+        (
+            Self {
+                tx,
+                stats,
+                budget: Arc::new(Semaphore::new(BODY_BUDGET)),
+                slots: Arc::new(Semaphore::new(INTAKE_SLOTS)),
+            },
+            rx,
+        )
     }
 
-    /// `bytes` is the body size of the unit. A multipart body that the plugin parsed keeps its file parts in spool files and its other parts in memory. submit at once refuses a body that does not fit the free budget, because the body stays in memory or in the spool dir while it waits. A body larger than the budget fits only when the whole budget is free. A spool dir on tmpfs is also memory.
-    /// submit increments pending before the send, because the consumer decrements it as soon as it wakes. The reverse order could wrap the counter below zero.
+    /// Reserve the body bytes and a queue slot. A body larger than the pool budget needs the full budget.
     pub async fn submit(&self, unit: Unit, bytes: usize) -> Result<(), Refused> {
-        // A body larger than the budget takes all of it.
         let Ok(held) =
             Arc::clone(&self.budget).try_acquire_many_owned(bytes.min(BODY_BUDGET) as u32)
         else {
-            count_shed(self.slot);
+            self.stats.refused.fetch_add(1, Ordering::Relaxed);
             return Err(Refused::OverBudget);
         };
-        let mut pending = PendingGuard::arm(self.slot);
+        // Count the unit before a worker can take it.
+        let mut pending = PendingGuard::arm(&self.stats);
         let slot = match Arc::clone(&self.slots).try_acquire_owned() {
             Ok(slot) => slot,
             Err(_) => {
@@ -269,39 +265,30 @@ impl Intake {
                     tracing::warn!(
                         target: "rapira",
                         "intake full for {INTAKE_WAIT:?} ({} pending); shedding the request",
-                        self.slot.pending.load(Ordering::Relaxed)
+                        self.stats.pending.load(Ordering::Relaxed)
                     );
-                    count_shed(self.slot);
+                    self.stats.refused.fetch_add(1, Ordering::Relaxed);
                     return Err(Refused::Saturated);
                 };
                 slot.expect("the intake never closes its slot semaphore")
             }
         };
-        let entry = Entry::Unit {
+        let entry = Entry {
             unit,
             _bytes: held,
             _slot: slot,
         };
         if self.tx.send(entry).is_err() {
+            self.stats.refused.fetch_add(1, Ordering::Relaxed);
             return Err(Refused::Stopped);
         }
         pending.disarm();
         Ok(())
     }
-
-    /// Sends the reload signal through the intake, so it also wakes a PHP thread that waits for work.
-    /// It is not a unit. It takes no slot and no budget, and no counter sees it, so it enters a full intake at once.
-    pub(crate) fn restart_app(&self) -> Result<(), Refused> {
-        self.tx
-            .send(Entry::RestartApp)
-            .map_err(|_| Refused::Stopped)
-    }
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::mpsc::channel;
-
     use super::*;
 
     struct Probe;
@@ -341,16 +328,14 @@ mod tests {
         );
     }
 
-    /// An intake on slot 0 of a board in memory.
-    fn intake(tx: Sender<Entry>) -> Intake {
-        Intake::new(tx, &rapira_scoreboard::create(1).unwrap()[0])
+    fn intake() -> (Intake, crossbeam_channel::Receiver<Entry>) {
+        Intake::new(Arc::new(rapira_scoreboard::Pool::new("http", 2)))
     }
 
     #[tokio::test(flavor = "current_thread")]
     async fn intake_reports_stopped_after_the_receiver_is_gone() {
-        let (tx, rx) = channel();
-        let intake = intake(tx);
-        let slot = intake.slot;
+        let (intake, rx) = intake();
+        let stats = &intake.stats;
         drop(rx);
         assert_eq!(
             intake.submit(probe(), 0).await.unwrap_err(),
@@ -358,38 +343,60 @@ mod tests {
         );
         assert_eq!(
             (
-                slot.failed_on_full_queue.load(Ordering::Relaxed),
-                slot.pending.load(Ordering::Relaxed),
+                stats.refused.load(Ordering::Relaxed),
+                stats.failed_on_full_queue.load(Ordering::Relaxed),
+                stats.pending.load(Ordering::Relaxed),
             ),
-            (0, 0),
-            "the unit never found the queue full: failed_on_full_queue, pending"
+            (1, 0, 0),
+            "refused, failed on full queue, pending"
         );
     }
 
-    /// A reload enters a full intake at once. It is a signal, not a unit, so it never waits for a unit to leave and no counter sees it.
     #[tokio::test(flavor = "current_thread")]
-    async fn a_reload_enters_a_full_intake_at_once() {
-        let (tx, _rx) = channel();
-        let intake = intake(tx);
-        let slot = intake.slot;
-        for _ in 0..INTAKE_SLOTS {
-            intake.submit(probe(), 0).await.unwrap();
+    async fn submitters_share_the_body_budget_of_the_pool() {
+        struct Case {
+            name: &'static str,
+            queued_bytes: usize,
+            next_bytes: usize,
+            result: Result<(), Refused>,
+            pending: u64,
+            refused: u64,
         }
-        assert_eq!(
-            intake.restart_app(),
-            Ok(()),
-            "the reload enters without a wait"
-        );
-        assert_eq!(
-            (
-                slot.handled.load(Ordering::Relaxed),
-                slot.errors.load(Ordering::Relaxed),
-                slot.failed_on_full_queue.load(Ordering::Relaxed),
-                slot.pending.load(Ordering::Relaxed),
-            ),
-            (0, 0, 0, INTAKE_SLOTS as u64),
-            "handled, errors, failed_on_full_queue, pending"
-        );
+        let cases = [
+            Case {
+                name: "the next body fits the remaining byte",
+                queued_bytes: BODY_BUDGET - 1,
+                next_bytes: 1,
+                result: Ok(()),
+                pending: 2,
+                refused: 0,
+            },
+            Case {
+                name: "a large first body holds the whole budget",
+                queued_bytes: BODY_BUDGET + 1,
+                next_bytes: 1,
+                result: Err(Refused::OverBudget),
+                pending: 1,
+                refused: 1,
+            },
+        ];
+        for case in cases {
+            let (intake, _rx) = intake();
+            intake.submit(probe(), case.queued_bytes).await.unwrap();
+            let other = intake.clone();
+            let result = other.submit(probe(), case.next_bytes).await;
+            assert_eq!(result, case.result, "{}", case.name);
+            assert_eq!(
+                (
+                    intake.stats.pending.load(Ordering::Relaxed),
+                    intake.stats.refused.load(Ordering::Relaxed),
+                    intake.stats.failed_on_full_queue.load(Ordering::Relaxed),
+                ),
+                (case.pending, case.refused, 0),
+                "{}",
+                case.name
+            );
+        }
     }
 
     /// Each case fills all INTAKE_SLOTS slots first, so the submit under test finds the intake full. The paused clock moves to the next timer at once, so the waits take no real time.
@@ -402,8 +409,7 @@ mod tests {
             RoomFrees,
         }
         struct Counts {
-            handled: u64,
-            errors: u64,
+            refused: u64,
             failed_on_full_queue: u64,
             /// The pending units beyond the INTAKE_SLOTS units that fill the intake.
             pending: u64,
@@ -423,8 +429,7 @@ mod tests {
                 during: During::Nothing,
                 result: Some(Err(Refused::Saturated)),
                 want: Counts {
-                    handled: 1,
-                    errors: 1,
+                    refused: 1,
                     failed_on_full_queue: 1,
                     pending: 0,
                 },
@@ -434,8 +439,7 @@ mod tests {
                 during: During::ClientLeaves,
                 result: None,
                 want: Counts {
-                    handled: 0,
-                    errors: 0,
+                    refused: 0,
                     failed_on_full_queue: 1,
                     pending: 0,
                 },
@@ -445,8 +449,7 @@ mod tests {
                 during: During::WorkerStops,
                 result: Some(Err(Refused::Stopped)),
                 want: Counts {
-                    handled: 0,
-                    errors: 0,
+                    refused: 1,
                     failed_on_full_queue: 1,
                     pending: 0,
                 },
@@ -457,17 +460,15 @@ mod tests {
                 result: Some(Ok(())),
                 // The unit is in the queue. Only the pull of the PHP thread subtracts it from pending.
                 want: Counts {
-                    handled: 0,
-                    errors: 0,
+                    refused: 0,
                     failed_on_full_queue: 0,
                     pending: 1,
                 },
             },
         ];
         for case in cases {
-            let (tx, rx) = channel::<Entry>();
-            let intake = intake(tx);
-            let slot = intake.slot;
+            let (intake, rx) = intake();
+            let stats = &intake.stats;
             for _ in 0..INTAKE_SLOTS {
                 intake.submit(probe(), 0).await.unwrap();
             }
@@ -494,18 +495,16 @@ mod tests {
             assert_eq!(result, case.result, "{}", case.name);
             assert_eq!(
                 (
-                    slot.handled.load(Ordering::Relaxed),
-                    slot.errors.load(Ordering::Relaxed),
-                    slot.failed_on_full_queue.load(Ordering::Relaxed),
-                    slot.pending.load(Ordering::Relaxed),
+                    stats.refused.load(Ordering::Relaxed),
+                    stats.failed_on_full_queue.load(Ordering::Relaxed),
+                    stats.pending.load(Ordering::Relaxed),
                 ),
                 (
-                    case.want.handled,
-                    case.want.errors,
+                    case.want.refused,
                     case.want.failed_on_full_queue,
                     case.want.pending + INTAKE_SLOTS as u64,
                 ),
-                "{}: handled, errors, failed_on_full_queue, pending",
+                "{}: refused, failed on full queue, pending",
                 case.name
             );
         }

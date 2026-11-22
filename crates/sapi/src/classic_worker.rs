@@ -6,11 +6,24 @@ use crate::{
     types::Context,
     *,
 };
+use std::path::Path;
 
-pub(crate) fn classic_worker() {
-    while let Pull::Unit(unit) = pull(Wait::Forever) {
-        let mut ctx = unit.into_cgi();
-        sb_update(classic_executor(&mut ctx));
+pub(crate) fn classic_worker(entrypoint: &Path) {
+    loop {
+        crate::context::resolve_script(entrypoint);
+        crate::context::clean_realpath_cache();
+        loop {
+            match pull(Wait::Forever) {
+                Pull::Unit(unit) => sb_update(classic_executor(&mut unit.into_cgi())),
+                Pull::Reload => {
+                    sb_update(Event::Starting);
+                    crate::quota::renew();
+                    tracing::info!(target: "rapira", "reload requested; resolving the entrypoint again");
+                    break;
+                }
+                Pull::Closed | Pull::NoUnit => return,
+            }
+        }
     }
 }
 
@@ -30,7 +43,7 @@ fn classic_executor(ctx: &mut Context) -> Event {
         }
         crate::context::apply_proto_num(ctx);
 
-        let failed = !run_script(&crate::context::script().filename);
+        let failed = !run_script(crate::context::script().filename());
         let exec_err: bool = failed && fatal_error_recorded();
         ctx.tearing_down = true;
         ctx.errored = exec_err;

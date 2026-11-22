@@ -1,80 +1,97 @@
-use std::cell::Cell;
+use std::cell::RefCell;
+use std::sync::Arc;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering::{Relaxed, Release};
+use std::sync::atomic::Ordering::{Relaxed, Release, SeqCst};
 
 use rapira_scoreboard::{
-    SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SLOT_STARTING, SharedSlot, now_millis,
+    Board, Pool, SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SLOT_STARTING, Worker, now_millis,
 };
 
 thread_local! {
-    static SB: Cell<Option<&'static SharedSlot>> = const { Cell::new(None) };
+    static SB: RefCell<Option<(Arc<Pool>, usize)>> = const { RefCell::new(None) };
 }
 
-/// The drain decision. One worker runs in each process, so the signal thread sets the flag that the PHP thread reads.
 static DRAINING: AtomicBool = AtomicBool::new(false);
 
 pub enum Event {
-    Handled {
-        errored: bool,
-    },
+    Handled { errored: bool },
     Shed,
     Recycled,
     Idle,
     Active,
-    Draining,
-    /// A boot cycle ends without a pull of the app. The slot shows STARTING until the app pulls. After the drain decision, the slot shows DRAINING.
-    BootFailed,
+    Starting,
+    Stopped,
 }
 
-pub(crate) fn sb_set(slot: &'static SharedSlot) {
-    SB.set(Some(slot));
+pub(crate) fn sb_set(stats: Arc<Pool>, index: usize) {
+    SB.set(Some((stats, index)));
 }
 
-/// Counts a unit that the host shed: one error, then one handled unit. It takes the slot, because only the PHP thread sets `SB`.
-pub(crate) fn count_shed(s: &SharedSlot) {
-    s.errors.fetch_add(1, Relaxed);
-    s.handled.fetch_add(1, Release);
-}
-
-/// Each Release store publishes the Relaxed write before it (errors, last_activity_ms) to the master's Acquire load.
 pub fn sb_update(event: Event) {
-    let Some(s) = SB.get() else { return };
-    match event {
-        Event::Handled { errored } => {
-            if errored {
-                s.errors.fetch_add(1, Relaxed);
+    SB.with_borrow(|slot| {
+        let Some((pool, index)) = slot else { return };
+        let s = &pool.workers[*index];
+        if matches!(
+            event,
+            Event::Idle | Event::Active | Event::Recycled | Event::Handled { errored: false }
+        ) && !pool.served.load(Relaxed)
+        {
+            pool.served.store(true, Release);
+        }
+        match event {
+            Event::Handled { errored } => {
+                if errored {
+                    s.errors.fetch_add(1, Relaxed);
+                }
+                s.handled.fetch_add(1, Release);
+                crate::quota::tick();
             }
-            s.handled.fetch_add(1, Release);
-            crate::quota::tick();
+            Event::Shed => {
+                s.errors.fetch_add(1, Relaxed);
+                s.handled.fetch_add(1, Release);
+            }
+            Event::Recycled => {
+                s.recycles.fetch_add(1, Relaxed);
+                inactive(s, SLOT_STARTING);
+            }
+            Event::Idle => inactive(s, SLOT_IDLE),
+            Event::Active => {
+                let since = now_millis();
+                crate::watchdog::arm(since);
+                s.last_activity_ms.store(since, Relaxed);
+                s.state.store(SLOT_ACTIVE, Release);
+            }
+            Event::Starting => inactive(s, SLOT_STARTING),
+            Event::Stopped => {
+                crate::watchdog::clear();
+                s.state.store(SLOT_DRAINING, Release);
+            }
         }
-        Event::Shed => count_shed(s),
-        Event::Recycled => {
-            s.recycles.fetch_add(1, Relaxed);
-        }
-        Event::Idle => s.state.store(draining_or(SLOT_IDLE), Release),
-        Event::Active => {
-            s.last_activity_ms.store(now_millis(), Relaxed);
-            s.state.store(SLOT_ACTIVE, Release);
-        }
-        Event::Draining => drain(s),
-        Event::BootFailed => s.state.store(draining_or(SLOT_STARTING), Release),
-    }
-}
-
-/// Stores the drain decision. The slot shows DRAINING, and the later Idle and BootFailed stores keep it. A request in flight keeps ACTIVE for the request watchdog until its Idle store. The function takes the slot, because only the PHP thread sets `SB`.
-pub fn drain(s: &SharedSlot) {
-    DRAINING.store(true, Relaxed);
-    let _ = s.state.try_update(Release, Relaxed, |state| {
-        (state != SLOT_ACTIVE).then_some(SLOT_DRAINING)
     });
 }
 
-/// `state`, or DRAINING after the drain decision.
-fn draining_or(state: u32) -> u32 {
-    if DRAINING.load(Relaxed) {
-        SLOT_DRAINING
-    } else {
-        state
+/// Active workers keep their request deadline during the drain.
+pub fn begin_drain(board: &Board) {
+    DRAINING.store(true, SeqCst);
+    for pool in board.iter() {
+        for s in &pool.workers {
+            let _ = s.state.try_update(SeqCst, SeqCst, |state| {
+                (state != SLOT_ACTIVE).then_some(SLOT_DRAINING)
+            });
+        }
+    }
+}
+
+pub(crate) fn draining() -> bool {
+    DRAINING.load(SeqCst)
+}
+
+/// Store first so a concurrent drain sees this state or this thread sees the drain.
+fn inactive(worker: &Worker, state: u32) {
+    crate::watchdog::clear();
+    worker.state.store(state, SeqCst);
+    if draining() {
+        worker.state.store(SLOT_DRAINING, Release);
     }
 }
 
@@ -82,7 +99,7 @@ fn draining_or(state: u32) -> u32 {
 mod tests {
     use super::*;
 
-    /// The slot shows draining after the worker decides to exit. A request in flight stays active until its next pull. One test holds all cases, because the drain decision is process-wide.
+    /// A request stays active during the drain until its next pull.
     #[test]
     fn the_slot_shows_draining_after_the_drain_decision() {
         enum Step {
@@ -134,17 +151,20 @@ mod tests {
                 want: SLOT_DRAINING,
             },
         ];
-        let slot = &rapira_scoreboard::create(1).unwrap()[0];
-        sb_set(slot);
+        let pool = Arc::new(Pool::new("http", 1));
+        let board: Board = Arc::from([Arc::clone(&pool)]);
+        let slot = &pool.workers[0];
+        sb_set(Arc::clone(&pool), 0);
         for case in cases {
             DRAINING.store(case.draining, Relaxed);
             slot.state.store(case.state, Relaxed);
             match case.step {
-                Step::Drain => drain(slot),
+                Step::Drain => begin_drain(&board),
                 Step::Idle => sb_update(Event::Idle),
-                Step::BootFailed => sb_update(Event::BootFailed),
+                Step::BootFailed => sb_update(Event::Starting),
             }
             assert_eq!(slot.state.load(Relaxed), case.want, "{}", case.name);
         }
+        DRAINING.store(false, SeqCst);
     }
 }

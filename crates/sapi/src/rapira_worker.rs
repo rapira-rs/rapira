@@ -52,18 +52,13 @@ enum Cycle {
     Restart,
 }
 
-pub enum WorkerExit {
-    Closed,
-    Restart,
-}
-
 /// Starts the boot request with the argv of `php entrypoint.php` and builds $_SERVER before the entrypoint runs, as the CLI does.
 /// After this, argc is 0 again. With argc set, each later $_SERVER build adds a reference to the $argv global, and that crashes when $argv holds null, an int or [].
 /// https://github.com/php/php-src/blob/php-8.5.11/sapi/cli/php_cli.c#L941
 /// https://github.com/php/php-src/blob/php-8.5.11/main/php_variables.c#L881-L887
 fn boot_request_startup() -> bool {
     // php_build_argv copies the string; the script paths stay until the next app start.
-    let mut argv = [crate::context::script().filename.as_ptr().cast_mut()];
+    let mut argv = [crate::context::script().filename().as_ptr().cast_mut()];
     unsafe {
         let sg = rapira_sg();
         (*sg).request_info.argc = 1;
@@ -101,7 +96,7 @@ fn run_cycle(script: &Path) -> Cycle {
     let started = boot_request_startup();
     if started {
         note_opcache_at_boot();
-        unsafe { run_script(&crate::context::script().filename) };
+        unsafe { run_script(crate::context::script().filename()) };
         // the boot of the next app instance compares last_restart_time with this value
         let mut last_restart: zend_long = 0;
         let state = unsafe { rapira_opcache_state(&mut last_restart) };
@@ -228,70 +223,71 @@ pub(crate) fn reset_opcache_before_request() -> bool {
     if started {
         HOST_RESET.set(true);
         // A busy worker can receive one control for several reloads. OPcache keeps a single restart pending.
-    let shutdown = unsafe { rapira_request_shutdown() };
-    crate::reload::finish_reset(sent, started);
-    reload_for_opcache_restart();
-    started && shutdown != RAPIRA_BAILOUT as c_int
         for _ in due {
             unsafe { rapira_opcache_reset() };
         }
         HOST_RESET.set(false);
     }
+    let shutdown = unsafe { rapira_request_shutdown() };
+    crate::reload::finish_reset(sent, started);
+    reload_for_opcache_restart();
+    started && shutdown != RAPIRA_BAILOUT as c_int
 }
 
-/// `max_boot_failures` is the number of failed boots in sequence after which the worker stops as unhealthy. 0 means no limit.
-pub fn rapira_worker(script: &Path, max_boot_failures: u32) -> WorkerExit {
+fn give_up_boot(failures: u32, limit: u32, served: bool) -> bool {
+    limit != 0 && failures >= limit && !served
+}
+
+pub(crate) fn rapira_worker(
+    script: &Path,
+    max_boot_failures: u32,
+    pool: &rapira_scoreboard::Pool,
+    index: usize,
+) {
     let mut failures: u32 = 0;
     let mut retry_delay = BOOT_RETRY_BASE;
-    let exit = 'cycles: loop {
-        match run_cycle(script) {
-            Cycle::Stop => break WorkerExit::Closed,
-            Cycle::Restart => break WorkerExit::Restart,
-            Cycle::Recycle => {
-                sb_update(scoreboard::Event::Recycled);
-                // No request runs while the app boots again, so the request watchdog skips the slot.
-                sb_update(scoreboard::Event::Idle);
-                failures = 0;
-                retry_delay = BOOT_RETRY_BASE;
+    'cycles: loop {
+        let cycle = run_cycle(script);
+        crate::exchange::reclaim_current();
+        let received = crate::start::RECEIVED.take();
+        if matches!(cycle, Cycle::Stop) || crate::start::CLOSED_SEEN.get() {
+            break;
+        }
+        if matches!(cycle, Cycle::Recycle) || received || crate::quota::exhausted() {
+            sb_update(scoreboard::Event::Recycled);
+            failures = 0;
+            retry_delay = BOOT_RETRY_BASE;
+            continue;
+        }
+        sb_update(scoreboard::Event::Starting);
+        failures = failures.saturating_add(1);
+        if give_up_boot(
+            failures,
+            max_boot_failures,
+            pool.served.load(std::sync::atomic::Ordering::Acquire),
+        ) && !scoreboard::draining()
+        {
+            error!(target: "rapira", "{} pool: worker {index} failed to boot {failures} times; the pool never served; exiting with code 70", pool.name);
+            unsafe { libc::_exit(70) };
+        }
+        // Units that arrive during the wait do not change the next boot time.
+        let retry_at = Instant::now() + retry_delay;
+        retry_delay = (retry_delay * 2).min(BOOT_RETRY_MAX);
+        loop {
+            let wait = retry_at.saturating_duration_since(Instant::now());
+            if wait.is_zero() {
+                break;
             }
-            Cycle::Failed => {
-                failures += 1;
-                // The count starts at 1, so a limit of 0 never matches.
-                let unhealthy = failures == max_boot_failures;
-                if unhealthy {
-                    error!(target: "rapira", "worker keeps failing to boot; flagged unhealthy");
-                    crate::quota::fire_unhealthy();
+            match pull_unit_to_shed(wait) {
+                Pull::Closed => break 'cycles,
+                Pull::Unit(unit) => {
+                    unit.shed();
+                    sb_update(scoreboard::Event::Shed);
                 }
-                sb_update(scoreboard::Event::BootFailed);
-                // One deadline covers the whole wait. The host sheds the units that arrive, and they do not delay the next boot.
-                let retry_at = Instant::now() + retry_delay;
-                retry_delay = (retry_delay * 2).min(BOOT_RETRY_MAX);
-                loop {
-                    // An unhealthy worker does not boot again. It sheds units until the drain closes the intake.
-                    let wait = if unhealthy {
-                        BOOT_RETRY_MAX
-                    } else {
-                        retry_at.saturating_duration_since(Instant::now())
-                    };
-                    if wait.is_zero() {
-                        break;
-                    }
-                    match pull_unit_to_shed(wait) {
-                        Pull::Closed => break 'cycles WorkerExit::Closed,
-                        Pull::Unit(unit) => {
-                            unit.shed();
-                            sb_update(scoreboard::Event::Shed);
-                        }
-                        Pull::NoUnit if unhealthy => {}
-                        // The wait ended, or a reload arrived, so the next boot starts.
-                        Pull::NoUnit => break,
-                    }
-                }
+                Pull::Reload | Pull::NoUnit => break,
             }
         }
-    };
-    crate::exchange::reclaim_current();
-    exit
+    }
 }
 
 /// # Safety
@@ -367,7 +363,7 @@ fn next_unit() -> Option<Box<Context>> {
     match pull(Wait::Forever) {
         Pull::Unit(unit) => Some(unit.into_cgi()),
         // The app instance takes no more units. handle_request() returns false, and the worker stays.
-        Pull::Closed | Pull::NoUnit => None,
+        Pull::Closed | Pull::Reload | Pull::NoUnit => None,
     }
 }
 
@@ -415,6 +411,62 @@ fn log_and_clear_last_error() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_failed_boot_exits_only_before_the_pool_serves() {
+        struct Case {
+            name: &'static str,
+            failures: u32,
+            limit: u32,
+            served: bool,
+            exit: bool,
+        }
+        let cases = [
+            Case {
+                name: "the next boot can still succeed",
+                failures: 2,
+                limit: 3,
+                served: false,
+                exit: false,
+            },
+            Case {
+                name: "the pool never served and this worker reached the limit",
+                failures: 3,
+                limit: 3,
+                served: false,
+                exit: true,
+            },
+            Case {
+                name: "another worker served before this worker reached the limit",
+                failures: 3,
+                limit: 3,
+                served: true,
+                exit: false,
+            },
+            Case {
+                name: "a pool that served continues to retry",
+                failures: 4,
+                limit: 3,
+                served: true,
+                exit: false,
+            },
+            Case {
+                name: "zero disables the limit even if the pool never served",
+                failures: 5,
+                limit: 0,
+                served: false,
+                exit: false,
+            },
+        ];
+        for case in cases {
+            assert_eq!(
+                give_up_boot(case.failures, case.limit, case.served),
+                case.exit,
+                "{}",
+                case.name
+            );
+        }
+    }
 
     fn text(boot: &OpcacheBoot) -> String {
         match boot {
