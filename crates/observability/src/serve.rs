@@ -1,25 +1,25 @@
 use std::convert::Infallible;
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result};
 use hyper::body::Incoming;
 use hyper::header::{CONTENT_TYPE, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
-use rapira_net::{Acceptor, PreparedListener, Serve};
-use rapira_scoreboard::{PoolRegion, SharedSlot};
+use rapira_net::{PreparedListener, Serve};
+use rapira_scoreboard::Board;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 
 use crate::config::Settings;
 use crate::text::{self, Build};
-use crate::{memory, probes, stats};
+use crate::{probes, stats};
 
-/// The observability endpoint. The master prepares it before the fork, and the observability process serves it.
+/// The bound listener and its endpoint settings.
 pub struct Server {
-    build: Build,
     prepared: PreparedListener,
     keepalive_timeout: Duration,
     metrics: bool,
@@ -27,12 +27,10 @@ pub struct Server {
 }
 
 impl Server {
-    /// Binds the listener. The master calls this before the fork.
-    pub fn new(settings: Settings, build: Build) -> Result<Server> {
+    /// Binds the listener before the PHP engine starts.
+    pub fn from_settings(settings: Settings) -> Result<Self> {
         let prepared = rapira_net::bind(&settings.listen)?;
-        tracing::info!(target: "observability", "prepared listener on {}", prepared.addr());
         Ok(Self {
-            build,
             prepared,
             keepalive_timeout: settings.keepalive_timeout,
             metrics: settings.metrics,
@@ -40,72 +38,52 @@ impl Server {
         })
     }
 
-    /// Runs in the observability process. Serves the routes of the configured sub-tables until `stop` turns true, then waits for the requests in flight within `drain_grace`. `pools` are the pools that the metrics and `/readyz` report.
+    /// Runs on the observability thread. When `stop` is true, waits up to `drain_grace` for open connections to close.
     pub fn serve(
         self,
-        board: &'static [SharedSlot],
-        pools: &'static [PoolRegion],
+        board: Board,
+        build: Build,
         stop: watch::Receiver<bool>,
         drain_grace: Duration,
     ) -> Result<()> {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
+        let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .thread_name("rapira-obs-io")
             .build()
-            .map_err(|e| anyhow!("building the observability runtime: {e}"))?;
-        tracing::info!(target: "observability", "serving on {}", self.prepared.addr());
-        let acceptor = Acceptor::adopt(self.prepared, stop, rt.handle())?;
-        let mut builder = http1::Builder::new();
-        builder
-            .timer(TokioTimer::new())
-            .header_read_timeout(self.keepalive_timeout);
-        let serving = Serving {
-            routes: Box::leak(Box::new(Routes {
-                board,
-                pools,
-                build: self.build,
-                metrics: self.metrics,
-                probes: self.probes,
-            })),
-            graceful: GracefulShutdown::new(),
-            builder,
-        };
-        let fatal = acceptor.run(rt.handle(), &serving);
-        let Serving { graceful, .. } = serving;
-        // tokio::time::timeout panics outside a runtime context, so the call runs inside block_on.
-        let drained =
-            rt.block_on(async { tokio::time::timeout(drain_grace, graceful.shutdown()).await });
-        if drained.is_err() {
-            tracing::warn!(target: "observability", "requests still in flight after {drain_grace:?}");
-        }
-        fatal.map_or(Ok(()), Err)
+            .context("building the observability runtime")?;
+        rt.block_on(async {
+            let mut builder = http1::Builder::new();
+            builder
+                .timer(TokioTimer::new())
+                .header_read_timeout(self.keepalive_timeout);
+            let serving = Serving {
+                routes: Arc::new(Routes {
+                    board,
+                    build,
+                    metrics: self.metrics,
+                    probes: self.probes,
+                }),
+                graceful: GracefulShutdown::new(),
+                builder,
+            };
+            tracing::info!(target: "observability", "listening on {}", self.prepared.addr());
+            let result = self.prepared.run(stop, &serving).await;
+            if tokio::time::timeout(drain_grace, serving.graceful.shutdown()).await.is_err() {
+                tracing::warn!(target: "observability", "requests still in flight after {drain_grace:?}");
+            }
+            result
+        })
     }
 }
 
-/// What a request reads: the board, the pools it reports, the build and the routes that the config turns on.
 struct Routes {
-    board: &'static [SharedSlot],
-    /// Every pool except the pool of the observability process.
-    pools: &'static [PoolRegion],
+    board: Board,
     build: Build,
     metrics: bool,
     probes: bool,
 }
 
-impl Routes {
-    /// Reads the board in one pass, then reads `/proc` once for each live worker.
-    fn metrics_text(&self) -> String {
-        let mut pools = stats::board_stats(self.board, self.pools);
-        for worker in pools.iter_mut().flat_map(|p| p.workers.iter_mut()) {
-            worker.memory = memory::read(worker.pid);
-        }
-        text::render(&pools, &self.build)
-    }
-}
-
 struct Serving {
-    routes: &'static Routes,
+    routes: Arc<Routes>,
     graceful: GracefulShutdown,
     builder: http1::Builder,
 }
@@ -115,9 +93,9 @@ impl Serving {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let routes = self.routes;
+        let routes = Arc::clone(&self.routes);
         let service = hyper::service::service_fn(move |req| {
-            std::future::ready(Ok::<_, Infallible>(respond(routes, &req)))
+            std::future::ready(Ok::<_, Infallible>(respond(&routes, &req)))
         });
         let conn = self
             .graceful
@@ -147,23 +125,19 @@ const PROBE_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<String> {
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/metrics") if routes.metrics => {
-            reply(StatusCode::OK, text::CONTENT_TYPE, routes.metrics_text())
+            let pools = stats::board_stats(&routes.board);
+            reply(
+                StatusCode::OK,
+                text::CONTENT_TYPE,
+                text::render(&pools, &routes.build),
+            )
         }
-        // The lifeline stops this process when the master dies, so an answer shows that the master lives.
         (&Method::GET, "/livez") if routes.probes => {
             reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
         }
         (&Method::GET, "/readyz") if routes.probes => {
-            let unready = probes::unready(routes.board, routes.pools);
-            if unready.is_empty() {
-                reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
-            } else {
-                let body: String = unready
-                    .iter()
-                    .map(|name| format!("pool {name}: no ready worker\n"))
-                    .collect();
-                reply(StatusCode::SERVICE_UNAVAILABLE, PROBE_CONTENT_TYPE, body)
-            }
+            let (status, body) = probes::readyz(&routes.board);
+            reply(status, PROBE_CONTENT_TYPE, body)
         }
         _ => {
             let mut not_found = Response::new(String::new());

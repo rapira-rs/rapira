@@ -4,7 +4,7 @@ version = "0.9.2"
 edition.workspace = true
 publish = false
 license = "MIT"
-description = "The observability process of rapira - a process without PHP that serves the Prometheus metrics and the livez and readyz probes"
+description = "Prometheus metrics and health probes for Rapira worker pools"
 
 [lints]
 workspace = true
@@ -16,6 +16,6 @@ rapira_config = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "time"] }
+tokio = { workspace = true, features = ["rt", "net", "time"] }
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio", "server", "http1", "server-graceful"] }

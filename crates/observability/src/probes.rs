@@ -1,132 +1,87 @@
-use rapira_scoreboard::{PoolRegion, SharedSlot};
+use std::fmt::Write as _;
+use std::sync::Arc;
 
-/// Returns the pools in `pools` without a worker that can serve. In such a pool, no slot is idle or active.
-pub(crate) fn unready(board: &[SharedSlot], pools: &[PoolRegion]) -> Vec<&'static str> {
-    pools
-        .iter()
-        .filter(|pool| !board[pool.slots.clone()].iter().any(SharedSlot::serving))
-        .map(|pool| pool.name)
-        .collect()
+use hyper::StatusCode;
+use rapira_scoreboard::Pool;
+
+pub(crate) fn readyz(board: &[Arc<Pool>]) -> (StatusCode, String) {
+    let mut body = String::new();
+    for pool in board.iter().filter(|pool| !pool.ready()) {
+        let _ = writeln!(body, "pool {}: no ready worker", pool.name);
+    }
+    if body.is_empty() {
+        (StatusCode::OK, "ok\n".to_owned())
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, body)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use std::sync::atomic::Ordering::Relaxed;
 
-    use rapira_scoreboard::{SLOT_ACTIVE, SLOT_DRAINING, SLOT_FREE, SLOT_IDLE, SLOT_STARTING};
+    use rapira_scoreboard::{SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SLOT_STARTING};
 
     use super::*;
 
-    const HTTP: PoolRegion = PoolRegion {
-        name: "http",
-        slots: 0..4,
-    };
-    const GRPC: PoolRegion = PoolRegion {
-        name: "grpc",
-        slots: 4..8,
-    };
-
     #[test]
-    fn unready_lists_each_pool_without_a_serving_worker() {
-        struct Slot {
-            index: usize,
-            state: u32,
-            handled: u64,
-        }
+    fn readyz_needs_a_serving_worker_in_each_pool() {
         struct Case {
             name: &'static str,
-            pools: Vec<PoolRegion>,
-            /// The slots that the case sets. The other slots stay FREE with no counts.
-            slots: &'static [Slot],
-            want: &'static [&'static str],
+            http: [u32; 2],
+            grpc: [u32; 2],
+            want: (StatusCode, &'static str),
         }
         let cases = [
             Case {
-                name: "an idle worker",
-                pools: vec![HTTP],
-                slots: &[Slot {
-                    index: 0,
-                    state: SLOT_IDLE,
-                    handled: 0,
-                }],
-                want: &[],
+                name: "an idle HTTP worker and an active gRPC worker",
+                http: [SLOT_STARTING, SLOT_IDLE],
+                grpc: [SLOT_ACTIVE, SLOT_DRAINING],
+                want: (StatusCode::OK, "ok\n"),
             },
             Case {
-                name: "only busy workers",
-                pools: vec![HTTP],
-                slots: &[
-                    Slot {
-                        index: 0,
-                        state: SLOT_ACTIVE,
-                        handled: 0,
-                    },
-                    Slot {
-                        index: 1,
-                        state: SLOT_ACTIVE,
-                        handled: 0,
-                    },
-                ],
-                want: &[],
+                name: "the first pool has no serving worker",
+                http: [SLOT_STARTING, SLOT_STARTING],
+                grpc: [SLOT_IDLE, SLOT_ACTIVE],
+                want: (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "pool http: no ready worker\n",
+                ),
             },
             Case {
-                name: "booting and draining workers",
-                pools: vec![HTTP],
-                slots: &[
-                    Slot {
-                        index: 0,
-                        state: SLOT_STARTING,
-                        handled: 0,
-                    },
-                    Slot {
-                        index: 1,
-                        state: SLOT_DRAINING,
-                        handled: 0,
-                    },
-                ],
-                want: &["http"],
+                name: "the second pool has no serving worker",
+                http: [SLOT_ACTIVE, SLOT_ACTIVE],
+                grpc: [SLOT_STARTING, SLOT_DRAINING],
+                want: (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "pool grpc: no ready worker\n",
+                ),
             },
             Case {
-                name: "dead workers with counters",
-                pools: vec![HTTP],
-                slots: &[
-                    Slot {
-                        index: 0,
-                        state: SLOT_FREE,
-                        handled: 5,
-                    },
-                    Slot {
-                        index: 1,
-                        state: SLOT_FREE,
-                        handled: 7,
-                    },
-                ],
-                want: &["http"],
-            },
-            Case {
-                name: "one of two pools not ready",
-                pools: vec![HTTP, GRPC],
-                slots: &[
-                    Slot {
-                        index: 0,
-                        state: SLOT_IDLE,
-                        handled: 0,
-                    },
-                    Slot {
-                        index: 4,
-                        state: SLOT_STARTING,
-                        handled: 0,
-                    },
-                ],
-                want: &["grpc"],
+                name: "both pools served before and now have no serving workers",
+                http: [SLOT_DRAINING, SLOT_STARTING],
+                grpc: [SLOT_STARTING, SLOT_DRAINING],
+                want: (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "pool http: no ready worker\npool grpc: no ready worker\n",
+                ),
             },
         ];
+        let board = [
+            Arc::new(Pool::new("http", 2)),
+            Arc::new(Pool::new("grpc", 2)),
+        ];
+        for pool in &board {
+            pool.served.store(true, Relaxed);
+        }
         for case in cases {
-            let board = rapira_scoreboard::create(8).unwrap();
-            for slot in case.slots {
-                board[slot.index].state.store(slot.state, Relaxed);
-                board[slot.index].handled.store(slot.handled, Relaxed);
+            for (pool, states) in board.iter().zip([case.http, case.grpc]) {
+                for (worker, state) in pool.workers.iter().zip(states) {
+                    worker.state.store(state, Relaxed);
+                }
             }
-            assert_eq!(unready(board, &case.pools), case.want, "{}", case.name);
+            let (status, body) = readyz(&board);
+            assert_eq!((status, body.as_str()), case.want, "{}", case.name);
         }
     }
 }
