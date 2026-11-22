@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 
-# The Rapira image: rapira and the Rapira PHP extensions on an NTS PHP image of https://github.com/rapira-rs/docker.
+# The base image supplies ZTS PHP and the embed library. https://github.com/rapira-rs/docker
 # The workflows pass the PHP image of each minor by digest.
-ARG PHP_IMAGE=ghcr.io/rapira-rs/php:8.6-nts
+ARG PHP_IMAGE=ghcr.io/rapira-rs/php:8.6-zts
 
 # The tag moves to each stable Rust release, as rust-toolchain.toml and the CI workflows do.
 FROM rust:1-trixie AS rust
@@ -32,7 +32,7 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     ldd /usr/local/bin/rapira | grep -q '/usr/local/lib/libphp.so'
 
 # The PHP images have only the extensions of the official PHP image.
-# igbinary 3.2.17RC1 and redis 6.3.0 do not compile on PHP 8.6.
+# igbinary 3.2.17RC1 supports PHP 8.4 and 8.5.
 FROM ${PHP_IMAGE} AS php
 RUN set -eux; \
     savedAptMark="$(apt-mark showmanual)"; \
@@ -45,15 +45,9 @@ RUN set -eux; \
             echo '91da821443db125282a6aea039f24588dd28ff5d71e8187f6ecc41165bceafbc  /tmp/igbinary.tgz' | sha256sum -c -; \
             mkdir -p /usr/src/php/ext/igbinary; \
             tar -xzf /tmp/igbinary.tgz -C /usr/src/php/ext/igbinary --strip-components=1; \
-            curl -fsSL --retry 3 https://pecl.php.net/get/redis-6.3.0.tgz -o /tmp/redis.tgz; \
-            echo '0d5141f634bd1db6c1ddcda053d25ecf2c4fc1c395430d534fd3f8d51dd7f0b5  /tmp/redis.tgz' | sha256sum -c -; \
-            mkdir -p /usr/src/php/ext/redis; \
-            tar -xzf /tmp/redis.tgz -C /usr/src/php/ext/redis --strip-components=1; \
             docker-php-ext-install -j"$(nproc)" bcmath intl pdo_pgsql pgsql igbinary; \
-            docker-php-ext-configure redis --enable-redis-igbinary; \
-            docker-php-ext-install -j"$(nproc)" redis; \
             docker-php-source delete; \
-            rm /tmp/igbinary.tgz /tmp/redis.tgz; \
+            rm /tmp/igbinary.tgz; \
             ;; \
         8.6.*) \
             apt-get install -y --no-install-recommends libicu-dev libonig-dev libpq-dev; \
@@ -79,12 +73,13 @@ RUN set -eux; \
 FROM php AS runtime
 
 LABEL org.opencontainers.image.title="Rapira" \
-      org.opencontainers.image.description="Rapira with NTS PHP and PHP extensions" \
+      org.opencontainers.image.description="Rapira with ZTS PHP and PHP extensions" \
       org.opencontainers.image.url="https://rapira.rs" \
       org.opencontainers.image.source="https://github.com/rapira-rs/rapira" \
       org.opencontainers.image.licenses="MIT"
 
 COPY --from=builder /usr/local/bin/rapira /usr/local/bin/rapira
-RUN rapira --version
+RUN --mount=type=bind,source=.github/test-runtime.sh,target=/tmp/test-runtime.sh \
+    sh /tmp/test-runtime.sh /usr/local/bin/rapira "$(php-config --extension-dir)"
 
 CMD ["rapira", "serve", "/app/rapira.toml"]
