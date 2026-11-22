@@ -44,7 +44,6 @@ permissions:
 
 env:
     IMAGE: ghcr.io/${{ github.repository }}
-    PHP_IMAGE: ghcr.io/${{ github.repository_owner }}/php
 
 jobs:
     resolve:
@@ -75,15 +74,20 @@ jobs:
                   MINORS: ${{ inputs.php }}
               run: |
                   set -euo pipefail
-                  # A scheduled rebuild uses the PHP thread model of its release.
-                  MODEL=$(sed -n 's/^ARG PHP_IMAGE=.*-\(nts\|zts\)$/\1/p' Dockerfile)
-                  if [ -z "$MODEL" ]; then
-                      echo "::error::The requested Dockerfile must select an NTS or ZTS base with PHP_IMAGE."
+                  BASE=$(sed -n 's/^ARG PHP_IMAGE=//p' Dockerfile)
+                  if [ -z "$BASE" ]; then
+                      echo "::error::The requested Dockerfile must set PHP_IMAGE."
                       exit 1
                   fi
+                  REPO=${BASE%:*}
+                  TAG=${BASE##*:}
                   for MINOR in $MINORS; do
-                      # All jobs of a minor build on the same PHP image, named by digest.
-                      NAME="$PHP_IMAGE:$MINOR-$MODEL"
+                      # The official PHP 8.4 and 8.5 CLI images use NTS. https://hub.docker.com/_/php
+                      case "$REPO:$MINOR" in
+                          docker.io/library/php:8.[45]) VARIANT=zts-trixie ;;
+                          *) VARIANT=${TAG#*-} ;;
+                      esac
+                      NAME="$REPO:$MINOR-$VARIANT"
                       DIGEST=$(docker buildx imagetools inspect "$NAME" --format '{{json .Manifest}}' | jq -er .digest)
                       jq -cn --arg php "$MINOR" --arg name "$NAME" --arg digest "$DIGEST" \
                           '{php: $php, name: $name, digest: $digest}' >> images.json

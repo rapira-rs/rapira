@@ -37,7 +37,7 @@ mode = "classic"
 
 The tags are `php8.4`, `php8.5` and `php8.6`. Each image includes `bcmath`, `intl`, `mbstring`, `pdo_pgsql`, `pgsql` and `sodium`. The PHP 8.4 and 8.5 images also include `igbinary`. Use ZTS-compatible extensions when you add to the image with `docker-php-ext-install`.
 
-The base image is `ghcr.io/rapira-rs/php:<minor>-zts`, for example `ghcr.io/rapira-rs/php:8.5-zts`. See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for image tags and PHP extensions.
+Rapira uses the [official PHP images](https://hub.docker.com/_/php): `php:8.4-zts-trixie`, `php:8.5-zts-trixie` and `php:8.6-cli-trixie`. The PHP 8.6 CLI image includes ZTS and the embed library. See the [Docker guide](https://rapira.rs/docs/intro/installation#docker) for Rapira image tags and PHP extensions.
 
 ### Run the server
 

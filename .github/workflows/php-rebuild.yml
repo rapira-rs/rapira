@@ -1,5 +1,4 @@
 # Rebuilds the newest release when its PHP base image changes.
-# https://github.com/rapira-rs/docker builds the PHP images ghcr.io/<owner>/php.
 # The images hold the state, in the base annotations of the rapira tag php<minor>.
 name: PHP rebuild
 on:

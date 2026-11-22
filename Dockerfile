@@ -1,8 +1,8 @@
 # syntax=docker/dockerfile:1
 
-# The base image supplies ZTS PHP and the embed library. https://github.com/rapira-rs/docker
+# The official PHP image supplies ZTS and the embed library. https://hub.docker.com/_/php
 # The workflows pass the PHP image of each minor by digest.
-ARG PHP_IMAGE=ghcr.io/rapira-rs/php:8.6-zts
+ARG PHP_IMAGE=docker.io/library/php:8.6-cli-trixie
 
 # The tag moves to each stable Rust release, as rust-toolchain.toml and the CI workflows do.
 FROM rust:1-trixie AS rust
@@ -31,7 +31,6 @@ RUN --mount=type=cache,target=/usr/local/cargo/registry,sharing=locked \
     cp target/release/rapira /usr/local/bin/rapira; \
     ldd /usr/local/bin/rapira | grep -q '/usr/local/lib/libphp.so'
 
-# The PHP images have only the extensions of the official PHP image.
 # igbinary 3.2.17RC1 supports PHP 8.4 and 8.5.
 FROM ${PHP_IMAGE} AS php
 RUN set -eux; \
