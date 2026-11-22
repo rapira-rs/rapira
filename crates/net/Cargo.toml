@@ -4,7 +4,7 @@ version = "0.9.2"
 edition.workspace = true
 publish = false
 license = "MIT"
-description = "Listeners for rapira plugins - bound in the master before the fork, adopted and accepted in each worker"
+description = "TCP and Unix listeners for Rapira"
 
 [lints]
 workspace = true
@@ -15,4 +15,4 @@ rapira_config = { workspace = true }
 tracing = { workspace = true }
 libc = { workspace = true }
 socket2 = "0.6"
-tokio = { workspace = true, features = ["rt", "rt-multi-thread", "net", "time", "macros"] }
+tokio = { workspace = true, features = ["net", "time", "macros"] }

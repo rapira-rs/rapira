@@ -8,10 +8,10 @@ use socket2::{Domain, Protocol, SockAddr, Socket, Type};
 
 pub use rapira_config::ListenAddr;
 
-/// The backlog of every master-bound listener. The master binds before the fork, and the workers inherit the queue. The kernel caps the value at `net.core.somaxconn`. https://man7.org/linux/man-pages/man2/listen.2.html
+/// Linux limits the backlog to `net.core.somaxconn`. https://man7.org/linux/man-pages/man2/listen.2.html
 const LISTEN_BACKLOG: i32 = 65535;
 
-/// Each process has exactly one closer. The master holds its copy until `rapira_master::run` returns, so respawned workers inherit it. A worker gives its copy to the adopter.
+/// A listening socket and its bound address.
 #[derive(Debug)]
 pub struct PreparedListener {
     pub(crate) fd: OwnedFd,
@@ -24,7 +24,7 @@ impl PreparedListener {
     }
 }
 
-/// Runs before any fork and before a runtime exists, so it uses sync syscalls only. Sets O_NONBLOCK, because tokio's `from_std` requires it, and the Linux acceptor needs `accept` to return WouldBlock when another worker takes the connection.
+/// Binds a nonblocking listener before the IO runtime starts.
 pub fn bind(addr: &ListenAddr) -> anyhow::Result<PreparedListener> {
     match addr {
         ListenAddr::Tcp(addr) => bind_tcp(*addr),
