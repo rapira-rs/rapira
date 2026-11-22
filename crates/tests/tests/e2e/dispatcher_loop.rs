@@ -102,6 +102,39 @@ fn recv_probes_on_an_empty_channel() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn blocking_receive_preserves_last_activity_until_php_resumes() -> anyhow::Result<()> {
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/held-worker.php"))
+        .json_log()
+        .spawn();
+    let stamp = |fragment| {
+        let row = slot_line(&srv, fragment);
+        row.split_once("last_activity_ms=")
+            .unwrap()
+            .1
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    let release = srv.dir.join("release");
+    let held = submit(srv.addr, req(&format!("/?release={}", release.display())))?;
+    server_log::wait_app_record(&srv.log_file(), "held");
+    let active = stamp("state=active handled=0 ");
+    // The activity clock has millisecond resolution.
+    std::thread::sleep(Duration::from_millis(2));
+    std::fs::write(release, "")?;
+    assert_eq!(drain(held).body, "done");
+    assert_eq!(stamp("state=idle handled=1 "), active);
+    assert_eq!(
+        drain(submit(srv.addr, req("/?probe=count"))?).body,
+        "runs=1"
+    );
+    assert!(stamp("state=idle handled=2 ") > active);
+    Ok(())
+}
+
 /// A `writeBody()` with no prior `writeHead()` commits an implicit 200.
 #[test]
 fn implicit_200_on_first_write_body() -> anyhow::Result<()> {

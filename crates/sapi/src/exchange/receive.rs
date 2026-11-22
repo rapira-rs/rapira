@@ -30,48 +30,48 @@ unsafe fn receive_into(rv: *mut zval, mode: RecvMode) -> bool {
             return false;
         }
         // The timer of the previous unit still runs. A queued unit re-arms it, so disarm it only before a wait.
-        let mut armed = matches!(mode, RecvMode::Wait(t) if t != 0);
-        if !armed {
-            // SAFETY: the call is plain zend timer bookkeeping on this thread and has no bailout path.
-            rapira_receive_untimed();
-        }
-        loop {
-            let wait = match mode {
-                RecvMode::Wait(_) if armed => Wait::Never,
-                RecvMode::Try | RecvMode::Wait(0) => Wait::Never,
-                RecvMode::Wait(-1) => Wait::Forever,
-                RecvMode::Wait(t) => Wait::For(Duration::from_micros(t as u64)),
-            };
-            match pull(wait) {
-                Pull::Unit(unit) => {
-                    // SAFETY: the call is plain zend timer bookkeeping and has no bailout path.
-                    rapira_receive_timed();
-                    let ptr = NonNull::from(Box::leak(unit.into_held()));
-                    UNIT.set(Some(ptr.as_ptr()));
-                    // A Zend OOM bailout in the allocation longjmps through this frame, so it holds no value with Drop glue; the cycle slot then reclaims the unit.
-                    rapira_unit_object(rv, ptr.as_ref().class())
-                        .cast::<HeldPtr>()
-                        .write(HeldPtr(Some(ptr)));
-                    return true;
+        let wait = match mode {
+            RecvMode::Try | RecvMode::Wait(0) => Wait::Never,
+            RecvMode::Wait(-1) => Wait::Forever,
+            RecvMode::Wait(t) => Wait::For(Duration::from_micros(t as u64)),
+        };
+        let mut disarmed = false;
+        let got = pull_with(|units| {
+            if !matches!(wait, Wait::Never) {
+                let got = units.next(Wait::Never);
+                if !matches!(got, Pull::NoUnit) {
+                    return got;
                 }
-                _ if armed => {
-                    armed = false;
-                    // SAFETY: the call is plain zend timer bookkeeping and has no bailout path.
+            }
+            rapira_receive_untimed();
+            disarmed = true;
+            units.next(wait)
+        });
+        match got {
+            Pull::Unit(unit) => {
+                rapira_receive_timed();
+                let ptr = NonNull::from(Box::leak(unit.into_held()));
+                UNIT.set(Some(ptr.as_ptr()));
+                // A Zend OOM bailout in the allocation longjmps through this frame, so it holds no value with Drop glue; the cycle slot then reclaims the unit.
+                rapira_unit_object(rv, ptr.as_ref().class())
+                    .cast::<HeldPtr>()
+                    .write(HeldPtr(Some(ptr)));
+                true
+            }
+            Pull::Closed | Pull::Reload => {
+                if !disarmed {
                     rapira_receive_untimed();
                 }
-                // The app instance takes no more units. It sees the source closed, and the worker stays.
-                Pull::Closed | Pull::Reload => {
-                    zend::throw_exception(rapira_ce_closed_exception, CLOSED);
-                    return false;
-                }
-                Pull::NoUnit if matches!(mode, RecvMode::Try) => return false,
-                Pull::NoUnit => {
-                    zend::throw_exception(
-                        rapira_ce_timeout_exception,
-                        c"no work became available within the timeout",
-                    );
-                    return false;
-                }
+                zend::throw_exception(rapira_ce_closed_exception, CLOSED);
+                false
+            }
+            Pull::NoUnit if matches!(mode, RecvMode::Try) => false,
+            Pull::NoUnit => {
+                zend::throw_exception(
+                    rapira_ce_timeout_exception,
+                    c"no work became available within the timeout",
+                );
+                false
             }
         }
     }

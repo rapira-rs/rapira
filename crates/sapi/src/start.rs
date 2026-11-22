@@ -30,7 +30,7 @@ thread_local! {
     pub(crate) static CLOSED_SEEN: Cell<bool> = const { Cell::new(false) };
 }
 
-struct UnitRx {
+pub(crate) struct UnitRx {
     rx: Receiver<Entry>,
     control: Receiver<()>,
     stats: Arc<PoolStats>,
@@ -256,40 +256,54 @@ pub(crate) enum Pull {
     NoUnit,
 }
 
-/// A timed pull keeps one deadline across cancelled units. PHP becomes active again even when a poll finds no unit.
 pub(crate) fn pull(wait: Wait) -> Pull {
+    pull_with(|units| units.next(wait))
+}
+
+/// The worker stays idle until the caller returns to PHP, including across an empty probe.
+pub(crate) fn pull_with(select: impl FnOnce(&UnitRx) -> Pull) -> Pull {
     UNIT_RX.with_borrow(|slot| {
-        let Some(unit_r) = slot.as_ref() else {
+        let Some(units) = slot else {
             CLOSED_SEEN.set(true);
             return Pull::Closed;
         };
-        let deadline = match wait {
-            Wait::Never => Some(Instant::now()),
-            Wait::For(t) => Some(Instant::now() + t),
-            Wait::Forever => None,
-        };
         crate::rapira_worker::reload_for_opcache_restart();
+        if quota::exhausted() {
+            return Pull::Closed;
+        }
+        sb_update(Event::Idle);
+        let got = select(units);
+        sb_update(Event::Active);
+        got
+    })
+}
+
+impl UnitRx {
+    /// A timed wait keeps its deadline across cancelled units and OPcache checks.
+    pub(crate) fn next(&self, wait: Wait) -> Pull {
+        let deadline = match wait {
+            Wait::For(t) => Some(Instant::now() + t),
+            _ => None,
+        };
         loop {
-            // The app instance took its last unit; the worker stays for the next one.
-            if quota::exhausted() {
-                return Pull::Closed;
-            }
             if crate::rapira_worker::opcache_restart_ran() {
                 info!(target: "rapira", "the OPcache restart has run; restarting the app");
                 quota::exhaust();
-                sb_update(Event::Active);
                 return Pull::Closed;
             }
-            sb_update(Event::Idle);
-            let poll = crate::rapira_worker::OPCACHE_WAIT
-                .get()
-                .map(|_| OPCACHE_POLL);
-            let left = deadline.map_or(Duration::MAX, |d| {
-                d.saturating_duration_since(Instant::now())
-            });
-            let got = idle_wait(poll.map_or(left, |p| p.min(left)), |t| {
-                unit_r.recv(&unit_r.rx, t)
-            });
+            let got = if matches!(wait, Wait::Never) {
+                self.recv(&self.rx, Duration::ZERO)
+            } else {
+                let left = deadline.map_or(Duration::MAX, |d| {
+                    d.saturating_duration_since(Instant::now())
+                });
+                let timeout = if crate::rapira_worker::OPCACHE_WAIT.get().is_some() {
+                    left.min(OPCACHE_POLL)
+                } else {
+                    left
+                };
+                idle_wait(timeout, |t| self.recv(&self.rx, t))
+            };
             match &got {
                 Pull::Unit(unit) if unit.cancelled() => {
                     sb_update(Event::Shed);
@@ -298,15 +312,17 @@ pub(crate) fn pull(wait: Wait) -> Pull {
                 Pull::Unit(_) => RECEIVED.set(true),
                 Pull::Reload => quota::exhaust(),
                 Pull::Closed => CLOSED_SEEN.set(true),
-                Pull::NoUnit if poll.is_some() && deadline.is_none_or(|d| Instant::now() < d) => {
+                Pull::NoUnit
+                    if !matches!(wait, Wait::Never)
+                        && deadline.is_none_or(|d| Instant::now() < d) =>
+                {
                     continue;
                 }
                 Pull::NoUnit => {}
             }
-            sb_update(Event::Active);
             return got;
         }
-    })
+    }
 }
 
 /// A retry takes a queued unit only while no worker can serve it.
