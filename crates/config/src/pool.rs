@@ -12,13 +12,11 @@ use crate::{capped_timeout, opt_path};
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PoolSettings {
     pub entrypoint: PathBuf,
-    pub processes: usize,
+    pub workers: usize,
     pub mode: Mode,
     /// Requests a worker serves before it recycles its app, with jitter. 0 means no limit.
     pub max_requests: u64,
-    /// RSS of one worker in MiB above which the master drains the worker and forks a new one. 0 means no limit.
-    pub max_memory_mb: u64,
-    /// Failed boots in sequence after which a worker stops as unhealthy. 0 means no limit.
+    /// Consecutive boot failures before the server exits if the pool never served. Zero permits unlimited retries.
     pub max_boot_failures: u32,
     /// Wall-clock limit of one request. The clock starts again at each pull that reaches the intake, also when the pull finds no unit. Time in the intake does not count. Zero disables the limit.
     pub request_terminate_timeout: Duration,
@@ -50,16 +48,15 @@ impl fmt::Display for Mode {
 #[serde(deny_unknown_fields)]
 pub struct PoolSection {
     entrypoint: Option<String>,
-    processes: Option<NonZero<usize>>,
+    workers: Option<NonZero<usize>>,
     mode: Option<Mode>,
     max_requests: Option<u64>,
-    max_memory_mb: Option<u64>,
     max_boot_failures: Option<u32>,
     request_terminate_timeout_secs: Option<u64>,
     env: Option<BTreeMap<String, String>>,
 }
 
-fn default_processes() -> usize {
+fn default_workers() -> usize {
     std::thread::available_parallelism()
         .map(|n| n.get())
         .unwrap_or(1)
@@ -67,9 +64,7 @@ fn default_processes() -> usize {
 
 /// `table` is the qualified table of the calling plugin, such as `http.pool`. Every message carries it.
 pub fn resolve_pool(section: PoolSection, table: &str, dir: &Path) -> anyhow::Result<PoolSettings> {
-    let processes = section
-        .processes
-        .map_or_else(default_processes, NonZero::get);
+    let workers = section.workers.map_or_else(default_workers, NonZero::get);
 
     let mode = section.mode.unwrap_or(Mode::Dispatcher);
 
@@ -89,10 +84,9 @@ pub fn resolve_pool(section: PoolSection, table: &str, dir: &Path) -> anyhow::Re
 
     Ok(PoolSettings {
         entrypoint,
-        processes,
+        workers,
         mode,
         max_requests: section.max_requests.unwrap_or(0),
-        max_memory_mb: section.max_memory_mb.unwrap_or(0),
         max_boot_failures: section.max_boot_failures.unwrap_or(5),
         request_terminate_timeout: capped_timeout(
             table,
@@ -133,14 +127,13 @@ mod tests {
         resolve_pool(section, "http.pool", Path::new("/w"))
     }
 
-    /// What `entrypoint = "a.php"` and `processes = 4` resolve to.
+    /// Pool settings for `entrypoint = "a.php"` and `workers = 4`.
     fn base() -> PoolSettings {
         PoolSettings {
             entrypoint: PathBuf::from("/w/a.php"),
-            processes: 4,
+            workers: 4,
             mode: Mode::Dispatcher,
             max_requests: 0,
-            max_memory_mb: 0,
             max_boot_failures: 5,
             request_terminate_timeout: Duration::ZERO,
             env: BTreeMap::new(),
@@ -167,12 +160,12 @@ mod tests {
         let cases = [
             Case {
                 name: "defaults",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\n",
+                toml: "entrypoint = \"a.php\"\nworkers = 4\n",
                 want: base(),
             },
             Case {
                 name: "entrypoint resolves against the config dir",
-                toml: "entrypoint = \"public/index.php\"\nprocesses = 4\n",
+                toml: "entrypoint = \"public/index.php\"\nworkers = 4\n",
                 want: PoolSettings {
                     entrypoint: PathBuf::from("/w/public/index.php"),
                     ..base()
@@ -180,23 +173,15 @@ mod tests {
             },
             Case {
                 name: "max requests",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nmax_requests = 500\n",
+                toml: "entrypoint = \"a.php\"\nworkers = 4\nmax_requests = 500\n",
                 want: PoolSettings {
                     max_requests: 500,
                     ..base()
                 },
             },
             Case {
-                name: "max memory",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nmax_memory_mb = 512\n",
-                want: PoolSettings {
-                    max_memory_mb: 512,
-                    ..base()
-                },
-            },
-            Case {
                 name: "max boot failures",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nmax_boot_failures = 2\n",
+                toml: "entrypoint = \"a.php\"\nworkers = 4\nmax_boot_failures = 2\n",
                 want: PoolSettings {
                     max_boot_failures: 2,
                     ..base()
@@ -204,7 +189,7 @@ mod tests {
             },
             Case {
                 name: "env table",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\n[env]\nAPP_ENV = \"prod\"\nPOOL_EMPTY = \"\"\n",
+                toml: "entrypoint = \"a.php\"\nworkers = 4\n[env]\nAPP_ENV = \"prod\"\nPOOL_EMPTY = \"\"\n",
                 want: PoolSettings {
                     env: BTreeMap::from([
                         ("APP_ENV".to_owned(), "prod".to_owned()),
@@ -215,7 +200,7 @@ mod tests {
             },
             Case {
                 name: "classic mode",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nmode = \"classic\"\n",
+                toml: "entrypoint = \"a.php\"\nworkers = 4\nmode = \"classic\"\n",
                 want: PoolSettings {
                     mode: Mode::Classic,
                     ..base()
@@ -223,7 +208,7 @@ mod tests {
             },
             Case {
                 name: "worker mode",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nmode = \"worker\"\n",
+                toml: "entrypoint = \"a.php\"\nworkers = 4\nmode = \"worker\"\n",
                 want: PoolSettings {
                     mode: Mode::Worker,
                     ..base()
@@ -231,12 +216,12 @@ mod tests {
             },
             Case {
                 name: "dispatcher mode",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nmode = \"dispatcher\"\n",
+                toml: "entrypoint = \"a.php\"\nworkers = 4\nmode = \"dispatcher\"\n",
                 want: base(),
             },
             Case {
                 name: "request timeout at the cap",
-                toml: "entrypoint = \"a.php\"\nprocesses = 4\nrequest_terminate_timeout_secs = 86400\n",
+                toml: "entrypoint = \"a.php\"\nworkers = 4\nrequest_terminate_timeout_secs = 86400\n",
                 want: PoolSettings {
                     request_terminate_timeout: Duration::from_secs(86_400),
                     ..base()
@@ -259,6 +244,16 @@ mod tests {
     fn pool_errors_name_the_key() {
         let cases = [
             ErrCase {
+                name: "process count",
+                toml: "entrypoint = \"a.php\"\nprocesses = 2\n",
+                error: "unknown field `processes`",
+            },
+            ErrCase {
+                name: "per-process memory limit",
+                toml: "entrypoint = \"a.php\"\nmax_memory_mb = 128\n",
+                error: "unknown field `max_memory_mb`",
+            },
+            ErrCase {
                 name: "empty entrypoint",
                 toml: "entrypoint = \"\"\n",
                 error: "http.pool.entrypoint is required",
@@ -269,8 +264,8 @@ mod tests {
                 error: "http.pool.entrypoint is required",
             },
             ErrCase {
-                name: "zero processes",
-                toml: "entrypoint = \"a.php\"\nprocesses = 0\n",
+                name: "zero workers",
+                toml: "entrypoint = \"a.php\"\nworkers = 0\n",
                 error: "expected a nonzero usize",
             },
             ErrCase {

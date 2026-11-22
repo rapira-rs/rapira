@@ -22,9 +22,7 @@ listen = "127.0.0.1:8000"    # host:port, ":port" for all interfaces, or "unix:/
 
 # Serve files from a directory before PHP. A miss falls through to PHP. Dotfiles always fall through to PHP.
 # Requires "static" in http.middleware.
-# The server holds served files in memory. Each worker keeps up to 16MiB and stores no file
-# above 256KiB. The cost is therefore 16MiB for each process in http.pool.processes. An entry stays
-# fresh for one second, so a rewritten file reaches the client after that time.
+# The HTTP plugin caches up to 16 MiB of files. Each file must be at most 256 KiB. Entries stay fresh for one second.
 # [http.static]
 # root = "public"            # required; the directory must exist; relative paths resolve against this file's directory
 # forbid = [".php"]          # file-name suffixes the server never serves; an explicit list replaces this default
@@ -33,11 +31,10 @@ listen = "127.0.0.1:8000"    # host:port, ":port" for all interfaces, or "unix:/
 [http.pool]
 entrypoint = "dispatcher-sync.php" # relative paths resolve against this file's directory
 mode = "dispatcher"           # "classic" | "worker" | "dispatcher" (the default)
-processes = 16                # a fixed worker count; defaults to the CPU count
+workers = 16                  # PHP interpreter threads; defaults to the CPU count
 # max_requests = 0            # recycle the app of a worker after about N requests, with jitter; 0 means no limit
-# max_memory_mb = 0           # drain and replace a worker whose RSS goes above this; the master checks it every second; 0 means no limit
-# max_boot_failures = 5       # stop a worker as unhealthy after N failed boots in sequence; 0 means no limit; for worker and dispatcher modes
-# request_terminate_timeout_secs = 0  # kill and replace a worker whose request runs longer; 0 turns it off
+# max_boot_failures = 5       # exit after N consecutive boot failures in a pool that never served; 0 means no limit
+# request_terminate_timeout_secs = 0  # interrupt a unit at its time limit; exit 124 if it still runs 5 seconds later
 # PHP reads these values through getenv(), $_ENV and $_SERVER. Child processes inherit the server environment.
 # [http.pool.env]
 # APP_ENV = "prod"
@@ -46,7 +43,7 @@ processes = 16                # a fixed worker count; defaults to the CPU count
 # With a [grpc] table, grpc.descriptor_set and grpc.pool.entrypoint are required.
 # [grpc]
 # listen = "127.0.0.1:50051"   # host:port, ":port" for all interfaces, or "unix:/path"
-# descriptor_set = "api.binpb" # relative to this file's directory, or an http:// or https:// URL that the master downloads at boot; build it with its imports: buf build --as-file-descriptor-set -o api.binpb
+# descriptor_set = "api.binpb" # relative to this file's directory, or an HTTP or HTTPS URL to load at boot
 # services = ["billing.v1.InvoiceService"] # serve only these fully qualified names, each in descriptor_set; unset means the services of the files that no other file imports
 # reflection = false           # serve grpc.reflection.v1 and v1alpha
 # default_timeout_secs = 30    # deadline of a call without a client timeout; unset by default, which means no deadline
@@ -59,22 +56,23 @@ processes = 16                # a fixed worker count; defaults to the CPU count
 # [grpc.pool]
 # entrypoint = "grpc.php"      # relative paths resolve against this file's directory
 # mode = "dispatcher"          # the only mode for a grpc pool
-# processes = 16               # defaults to the CPU count
+# workers = 16                 # defaults to the CPU count
 
 # The bearer-token check. Requires "auth" in grpc.interceptors. grpc.health.v1.Health needs no token.
 # [grpc.auth]
 # tokens_file = "grpc-tokens"  # relative to this file's directory; one token per line
 
-# The observability process runs no PHP. It serves GET /metrics and the livez and readyz probes from the worker scoreboard.
+# The observability thread serves GET /metrics, /livez and /readyz.
 # [observability]
 # listen = "127.0.0.1:9180"    # required; host:port, ":port" for all interfaces, or "unix:/path"
 # keepalive_timeout_secs = 60 # optional; closes a keep-alive connection idle past the limit
 # [observability.metrics]    # GET /metrics
 # [observability.probes]     # GET /livez, GET /readyz
 
-# [supervisor]
+# [server]
 # pidfile = "rapira.pid"      # relative to this file's directory
-# process_control_timeout_secs = 30   # stop time from QUIT to TERM; KILL follows one second after TERM
+# stop_timeout_secs = 30      # time for plugins and PHP threads to stop
+# io_threads = 2              # shared HTTP and gRPC IO threads; defaults to the Tokio runtime setting
 
 [log]
 # level = "error"             # error | warn | info | debug | trace

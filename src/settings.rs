@@ -1,6 +1,6 @@
 use anyhow::{Context, bail};
 use rapira_config::{
-    LogSettings, SupervisorSection, SupervisorSettings, resolve_log, resolve_supervisor,
+    LogSettings, ServerSection, ServerSettings, resolve_log, resolve_server,
 };
 use serde::Deserialize;
 use std::path::Path;
@@ -13,7 +13,7 @@ struct FileConfig {
     grpc: Option<rapira_grpc::config::Section>,
     observability: Option<rapira_observability::config::Section>,
     #[serde(default)]
-    supervisor: SupervisorSection,
+    server: ServerSection,
     #[serde(default)]
     log: LogSettings,
 }
@@ -23,7 +23,7 @@ pub struct Settings {
     pub http: Option<rapira_http::config::Settings>,
     pub grpc: Option<rapira_grpc::config::Settings>,
     pub observability: Option<rapira_observability::config::Settings>,
-    pub supervisor: SupervisorSettings,
+    pub server: ServerSettings,
     pub log: LogSettings,
 }
 
@@ -55,14 +55,14 @@ fn settings(file: FileConfig, dir: &Path) -> anyhow::Result<Settings> {
         .observability
         .map(|section| rapira_observability::config::resolve(section, dir))
         .transpose()?;
-    let supervisor = resolve_supervisor(file.supervisor, dir)?;
+    let server = resolve_server(file.server, dir)?;
     let log = resolve_log(file.log)?;
 
     Ok(Settings {
         http,
         grpc,
         observability,
-        supervisor,
+        server,
         log,
     })
 }

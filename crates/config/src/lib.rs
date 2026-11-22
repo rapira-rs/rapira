@@ -5,12 +5,12 @@ use std::time::Duration;
 mod listen;
 mod log;
 mod pool;
-mod supervisor;
+mod server;
 
 pub use listen::ListenAddr;
 pub use log::{LogFormat, LogLevel, LogSettings, resolve_log};
 pub use pool::{Mode, PoolSection, PoolSettings, check_entrypoint, resolve_pool};
-pub use supervisor::{SupervisorSection, SupervisorSettings, resolve_supervisor};
+pub use server::{ServerSection, ServerSettings, resolve_server};
 
 /// `value` resolved against the config directory `dir`. An empty string counts as absent.
 pub fn opt_path(dir: &Path, value: Option<&str>) -> std::io::Result<Option<PathBuf>> {
@@ -52,7 +52,7 @@ pub fn nonzero_timeout(table: &str, key: &str, secs: u64) -> anyhow::Result<Dura
     capped_timeout(table, key, secs)
 }
 
-/// Caps every `*_secs` key so the master's deadline arithmetic cannot overflow.
+/// Caps each timeout before the server computes its deadline.
 const MAX_TIMEOUT_SECS: u64 = 86_400;
 
 pub fn capped_timeout(table: &str, key: &str, secs: u64) -> anyhow::Result<Duration> {
