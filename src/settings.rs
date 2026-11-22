@@ -1,7 +1,5 @@
 use anyhow::{Context, bail};
-use rapira_config::{
-    LogSettings, ServerSection, ServerSettings, resolve_log, resolve_server,
-};
+use rapira_config::{LogSettings, ServerSection, ServerSettings, resolve_log, resolve_server};
 use serde::Deserialize;
 use std::path::Path;
 

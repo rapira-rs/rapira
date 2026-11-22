@@ -5,7 +5,7 @@ edition = "2024"
 name = "rapira_core"
 version = "0.9.2"
 edition.workspace = true
-description = "PHP application server: embeds NTS PHP via the embed SAPI and serves HTTP directly"
+description = "PHP application server with HTTP and gRPC worker pools"
 homepage = "https://rapira.rs"
 documentation = "https://rapira.rs/docs/"
 repository = "https://github.com/rapira-rs/rapira"
@@ -21,7 +21,6 @@ path = "src/main.rs"
 members = [
     "crates/config",
     "crates/tests",
-    "crates/master",
     "crates/observability",
     "crates/php_build",
     "crates/middleware/static_files",
@@ -46,7 +45,6 @@ rapira_grpc_auth = { path = "crates/interceptors/auth" }
 rapira_http = { path = "crates/plugins/http" }
 rapira_grpc = { path = "crates/plugins/grpc" }
 rapira_net = { path = "crates/net" }
-rapira_master = { path = "crates/master" }
 rapira_observability = { path = "crates/observability" }
 rapira_scoreboard = { path = "crates/scoreboard" }
 serde = { version = "1", features = ["derive"] }
@@ -77,7 +75,6 @@ codegen-units = 1
 [dependencies]
 anyhow = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-rapira_master = { workspace = true }
 rapira_sapi = { workspace = true }
 rapira_config = { workspace = true }
 rapira_http = { workspace = true }
@@ -87,7 +84,7 @@ rapira_scoreboard = { workspace = true }
 libc = { workspace = true }
 mimalloc = "0.1"
 serde = { workspace = true }
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["rt-multi-thread"] }
 toml = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { version = "0.3.18", default-features = false, features = ["fmt", "ansi", "env-filter", "json"] }

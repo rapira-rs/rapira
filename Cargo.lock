@@ -951,7 +951,6 @@ dependencies = [
  "rapira_config",
  "rapira_grpc",
  "rapira_http",
- "rapira_master",
  "rapira_observability",
  "rapira_sapi",
  "rapira_scoreboard",
@@ -1019,16 +1018,6 @@ dependencies = [
  "tokio",
  "toml",
  "tower",
- "tracing",
-]
-
-[[package]]
-name = "rapira_master"
-version = "0.9.2"
-dependencies = [
- "anyhow",
- "libc",
- "rapira_scoreboard",
  "tracing",
 ]
 

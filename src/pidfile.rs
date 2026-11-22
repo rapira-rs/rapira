@@ -1,4 +1,4 @@
-//! The master pidfile. `PidFile::write` writes it at start, and the drop removes it.
+//! The pidfile identifies the server until it exits.
 
 use std::io;
 use std::path::{Path, PathBuf};

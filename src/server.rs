@@ -1,0 +1,280 @@
+use std::mem::ManuallyDrop;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::thread;
+use std::time::{Duration, Instant};
+
+use anyhow::{Context, Result, ensure};
+use rapira_config::{Mode, PoolSettings};
+use rapira_sapi::plugin::{Plugin, Worker};
+use rapira_scoreboard::{Board, Pool, SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SLOT_STARTING};
+use tokio::sync::watch;
+use tokio::task::JoinSet;
+use tracing::{error, info, warn};
+
+use crate::pidfile::PidFile;
+use crate::settings::Settings;
+use crate::signals::Signals;
+
+pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
+    info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
+    let obs = settings
+        .observability
+        .map(rapira_observability::Server::from_settings)
+        .transpose()
+        .context("preparing observability")?;
+    let mut plugins: Vec<(Box<dyn Plugin>, PoolSettings)> = Vec::new();
+    if let Some(http) = settings.http {
+        let pool = http.pool.clone();
+        plugins.push((Box::new(rapira_http::Server::from_settings(http)?), pool));
+    }
+    if let Some(grpc) = settings.grpc {
+        let pool = grpc.pool.clone();
+        plugins.push((Box::new(rapira_grpc::Server::from_settings(grpc)?), pool));
+    }
+    for (plugin, pool) in &plugins {
+        check_mode(plugin.name(), plugin.modes(), pool.mode)?;
+    }
+
+    let zts = rapira_sapi::zts();
+    let count = if zts {
+        plugins
+            .iter()
+            .try_fold(0usize, |n, (_, pool)| n.checked_add(pool.workers))
+            .context("too many PHP workers")?
+    } else {
+        1
+    };
+    let engine = rapira_sapi::Engine::start(&crate::PLUGIN_REGISTERS, count)?;
+    if !zts {
+        ensure!(
+            plugins.len() == 1,
+            "NTS PHP supports one pool; build PHP with --enable-zts for multiple pools"
+        );
+        let (plugin, pool) = &mut plugins[0];
+        if pool.workers > 1 {
+            warn!(target: "rapira", "{}.pool.workers = {}: NTS PHP runs one worker; build PHP with --enable-zts for multiple workers", plugin.name(), pool.workers);
+            pool.workers = 1;
+        }
+    }
+    let board: Board = plugins
+        .iter()
+        .map(|(plugin, pool)| Arc::new(Pool::new(plugin.name(), pool.workers)))
+        .collect();
+    let timed = plugins
+        .iter()
+        .any(|(_, pool)| !pool.request_terminate_timeout.is_zero());
+    let mut pidfile = settings
+        .server
+        .pidfile
+        .as_deref()
+        .map(PidFile::write)
+        .transpose()
+        .context("writing pidfile")?;
+    // From the first worker start, only the successful join path may shut PHP down.
+    let engine = ManuallyDrop::new(engine);
+    let (stop, _) = watch::channel(false);
+    let grace = settings.server.drain_grace();
+    let mut pools = Vec::new();
+    let mut services = Vec::new();
+    for ((plugin, cfg), record) in plugins.into_iter().zip(board.iter()) {
+        // SAFETY: MINIT finished. The engine and the plugin records live until every PHP thread ends.
+        let (pool, intake) = or_exit(
+            unsafe { rapira_sapi::Pool::start(cfg, Arc::clone(record), &*plugin) },
+            &mut pidfile,
+        );
+        pools.push(pool);
+        services.push((
+            plugin,
+            Worker {
+                intake,
+                stop: stop.subscribe(),
+                drain_grace: grace,
+            },
+        ));
+    }
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if let Some(n) = settings.server.io_threads {
+        builder.worker_threads(n.get());
+    }
+    let rt = or_exit(
+        builder
+            .enable_all()
+            .thread_name("rapira-io")
+            .build()
+            .context("starting the IO runtime"),
+        &mut pidfile,
+    );
+    rapira_sapi::plugin::set_runtime(rt.handle().clone());
+    let failed = Arc::new(AtomicBool::new(false));
+    let mut tasks = JoinSet::new();
+    for (plugin, worker) in services {
+        let name = plugin.name();
+        tasks.spawn_on(
+            async move { (name, plugin.serve(worker).await) },
+            rt.handle(),
+        );
+    }
+    let stopped = stop.subscribe();
+    let error_flag = Arc::clone(&failed);
+    let plugins = rt.spawn(async move {
+        while let Some(result) = tasks.join_next().await {
+            let (name, result) = result.unwrap_or_else(|e| ("task", Err(e.into())));
+            service_end(name, result, &stopped, &error_flag);
+        }
+    });
+    let obs = obs.map(|server| {
+        let build = rapira_observability::Build {
+            version: env!("CARGO_PKG_VERSION"),
+            php_version: rapira_sapi::linked_php_version(),
+        };
+        let stopped = stop.subscribe();
+        let flag = Arc::clone(&failed);
+        let board = Arc::clone(&board);
+        or_exit(
+            thread::Builder::new()
+                .name("rapira-obs".into())
+                .spawn(move || {
+                    let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                        server.serve(board, build, stopped.clone(), grace)
+                    }))
+                    .unwrap_or_else(|_| Err(anyhow::anyhow!("observability thread panicked")));
+                    service_end("observability", result, &stopped, &flag);
+                })
+                .context("starting observability"),
+            &mut pidfile,
+        )
+    });
+    let watchdog = timed.then(|| {
+        or_exit(
+            rapira_sapi::watchdog::start().context("starting the watchdog"),
+            &mut pidfile,
+        )
+    });
+
+    loop {
+        let sig = or_exit(
+            signals.wait().context("waiting for a host signal"),
+            &mut pidfile,
+        );
+        if failed.load(Ordering::Acquire) {
+            break;
+        }
+        match sig {
+            libc::SIGTERM | libc::SIGINT | libc::SIGQUIT => break,
+            libc::SIGUSR1 => status(&board),
+            libc::SIGUSR2 | libc::SIGHUP => {
+                info!(target: "rapira", "reloading all pools");
+                rapira_sapi::reload();
+            }
+            _ => unreachable!(),
+        }
+    }
+
+    let deadline = Instant::now() + settings.server.stop_timeout;
+    info!(target: "rapira", "stopping server");
+    rapira_sapi::scoreboard::begin_drain(&board);
+    stop.send_replace(true);
+    drop(watchdog);
+    loop {
+        match or_exit(
+            signals.pending().context("checking signals during stop"),
+            &mut pidfile,
+        ) {
+            Some(libc::SIGTERM | libc::SIGINT) => exit(130, &mut pidfile),
+            Some(libc::SIGUSR1) => status(&board),
+            _ => {}
+        }
+        if plugins.is_finished()
+            && obs.as_ref().is_none_or(thread::JoinHandle::is_finished)
+            && pools.iter().all(rapira_sapi::Pool::is_finished)
+        {
+            break;
+        }
+        let left = deadline.saturating_duration_since(Instant::now());
+        if left.is_zero() {
+            error!(target: "rapira", "stop deadline reached; exiting without PHP module shutdown");
+            exit(i32::from(failed.load(Ordering::Acquire)), &mut pidfile);
+        }
+        thread::sleep(left.min(Duration::from_millis(10)));
+    }
+    for pool in pools {
+        pool.join();
+    }
+    if let Some(thread) = obs {
+        thread.join().expect("observability caught its panic");
+    }
+    rt.shutdown_background();
+    drop(ManuallyDrop::into_inner(engine));
+    ensure!(!failed.load(Ordering::Acquire), "a server listener stopped");
+    Ok(())
+}
+
+/// A listener failure wakes the signal loop. During an operator stop, a cut drain still exits successfully.
+fn service_end(name: &str, result: Result<()>, stop: &watch::Receiver<bool>, failed: &AtomicBool) {
+    if let Err(e) = result {
+        error!(target: "rapira", "plugin {name}: {e:#}");
+    }
+    if !*stop.borrow() {
+        failed.store(true, Ordering::Release);
+        // SAFETY: all threads block SIGUSR1. The main thread accepts it and checks the failure flag.
+        unsafe {
+            libc::kill(libc::getpid(), libc::SIGUSR1);
+        }
+    }
+}
+
+fn status(board: &Board) {
+    use Ordering::Relaxed;
+    for p in board.iter() {
+        info!(target: "rapira", "pool={} workers={} pending={} failed_on_full_queue={} refused={}", p.name, p.workers.len(), p.pending.load(Relaxed), p.failed_on_full_queue.load(Relaxed), p.refused.load(Relaxed));
+        for (i, w) in p.workers.iter().enumerate() {
+            let state = match w.state.load(Ordering::Acquire) {
+                SLOT_STARTING => "starting",
+                SLOT_IDLE => "idle",
+                SLOT_ACTIVE => "active",
+                SLOT_DRAINING => "draining",
+                _ => unreachable!(),
+            };
+            info!(target: "rapira", "pool={} worker={i} state={state} handled={} errors={} recycles={} last_activity_ms={}", p.name, w.handled.load(Relaxed), w.errors.load(Relaxed), w.recycles.load(Relaxed), w.last_activity_ms.load(Relaxed));
+        }
+    }
+}
+
+fn or_exit<T>(result: Result<T>, pidfile: &mut Option<PidFile>) -> T {
+    result.unwrap_or_else(|e| {
+        error!(target: "rapira", "{e:#}");
+        exit(1, pidfile);
+    })
+}
+
+fn exit(code: i32, pidfile: &mut Option<PidFile>) -> ! {
+    drop(pidfile.take());
+    // SAFETY: threads can still be inside PHP. Skip process destructors.
+    unsafe { libc::_exit(code) }
+}
+
+fn check_mode(name: &str, served: &[Mode], mode: Mode) -> Result<()> {
+    if served.contains(&mode) {
+        return Ok(());
+    }
+    let served: Vec<String> = served.iter().map(Mode::to_string).collect();
+    anyhow::bail!(
+        "{name}.pool.mode = {mode}: this plugin serves {}",
+        served.join(", ")
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_pool_mode_the_plugin_does_not_serve_fails_the_boot() {
+        let err = check_mode("grpc", &[Mode::Dispatcher], Mode::Worker).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "grpc.pool.mode = worker: this plugin serves dispatcher"
+        );
+    }
+}
