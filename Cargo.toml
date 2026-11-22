@@ -35,6 +35,7 @@ members = [
 
 [workspace.dependencies]
 anyhow = "1"
+crossbeam-channel = "0.5"
 base64 = "0.23"
 tracing = { version = "0.1", default-features = false, features = ["std"] }
 rapira_sapi = { path = "crates/sapi" }
