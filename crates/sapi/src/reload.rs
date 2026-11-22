@@ -1,0 +1,197 @@
+use crossbeam_channel::Sender;
+use std::ops::RangeInclusive;
+use std::sync::atomic::{AtomicU64, Ordering};
+use std::sync::{Condvar, Mutex, RwLock};
+
+unsafe extern "C" {
+    fn rapira_opcache_enabled() -> bool;
+}
+
+static CONTROLS: RwLock<Vec<Sender<()>>> = RwLock::new(Vec::new());
+static SENT: AtomicU64 = AtomicU64::new(0);
+static RESET: AtomicU64 = AtomicU64::new(0);
+static RESETTING: Mutex<bool> = Mutex::new(false);
+static RESET_DONE: Condvar = Condvar::new();
+
+/// The main thread registers the control channel before it starts the worker.
+pub(crate) fn register(tx: Sender<()>) {
+    CONTROLS.write().unwrap().push(tx);
+}
+
+pub(crate) fn wake_workers() {
+    for tx in CONTROLS.read().unwrap().iter() {
+        // A full channel already has a reload for this worker.
+        let _ = tx.try_send(());
+    }
+}
+
+/// Requests one OPcache reset and wakes each worker of each pool.
+pub fn reload() {
+    SENT.fetch_add(1, Ordering::Release);
+    wake_workers();
+}
+
+fn reset_due() -> Option<RangeInclusive<u64>> {
+    let sent = SENT.load(Ordering::Acquire);
+    let reset = RESET.load(Ordering::Acquire);
+    (sent > reset).then(|| reset + 1..=sent)
+}
+
+/// Only one worker starts the reset request. Other workers wait before they can load a script from the cache.
+pub(crate) fn claim_reset() -> Option<RangeInclusive<u64>> {
+    reset_due()?;
+    let mut active = RESET_DONE
+        .wait_while(RESETTING.lock().unwrap(), |active| *active)
+        .unwrap();
+    let due = reset_due()?;
+    *active = true;
+    Some(due)
+}
+
+/// A failed request startup leaves the reset due for the next worker.
+pub(crate) fn finish_reset(sent: u64, started: bool) {
+    let mut active = RESETTING.lock().unwrap();
+    if started {
+        RESET.store(sent, Ordering::Release);
+    }
+    *active = false;
+    RESET_DONE.notify_all();
+}
+
+/// Call on the main thread after module startup and before the workers start.
+pub(crate) fn check_opcache(total_workers: usize) -> anyhow::Result<()> {
+    // Both calls read startup state. They need no PHP request.
+    let (version, enabled) = unsafe { (crate::php_version_id(), rapira_opcache_enabled()) };
+    if let Some(needed) = missing_opcache_fix(version, crate::zts(), enabled, total_workers) {
+        anyhow::bail!(
+            "PHP {} cannot run {total_workers} workers with OPcache. Use PHP {needed} or later in this minor.",
+            crate::linked_php_version()
+        );
+    }
+    Ok(())
+}
+
+// The fix protects shared memory while other threads use it. https://github.com/php/php-src/commit/36c6d1f500f7ec477f6eae0b0f5c46b041d82347
+fn missing_opcache_fix(
+    version: u32,
+    zts: bool,
+    enabled: bool,
+    total_workers: usize,
+) -> Option<&'static str> {
+    if !zts || !enabled || total_workers <= 1 {
+        return None;
+    }
+    match version {
+        80400..80429 => Some("8.4.29"),
+        80500..80514 => Some("8.5.14"),
+        80600 => Some("8.6.1"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn opcache_version_for_several_workers() {
+        struct Case {
+            name: &'static str,
+            version: u32,
+            zts: bool,
+            enabled: bool,
+            workers: usize,
+            required: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "NTS has only one interpreter",
+                version: 80428,
+                zts: false,
+                enabled: true,
+                workers: 4,
+                required: None,
+            },
+            Case {
+                name: "OPcache is off",
+                version: 80513,
+                zts: true,
+                enabled: false,
+                workers: 2,
+                required: None,
+            },
+            Case {
+                name: "one worker",
+                version: 80600,
+                zts: true,
+                enabled: true,
+                workers: 1,
+                required: None,
+            },
+            Case {
+                name: "8.4 before the fix",
+                version: 80428,
+                zts: true,
+                enabled: true,
+                workers: 2,
+                required: Some("8.4.29"),
+            },
+            Case {
+                name: "8.4 with the fix",
+                version: 80429,
+                zts: true,
+                enabled: true,
+                workers: 2,
+                required: None,
+            },
+            Case {
+                name: "8.5 before the fix",
+                version: 80513,
+                zts: true,
+                enabled: true,
+                workers: 2,
+                required: Some("8.5.14"),
+            },
+            Case {
+                name: "8.5 with the fix",
+                version: 80514,
+                zts: true,
+                enabled: true,
+                workers: 2,
+                required: None,
+            },
+            Case {
+                name: "8.6 before the fix",
+                version: 80600,
+                zts: true,
+                enabled: true,
+                workers: 2,
+                required: Some("8.6.1"),
+            },
+            Case {
+                name: "8.6 with the fix",
+                version: 80601,
+                zts: true,
+                enabled: true,
+                workers: 2,
+                required: None,
+            },
+            Case {
+                name: "8.7 includes the fix",
+                version: 80700,
+                zts: true,
+                enabled: true,
+                workers: 2,
+                required: None,
+            },
+        ];
+        for case in cases {
+            assert_eq!(
+                missing_opcache_fix(case.version, case.zts, case.enabled, case.workers),
+                case.required,
+                "{}",
+                case.name
+            );
+        }
+    }
+}

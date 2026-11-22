@@ -11,7 +11,6 @@ use std::{
     os::raw::c_int,
     path::Path,
     ptr::null_mut,
-    sync::atomic::{AtomicI32, Ordering},
     time::{Duration, Instant},
 };
 
@@ -31,13 +30,10 @@ thread_local! {
     pub(crate) static OPCACHE_WAIT: Cell<Option<zend_long>> = const { Cell::new(None) };
     /// The last_restart_time at the end of the previous app instance of this thread.
     static PREVIOUS_END: Cell<Option<zend_long>> = const { Cell::new(None) };
-    /// The reload count of the server, set before the first app boot.
-    pub(crate) static RELOADS: Cell<Option<&'static rapira_scoreboard::Reloads>> = const { Cell::new(None) };
+    /// The thread that scheduled the restart sends the controls after PHP releases the OPcache lock.
+    static OPCACHE_SCHEDULED: Cell<Option<c_int>> = const { Cell::new(None) };
+    static HOST_RESET: Cell<bool> = const { Cell::new(false) };
 }
-
-/// The zend_accel_restart_reason of a restart that OPcache scheduled in this process, until the next pull reports it.
-static OPCACHE_SCHEDULED: AtomicI32 = AtomicI32::new(NO_RESTART);
-const NO_RESTART: i32 = -1;
 
 /// The flags of rapira_opcache_state().
 const OPCACHE_ON: c_int = 1;
@@ -97,7 +93,7 @@ fn run_cycle(script: &Path) -> Cycle {
     crate::context::resolve_script(script);
     crate::context::clean_realpath_cache();
     if !reset_opcache_before_request() {
-        error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
+        error!(target: "rapira", "OPcache reset request failed; restarting the app");
         return Cycle::Restart;
     }
     // the cycle number changes after the reset request, because its quiesce hook stores the number of the cycle that it ends
@@ -110,7 +106,6 @@ fn run_cycle(script: &Path) -> Cycle {
         let mut last_restart: zend_long = 0;
         let state = unsafe { rapira_opcache_state(&mut last_restart) };
         PREVIOUS_END.set((state >= 0).then_some(last_restart));
-        reset_opcache_if_due();
     } else {
         error!(target: "rapira", "php_request_startup() failed");
     }
@@ -119,8 +114,11 @@ fn run_cycle(script: &Path) -> Cycle {
     let recycle = RECYCLE.take();
 
     log_and_clear_last_error();
-    if unsafe { rapira_request_shutdown() } == RAPIRA_BAILOUT as c_int {
-        error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
+    let shutdown = unsafe { rapira_request_shutdown() };
+    // A script can schedule a restart and exit before its next pull. Its shutdown functions can also schedule a restart.
+    reload_for_opcache_restart();
+    if shutdown == RAPIRA_BAILOUT as c_int {
+        error!(target: "rapira", "php_request_shutdown() bailed; restarting the app");
         return Cycle::Restart;
     }
 
@@ -198,57 +196,46 @@ pub(crate) fn opcache_restart_ran() -> bool {
     })
 }
 
-/// OPcache calls it on the PHP thread that schedules a restart, inside OPcache with its lock held and before it marks the restart pending, so it only stores the reason.
-/// It stores nothing while the reset of a reload is due. Every app restarts for that reload, so the OPcache restart can run with no report.
+/// OPcache holds its lock and has not set restart_pending yet. Only the calling thread can report the restart after PHP returns. https://github.com/php/php-src/blob/php-8.6.0/ext/opcache/ZendAccelerator.c#L3797-L3814
 pub(crate) unsafe extern "C" fn opcache_restart_scheduled(reason: c_int) {
-    if RELOADS.get().is_some_and(|r| r.reset_due().is_some()) {
-        return;
+    if !HOST_RESET.get() {
+        OPCACHE_SCHEDULED.set(Some(reason));
     }
-    OPCACHE_SCHEDULED.store(reason, Ordering::Relaxed);
 }
 
-/// The restart runs only when no app holds OPcache, so the master reloads every pool. SIGUSR2 to the master, the parent of every worker, starts the reload.
+/// Every app releases its reader at shutdown. OPcache has already scheduled the reset.
 pub(crate) fn reload_for_opcache_restart() {
-    let reason = OPCACHE_SCHEDULED.swap(NO_RESTART, Ordering::Relaxed);
-    if reason == NO_RESTART {
+    let Some(reason) = OPCACHE_SCHEDULED.take() else {
         return;
-    }
-    // the order of zend_accel_restart_reason (ext/opcache/ZendAccelerator.h)
+    };
+    crate::reload::wake_workers();
+    // https://github.com/php/php-src/blob/php-8.6.0/ext/opcache/ZendAccelerator.h#L105-L109
     let why = match reason {
         0 => "out of memory",
         1 => "hash table full",
         _ => "opcache_reset()",
     };
     warn!(target: "rapira", "OPcache scheduled a restart ({why}); every app restarts so that the restart can run");
-    // SAFETY: these are plain syscalls.
-    unsafe { libc::kill(libc::getppid(), libc::SIGUSR2) };
 }
 
-/// When a reset is due, makes the reset call in a request of its own that runs no script. OPcache takes the usage lock at the first cached compile of a request (persistent_compile_file in ext/opcache/ZendAccelerator.c), and a restart that runs before that lock empties the strings of a script that the request then loads. The next request starts with the restart pending or done.
-/// Returns false when the shutdown of that request bailed.
+/// A fresh request calls opcache_reset() without loading a script. Other workers can start their scripts once that request ends.
 pub(crate) fn reset_opcache_before_request() -> bool {
-    // Read this before the request starts. When no reset is due, a reset call for every reload so far has returned.
-    if RELOADS.get().is_none_or(|r| r.reset_due().is_none()) {
+    let Some(due) = crate::reload::claim_reset() else {
         return true;
-    }
-    unsafe {
-        if php_request_startup() == SUCCESS {
-            reset_opcache_if_due();
-        }
-        rapira_request_shutdown() != RAPIRA_BAILOUT as c_int
-    }
-}
-
-/// A reload empties OPcache, as a PHP-FPM reload does. A worker calls opcache_reset() only when no reset call for the last reload has returned, and it records its call after the call. A call that finds a restart pending schedules nothing.
-/// A call from a request that holds no usage lock can schedule a second restart for one reload. It waits for the lock of OPcache while another call schedules the first restart and a third request runs it. opcache_restart_scheduled keeps the record of that second restart, and the next pull asks the master for a reload, except the pull after a failed boot.
-/// Needs an active request: the end of each app instance in worker and dispatcher mode, and the request of reset_opcache_before_request in every mode.
-fn reset_opcache_if_due() {
-    let Some(reloads) = RELOADS.get() else {
-        return;
     };
-    if let Some(sent) = reloads.reset_due() {
-        unsafe { rapira_opcache_reset() };
-        reloads.record_reset(sent);
+    let sent = *due.end();
+    let started = unsafe { php_request_startup() } == SUCCESS;
+    if started {
+        HOST_RESET.set(true);
+        // A busy worker can receive one control for several reloads. OPcache keeps a single restart pending.
+    let shutdown = unsafe { rapira_request_shutdown() };
+    crate::reload::finish_reset(sent, started);
+    reload_for_opcache_restart();
+    started && shutdown != RAPIRA_BAILOUT as c_int
+        for _ in due {
+            unsafe { rapira_opcache_reset() };
+        }
+        HOST_RESET.set(false);
     }
 }
 

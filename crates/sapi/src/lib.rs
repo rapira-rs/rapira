@@ -11,6 +11,7 @@ mod module;
 pub mod plugin;
 pub mod quota;
 mod rapira_worker;
+mod reload;
 pub mod scoreboard;
 mod start;
 pub mod stream;
@@ -22,6 +23,7 @@ pub mod zend;
 use std::ffi::c_int;
 
 pub use bindings::*;
+pub use reload::reload;
 pub use start::{PhpModule, Rapira, StartedWorker, boot_master, linked_php_version};
 pub use types::{Addr, Frame, Request};
 
