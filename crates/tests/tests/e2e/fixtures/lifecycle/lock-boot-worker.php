@@ -16,6 +16,12 @@ $d = \Rapira\get_dispatcher();
 try {
     while (true) {
         $ex = $d->receive();
+        if ($ex->getRequest()->target === '/hold') {
+            \Rapira\log('held');
+            while (!file_exists(__DIR__ . '/release')) {
+                usleep(10000);
+            }
+        }
         $ex->writeHead(200, ['content-type' => ['text/plain']]);
         $ex->writeBody('ok');
     }

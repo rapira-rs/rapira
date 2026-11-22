@@ -193,6 +193,7 @@ pub fn now_unix_f64() -> f64 {
 #[derive(Clone)]
 pub struct Intake {
     tx: Sender<Entry>,
+    pub(crate) boot_retry: Arc<crate::start::BootRetry>,
     stats: Arc<Pool>,
     /// The bytes of the pending units.
     budget: Arc<Semaphore>,
@@ -236,6 +237,7 @@ impl Intake {
         (
             Self {
                 tx,
+                boot_retry: Arc::default(),
                 stats,
                 budget: Arc::new(Semaphore::new(BODY_BUDGET)),
                 slots: Arc::new(Semaphore::new(INTAKE_SLOTS)),

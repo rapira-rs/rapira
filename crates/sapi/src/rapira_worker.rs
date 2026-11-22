@@ -4,13 +4,14 @@ use crate::{
     callbacks::*,
     diagnostics::{Severity, error_type_to_level},
     scoreboard::sb_update,
-    start::{Pull, Wait, pull, pull_unit_to_shed, run_script},
+    start::{BootRetry, Pull, Wait, pull, pull_unit_to_shed, run_script},
 };
 use std::{
     cell::Cell,
     os::raw::c_int,
     path::Path,
     ptr::null_mut,
+    sync::Weak,
     time::{Duration, Instant},
 };
 
@@ -242,6 +243,7 @@ pub(crate) fn rapira_worker(
     max_boot_failures: u32,
     pool: &rapira_scoreboard::Pool,
     index: usize,
+    retry: &Weak<BootRetry>,
 ) {
     let mut failures: u32 = 0;
     let mut retry_delay = BOOT_RETRY_BASE;
@@ -252,13 +254,21 @@ pub(crate) fn rapira_worker(
         if matches!(cycle, Cycle::Stop) || crate::start::CLOSED_SEEN.get() {
             break;
         }
-        if matches!(cycle, Cycle::Recycle) || received || crate::quota::exhausted() {
-            sb_update(scoreboard::Event::Recycled);
+        let recycled = matches!(cycle, Cycle::Recycle) || received || crate::quota::exhausted();
+        let was_serving = pool.workers[index].serving();
+        sb_update(if recycled {
+            scoreboard::Event::Recycled
+        } else {
+            scoreboard::Event::Starting
+        });
+        if was_serving && let Some(retry) = retry.upgrade() {
+            retry.wake();
+        }
+        if recycled {
             failures = 0;
             retry_delay = BOOT_RETRY_BASE;
             continue;
         }
-        sb_update(scoreboard::Event::Starting);
         failures = failures.saturating_add(1);
         if give_up_boot(
             failures,
@@ -273,11 +283,7 @@ pub(crate) fn rapira_worker(
         let retry_at = Instant::now() + retry_delay;
         retry_delay = (retry_delay * 2).min(BOOT_RETRY_MAX);
         loop {
-            let wait = retry_at.saturating_duration_since(Instant::now());
-            if wait.is_zero() {
-                break;
-            }
-            match pull_unit_to_shed(wait) {
+            match pull_unit_to_shed(retry_at, retry) {
                 Pull::Closed => break 'cycles,
                 Pull::Unit(unit) => {
                     unit.shed();

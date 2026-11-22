@@ -424,7 +424,7 @@ fn a_boot_failure_limit_in_one_worker_stops_a_pool_that_never_served() {
     );
 }
 
-/// An idle worker makes the pool ready while the other worker retries past the boot failure limit.
+/// One worker serves each request while the other retries past the boot failure limit.
 #[test]
 #[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 fn a_failing_worker_retries_next_to_a_serving_worker() {
@@ -453,6 +453,24 @@ fn a_failing_worker_retries_next_to_a_serving_worker() {
         "\n{}",
         diagnostics(&srv)
     );
+
+    for _ in 0..2 {
+        let response = http_get(srv.addr, "/", BOOT).expect("GET /");
+        assert_eq!(response.status, 200, "\n{}", diagnostics(&srv));
+    }
+
+    let held = submit(srv.addr, req("/hold")).expect("GET /hold");
+    server_log::wait_app_record(&srv.log_file(), "held");
+    let queued = submit(srv.addr, req("/")).expect("GET while the worker is busy");
+    pool_line(&srv, "http", "pending=1 ");
+    std::fs::write(srv.dir.join("http/release"), "").expect("release the held request");
+    let deadline = Instant::now() + BOOT;
+    let statuses = [held, queued].map(|mut reply| {
+        tests::drain_resp_deadline(&mut reply, deadline)
+            .expect("response after the release")
+            .status()
+    });
+    assert_eq!(statuses, [200, 200], "\n{}", diagnostics(&srv));
 }
 
 /// An entrypoint that returns before `handle_request()` fails its boot without a client.

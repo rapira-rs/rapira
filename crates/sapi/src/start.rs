@@ -1,12 +1,12 @@
 use anyhow::Context as _;
-use crossbeam_channel::{Receiver, bounded, select_biased};
+use crossbeam_channel::{Receiver, Select, Sender, bounded, never, select_biased};
 use rapira_config::{Mode, PoolSettings};
 use rapira_scoreboard::Pool as PoolStats;
 use std::cell::{Cell, RefCell};
 use std::ffi::{CStr, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex, Weak};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 use tracing::{error, info};
@@ -36,6 +36,22 @@ struct UnitRx {
     stats: Arc<PoolStats>,
 }
 
+/// Dropping the sender wakes every boot retry when a worker leaves service or the intake closes.
+#[derive(Default)]
+pub(crate) struct BootRetry(Mutex<Option<(Sender<()>, Receiver<()>)>>);
+
+impl BootRetry {
+    fn changes(&self) -> Receiver<()> {
+        let mut channel = self.0.lock().unwrap();
+        let (_, rx) = channel.get_or_insert_with(|| bounded(0));
+        rx.clone()
+    }
+
+    pub(crate) fn wake(&self) {
+        self.0.lock().unwrap().take();
+    }
+}
+
 /// An idle worker returns unused pages after this wait.
 const IDLE_PURGE_AFTER: Duration = Duration::from_secs(2);
 /// An idle pull checks for a pending OPcache restart at this interval.
@@ -48,26 +64,27 @@ impl UnitRx {
         Self { rx, control, stats }
     }
 
-    fn recv(&self, timeout: Duration) -> Pull {
-        let select = |limit| {
-            select_biased! {
-                recv(self.control) -> msg => msg.map_or(Pull::Closed, |()| Pull::Reload),
-                recv(self.rx) -> msg => msg.map_or(Pull::Closed, |entry| {
-                    self.stats.pending.fetch_sub(1, Ordering::Relaxed);
-                    Pull::Unit(entry.unit)
-                }),
-                default(limit) => Pull::NoUnit,
-            }
-        };
-        let first = timeout.min(IDLE_PURGE_AFTER);
-        let got = select(first);
-        if matches!(got, Pull::NoUnit) && first == IDLE_PURGE_AFTER {
-            // SAFETY: mimalloc can collect on the thread that owns the idle heap.
-            unsafe { libmimalloc_sys::mi_collect(true) };
-            return select(timeout - first);
+    fn recv(&self, units: &Receiver<Entry>, timeout: Duration) -> Pull {
+        select_biased! {
+            recv(self.control) -> msg => msg.map_or(Pull::Closed, |()| Pull::Reload),
+            recv(units) -> msg => msg.map_or(Pull::Closed, |entry| {
+                self.stats.pending.fetch_sub(1, Ordering::Relaxed);
+                Pull::Unit(entry.unit)
+            }),
+            default(timeout) => Pull::NoUnit,
         }
-        got
     }
+}
+
+fn idle_wait(timeout: Duration, select: impl Fn(Duration) -> Pull) -> Pull {
+    let first = timeout.min(IDLE_PURGE_AFTER);
+    let got = select(first);
+    if matches!(got, Pull::NoUnit) && first == IDLE_PURGE_AFTER {
+        // SAFETY: mimalloc can collect on the thread that owns the idle heap.
+        unsafe { libmimalloc_sys::mi_collect(true) };
+        return select(timeout - first);
+    }
+    got
 }
 
 pub struct Pool {
@@ -138,6 +155,7 @@ impl Pool {
         let mut workers = Vec::with_capacity(settings.workers);
         for index in 0..settings.workers {
             let units = UnitRx::new(rx.clone(), Arc::clone(&stats));
+            let boot_retry = Arc::downgrade(&intake.boot_retry);
             let stats = Arc::clone(&stats);
             let server_env = Arc::clone(&server_env);
             let env = Arc::clone(&env);
@@ -169,7 +187,7 @@ impl Pool {
                         match mode {
                             Mode::Classic => classic_worker(&entrypoint),
                             Mode::Worker | Mode::Dispatcher => {
-                                rapira_worker(&entrypoint, settings.max_boot_failures, &stats, index);
+                                rapira_worker(&entrypoint, settings.max_boot_failures, &stats, index, &boot_retry);
                             }
                         }
                         sb_update(Event::Stopped);
@@ -269,7 +287,9 @@ pub(crate) fn pull(wait: Wait) -> Pull {
             let left = deadline.map_or(Duration::MAX, |d| {
                 d.saturating_duration_since(Instant::now())
             });
-            let got = unit_r.recv(poll.map_or(left, |p| p.min(left)));
+            let got = idle_wait(poll.map_or(left, |p| p.min(left)), |t| {
+                unit_r.recv(&unit_r.rx, t)
+            });
             match &got {
                 Pull::Unit(unit) if unit.cancelled() => {
                     sb_update(Event::Shed);
@@ -289,9 +309,35 @@ pub(crate) fn pull(wait: Wait) -> Pull {
     })
 }
 
-/// The host sheds queued units during the boot retry delay. It keeps the worker state and quota.
-pub(crate) fn pull_unit_to_shed(timeout: Duration) -> Pull {
-    UNIT_RX.with_borrow(|slot| slot.as_ref().map_or(Pull::Closed, |rx| rx.recv(timeout)))
+/// A retry takes a queued unit only while no worker can serve it.
+pub(crate) fn pull_unit_to_shed(deadline: Instant, retry: &Weak<BootRetry>) -> Pull {
+    UNIT_RX.with_borrow(|slot| {
+        let Some(rx) = slot else { return Pull::Closed };
+        let disabled = never();
+        idle_wait(deadline.saturating_duration_since(Instant::now()), |t| {
+            let until = deadline.min(Instant::now() + t);
+            while Instant::now() < until {
+                // Subscribe before checking readiness so the last serving worker can wake this wait.
+                let Some(changes) = retry.upgrade().map(|retry| retry.changes()) else {
+                    return Pull::Closed;
+                };
+                let units = if rx.stats.ready() { &disabled } else { &rx.rx };
+                let got = rx.recv(units, Duration::ZERO);
+                if !matches!(got, Pull::NoUnit) {
+                    return got;
+                }
+                // Wait without taking a unit. A worker can become ready before the next unit arrives.
+                let mut wait = Select::new();
+                wait.recv(&rx.control);
+                wait.recv(&changes);
+                wait.recv(units);
+                if wait.ready_deadline(until).is_err() {
+                    break;
+                }
+            }
+            Pull::NoUnit
+        })
+    })
 }
 
 pub(crate) fn pending_depth() -> u64 {
