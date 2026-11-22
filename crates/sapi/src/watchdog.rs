@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::{self, RecvTimeoutError};
-use std::sync::{Arc, Mutex, OnceLock};
+use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
@@ -42,14 +42,14 @@ fn signal_result(code: c_int) -> io::Result<()> {
     }
 }
 
-/// Call on the main thread before it starts other threads. Only PHP threads unblock these signals.
-pub fn block_signals() -> io::Result<()> {
-    signal_result(unsafe { rapira_watchdog_mask(libc::SIG_BLOCK, true) })
+/// Only PHP workers may receive the execution timer signal.
+pub fn block_timer_signal() -> io::Result<()> {
+    signal_result(unsafe { rapira_watchdog_mask(libc::SIG_BLOCK, false) })
 }
 
-fn install_handler() -> io::Result<()> {
-    static RESULT: OnceLock<c_int> = OnceLock::new();
-    signal_result(*RESULT.get_or_init(|| unsafe { rapira_watchdog_install() }))
+/// Call on the main thread after PHP module startup and before any pool starts.
+pub fn reserve_wake_signal() -> io::Result<()> {
+    signal_result(unsafe { rapira_watchdog_install() })
 }
 
 enum Unit {
@@ -88,9 +88,6 @@ pub(crate) struct Guard(PhantomData<Rc<()>>);
 /// Call once after this worker's `rapira_thread_start`. Drop the guard before `rapira_thread_end`.
 pub(crate) unsafe fn enter(pool: Arc<Pool>, index: usize, timeout: Duration) -> Guard {
     let enabled = !timeout.is_zero();
-    if enabled {
-        install_handler().expect("install the watchdog signal handler");
-    }
     signal_result(unsafe { rapira_watchdog_mask(libc::SIG_UNBLOCK, enabled) })
         .expect("unblock the PHP thread signals");
     if enabled {
@@ -111,11 +108,14 @@ pub(crate) unsafe fn enter(pool: Arc<Pool>, index: usize, timeout: Duration) -> 
 impl Drop for Guard {
     fn drop(&mut self) {
         clear();
-        if let Some(slot) = LOCAL.take() {
+        let slot = LOCAL.take();
+        let timed = slot.is_some();
+        if let Some(slot) = slot {
             // A tick keeps this lock until its last access to the flags and the pthread ID.
             WORKERS.lock().unwrap().retain(|s| !Arc::ptr_eq(s, &slot));
         }
-        block_signals().expect("block the PHP thread signals before shutdown");
+        signal_result(unsafe { rapira_watchdog_mask(libc::SIG_BLOCK, timed) })
+            .expect("block the PHP thread signals before shutdown");
     }
 }
 
@@ -194,7 +194,6 @@ pub struct Watchdog {
 
 /// Start after worker startup when at least one pool has a request timeout.
 pub fn start() -> io::Result<Watchdog> {
-    install_handler()?;
     let (stop, rx) = mpsc::channel();
     let thread = thread::Builder::new()
         .name("rapira-watchdog".into())

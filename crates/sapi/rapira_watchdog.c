@@ -23,20 +23,37 @@ typedef struct {
     pthread_t thread;
 } rapira_interrupt;
 
-#ifdef SIGRTMIN
-// Wake the PHP thread with a separate signal so Zend's SIGRTMIN timer handler does not run. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_max_execution_timer.c#L58-L63
-#define RAPIRA_WAKE_SIGNAL (SIGRTMIN + 3)
-
+#ifdef SIGRTMAX
 static void rapira_watchdog_wake(int signo) { (void)signo; }
 #endif
 
 int rapira_watchdog_install(void) {
-#ifdef RAPIRA_WAKE_SIGNAL
+#ifdef SIGRTMAX
+    // Use the high end of the application signal range. Zend's timer uses SIGRTMIN. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_max_execution_timer.c#L58-L63
+    struct sigaction current;
+    if (sigaction(SIGRTMAX, NULL, &current) == -1) {
+        return errno;
+    }
+    if (current.sa_handler != SIG_DFL) {
+        return EBUSY;
+    }
+    // A caller can block a signal for sigwait() without installing a handler. https://pubs.opengroup.org/onlinepubs/9799919799/functions/sigwait.html
+    sigset_t set, previous;
+    sigemptyset(&set);
+    sigaddset(&set, SIGRTMAX);
+    int err = pthread_sigmask(SIG_BLOCK, &set, &previous);
+    if (err != 0) {
+        return err;
+    }
+    if (sigismember(&previous, SIGRTMAX)) {
+        return EBUSY;
+    }
+
     // A blocking system call must be able to return EINTR.
     struct sigaction action = {0};
     action.sa_handler = rapira_watchdog_wake;
     sigemptyset(&action.sa_mask);
-    if (sigaction(RAPIRA_WAKE_SIGNAL, &action, NULL) == -1) {
+    if (sigaction(SIGRTMAX, &action, NULL) == -1) {
         return errno;
     }
 #endif
@@ -64,9 +81,9 @@ int rapira_watchdog_mask(int how, bool wake) {
 #ifdef RAPIRA_TIMER_SIGNAL
     sigaddset(&set, RAPIRA_TIMER_SIGNAL);
 #endif
-#ifdef RAPIRA_WAKE_SIGNAL
+#ifdef SIGRTMAX
     if (wake) {
-        sigaddset(&set, RAPIRA_WAKE_SIGNAL);
+        sigaddset(&set, SIGRTMAX);
     }
 #endif
     return pthread_sigmask(how, &set, NULL);
@@ -89,8 +106,8 @@ void rapira_watchdog_fire(const rapira_interrupt *slot) {
 #endif
     rapira_store_flag(slot->timed_out, true);
     rapira_store_flag(slot->vm_interrupt, true);
-#ifdef RAPIRA_WAKE_SIGNAL
-    pthread_kill(slot->thread, RAPIRA_WAKE_SIGNAL);
+#ifdef SIGRTMAX
+    pthread_kill(slot->thread, SIGRTMAX);
 #endif
 }
 
@@ -98,11 +115,11 @@ void rapira_watchdog_clear(const rapira_interrupt *slot) {
     // The VM also uses vm_interrupt for pending extension callbacks.
     // https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_vm_def.h#L10737-L10753
     rapira_store_flag(slot->timed_out, false);
-#ifdef RAPIRA_WAKE_SIGNAL
+#ifdef SIGRTMAX
     // The unit can end with its wake signal still pending on this thread.
     sigset_t set, saved;
     sigemptyset(&set);
-    sigaddset(&set, RAPIRA_WAKE_SIGNAL);
+    sigaddset(&set, SIGRTMAX);
     pthread_sigmask(SIG_BLOCK, &set, &saved);
     struct timespec zero = {0};
     while (sigtimedwait(&set, NULL, &zero) == -1 && errno == EINTR) {

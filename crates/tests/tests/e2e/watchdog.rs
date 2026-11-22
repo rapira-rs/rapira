@@ -13,6 +13,40 @@ use crate::harness::{
 const WAIT: Duration = Duration::from_secs(15);
 const BLOCKED: &str = "the unit will end when its native call returns";
 
+#[cfg(target_os = "linux")]
+#[test]
+fn only_a_configured_watchdog_requires_a_free_wake_signal() {
+    // The child inherits this thread's mask. Other tests keep their own masks.
+    std::thread::spawn(|| {
+        // SAFETY: sigemptyset initializes set. pthread_sigmask copies it.
+        unsafe {
+            let mut set = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            libc::sigaddset(&mut set, libc::SIGRTMAX());
+            assert_eq!(
+                libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut()),
+                0
+            );
+        }
+        let spawn = || Spawn::http(Mode::Worker, fixture("watchdog/worker.php"));
+        let untimed = spawn().spawn();
+        let response = http_get(untimed.addr, "/", WAIT).expect("request without a watchdog");
+        assert_eq!(
+            (response.status, response.body.as_slice()),
+            (200, b"ok".as_slice())
+        );
+        drop(untimed);
+
+        let refused = spawn()
+            .http_pool("request_terminate_timeout_secs = 2")
+            .boot_failure();
+        assert_eq!(refused.status.code(), Some(1), "{}", refused.log);
+        assert!(refused.log.contains("SIGRTMAX"), "{}", refused.log);
+    })
+    .join()
+    .unwrap();
+}
+
 #[test]
 fn a_request_timeout_recycles_the_app_and_the_next_request_succeeds() -> io::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("watchdog/worker.php"))

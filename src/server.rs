@@ -59,6 +59,10 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
     let timed = plugins
         .iter()
         .any(|(_, pool)| !pool.request_terminate_timeout.is_zero());
+    if timed {
+        rapira_sapi::watchdog::reserve_wake_signal()
+            .context("the request watchdog requires a free SIGRTMAX")?;
+    }
     let mut pidfile = settings
         .server
         .pidfile

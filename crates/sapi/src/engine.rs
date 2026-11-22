@@ -95,7 +95,7 @@ impl Engine {
         // OPcache preloading starts a PHP request. https://github.com/php/php-src/blob/php-8.6.0/ext/opcache/ZendAccelerator.c#L5152-L5173
         // Request startup sets the timeout with reset_signals enabled. https://github.com/php/php-src/blob/php-8.6.0/main/main.c#L1886-L1890
         // This can unblock the timer signal on the main thread. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1656-L1672
-        crate::watchdog::block_signals()?;
+        crate::watchdog::block_timer_signal()?;
         crate::reload::check_opcache(workers)?;
         // SAFETY: MINIT is complete and no worker can read the hooks yet.
         unsafe {
