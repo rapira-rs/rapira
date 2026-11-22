@@ -3,7 +3,7 @@
     "sapi_globals_struct", "zend_executor_globals", "php_core_globals", "zend_compiler_globals",
     "zend_file_handle", "zend_module_entry", "zend_string", "zval", "HashTable", "zend_long",
     "zend_fcall_info", "zend_fcall_info_cache",
-    "sapi_startup", "sapi_shutdown", "php_module_startup", "php_module_shutdown", "php_request_startup",
+    "sapi_startup", "php_module_startup", "php_request_startup",
     "php_execute_script", "zend_error", "zend_stream_init_filename", "zend_destroy_file_handle",
     "rapira_mode", "RAPIRA_MODE_CLASSIC", "RAPIRA_MODE_WORKER",
     "RAPIRA_MODE_DISPATCHER", "RAPIRA_OK", "RAPIRA_BAILOUT", "RAPIRA_THROW",

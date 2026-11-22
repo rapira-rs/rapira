@@ -184,7 +184,7 @@ pub(crate) fn enter_entrypoint_dir() {
     if let Err(e) = std::env::set_current_dir(dir) {
         tracing::error!(target: "rapira", "entering the entrypoint directory {dir}: {e}");
     }
-    // SAFETY: NTS keeps one realpath cache per process, and only the PHP thread uses it.
+    // SAFETY: the PHP thread calls it. The realpath cache is per thread on ZTS, and on NTS only the PHP thread uses it.
     unsafe { realpath_cache_clean() };
 }
 

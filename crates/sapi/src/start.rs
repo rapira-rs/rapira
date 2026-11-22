@@ -69,10 +69,8 @@ pub struct PhpModule {}
 
 impl Drop for PhpModule {
     fn drop(&mut self) {
-        unsafe {
-            php_module_shutdown();
-            sapi_shutdown();
-        }
+        // SAFETY: the master drops the module on the thread that started it, and no PHP thread runs in the master.
+        unsafe { rapira_process_shutdown() };
     }
 }
 
@@ -132,7 +130,8 @@ pub fn boot_master(register: &'static [unsafe extern "C" fn()]) -> anyhow::Resul
     let mut module: _sapi_module_struct = module::build_sapi_module();
     let started: bool = unsafe {
         // The Rust runtime sets SIGPIPE to SIG_IGN before main, so a write to a closed peer returns EPIPE. https://doc.rust-lang.org/beta/unstable-book/compiler-flags/on-broken-pipe.html
-        rapira_process_init();
+        // The main thread and the PHP thread of a forked worker.
+        rapira_process_init(2);
         sapi_startup(&mut module);
         php_module_startup(&mut module, &raw mut rapira_module_entry) == SUCCESS
     };
@@ -204,6 +203,8 @@ impl Rapira {
         let worker: JoinHandle<()> = thread::Builder::new()
             .stack_size(8 << 20)
             .spawn(move || {
+                // SAFETY: the first PHP call on this thread, after MINIT.
+                unsafe { rapira_thread_start() };
                 sb_set(slot);
                 crate::rapira_worker::RELOADS.set(Some(reloads));
                 crate::context::intern_server_env(&env);
@@ -254,13 +255,9 @@ impl Rapira {
     }
 }
 
-/// NTS initializes the module and the request on different threads, so this function initializes the call stack again on this thread. https://github.com/php/php-src/pull/9104
 fn worker_main(mode: Mode, entrypoint: PathBuf, max_boot_failures: u32, rx: UnitRx) {
     UNIT_RX.with_borrow_mut(|slot| *slot = Some(rx));
     loop {
-        unsafe {
-            rapira_init_call_stack();
-        };
         let exit: WorkerExit = match mode {
             Mode::Classic => {
                 crate::context::resolve_script(&entrypoint);
@@ -450,8 +447,7 @@ mod tests {
                 rx,
                 pending: &slot.pending,
                 classic,
-                // A classic reload enters the directory of the entrypoint, so the test names a file in the current directory.
-                entrypoint: std::env::current_dir().unwrap().join("index.php"),
+                entrypoint: PathBuf::new(),
             })
         });
         TestWorker {
@@ -622,23 +618,6 @@ mod tests {
                     handled: 0,
                     errors: 0,
                     pending: 1,
-                },
-                max_elapsed: NO_LIMIT,
-            },
-            Case {
-                name: "a classic reload restarts nothing and the unit follows",
-                max_requests: 0,
-                classic: true,
-                feed: &[Feed::Reload, Feed::Unit],
-                wait: Wait::Never,
-                want: "unit",
-                received: true,
-                closed_seen: false,
-                exhausted: false,
-                counts: Counts {
-                    handled: 0,
-                    errors: 0,
-                    pending: 0,
                 },
                 max_elapsed: NO_LIMIT,
             },

@@ -20,7 +20,7 @@ const char *rapira_plugin_name;
 size_t rapira_plugin_name_len;
 
 // the memoized plugin Dispatcher of this cycle; RSHUTDOWN releases it
-static zval rapira_dispatcher_memo;
+ZEND_TLS zval rapira_dispatcher_memo;
 
 ZEND_FUNCTION(Rapira_get_version) {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -68,7 +68,7 @@ void rapira_dispatcher_release(void) {
 void rapira_dispatcher_forget(void) { ZVAL_UNDEF(&rapira_dispatcher_memo); }
 
 // a nested handle_request() would rebind SG(server_context) over the live unit
-static bool rapira_in_handle_request = false;
+ZEND_TLS bool rapira_in_handle_request = false;
 
 ZEND_FUNCTION(Rapira_handle_request) {
     zend_fcall_info fci;

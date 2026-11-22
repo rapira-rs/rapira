@@ -11,15 +11,6 @@
 #include <main/php_variables.h>
 // clang-format on
 
-// ZTS comes from the main/php_config.h of the headers this build compiles against.
-#ifdef ZTS
-#error "rapira is NTS-only, but these PHP headers are from a thread-safe (ZTS) build. Rebuild PHP without --enable-zts, or point PHP_CONFIG at an NTS php-config."
-#endif
-// A park of the PHP thread pauses the setitimer() execution timer (stream.rs). This option replaces that timer with a POSIX timer: https://github.com/php/php-src/blob/php-8.5.12/Zend/Zend.m4#L446-L455
-#ifdef ZEND_MAX_EXECUTION_TIMERS
-#error "rapira needs the setitimer() execution timer, but these PHP headers enable ZEND_MAX_EXECUTION_TIMERS. Rebuild PHP without --enable-zend-max-execution-timers."
-#endif
-
 #ifdef HAVE_PHP_SESSION
 #include <ext/session/php_session.h>
 #endif
@@ -201,8 +192,8 @@ rapira_prop_str_or_null(zend_class_entry *ce, zend_object *obj,
         zend_update_property_null(ce, obj, name, name_len);
     }
 }
-// called from start.rs after php_module_startup. It registers the post readers
-// that hand the buffered body to PHP (module.c)
+// called from start.rs after php_module_startup. It registers the default post
+// reader and the activate hook that hand the buffered body to PHP (module.c)
 void rapira_register_post_reader(void);
 
 // The Dispatcher, DispatcherInfo and Work methods that every plugin shares, and

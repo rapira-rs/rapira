@@ -3,7 +3,7 @@
 #include <main/php_content_types.h>
 
 // True while rapira_run_handler runs the handler and its shutdown functions.
-static bool rapira_in_handler = false;
+ZEND_TLS bool rapira_in_handler = false;
 
 // php_handle_aborted_connection (main.c:2722) longjmps past Rust's
 // catch_unwind. In worker mode a bailout runs the boot again, so the abort ends
@@ -115,7 +115,7 @@ static void rapira_observer_end_to(zend_execute_data *base) {
 
 // The per-unit time budget, or -1 when it is not captured. set_time_limit()
 // rewrites the live field.
-static zend_long rapira_unit_timeout = -1;
+ZEND_TLS zend_long rapira_unit_timeout = -1;
 
 // zend_unset_timeout does not stop the timer when EG(timeout_seconds) is 0, so
 // stop the timer before this function sets the field to 0.
@@ -459,18 +459,28 @@ void rapira_clear_last_error(void) {
 #endif
 }
 
-// runs once per process, before sapi_startup
-void rapira_process_init(void) { zend_signal_startup(); }
+// Start TSRM before Zend signal handling and SAPI startup. https://github.com/php/php-src/blob/php-8.6.0/sapi/embed/php_embed.c#L167-L186
+void rapira_process_init(int expected_threads) {
+#ifdef ZTS
+    php_tsrm_startup_ex(expected_threads);
+#endif
+    zend_signal_startup();
+}
 
-// php_child_init re-keys the MM heap after fork and calls the child_init_func
-// of each extension. PHP 8.5 asserts getpid() == heap->pid at shutdown.
-// php_execute_script keeps the current directory over a script run
-// (main/main.c, SAPI_OPTION_NO_CHDIR)
+// Only the thread that started TSRM can shut it down. https://github.com/php/php-src/blob/php-8.6.0/TSRM/TSRM.c#L194-L206
+void rapira_process_shutdown(void) {
+    php_module_shutdown();
+    sapi_shutdown();
+#ifdef ZTS
+    tsrm_shutdown();
+#endif
+}
+
+// PHP 8.5 and later update the heap owner after a fork. PHP 8.7-dev also calls the child init hooks of extensions. https://github.com/php/php-src/blob/75679b1eeee47af1cdb0c0a4852e3dd8c7c88e81/main/main.c#L1859-L1870
 void rapira_child_init(void) {
 #if PHP_VERSION_ID >= 80500
     php_child_init();
 #endif
-    SG(options) |= SAPI_OPTION_NO_CHDIR;
 }
 
 // Returns NULL when opcache.restrict_api is set. php-src refuses the API with a
@@ -663,13 +673,22 @@ static int rapira_activate(void) {
 }
 
 // Runs after php_module_startup, because php_module_startup resets
-// default_post_reader (main/main.c:2329), and the MINIT of mbstring registers
-// the urlencoded entry again (ext/mbstring/mbstring.c). Only post_reader
-// changes. The registered post handler stays (php_mb_post_handler with
-// mbstring.encoding_translation).
+// default_post_reader (main/main.c:2329).
 void rapira_register_post_reader(void) {
     sapi_register_default_post_reader(rapira_default_post_reader);
     sapi_module.activate = rapira_activate;
+}
+
+// The ZTS thread constructor copies the ini entries and initializes the stack limit and the timer. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend.c#L883-L891
+void rapira_thread_start(void) {
+#ifdef ZTS
+    (void)ts_resource(0);
+#elif defined(ZEND_CHECK_STACK_LIMIT)
+    // On NTS, MINIT set the limit for the main thread.
+    zend_call_stack_init();
+#endif
+    SG(options) |= SAPI_OPTION_NO_CHDIR;
+    // Each thread has its own content type table. Keep the POST handler that mbstring selected. https://github.com/php/php-src/blob/php-8.6.0/main/SAPI.c#L50-L55
     sapi_post_entry *entry = zend_hash_str_find_ptr(
         &SG(known_post_content_types), DEFAULT_POST_CONTENT_TYPE,
         sizeof(DEFAULT_POST_CONTENT_TYPE) - 1);
@@ -679,7 +698,7 @@ void rapira_register_post_reader(void) {
 }
 
 // Boot-registered shutdown functions run once, at cycle end.
-static HashTable *rapira_boot_shutdown_functions = NULL;
+ZEND_TLS HashTable *rapira_boot_shutdown_functions = NULL;
 
 void rapira_stash_boot_shutdown_functions(void) {
     rapira_boot_shutdown_functions = BG(user_shutdown_function_names);
