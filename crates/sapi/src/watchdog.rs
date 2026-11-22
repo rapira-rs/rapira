@@ -3,6 +3,7 @@ use std::ffi::{c_int, c_void};
 use std::io;
 use std::marker::PhantomData;
 use std::rc::Rc;
+use std::sync::atomic::Ordering::Relaxed;
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::thread::{self, JoinHandle};
@@ -55,10 +56,17 @@ enum Unit {
     Idle,
     Active(u64),
     Interrupted(Instant),
+    Blocked,
+}
+
+impl Unit {
+    fn interrupted(&self) -> bool {
+        matches!(self, Self::Interrupted(_) | Self::Blocked)
+    }
 }
 
 struct Worker {
-    pool: &'static str,
+    pool: Arc<Pool>,
     index: usize,
     timeout: Duration,
     interrupt: Interrupt,
@@ -87,7 +95,7 @@ pub(crate) unsafe fn enter(pool: Arc<Pool>, index: usize, timeout: Duration) -> 
         .expect("unblock the PHP thread signals");
     if enabled {
         let slot = Arc::new(Mutex::new(Worker {
-            pool: pool.name,
+            pool,
             index,
             timeout,
             interrupt: unsafe { rapira_watchdog_capture() },
@@ -133,10 +141,7 @@ pub(crate) fn wake() -> Option<watch::Receiver<bool>> {
 pub(crate) unsafe fn resume_timer(saved: &crate::rapira_timer) {
     LOCAL.with_borrow(|slot| {
         let worker = slot.as_ref().map(|slot| slot.lock().unwrap());
-        if worker
-            .as_ref()
-            .is_none_or(|w| !matches!(w.unit, Unit::Interrupted(_)))
-        {
+        if worker.as_ref().is_none_or(|w| !w.unit.interrupted()) {
             unsafe { crate::rapira_timer_resume(saved) };
         }
     });
@@ -146,7 +151,10 @@ fn set_unit(unit: Unit) {
     LOCAL.with_borrow(|slot| {
         if let Some(slot) = slot {
             let mut worker = slot.lock().unwrap();
-            if matches!(worker.unit, Unit::Interrupted(_)) {
+            if matches!(worker.unit, Unit::Blocked) {
+                worker.pool.blocked.fetch_sub(1, Relaxed);
+            }
+            if worker.unit.interrupted() {
                 // The previous fire has returned. Withdraw its timeout before the next unit or boot.
                 unsafe { rapira_watchdog_clear(&worker.interrupt) };
                 worker.wake.send_replace(false);
@@ -158,12 +166,7 @@ fn set_unit(unit: Unit) {
 
 impl Worker {
     fn tick(&mut self) {
-        let Self {
-            pool,
-            index,
-            timeout,
-            ..
-        } = *self;
+        let (pool, index, timeout) = (self.pool.name, self.index, self.timeout);
         match self.unit {
             Unit::Active(since) if Duration::from_millis(now_millis() - since) >= timeout => {
                 unsafe { rapira_watchdog_fire(&self.interrupt) };
@@ -172,8 +175,12 @@ impl Worker {
                 warn!(target: "rapira", "{pool}.pool.request_terminate_timeout_secs exceeded on worker {index} ({timeout:?}); interrupting the request");
             }
             Unit::Interrupted(at) if at.elapsed() >= GRACE => {
-                error!(target: "rapira", "{pool} worker {index} still active {GRACE:?} after the request timeout interrupt; exiting with code 124");
-                unsafe { libc::_exit(124) };
+                self.unit = Unit::Blocked;
+                error!(target: "rapira", "{pool} worker {index} is blocked {GRACE:?} after its interrupt; the unit will end when its native call returns");
+                if self.pool.blocked.fetch_add(1, Relaxed) + 1 == self.pool.workers.len() {
+                    error!(target: "rapira", "every worker of pool {pool} is blocked; exiting with code 124");
+                    unsafe { libc::_exit(124) };
+                }
             }
             _ => {}
         }

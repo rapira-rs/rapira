@@ -1,18 +1,22 @@
 <?php
 
-$handler = static function (): void {
+$app = bin2hex(random_bytes(8));
+$handler = static function () use ($app): void {
     if (isset($_GET['sleep'])) {
         // On macOS, PHP checks the interrupt flags after each one-second sleep. On other platforms, the wake signal interrupts sleep().
         $interval = PHP_OS_FAMILY === 'Darwin' ? 1 : 10;
         for ($elapsed = 0; $elapsed < 10; $elapsed += $interval) {
             sleep($interval);
         }
-    } elseif (isset($_GET['derive'])) {
-        // Derive a fixed block of test keys in one native call.
-        hash_pbkdf2('sha3-512', 'test password', 'watchdog fixture', 1_000_000, 1024, true);
+    } elseif (isset($_GET['read'])) {
+        $socket = stream_socket_client('unix://' . dirname(__DIR__) . '/peer.sock');
+        stream_set_timeout($socket, 20);
+        fread($socket, 1);
+        fclose($socket);
     }
-    header('Content-Length: 2');
-    echo 'ok';
+    $body = isset($_GET['app']) ? $app : 'ok';
+    header('Content-Length: ' . strlen($body));
+    echo $body;
 };
 
 while (\Rapira\handle_request($handler)) {

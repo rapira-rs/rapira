@@ -1,5 +1,5 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Acquire};
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::Acquire};
 use std::time::Instant;
 
 pub const SLOT_STARTING: u32 = 1;
@@ -17,6 +17,8 @@ pub struct Pool {
     /// Units refused before a worker could take them.
     pub refused: AtomicU64,
     pub served: AtomicBool,
+    /// Active workers whose interrupted unit is still running after the watchdog grace period.
+    pub blocked: AtomicUsize,
 }
 
 impl Pool {
@@ -28,6 +30,7 @@ impl Pool {
             failed_on_full_queue: AtomicU64::new(0),
             refused: AtomicU64::new(0),
             served: AtomicBool::new(false),
+            blocked: AtomicUsize::new(0),
         }
     }
 
