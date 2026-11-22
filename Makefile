@@ -43,15 +43,28 @@ test_e2e:
 
 PHP_SRC ?= ../../third-party/php-src
 
+# Compiler flags from the official PHP CLI image. https://github.com/docker-library/php/blob/3b25f4162a9bd144d3f447d03cb8fe16c0d2c9cc/8.6/trixie/cli/Dockerfile#L53-L59
+php: CFLAGS ?= -fstack-protector-strong -fpic -fpie -O2 -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64
+php: CPPFLAGS ?= $(CFLAGS)
+ifeq ($(shell uname -s),Linux)
+php: LDFLAGS ?= -Wl,-O1 -pie
+endif
+
 php:
 	@test -d "$(PHP_SRC)" || { echo "php-src not found at $(PHP_SRC); set PHP_SRC=/path/to/php-src"; exit 1; }
 	-@$(MAKE) -C "$(PHP_SRC)" distclean >/dev/null 2>&1
-	@FLAGS="$$(tr '\n' ' ' < .github/php-configure-flags.txt)"; \
-	cd "$(PHP_SRC)" && \
-	./buildconf --force && \
-	./configure --prefix="$(PHP_PREFIX)" $$FLAGS
+	@cd "$(PHP_SRC)" && \
+		./buildconf --force && \
+		CFLAGS="$(CFLAGS)" CPPFLAGS="$(CPPFLAGS)" LDFLAGS="$(LDFLAGS)" \
+		./configure --prefix="$(PHP_PREFIX)" \
+			--with-config-file-path="$(PHP_PREFIX)/etc/php" --with-config-file-scan-dir="$(PHP_PREFIX)/etc/php/conf.d" \
+			--enable-option-checking=fatal --enable-embed=shared --enable-zts --disable-zend-signals \
+			--enable-mysqlnd --with-password-argon2 --with-sodium=shared --with-pdo-sqlite --with-sqlite3 \
+			--with-curl --with-iconv --with-openssl --with-readline --with-zlib --enable-phpdbg --enable-phpdbg-readline
 	@$(MAKE) -C "$(PHP_SRC)" -j"$$(getconf _NPROCESSORS_ONLN)"
 	@$(MAKE) -C "$(PHP_SRC)" install
+	@mkdir -p "$(PHP_PREFIX)/etc/php/conf.d"
+	@echo 'extension=sodium' > "$(PHP_PREFIX)/etc/php/conf.d/sodium.ini"
 
 # A forced exit skips the profile write. Continuous mode (%c) keeps the counters in a mapped file.
 # https://clang.llvm.org/docs/SourceBasedCodeCoverage.html#running-the-instrumented-program
