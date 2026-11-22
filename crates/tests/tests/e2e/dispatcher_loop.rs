@@ -603,7 +603,9 @@ fn first_request_access_after_finalization_keeps_the_body() -> anyhow::Result<()
 /// The protocol spelling that the plugin stamps, and the no-authority `$uri` fallback to the server socket. Only an HTTP/1.0 request may omit Host.
 #[test]
 fn plugin_stamped_fields_pass_through() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php")).spawn();
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php"))
+        .http_extra("server_name = \"public.example\"\nserver_port = 8443")
+        .spawn();
 
     let mut rq = req("/p");
     *rq.version_mut() = Version::HTTP_10;
@@ -623,7 +625,7 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
     let sock = std::env::temp_dir().join(format!("rapira-e2e-{}.sock", std::process::id()));
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php"))
         .http_listen(ListenAddr::Unix(sock.clone()))
-        .http_extra("server_port = 8080")
+        .http_extra("server_name = \"unix.example\"\nserver_port = 8080")
         .spawn();
 
     // An unbound client socket, so the server gets no peer path. HTTP/1.0 with no Host takes the $uri fallback.
@@ -640,7 +642,7 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
         "remote-detail=NULL",
         "server=Rapira\\UnixAddress",
         &server_detail,
-        "uri=http://localhost:8080/",
+        "uri=http://unix.example:8080/",
         "readonly-remote=Cannot modify readonly property Rapira\\UnixAddress::$path",
     ] {
         assert!(body.contains(line), "missing {line:?} in {body:?}");

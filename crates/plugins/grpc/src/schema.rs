@@ -1,9 +1,10 @@
 //! The descriptor set: the method routes, the JSON transcoding and the service list of `getServices()`.
 
+use std::cell::OnceCell;
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::path::PathBuf;
-use std::sync::{Arc, OnceLock};
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::anyhow;
@@ -83,17 +84,21 @@ pub(crate) struct MethodInfo {
     pub server_streaming: bool,
 }
 
-/// The schema that `getServices()` reads. Plugin preparation sets it before PHP starts.
-static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
-
-/// The first call sets the schema; a later call changes nothing.
-pub(crate) fn set_schema(schema: Arc<Schema>) {
-    let _ = SCHEMA.set(schema);
+thread_local! {
+    static SCHEMA: OnceCell<Arc<Schema>> = const { OnceCell::new() };
 }
 
-/// The services that `getServices()` reports; empty before `set_schema`.
-pub(crate) fn services() -> &'static [ServiceInfo] {
-    SCHEMA.get().map_or(&[], |s| s.services())
+pub(crate) fn enter(schema: Arc<Schema>) {
+    SCHEMA.with(|slot| assert!(slot.set(schema).is_ok()));
+}
+
+pub(crate) fn with_services<T>(f: impl FnOnce(&[ServiceInfo]) -> T) -> T {
+    SCHEMA.with(|slot| {
+        f(slot
+            .get()
+            .expect("the gRPC worker has its schema")
+            .services())
+    })
 }
 
 /// A method that rapira routes to PHP: unary or server-streaming.

@@ -3,37 +3,18 @@
 
 #![no_main]
 
-use std::path::PathBuf;
-use std::sync::LazyLock;
-use std::time::Duration;
-
 use http::header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
 use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri, Version};
 use rapira_fuzz::safe_name;
-use rapira_http::Config;
 use rapira_http::check::check_request;
 use rapira_http::middleware::Peer;
 use rapira_http::php::uri_abs;
 use rapira_http::request::build;
-use rapira_net::ListenAddr;
 use rapira_sapi::Addr;
 use rapira_sapi::types::Chunks;
 
 const MAX_BODY: usize = 1024;
 const SERVER: &str = "127.0.0.1:8000";
-
-static CONFIG: LazyLock<Config> = LazyLock::new(|| Config {
-    listen: ListenAddr::Tcp(SERVER.parse().unwrap()),
-    server_name: "localhost",
-    server_port: 8000,
-    max_body_size: MAX_BODY,
-    superglobals: true,
-    write_timeout: Duration::ZERO,
-    keepalive_timeout: Duration::ZERO,
-    middleware: Vec::new(),
-    uploads: None,
-    sendfile_root: PathBuf::new(),
-});
 
 /// RFC 9110 Content-Length = 1*DIGIT: https://www.rfc-editor.org/rfc/rfc9110#section-8.6
 fn length(v: &HeaderValue) -> Option<u64> {
@@ -136,13 +117,14 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         .collect();
     assert_eq!(parts.headers, want_fields, "fields");
 
+    let local = if flags & 1 == 0 { SERVER } else { "[::1]:8123" };
     let peer = Peer {
         remote: Addr::Inet(([127, 0, 0, 1], 40000).into()),
-        server: Addr::Inet(SERVER.parse().unwrap()),
+        server: Addr::Inet(local.parse().unwrap()),
         https,
         received_at: 0.0,
     };
-    let built = build(parts, authority.clone(), Chunks::default(), peer, &CONFIG);
+    let built = build(parts, authority.clone(), Chunks::default(), peer);
     // http::Uri drops a fragment, so $target has none.
     let raw = target.split('#').next().unwrap_or_default();
     let (want_uri, want_target) = if raw == "*" || raw.starts_with('/') {
@@ -170,7 +152,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
 
     // Request::$uri: the listener scheme, the authority or else the listener address, and the path. OPTIONS * gives the root.
     let uri_abs = uri_abs(&built);
-    let a = authority.as_deref().unwrap_or(SERVER.as_bytes());
+    let a = authority.as_deref().unwrap_or(local.as_bytes());
     // rapira puts any Host value into $uri, so the target checks $uri only for an authority that http::Uri accepts.
     if http::uri::Authority::try_from(a).is_ok() {
         let u = Uri::try_from(uri_abs.as_str()).unwrap_or_else(|e| panic!("$uri {uri_abs}: {e}"));

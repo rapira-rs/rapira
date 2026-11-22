@@ -22,7 +22,7 @@ mod serve;
 
 use call::{Call, Head, Part, UnaryReply};
 pub use php::rapira_grpc_register_classes;
-use schema::{MethodInfo, Schema, set_schema};
+use schema::{MethodInfo, Schema};
 
 pub(crate) struct Config {
     pub listen: ListenAddr,
@@ -65,7 +65,6 @@ fn prepare(config: &Config) -> Result<Prepared> {
             .with_services(names);
         router = connectrpc_reflection::install(router, reflector);
     }
-    set_schema(Arc::clone(&config.schema));
     tracing::info!(target: "grpc", "listening on {}", listener.addr());
     Ok(Prepared {
         listener,
@@ -85,6 +84,11 @@ impl Plugin for Server {
 
     fn dispatcher(&self) -> *const rapira_plugin {
         &raw const php::rapira_grpc_plugin
+    }
+
+    fn worker_init(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let schema = Arc::clone(&self.config.schema);
+        Arc::new(move || schema::enter(Arc::clone(&schema)))
     }
 
     fn serve(self: Box<Self>, worker: Worker) -> ServeFuture {

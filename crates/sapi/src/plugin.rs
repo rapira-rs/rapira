@@ -1,4 +1,5 @@
 use std::pin::Pin;
+use std::sync::Arc;
 use std::time::Duration;
 
 use tokio::sync::watch;
@@ -25,6 +26,8 @@ pub trait Plugin: Send + 'static {
     fn modes(&self) -> &'static [Mode];
     /// The address of the plugin record (`rapira_plugin` in rapira_sapi.h). In dispatcher mode, PHP calls receive() on the dispatcher that the record describes.
     fn dispatcher(&self) -> *const rapira_plugin;
+    /// Binds the pool configuration on each PHP thread before its first entrypoint.
+    fn worker_init(&self) -> Arc<dyn Fn() + Send + Sync>;
     /// Serves on the IO runtime until the listener fails or the drain ends.
     fn serve(self: Box<Self>, worker: Worker) -> ServeFuture;
 }

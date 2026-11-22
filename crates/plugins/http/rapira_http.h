@@ -3,10 +3,8 @@
 
 #include "../../sapi/rapira_sapi.h"
 
-// The HTTP plugin sets the server identity before PHP starts.
-extern const char *rapira_http_server_name;
-extern size_t rapira_http_server_name_len;
-extern zend_long rapira_http_server_port;
+zend_string *rapira_rs_http_server_name(void);
+zend_long rapira_rs_http_server_port(void);
 
 // The C data comes before zend_object std, as in rapira_sapi.h.
 typedef struct {

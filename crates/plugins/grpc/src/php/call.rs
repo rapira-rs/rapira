@@ -59,26 +59,27 @@ unsafe fn method_info(dst: *mut zval, m: &MethodInfo) {
 /// `rv` is writable. The engine is active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_services(rv: *mut zval) -> bool {
-    guard(false, || unsafe {
-        let services = crate::schema::services();
-        rapira_array_init(rv, services.len() as u32);
-        for s in services {
-            let mut methods: zval = std::mem::zeroed();
-            rapira_array_init(&mut methods, s.methods.len() as u32);
-            for m in &s.methods {
-                let mut info: zval = std::mem::zeroed();
-                method_info(&mut info, m);
-                let _ = add_next_index_object(&mut methods, info.value.obj);
+    guard(false, || {
+        crate::schema::with_services(|services| unsafe {
+            rapira_array_init(rv, services.len() as u32);
+            for s in services {
+                let mut methods: zval = std::mem::zeroed();
+                rapira_array_init(&mut methods, s.methods.len() as u32);
+                for m in &s.methods {
+                    let mut info: zval = std::mem::zeroed();
+                    method_info(&mut info, m);
+                    let _ = add_next_index_object(&mut methods, info.value.obj);
+                }
+                let ce = rapira_ce_grpc_service_info;
+                let mut service: zval = std::mem::zeroed();
+                let _ = object_init_ex(&mut service, ce);
+                zend::prop_stringl(ce, service.value.obj, c"name", s.name.as_bytes());
+                zend::prop_zval(ce, service.value.obj, c"methods", &mut methods);
+                zval_ptr_dtor(&mut methods);
+                let _ = add_next_index_object(rv, service.value.obj);
             }
-            let ce = rapira_ce_grpc_service_info;
-            let mut service: zval = std::mem::zeroed();
-            let _ = object_init_ex(&mut service, ce);
-            zend::prop_stringl(ce, service.value.obj, c"name", s.name.as_bytes());
-            zend::prop_zval(ce, service.value.obj, c"methods", &mut methods);
-            zval_ptr_dtor(&mut methods);
-            let _ = add_next_index_object(rv, service.value.obj);
-        }
-        true
+            true
+        })
     })
 }
 

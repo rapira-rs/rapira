@@ -3,7 +3,6 @@
 use rapira_sapi::Request;
 use rapira_sapi::types::Chunks;
 
-use crate::Config;
 use crate::middleware::Peer;
 
 /// The body stays raw, because the handler parses multipart.
@@ -12,7 +11,6 @@ pub fn build(
     authority: Option<Vec<u8>>,
     body: Chunks,
     peer: Peer,
-    cfg: &Config,
 ) -> Request {
     // hyper's HTTP/1 server parses only HTTP/1.0 and HTTP/1.1; HTTP/2 is planned.
     let protocol = match parts.version {
@@ -42,8 +40,6 @@ pub fn build(
         protocol,
         remote: peer.remote,
         server: peer.server,
-        server_name: cfg.server_name,
-        server_port: cfg.server_port,
         received_at: peer.received_at,
         body,
         headers: parts.headers,
@@ -54,22 +50,6 @@ pub fn build(
 mod tests {
     use super::*;
     use rapira_sapi::Addr;
-
-    /// build() reads only the server name and port.
-    fn config() -> Config {
-        Config {
-            listen: rapira_net::ListenAddr::Tcp(([127, 0, 0, 1], 8000).into()),
-            server_name: "localhost",
-            server_port: 8000,
-            max_body_size: 0,
-            superglobals: true,
-            write_timeout: std::time::Duration::ZERO,
-            keepalive_timeout: std::time::Duration::ZERO,
-            middleware: Vec::new(),
-            uploads: None,
-            sendfile_root: std::path::PathBuf::new(),
-        }
-    }
 
     fn peer() -> Peer {
         Peer {
@@ -91,13 +71,7 @@ mod tests {
             .body(())
             .unwrap();
         let (parts, ()) = req.into_parts();
-        let built = build(
-            parts,
-            Some(b"e2e".to_vec()),
-            Chunks::default(),
-            peer(),
-            &config(),
-        );
+        let built = build(parts, Some(b"e2e".to_vec()), Chunks::default(), peer());
         let probes: Vec<_> = built.headers.get_all("x-probe").iter().collect();
         assert_eq!(probes, ["one", "two"]);
         assert_eq!(built.protocol, "HTTP/1.1");
@@ -152,7 +126,7 @@ mod tests {
                 .body(())
                 .unwrap();
             let (parts, ()) = req.into_parts();
-            let built = build(parts, None, Chunks::default(), peer(), &config());
+            let built = build(parts, None, Chunks::default(), peer());
             assert_eq!(built.uri, case.want_uri, "{}", case.name);
             assert_eq!(built.target.as_deref(), case.want_target, "{}", case.name);
         }

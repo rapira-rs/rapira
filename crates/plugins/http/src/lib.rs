@@ -1,6 +1,7 @@
 //! The http plugin. It serves HTTP/1.1 on the configured listener, and PHP answers every request.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
 use anyhow::Result;
@@ -23,7 +24,7 @@ pub use php::rapira_http_register_classes;
 
 pub struct Config {
     pub listen: ListenAddr,
-    pub server_name: &'static str,
+    pub server_name: String,
     pub server_port: u16,
     pub max_body_size: usize,
     /// The classic and worker modes build the CGI view, so they drop the field names that alias a CGI variable.
@@ -51,7 +52,6 @@ fn prepare(config: &mut Config) -> Result<Option<multipart::SpoolDir>> {
         .as_mut()
         .map(multipart::SpoolDir::prepare)
         .transpose()?;
-    php::set_server_identity(config.server_name, config.server_port);
     php::set_sendfile_root(config.sendfile_root.clone());
     Ok(spool)
 }
@@ -67,6 +67,12 @@ impl Plugin for Server {
 
     fn dispatcher(&self) -> *const rapira_plugin {
         &raw const php::rapira_http_plugin
+    }
+
+    fn worker_init(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let identity =
+            rapira_sapi::HttpIdentity::new(&self.config.server_name, self.config.server_port);
+        Arc::new(move || identity.enter())
     }
 
     fn serve(self: Box<Self>, worker: Worker) -> ServeFuture {

@@ -24,6 +24,7 @@ pub mod zend;
 use std::ffi::c_int;
 
 pub use bindings::*;
+pub use context::HttpIdentity;
 pub use engine::{Engine, has_execution_timers, linked_php_version, zts};
 pub use types::{Addr, Frame, Request};
 

@@ -102,9 +102,6 @@ pub struct Request {
     pub protocol: &'static str,
     pub remote: Addr,
     pub server: Addr,
-    /// The configured CGI SERVER_NAME and SERVER_PORT. They are also the fallback for the $uri synthesis.
-    pub server_name: &'static str,
-    pub server_port: u16,
     pub headers: HeaderMap,
     pub body: Chunks,
     /// Unix seconds.
@@ -352,8 +349,6 @@ pub(crate) mod tests {
                 protocol: "HTTP/1.1",
                 remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
                 server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-                server_name: "",
-                server_port: 8080,
                 headers: HeaderMap::new(),
                 body: Chunks::default(),
                 received_at: 0.0,

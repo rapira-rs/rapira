@@ -370,7 +370,7 @@ where
         collected.push(Bytes::from(small));
     }
 
-    let request = request::build(parts, authority, Chunks::new(collected), peer, cfg);
+    let request = request::build(parts, authority, Chunks::new(collected), peer);
     let mut reply = match submit(shared, request).await {
         Ok(reply) => reply,
         Err(r) => {

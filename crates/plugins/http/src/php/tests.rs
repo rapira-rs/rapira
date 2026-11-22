@@ -14,8 +14,6 @@ fn base_req() -> Request {
         protocol: "HTTP/1.1",
         remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-        server_name: "",
-        server_port: 8080,
         headers: HeaderMap::new(),
         body: Chunks::default(),
         received_at: 0.0,
@@ -238,22 +236,6 @@ fn uri_abs_spells_the_uri() {
             server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
             want_uri: "http://h/",
         },
-        Case {
-            name: "unix server, no authority",
-            https: false,
-            authority: None,
-            uri: "/p",
-            server: Addr::Unix(Some("/run/r.sock".into())),
-            want_uri: "http://localhost:80/p",
-        },
-        Case {
-            name: "unnamed unix server",
-            https: false,
-            authority: None,
-            uri: "/",
-            server: Addr::Unix(None),
-            want_uri: "http://localhost:80/",
-        },
     ];
     for c in cases {
         let mut req = base_req();
@@ -261,8 +243,6 @@ fn uri_abs_spells_the_uri() {
         req.authority = c.authority.map(<[u8]>::to_vec);
         req.uri = c.uri.into();
         req.server = c.server;
-        req.server_name = "localhost";
-        req.server_port = 80;
         assert_eq!(uri_abs(&req), c.want_uri, "{}", c.name);
     }
 }

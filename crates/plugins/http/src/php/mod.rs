@@ -46,20 +46,6 @@ unsafe extern "C" {
     // The record of the http plugin (rapira_http_classes.c).
     pub static mut rapira_http_plugin: rapira_plugin;
     pub fn rapira_http_register_classes();
-    // The server identity that DispatcherInfo::serverName() and serverPort() return (rapira_http.h).
-    static mut rapira_http_server_name: *const c_char;
-    static mut rapira_http_server_name_len: usize;
-    static mut rapira_http_server_port: rapira_sapi::zend_long;
-}
-
-/// Sets the HTTP identity before PHP starts.
-pub(crate) fn set_server_identity(name: &'static str, port: u16) {
-    // SAFETY: only the boot thread runs here. The name has a static lifetime.
-    unsafe {
-        rapira_http_server_name = zend::ptr_or_empty(name.as_bytes());
-        rapira_http_server_name_len = name.len();
-        rapira_http_server_port = i64::from(port);
-    }
 }
 
 /// The head locks on the first head or body write. A body write sends an implicit 200 head first.
@@ -106,9 +92,10 @@ pub fn uri_abs(req: &Request) -> String {
             }
             Addr::Inet(sa) => uri_abs.push_str(&sa.to_string()),
             Addr::Unix(_) => {
-                uri_abs.push_str(req.server_name);
+                let identity = rapira_sapi::HttpIdentity::current();
+                uri_abs.push_str(identity.name());
                 uri_abs.push(':');
-                uri_abs.push_str(req.server_port.format_into(&mut NumBuffer::new()));
+                uri_abs.push_str(identity.port.format_into(&mut NumBuffer::new()));
             }
         },
     }

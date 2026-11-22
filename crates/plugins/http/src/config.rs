@@ -249,8 +249,7 @@ impl Server {
         let mut config = Config {
             // The bound address, because the kernel picks the port for a listen port 0.
             listen: prepared.addr().clone(),
-            // The plugin leaks it once at boot, because every request borrows it until the process exits.
-            server_name: Box::leak(settings.server_name.into_boxed_str()),
+            server_name: settings.server_name,
             server_port: settings.server_port.unwrap_or(match prepared.addr() {
                 ListenAddr::Tcp(addr) => addr.port(),
                 ListenAddr::Unix(_) => 80,

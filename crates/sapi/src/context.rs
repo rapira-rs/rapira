@@ -79,11 +79,10 @@ server_strings! {
     http_1_1: b"HTTP/1.1",
 }
 
-/// `SERVER_NAME` and `SERVER_PORT` as permanent interned strings, with the `[http]` values they come from.
+/// The HTTP pool identity shared by the dispatcher and CGI.
 #[derive(Clone, Copy)]
-pub(crate) struct ServerIdentity {
-    name: &'static str,
-    port: u16,
+pub struct HttpIdentity {
+    pub port: u16,
     pub(crate) server_name: Permanent,
     pub(crate) server_port: Permanent,
 }
@@ -95,8 +94,7 @@ type ServerEnv = [(Permanent, Permanent)];
 thread_local! {
     pub(crate) static SCRIPT: Cell<Option<ScriptPaths>> = const { Cell::new(None) };
     static SERVER_ENV: OnceCell<Arc<ServerEnv>> = const { OnceCell::new() };
-    /// The identity strings of the last request, from `server_identity`.
-    static SERVER_IDENTITY: Cell<Option<ServerIdentity>> = const { Cell::new(None) };
+    static SERVER_IDENTITY: Cell<Option<HttpIdentity>> = const { Cell::new(None) };
 }
 
 #[derive(Clone, Copy)]
@@ -153,22 +151,39 @@ pub(crate) fn server_strings() -> &'static ServerStrings {
         .expect("the engine has initialized the server strings")
 }
 
-/// The identity strings for the server name and port of a request. Every request of a worker carries the same pair, so the first request builds the strings and the next requests reuse them.
-pub(crate) fn server_identity(name: &'static str, port: u16) -> ServerIdentity {
-    let cached = SERVER_IDENTITY
-        .get()
-        .filter(|identity| identity.name == name && identity.port == port);
-    if let Some(identity) = cached {
-        return identity;
+impl HttpIdentity {
+    pub fn new(name: &str, port: u16) -> Self {
+        Self {
+            port,
+            server_name: permanent(name.as_bytes()),
+            server_port: permanent(port.format_into(&mut NumBuffer::new()).as_bytes()),
+        }
     }
-    let identity = ServerIdentity {
-        name,
-        port,
-        server_name: permanent(name.as_bytes()),
-        server_port: permanent(port.format_into(&mut NumBuffer::new()).as_bytes()),
-    };
-    SERVER_IDENTITY.set(Some(identity));
-    identity
+
+    pub fn enter(self) {
+        SERVER_IDENTITY.set(Some(self));
+    }
+
+    pub fn current() -> Self {
+        SERVER_IDENTITY
+            .get()
+            .expect("the HTTP worker has its pool identity")
+    }
+
+    pub fn name(self) -> &'static str {
+        // SAFETY: new() copies a UTF-8 name into an immutable process-lifetime Zend string.
+        unsafe { std::str::from_utf8_unchecked(zend::zstr_bytes(self.server_name.as_ptr())) }
+    }
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rapira_rs_http_server_name() -> *mut zend_string {
+    HttpIdentity::current().server_name.as_ptr()
+}
+
+#[unsafe(no_mangle)]
+pub extern "C" fn rapira_rs_http_server_port() -> zend_long {
+    HttpIdentity::current().port.into()
 }
 
 /// Resolves the configured entrypoint to its real path and gives that path to PHP: the script file, `SCRIPT_FILENAME`, `DOCUMENT_ROOT` and the boot argv. OPcache then keys the entrypoint by the path of the release, so a symlink deploy and a reload run the new release. A path that does not resolve stays as configured.

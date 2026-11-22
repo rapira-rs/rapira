@@ -152,6 +152,7 @@ impl crate::Engine {
     ) -> anyhow::Result<Intake> {
         let name = plugin.name();
         let mode = settings.mode;
+        let worker_init = plugin.worker_init();
         let plugin = ThreadPlugin {
             name,
             mode: match mode {
@@ -172,6 +173,7 @@ impl crate::Engine {
             let (units, control) =
                 UnitRx::new(rx.clone(), Arc::clone(&stats), Arc::clone(&self.workers));
             let io = io.clone();
+            let init = Arc::clone(&worker_init);
             let boot_retry = Arc::downgrade(&intake.boot_retry);
             let stats = Arc::clone(&stats);
             let server_env = Arc::clone(&server_env);
@@ -199,6 +201,7 @@ impl crate::Engine {
                         };
                         sb_set(Arc::clone(&stats), index);
                         UNIT_RX.set(Some(units));
+                        init();
                         crate::context::enter_server_env(server_env);
                         crate::env::enter_pool(env);
                         quota::install(max_requests);

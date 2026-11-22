@@ -314,7 +314,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         });
         let s = crate::context::server_strings();
         let script = crate::context::script();
-        let identity = crate::context::server_identity(ctx.req.server_name, ctx.req.server_port);
+        let identity = crate::HttpIdentity::current();
         put_interned(s.php_self, script.server_script_name);
         let (doc_uri, query) = ctx
             .req

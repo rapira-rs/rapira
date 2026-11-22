@@ -15,10 +15,6 @@ zend_class_entry *rapira_ce_http_file_not_sendable_exception;
 // The unit class. ExchangeState::class returns it (src/php/mod.rs).
 zend_class_entry *rapira_ce_http_exchange;
 
-const char *rapira_http_server_name;
-size_t rapira_http_server_name_len;
-zend_long rapira_http_server_port;
-
 // The plugin record. Plugin::dispatcher() returns its address (src/lib.rs).
 rapira_plugin rapira_http_plugin = {
     .busy = "this worker holds one unit at a time, and its "
@@ -40,12 +36,12 @@ static void rapira_exchange_free(zend_object *std) {
 
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverName) {
     ZEND_PARSE_PARAMETERS_NONE();
-    RETURN_STRINGL(rapira_http_server_name, rapira_http_server_name_len);
+    RETURN_STR_COPY(rapira_rs_http_server_name());
 }
 
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverPort) {
     ZEND_PARSE_PARAMETERS_NONE();
-    RETURN_LONG(rapira_http_server_port);
+    RETURN_LONG(rapira_rs_http_server_port());
 }
 
 void rapira_http_register_classes(void) {
