@@ -372,6 +372,7 @@ fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
         (200, "state=false"),
         "the recycled worker must keep serving"
     );
+    slot_line(&srv, "state=idle handled=2 errors=1 recycles=1 ");
     Ok(())
 }
 

@@ -892,6 +892,7 @@ fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() ->
         body, "2",
         "first-call teardown bailout must recycle + re-bootstrap, not serve in cycle 1 (got {body:?})"
     );
+    slot_line(&srv, "state=idle handled=1 errors=0 recycles=1 ");
     std::fs::remove_dir_all(&tmp)?;
     Ok(())
 }

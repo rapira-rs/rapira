@@ -24,6 +24,10 @@ use crate::{
 };
 
 thread_local! {
+    /// The app took a unit in this cycle.
+    pub(crate) static RECEIVED: Cell<bool> = const { Cell::new(false) };
+    /// A pull in this cycle saw the intake close.
+    pub(crate) static CLOSED_SEEN: Cell<bool> = const { Cell::new(false) };
     /// The next handle_request() call tears down the boot request first.
     static FIRST_CALL: Cell<bool> = const { Cell::new(true) };
     static RECYCLE: Cell<bool> = const { Cell::new(false) };
@@ -50,7 +54,6 @@ enum Cycle {
     Stop,
     Recycle,
     Failed,
-    Restart,
 }
 
 /// Starts the boot request with the argv of `php entrypoint.php` and builds $_SERVER before the entrypoint runs, as the CLI does.
@@ -83,17 +86,17 @@ fn boot_request_startup() -> bool {
     }
 }
 
-/// Logs PG(last_error_message) before php_request_shutdown frees it (main/main.c:2024).
-fn run_cycle(script: &Path) -> Cycle {
+/// Returns the handler's recycle request when PHP completes shutdown.
+fn run_app(script: &Path) -> bool {
     crate::quota::renew();
     crate::context::resolve_script(script);
     crate::context::clean_realpath_cache();
     if !reset_opcache_before_request() {
         error!(target: "rapira", "OPcache reset request failed; restarting the app");
-        return Cycle::Restart;
+        return false;
     }
     // the cycle number changes after the reset request, because its quiesce hook stores the number of the cycle that it ends
-    crate::exchange::cycle_reset();
+    crate::exchange::begin_cycle();
     let started = boot_request_startup();
     if started {
         note_opcache_at_boot();
@@ -115,12 +118,18 @@ fn run_cycle(script: &Path) -> Cycle {
     reload_for_opcache_restart();
     if shutdown == RAPIRA_BAILOUT as c_int {
         error!(target: "rapira", "php_request_shutdown() bailed; restarting the app");
-        return Cycle::Restart;
+        return false;
     }
+    recycle
+}
 
-    if crate::start::CLOSED_SEEN.get() {
+fn run_cycle(script: &Path) -> Cycle {
+    let recycle = run_app(script);
+    crate::exchange::reclaim_current();
+    let received = RECEIVED.take();
+    if CLOSED_SEEN.take() {
         Cycle::Stop
-    } else if recycle || crate::quota::exhausted() || crate::start::RECEIVED.get() {
+    } else if recycle || received || crate::quota::exhausted() {
         Cycle::Recycle
     } else {
         Cycle::Failed
@@ -248,13 +257,11 @@ pub(crate) fn rapira_worker(
     let mut failures: u32 = 0;
     let mut retry_delay = BOOT_RETRY_BASE;
     'cycles: loop {
-        let cycle = run_cycle(script);
-        crate::exchange::reclaim_current();
-        let received = crate::start::RECEIVED.take();
-        if matches!(cycle, Cycle::Stop) || crate::start::CLOSED_SEEN.get() {
-            break;
-        }
-        let recycled = matches!(cycle, Cycle::Recycle) || received || crate::quota::exhausted();
+        let recycled = match run_cycle(script) {
+            Cycle::Stop => break,
+            Cycle::Recycle => true,
+            Cycle::Failed => false,
+        };
         let was_serving = pool.workers[index].serving();
         sb_update(if recycled {
             scoreboard::Event::Recycled

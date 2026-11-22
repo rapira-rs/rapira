@@ -2,7 +2,7 @@ use anyhow::Context as _;
 use crossbeam_channel::{Receiver, Select, Sender, bounded, never, select_biased};
 use rapira_config::{Mode, PoolSettings};
 use rapira_scoreboard::Pool as PoolStats;
-use std::cell::{Cell, RefCell};
+use std::cell::RefCell;
 use std::ffi::{CStr, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::Ordering;
@@ -13,7 +13,7 @@ use tracing::{error, info};
 
 use crate::plugin::Plugin;
 use crate::quota;
-use crate::rapira_worker::rapira_worker;
+use crate::rapira_worker::{CLOSED_SEEN, RECEIVED, rapira_worker};
 use crate::scoreboard::{Event, sb_set, sb_update};
 use crate::work::{Entry, Intake, Unit};
 use crate::{
@@ -24,10 +24,6 @@ use crate::{
 
 thread_local! {
     static UNIT_RX: RefCell<Option<UnitRx>> = const { RefCell::new(None) };
-    /// The app took at least one unit in this cycle.
-    pub(crate) static RECEIVED: Cell<bool> = const { Cell::new(false) };
-    /// A pull of this cycle saw the intake closed.
-    pub(crate) static CLOSED_SEEN: Cell<bool> = const { Cell::new(false) };
 }
 
 pub(crate) struct UnitRx {

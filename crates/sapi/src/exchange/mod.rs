@@ -34,11 +34,8 @@ pub(crate) fn forget_held(ptr: *const ()) {
     }
 }
 
-pub(crate) fn cycle_reset() {
-    reclaim_current();
+pub(crate) fn begin_cycle() {
     CYCLE.set(CYCLE.get() + 1);
-    crate::start::CLOSED_SEEN.set(false);
-    crate::start::RECEIVED.set(false);
 }
 
 /// Reclaims a unit that free_obj never saw, after a shutdown bailout or an allocation bailout.
