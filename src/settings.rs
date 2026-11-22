@@ -32,7 +32,10 @@ pub fn resolve(path: &Path) -> anyhow::Result<Settings> {
         .with_context(|| format!("reading config file {}", path.display()))?;
     let file: FileConfig =
         toml::from_str(&text).with_context(|| format!("parsing config file {}", path.display()))?;
-    let dir = path.parent().unwrap_or(Path::new("."));
+    // The parent of a bare file name is empty. `absolute` keeps symlinks, so a config under a switched `current` link resolves against that link.
+    let path = std::path::absolute(path)
+        .with_context(|| format!("resolving config file {}", path.display()))?;
+    let dir = path.parent().unwrap_or(Path::new("/"));
     settings(file, dir)
 }
 
@@ -50,7 +53,7 @@ fn settings(file: FileConfig, dir: &Path) -> anyhow::Result<Settings> {
         .transpose()?;
     let observability = file
         .observability
-        .map(rapira_observability::config::resolve)
+        .map(|section| rapira_observability::config::resolve(section, dir))
         .transpose()?;
     let supervisor = resolve_supervisor(file.supervisor, dir)?;
     let log = resolve_log(file.log)?;

@@ -79,14 +79,17 @@ fn header_callback_fatal_keeps_the_worker() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// A classic worker enters the entrypoint directory at its start and at each reload, so a chdir by the app stays in effect after the request that made it.
+/// Each classic request starts in the entrypoint directory, as `php_execute_script` enters it. A chdir() by the app ends with the request that made it.
 #[test]
-fn classic_mode_keeps_the_working_directory_across_requests() {
+fn classic_mode_starts_each_request_in_the_entrypoint_directory() {
     let srv = Spawn::http(Mode::Classic, harness::fixture_path("classic/cwd.php")).spawn();
     // getcwd() reports the resolved path, and the scratch directory can be under a symlinked temp directory.
     let entrypoint_dir =
         std::fs::canonicalize(srv.dir.join("http")).expect("canonicalize the entrypoint dir");
     let entrypoint_dir = entrypoint_dir.to_string_lossy().into_owned();
+    // sys_get_temp_dir() reads TMPDIR, which the server inherits from the test.
+    let temp_dir = std::fs::canonicalize(std::env::temp_dir()).expect("canonicalize the temp dir");
+    let temp_dir = temp_dir.to_string_lossy().into_owned();
 
     let StatusBody { status: code, body } = http_get(srv.addr, "/", REQ).expect("request");
     assert_eq!(code, 200, "{}", harness::diagnostics(&srv));
@@ -99,11 +102,10 @@ fn classic_mode_keeps_the_working_directory_across_requests() {
 
     let StatusBody { status: code, body } = http_get(srv.addr, "/chdir", REQ).expect("request");
     assert_eq!(code, 200, "{}", harness::diagnostics(&srv));
-    let moved = String::from_utf8_lossy(&body).into_owned();
-    assert_ne!(
-        moved,
-        entrypoint_dir,
-        "the fixture must chdir out of the entrypoint directory\n{}",
+    assert_eq!(
+        String::from_utf8_lossy(&body),
+        temp_dir,
+        "the chdir() of the request must take effect in that request\n{}",
         harness::diagnostics(&srv)
     );
 
@@ -111,8 +113,8 @@ fn classic_mode_keeps_the_working_directory_across_requests() {
     assert_eq!(code, 200, "{}", harness::diagnostics(&srv));
     assert_eq!(
         String::from_utf8_lossy(&body),
-        moved,
-        "the chdir of the previous request must still hold\n{}",
+        entrypoint_dir,
+        "the next request must start in the entrypoint directory again\n{}",
         harness::diagnostics(&srv)
     );
 }

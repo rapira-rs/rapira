@@ -95,7 +95,7 @@ fn boot_request_startup() -> bool {
 fn run_cycle(script: &Path) -> Cycle {
     crate::quota::renew();
     crate::context::resolve_script(script);
-    crate::context::enter_entrypoint_dir();
+    crate::context::clean_realpath_cache();
     if !reset_opcache_before_request() {
         error!(target: "rapira", "php_request_shutdown() bailed; restarting the PHP thread");
         return Cycle::Restart;

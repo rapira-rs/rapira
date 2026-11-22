@@ -1,4 +1,3 @@
-use std::path::Path;
 use std::time::Duration;
 
 use rapira_config::PoolSettings;
@@ -16,19 +15,6 @@ pub fn worker_body(
 ) -> i32 {
     // SAFETY: the process is single-threaded here, before the PHP worker thread exists.
     unsafe { rapira_sapi::rapira_child_init() };
-    // A worker that cannot enter the entrypoint directory exits at start. Each app start and each classic reload enter the directory again.
-    let entrypoint_dir: &Path = pool
-        .entrypoint
-        .parent()
-        .expect("the boot check accepted a regular file");
-    if let Err(e) = std::env::set_current_dir(entrypoint_dir) {
-        tracing::error!(
-            target: "rapira",
-            "entering the entrypoint directory {}: {e}",
-            entrypoint_dir.display()
-        );
-        return WORKER_EXIT_UNHEALTHY;
-    }
     let stopper = Stopper::default();
     let StartedWorker { rapira, intake } = Rapira::start_worker(
         pool,

@@ -54,14 +54,21 @@ struct FileSlice {
     len: u64,
 }
 
+/// `cwd` is the cwd of PHP for a relative `path`. None resolves `path` against the process cwd.
 fn open_send_file(
     path: &[u8],
+    cwd: Option<&CStr>,
     offset: u64,
     length: Option<u64>,
 ) -> Result<FileSlice, &'static CStr> {
+    use std::ffi::OsStr;
     use std::os::unix::ffi::OsStrExt;
-    let path = std::path::Path::new(std::ffi::OsStr::from_bytes(path));
-    let canonical = std::fs::canonicalize(path).map_err(|_| c"no readable file at the path")?;
+    let path = Path::new(OsStr::from_bytes(path));
+    let canonical = match cwd {
+        Some(cwd) => std::fs::canonicalize(Path::new(OsStr::from_bytes(cwd.to_bytes())).join(path)),
+        None => std::fs::canonicalize(path),
+    }
+    .map_err(|_| c"no readable file at the path")?;
     if !under_root(&canonical) {
         return Err(c"the path is outside the configured sendfile root");
     }
@@ -93,6 +100,7 @@ fn open_send_file(
 pub(super) unsafe fn send_file_core(
     st: &mut ExchangeState,
     path: &[u8],
+    cwd: Option<&CStr>,
     offset: u64,
     length: Option<u64>,
     eos: bool,
@@ -104,7 +112,7 @@ pub(super) unsafe fn send_file_core(
     if st.settled() {
         return Verb::Finalized;
     }
-    let FileSlice { file, len } = match open_send_file(path, offset, length) {
+    let FileSlice { file, len } = match open_send_file(path, cwd, offset, length) {
         Ok(opened) => opened,
         Err(msg) => return Verb::FileNotSendable(msg),
     };
@@ -122,12 +130,13 @@ pub(super) unsafe fn send_file_core(
 }
 
 /// # Safety
-/// `held` is the slot of a live exchange. `path` points at `path_len` readable bytes that ZPP owns. `offset >= 0`, and `length >= 1` unless `length_is_null`. The engine is active on this thread.
+/// `held` is the slot of a live exchange. `path` points at `path_len` readable bytes that ZPP owns. `cwd` is null or a NUL-terminated string that stays valid for the call. `offset >= 0`, and `length >= 1` unless `length_is_null`. The engine is active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_exchange_send_file(
     held: *const HeldPtr,
     path: *const c_char,
     path_len: usize,
+    cwd: *const c_char,
     offset: i64,
     length: i64,
     length_is_null: bool,
@@ -136,7 +145,8 @@ pub unsafe extern "C" fn rapira_rs_exchange_send_file(
     guard(false, || unsafe {
         let st = &mut *(*held).state::<ExchangeState>();
         let path = std::slice::from_raw_parts(path.cast::<u8>(), path_len);
+        let cwd = (!cwd.is_null()).then(|| CStr::from_ptr(cwd));
         let length = (!length_is_null).then_some(length as u64);
-        throw_verb(send_file_core(st, path, offset as u64, length, eos))
+        throw_verb(send_file_core(st, path, cwd, offset as u64, length, eos))
     })
 }

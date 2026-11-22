@@ -1490,6 +1490,41 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A relative sendFile() path resolves against the cwd of PHP: the entrypoint directory at the app start, and the target of a chdir() after it.
+/// Both directories hold a file with the same name, so the body tells which directory the path resolved against.
+#[test]
+fn sendfile_relative_path_follows_the_php_cwd() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        target: &'static str,
+        body: &'static str,
+    }
+    let srv = sendfile_server();
+    let entrypoint_dir = srv.dir.join("http");
+    std::fs::create_dir(entrypoint_dir.join("nested"))?;
+    std::fs::write(entrypoint_dir.join("same"), "entrypoint")?;
+    std::fs::write(entrypoint_dir.join("nested/same"), "nested")?;
+    // The app keeps its cwd across units, so the cases run in this order.
+    let cases = [
+        Case {
+            name: "before chdir",
+            target: "/?probe=sendfile-cwd",
+            body: "entrypoint",
+        },
+        Case {
+            name: "after chdir",
+            target: "/?probe=sendfile-cwd&nested=1",
+            body: "nested",
+        },
+    ];
+    for case in cases {
+        let resp = drain_resp(submit(srv.addr, req(case.target))?);
+        assert_eq!(resp.status(), 200, "{}", case.name);
+        assert_eq!(resp.body_string(), case.body, "{}", case.name);
+    }
+    Ok(())
+}
+
 /// sendFile rejects a directory, an offset or a slice past the end of the file, and a symlink out of the root before anything is written, so the handler answers 403.
 /// A symlink inside the root stays sendable, and a slice longer than two 256 KiB plugin reads keeps its offset across the reads.
 /// A negative offset or a length below 1 is a ValueError, and the handler answers 400 with its message.

@@ -70,6 +70,7 @@ pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
 /// The settings of `section`. Reads no file.
 fn settings(section: Section, dir: &Path) -> Result<Settings> {
     let listen = parse_listen(
+        dir,
         "grpc",
         section.listen.as_deref(),
         ListenAddr::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 50051))),

@@ -749,7 +749,6 @@ void rapira_thread_start(void) {
     // On NTS, MINIT set the limit for the main thread.
     zend_call_stack_init();
 #endif
-    SG(options) |= SAPI_OPTION_NO_CHDIR;
     // Each thread has its own content type table. Keep the POST handler that mbstring selected. https://github.com/php/php-src/blob/php-8.6.0/main/SAPI.c#L50-L55
     sapi_post_entry *entry = zend_hash_str_find_ptr(
         &SG(known_post_content_types), DEFAULT_POST_CONTENT_TYPE,

@@ -70,7 +70,11 @@ mode = "classic"
 rapira serve rapira.toml
 ```
 
-Each app instance resolves the entrypoint path when it starts, enters the entrypoint directory and keeps that working directory until the next app start. A `chdir()` in one request applies to every later request of that app instance. In classic mode a worker resolves the path when it starts and at each reload. A deploy that re-points a symlink in the entrypoint path needs a reload (SIGHUP or SIGUSR2) right after the switch. The reload moves every worker to the new directory and the new code.
+Each classic request starts in the entrypoint directory. A `chdir()` lasts for that request. In worker and dispatcher modes, the new directory stays in effect until the app restarts. A relative `sendFile()` path starts in the PHP working directory.
+
+On ZTS, each PHP thread has its own working directory. `proc_open()` without a `$cwd` starts the child in the directory where Rapira started. Pass `getcwd()` as `$cwd` to use the app's directory. `exec()`, `shell_exec()` and `popen()` use the PHP working directory.
+
+Rapira resolves the entrypoint path at worker startup, at each app restart and on a classic reload. After you switch a symlink in that path, send SIGHUP or SIGUSR2 so that every worker loads the new release.
 
 ### Worker
 

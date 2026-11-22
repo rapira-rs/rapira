@@ -13,7 +13,6 @@ use std::{
 pub(crate) struct ScriptPaths {
     /// `SG(request_info).path_translated` points at it while a unit runs.
     pub(crate) filename: CString,
-    pub(crate) document_root: String,
     /// `SCRIPT_FILENAME`, `SCRIPT_NAME` and `DOCUMENT_ROOT` of `$_SERVER`, as permanent interned strings.
     pub(crate) server_filename: *mut zend_string,
     pub(crate) server_script_name: *mut zend_string,
@@ -149,10 +148,7 @@ pub(crate) fn resolve_script(configured: &Path) {
     if current.is_some_and(|paths| paths.filename.as_bytes() == real.as_os_str().as_bytes()) {
         return;
     }
-    let document_root = real
-        .parent()
-        .map(|p| p.to_string_lossy().into_owned())
-        .unwrap_or_default();
+    let document_root = real.parent().map_or(&b""[..], |p| p.as_os_str().as_bytes());
     let script_name = configured
         .file_name()
         .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
@@ -160,9 +156,8 @@ pub(crate) fn resolve_script(configured: &Path) {
     let paths = Box::new(ScriptPaths {
         server_filename: permanent(filename.as_bytes()),
         server_script_name: permanent(script_name.as_bytes()),
-        server_document_root: permanent(document_root.as_bytes()),
+        server_document_root: permanent(document_root),
         filename,
-        document_root,
     });
     let old = SCRIPT.replace(Box::into_raw(paths));
     if !old.is_null() {
@@ -178,12 +173,8 @@ pub(crate) fn script() -> &'static ScriptPaths {
         .expect("the PHP thread resolves the script paths before the first request")
 }
 
-/// Enters the directory of the resolved entrypoint and empties the realpath cache of PHP, so a path through a switched symlink resolves again. A cache entry lives `realpath_cache_ttl` seconds, 120 by default.
-pub(crate) fn enter_entrypoint_dir() {
-    let dir = &script().document_root;
-    if let Err(e) = std::env::set_current_dir(dir) {
-        tracing::error!(target: "rapira", "entering the entrypoint directory {dir}: {e}");
-    }
+/// Empties the realpath cache of PHP, so a path through a switched symlink resolves again. A cache entry lives `realpath_cache_ttl` seconds, 120 by default.
+pub(crate) fn clean_realpath_cache() {
     // SAFETY: the PHP thread calls it. The realpath cache is per thread on ZTS, and on NTS only the PHP thread uses it.
     unsafe { realpath_cache_clean() };
 }

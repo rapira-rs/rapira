@@ -460,6 +460,81 @@ fn the_first_classic_request_after_a_reload_runs_the_new_release() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+/// A chdir() of a worker app stays for the next units of the same app instance. After a reload the next app instance starts in the entrypoint directory. A proc_open() child without a cwd starts in the PHP cwd on NTS and in the launch dir of the server on ZTS.
+#[test]
+fn a_worker_chdir_lasts_until_the_reload() {
+    let srv = Spawn::http(Mode::Worker, fixture_path("lifecycle/cwd-worker.php"))
+        .json_log()
+        .spawn();
+    // getcwd() reports the resolved path, and the scratch directory can be under a symlinked temp directory.
+    let entrypoint_dir = std::fs::canonicalize(srv.dir.join("http"))
+        .expect("canonicalize the entrypoint dir")
+        .display()
+        .to_string();
+    // sys_get_temp_dir() reads TMPDIR, which the server inherits from the test.
+    let temp_dir = std::fs::canonicalize(std::env::temp_dir())
+        .expect("canonicalize the temp dir")
+        .display()
+        .to_string();
+    let cwd = |path: &str| {
+        let got = drain(submit(srv.addr, req(path)).expect("GET"));
+        assert_eq!(got.status, 200, "GET {path}\n{}", diagnostics(&srv));
+        got.body
+    };
+
+    assert_eq!(
+        cwd("/"),
+        entrypoint_dir,
+        "the first unit runs in the entrypoint directory\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(
+        cwd("/chdir"),
+        temp_dir,
+        "the chdir() takes effect in its unit\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(
+        cwd("/"),
+        temp_dir,
+        "the chdir() of the previous unit still holds\n{}",
+        diagnostics(&srv)
+    );
+    // proc_open() without a cwd starts the child in the cwd of the process. On ZTS the PHP cwd is per thread, and the process stays in its launch dir. On NTS the chdir() moves the process.
+    let launch_dir = std::fs::canonicalize(&srv.dir)
+        .expect("canonicalize the scratch dir")
+        .display()
+        .to_string();
+    let child = cwd("/child");
+    let want = match child.split_once(' ') {
+        Some(("1", _)) => format!("1 {launch_dir}"),
+        _ => format!("0 {temp_dir}"),
+    };
+    assert_eq!(
+        child,
+        want,
+        "the directory of a proc_open() child\n{}",
+        diagnostics(&srv)
+    );
+
+    signal(srv.pid(), libc::SIGUSR2);
+    let log = srv.log_file();
+    let rebooted = poll(Duration::from_secs(10), || {
+        (app_contexts(&log, "booted").len() >= 2).then_some(())
+    });
+    assert!(
+        rebooted.is_some(),
+        "the reload boots the app again\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(
+        cwd("/"),
+        entrypoint_dir,
+        "the first unit after the reload runs in the entrypoint directory\n{}",
+        diagnostics(&srv)
+    );
+}
+
 /// PHP keeps its copy of a content type that it does not parse until the request ends. With USE_ZEND_ALLOC=0 each free of PHP goes to the C library, which aborts the worker on a second free of that copy.
 #[test]
 fn a_reload_after_a_json_post_keeps_the_classic_worker() {

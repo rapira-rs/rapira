@@ -88,6 +88,7 @@ pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
 /// Returns the settings of `section`. It reads no file.
 fn settings(section: Section, dir: &Path) -> Result<Settings> {
     let listen = parse_listen(
+        dir,
         "http",
         section.listen.as_deref(),
         ListenAddr::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 8000))),
@@ -179,7 +180,11 @@ fn check_middleware(list: &[String], static_configured: bool) -> Result<()> {
 }
 
 fn resolve_uploads(section: UploadsSection, config_dir: &Path) -> Result<Limits> {
-    let dir = opt_path(config_dir, section.dir.as_deref())?.unwrap_or_else(std::env::temp_dir);
+    // TMPDIR can be relative, and the cwd of the process changes when PHP enters the entrypoint directory on NTS.
+    let dir = match opt_path(config_dir, section.dir.as_deref())? {
+        Some(dir) => dir,
+        None => std::path::absolute(std::env::temp_dir())?,
+    };
     let max_file_size_mb = section.max_file_size_mb.map_or(2, NonZero::get);
     let max_file_size = max_file_size_mb
         .checked_mul(1024 * 1024)

@@ -1,3 +1,4 @@
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::{Context, Result, bail};
@@ -30,11 +31,12 @@ pub struct Settings {
     pub probes: bool,
 }
 
-pub fn resolve(section: Section) -> Result<Settings> {
+pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
     let listen = section
         .listen
         .parse::<ListenAddr>()
         .with_context(|| format!("invalid observability.listen `{}`", section.listen))?;
+    let listen = rapira_config::resolve_listen(dir, listen)?;
     let keepalive_timeout = rapira_config::nonzero_timeout(
         "observability",
         "keepalive_timeout_secs",
@@ -121,7 +123,7 @@ mod tests {
             },
         ];
         for case in cases {
-            match (resolve(case.section), case.error) {
+            match (resolve(case.section, Path::new("/w")), case.error) {
                 (Ok(_), None) => {}
                 (Err(err), Some(want)) => assert_eq!(format!("{err:#}"), want, "{}", case.name),
                 (got, _) => panic!("{}: unexpected {got:?}", case.name),

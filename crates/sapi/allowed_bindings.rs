@@ -59,7 +59,7 @@
     "zend_object", "zend_class_entry", "zval_ptr_dtor", // zval_ptr_dtor_nogc is inline-only, so the Rust side uses zval_ptr_dtor
     // zend_string_init is inline-only; the exported interner function pointer covers startup-time strings
     "zend_hash_str_update", "zend_string_init_interned",
-    // the realpath cache of the process (Zend/zend_virtual_cwd.c); each app start empties it
+    // the realpath cache of PHP, per thread on ZTS (Zend/zend_virtual_cwd.c); each app start empties it
     "realpath_cache_clean",
     "php_default_post_reader", "php_default_treat_data", "php_default_input_filter",
     "SAPI_HEADER_SENT_SUCCESSFULLY", "SAPI_HEADER_SEND_FAILED", "IS_STRING",

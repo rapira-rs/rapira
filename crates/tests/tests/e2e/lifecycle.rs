@@ -1169,6 +1169,43 @@ fn dispatcher_multipart_over_the_wire() {
     assert_eq!(code, 413, "over-limit file part must answer 413");
 }
 
+/// A relative TMPDIR names the default spool dir of file parts. The host resolves it against its launch dir at boot, so a spool path stays valid after PHP enters the entrypoint directory.
+#[test]
+fn a_relative_tmpdir_gives_an_absolute_spool_path() {
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/fidelity-worker.php"),
+    )
+    .env("TMPDIR", "spool")
+    .spawn();
+    let spool = std::fs::canonicalize(&srv.dir)
+        .expect("canonicalize the scratch dir")
+        .join("spool");
+
+    let body = b"--B\r\ncontent-disposition: form-data; name=\"note\"\r\n\r\nhello\r\n\
+--B\r\ncontent-disposition: form-data; name=\"f\"; filename=\"a.bin\"\r\n\r\nPAYLOAD\r\n--B--";
+    let StatusBody { status, body } = http_post(
+        srv.addr,
+        "/?probe=multipart",
+        b"multipart/form-data; boundary=B",
+        body,
+        Duration::from_secs(10),
+    )
+    .expect("multipart POST");
+    let text = String::from_utf8_lossy(&body).into_owned();
+    assert_eq!(status, 200, "{text}\n{}", diagnostics(&srv));
+    let tmp = text
+        .lines()
+        .find_map(|l| l.strip_prefix("tmp="))
+        .unwrap_or_else(|| panic!("no tmp line: {text}"));
+    assert!(
+        std::path::Path::new(tmp).starts_with(&spool),
+        "the spool path {tmp} is not under {}\n{}",
+        spool.display(),
+        diagnostics(&srv)
+    );
+}
+
 /// The request watchdog does not count the boot of the next app instance. The last request and the boot take 2 s each, under the 3 s limit, and the worker survives.
 #[test]
 fn the_request_watchdog_skips_the_boot_after_an_app_restart() {

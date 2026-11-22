@@ -31,7 +31,7 @@ struct UnitRx {
     rx: Receiver<Entry>,
     /// The `pending` field of this worker's scoreboard slot.
     pending: &'static AtomicU64,
-    /// Classic mode runs every unit in a new cycle, so a reload has no app instance to recycle. The pull resolves the entrypoint again and enters its directory.
+    /// Classic mode runs every unit in a new cycle, so a reload has no app instance to recycle. The pull resolves the entrypoint again and empties the realpath cache.
     classic: bool,
     /// The configured entrypoint, with its symlinks.
     entrypoint: PathBuf,
@@ -261,7 +261,7 @@ fn worker_main(mode: Mode, entrypoint: PathBuf, max_boot_failures: u32, rx: Unit
         let exit: WorkerExit = match mode {
             Mode::Classic => {
                 crate::context::resolve_script(&entrypoint);
-                crate::context::enter_entrypoint_dir();
+                crate::context::clean_realpath_cache();
                 classic_worker();
                 WorkerExit::Closed
             }
@@ -356,7 +356,7 @@ pub(crate) fn pull(wait: Wait) -> Pull {
                 Ok(Entry::RestartApp) if unit_r.classic => {
                     info!(target: "rapira", "reload requested; resolving the entrypoint again");
                     crate::context::resolve_script(&unit_r.entrypoint);
-                    crate::context::enter_entrypoint_dir();
+                    crate::context::clean_realpath_cache();
                 }
                 // The current app instance takes no more units; the next one takes the rest.
                 Ok(Entry::RestartApp) => {
