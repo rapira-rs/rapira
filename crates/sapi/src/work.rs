@@ -108,7 +108,7 @@ pub unsafe extern "C" fn rapira_rs_held_drop(held: *mut HeldPtr) {
             return;
         };
         let mut held = release(ptr.as_ptr());
-        if !held.settled() && !crate::compiler_globals.unclean_shutdown {
+        if !held.settled() && !(*crate::rapira_cg()).unclean_shutdown {
             held.lost();
         }
     })

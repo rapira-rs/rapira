@@ -167,7 +167,7 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
 
         if ctx.stream == StreamState::NotSent {
             let status = unsafe {
-                let headers = &raw const sapi_globals.sapi_headers;
+                let headers = &raw const (*rapira_sg()).sapi_headers;
                 head_status(&*headers)
             };
             ctx.commit_head(status, HeaderMap::new());
@@ -367,7 +367,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             .unwrap_or(b"");
         put(s.auth_type, auth_type);
 
-        let auth_user = unsafe { sapi_globals.request_info.auth_user };
+        let auth_user = unsafe { (*rapira_sg()).request_info.auth_user };
         if !auth_user.is_null() {
             let user: &CStr = unsafe { CStr::from_ptr(auth_user as *const c_char) };
             put(s.remote_user, user.to_bytes());
@@ -415,8 +415,8 @@ pub(crate) unsafe extern "C" fn log_message(message: *const c_char, syslog_type:
 /// https://github.com/php/php-src/blob/php-8.5.11/main/main.c#L1393-L1540
 pub(crate) fn fatal_error_recorded() -> bool {
     unsafe {
-        !core_globals.last_error_message.is_null()
-            && core_globals.last_error_type & E_FATAL_ERRORS as c_int != 0
+        let pg = rapira_pg();
+        !(*pg).last_error_message.is_null() && (*pg).last_error_type & E_FATAL_ERRORS as c_int != 0
     }
 }
 

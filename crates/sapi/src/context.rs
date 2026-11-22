@@ -191,7 +191,7 @@ pub(crate) fn enter_entrypoint_dir() {
 /// # Safety
 /// The result aliases the per-thread `SG(server_context)`. It is sound only while a worker serves one request at a time. Do not hold the reference across another `ctx()` call.
 pub unsafe fn ctx<'a>() -> Option<&'a mut Context> {
-    unsafe { (sapi_globals.server_context as *mut Context).as_mut() }
+    unsafe { ((*rapira_sg()).server_context as *mut Context).as_mut() }
 }
 
 pub fn with_ctx<T: Copy>(default: T, f: impl FnOnce(&mut Context) -> T) -> T {
@@ -203,14 +203,14 @@ pub fn with_ctx<T: Copy>(default: T, f: impl FnOnce(&mut Context) -> T) -> T {
 
 pub(crate) fn bind_server_context(ctx: &mut Context) {
     unsafe {
-        sapi_globals.server_context = (ctx as *mut Context) as *mut c_void;
+        (*rapira_sg()).server_context = (ctx as *mut Context) as *mut c_void;
     }
 }
 
 /// Clears SG(server_context) and the SG(request_info) pointers into the unit.
 pub(crate) fn unbind_server_context() {
     unsafe {
-        let sg = &raw mut sapi_globals;
+        let sg = rapira_sg();
         (*sg).server_context = null_mut();
         let ri = &mut (*sg).request_info;
         ri.request_method = null();
@@ -229,13 +229,13 @@ pub(crate) unsafe fn apply_proto_num(ctx: &Context) {
         "HTTP/2.0" => 2000,
         _ => 1001,
     };
-    unsafe { sapi_globals.request_info.proto_num = proto_num };
+    unsafe { (*rapira_sg()).request_info.proto_num = proto_num };
 }
 
 /// Resets `http_response_code`, because the engine keeps the status of the previous request. The reset in main/SAPI.c:435-437 is commented out.
 pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     let reqc = &ctx.c;
-    let sg = &raw mut sapi_globals;
+    let sg = unsafe { rapira_sg() };
     unsafe { (*sg).sapi_headers.http_response_code = 200 };
     let ri: &mut sapi_request_info = unsafe { &mut (*sg).request_info };
     ri.request_method = reqc.method.as_ptr();

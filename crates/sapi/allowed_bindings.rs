@@ -1,7 +1,6 @@
 &[
     "sapi_module_struct", "sapi_headers_struct", "sapi_header_struct", "sapi_request_info",
     "sapi_globals_struct", "zend_executor_globals", "php_core_globals", "zend_compiler_globals",
-    "sapi_globals", "executor_globals", "compiler_globals", "core_globals",
     "zend_file_handle", "zend_module_entry", "zend_string", "zval", "HashTable", "zend_long",
     "zend_fcall_info", "zend_fcall_info_cache",
     "sapi_startup", "sapi_shutdown", "php_module_startup", "php_module_shutdown", "php_request_startup",
@@ -35,6 +34,8 @@
     // the EG(fake_scope) swap inside zend_update_property* initializes readonly props
     "object_init_ex", "zend_update_property", "zend_update_property_stringl",
     "zend_update_property_long", "zend_update_property_double", "zend_update_property_null",
+    // SG, EG, PG and CG are macros that read a thread-local struct on ZTS, so wrapper.c has accessors
+    "rapira_sg", "rapira_eg", "rapira_pg", "rapira_cg",
     // array_init_size is a macro, so wrapper.c has the rapira_array_init shim
     "rapira_array_init",
     // zend_array_is_list is inline, so wrapper.c has the rapira_array_is_list shim

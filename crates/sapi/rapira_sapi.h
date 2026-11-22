@@ -58,6 +58,12 @@ void rapira_register_known_stringl(const char *name, size_t name_len,
 void rapira_hash_update_stringl(HashTable *ht, zend_string *key,
                                 const char *val, size_t val_len);
 
+// The PHP globals struct of the calling thread. The code reads each global through these accessors, so one body fits NTS and ZTS.
+sapi_globals_struct *rapira_sg(void);
+zend_executor_globals *rapira_eg(void);
+php_core_globals *rapira_pg(void);
+zend_compiler_globals *rapira_cg(void);
+
 // The Mode enum of rapira_config (crates/config/src/pool.rs). start_worker (start.rs) maps it to these values. Keep both in sync.
 enum {
     RAPIRA_MODE_CLASSIC = 0,

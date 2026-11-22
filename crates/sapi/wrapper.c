@@ -2,6 +2,26 @@
 
 #include <Zend/zend_smart_str.h>
 
+sapi_globals_struct *rapira_sg(void) {
+    return (sapi_globals_struct *)((char *)&SG(server_context) -
+                                   offsetof(sapi_globals_struct, server_context));
+}
+
+zend_executor_globals *rapira_eg(void) {
+    return (zend_executor_globals *)((char *)&EG(exception) -
+                                     offsetof(zend_executor_globals, exception));
+}
+
+php_core_globals *rapira_pg(void) {
+    return (php_core_globals *)((char *)&PG(last_error_message) -
+                                offsetof(php_core_globals, last_error_message));
+}
+
+zend_compiler_globals *rapira_cg(void) {
+    return (zend_compiler_globals *)((char *)&CG(unclean_shutdown) -
+                                     offsetof(zend_compiler_globals, unclean_shutdown));
+}
+
 void rapira_array_init(zval *zv, uint32_t size) {
     array_init_size(zv, size);
 }

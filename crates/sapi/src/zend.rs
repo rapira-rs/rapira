@@ -3,8 +3,8 @@ use std::ffi::{CStr, c_char};
 use crate::types::Chunks;
 use crate::{
     HashPosition, HashTable, IS_DOUBLE, IS_LONG, IS_NULL, IS_PROP_REINITABLE, IS_PROP_UNINIT,
-    IS_REFERENCE, executor_globals, rapira_zval_string_alloc, rapira_zval_stringl,
-    zend_class_entry, zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
+    IS_REFERENCE, rapira_eg, rapira_zval_string_alloc, rapira_zval_stringl, zend_class_entry,
+    zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object,
     zend_property_info, zend_read_property, zend_string, zend_throw_error, zend_throw_exception,
     zend_ulong, zend_update_property, zend_update_property_double, zend_update_property_long,
@@ -185,7 +185,7 @@ pub unsafe fn slot_double(obj: *mut zend_object, offset: u32, d: f64) {
 /// # Safety
 /// The engine is started on this thread.
 pub unsafe fn exception_pending() -> bool {
-    unsafe { !executor_globals.exception.is_null() }
+    unsafe { !(*rapira_eg()).exception.is_null() }
 }
 
 /// instanceof_function is inline, so this function repeats its two halves: the identity check and the exported slow path.

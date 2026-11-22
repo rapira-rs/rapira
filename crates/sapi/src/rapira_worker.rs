@@ -69,20 +69,21 @@ fn boot_request_startup() -> bool {
     // php_build_argv copies the string; the script paths stay until the next app start.
     let mut argv = [crate::context::script().filename.as_ptr().cast_mut()];
     unsafe {
-        let sg = &raw mut sapi_globals;
+        let sg = rapira_sg();
         (*sg).request_info.argc = 1;
         (*sg).request_info.argv = argv.as_mut_ptr();
         // PHP 8.4 adds argv only with register_argc_argv on, so its CLI and embed SAPIs force it on; PHP 8.5 adds argv when argc is set.
         // https://github.com/php/php-src/blob/php-8.4.26/sapi/embed/php_embed.c#L26-L32
         #[cfg(php84)]
-        let register_argc_argv = std::ptr::replace(&raw mut core_globals.register_argc_argv, true);
+        let register_argc_argv =
+            std::ptr::replace(&raw mut (*rapira_pg()).register_argc_argv, true);
         let started = php_request_startup() == SUCCESS;
         if started {
             zend_is_auto_global_str(c"_SERVER".as_ptr(), c"_SERVER".count_bytes());
         }
         #[cfg(php84)]
         {
-            core_globals.register_argc_argv = register_argc_argv;
+            (*rapira_pg()).register_argc_argv = register_argc_argv;
         }
         (*sg).request_info.argc = 0;
         (*sg).request_info.argv = null_mut();
@@ -401,21 +402,22 @@ pub extern "C" fn rapira_rs_finish_response() {
 /// The check reads the mask at this call. When @ or a temporary error_reporting() call masked the diagnostic and the code restored the mask before this call, the diagnostic gets no record. PHP does not log it either.
 fn log_and_clear_last_error() {
     unsafe {
-        let msg = core_globals.last_error_message;
-        let mask = executor_globals.error_reporting;
+        let pg = rapira_pg();
+        let msg = (*pg).last_error_message;
+        let mask = (*rapira_eg()).error_reporting;
         // php_error_cb logs an unmasked diagnostic through log_message when log_errors is set and error_log is empty (main/main.c:1410-1463, 935-988)
-        let php_logged = core_globals.last_error_type & (mask | E_CORE as c_int) != 0
-            && core_globals.log_errors
-            && core_globals.error_log.is_null();
+        let php_logged = (*pg).last_error_type & (mask | E_CORE as c_int) != 0
+            && (*pg).log_errors
+            && (*pg).error_log.is_null();
         if !msg.is_null() && !php_logged {
-            let lineno = core_globals.last_error_lineno;
-            let Severity { level, label } = error_type_to_level(core_globals.last_error_type, mask);
+            let lineno = (*pg).last_error_lineno;
+            let Severity { level, label } = error_type_to_level((*pg).last_error_type, mask);
             crate::diagnostics::event_at!(
                 "php",
                 level,
                 "{label}: {} in {}:{}",
                 String::from_utf8_lossy(zend::zstr_bytes(msg)),
-                String::from_utf8_lossy(zend::zstr_bytes(core_globals.last_error_file)),
+                String::from_utf8_lossy(zend::zstr_bytes((*pg).last_error_file)),
                 lineno
             );
         }
