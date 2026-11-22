@@ -25,8 +25,6 @@ use std::ffi::c_int;
 
 pub use bindings::*;
 pub use engine::{Engine, has_execution_timers, linked_php_version, zts};
-pub use reload::reload;
-pub use start::Pool;
 pub use types::{Addr, Frame, Request};
 
 // bindgen names the Zend SUCCESS and FAILURE constants differently across php-src versions, so the values are hardcoded.

@@ -2,16 +2,12 @@
 
 use std::future::Future;
 use std::mem::MaybeUninit;
-use std::sync::OnceLock;
 use std::time::Instant;
 
 use tokio::runtime::Handle;
 use tokio::sync::{mpsc, watch};
 
 pub use crate::start::Wait;
-
-/// The shared IO runtime. The host sets the handle before any plugin serves.
-pub(crate) static HANDLE: OnceLock<Handle> = OnceLock::new();
 
 /// Runs `park` with the execution timer of this thread paused, then restores the timer. A parked thread never reaches an opcode boundary, and on NTS a second expiry would `_exit(124)`.
 /// # Safety
@@ -79,9 +75,7 @@ pub unsafe fn wait<T>(
     closed: impl Future<Output = ()>,
     wait: Wait,
 ) -> Step<T> {
-    let handle = HANDLE
-        .get()
-        .expect("the host sets the IO runtime before a plugin submits a unit");
+    let handle = Handle::current();
     // SAFETY: the caller runs on a PHP thread.
     unsafe { paused(|| handle.block_on(first(next, closed, wait, crate::watchdog::wake()))) }
 }

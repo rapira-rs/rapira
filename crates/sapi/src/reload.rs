@@ -1,33 +1,17 @@
-use crossbeam_channel::Sender;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Condvar, Mutex, RwLock};
+use std::sync::{Condvar, Mutex};
 
 unsafe extern "C" {
     fn rapira_opcache_enabled() -> bool;
 }
 
-static CONTROLS: RwLock<Vec<Sender<()>>> = RwLock::new(Vec::new());
 static SENT: AtomicU64 = AtomicU64::new(0);
 static RESET: AtomicU64 = AtomicU64::new(0);
 static RESETTING: Mutex<bool> = Mutex::new(false);
 static RESET_DONE: Condvar = Condvar::new();
 
-/// The main thread registers the control channel before it starts the worker.
-pub(crate) fn register(tx: Sender<()>) {
-    CONTROLS.write().unwrap().push(tx);
-}
-
-pub(crate) fn wake_workers() {
-    for tx in CONTROLS.read().unwrap().iter() {
-        // A full channel already has a reload for this worker.
-        let _ = tx.try_send(());
-    }
-}
-
-/// Requests an OPcache reset and wakes each worker of each pool.
-pub fn reload() {
+pub(crate) fn request_reset() {
     SENT.fetch_add(1, Ordering::Release);
-    wake_workers();
 }
 
 fn reset_due() -> Option<u64> {

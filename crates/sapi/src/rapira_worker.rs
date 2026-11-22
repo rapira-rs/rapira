@@ -215,7 +215,7 @@ pub(crate) fn reload_for_opcache_restart() {
     let Some(reason) = OPCACHE_SCHEDULED.take() else {
         return;
     };
-    crate::reload::wake_workers();
+    crate::start::wake_workers();
     // https://github.com/php/php-src/blob/php-8.6.0/ext/opcache/ZendAccelerator.h#L105-L109
     let why = match reason {
         0 => "out of memory",

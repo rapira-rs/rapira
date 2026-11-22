@@ -1,4 +1,3 @@
-use std::mem::ManuallyDrop;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread;
@@ -51,7 +50,7 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
         .iter()
         .try_fold(0usize, |n, (_, pool)| n.checked_add(pool.workers))
         .context("too many PHP workers")?;
-    let engine = rapira_sapi::Engine::start(&crate::PLUGIN_REGISTERS, count)?;
+    let mut engine = rapira_sapi::Engine::start(&crate::PLUGIN_REGISTERS, count)?;
     let board: Board = plugins
         .iter()
         .map(|(plugin, pool)| Arc::new(Pool::new(plugin.name(), pool.workers)))
@@ -70,19 +69,24 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
         .map(PidFile::write)
         .transpose()
         .context("writing pidfile")?;
-    // From the first worker start, only the successful join path may shut PHP down.
-    let engine = ManuallyDrop::new(engine);
+    let mut builder = tokio::runtime::Builder::new_multi_thread();
+    if let Some(n) = settings.server.io_threads {
+        builder.worker_threads(n.get());
+    }
+    let rt = builder
+        .enable_all()
+        .thread_name("rapira-io")
+        .build()
+        .context("starting the IO runtime")?;
     let (stop, _) = watch::channel(false);
     let grace = settings.server.drain_grace();
-    let mut pools = Vec::new();
     let mut services = Vec::new();
     for ((plugin, cfg), record) in plugins.into_iter().zip(board.iter()) {
-        // SAFETY: MINIT finished. The engine and the plugin records live until every PHP thread ends.
-        let (pool, intake) = or_exit(
-            unsafe { rapira_sapi::Pool::start(cfg, Arc::clone(record), &*plugin) },
+        // SAFETY: both plugins supply static dispatcher records.
+        let intake = or_exit(
+            unsafe { engine.start_pool(cfg, Arc::clone(record), &*plugin, rt.handle()) },
             &mut pidfile,
         );
-        pools.push(pool);
         services.push((
             plugin,
             Worker {
@@ -92,19 +96,6 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
             },
         ));
     }
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    if let Some(n) = settings.server.io_threads {
-        builder.worker_threads(n.get());
-    }
-    let rt = or_exit(
-        builder
-            .enable_all()
-            .thread_name("rapira-io")
-            .build()
-            .context("starting the IO runtime"),
-        &mut pidfile,
-    );
-    rapira_sapi::plugin::set_runtime(rt.handle().clone());
     let failed = Arc::new(AtomicBool::new(false));
     let mut tasks = JoinSet::new();
     for (plugin, worker) in services {
@@ -164,7 +155,7 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
             libc::SIGUSR1 => status(&board),
             libc::SIGUSR2 | libc::SIGHUP => {
                 info!(target: "rapira", "reloading all pools");
-                rapira_sapi::reload();
+                engine.reload();
             }
             _ => unreachable!(),
         }
@@ -186,7 +177,7 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
         }
         if plugins.is_finished()
             && obs.as_ref().is_none_or(thread::JoinHandle::is_finished)
-            && pools.iter().all(rapira_sapi::Pool::is_finished)
+            && engine.workers_finished()
         {
             break;
         }
@@ -197,14 +188,11 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
         }
         thread::sleep(left.min(Duration::from_millis(10)));
     }
-    for pool in pools {
-        pool.join();
-    }
     if let Some(thread) = obs {
         thread.join().expect("observability caught its panic");
     }
+    drop(engine);
     rt.shutdown_background();
-    drop(ManuallyDrop::into_inner(engine));
     ensure!(!failed.load(Ordering::Acquire), "a server listener stopped");
     Ok(())
 }

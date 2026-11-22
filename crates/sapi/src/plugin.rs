@@ -1,20 +1,12 @@
 use std::pin::Pin;
 use std::time::Duration;
 
-use tokio::runtime::Handle;
 use tokio::sync::watch;
 
 use crate::rapira_plugin;
 use crate::work::Intake;
 
 pub use rapira_config::Mode;
-
-/// Sets the IO runtime for PHP stream waits. The host calls this once before it starts the plugin tasks.
-pub fn set_runtime(handle: Handle) {
-    crate::stream::HANDLE
-        .set(handle)
-        .expect("the host sets the IO runtime once");
-}
 
 /// The pool intake and the stop settings for one plugin.
 pub struct Worker {

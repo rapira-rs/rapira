@@ -2,8 +2,11 @@ use std::ffi::{CStr, c_int};
 use std::marker::PhantomData;
 use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use std::thread::{Builder, JoinHandle};
 
 use anyhow::{Context, ensure};
+use crossbeam_channel::Sender;
 
 use crate::*;
 
@@ -45,8 +48,33 @@ fn check_linked_php() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The PHP engine of the process. Start it on the main thread and drop it there after all workers have stopped.
+#[derive(Default)]
+pub(crate) struct Workers(Mutex<Vec<(Sender<()>, JoinHandle<()>)>>);
+
+impl Workers {
+    pub(crate) fn spawn(
+        &self,
+        builder: Builder,
+        control: Sender<()>,
+        run: impl FnOnce() + Send + 'static,
+    ) -> std::io::Result<()> {
+        let mut workers = self.0.lock().unwrap();
+        let thread = builder.spawn(run)?;
+        workers.push((control, thread));
+        Ok(())
+    }
+
+    pub(crate) fn wake(&self) {
+        for (control, _) in self.0.lock().unwrap().iter() {
+            // A full channel already holds a reload for this worker.
+            let _ = control.try_send(());
+        }
+    }
+}
+
+/// The main thread owns PHP startup, the worker roster and PHP shutdown.
 pub struct Engine {
+    pub(crate) workers: Arc<Workers>,
     _main_thread: PhantomData<Rc<()>>,
 }
 
@@ -89,6 +117,7 @@ impl Engine {
             php_module_startup(&mut module, &raw mut rapira_module_entry) == SUCCESS
         };
         let engine = Self {
+            workers: Arc::default(),
             _main_thread: PhantomData,
         };
         ensure!(started, "php_module_startup failed");
@@ -107,11 +136,30 @@ impl Engine {
         crate::context::intern_server_strings();
         Ok(engine)
     }
+
+    pub fn workers_finished(&self) -> bool {
+        self.workers
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|(_, t)| t.is_finished())
+    }
+
+    pub fn reload(&self) {
+        crate::reload::request_reset();
+        self.workers.wake();
+    }
 }
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        // SAFETY: Engine stays on the thread that started TSRM. The host joins all workers before it drops Engine.
+        let workers = std::mem::take(&mut *self.workers.0.lock().unwrap());
+        for (control, worker) in workers {
+            drop(control);
+            worker.join().expect("the worker catches its panics");
+        }
+        // SAFETY: this is the thread that started TSRM. Every PHP worker has joined.
         unsafe { rapira_process_shutdown() };
     }
 }

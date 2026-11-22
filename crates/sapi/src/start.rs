@@ -7,10 +7,11 @@ use std::ffi::{CStr, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
-use std::thread::{self, JoinHandle};
+use std::thread;
 use std::time::{Duration, Instant};
 use tracing::{error, info};
 
+use crate::engine::Workers;
 use crate::plugin::Plugin;
 use crate::quota;
 use crate::rapira_worker::{CLOSED_SEEN, RECEIVED, rapira_worker};
@@ -30,6 +31,7 @@ pub(crate) struct UnitRx {
     rx: Receiver<Entry>,
     control: Receiver<()>,
     stats: Arc<PoolStats>,
+    workers: Arc<Workers>,
 }
 
 /// Dropping the sender wakes every boot retry when a worker leaves service or the intake closes.
@@ -54,10 +56,21 @@ const IDLE_PURGE_AFTER: Duration = Duration::from_secs(2);
 const OPCACHE_POLL: Duration = Duration::from_secs(1);
 
 impl UnitRx {
-    fn new(rx: Receiver<Entry>, stats: Arc<PoolStats>) -> Self {
+    fn new(
+        rx: Receiver<Entry>,
+        stats: Arc<PoolStats>,
+        workers: Arc<Workers>,
+    ) -> (Self, Sender<()>) {
         let (tx, control) = bounded(1);
-        crate::reload::register(tx);
-        Self { rx, control, stats }
+        (
+            Self {
+                rx,
+                control,
+                stats,
+                workers,
+            },
+            tx,
+        )
     }
 
     fn recv(&self, units: &Receiver<Entry>, timeout: Duration) -> Pull {
@@ -83,8 +96,13 @@ fn idle_wait(timeout: Duration, select: impl Fn(Duration) -> Pull) -> Pull {
     got
 }
 
-pub struct Pool {
-    workers: Vec<JoinHandle<()>>,
+pub(crate) fn wake_workers() {
+    UNIT_RX.with_borrow(|slot| {
+        slot.as_ref()
+            .expect("a running worker has an intake")
+            .workers
+            .wake()
+    });
 }
 
 /// The jitter spreads the recycles across workers.
@@ -120,16 +138,18 @@ impl ThreadPlugin {
     }
 }
 
-impl Pool {
+impl crate::Engine {
     /// Start the PHP threads and return the submit end of their queue.
     ///
     /// # Safety
-    /// Start on the engine thread after MINIT. The dispatcher record must stay immutable until all workers have joined. Keep the engine running until then. A spawn error can leave workers running.
-    pub unsafe fn start(
+    /// The plugin's dispatcher record must stay immutable until engine shutdown.
+    pub unsafe fn start_pool(
+        &mut self,
         settings: PoolSettings,
         stats: Arc<PoolStats>,
         plugin: &dyn Plugin,
-    ) -> anyhow::Result<(Self, Intake)> {
+        io: &tokio::runtime::Handle,
+    ) -> anyhow::Result<Intake> {
         let name = plugin.name();
         let mode = settings.mode;
         let plugin = ThreadPlugin {
@@ -148,9 +168,10 @@ impl Pool {
         let (intake, rx) = Intake::new(Arc::clone(&stats));
         let env = Arc::new(settings.env);
         let server_env = crate::context::intern_server_env(&env);
-        let mut workers = Vec::with_capacity(settings.workers);
         for index in 0..settings.workers {
-            let units = UnitRx::new(rx.clone(), Arc::clone(&stats));
+            let (units, control) =
+                UnitRx::new(rx.clone(), Arc::clone(&stats), Arc::clone(&self.workers));
+            let io = io.clone();
             let boot_retry = Arc::downgrade(&intake.boot_retry);
             let stats = Arc::clone(&stats);
             let server_env = Arc::clone(&server_env);
@@ -161,10 +182,11 @@ impl Pool {
             } else {
                 effective_quota(settings.max_requests, index)
             };
-            let worker = thread::Builder::new()
+            let builder = thread::Builder::new()
                 .name(format!("rapira-{name}-{index}"))
-                .stack_size(8 << 20)
-                .spawn(move || {
+                .stack_size(8 << 20);
+            self.workers.spawn(builder, control, move || {
+                    let _entered = io.enter();
                     let result = catch_unwind(AssertUnwindSafe(|| {
                         // SAFETY: MINIT has finished. This is the first PHP call on this thread.
                         unsafe { plugin.enter() };
@@ -202,21 +224,8 @@ impl Pool {
                     }
                 })
                 .with_context(|| format!("spawning {name} worker {index}"))?;
-            workers.push(worker);
         }
-        Ok((Self { workers }, intake))
-    }
-
-    pub fn is_finished(&self) -> bool {
-        self.workers.iter().all(JoinHandle::is_finished)
-    }
-
-    pub fn join(self) {
-        for worker in self.workers {
-            worker
-                .join()
-                .expect("the worker catches a panic before it exits");
-        }
+        Ok(intake)
     }
 }
 
@@ -402,12 +411,8 @@ mod tests {
         RECEIVED.set(false);
         CLOSED_SEEN.set(false);
         let (intake, rx) = Intake::new(Arc::clone(&stats));
-        let (tx, control) = bounded(1);
-        UNIT_RX.set(Some(UnitRx {
-            rx,
-            control,
-            stats: Arc::clone(&stats),
-        }));
+        let (units, tx) = UnitRx::new(rx, Arc::clone(&stats), Arc::default());
+        UNIT_RX.set(Some(units));
         TestWorker {
             stats,
             intake,
@@ -425,7 +430,7 @@ mod tests {
     }
 
     #[tokio::test(flavor = "current_thread")]
-    async fn a_reload_reaches_every_worker_of_the_pool() {
+    async fn a_pending_reload_takes_priority_on_each_intake_receiver() {
         struct Case {
             name: &'static str,
             queued: usize,
@@ -444,8 +449,8 @@ mod tests {
             let stats = Arc::new(PoolStats::new("http", 2));
             let (intake, rx) = Intake::new(Arc::clone(&stats));
             let workers = [
-                UnitRx::new(rx.clone(), Arc::clone(&stats)),
-                UnitRx::new(rx, Arc::clone(&stats)),
+                UnitRx::new(rx.clone(), Arc::clone(&stats), Arc::default()),
+                UnitRx::new(rx, Arc::clone(&stats), Arc::default()),
             ];
             for _ in 0..case.queued {
                 intake
@@ -453,8 +458,8 @@ mod tests {
                     .await
                     .unwrap();
             }
-            crate::reload::wake_workers();
-            for (index, worker) in workers.into_iter().enumerate() {
+            for (index, (worker, control)) in workers.into_iter().enumerate() {
+                control.try_send(()).unwrap();
                 sb_set(Arc::clone(&stats), index);
                 quota::install(0);
                 UNIT_RX.set(Some(worker));
