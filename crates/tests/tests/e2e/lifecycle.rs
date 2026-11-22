@@ -30,12 +30,22 @@ fn nts_refuses_two_pools() {
     if is_zts() {
         return;
     }
+    let preload = fixture_path("lifecycle/preload-marker.php");
+    let mut ini = format!(
+        "opcache.enable = 1\nopcache.preload = \"{}\"\n",
+        preload.display()
+    );
+    if unsafe { libc::geteuid() } == 0 {
+        ini.push_str("opcache.preload_user = root\n");
+    }
     let Exited { status, log } =
         Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
             .with_grpc(fixture_path("grpc/echo-worker.php"))
+            .php_ini(&ini)
             .boot_failure();
     assert_eq!(status.code(), Some(1), "{log}");
     assert!(log.contains("NTS PHP supports one pool"), "{log}");
+    assert!(!log.contains("preload ran"), "{log}");
 }
 
 #[test]

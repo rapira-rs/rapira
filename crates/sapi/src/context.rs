@@ -102,7 +102,7 @@ thread_local! {
 #[derive(Clone, Copy)]
 pub(crate) struct Permanent(*mut zend_string);
 
-// SAFETY: the bytes, flags and hash are immutable. Only the engine frees the allocation, after all PHP threads and modules have stopped.
+// SAFETY: the bytes, flags and hash stay immutable for the life of the process.
 unsafe impl Send for Permanent {}
 unsafe impl Sync for Permanent {}
 
@@ -124,17 +124,6 @@ fn permanent(bytes: &[u8]) -> Permanent {
     let s = Permanent(unsafe { rapira_permanent_string(bytes.as_ptr().cast(), bytes.len()) });
     table.insert(bytes.into(), s);
     s
-}
-
-pub(crate) fn free_permanent_strings() {
-    for (_, s) in std::mem::take(&mut *PERMANENT.lock().unwrap()) {
-        // SAFETY: each allocation came from rapira_permanent_string. PHP and its extensions have finished using it.
-        unsafe { rapira_free_permanent_string(s.0) };
-    }
-}
-
-unsafe extern "C" {
-    fn rapira_free_permanent_string(s: *mut zend_string);
 }
 
 /// Prepare one immutable array of env pairs for all workers of the pool.

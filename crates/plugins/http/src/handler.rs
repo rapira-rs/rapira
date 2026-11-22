@@ -33,10 +33,7 @@ pub(crate) struct Shared {
 impl From<Refused> for Rejection {
     fn from(e: Refused) -> Self {
         Self {
-            status: match e {
-                Refused::Saturated | Refused::OverBudget => http::StatusCode::SERVICE_UNAVAILABLE,
-                Refused::Stopped => http::StatusCode::INTERNAL_SERVER_ERROR,
-            },
+            status: http::StatusCode::SERVICE_UNAVAILABLE,
             reason: e.to_string(),
         }
     }

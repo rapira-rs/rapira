@@ -72,12 +72,10 @@ void rapira_zstr_addref(zend_string *s) { zend_string_addref(s); }
 
 void rapira_zstr_release(zend_string *s) { zend_string_release(s); }
 
-// The engine owns this immutable allocation. PHP can keep it in extension caches until module shutdown. https://github.com/php/php-src/blob/php-8.6.0/ext/pcre/php_pcre.c#L847-L863
+// This immutable string stays valid until process exit. PHP can keep it in extension caches until module shutdown. https://github.com/php/php-src/blob/php-8.6.0/ext/pcre/php_pcre.c#L847-L863
 zend_string *rapira_permanent_string(const char *s, size_t len) {
     zend_string *str = zend_string_init(s, len, true);
     zend_string_hash_val(str);
     GC_ADD_FLAGS(str, IS_STR_INTERNED | IS_STR_PERMANENT);
     return str;
 }
-
-void rapira_free_permanent_string(zend_string *s) { pefree(s, true); }

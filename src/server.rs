@@ -36,17 +36,7 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
         check_mode(plugin.name(), plugin.modes(), pool.mode)?;
     }
 
-    let zts = rapira_sapi::zts();
-    let count = if zts {
-        plugins
-            .iter()
-            .try_fold(0usize, |n, (_, pool)| n.checked_add(pool.workers))
-            .context("too many PHP workers")?
-    } else {
-        1
-    };
-    let engine = rapira_sapi::Engine::start(&crate::PLUGIN_REGISTERS, count)?;
-    if !zts {
+    if !rapira_sapi::zts() {
         ensure!(
             plugins.len() == 1,
             "NTS PHP supports one pool; build PHP with --enable-zts for multiple pools"
@@ -57,6 +47,11 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
             pool.workers = 1;
         }
     }
+    let count = plugins
+        .iter()
+        .try_fold(0usize, |n, (_, pool)| n.checked_add(pool.workers))
+        .context("too many PHP workers")?;
+    let engine = rapira_sapi::Engine::start(&crate::PLUGIN_REGISTERS, count)?;
     let board: Board = plugins
         .iter()
         .map(|(plugin, pool)| Arc::new(Pool::new(plugin.name(), pool.workers)))

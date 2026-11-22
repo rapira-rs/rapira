@@ -1,5 +1,4 @@
 use crossbeam_channel::Sender;
-use std::ops::RangeInclusive;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Condvar, Mutex, RwLock};
 
@@ -25,27 +24,26 @@ pub(crate) fn wake_workers() {
     }
 }
 
-/// Requests one OPcache reset and wakes each worker of each pool.
+/// Requests an OPcache reset and wakes each worker of each pool.
 pub fn reload() {
     SENT.fetch_add(1, Ordering::Release);
     wake_workers();
 }
 
-fn reset_due() -> Option<RangeInclusive<u64>> {
+fn reset_due() -> Option<u64> {
     let sent = SENT.load(Ordering::Acquire);
-    let reset = RESET.load(Ordering::Acquire);
-    (sent > reset).then(|| reset + 1..=sent)
+    (sent > RESET.load(Ordering::Acquire)).then_some(sent)
 }
 
-/// Only one worker starts the reset request. Other workers wait before they can load a script from the cache.
-pub(crate) fn claim_reset() -> Option<RangeInclusive<u64>> {
+/// One worker resets the cache for all reloads through the returned sequence number. Other workers wait before they can load a script from the cache.
+pub(crate) fn claim_reset() -> Option<u64> {
     reset_due()?;
     let mut active = RESET_DONE
         .wait_while(RESETTING.lock().unwrap(), |active| *active)
         .unwrap();
-    let due = reset_due()?;
+    let sent = reset_due()?;
     *active = true;
-    Some(due)
+    Some(sent)
 }
 
 /// A failed request startup leaves the reset due for the next worker.

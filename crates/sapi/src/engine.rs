@@ -110,6 +110,5 @@ impl Drop for Engine {
     fn drop(&mut self) {
         // SAFETY: Engine stays on the thread that started TSRM. The host joins all workers before it drops Engine.
         unsafe { rapira_process_shutdown() };
-        crate::context::free_permanent_strings();
     }
 }

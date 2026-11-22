@@ -23,7 +23,7 @@ typedef struct {
     pthread_t thread;
 } rapira_interrupt;
 
-#if defined(SIGRTMIN) && !defined(__APPLE__)
+#ifdef SIGRTMIN
 // Use the same wake signal as FrankenPHP.
 // https://github.com/php/frankenphp/blob/30c6bb778ebbb56d7dceb939993160210fba01b2/frankenphp.h#L28-L33
 #define RAPIRA_WAKE_SIGNAL (SIGRTMIN + 3)

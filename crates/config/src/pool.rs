@@ -244,16 +244,6 @@ mod tests {
     fn pool_errors_name_the_key() {
         let cases = [
             ErrCase {
-                name: "process count",
-                toml: "entrypoint = \"a.php\"\nprocesses = 2\n",
-                error: "unknown field `processes`",
-            },
-            ErrCase {
-                name: "per-process memory limit",
-                toml: "entrypoint = \"a.php\"\nmax_memory_mb = 128\n",
-                error: "unknown field `max_memory_mb`",
-            },
-            ErrCase {
                 name: "empty entrypoint",
                 toml: "entrypoint = \"\"\n",
                 error: "http.pool.entrypoint is required",

@@ -216,17 +216,13 @@ pub(crate) fn reload_for_opcache_restart() {
 /// A fresh request calls opcache_reset() without loading a script. Other workers can start their scripts once that request ends.
 #[must_use = "start the app or run the unit only after the reset request succeeds"]
 pub(crate) fn reset_opcache_before_request() -> bool {
-    let Some(due) = crate::reload::claim_reset() else {
+    let Some(sent) = crate::reload::claim_reset() else {
         return true;
     };
-    let sent = *due.end();
     let started = unsafe { php_request_startup() } == SUCCESS;
     if started {
         HOST_RESET.set(true);
-        // A busy worker can receive one control for several reloads. OPcache keeps a single restart pending.
-        for _ in due {
-            unsafe { rapira_opcache_reset() };
-        }
+        unsafe { rapira_opcache_reset() };
         HOST_RESET.set(false);
     }
     let shutdown = unsafe { rapira_request_shutdown() };

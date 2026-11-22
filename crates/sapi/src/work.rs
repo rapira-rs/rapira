@@ -165,7 +165,6 @@ pub(crate) struct Entry {
 pub enum Refused {
     Saturated,
     OverBudget,
-    Stopped,
 }
 
 impl std::fmt::Display for Refused {
@@ -177,7 +176,6 @@ impl std::fmt::Display for Refused {
                 "request bodies that wait for the worker use all {} MiB",
                 BODY_BUDGET >> 20
             ),
-            Self::Stopped => write!(f, "worker pool stopped"),
         }
     }
 }
@@ -278,10 +276,9 @@ impl Intake {
             _bytes: held,
             _slot: slot,
         };
-        if self.tx.send(entry).is_err() {
-            self.stats.refused.fetch_add(1, Ordering::Relaxed);
-            return Err(Refused::Stopped);
-        }
+        self.tx
+            .send(entry)
+            .expect("workers keep the receiver until the last intake drops");
         pending.disarm();
         Ok(())
     }
@@ -330,26 +327,6 @@ mod tests {
 
     fn intake() -> (Intake, crossbeam_channel::Receiver<Entry>) {
         Intake::new(Arc::new(rapira_scoreboard::Pool::new("http", 2)))
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn intake_reports_stopped_after_the_receiver_is_gone() {
-        let (intake, rx) = intake();
-        let stats = &intake.stats;
-        drop(rx);
-        assert_eq!(
-            intake.submit(probe(), 0).await.unwrap_err(),
-            Refused::Stopped
-        );
-        assert_eq!(
-            (
-                stats.refused.load(Ordering::Relaxed),
-                stats.failed_on_full_queue.load(Ordering::Relaxed),
-                stats.pending.load(Ordering::Relaxed),
-            ),
-            (1, 0, 0),
-            "refused, failed on full queue, pending"
-        );
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -405,7 +382,6 @@ mod tests {
         enum During {
             Nothing,
             ClientLeaves,
-            WorkerStops,
             RoomFrees,
         }
         struct Counts {
@@ -445,16 +421,6 @@ mod tests {
                 },
             },
             Case {
-                name: "the worker stops during the wait",
-                during: During::WorkerStops,
-                result: Some(Err(Refused::Stopped)),
-                want: Counts {
-                    refused: 1,
-                    failed_on_full_queue: 1,
-                    pending: 0,
-                },
-            },
-            Case {
                 name: "room frees during the wait",
                 during: During::RoomFrees,
                 result: Some(Ok(())),
@@ -476,13 +442,6 @@ mod tests {
             let result = match case.during {
                 During::Nothing => Some(submit.await),
                 During::ClientLeaves => tokio::time::timeout(ACTION_DELAY, submit).await.ok(),
-                During::WorkerStops => {
-                    let (result, ()) = tokio::join!(submit, async move {
-                        tokio::time::sleep(ACTION_DELAY).await;
-                        drop(rx);
-                    });
-                    Some(result)
-                }
                 During::RoomFrees => {
                     let (result, ()) = tokio::join!(submit, async {
                         tokio::time::sleep(ACTION_DELAY).await;
