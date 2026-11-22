@@ -320,6 +320,12 @@ pub(crate) struct TimedIo<T> {
     state: watch::Sender<ConnectionState>,
 }
 
+impl<T> Drop for TimedIo<T> {
+    fn drop(&mut self) {
+        self.state.send_modify(|s| s.closed = true);
+    }
+}
+
 impl<T> TimedIo<T> {
     pub(crate) fn new(io: T, timeout: Duration, state: watch::Sender<ConnectionState>) -> Self {
         Self {

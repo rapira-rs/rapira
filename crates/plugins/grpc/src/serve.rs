@@ -1,7 +1,8 @@
 //! The accept loop, one connectrpc connection per socket, and the drain at the stop.
 
+use std::convert::Infallible;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
@@ -10,14 +11,15 @@ use connectrpc::{
     Chain, CompressionRegistry, ConnectRpcBody, ConnectRpcService, ConnectionConfig,
     ConnectionInfo, DeadlinePolicy, GzipProvider, Router, http,
 };
-use connectrpc_health::StaticChecker;
-use rapira_net::Serve;
+use connectrpc_health::Status;
+use rapira_net::{Connections, Serve};
 use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::watch;
-use tower::ServiceExt as _;
+use tokio::sync::{Notify, watch};
+use tokio_util::io::InspectWriter;
+use tower::Service as _;
 
 use crate::dispatch::PhpDispatcher;
 use crate::{Config, Prepared};
@@ -26,10 +28,8 @@ use crate::{Config, Prepared};
 struct Serving {
     service: ConnectRpcService<Chain<Router, PhpDispatcher>>,
     connection: ConnectionConfig,
-    health: Arc<StaticChecker>,
-    shutdown: watch::Sender<bool>,
-    /// Each connection holds a receiver until it ends. Dropping the sender cuts the remaining connections.
-    connections: watch::Sender<()>,
+    health: watch::Sender<Status>,
+    connections: Connections,
     /// The calls whose response is not complete: a unary call until its response is ready, and a stream of PHP until its body ends.
     inflight: Arc<AtomicUsize>,
 }
@@ -51,7 +51,12 @@ impl Drop for InFlight {
 }
 
 impl Serving {
-    fn start(intake: Intake, config: &Config, router: Router, health: Arc<StaticChecker>) -> Self {
+    fn start(
+        intake: Intake,
+        config: &Config,
+        router: Router,
+        health: watch::Sender<Status>,
+    ) -> Self {
         let mut deadlines = DeadlinePolicy::new();
         if let Some(timeout) = config.default_timeout {
             deadlines = deadlines.with_default_timeout(timeout);
@@ -81,8 +86,7 @@ impl Serving {
                 .with_http2_keepalive_interval(config.keepalive_interval)
                 .with_http2_keepalive_timeout(config.keepalive_timeout),
             health,
-            shutdown: watch::Sender::new(false),
-            connections: watch::Sender::new(()),
+            connections: Connections::default(),
             inflight,
         }
     }
@@ -91,68 +95,53 @@ impl Serving {
     where
         I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let mut stop = self.shutdown.subscribe();
+        let mut stop = self.health.subscribe();
         let draining = stop.clone();
-        // During the drain an HTTP/1.1 connection closes itself after its next response, and h2 gets GOAWAY.
-        let http1 = Arc::new(AtomicBool::new(false));
-        let (mark, close) = (Arc::clone(&http1), Arc::clone(&http1));
+        // The server's first write starts with 'H' for HTTP/1 or the length of its initial SETTINGS frame for HTTP/2. https://www.rfc-editor.org/rfc/rfc9113#section-3.4
+        let h2 = Arc::new(Notify::new());
+        let mut first = Some(Arc::clone(&h2));
+        let io = InspectWriter::new(io, move |bytes| {
+            if let Some(h2) = first.take()
+                && bytes[0] == 0
+            {
+                h2.notify_one();
+            }
+        });
         let inflight = Arc::clone(&self.inflight);
-        let service = self
-            .service
-            .clone()
-            .map_request(move |req: http::Request<_>| {
-                mark.store(req.version() < http::Version::HTTP_2, Relaxed);
-                req
-            })
-            .map_future(move |call| {
-                let counted = InFlight::start(&inflight);
-                async move {
-                    let response = call.await;
-                    drop(counted);
-                    response
-                }
-            })
-            .map_response(move |response| {
-                let mut response = status_in_trailers(response);
-                if close.load(Relaxed) && *draining.borrow() {
+        let mut service = self.service.clone();
+        let service = tower::service_fn(move |req: http::Request<_>| {
+            let http1 = req.version() < http::Version::HTTP_2;
+            let draining = draining.clone();
+            let counted = InFlight::start(&inflight);
+            let call = service.call(req);
+            async move {
+                let mut response = status_in_trailers(call.await?);
+                if http1 && *draining.borrow() == Status::NotServing {
                     response.headers_mut().insert(
                         http::header::CONNECTION,
                         http::HeaderValue::from_static("close"),
                     );
                 }
-                response
-            });
-        let connection = serve_connection(io, info, service, self.connection.clone(), async move {
-            let _ = stop.wait_for(|stop| *stop).await;
-            if http1.load(Relaxed) {
-                // The connection closes after its next response, or the drain deadline cuts it.
-                std::future::pending::<()>().await;
+                drop(counted);
+                Ok::<_, Infallible>(response)
             }
         });
-        let mut cut = self.connections.subscribe();
-        tokio::spawn(async move {
-            tokio::select! {
-                biased;
-                _ = cut.changed() => {}
-                closed = connection => {
-                    tracing::debug!(target: "grpc", "connection closed: {:?}", closed.reason());
-                }
-            }
+        let connection = serve_connection(io, info, service, self.connection.clone(), async move {
+            let _ = stop.changed().await;
+            h2.notified().await;
+        });
+        self.connections.spawn(async move {
+            let closed = connection.await;
+            tracing::debug!(target: "grpc", "connection closed: {:?}", closed.reason());
         });
     }
 
     /// Waits for the open connections after the listener closes.
     async fn drain(self, grace: Duration) -> Result<()> {
-        // StaticChecker::shutdown only sets NOT_SERVING. A Watch stream ends only when its service is removed, and an open stream holds its connection until the grace ends.
-        self.health.shutdown();
-        for name in self.health.services() {
-            self.health.remove_service(&name);
-        }
-        self.shutdown.send_replace(true);
+        self.health.send_replace(Status::NotServing);
+        drop(self.health);
         tracing::info!(target: "grpc", "draining open connections");
-        let drained = tokio::time::timeout(grace, self.connections.closed())
-            .await
-            .is_ok();
+        let drained = self.connections.drain(grace, std::future::ready(())).await;
         // An HTTP/1.1 connection that stays idle until the deadline holds no call, so only a call in flight fails the drain.
         let cut = self.inflight.load(Relaxed);
         if !drained && cut > 0 {

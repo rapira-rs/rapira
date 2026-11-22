@@ -981,6 +981,7 @@ dependencies = [
  "rapira_sapi",
  "serde",
  "tokio",
+ "tokio-util",
  "toml",
  "tower",
  "tracing",

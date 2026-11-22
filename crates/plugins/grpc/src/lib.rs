@@ -5,15 +5,17 @@ use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use connectrpc::Router;
-use connectrpc_health::StaticChecker;
+use connectrpc_health::Status;
 use connectrpc_reflection::Reflector;
 use rapira_net::{ListenAddr, PreparedListener};
 use rapira_sapi::plugin::{Mode, Plugin, ServeFuture, Worker};
 use rapira_sapi::rapira_plugin;
+use tokio::sync::watch;
 
 mod call;
 pub mod config;
 mod dispatch;
+mod health;
 pub mod php;
 pub mod schema;
 mod serve;
@@ -48,20 +50,15 @@ pub struct Server {
 pub(crate) struct Prepared {
     pub(crate) listener: PreparedListener,
     pub(crate) router: Router,
-    pub(crate) health: Arc<StaticChecker>,
+    pub(crate) health: watch::Sender<Status>,
 }
 
 /// Binds the listener and prepares the routes before PHP starts.
 fn prepare(config: &Config) -> Result<Prepared> {
     let listener = rapira_net::bind(&config.listen)?;
 
-    let names: Vec<String> = config
-        .schema
-        .services()
-        .iter()
-        .map(|s| s.name.clone())
-        .collect();
-    let (mut router, health) = connectrpc_health::install_static(Router::new(), names.clone());
+    let names = config.schema.services().iter().map(|s| s.name.clone());
+    let (mut router, health) = health::install(names.clone());
     if config.reflection {
         let reflector = Reflector::from_descriptor_pool(Arc::clone(config.schema.pool()))
             .map_err(|e| anyhow!("building grpc reflection: {e}"))?

@@ -858,6 +858,7 @@ dependencies = [
  "rapira_sapi",
  "serde",
  "tokio",
+ "tokio-util",
  "tower",
  "tracing",
  "ureq",

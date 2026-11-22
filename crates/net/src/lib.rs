@@ -7,6 +7,37 @@ use tokio::sync::watch;
 pub mod listen;
 pub use listen::{ListenAddr, PreparedListener, bind};
 
+/// The accepted connections of one listener. Dropping the owner cuts open connections.
+#[derive(Default)]
+pub struct Connections(watch::Sender<()>);
+
+impl Connections {
+    pub fn spawn(&self, connection: impl Future<Output = ()> + Send + 'static) {
+        let mut cut = self.0.subscribe();
+        tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = cut.changed() => {}
+                () = connection => {}
+            }
+        });
+    }
+
+    pub fn count(&self) -> usize {
+        self.0.receiver_count()
+    }
+
+    /// Waits for the sockets and any work that outlives them under one deadline.
+    pub async fn drain(&self, grace: Duration, finish: impl Future<Output = ()>) -> bool {
+        tokio::time::timeout(grace, async {
+            self.0.closed().await;
+            finish.await;
+        })
+        .await
+        .is_ok()
+    }
+}
+
 /// Starts a task for each connection that [`PreparedListener::run`] accepts.
 pub trait Serve {
     fn spawn_tcp(&self, stream: tokio::net::TcpStream, peer: std::net::SocketAddr);

@@ -8,7 +8,7 @@ use std::time::Duration;
 use anyhow::{Result, anyhow};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
-use rapira_net::{ListenAddr, Serve};
+use rapira_net::{Connections, ListenAddr, Serve};
 use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
@@ -22,8 +22,7 @@ use crate::{Config, Server};
 /// Everything the accept loop hands to a connection, and the drain that follows it.
 struct Serving {
     shared: Arc<Shared>,
-    /// Each connection holds a receiver until it ends. Dropping the sender cuts the remaining connections.
-    connections: watch::Sender<()>,
+    connections: Connections,
     builder: http1::Builder,
 }
 
@@ -47,7 +46,7 @@ impl Serving {
             .header_read_timeout(shared.cfg.keepalive_timeout);
         Self {
             shared,
-            connections: watch::Sender::new(()),
+            connections: Connections::default(),
             builder,
         }
     }
@@ -62,7 +61,7 @@ impl Serving {
         let io = crate::bridge::TimedIo::new(
             TokioIo::new(stream),
             self.shared.cfg.write_timeout,
-            closed_tx.clone(),
+            closed_tx,
         );
         let chain = handler.chain();
         // BoxCloneService polls and calls through &mut, so each request takes its own clone.
@@ -72,18 +71,10 @@ impl Serving {
             async move { Ok::<_, Infallible>(respond(&handler, chain, req).await) }
         });
         let connection = self.builder.serve_connection(io, service);
-        let mut cut = self.connections.subscribe();
-        tokio::spawn(async move {
-            tokio::select! {
-                biased;
-                _ = cut.changed() => {}
-                result = connection => {
-                    if let Err(e) = result {
-                        tracing::debug!(target: "http", "connection ended with error: {e}");
-                    }
-                }
+        self.connections.spawn(async move {
+            if let Err(e) = connection.await {
+                tracing::debug!(target: "http", "connection ended with error: {e}");
             }
-            closed_tx.send_modify(|s| s.closed = true);
         });
     }
 
@@ -93,15 +84,15 @@ impl Serving {
         tracing::info!(
             target: "http",
             "draining {} open connections",
-            self.connections.receiver_count()
+            self.connections.count()
         );
-        let _ = tokio::time::timeout(grace, async {
-            self.connections.closed().await;
-            while self.shared.inflight.count() > 0 {
-                tokio::time::sleep(Duration::from_millis(50)).await;
-            }
-        })
-        .await;
+        self.connections
+            .drain(grace, async {
+                while self.shared.inflight.count() > 0 {
+                    tokio::time::sleep(Duration::from_millis(50)).await;
+                }
+            })
+            .await;
         let stranded = self.shared.inflight.count();
         if stranded > 0 {
             return Err(anyhow!(

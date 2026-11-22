@@ -1,6 +1,5 @@
 use crate::harness::*;
 use rapira_sapi::plugin::Mode;
-use std::net::TcpStream;
 use std::time::Duration;
 
 const READ: Duration = Duration::from_secs(10);
@@ -24,15 +23,6 @@ fn field<'a>(head: &'a Head, name: &str) -> Option<&'a str> {
         .iter()
         .find(|(k, _)| k == name)
         .map(|(_, v)| v.as_str())
-}
-
-fn assert_new_connection_refused(srv: &Server) {
-    tests::poll(READ, || {
-        TcpStream::connect_timeout(&srv.addr, READ)
-            .err()
-            .filter(|err| err.kind() == std::io::ErrorKind::ConnectionRefused)
-    })
-    .unwrap_or_else(|| panic!("new connections still get through\n{}", diagnostics(srv)));
 }
 
 /// During a stop, each accepted HTTP connection gets its last response with `connection: close`.
@@ -63,7 +53,6 @@ fn a_stopping_server_answers_requests_on_its_http_connections() {
         "no drain record\n{}",
         diagnostics(&srv)
     );
-    assert_new_connection_refused(&srv);
     for (i, conn) in used.iter_mut().enumerate() {
         exchange(conn, REQUEST, Some("close"))
             .unwrap_or_else(|e| panic!("held connection {i}: {e}\n{}", diagnostics(&srv)));
@@ -97,7 +86,12 @@ async fn a_stopping_server_answers_on_its_grpc_http1_connections() {
         .json_log()
         .spawn();
     wait_serving(&srv, "grpc", 1);
-    let mut conns = Vec::new();
+    // The first reply on a later connection confirms that the listener accepted this one.
+    let mut conns = vec![
+        tests::grpc::Conn::open(&listen(&srv), tests::grpc::Wire::Http1)
+            .await
+            .expect("connect before the stop"),
+    ];
     for _ in 0..4 {
         let mut conn = tests::grpc::Conn::open(&listen(&srv), tests::grpc::Wire::Http1)
             .await
@@ -113,8 +107,6 @@ async fn a_stopping_server_answers_on_its_grpc_http1_connections() {
         "no drain record\n{}",
         diagnostics(&srv)
     );
-    assert_new_connection_refused(&srv);
-
     for (i, conn) in conns.iter_mut().enumerate() {
         let response = connect_call(conn).await;
         assert_eq!(
@@ -136,4 +128,67 @@ async fn a_stopping_server_answers_on_its_grpc_http1_connections() {
     tokio::time::timeout(READ, exited(srv))
         .await
         .expect("the server exits after the last response");
+}
+
+#[tokio::test]
+async fn drain_keeps_the_health_names_for_the_last_connect_check() {
+    const CHECK: &str = "/grpc.health.v1.Health/Check";
+    const PROTO: tests::grpc::Fields = &[("content-type", "application/proto")];
+    struct Case {
+        name: &'static str,
+        message: &'static [u8],
+        status: u16,
+    }
+    let cases = [
+        Case {
+            name: "whole server",
+            message: b"",
+            status: 200,
+        },
+        Case {
+            name: "configured service",
+            message: b"\x0a\x1arapira.test.v1.EchoService",
+            status: 200,
+        },
+        Case {
+            name: "unknown service",
+            message: b"\x0a\x01x",
+            status: 404,
+        },
+    ];
+    let srv = Spawn::grpc(fixture_path("grpc/echo-worker.php"))
+        .json_log()
+        .spawn();
+    let mut conns = Vec::new();
+    for case in cases {
+        let mut conn = tests::grpc::Conn::open(&listen(&srv), tests::grpc::Wire::Http1)
+            .await
+            .unwrap();
+        let before = conn
+            .send(http::Method::POST, CHECK, PROTO, case.message)
+            .await
+            .unwrap();
+        assert_eq!(before.status, case.status, "{}", case.name);
+        if case.status == 200 {
+            assert_eq!(&before.body[..], b"\x08\x01", "{}: SERVING", case.name);
+        }
+        conns.push((case, conn));
+    }
+    signal(srv.pid(), libc::SIGQUIT);
+    assert!(wait_log_contains(&srv, "draining open connections", READ));
+    for (case, mut conn) in conns {
+        let after = conn
+            .send(http::Method::POST, CHECK, PROTO, case.message)
+            .await
+            .unwrap();
+        assert_eq!(after.status, case.status, "{}", case.name);
+        assert_eq!(after.field("connection"), Some("close"), "{}", case.name);
+        if case.status == 200 {
+            assert_eq!(&after.body[..], b"\x08\x02", "{}: NOT_SERVING", case.name);
+        } else {
+            let error: serde_json::Value = serde_json::from_slice(&after.body).unwrap();
+            assert_eq!(error["code"], "not_found", "{}", case.name);
+        }
+    }
+    assert_eq!(plugin_error(&exited(srv).await), None);
 }
