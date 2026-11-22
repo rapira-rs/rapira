@@ -195,8 +195,6 @@ pub(crate) struct StreamReply {
     /// None after the head went out.
     head: Option<oneshot::Sender<Result<Head, ConnectError>>>,
     parts: mpsc::Sender<Part>,
-    /// The deadline of the call. No park waits past it. From that time on, the call is cancelled.
-    until: Option<Instant>,
     /// A trailer was added after the head went out. A stream that ends with success does not send it.
     late_trailer: bool,
 }
@@ -205,12 +203,10 @@ impl StreamReply {
     pub(crate) fn new(
         head: oneshot::Sender<Result<Head, ConnectError>>,
         parts: mpsc::Sender<Part>,
-        until: Option<Instant>,
     ) -> Self {
         Self {
             head: Some(head),
             parts,
-            until,
             late_trailer: false,
         }
     }
@@ -248,16 +244,16 @@ impl Held for GrpcState {
         self.reply.is_none()
     }
 
-    /// The plugin dropped the receiver because the deadline passed or the client left. connectrpc bounds only the handler with the deadline. The handler of a stream returns at the head, so a stream also checks its deadline here.
+    /// A pending reply needs both an open receiver and a live call deadline.
     fn cancelled(&self) -> bool {
         self.discarded
-            || match &self.reply {
-                Some(Reply::Unary(reply)) => reply.is_closed(),
-                Some(Reply::Stream(out)) => {
-                    out.parts.is_closed() || out.until.is_some_and(|until| Instant::now() >= until)
-                }
-                None => false,
-            }
+            || self.reply.as_ref().is_some_and(|reply| {
+                let closed = match reply {
+                    Reply::Unary(tx) => tx.is_closed(),
+                    Reply::Stream(out) => out.parts.is_closed(),
+                };
+                closed || crate::call::expired(self.req.until())
+            })
     }
 
     /// The drop of `reply` finalizes the call, so `release()` does not count it a second time.
@@ -375,7 +371,7 @@ fn add_core(st: &mut GrpcState, trailer: bool, binary: bool, name: &[u8], value:
 /// Sends the one outcome of the call, with both metadata halves in wire form. On a streaming response the outcome is a status. Before the head, it goes out with both halves. After the head, it ends the stream with every trailer.
 /// # Safety
 /// For a streaming response, the caller runs on a PHP thread.
-unsafe fn finish(st: &mut GrpcState, result: Result<Bytes, ConnectError>) -> Verb {
+unsafe fn finish(st: &mut GrpcState, result: Result<&[u8], ConnectError>) -> Verb {
     if st.cancelled() {
         st.discard();
         return Verb::Discarded;
@@ -390,7 +386,7 @@ unsafe fn finish(st: &mut GrpcState, result: Result<Bytes, ConnectError>) -> Ver
             .send(UnaryReply {
                 headers: wire(&st.headers),
                 trailers,
-                outcome,
+                outcome: outcome.map(Bytes::copy_from_slice),
             })
             .is_ok(),
         (Reply::Stream(mut out), Err(err)) => match out.head.take() {
@@ -400,7 +396,13 @@ unsafe fn finish(st: &mut GrpcState, result: Result<Bytes, ConnectError>) -> Ver
                     .with_trailers(trailers)))
                 .is_ok(),
             // SAFETY: the caller runs on a PHP thread for a streaming response.
-            None => unsafe { push(&out, Part::Fail(err.with_trailers(trailers))) },
+            None => unsafe {
+                push(
+                    &out,
+                    Part::Fail(err.with_trailers(trailers)),
+                    st.req.until(),
+                )
+            },
         },
         (Reply::Stream(_), Ok(_)) => unreachable!("only UnaryCall has respond(string)"),
     };
@@ -445,14 +447,14 @@ fn commit(out: &mut StreamReply, headers: &[MetadataField], trailers: &[Metadata
 /// Sends one part with the deadline of the call. An interrupted or closed stream takes no more parts.
 /// # Safety
 /// The caller runs on a PHP thread.
-unsafe fn push(out: &StreamReply, part: Part) -> bool {
-    unsafe { stream::send(&out.parts, part, out.until) }
+unsafe fn push(out: &StreamReply, part: Part, until: Option<Instant>) -> bool {
+    unsafe { stream::send(&out.parts, part, until) }
 }
 
 /// Sends one message of a streaming response. The first message sends the head before it. Returns false when the message has no destination. The call is then discarded.
 /// # Safety
 /// The caller runs on a PHP thread.
-unsafe fn send_core(st: &mut GrpcState, message: Bytes) -> bool {
+unsafe fn send_core(st: &mut GrpcState, message: &[u8]) -> bool {
     if st.cancelled() {
         st.discard();
         return false;
@@ -462,8 +464,14 @@ unsafe fn send_core(st: &mut GrpcState, message: Bytes) -> bool {
         return false;
     };
     // SAFETY: the caller runs on a PHP thread.
-    let sent =
-        commit(out, &st.headers, &st.trailers) && unsafe { push(out, Part::Message(message)) };
+    let sent = commit(out, &st.headers, &st.trailers)
+        && unsafe {
+            push(
+                out,
+                Part::Message(Bytes::copy_from_slice(message)),
+                st.req.until(),
+            )
+        };
     if !sent {
         st.discard();
     }
@@ -483,7 +491,8 @@ unsafe fn end(st: &mut GrpcState) {
         return;
     };
     // SAFETY: the caller runs on a PHP thread.
-    let sent = commit(&mut out, &st.headers, &st.trailers) && unsafe { push(&out, Part::End) };
+    let sent = commit(&mut out, &st.headers, &st.trailers)
+        && unsafe { push(&out, Part::End, st.req.until()) };
     if out.late_trailer {
         tracing::debug!(target: "grpc", "{}: a trailer added after the first yield is not sent", st.req.method);
     }
@@ -573,7 +582,7 @@ unsafe fn build_context(dst: *mut zval, st: &mut GrpcState) {
         zend::prop_zval(ce, o, c"metadata", &mut metadata);
         zval_ptr_dtor(&mut metadata);
         match req.deadline {
-            Some(d) => zend::prop_double(ce, o, c"deadline", d),
+            Some(d) => zend::prop_double(ce, o, c"deadline", d.unix),
             None => zend::prop_null(ce, o, c"deadline"),
         }
         zend::prop_zval(ce, o, c"remote", &mut remote);
@@ -670,7 +679,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_respond(
     len: usize,
 ) -> bool {
     guard(false, || unsafe {
-        let message = Bytes::copy_from_slice(std::slice::from_raw_parts(message.cast::<u8>(), len));
+        let message = std::slice::from_raw_parts(message.cast::<u8>(), len);
         thrown(finish(&mut *(*held).state::<GrpcState>(), Ok(message)))
     })
 }
@@ -695,7 +704,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_stream_send(
     len: usize,
 ) -> bool {
     guard(false, || unsafe {
-        let message = Bytes::copy_from_slice(std::slice::from_raw_parts(message.cast::<u8>(), len));
+        let message = std::slice::from_raw_parts(message.cast::<u8>(), len);
         send_core(&mut *(*held).state::<GrpcState>(), message)
     })
 }
@@ -1250,12 +1259,7 @@ mod tests {
             let _rx = match c.setup {
                 Setup::Responded => {
                     // SAFETY: a unary reply does not park.
-                    assert_eq!(
-                        unsafe { finish(&mut st, Ok(Bytes::new())) },
-                        Verb::Ok,
-                        "{}",
-                        c.name
-                    );
+                    assert_eq!(unsafe { finish(&mut st, Ok(&[])) }, Verb::Ok, "{}", c.name);
                     Some(rx)
                 }
                 Setup::HostClosed => {
@@ -1447,9 +1451,7 @@ mod tests {
                 // SAFETY: a unary reply does not park.
                 .map(|f| unsafe {
                     match f {
-                        Finish::Respond(message) => {
-                            finish(&mut st, Ok(Bytes::from_static(message)))
-                        }
+                        Finish::Respond(message) => finish(&mut st, Ok(message)),
                         Finish::Fail(s) => finish(&mut st, Err(error(s))),
                     }
                 })

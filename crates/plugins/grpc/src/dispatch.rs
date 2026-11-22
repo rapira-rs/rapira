@@ -16,6 +16,7 @@ use rapira_sapi::work::{Intake, Unit, now_unix_f64};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout_at;
 
+use crate::call::{Deadline, expired};
 use crate::php::GrpcState;
 use crate::php::call::{Reply, StreamReply};
 use crate::schema::{Method, Schema};
@@ -124,9 +125,10 @@ fn call(
         kind: method.kind,
         protocol: ctx.protocol().unwrap_or(Protocol::Connect),
         metadata: std::mem::take(ctx.headers_mut()),
-        deadline: ctx
-            .deadline()
-            .map(|d| now_unix_f64() + d.saturating_duration_since(Instant::now()).as_secs_f64()),
+        deadline: ctx.deadline().map(|at| Deadline {
+            at,
+            unix: now_unix_f64() + at.saturating_duration_since(Instant::now()).as_secs_f64(),
+        }),
         remote: ctx
             .extensions_mut()
             .remove::<Addr>()
@@ -155,8 +157,11 @@ fn encode(
     }
 }
 
-/// Logs and returns the error for a lost call. PHP dropped the call with no outcome.
-fn lost(path: &str) -> ConnectError {
+/// A sender can close because PHP saw the deadline before the IO timer ran.
+fn missing_reply(path: &str, until: Option<Instant>) -> ConnectError {
+    if expired(until) {
+        return deadline();
+    }
     tracing::warn!(target: "grpc", "{path}: the app lost the call");
     ConnectError::internal("internal error")
 }
@@ -181,6 +186,7 @@ async fn unary(
     drop(request);
     let protocol = call.protocol;
     let bytes = call.message.len();
+    let until = call.until();
     let (tx, reply) = oneshot::channel();
     let call = GrpcState::new(call, Reply::Unary(tx));
     // The intake refuses the call before dispatch, so PHP never sees it.
@@ -189,7 +195,7 @@ async fn unary(
     }
     // A closed channel means that PHP lost the call. The drop of this future closes the call for PHP.
     let Ok(reply) = reply.await else {
-        return Err(lost(&path));
+        return Err(missing_reply(&path, until));
     };
     let message = match reply.outcome {
         Ok(message) => message,
@@ -227,13 +233,13 @@ async fn server_streaming(
 ) -> Result<Response<EncodedStream>, ConnectError> {
     let method = schema.method(&path).expect("lookup found the route");
     let plain_reply = plain_reply(&ctx);
-    let until = ctx.deadline();
     let call = call(&schema, method, &path, &mut ctx, request, format)?;
+    let until = call.until();
     let bytes = call.message.len();
     let (head_tx, head) = oneshot::channel();
     // The channel holds one message. When the buffers of the connection are full, hyper stops the poll of the body, so the generator waits at its yield.
     let (parts_tx, parts) = mpsc::channel(1);
-    let reply = StreamReply::new(head_tx, parts_tx, until);
+    let reply = StreamReply::new(head_tx, parts_tx);
     let call = GrpcState::new(call, Reply::Stream(reply));
     // The intake refuses the call before dispatch, so PHP never sees it.
     if let Err(e) = intake.submit(Unit::Dispatcher(Box::new(call)), bytes).await {
@@ -244,9 +250,7 @@ async fn server_streaming(
         Ok(Ok(head)) => head,
         // fail() before the first yield
         Ok(Err(err)) => return Err(err),
-        // PHP discards a call at its deadline, and its check can come before the timer of connectrpc.
-        Err(_) if until.is_some_and(|until| Instant::now() >= until) => return Err(deadline()),
-        Err(_) => return Err(lost(&path)),
+        Err(_) => return Err(missing_reply(&path, until)),
     };
     let body = Body {
         parts,
@@ -296,13 +300,66 @@ impl Body {
             }
             Some(Part::End) => Ok(None),
             Some(Part::Fail(err)) => Err(err),
-            // PHP discards the call at its deadline.
-            None if self.until.is_some_and(|until| Instant::now() >= until) => Err(deadline()),
-            None => Err(lost(&self.path)),
+            None => Err(missing_reply(&self.path, self.until)),
         }
     }
 }
 
 fn deadline() -> ConnectError {
-    ConnectError::deadline_exceeded("request deadline exceeded while streaming")
+    ConnectError::deadline_exceeded("request deadline exceeded")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use rapira_sapi::work::Held;
+    use std::time::Duration;
+
+    #[test]
+    fn the_unary_pull_observes_the_deadline_with_its_reply_receiver_open() {
+        struct Case {
+            name: &'static str,
+            until: Option<Instant>,
+            cancelled: bool,
+        }
+        let now = Instant::now();
+        let cases = [
+            Case {
+                name: "no deadline",
+                until: None,
+                cancelled: false,
+            },
+            Case {
+                name: "live deadline",
+                until: Some(now + Duration::from_secs(60)),
+                cancelled: false,
+            },
+            Case {
+                name: "expired deadline",
+                until: Some(now - Duration::from_millis(1)),
+                cancelled: true,
+            },
+        ];
+        let path = "rapira.test.v1.EchoService/Echo";
+        let descriptors = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../tests/fixtures/grpc/echo.binpb");
+        let schema = Schema::load(&crate::schema::Source::File(descriptors), None).unwrap();
+        for case in cases {
+            let mut ctx = RequestContext::new(http::HeaderMap::new()).with_deadline(case.until);
+            ctx.extensions_mut().insert(Addr::Unix(None));
+            let req = call(
+                &schema,
+                schema.method(path).unwrap(),
+                path,
+                &mut ctx,
+                Bytes::new(),
+                CodecFormat::Proto,
+            )
+            .unwrap();
+            let (tx, _receiver) = oneshot::channel();
+            let state = GrpcState::new(req, Reply::Unary(tx));
+            assert_eq!(state.cancelled(), case.cancelled, "{}", case.name);
+            assert_eq!(state.is_finalized(), case.cancelled, "{}", case.name);
+        }
+    }
 }

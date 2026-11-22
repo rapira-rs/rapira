@@ -4,6 +4,17 @@ use bytes::Bytes;
 use connectrpc::http::HeaderMap;
 use connectrpc::{ConnectError, MethodKind};
 use rapira_sapi::types::Addr;
+use std::time::Instant;
+
+#[derive(Clone, Copy)]
+pub(crate) struct Deadline {
+    pub at: Instant,
+    pub unix: f64,
+}
+
+pub(crate) fn expired(until: Option<Instant>) -> bool {
+    until.is_some_and(|at| Instant::now() >= at)
+}
 
 /// One call with one request message. `message` is the binary protobuf encoding of the method's input message.
 pub(crate) struct Call {
@@ -13,10 +24,15 @@ pub(crate) struct Call {
     pub protocol: connectrpc::Protocol,
     /// The request headers as received. `getContext()` drops the transport names and decodes `-bin` values when it builds `Context::$metadata`.
     pub metadata: HeaderMap,
-    /// Unix seconds.
-    pub deadline: Option<f64>,
+    pub deadline: Option<Deadline>,
     pub remote: Addr,
     pub message: Bytes,
+}
+
+impl Call {
+    pub(crate) fn until(&self) -> Option<Instant> {
+        self.deadline.map(|d| d.at)
+    }
 }
 
 /// The outcome of a unary call. The metadata is in wire form, where `-bin` values are unpadded base64.
