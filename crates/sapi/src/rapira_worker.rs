@@ -214,6 +214,7 @@ pub(crate) fn reload_for_opcache_restart() {
 }
 
 /// A fresh request calls opcache_reset() without loading a script. Other workers can start their scripts once that request ends.
+#[must_use = "start the app or run the unit only after the reset request succeeds"]
 pub(crate) fn reset_opcache_before_request() -> bool {
     let Some(due) = crate::reload::claim_reset() else {
         return true;

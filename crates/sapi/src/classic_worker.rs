@@ -30,7 +30,11 @@ pub(crate) fn classic_worker(entrypoint: &Path) {
 // run_script is also false for exit() and die(), so only a recorded fatal error marks a failure.
 fn classic_executor(ctx: &mut Context) -> Event {
     // The reset comes before bind_server_context, because the request that makes the reset call has no client and runs no script.
-    crate::rapira_worker::reset_opcache_before_request();
+    if !crate::rapira_worker::reset_opcache_before_request() {
+        tracing::error!(target: "rapira", "OPcache reset request failed; refusing the request");
+        ctx.refuse(500);
+        return Event::Handled { errored: true };
+    }
     bind_server_context(ctx);
     let errored = unsafe {
         populate_request_context(ctx);
