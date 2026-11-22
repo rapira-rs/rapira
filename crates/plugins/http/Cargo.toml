@@ -20,9 +20,9 @@ serde = { workspace = true }
 tracing = { workspace = true }
 http = { workspace = true }
 http-body-util = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "time", "macros"] }
+tokio = { workspace = true, features = ["rt", "net", "time", "macros"] }
 hyper = { workspace = true, features = ["http1", "server"] }
-hyper-util = { workspace = true, features = ["tokio", "server", "http1", "server-graceful"] }
+hyper-util = { workspace = true, features = ["tokio"] }
 tower = { workspace = true }
 # The multipart parser of the buffered body uses these crates.
 memchr = "2"

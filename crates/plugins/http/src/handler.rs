@@ -3,7 +3,7 @@
 use std::convert::Infallible;
 use std::pin::Pin;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
@@ -25,8 +25,8 @@ use crate::{Config, multipart, request};
 pub(crate) struct Shared {
     pub cfg: Config,
     pub intake: Intake,
-    pub inflight: Arc<AtomicUsize>,
-    /// True while the worker drains. Every response then closes its connection, so the client sends its next request to another worker.
+    pub inflight: Arc<bridge::Inflight>,
+    /// True while the listener drains. Each response then closes its connection.
     pub closing: AtomicBool,
 }
 

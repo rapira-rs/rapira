@@ -21,20 +21,35 @@ pub(crate) struct ConnectionState {
     flushes: u64,
 }
 
-/// One request in flight on the worker. The response body, the PHP reply and the drain task share it.
-/// It counts the request until the last holder drops. It also holds the flush record of the delivery,
-/// so a connection close cancels PHP only while the last response byte is not flushed to the socket.
+/// Tracks requests until their replies end, including replies that outlive their connection.
+#[derive(Default)]
+pub(crate) struct Inflight {
+    count: AtomicUsize,
+    cut: watch::Sender<bool>,
+}
+
+impl Inflight {
+    pub(crate) fn count(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+
+    pub(crate) fn cut(&self) {
+        self.cut.send_replace(true);
+    }
+}
+
+/// The response body, PHP reply and drain task share the request count and the flush record.
 pub(crate) struct InflightRequest {
-    counter: Arc<AtomicUsize>,
+    inflight: Arc<Inflight>,
     /// The flush count of the connection when the host gave the last response byte to hyper.
     end_flush: OnceLock<u64>,
 }
 
 impl InflightRequest {
-    pub(crate) fn init(counter: &Arc<AtomicUsize>) -> Self {
-        counter.fetch_add(1, Ordering::AcqRel);
+    pub(crate) fn init(inflight: &Arc<Inflight>) -> Self {
+        inflight.count.fetch_add(1, Ordering::AcqRel);
         Self {
-            counter: Arc::clone(counter),
+            inflight: Arc::clone(inflight),
             end_flush: OnceLock::new(),
         }
     }
@@ -55,7 +70,7 @@ impl InflightRequest {
 
 impl Drop for InflightRequest {
     fn drop(&mut self) {
-        self.counter.fetch_sub(1, Ordering::AcqRel);
+        self.inflight.count.fetch_sub(1, Ordering::AcqRel);
     }
 }
 
@@ -259,7 +274,7 @@ impl Drop for ReplyBody {
 }
 
 /// Consumes the reply up to End. A connection close cancels the reply unless the response was delivered by then.
-/// After the delivery the drain holds the reply until PHP sends End, so a delivered response never reports cancellation to PHP.
+/// After delivery the drain holds the reply until PHP sends End or the plugin cuts the drain.
 pub(crate) fn spawn_drain(
     mut reply: Receiver<Frame>,
     mut closed: watch::Receiver<ConnectionState>,
@@ -270,18 +285,23 @@ pub(crate) fn spawn_drain(
     if let Poll::Ready(Some(Frame::End { .. }) | None) = reply.poll_recv(&mut cx) {
         return;
     }
+    let mut cut = guard.inflight.cut.subscribe();
     tokio::spawn(async move {
-        // The flush count changes without a notification, so only the close wakes this wait.
+        let disconnected = async {
+            let delivered = closed
+                .wait_for(|s| s.closed)
+                .await
+                .is_ok_and(|s| guard.delivered(&s));
+            if delivered {
+                std::future::pending::<()>().await;
+            }
+        };
         tokio::select! {
             biased;
-            state = closed.wait_for(|s| s.closed) => {
-                if !state.is_ok_and(|s| guard.delivered(&s)) {
-                    return;
-                }
-            }
-            () = drain(&mut reply) => return,
+            _ = cut.wait_for(|cut| *cut) => {}
+            () = disconnected => {}
+            () = drain(&mut reply) => {}
         }
-        drain(&mut reply).await;
     });
 }
 
@@ -436,7 +456,7 @@ mod tests {
     }
 
     fn guard() -> Arc<InflightRequest> {
-        Arc::new(InflightRequest::init(&Arc::new(AtomicUsize::new(0))))
+        Arc::new(InflightRequest::init(&Arc::new(Inflight::default())))
     }
 
     fn body(events: Vec<Frame>, declared_cl: Option<u64>) -> ReplyBody {
@@ -580,7 +600,7 @@ mod tests {
     }
 
     struct Drain {
-        inflight: Arc<AtomicUsize>,
+        inflight: Arc<Inflight>,
         /// A weak reference, so the drain task stays the only owner of the request count.
         guard: Weak<InflightRequest>,
         events: mpsc::Sender<Frame>,
@@ -597,7 +617,7 @@ mod tests {
 
     /// A drain parked on an empty reply after two chunks, with the request still counted.
     async fn parked_drain() -> Drain {
-        let inflight = Arc::new(AtomicUsize::new(0));
+        let inflight = Arc::new(Inflight::default());
         let guard = Arc::new(InflightRequest::init(&inflight));
         let weak = Arc::downgrade(&guard);
         let OpenReply { reply, events } = open_reply(vec![chunk("queued")]);
@@ -620,7 +640,7 @@ mod tests {
             !events.is_closed(),
             "drain must retain the reply while it is pending"
         );
-        assert_eq!(inflight.load(Ordering::Acquire), 1);
+        assert_eq!(inflight.count(), 1);
         Drain {
             inflight,
             guard: weak,
@@ -637,7 +657,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), d.events.closed())
             .await
             .expect("drain must drop the reply after End");
-        assert_eq!(d.inflight.load(Ordering::Acquire), 0);
+        assert_eq!(d.inflight.count(), 0);
     }
 
     /// Without a record, a client disconnect cancels the drain.
@@ -648,7 +668,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), d.events.closed())
             .await
             .expect("drain must drop the reply when the connection closes");
-        assert_eq!(d.inflight.load(Ordering::Acquire), 0);
+        assert_eq!(d.inflight.count(), 0);
     }
 
     /// A flush past the record wrote the last byte to the socket, so a later close must not cancel the reply.
@@ -665,12 +685,33 @@ mod tests {
                 .is_err(),
             "the reply must outlive the connection"
         );
-        assert_eq!(d.inflight.load(Ordering::Acquire), 1);
+        assert_eq!(d.inflight.count(), 1);
         d.events.send(end(false)).await.unwrap();
         tokio::time::timeout(Duration::from_secs(5), d.events.closed())
             .await
             .expect("drain must drop the reply after End");
-        assert_eq!(d.inflight.load(Ordering::Acquire), 0);
+        assert_eq!(d.inflight.count(), 0);
+    }
+
+    /// A delivered reply can outlive its socket. At the drain deadline PHP must see its reply channel close.
+    #[tokio::test(start_paused = true)]
+    async fn the_plugin_cut_cancels_a_delivered_reply() {
+        let d = parked_drain().await;
+        d.mark();
+        d.state.send_modify(|s| {
+            s.flushes = 1;
+            s.closed = true;
+        });
+        assert!(
+            tokio::time::timeout(Duration::from_secs(1), d.events.closed())
+                .await
+                .is_err(),
+            "the delivered reply must stay open during the grace period"
+        );
+        d.inflight.cut();
+        tokio::time::timeout(Duration::from_secs(5), d.events.closed())
+            .await
+            .expect("the plugin cut must cancel the reply");
     }
 
     /// A flush at the record is not past it, so a close then cancels the reply.
@@ -683,7 +724,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(5), d.events.closed())
             .await
             .expect("drain must drop the reply when the connection closes before the flush");
-        assert_eq!(d.inflight.load(Ordering::Acquire), 0);
+        assert_eq!(d.inflight.count(), 0);
     }
 
     /// A reply with one chunk and no End, the shape of an unfinalized PHP exchange. The sender closes when the reply drops.

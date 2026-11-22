@@ -21,7 +21,7 @@ thread_local! {
     static CYCLE_ROOT: RefCell<Option<CycleRoot>> = const { RefCell::new(None) };
 }
 
-/// Runs once in the master before the fork; the workers inherit the value. A later call changes nothing.
+/// Sets the sendFile() root before PHP starts.
 pub(crate) fn set_sendfile_root(root: PathBuf) {
     let _ = SENDFILE_ROOT.set(root);
 }

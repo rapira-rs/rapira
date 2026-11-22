@@ -37,9 +37,8 @@ impl fmt::Display for Source {
     }
 }
 
-/// The body of a GET request for `url`. The master calls it before the fork.
+/// Gets the descriptor set at boot.
 fn download(url: &str) -> Result<Vec<u8>, ureq::Error> {
-    // Phase timeouts keep the host lookup on this thread. A total or a resolve timeout makes ureq resolve the host on a helper thread, and the master must stay single-threaded before the fork.
     let timeout = Some(Duration::from_secs(30));
     let agent = ureq::Agent::config_builder()
         .timeout_connect(timeout)
@@ -84,7 +83,7 @@ pub(crate) struct MethodInfo {
     pub server_streaming: bool,
 }
 
-/// The schema whose services `getServices()` reports. The master sets it in `prepare`, before the fork, so every worker inherits it.
+/// The schema that `getServices()` reads. Plugin preparation sets it before PHP starts.
 static SCHEMA: OnceLock<Arc<Schema>> = OnceLock::new();
 
 /// The first call sets the schema; a later call changes nothing.

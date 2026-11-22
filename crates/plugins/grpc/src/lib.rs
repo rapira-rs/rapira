@@ -8,7 +8,7 @@ use connectrpc::Router;
 use connectrpc_health::StaticChecker;
 use connectrpc_reflection::Reflector;
 use rapira_net::{ListenAddr, PreparedListener};
-use rapira_sapi::plugin::{Mode, Plugin, Worker};
+use rapira_sapi::plugin::{Mode, Plugin, ServeFuture, Worker};
 use rapira_sapi::rapira_plugin;
 
 mod call;
@@ -51,11 +51,9 @@ pub(crate) struct Prepared {
     pub(crate) health: Arc<StaticChecker>,
 }
 
-/// Runs in the master before the fork, with no runtime.
+/// Binds the listener and prepares the routes before PHP starts.
 fn prepare(config: &Config) -> Result<Prepared> {
-    set_schema(Arc::clone(&config.schema));
     let listener = rapira_net::bind(&config.listen)?;
-    tracing::info!(target: "grpc", "prepared listener on {}", listener.addr());
 
     let names: Vec<String> = config
         .schema
@@ -70,6 +68,8 @@ fn prepare(config: &Config) -> Result<Prepared> {
             .with_services(names);
         router = connectrpc_reflection::install(router, reflector);
     }
+    set_schema(Arc::clone(&config.schema));
+    tracing::info!(target: "grpc", "listening on {}", listener.addr());
     Ok(Prepared {
         listener,
         router,
@@ -90,8 +90,8 @@ impl Plugin for Server {
         &raw const php::rapira_grpc_plugin
     }
 
-    fn serve(self: Box<Self>, worker: Worker) -> Result<()> {
+    fn serve(self: Box<Self>, worker: Worker) -> ServeFuture {
         let Self { config, prepared } = *self;
-        serve::serve(config, prepared, worker)
+        Box::pin(serve::serve(config, prepared, worker))
     }
 }

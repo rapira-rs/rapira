@@ -2,41 +2,43 @@
 
 use std::convert::Infallible;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use anyhow::{Result, anyhow};
 use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
-use hyper_util::server::graceful::GracefulShutdown;
-use rapira_net::{Acceptor, ListenAddr, PreparedListener, Serve};
+use rapira_net::{ListenAddr, Serve};
 use rapira_sapi::Addr;
 use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
-use tokio::sync::watch::channel;
+use tokio::sync::watch;
 
-use crate::bridge::ConnectionState;
+use crate::bridge::{ConnectionState, Inflight};
 use crate::handler::{Conn, Shared, respond};
-use crate::{Config, multipart};
+use crate::{Config, Server};
 
 /// Everything the accept loop hands to a connection, and the drain that follows it.
 struct Serving {
     shared: Arc<Shared>,
-    graceful: GracefulShutdown,
+    /// Each connection holds a receiver until it ends. Dropping the sender cuts the remaining connections.
+    connections: watch::Sender<()>,
     builder: http1::Builder,
+}
+
+impl Drop for Serving {
+    fn drop(&mut self) {
+        self.shared.inflight.cut();
+    }
 }
 
 impl Serving {
     fn start(intake: Intake, config: Config) -> Self {
-        match &config.listen {
-            ListenAddr::Tcp(a) => tracing::info!(target: "http", "listening on http://{a}"),
-            unix => tracing::info!(target: "http", "listening on {unix}"),
-        }
         let shared = Arc::new(Shared {
             cfg: config,
             intake,
-            inflight: Arc::new(AtomicUsize::new(0)),
+            inflight: Arc::new(Inflight::default()),
             closing: AtomicBool::new(false),
         });
         let mut builder = http1::Builder::new();
@@ -45,17 +47,17 @@ impl Serving {
             .header_read_timeout(shared.cfg.keepalive_timeout);
         Self {
             shared,
-            graceful: GracefulShutdown::new(),
+            connections: watch::Sender::new(()),
             builder,
         }
     }
 
-    /// Serves one connection under `graceful` on its own task and marks its `ConnectionState` closed when the connection ends.
+    /// Serves one connection and marks its state closed when the task ends.
     fn spawn_conn<S>(&self, stream: S, remote: Addr, server: Addr)
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let (closed_tx, closed_rx) = channel(ConnectionState::default());
+        let (closed_tx, closed_rx) = watch::channel(ConnectionState::default());
         let handler = Conn::new(Arc::clone(&self.shared), remote, server, closed_rx);
         let io = crate::bridge::TimedIo::new(
             TokioIo::new(stream),
@@ -69,46 +71,38 @@ impl Serving {
             let chain = chain.clone();
             async move { Ok::<_, Infallible>(respond(&handler, chain, req).await) }
         });
-        let watched = self
-            .graceful
-            .watch(self.builder.serve_connection(io, service));
+        let connection = self.builder.serve_connection(io, service);
+        let mut cut = self.connections.subscribe();
         tokio::spawn(async move {
-            if let Err(e) = watched.await {
-                tracing::debug!(target: "http", "connection ended with error: {e}");
+            tokio::select! {
+                biased;
+                _ = cut.changed() => {}
+                result = connection => {
+                    if let Err(e) = result {
+                        tracing::debug!(target: "http", "connection ended with error: {e}");
+                    }
+                }
             }
             closed_tx.send_modify(|s| s.closed = true);
         });
     }
 
-    /// Waits for the connections in flight to end. The acceptor is already gone.
-    /// A connection closes after its next response, so a request on an idle keep-alive connection still gets an answer. The drain holds an idle connection that gets no request until the grace period or its keepalive_timeout ends. So the idle keep-alive connections of a load balancer can make a stop last the whole grace period.
-    async fn drain(self, fatal: Option<anyhow::Error>, grace: Duration) -> Result<()> {
-        let deadline = tokio::time::Instant::now() + grace;
+    /// A held connection closes after its next response. An idle connection can stay open for the full grace period.
+    async fn drain(self, grace: Duration) -> Result<()> {
         self.shared.closing.store(true, Ordering::Release);
         tracing::info!(
             target: "http",
             "draining {} open connections",
-            self.graceful.count()
+            self.connections.receiver_count()
         );
-        while self.graceful.count() > 0 && tokio::time::Instant::now() < deadline {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let _ = tokio::time::timeout_at(deadline, self.graceful.shutdown()).await;
-        while self.shared.inflight.load(Ordering::Acquire) > 0
-            && tokio::time::Instant::now() < deadline
-        {
-            tokio::time::sleep(Duration::from_millis(50)).await;
-        }
-        let stranded = self.shared.inflight.load(Ordering::Acquire);
-        if let Some(e) = fatal {
-            if stranded > 0 {
-                tracing::warn!(
-                    target: "http",
-                    "{stranded} request(s) still in flight when the listener failed"
-                );
+        let _ = tokio::time::timeout(grace, async {
+            self.connections.closed().await;
+            while self.shared.inflight.count() > 0 {
+                tokio::time::sleep(Duration::from_millis(50)).await;
             }
-            return Err(e);
-        }
+        })
+        .await;
+        let stranded = self.shared.inflight.count();
         if stranded > 0 {
             return Err(anyhow!(
                 "http drain timed out after {grace:?} with {stranded} request(s) in flight; \
@@ -139,31 +133,15 @@ impl Serve for Serving {
     }
 }
 
-/// Runs the accept loop on the calling thread until the stop flag, then drains the connections.
-pub(crate) fn serve(mut config: Config, prepared: PreparedListener, worker: Worker) -> Result<()> {
-    let Worker {
-        handle,
-        intake,
-        stop,
-        drain_grace,
-    } = worker;
-    let acceptor = Acceptor::adopt(prepared, stop, &handle)?;
-    // Each worker spools in its own dir under the configured one. The sweep removes the dir of a killed worker that this worker replaces.
-    if let Some(limits) = &mut config.uploads {
-        multipart::sweep_spool_dirs(&limits.dir);
-        limits.dir = multipart::create_worker_spool_dir(&limits.dir)?;
-    }
-    let spool_dir = config.uploads.as_ref().map(|limits| limits.dir.clone());
-    let serving = Serving::start(intake, config);
-    let fatal = acceptor.run(&handle, &serving);
-    let drained = handle.block_on(serving.drain(fatal, drain_grace));
-    // The plugin removes the dir when its drain ends. A spooled file of an exchange that still runs after the drain is removed with it.
-    if let Some(dir) = &spool_dir
-        && let Err(e) = std::fs::remove_dir_all(dir)
-    {
-        tracing::warn!(target: "rapira", "removing spool dir {}: {e}", dir.display());
-    }
-    drained
+pub(crate) async fn serve(server: Server, worker: Worker) -> Result<()> {
+    let Server {
+        config,
+        prepared,
+        spool: _spool,
+    } = server;
+    let serving = Serving::start(worker.intake, config);
+    prepared.run(worker.stop, &serving).await?;
+    serving.drain(worker.drain_grace).await
 }
 
 fn listen_addr(listen: &ListenAddr) -> Addr {

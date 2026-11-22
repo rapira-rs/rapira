@@ -1,4 +1,4 @@
-//! This module has the settings of the [http] table, the boot checks and the Server that the master forks with.
+//! The `[http]` settings, boot checks and listener preparation.
 
 use std::fs::{OpenOptions, remove_file};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -237,7 +237,7 @@ fn check_uploads_dir(dir: &Path) -> Result<()> {
 }
 
 impl Server {
-    /// Runs in the master after the logger starts. It binds the listener before the fork.
+    /// Prepares the HTTP listener and its settings before the workers start.
     pub fn from_settings(settings: Settings) -> Result<Self> {
         let mut middleware: Vec<crate::middleware::Layer> = Vec::new();
         if let Some(st) = settings.static_files {
@@ -246,8 +246,7 @@ impl Server {
         }
 
         let prepared = rapira_net::bind(&settings.listen).context("plugin http: prepare failed")?;
-        tracing::info!(target: "http", "prepared listener on {}", prepared.addr());
-        let config = Config {
+        let mut config = Config {
             // The bound address, because the kernel picks the port for a listen port 0.
             listen: prepared.addr().clone(),
             // The plugin leaks it once at boot, because every request borrows it until the process exits.
@@ -264,8 +263,13 @@ impl Server {
             uploads: settings.uploads,
             sendfile_root: settings.sendfile_root,
         };
-        prepare(&config);
-        Ok(Self { config, prepared })
+        let spool = prepare(&mut config).context("plugin http: prepare failed")?;
+        tracing::info!(target: "http", "listening on {}", prepared.addr());
+        Ok(Self {
+            config,
+            prepared,
+            spool,
+        })
     }
 }
 

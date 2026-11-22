@@ -1,4 +1,4 @@
-//! This module has the multipart/form-data parser of dispatcher mode and the spool dirs of the workers. https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
+//! The multipart/form-data parser for dispatcher mode and the process spool directory. https://www.rfc-editor.org/rfc/rfc2046#section-5.1.1
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -76,23 +76,40 @@ pub struct Limits {
     pub max_part_headers: usize,
 }
 
-/// Creates the spool dir of this worker process under `base`, with owner-only access. The master at boot and each worker at its start sweep the dirs whose process is gone.
-pub(crate) fn create_worker_spool_dir(base: &Path) -> anyhow::Result<PathBuf> {
-    use std::os::unix::fs::DirBuilderExt;
-    let dir = base.join(format!("rapira-spool-{}", std::process::id()));
-    // A killed worker that had the same pid leaves a dir with this pid.
-    let _ = std::fs::remove_dir_all(&dir);
-    std::fs::DirBuilder::new()
-        .mode(0o700)
-        .create(&dir)
-        .map_err(|e| anyhow::anyhow!("creating spool dir {}: {e}", dir.display()))?;
-    // systemd-tmpfiles does not age a dir with a BSD lock. The fd stays open until the worker exits. https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html#Age
-    if let Ok(lock) = std::fs::File::open(&dir)
-        && lock.lock_shared().is_ok()
-    {
-        std::mem::forget(lock);
+pub(crate) struct SpoolDir {
+    dir: PathBuf,
+    _lock: Option<std::fs::File>,
+}
+
+impl SpoolDir {
+    /// Removes stale directories and sets `limits.dir` to the new process spool directory.
+    pub(crate) fn prepare(limits: &mut Limits) -> anyhow::Result<Self> {
+        use std::os::unix::fs::DirBuilderExt;
+        sweep_spool_dirs(&limits.dir);
+        let dir = limits
+            .dir
+            .join(format!("rapira-spool-{}", std::process::id()));
+        // The OS can reuse the pid of a process that left its directory behind.
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&dir)
+            .map_err(|e| anyhow::anyhow!("creating spool dir {}: {e}", dir.display()))?;
+        // A shared lock keeps systemd-tmpfiles from removing the directory. https://www.freedesktop.org/software/systemd/man/latest/tmpfiles.d.html#Age
+        let lock = std::fs::File::open(&dir)
+            .ok()
+            .filter(|f| f.lock_shared().is_ok());
+        limits.dir.clone_from(&dir);
+        Ok(Self { dir, _lock: lock })
     }
-    Ok(dir)
+}
+
+impl Drop for SpoolDir {
+    fn drop(&mut self) {
+        if let Err(e) = std::fs::remove_dir_all(&self.dir) {
+            tracing::warn!(target: "rapira", "removing spool dir {}: {e}", self.dir.display());
+        }
+    }
 }
 
 /// kill(pid, 0) checks that the process exists and sends no signal. ESRCH means that the owner is gone, and EPERM means that it runs under another uid. https://man7.org/linux/man-pages/man2/kill.2.html
@@ -109,7 +126,7 @@ fn spool_dir_reclaimable(name: &str) -> bool {
 }
 
 /// Removes the spool dirs under `base` whose process is gone.
-pub(crate) fn sweep_spool_dirs(base: &Path) {
+fn sweep_spool_dirs(base: &Path) {
     match std::fs::read_dir(base) {
         Ok(entries) => {
             for entry in entries.flatten() {

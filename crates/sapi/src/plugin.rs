@@ -1,8 +1,7 @@
-use std::sync::{Arc, Condvar, Mutex, MutexGuard, PoisonError};
-use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::pin::Pin;
+use std::time::Duration;
 
-use anyhow::anyhow;
+use tokio::runtime::Handle;
 use tokio::sync::watch;
 
 use crate::rapira_plugin;
@@ -10,15 +9,22 @@ use crate::work::Intake;
 
 pub use rapira_config::Mode;
 
-/// What the worker hands to [`Plugin::serve`].
+/// Sets the IO runtime for PHP stream waits. The host calls this once before it starts the plugin tasks.
+pub fn set_runtime(handle: Handle) {
+    crate::stream::HANDLE
+        .set(handle)
+        .expect("the host sets the IO runtime once");
+}
+
+/// The pool intake and the stop settings for one plugin.
 pub struct Worker {
-    pub handle: tokio::runtime::Handle,
     pub intake: Intake,
-    /// Set to true once. The plugin stops accepting, drains within `drain_grace`, and returns from `serve`.
+    /// A true value or a closed channel stops the accept loop.
     pub stop: watch::Receiver<bool>,
-    /// The bound of the plugin's drain after the stop. The root sets it below the join bound of [`run_plugin`].
     pub drain_grace: Duration,
 }
+
+pub type ServeFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'static>>;
 
 pub trait Plugin: Send + 'static {
     /// The TOML section and the dispatcher name PHP sees.
@@ -27,162 +33,6 @@ pub trait Plugin: Send + 'static {
     fn modes(&self) -> &'static [Mode];
     /// The address of the plugin record (`rapira_plugin` in rapira_sapi.h). In dispatcher mode, PHP calls receive() on the dispatcher that the record describes.
     fn dispatcher(&self) -> *const rapira_plugin;
-    /// Runs in the worker, on the plugin thread. Returns after the stop signal and the drain.
-    fn serve(self: Box<Self>, worker: Worker) -> anyhow::Result<()>;
-}
-
-/// The plugin thread that [`run_plugin`] started.
-pub struct Running {
-    name: &'static str,
-    thread: JoinHandle<anyhow::Result<()>>,
-    stopper: Stopper,
-    grace: Duration,
-}
-
-impl Running {
-    /// Joins the plugin thread. An error from serve, a panic, or a join past `grace` after stop is an Err.
-    pub fn join(self) -> anyhow::Result<()> {
-        let Running {
-            name,
-            thread,
-            stopper,
-            grace,
-        } = self;
-        let events = &stopper.events;
-        let mut state = events.lock();
-        while !state.ended {
-            state = match state.stopped_at {
-                None => events
-                    .changed
-                    .wait(state)
-                    .unwrap_or_else(PoisonError::into_inner),
-                Some(at) => {
-                    let Some(left) = grace.checked_sub(at.elapsed()) else {
-                        return Err(anyhow!("{name} did not stop within {grace:?}"));
-                    };
-                    events
-                        .changed
-                        .wait_timeout(state, left)
-                        .unwrap_or_else(PoisonError::into_inner)
-                        .0
-                }
-            };
-        }
-        drop(state);
-        thread.join().map_err(|payload| {
-            let msg = payload
-                .downcast_ref::<&str>()
-                .copied()
-                .or_else(|| payload.downcast_ref::<String>().map(String::as_str))
-                .unwrap_or("unknown panic");
-            anyhow!("{name} panicked: {msg}")
-        })?
-    }
-}
-
-/// Sets the stop flag. It needs no runtime, so a plain thread can call it. A stop before [`run_plugin`] also reaches the plugin.
-#[derive(Clone, Default)]
-pub struct Stopper {
-    flag: watch::Sender<bool>,
-    events: Arc<JoinEvents>,
-    restart: Arc<tokio::sync::Notify>,
-}
-
-impl Stopper {
-    pub fn stop(&self) {
-        self.flag.send_replace(true);
-        let mut state = self.events.lock();
-        state.stopped_at.get_or_insert_with(Instant::now);
-        self.events.changed.notify_all();
-    }
-
-    /// Asks the app to restart in this worker. Works from a plain thread.
-    pub fn restart_app(&self) {
-        self.restart.notify_one();
-    }
-}
-
-/// The two events that [`Running::join`] waits for.
-#[derive(Default)]
-struct JoinEvents {
-    state: Mutex<JoinState>,
-    changed: Condvar,
-}
-
-#[derive(Default)]
-struct JoinState {
-    /// The time of the first stop. The grace of the join counts from this time.
-    stopped_at: Option<Instant>,
-    /// The plugin thread ended.
-    ended: bool,
-}
-
-impl JoinEvents {
-    fn lock(&self) -> MutexGuard<'_, JoinState> {
-        self.state.lock().unwrap_or_else(PoisonError::into_inner)
-    }
-}
-
-/// Marks the end of the plugin thread when it drops, also on a panic.
-struct Ended(Arc<JoinEvents>);
-
-impl Drop for Ended {
-    fn drop(&mut self) {
-        self.0.lock().ended = true;
-        self.0.changed.notify_all();
-    }
-}
-
-/// Builds one two-worker tokio runtime with the IO and time drivers, spawns `rapira-{name}` and runs `serve` on it.
-/// `stopper` stops the plugin. `grace` bounds the join after the stop. `drain_grace` goes to [`Worker::drain_grace`].
-pub fn run_plugin(
-    plugin: Box<dyn Plugin>,
-    intake: Intake,
-    stopper: Stopper,
-    grace: Duration,
-    drain_grace: Duration,
-) -> anyhow::Result<Running> {
-    let name = plugin.name();
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .worker_threads(2)
-        .enable_all()
-        .thread_name(format!("rapira-{name}-io"))
-        .build()
-        .map_err(|e| anyhow!("building the {name} runtime: {e}"))?;
-    // One worker runs one plugin, so this is the only set of the process.
-    let _ = crate::stream::HANDLE.set(rt.handle().clone());
-    let ended = Ended(Arc::clone(&stopper.events));
-    // The task and its Intake clone drop with the runtime when serve returns, so the clone never keeps the intake open after a stop.
-    let restart = Arc::clone(&stopper.restart);
-    let restart_intake = intake.clone();
-    rt.spawn(async move {
-        loop {
-            restart.notified().await;
-            if let Err(e) = restart_intake.restart_app() {
-                tracing::warn!(target: "rapira", "reload skipped: {e}");
-            }
-        }
-    });
-    let worker = Worker {
-        handle: rt.handle().clone(),
-        intake,
-        stop: stopper.flag.subscribe(),
-        drain_grace,
-    };
-    let thread = std::thread::Builder::new()
-        .name(format!("rapira-{name}"))
-        .spawn(move || {
-            let _ended = ended;
-            let result = plugin.serve(worker);
-            // The runtime drops here, on a plain thread, because a drop in an async context panics.
-            drop(rt);
-            result
-        })
-        .map_err(|e| anyhow!("spawning the {name} thread: {e}"))?;
-    Ok(Running {
-        name,
-        thread,
-        stopper,
-        grace,
-    })
+    /// Serves on the IO runtime until the listener fails or the drain ends.
+    fn serve(self: Box<Self>, worker: Worker) -> ServeFuture;
 }

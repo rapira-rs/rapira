@@ -52,9 +52,9 @@ unsafe extern "C" {
     static mut rapira_http_server_port: rapira_sapi::zend_long;
 }
 
-/// Runs once in the master before the fork; the workers inherit the values.
+/// Sets the HTTP identity before PHP starts.
 pub(crate) fn set_server_identity(name: &'static str, port: u16) {
-    // SAFETY: the master is single-threaded and no PHP reads the values before the fork; name is static, so the pointer stays valid.
+    // SAFETY: only the boot thread runs here. The name has a static lifetime.
     unsafe {
         rapira_http_server_name = zend::ptr_or_empty(name.as_bytes());
         rapira_http_server_name_len = name.len();
@@ -206,7 +206,7 @@ impl Held for ExchangeState {
     }
 
     fn class(&self) -> *mut zend_class_entry {
-        // SAFETY: MINIT assigns the class entry in the master before the fork, and nothing writes it after.
+        // SAFETY: MINIT sets the class entry before any worker starts.
         unsafe { rapira_ce_http_exchange }
     }
 }

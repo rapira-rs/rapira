@@ -8,7 +8,7 @@ use tokio::runtime::Handle;
 
 pub use crate::start::Wait;
 
-/// The runtime of the plugin of this worker. `run_plugin` sets it before the plugin serves.
+/// The shared IO runtime. The host sets the handle before any plugin serves.
 pub(crate) static HANDLE: OnceLock<Handle> = OnceLock::new();
 
 /// Runs `park` with the execution timer of this thread paused, then restores the timer. A parked thread never reaches an opcode boundary, and on NTS a second expiry would `_exit(124)`.
@@ -59,7 +59,7 @@ async fn first<T>(
     }
 }
 
-/// Blocks the PHP thread until `closed` completes, `next` completes or the wait ends, in this order of precedence. The PHP thread drives only these futures on the plugin runtime; the IO threads of the runtime handle the sockets and the timers.
+/// Blocks the PHP thread until `closed` completes, `next` completes or the wait ends, in this order. The IO threads handle the sockets and timers.
 /// # Safety
 /// The caller runs on a PHP thread.
 pub unsafe fn wait<T>(
@@ -69,7 +69,7 @@ pub unsafe fn wait<T>(
 ) -> Step<T> {
     let handle = HANDLE
         .get()
-        .expect("run_plugin sets the handle before the plugin submits a unit");
+        .expect("the host sets the IO runtime before a plugin submits a unit");
     // SAFETY: the caller runs on a PHP thread.
     unsafe { paused(|| handle.block_on(first(next, closed, wait))) }
 }

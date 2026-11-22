@@ -293,7 +293,7 @@ impl Held for GrpcState {
     }
 
     fn class(&self) -> *mut zend_class_entry {
-        // SAFETY: MINIT assigns the class entries in the master before the fork, and nothing writes them after.
+        // SAFETY: MINIT sets the class entries before any worker starts.
         unsafe {
             match self.req.kind {
                 MethodKind::ServerStreaming => rapira_ce_grpc_server_streaming_call,

@@ -1,4 +1,4 @@
-//! The `[grpc]` table: its settings, the boot checks, the interceptor list and the `Server` that the master forks with.
+//! The `[grpc]` settings, boot checks, interceptors and listener preparation.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
@@ -169,7 +169,7 @@ fn resolve_interceptors(
 }
 
 impl Server {
-    /// The master loads the schema and interceptors and binds the listener before the fork. An error stops the boot.
+    /// Loads the schema and interceptors and binds the listener before the workers start.
     pub fn from_settings(settings: Settings) -> Result<Self> {
         let schema = Arc::new(Schema::load(
             &settings.descriptor_set,
