@@ -34,12 +34,8 @@ pub struct StaticFiles {
 
 impl StaticFiles {
     /// A relative `root` resolves against the process working directory.
-    /// `forbid` holds file-name suffixes with a leading dot.
-    /// The constructor lowercases them, so an uppercase entry still matches in `eligible`.
-    pub fn new(root: PathBuf, mut forbid: Vec<String>) -> Self {
-        for entry in &mut forbid {
-            entry.make_ascii_lowercase();
-        }
+    /// `forbid` holds ASCII case-insensitive file-name suffixes with a leading dot.
+    pub fn new(root: PathBuf, forbid: Vec<String>) -> Self {
         Self {
             // The URL space belongs to PHP, so a directory URL is the app's route, not an
             // implicit index.html.
@@ -67,8 +63,11 @@ impl StaticFiles {
             .rsplit('/')
             .find(|s| !s.is_empty())
             .unwrap_or_default()
-            .to_ascii_lowercase();
-        !self.forbid.iter().any(|ext| file.ends_with(ext.as_str()))
+            .as_bytes();
+        !self.forbid.iter().any(|ext| {
+            let start = file.len().saturating_sub(ext.len());
+            file[start..].eq_ignore_ascii_case(ext.as_bytes())
+        })
     }
 }
 
@@ -167,6 +166,41 @@ async fn forward(mut inner: Inner, req: http::Request<Body>) -> http::Response<B
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn suffixes_match_the_end_of_the_file_name_in_ascii_case() {
+        struct Case {
+            name: &'static str,
+            path: &'static str,
+            eligible: bool,
+        }
+        let cases = [
+            Case {
+                name: "mixed case compound suffix",
+                path: "/archive.TaR.Gz",
+                eligible: false,
+            },
+            Case {
+                name: "suffix before the end",
+                path: "/archive.tar.gz.txt",
+                eligible: true,
+            },
+            Case {
+                name: "shorter than the suffix",
+                path: "/a",
+                eligible: true,
+            },
+            Case {
+                name: "suffix window starts inside a UTF-8 character",
+                path: "/ééx",
+                eligible: true,
+            },
+        ];
+        let files = StaticFiles::new(PathBuf::from("/"), vec![".TaR.gZ".into(), ".LOG".into()]);
+        for case in cases {
+            assert_eq!(files.eligible(case.path), case.eligible, "{}", case.name);
+        }
+    }
 
     /// The middleware cannot check an undecodable path against the dot and forbid rules, so the path is never eligible.
     #[test]

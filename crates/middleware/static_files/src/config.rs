@@ -15,7 +15,7 @@ pub struct Section {
 pub struct Settings {
     pub root: PathBuf,
     /// Extensions the middleware never serves from the root, with a leading dot.
-    /// The middleware normalizes the case.
+    /// The middleware ignores ASCII case.
     pub forbid: Vec<String>,
 }
 
