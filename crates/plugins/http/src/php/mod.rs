@@ -118,7 +118,7 @@ pub fn uri_abs(req: &Request) -> String {
 
 pub struct ExchangeState {
     // The multipart field comes before sender, so the drop in declaration order unlinks the spool files before the frame sender closes.
-    /// The parsed multipart body. The parse takes the raw chunks out of `req`, so `req.body` is empty when this is `Some`. With `None`, `req.body` holds the raw body. seal(), discard_unit() and fail() unlink the spool files. SpooledFile::drop removes a file that a bailout after a fatal error or a timeout leaves behind.
+    /// The multipart parser takes the raw chunks from `req`. For other bodies, `req` keeps the chunks until `getRequest()` stores the PHP object. seal(), discard_unit() and fail() unlink the spool files. SpooledFile::drop removes a file that a bailout after a fatal error or a timeout leaves behind.
     multipart: Option<MultipartBody>,
     req: Request,
     sender: Option<Sender<Frame>>,

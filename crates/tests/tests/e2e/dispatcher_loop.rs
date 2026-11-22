@@ -573,6 +573,32 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn first_request_access_after_finalization_keeps_the_body() -> anyhow::Result<()> {
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/late-request.php")).spawn();
+    let mut post = req("/late?x=%2F");
+    *post.method_mut() = Method::POST;
+    *post.body_mut() = (0..=u8::MAX).cycle().take(262_144).collect();
+    post.body_mut().extend_from_slice(b"\xff\0!");
+    let sealed = drain_resp(submit(srv.addr, post)?);
+    assert_eq!(
+        (sealed.status(), sealed.body.as_slice()),
+        (200, &b"sealed\n"[..])
+    );
+    let late = drain_resp(submit(srv.addr, req("/next"))?);
+    assert_eq!(late.status(), 200);
+    let saved: serde_json::Value = serde_json::from_slice(&late.body)?;
+    assert_eq!(
+        saved,
+        serde_json::json!({
+            "final": true, "same": true, "method": "POST", "target": "/late?x=%2F",
+            "uri": "http://localhost/late?x=%2F", "length": 262147,
+            "sha256": "a6236f3d7af8393a1dcfb51f3c913cecc839339c641c580f80dd43723141b7f9"
+        })
+    );
+    Ok(())
+}
+
 /// The protocol spelling that the plugin stamps, and the no-authority `$uri` fallback to the server socket. Only an HTTP/1.0 request may omit Host.
 #[test]
 fn plugin_stamped_fields_pass_through() -> anyhow::Result<()> {

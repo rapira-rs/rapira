@@ -177,6 +177,7 @@ unsafe fn build_request_impl(held: *const HeldPtr, memo: *mut zval) -> bool {
         zend::slot_double(o, received_at_slot, req.received_at);
 
         *memo = reqz;
+        st.req.body = Default::default();
         true
     }
 }

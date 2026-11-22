@@ -178,6 +178,7 @@ async fn unary(
     }
     let plain_reply = plain_reply(&ctx);
     let call = call(schema, method, &path, &mut ctx, request.encoded()?, format)?;
+    drop(request);
     let protocol = call.protocol;
     let bytes = call.message.len();
     let (tx, reply) = oneshot::channel();
