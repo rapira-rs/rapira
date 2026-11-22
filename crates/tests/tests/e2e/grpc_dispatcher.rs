@@ -10,7 +10,7 @@ use tests::grpc::{
 };
 use tests::{fixture, server_log};
 
-use crate::harness::{Server, Spawn, is_zts, listen, logged_remote, scratch_dir, stop};
+use crate::harness::{Server, Spawn, listen, logged_remote, scratch_dir, stop};
 
 /// Waits for the boot probe of unary-worker.php, so no call races the boot.
 fn booted(srv: Server) -> Server {
@@ -106,10 +106,8 @@ fn dispatcher_identity_and_services() -> anyhow::Result<()> {
 
 /// The two pools run together. Each worker gets the dispatcher of its own pool.
 #[test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 fn an_http_worker_next_to_a_grpc_worker_keeps_the_http_dispatcher() {
-    if !is_zts() {
-        return;
-    }
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/worker-singleton.php"))
         .with_grpc(fixture("grpc/identity.php"))
         .json_log()

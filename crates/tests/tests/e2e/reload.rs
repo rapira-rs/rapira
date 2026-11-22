@@ -805,10 +805,8 @@ const OPCACHE_ON: &str = "enabled=true pending=false";
 
 /// The second reload arrives after one app ends but while another request still holds the old code. Both requests finish. Both new apps must have OPcache enabled with no restart pending.
 #[test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 fn two_reloads_during_long_requests_leave_opcache_on_in_every_worker() {
-    if !is_zts() {
-        return;
-    }
     let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
         .expect("read the shared php.ini");
     let srv = Spawn::http(

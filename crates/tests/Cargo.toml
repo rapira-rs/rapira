@@ -22,6 +22,10 @@ http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 
+[build-dependencies]
+cc = "1.2"
+rapira_php_build = { workspace = true }
+
 [dev-dependencies]
 # The E2E tests (tests/e2e) use it for process control of the spawned rapira binary.
 libc = { workspace = true }

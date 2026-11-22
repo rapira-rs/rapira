@@ -4,7 +4,7 @@ use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, fixture, req, server_log};
 
-use crate::harness::{Server, Spawn, is_zts, slot_line, wait_serving};
+use crate::harness::{Server, Spawn, slot_line, wait_serving};
 
 fn post(body: Vec<u8>) -> http::Request<Vec<u8>> {
     let mut r = req("/");
@@ -165,10 +165,8 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
 
 /// A second worker reads the unlocked session store as soon as the client gets the writer's response.
 #[test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 fn the_next_request_reads_the_session_of_the_previous_response() -> anyhow::Result<()> {
-    if !is_zts() {
-        return Ok(());
-    }
     struct Case {
         name: &'static str,
         mode: Mode,

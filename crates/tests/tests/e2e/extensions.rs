@@ -5,7 +5,7 @@ use rapira_sapi::plugin::Mode;
 use tests::StatusBody;
 
 use crate::harness::{
-    Server, Spawn, diagnostics, fan_out, fixture_path, http_get, http_get_with_headers, is_zts,
+    Server, Spawn, diagnostics, fan_out, fixture_path, http_get, http_get_with_headers,
     wait_serving,
 };
 
@@ -84,10 +84,8 @@ fn get_browser_uses_browscap_and_isolates_user_agent_requests() {
 
 /// Each worker reads the same browser table across requests.
 #[test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 fn browscap_table_is_shared_and_stable_across_workers() {
-    if !is_zts() {
-        return;
-    }
     const WORKERS: usize = 3;
     let srv = Spawn::http(Mode::Worker, fixture_path("browscap/browscap-worker.php"))
         .workers(WORKERS)

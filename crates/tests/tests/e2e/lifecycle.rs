@@ -5,10 +5,8 @@ use tests::wire::submit;
 use tests::{StatusBody, drain_resp, poll, req, server_log};
 
 #[test]
+#[cfg_attr(php_zts, ignore = "needs NTS PHP")]
 fn nts_uses_one_worker_and_warns_when_four_are_configured() {
-    if is_zts() {
-        return;
-    }
     let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
         .workers(4)
         .json_log()
@@ -26,10 +24,8 @@ fn nts_uses_one_worker_and_warns_when_four_are_configured() {
 }
 
 #[test]
+#[cfg_attr(php_zts, ignore = "needs NTS PHP")]
 fn nts_refuses_two_pools() {
-    if is_zts() {
-        return;
-    }
     let preload = fixture_path("lifecycle/preload-marker.php");
     let mut ini = format!(
         "opcache.enable = 1\nopcache.preload = \"{}\"\n",
@@ -406,10 +402,8 @@ fn an_unreadable_entrypoint_refuses_to_boot() {
 
 /// One worker waits at boot. The other reaches the limit before the pool can serve.
 #[test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 fn a_boot_failure_limit_in_one_worker_stops_a_pool_that_never_served() {
-    if !is_zts() {
-        return;
-    }
     let mut srv = Spawn::http(
         Mode::Dispatcher,
         fixture_path("lifecycle/lock-boot-worker.php"),
@@ -432,10 +426,8 @@ fn a_boot_failure_limit_in_one_worker_stops_a_pool_that_never_served() {
 
 /// An idle worker makes the pool ready while the other worker retries past the boot failure limit.
 #[test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 fn a_failing_worker_retries_next_to_a_serving_worker() {
-    if !is_zts() {
-        return;
-    }
     let observability = std::net::SocketAddr::from(([127, 0, 0, 1], free_port()));
     let srv = Spawn::http(
         Mode::Dispatcher,

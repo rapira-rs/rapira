@@ -10,7 +10,7 @@ use tests::{StatusBody, server_log};
 
 use crate::harness::{
     BOOT, ECHO_SERVICE, EXIT_OK, Exited, STOP_BUDGET, Spawn, assert_exit_code, diagnostics,
-    fixture_path, http_get, is_zts, listen, signal, wait_log_contains, wait_serving,
+    fixture_path, http_get, listen, signal, wait_log_contains, wait_serving,
 };
 
 /// Encodes `EchoRequest { text }` as field 1, length-delimited, for a text shorter than 128 bytes.
@@ -185,10 +185,8 @@ fn grpc_pool_serves_from_rapira_toml() {
 
 /// Each worker gets the dispatcher of its own pool and answers its protocol.
 #[test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 fn http_and_grpc_pools_run_side_by_side() {
-    if !is_zts() {
-        return;
-    }
     let srv = Spawn::http(
         Mode::Dispatcher,
         tests::fixture("dispatcher/echo-loop-worker.php"),

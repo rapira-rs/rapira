@@ -11,7 +11,7 @@ use tests::{drain_async, fixture, req, server_log, wire};
 use tokio::sync::mpsc::Receiver;
 use tokio::time::timeout;
 
-use crate::harness::{Server, Spawn, is_zts, listen, logged_remote, stop, wait_serving};
+use crate::harness::{Server, Spawn, listen, logged_remote, stop, wait_serving};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -51,10 +51,8 @@ fn assert_two_apps(srv: &Server, first: &Value, second: &Value) {
 }
 
 #[tokio::test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 async fn a_free_worker_answers_a_second_http_connection() -> anyhow::Result<()> {
-    if !is_zts() {
-        return Ok(());
-    }
     let srv = two_http_workers();
     let held = get(srv.addr, "/hold").await?;
     server_log::wait_app_record(&srv.log_file(), "/hold pending 0");
@@ -70,10 +68,8 @@ async fn a_free_worker_answers_a_second_http_connection() -> anyhow::Result<()> 
 }
 
 #[tokio::test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 async fn pending_is_per_pool_and_active_is_per_worker() -> anyhow::Result<()> {
-    if !is_zts() {
-        return Ok(());
-    }
     let srv = two_http_workers();
     let log = srv.log_file();
     let first = get(srv.addr, "/hold-first").await?;
@@ -100,10 +96,8 @@ async fn pending_is_per_pool_and_active_is_per_worker() -> anyhow::Result<()> {
 }
 
 #[tokio::test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 async fn two_grpc_calls_overlap_on_one_http2_connection() -> anyhow::Result<()> {
-    if !is_zts() {
-        return Ok(());
-    }
     let srv = Spawn::grpc(fixture("pool_threads/overlap/grpc.php"))
         .workers(2)
         .spawn();
@@ -167,10 +161,8 @@ async fn echo_view(conn: &mut Conn, headers: &[(&str, &str)]) -> anyhow::Result<
 }
 
 #[tokio::test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 async fn http_and_grpc_keep_their_pool_settings_in_one_process() -> anyhow::Result<()> {
-    if !is_zts() {
-        return Ok(());
-    }
     struct Case {
         name: &'static str,
         http_mode: Mode,
