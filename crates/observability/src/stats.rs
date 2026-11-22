@@ -63,8 +63,9 @@ fn pool_stats(pool: &Pool) -> PoolStats {
         if let Some(i) = STATES.iter().position(|known| known.state == state) {
             stats.states[i] += 1;
         }
-        stats.requests += worker.handled.load(Relaxed);
-        stats.failed += worker.errors.load(Relaxed);
+        let (handled, failed) = worker.totals();
+        stats.requests += handled;
+        stats.failed += failed;
         stats.script_restarts += worker.recycles.load(Relaxed);
     }
     stats
@@ -138,8 +139,9 @@ mod tests {
                     pool.workers.iter().zip(case.workers)
                 {
                     worker.state.store(state, Relaxed);
-                    worker.handled.store(handled, Relaxed);
-                    worker.errors.store(errors, Relaxed);
+                    for i in 0..handled {
+                        worker.record_outcome(i < errors);
+                    }
                     worker.recycles.store(recycles, Relaxed);
                 }
                 Arc::new(pool)

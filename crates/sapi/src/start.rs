@@ -775,12 +775,9 @@ mod tests {
                 "{}: received, closed seen, exhausted",
                 case.name
             );
+            let (handled, errors) = stats.workers[0].totals();
             assert_eq!(
-                (
-                    stats.workers[0].handled.load(Relaxed),
-                    stats.workers[0].errors.load(Relaxed),
-                    stats.pending.load(Relaxed),
-                ),
+                (handled, errors, stats.pending.load(Relaxed),),
                 (case.counts.handled, case.counts.errors, case.counts.pending),
                 "{}: handled, errors, pending",
                 case.name

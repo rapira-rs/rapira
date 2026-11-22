@@ -223,7 +223,8 @@ fn status(board: &Board) {
                 SLOT_DRAINING => "draining",
                 _ => unreachable!(),
             };
-            info!(target: "rapira", "pool={} worker={i} state={state} handled={} errors={} recycles={} last_activity_ms={}", p.name, w.handled.load(Relaxed), w.errors.load(Relaxed), w.recycles.load(Relaxed), w.last_activity_ms.load(Relaxed));
+            let (handled, errors) = w.totals();
+            info!(target: "rapira", "pool={} worker={i} state={state} handled={handled} errors={errors} recycles={} last_activity_ms={}", p.name, w.recycles.load(Relaxed), w.last_activity_ms.load(Relaxed));
         }
     }
 }

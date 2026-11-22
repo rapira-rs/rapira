@@ -40,16 +40,10 @@ pub fn sb_update(event: Event) {
         }
         match event {
             Event::Handled { errored } => {
-                if errored {
-                    s.errors.fetch_add(1, Relaxed);
-                }
-                s.handled.fetch_add(1, Release);
+                s.record_outcome(errored);
                 crate::quota::tick();
             }
-            Event::Shed => {
-                s.errors.fetch_add(1, Relaxed);
-                s.handled.fetch_add(1, Release);
-            }
+            Event::Shed => s.record_outcome(true),
             Event::Recycled => {
                 s.recycles.fetch_add(1, Relaxed);
                 inactive(s, SLOT_STARTING);
@@ -98,6 +92,33 @@ fn inactive(worker: &Worker, state: u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A pool that sheds every request must report the same handled and failed counts in each sample.
+    #[test]
+    fn a_live_shed_sample_counts_each_outcome_once() {
+        const SHED: u64 = 65_536;
+        let pool = Arc::new(Pool::new("http", 1));
+        let writer = Arc::clone(&pool);
+        let go = std::sync::Barrier::new(2);
+        std::thread::scope(|scope| {
+            let go = &go;
+            let worker = scope.spawn(move || {
+                sb_set(writer, 0);
+                go.wait();
+                for _ in 0..SHED {
+                    sb_update(Event::Shed);
+                }
+            });
+            let slot = &pool.workers[0];
+            go.wait();
+            while !worker.is_finished() {
+                let (handled, errors) = slot.totals();
+                assert_eq!(handled, errors, "live shed sample");
+            }
+            worker.join().unwrap();
+            assert_eq!(slot.totals(), (SHED, SHED));
+        });
+    }
 
     /// A request stays active during the drain until its next pull.
     #[test]

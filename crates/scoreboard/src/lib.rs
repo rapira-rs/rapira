@@ -1,5 +1,8 @@
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering::Acquire};
+use std::sync::atomic::{
+    AtomicBool, AtomicU32, AtomicU64, AtomicUsize,
+    Ordering::{Acquire, Relaxed, Release},
+};
 use std::time::Instant;
 
 pub const SLOT_STARTING: u32 = 1;
@@ -41,8 +44,8 @@ impl Pool {
 
 pub struct Worker {
     pub state: AtomicU32,
-    pub handled: AtomicU64,
-    pub errors: AtomicU64,
+    succeeded: AtomicU64,
+    failed: AtomicU64,
     pub recycles: AtomicU64,
     pub last_activity_ms: AtomicU64,
 }
@@ -51,8 +54,8 @@ impl Default for Worker {
     fn default() -> Self {
         Self {
             state: AtomicU32::new(SLOT_STARTING),
-            handled: AtomicU64::new(0),
-            errors: AtomicU64::new(0),
+            succeeded: AtomicU64::new(0),
+            failed: AtomicU64::new(0),
             recycles: AtomicU64::new(0),
             last_activity_ms: AtomicU64::new(0),
         }
@@ -60,6 +63,21 @@ impl Default for Worker {
 }
 
 impl Worker {
+    pub fn record_outcome(&self, failed: bool) {
+        let counter = if failed {
+            &self.failed
+        } else {
+            &self.succeeded
+        };
+        counter.fetch_add(1, Release);
+    }
+
+    /// Returns the handled and failed counts from the same outcome sample.
+    pub fn totals(&self) -> (u64, u64) {
+        let failed = self.failed.load(Relaxed);
+        (self.succeeded.load(Relaxed) + failed, failed)
+    }
+
     pub fn serving(&self) -> bool {
         matches!(self.state.load(Acquire), SLOT_IDLE | SLOT_ACTIVE)
     }
