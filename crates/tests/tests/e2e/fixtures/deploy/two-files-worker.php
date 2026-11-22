@@ -6,9 +6,11 @@ if (!is_file(__DIR__ . '/extra.php')) {
     throw new RuntimeException('extra.php is missing');
 }
 $extra = require __DIR__ . '/extra.php';
-$handler = static function () use ($release, $extra): void {
+$app = bin2hex(random_bytes(8));
+$handler = static function () use ($app, $release, $extra): void {
+    usleep(50_000);
     header('Content-Type: text/plain');
-    printf('pid=%d release.php=%s extra.php=%s', getmypid(), $release, $extra);
+    printf('%s release.php=%s extra.php=%s', $app, $release, $extra);
 };
 while (\Rapira\handle_request($handler)) {
 }

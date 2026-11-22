@@ -8,7 +8,7 @@ use serde_json::Value;
 use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, drain_resp_deadline, fixture, poll, req, server_log};
 
-use crate::harness::{Spawn, free_port, http_get, slot_line};
+use crate::harness::{Spawn, free_port, http_get, pool_line, slot_line};
 
 /// Superglobals are rebuilt for each unit in the resident loop. Query state must not leak.
 #[test]
@@ -192,8 +192,7 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     let rx_a = submit(srv.addr, req(&path))?;
     server_log::wait_app_record(&srv.log_file(), "held");
     let rx_b = submit(srv.addr, req(&path))?;
-    // No signal shows that B is queued or that the server saw its close. A holds the worker until the release file exists, so each wait can be long.
-    std::thread::sleep(Duration::from_secs(1));
+    pool_line(&srv, "http", "pending=1 ");
     drop(rx_b);
     std::thread::sleep(Duration::from_secs(1));
     std::fs::write(&release, "")?;
@@ -203,7 +202,7 @@ fn queued_client_gone_is_discarded_before_handout() -> anyhow::Result<()> {
     let resp = drain_resp(submit(srv.addr, req("/?probe=count"))?);
     assert_eq!(resp.body_string(), "runs=1");
     // A unit discarded at handout counts as handled with an error, so this line shows that B reached the intake.
-    slot_line(&srv, "handled 3 errors 1 ");
+    slot_line(&srv, "handled=3 errors=1 ");
     Ok(())
 }
 
@@ -219,21 +218,20 @@ fn classic_queued_client_gone_is_discarded_before_the_script_runs() -> anyhow::R
     let rx_a = submit(srv.addr, req(&path))?;
     server_log::wait_app_record(&srv.log_file(), "held");
     let rx_b = submit(srv.addr, req(&path))?;
-    // No signal shows that B is queued or that the server saw its close. A holds the worker until the release file exists, so each wait can be long.
-    std::thread::sleep(Duration::from_secs(1));
+    pool_line(&srv, "http", "pending=1 ");
     drop(rx_b);
     std::thread::sleep(Duration::from_secs(1));
     std::fs::write(&release, "")?;
     assert_eq!(drain_resp(rx_a).body_string(), "done");
 
     // A unit discarded at handout counts as handled with an error.
-    slot_line(&srv, "handled 2 errors 1 ");
+    slot_line(&srv, "handled=2 errors=1 ");
     let runs = server_log::app_contexts(&srv.log_file(), "held").len();
     assert_eq!(runs, 1, "the script ran for B");
     Ok(())
 }
 
-/// The bodies of the units that wait for PHP share a 64 MiB budget per worker. A body that does not fit gets 503 at once, before the 30 s intake wait.
+/// The bodies that wait for PHP share a 64 MiB budget per pool. A body that does not fit gets 503 at once.
 #[test]
 fn waiting_bodies_share_a_byte_budget() -> anyhow::Result<()> {
     let observability = SocketAddr::from(([127, 0, 0, 1], free_port()));

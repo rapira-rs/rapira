@@ -48,7 +48,7 @@ fn exit_in_a_frameless_callback_ends_the_reply_complete() -> anyhow::Result<()> 
         );
     }
     // exit() is a normal end, so the slot counts no error.
-    slot_line(&srv, &format!("handled {} errors 0 ", cases.len()));
+    slot_line(&srv, &format!("handled={} errors=0 ", cases.len()));
     Ok(())
 }
 
@@ -70,12 +70,9 @@ fn header_callback_fatal_keeps_the_worker() -> anyhow::Result<()> {
         "{}",
         harness::diagnostics(&srv)
     );
-    assert_eq!(
-        before.body_string(),
-        after.body_string(),
-        "the worker must not exit after the fatal: {}",
-        harness::diagnostics(&srv)
-    );
+    assert_eq!(before.body_string(), "ok");
+    assert_eq!(after.body_string(), "ok");
+    slot_line(&srv, "handled=3 ");
     Ok(())
 }
 

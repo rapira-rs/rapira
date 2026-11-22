@@ -4,14 +4,14 @@
 
 ini_set('memory_limit', '16M');
 $kept = new SplFixedArray(200000);
-$boot = uniqid('', true);
+$boot = bin2hex(random_bytes(8));
 $handler = static function () use ($kept, $boot): void {
     if (isset($_GET['leak'])) {
         for ($i = 0; $i < 200000; $i++) {
             $kept[$i] = ['a' => $i];
         }
     }
-    echo 'pid=', getmypid(), ' boot=', $boot;
+    echo $boot;
 };
 
 while (\Rapira\handle_request($handler)) {

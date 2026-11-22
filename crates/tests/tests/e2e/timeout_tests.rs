@@ -10,7 +10,7 @@ use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp_deadline, fixture, req, server_log};
 
-use crate::harness::{Spawn, http_get, scratch_dir, slot_line, worker_pids};
+use crate::harness::{Spawn, http_get, scratch_dir, slot_line, wait_serving};
 
 fn timeout_ini() -> String {
     std::fs::read_to_string(fixture("ini/timeout_tests/timeout.php.ini"))
@@ -157,7 +157,7 @@ fn max_execution_time_fires_on_rearmed_units() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks that a unit that waits on a socket keeps its worker under static-file load. On NTS the execution timer counts the CPU time of all threads of the process, so the IO threads use up the budget during the wait. On ZTS the timer counts wall-clock time, so the wait itself uses up the budget. The hard timeout of NTS must not end the worker process.
+/// A socket wait times out under static-file load. NTS counts the CPU time of the IO threads. ZTS counts wall-clock time. After the fatal error the worker recycles the app and returns to the idle state.
 #[test]
 fn socket_wait_under_static_load_keeps_the_worker() -> anyhow::Result<()> {
     let backend = TcpListener::bind("127.0.0.1:0")?;
@@ -174,7 +174,7 @@ fn socket_wait_under_static_load_keeps_the_worker() -> anyhow::Result<()> {
         root.display()
     ))
     .spawn();
-    let workers = worker_pids(srv.pid());
+    wait_serving(&srv, "http", 1);
 
     // The backend answers after the 1 s budget plus the 2 s hard timeout of PHP.
     let answer = std::thread::spawn(move || -> std::io::Result<()> {
@@ -215,11 +215,7 @@ fn socket_wait_under_static_load_keeps_the_worker() -> anyhow::Result<()> {
     );
     // accept() returns only after the unit connects, so a run where the unit never connects fails at the checks above and does not hang here.
     answer.join().expect("backend thread")?;
-    assert_eq!(
-        worker_pids(srv.pid()),
-        workers,
-        "the timeout must not end the worker process"
-    );
+    slot_line(&srv, "state=idle handled=1 errors=1 recycles=1 ");
     Ok(())
 }
 
@@ -265,8 +261,8 @@ fn queued_unit_gets_a_fresh_budget() -> anyhow::Result<()> {
             .spawn();
 
         let first = submit(srv.addr, req(c.first))?;
-        // Two connections reach the worker in any order, so the second request goes out once the first unit runs. Slot state 3 is SLOT_ACTIVE.
-        slot_line(&srv, "state 3 ");
+        // Wait for the first unit to start before submitting the second.
+        slot_line(&srv, "state=active ");
         let mut queued = submit(srv.addr, req(c.queued))?;
         assert_eq!(
             drain(first),

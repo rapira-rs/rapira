@@ -337,7 +337,7 @@ async fn auth_covers_the_plugin_routes() {
     stop(srv).await;
 }
 
-/// The master reads the tokens file before the fork. `main` returns the error, so the process exits 1.
+/// The server reads the tokens file at boot. A read error stops the server with exit code 1.
 #[test]
 fn a_missing_tokens_file_fails_the_boot() {
     let tokens = scratch_dir().join("missing-tokens");

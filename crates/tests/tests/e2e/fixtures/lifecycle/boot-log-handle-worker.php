@@ -3,7 +3,7 @@
 
 \Rapira\log('booted');
 while (\Rapira\handle_request(static function (): void {
-    echo getmypid();
+    echo 'ok';
 })) {
 }
 \Rapira\log('app loop ended');

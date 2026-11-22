@@ -7,4 +7,4 @@ if (isset($_GET['fatal'])) {
     });
     return;
 }
-echo getmypid();
+echo 'ok';

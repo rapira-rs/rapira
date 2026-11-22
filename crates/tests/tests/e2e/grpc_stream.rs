@@ -843,11 +843,11 @@ async fn respond_on_a_closed_call_does_not_start_the_generator() {
     stop(srv).await;
 }
 
-/// A stream that runs past the drain grace fails the drain. Sources: the case "a call past the grace is cut" of `drain_waits_for_calls_within_the_grace` in grpc_server.rs (`process_control_timeout_secs = 1` gives a drain grace of 500 ms, and a call that the drain cuts gives a plugin error with `grpc drain timed out`).
+/// A stop timeout of 1 s gives a drain grace of 500 ms. A stream that stays open past the grace causes a `grpc drain timed out` error.
 #[tokio::test]
 async fn a_stream_past_the_drain_grace_fails_the_drain() {
     let srv = Spawn::grpc(fixture("grpc/stream-worker.php"))
-        .toml("[supervisor]\nprocess_control_timeout_secs = 1")
+        .toml("[server]\nstop_timeout_secs = 1")
         .json_log()
         .spawn();
     let mut conn = Conn::open(&listen(&srv), Wire::H2).await.expect("connect");

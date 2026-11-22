@@ -1154,14 +1154,14 @@ async fn shutdown_joins_the_server_and_drops_every_intake_clone() {
     );
 }
 
-/// The drain grace is `[supervisor] process_control_timeout_secs` less the smaller of 5 s and half of it: 4 s gives 2 s, and 1 s gives 500 ms.
+/// The drain grace is `[server] stop_timeout_secs` less the smaller of 5 s and half of it: 4 s gives 2 s, and 1 s gives 500 ms.
 #[tokio::test]
 async fn drain_waits_for_calls_within_the_grace() {
     struct Case {
         name: &'static str,
         /// PHP answers the call this long after the stop. With None, PHP holds the call past the grace.
         answer_after: Option<Duration>,
-        process_control_timeout_secs: u64,
+        stop_timeout_secs: u64,
         grpc_status: Option<&'static str>,
         /// A text of the plugin error. None when the plugin stops clean.
         shutdown: Option<&'static str>,
@@ -1170,14 +1170,14 @@ async fn drain_waits_for_calls_within_the_grace() {
         Case {
             name: "a call that ends inside the grace completes",
             answer_after: Some(Duration::from_millis(100)),
-            process_control_timeout_secs: 4,
+            stop_timeout_secs: 4,
             grpc_status: Some("0"),
             shutdown: None,
         },
         Case {
             name: "a call past the grace is cut",
             answer_after: None,
-            process_control_timeout_secs: 1,
+            stop_timeout_secs: 1,
             grpc_status: None,
             shutdown: Some("grpc drain timed out"),
         },
@@ -1185,8 +1185,8 @@ async fn drain_waits_for_calls_within_the_grace() {
     for case in cases {
         let srv = Spawn::grpc(fixture("grpc/unary-worker.php"))
             .toml(&format!(
-                "[supervisor]\nprocess_control_timeout_secs = {}",
-                case.process_control_timeout_secs
+                "[server]\nstop_timeout_secs = {}",
+                case.stop_timeout_secs
             ))
             .json_log()
             .spawn();
@@ -1234,10 +1234,10 @@ async fn drain_waits_for_calls_within_the_grace() {
 /// Source: the `StaticChecker` docs. `shutdown` only sets NOT_SERVING, and a `Watch` stream ends when its service is removed.
 #[tokio::test]
 async fn drain_ends_health_watch_streams() {
-    // process_control_timeout_secs = 4 gives a drain grace of 2 s.
+    // A stop timeout of 4 s gives a drain grace of 2 s.
     let grace = Duration::from_secs(2);
     let srv = Spawn::grpc(wire_worker())
-        .toml("[supervisor]\nprocess_control_timeout_secs = 4")
+        .toml("[server]\nstop_timeout_secs = 4")
         .json_log()
         .spawn();
     let mut conn = Conn::open(&listen(&srv), Wire::H2).await.expect("connect");

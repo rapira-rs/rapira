@@ -80,7 +80,7 @@ fn services_report_every_configured_method() {
     );
 }
 
-/// The master loads the schema before the fork, and `main` returns the error, so the process exits 1.
+/// The server loads the schema at boot. A schema error stops the server with exit code 1.
 #[test]
 fn load_rejects_a_set_it_cannot_serve() {
     struct Case {
@@ -208,7 +208,7 @@ fn remote(status: &'static str, body: Vec<u8>) -> Remote {
     Remote { port, request_line }
 }
 
-/// The master downloads a `descriptor_set` URL at boot, and the pool routes by the downloaded image.
+/// The server downloads a `descriptor_set` URL at boot. The pool routes calls with that schema.
 ///
 /// Expected values: a Buf image input that starts with `http://` is a remote location (https://buf.build/docs/reference/inputs/#image-formats), and the echo of `json_transcodes_by_descriptor`.
 #[tokio::test]
@@ -242,7 +242,7 @@ async fn a_set_loads_from_a_url() {
     stop(srv).await;
 }
 
-/// A URL that the master cannot load fails the boot like a local set does. The log shows the URL without its userinfo and its query, because both can hold credentials.
+/// A URL that the server cannot load fails the boot like a local set does. The log shows the URL without its userinfo and its query, because both can hold credentials.
 ///
 /// Expected values: exit 1 as in `load_rejects_a_set_it_cannot_serve`, and the status text of ureq (`http status: 404`).
 #[test]

@@ -7,8 +7,8 @@ use tests::{Resp, StatusBody, drain_resp_deadline, poll, req, server_log};
 use tokio::sync::mpsc::Receiver;
 
 use crate::harness::{
-    Conn, Head, Server, Spawn, diagnostics, fixture_path, http_get, http_get_raw,
-    wait_log_contains, wait_workers, worker_pids,
+    Conn, Head, Server, Spawn, diagnostics, fixture_path, http_get, http_get_raw, slot_line,
+    wait_log_contains, wait_serving,
 };
 
 const T: Duration = Duration::from_secs(10);
@@ -168,7 +168,7 @@ fn head_completion_does_not_cancel_php() {
         fixture_path("lifecycle/completed-response-worker.php"),
     )
     .spawn();
-    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    wait_serving(&srv, "http", 1);
     let mut c = Conn::open(srv.addr, T).expect("connect");
     c.send(b"HEAD /body HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n")
         .expect("send");
@@ -186,7 +186,7 @@ fn head_completion_does_not_cancel_php() {
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     assert_eq!(
         body,
-        format!("{pid}:2:finalized").as_bytes(),
+        b"2:finalized",
         "a delivered head must leave PHP free to finalize\n{}",
         diagnostics(&srv)
     );
@@ -199,7 +199,7 @@ fn assert_completed_response_finalizes(path: &str, contents: &[u8]) {
             fixture_path("lifecycle/completed-response-worker.php"),
         )
         .spawn();
-        let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+        wait_serving(&srv, "http", 1);
         if path == "/file" {
             std::fs::write(srv.dir.join("http/payload.bin"), contents).expect("write payload");
         }
@@ -232,7 +232,7 @@ fn assert_completed_response_finalizes(path: &str, contents: &[u8]) {
         assert_eq!(status, 200, "\n{}", diagnostics(&srv));
         assert_eq!(
             c.read_remaining(T).expect("finalization result"),
-            format!("{pid}:2:finalized").as_bytes(),
+            b"2:finalized",
             "{path}, close={close}: complete delivery must preserve PHP finalization\n{}",
             diagnostics(&srv)
         );
@@ -246,7 +246,7 @@ fn later_connection_error_does_not_cancel_completed_response() {
         fixture_path("lifecycle/completed-response-worker.php"),
     )
     .spawn();
-    let pid = wait_workers(&srv, T, "1 worker", |p| p.len() == 1)[0];
+    wait_serving(&srv, "http", 1);
     let mut client = Conn::open(srv.addr, T).expect("connect");
     client
         .send(b"GET /body HTTP/1.1\r\nHost: e2e\r\n\r\n")
@@ -266,12 +266,7 @@ fn later_connection_error_does_not_cancel_completed_response() {
     let StatusBody { status, body } = http_get(srv.addr, "/state", T)
         .unwrap_or_else(|e| panic!("GET /state: {e}\n{}", diagnostics(&srv)));
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
-    assert_eq!(
-        body,
-        format!("{pid}:2:finalized").as_bytes(),
-        "\n{}",
-        diagnostics(&srv)
-    );
+    assert_eq!(body, b"2:finalized", "\n{}", diagnostics(&srv));
 }
 
 #[test]
@@ -285,7 +280,7 @@ fn reset_during_buffered_write_cancels_php() {
         fixture_path("lifecycle/buffered-download-worker.php"),
     )
     .spawn();
-    let pid = wait_workers(&srv, T, "1 worker", |p| p.len() == 1)[0];
+    wait_serving(&srv, "http", 1);
     let mut client = TcpStream::connect_timeout(&srv.addr, T).expect("connect");
     client.set_read_timeout(Some(T)).expect("read timeout");
     client.set_write_timeout(Some(T)).expect("write timeout");
@@ -345,12 +340,7 @@ fn reset_during_buffered_write_cancels_php() {
     let StatusBody { status, body } = http_get(srv.addr, "/state", T)
         .unwrap_or_else(|e| panic!("GET /state after reset: {e}\n{}", diagnostics(&srv)));
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
-    assert_eq!(
-        body,
-        format!("{pid}:2:discarded").as_bytes(),
-        "\n{}",
-        diagnostics(&srv)
-    );
+    assert_eq!(body, b"2:discarded", "\n{}", diagnostics(&srv));
 }
 
 /// An over-long body is cut to the declared content-length, so the framing stays safe for keep-alive. A piece of 16 KiB or more is cut in place, and a smaller piece is copied.
@@ -539,7 +529,7 @@ fn read_slowly(mut rx: Receiver<Frame>) -> Resp {
     resp
 }
 
-/// 160 writes of one 64 KiB string, read by a client that pauses after each frame. max_requests = 1 is a quota of 2, so the app instance ends after the large unit, while the IO thread still holds the pieces. Every byte read repeats the id of the instance that wrote it, the worker process stays, and a new app instance serves the next request on a new connection.
+/// The client pauses after each frame of the large response. The quota ends the app after its second request. The IO thread still holds pieces of the response from that app. A new app serves the next request.
 #[test]
 fn a_slow_client_reads_the_pieces_of_an_app_instance_that_ended() {
     struct Case {
@@ -571,7 +561,7 @@ fn a_slow_client_reads_the_pieces_of_an_app_instance_that_ended() {
         .http_pool("max_requests = 1")
         .json_log()
         .spawn();
-        let pid = wait_workers(&srv, T, "1 worker", |p| p.len() == 1)[0];
+        wait_serving(&srv, "http", 1);
         let first = instance(&srv);
         let read = read_slowly(
             submit(srv.addr, req(&format!("/?probe={}", case.probe))).expect("connect"),
@@ -607,13 +597,7 @@ fn a_slow_client_reads_the_pieces_of_an_app_instance_that_ended() {
             read.body.len(),
             diagnostics(&srv)
         );
-        assert_eq!(
-            worker_pids(srv.pid()),
-            [pid],
-            "{}: the worker process stays\n{}",
-            case.name,
-            diagnostics(&srv)
-        );
+        slot_line(&srv, "recycles=1 ");
         let next = instance(&srv);
         assert_ne!(
             next,

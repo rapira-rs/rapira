@@ -1,120 +1,15 @@
-use std::collections::HashMap;
+use std::collections::BTreeSet;
 use std::time::Duration;
 
 use rapira_sapi::plugin::Mode;
 use tests::StatusBody;
 
 use crate::harness::{
-    Server, Spawn, diagnostics, fan_out, fixture_path, http_get, http_get_with_headers,
-    wait_workers,
+    Server, Spawn, diagnostics, fan_out, fixture_path, http_get, http_get_with_headers, is_zts,
+    wait_serving,
 };
 
 const REQ: Duration = Duration::from_secs(10);
-
-/// One answer of an `*-rng-worker.php` fixture.
-struct RngDraw {
-    pid: u32,
-    /// The first draw of the worker, as hex.
-    first: String,
-}
-
-fn rng_draw(body: &str) -> RngDraw {
-    let (pid, first) = body
-        .strip_prefix("pid=")
-        .and_then(|r| r.split_once(" first="))
-        .unwrap_or_else(|| panic!("unexpected body {body:?}"));
-    let pid: u32 = pid
-        .parse()
-        .unwrap_or_else(|_| panic!("bad pid in {body:?}"));
-    RngDraw {
-        pid,
-        first: first.to_owned(),
-    }
-}
-
-/// No two workers may emit identical first draws. The cached draw also proves that the top level of the entrypoint runs once per worker.
-fn assert_distinct_first_draws(fixture: &str) {
-    let srv = Spawn::http(Mode::Dispatcher, fixture_path(fixture))
-        .processes(4)
-        .spawn();
-    let workers = wait_workers(&srv, Duration::from_secs(20), "4 workers", |p| p.len() == 4);
-    let StatusBody { body, .. } = http_get(srv.addr, "/", REQ).expect("GET /");
-    if body == b"skip" {
-        return;
-    }
-
-    let mut per_pid: HashMap<u32, String> = HashMap::new();
-    for _ in 0..5 {
-        for RngDraw { pid, first } in fan_out(srv.addr, "/", 4, 10, rng_draw) {
-            assert!(
-                first.len() == 32
-                    && first
-                        .bytes()
-                        .all(|b| b.is_ascii_hexdigit() && !b.is_ascii_uppercase()),
-                "bin2hex of 16 bytes must be 32 lowercase hex chars (got {first:?})"
-            );
-            match per_pid.get(&pid) {
-                Some(prev) => assert_eq!(
-                    prev, &first,
-                    "a worker's cached first draw must not change (pid {pid})"
-                ),
-                None => {
-                    per_pid.insert(pid, first);
-                }
-            }
-        }
-        if per_pid.len() == workers.len() {
-            break;
-        }
-    }
-    // Accept scheduling may starve a worker, as seen on macOS. Two distinct pids prove the claim.
-    assert!(
-        per_pid.len() >= 2,
-        "at least two workers must answer\n{}",
-        diagnostics(&srv)
-    );
-    let mut firsts: Vec<&String> = per_pid.values().collect();
-    firsts.sort_unstable();
-    firsts.dedup();
-    assert_eq!(
-        firsts.len(),
-        per_pid.len(),
-        "distinct workers must draw distinct first bytes (per pid: {per_pid:?})"
-    );
-}
-
-/// openssl_random_pseudo_bytes() draws from the OpenSSL DRBG; random_bytes() never uses OpenSSL.
-#[test]
-fn forked_workers_do_not_share_the_openssl_drbg() {
-    assert_distinct_first_draws("extensions/openssl-rng-worker.php");
-}
-
-/// MINIT calls sodium_init() in the master before the fork; each worker must still draw its own randombytes_buf() bytes.
-#[test]
-fn forked_workers_do_not_share_the_sodium_rng() {
-    assert_distinct_first_draws("extensions/sodium-rng-worker.php");
-}
-
-/// php_child_init() calls the child_init_func of each started extension once after the fork, for example the reseed of the session GC generator: https://github.com/php/php-src/blob/75679b1eeee47af1cdb0c0a4852e3dd8c7c88e81/main/main.c#L1859-L1870
-#[test]
-fn forked_workers_run_the_child_init_hooks_of_extensions() {
-    let srv = Spawn::http(
-        Mode::Dispatcher,
-        fixture_path("extensions/child-init-worker.php"),
-    )
-    .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-    let StatusBody { status, body } = http_get(srv.addr, "/", REQ).expect("GET /");
-    if body == b"skip" {
-        return;
-    }
-    assert_eq!(
-        (status, String::from_utf8_lossy(&body).as_ref()),
-        (200, "count=1"),
-        "{}",
-        diagnostics(&srv)
-    );
-}
 
 fn browscap_ini() -> String {
     format!(
@@ -130,13 +25,13 @@ fn browscap_probe(srv: &Server, ua: &str) -> String {
     String::from_utf8_lossy(&body).into_owned()
 }
 
-/// The `browscap` ini is PHP_INI_SYSTEM. MINIT parses the file once into persistent memory, in the master before the fork.
+/// MINIT reads the `browscap` file once. Each request uses its own user agent.
 #[test]
 fn get_browser_uses_browscap_and_isolates_user_agent_requests() {
     let srv = Spawn::http(Mode::Worker, fixture_path("browscap/browscap-worker.php"))
         .php_ini(&browscap_ini())
         .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
 
     struct Case {
         ua: &'static str,
@@ -187,57 +82,29 @@ fn get_browser_uses_browscap_and_isolates_user_agent_requests() {
     );
 }
 
-/// One answer of browscap-worker.php to `?probe=pid`.
-struct BrowscapReply {
-    table: String,
-    pid: u32,
-}
-
-fn table_and_pid(body: &str) -> BrowscapReply {
-    let (table, pid) = body
-        .rsplit_once("\npid=")
-        .unwrap_or_else(|| panic!("no pid line in {body:?}"));
-    BrowscapReply {
-        table: table.to_owned(),
-        pid: pid
-            .parse()
-            .unwrap_or_else(|_| panic!("bad pid in {body:?}")),
-    }
-}
-
-/// One MINIT parse in the master serves every worker. Distinct pids give identical answers, request after request.
+/// Each worker reads the same browser table across requests.
 #[test]
 fn browscap_table_is_shared_and_stable_across_workers() {
+    if !is_zts() {
+        return;
+    }
+    const WORKERS: usize = 3;
     let srv = Spawn::http(Mode::Worker, fixture_path("browscap/browscap-worker.php"))
-        .processes(3)
+        .workers(WORKERS)
         .php_ini(&browscap_ini())
         .spawn();
-    let workers = wait_workers(&srv, Duration::from_secs(20), "3 workers", |p| p.len() == 3);
-    let mut tables: Vec<String> = Vec::new();
-    let mut pids: Vec<u32> = Vec::new();
+    wait_serving(&srv, "http", WORKERS);
+    let expected = browscap_probe(&srv, "Rapira/1.0 (Darwin)");
+    let mut apps = BTreeSet::new();
     for _ in 0..5 {
-        for BrowscapReply { table, pid } in fan_out(srv.addr, "/?probe=pid", 4, 10, table_and_pid) {
-            tables.push(table);
-            pids.push(pid);
+        for body in fan_out(srv.addr, "/?probe=app", 4, 10, str::to_owned) {
+            let (table, app) = body.rsplit_once("\napp=").expect("table and boot token");
+            assert_eq!(table, expected, "browser table of app {app}");
+            apps.insert(app.to_owned());
         }
-        pids.sort_unstable();
-        pids.dedup();
-        if pids.len() == workers.len() {
+        if apps.len() == WORKERS {
             break;
         }
     }
-    // Accept scheduling may starve a worker, as seen on macOS. Two distinct pids prove the claim.
-    assert!(
-        pids.len() >= 2,
-        "at least two workers must answer\n{}",
-        diagnostics(&srv)
-    );
-    tables.sort();
-    tables.dedup();
-    assert_eq!(
-        tables.len(),
-        1,
-        "every worker must serve the identical table (got {} variants)",
-        tables.len()
-    );
+    assert_eq!(apps.len(), WORKERS, "serving apps: {apps:?}");
 }

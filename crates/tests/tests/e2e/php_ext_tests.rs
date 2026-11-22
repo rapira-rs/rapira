@@ -4,7 +4,7 @@ use tests::{Resp, drain_resp, fixture, req};
 
 use crate::harness::Spawn;
 
-/// One worker process serves every uri in order.
+/// One worker serves every URI in order.
 fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<Resp>> {
     let srv = Spawn::http(Mode::Worker, fixture(name)).spawn();
     uris.iter()

@@ -13,8 +13,8 @@ use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::{
-    Server, Spawn, diagnostics, fixture_path, parse_status_and_body, patterned, scratch_dir,
-    signal, slot_line, wait_log_contains, worker_pids,
+    Server, Spawn, fixture_path, is_zts, parse_status_and_body, patterned, scratch_dir, signal,
+    slot_line, wait_log_contains,
 };
 
 /// The read timeout of a raw socket exchange.
@@ -389,19 +389,16 @@ fn uploads_server(fixture_name: &str) -> Server {
         .spawn()
 }
 
-/// The files in the worker spool dirs of `srv`, read again until they are gone, for at most 5 s. The plugin creates one spool dir per worker at start.
+/// The files in the server's spool directory, read again until they are gone, for at most 5 s.
 /// The client can get the last byte of the response before seal() unlinks the spool files.
 fn spooled_files(srv: &Server) -> Vec<PathBuf> {
-    let uploads = srv.dir.join("uploads");
+    let spool = srv
+        .dir
+        .join("uploads")
+        .join(format!("rapira-spool-{}", srv.pid()));
     let read = || -> Vec<PathBuf> {
-        let dirs: Vec<PathBuf> = std::fs::read_dir(&uploads)
-            .unwrap_or_else(|e| panic!("read {}: {e}", uploads.display()))
-            .map(|e| e.expect("uploads dir entry").path())
-            .filter(|p| p.is_dir())
-            .collect();
-        assert!(!dirs.is_empty(), "no spool dir in {}", uploads.display());
-        dirs.iter()
-            .flat_map(|d| std::fs::read_dir(d).expect("read the spool dir"))
+        std::fs::read_dir(&spool)
+            .unwrap_or_else(|e| panic!("read {}: {e}", spool.display()))
             .map(|e| e.expect("spool dir entry").path())
             .collect()
     };
@@ -909,19 +906,39 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// At boot the master removes each spool dir under `http.uploads.dir` whose pid is gone. It keeps the dir of a live pid and every name that is not `rapira-spool-<positive pid>`.
+/// At boot the server removes the spool directory of a process that died with an upload in progress. It keeps directories for live processes and unrelated names.
 #[test]
 fn spool_sweep_removes_only_dead_pid_dirs() -> anyhow::Result<()> {
     struct Case {
         name: String,
         kept: bool,
     }
-    let mut child = std::process::Command::new("true").spawn()?;
-    let dead = child.id();
-    child.wait()?;
+    let uploads = scratch_dir();
+    let config = format!("[http.uploads]\ndir = \"{}\"", uploads.display());
+    let mut first = Spawn::http(Mode::Dispatcher, fixture("dispatcher/held-worker.php"))
+        .http_extra(&config)
+        .json_log()
+        .spawn();
+    let release = first.dir.join("release");
+    let upload = submit(
+        first.addr,
+        multipart(
+            &format!("/?release={}", release.display()),
+            &[Part {
+                headers: "content-disposition: form-data; name=\"f\"; filename=\"a.bin\"",
+                content: "PAYLOAD",
+            }],
+        ),
+    )?;
+    server_log::wait_app_record(&first.log_file(), "held");
+    let stale = format!("rapira-spool-{}", first.pid());
+    assert_eq!(std::fs::read_dir(uploads.join(&stale))?.count(), 1);
+    signal(first.pid(), libc::SIGKILL);
+    first.wait_exit(READ).context("server did not exit")?;
+    drop(upload);
     let cases = [
         Case {
-            name: format!("rapira-spool-{dead}"),
+            name: stale,
             kept: false,
         },
         Case {
@@ -949,14 +966,14 @@ fn spool_sweep_removes_only_dead_pid_dirs() -> anyhow::Result<()> {
             kept: true,
         },
     ];
-    let uploads = scratch_dir();
     for case in &cases {
-        std::fs::create_dir(uploads.join(&case.name))?;
+        if case.kept {
+            std::fs::create_dir(uploads.join(&case.name))?;
+        }
     }
 
-    // The master sweeps before it binds the listener, so the sweep is done when the spawn returns.
-    let _srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/multipart-worker.php"))
-        .http_extra(&format!("[http.uploads]\ndir = \"{}\"", uploads.display()))
+    let next = Spawn::http(Mode::Dispatcher, fixture("dispatcher/multipart-worker.php"))
+        .http_extra(&config)
         .spawn();
     for case in &cases {
         assert_eq!(
@@ -966,43 +983,8 @@ fn spool_sweep_removes_only_dead_pid_dirs() -> anyhow::Result<()> {
             case.name
         );
     }
-    Ok(())
-}
-
-/// A worker killed while it holds a spooled file part skips its own cleanup. The worker that replaces it removes the dead spool dir when it starts.
-#[test]
-fn killed_worker_spool_dir_goes_when_its_replacement_starts() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/held-worker.php"))
-        .http_extra("[http.uploads]\ndir = \"uploads\"")
-        .json_log()
-        .spawn();
-    let release = srv.log_file().with_file_name("release");
-    let rq = multipart(
-        &format!("/?release={}", release.display()),
-        &[Part {
-            headers: "content-disposition: form-data; name=\"f\"; filename=\"a.bin\"",
-            content: "PAYLOAD",
-        }],
-    );
-    let rx = submit(srv.addr, rq)?;
-    server_log::wait_app_record(&srv.log_file(), "held");
-    let pid = worker_pids(srv.pid())[0];
-    let dir = srv.dir.join("uploads").join(format!("rapira-spool-{pid}"));
-    assert_eq!(
-        std::fs::read_dir(&dir)?.count(),
-        1,
-        "the held unit spools its file part"
-    );
-
-    signal(pid, libc::SIGKILL);
-    drop(rx);
-    let gone = poll(Duration::from_secs(20), || (!dir.exists()).then_some(()));
-    assert!(
-        gone.is_some(),
-        "{} outlived its worker\n{}",
-        dir.display(),
-        diagnostics(&srv)
-    );
+    drop(next);
+    std::fs::remove_dir_all(uploads)?;
     Ok(())
 }
 
@@ -1122,12 +1104,7 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
             accepted += 1;
         }
     }
-    // The slot counts a unit before its response goes out, so the count is final here.
-    let slot = slot_line(&srv, "");
-    assert!(
-        slot.contains(&format!(" handled {accepted} ")),
-        "only the accepted bodies reach PHP: {slot}"
-    );
+    slot_line(&srv, &format!("handled={accepted} "));
     Ok(())
 }
 
@@ -1183,19 +1160,19 @@ fn get_info_reports_the_server_identity() -> anyhow::Result<()> {
 /// Every worker reads the server identity at boot, before its first `receive()`. The first boot of each worker sees the configured values, and no boot fails on them.
 #[test]
 fn get_info_reports_the_server_identity_at_boot() -> anyhow::Result<()> {
-    const WORKERS: usize = 16;
+    let workers = if is_zts() { 16 } else { 1 };
     let mut srv = Spawn::http(
         Mode::Dispatcher,
         fixture_path("lifecycle/boot-identity-worker.php"),
     )
-    .processes(WORKERS)
+    .workers(workers)
     .json_log()
     .spawn();
     let want = format!("name=localhost port={}", srv.addr.port());
     // A failed boot runs again after a short wait, so a worker whose first boot failed still logs a record in this window.
     let booted = poll(Duration::from_secs(15), || {
         let results = server_log::app_results(&srv.log_file(), "boot-identity");
-        (results.len() >= WORKERS).then_some(results)
+        (results.len() >= workers).then_some(results)
     });
     srv.stop();
     let failed: Vec<String> = server_log::app_records(&srv.log_file())

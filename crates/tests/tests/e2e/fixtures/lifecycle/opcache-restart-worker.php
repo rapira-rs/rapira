@@ -1,7 +1,8 @@
 <?php
 // Answers with the OPcache state of the worker. ?reset=1 calls opcache_reset().
 // ?fill=1 wastes OPcache memory with a changed file and then fills the hash table, so OPcache schedules a restart by itself.
-// ?sleep=S holds the request for S seconds.
+// ?hold=NAME waits for release-NAME. ?probe=1 holds a worker briefly so other probes can reach other workers.
+$app = bin2hex(random_bytes(8));
 $fill = static function (): void {
     $dir = __DIR__ . '/gen';
     @mkdir($dir);
@@ -18,8 +19,8 @@ $fill = static function (): void {
         include "$dir/s$i.php";
     }
 };
-$handler = static function () use ($fill): void {
-    if (!extension_loaded('Zend OPcache') || !is_array(opcache_get_status(false))) {
+$handler = static function () use ($fill, $app): void {
+    if (!extension_loaded('Zend OPcache')) {
         echo 'skip';
         return;
     }
@@ -29,11 +30,22 @@ $handler = static function () use ($fill): void {
     if (isset($_GET['fill'])) {
         $fill();
     }
-    if (isset($_GET['sleep'])) {
-        sleep((int) $_GET['sleep']);
+    if (isset($_GET['hold'])) {
+        $name = $_GET['hold'];
+        \Rapira\log("holding $name", context: ['app' => $app]);
+        $until = microtime(true) + 30;
+        while (!is_file(__DIR__ . "/release-$name")) {
+            if (microtime(true) >= $until) {
+                throw new RuntimeException("request $name was not released");
+            }
+            usleep(1_000);
+        }
+    } elseif (isset($_GET['probe'])) {
+        usleep(50_000);
     }
     $s = opcache_get_status(false);
-    printf('pid=%d enabled=%s pending=%s', getmypid(), var_export($s['opcache_enabled'], true), var_export($s['restart_pending'], true));
+    printf('%s enabled=%s pending=%s', $app, var_export($s['opcache_enabled'] ?? false, true), var_export($s['restart_pending'] ?? false, true));
 };
 while (\Rapira\handle_request($handler)) {
 }
+\Rapira\log("ended $app");

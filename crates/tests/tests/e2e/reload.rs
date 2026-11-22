@@ -1,29 +1,32 @@
 use crate::harness::*;
+use rapira_sapi::Frame;
 use rapira_sapi::plugin::Mode;
+use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tests::server_log::{app_contexts, records, wait_app_record};
 use tests::wire::submit;
-use tests::{StatusBody, drain, poll, req};
+use tests::{drain, poll, req};
+use tokio::sync::mpsc::Receiver;
 
-/// USR2 recycles the app inside every worker. The listener and the worker processes stay, and no request fails.
+/// USR2 recycles every app while the listener continues to serve requests.
 #[test]
 fn usr2_reload_restarts_the_apps_while_serving() {
+    let workers = if is_zts() { 3 } else { 1 };
     let srv = Spawn::http(
         Mode::Dispatcher,
         fixture_path("lifecycle/boot-log-worker.php"),
     )
-    .processes(3)
+    .workers(workers)
     .json_log()
     .spawn();
-    let mut pids = wait_workers(&srv, Duration::from_secs(20), "3 workers", |p| p.len() == 3);
-    pids.sort();
+    wait_serving(&srv, "http", workers);
     let storm = storm(srv.addr, 8);
     std::thread::sleep(Duration::from_millis(500));
     signal(srv.pid(), libc::SIGUSR2);
     let log = srv.log_file();
     let booted = poll(Duration::from_secs(20), || {
-        (app_contexts(&log, "booted").len() >= 6).then_some(())
+        (app_contexts(&log, "booted").len() >= 2 * workers).then_some(())
     });
     let tally = storm.halt();
     assert!(
@@ -39,17 +42,11 @@ fn usr2_reload_restarts_the_apps_while_serving() {
         diagnostics(&srv),
     );
     assert!(tally.ok > 0, "the storm got no response");
-    let mut after = worker_pids(srv.pid());
-    after.sort();
-    assert_eq!(
-        after,
-        pids,
-        "the worker processes stay\n{}",
-        diagnostics(&srv)
-    );
+    assert!(app_contexts(&log, "app loop ended").len() >= workers);
+    wait_for_pool_reload(&srv, "http", workers);
 }
 
-/// SIGUSR2 to a worker that waits for work recycles its app without a request, in the same process.
+/// SIGUSR2 recycles an idle app without a request.
 #[test]
 fn usr2_restarts_an_idle_app() {
     let srv = Spawn::http(
@@ -58,10 +55,10 @@ fn usr2_restarts_an_idle_app() {
     )
     .json_log()
     .spawn();
-    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    wait_serving(&srv, "http", 1);
     let log = srv.log_file();
     wait_app_record(&log, "booted");
-    signal(pid, libc::SIGUSR2);
+    signal(srv.pid(), libc::SIGUSR2);
     let booted = poll(Duration::from_secs(10), || {
         (app_contexts(&log, "booted").len() >= 2).then_some(())
     });
@@ -70,42 +67,7 @@ fn usr2_restarts_an_idle_app() {
         "the idle app booted again\n{}",
         diagnostics(&srv)
     );
-    assert_eq!(
-        worker_pids(srv.pid()),
-        vec![pid],
-        "the worker process stays\n{}",
-        diagnostics(&srv)
-    );
-}
-
-/// A reload into code that fails its boot makes the worker unhealthy. The pool booted before the reload, so the master replaces the worker and keeps the server running.
-#[test]
-fn a_reload_into_a_failing_boot_keeps_the_server_running() {
-    let mut srv = Spawn::http(
-        Mode::Dispatcher,
-        fixture_path("lifecycle/breakable-boot-worker.php"),
-    )
-    .json_log()
-    .spawn();
-    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
-    wait_app_record(&srv.log_file(), "booted");
-    std::fs::write(srv.dir.join("http/broken.flag"), "").expect("break the boot");
-    signal(srv.pid(), libc::SIGUSR2);
-    assert!(
-        wait_log_contains(&srv, "flagged unhealthy", Duration::from_secs(20)),
-        "the worker stays healthy\n{}",
-        diagnostics(&srv)
-    );
-    let exit = srv.wait_exit(Duration::from_secs(3));
-    assert_eq!(
-        exit,
-        None,
-        "the master keeps running\n{}",
-        diagnostics(&srv)
-    );
-    wait_workers(&srv, Duration::from_secs(20), "a replacement worker", |p| {
-        p.len() == 1 && p[0] != pid
-    });
+    slot_line(&srv, "state=idle handled=0 errors=0 recycles=1 ");
 }
 
 /// How a deploy puts release 2 in place.
@@ -167,7 +129,7 @@ fn stage_releases(dir: &Path, entrypoint: &str) -> [String; 2] {
     folders
 }
 
-/// Waits until the classic worker has handled the reload. The master counts the reload before it signals the pool, so this record of the worker means that the count is visible.
+/// Waits until the classic worker handles the reload before sending the first request of the new release.
 fn wait_for_the_classic_reload(srv: &Server) {
     let log = srv.log_file();
     let handled = poll(Duration::from_secs(10), || {
@@ -541,7 +503,7 @@ fn a_reload_after_a_json_post_keeps_the_classic_worker() {
     let srv = Spawn::http(Mode::Classic, fixture_path("classic/cwd.php"))
         .env("USE_ZEND_ALLOC", "0")
         .spawn();
-    let before = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
     let posted = http_post(
         srv.addr,
         "/",
@@ -563,16 +525,11 @@ fn a_reload_after_a_json_post_keeps_the_classic_worker() {
         "the first request after the reload\n{}",
         diagnostics(&srv)
     );
-    assert_eq!(
-        worker_pids(srv.pid()),
-        before,
-        "the worker process stays\n{}",
-        diagnostics(&srv)
-    );
+    slot_line(&srv, "handled=2 errors=0 ");
 }
 
-/// A one-worker server on release 1 of `deploy/breakable-worker.php`, with `pool` keys in `[http.pool]` and opcache.validate_timestamps = 0, after an in-place deploy of a release.php whose boot fails and its reload. Returns None without OPcache.
-fn breakable_server(dir: &Path, pool: &str) -> Option<Server> {
+/// Starts release 1, serves a request, then reloads a file that fails at boot. Returns None without OPcache.
+fn breakable_server(dir: &Path) -> Option<Server> {
     let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
         .expect("read the shared php.ini");
     // With file_update_protection = 0, OPcache caches the broken release.php at the first failed boot.
@@ -582,7 +539,7 @@ fn breakable_server(dir: &Path, pool: &str) -> Option<Server> {
     stage_releases(dir, "breakable-worker.php");
     let entrypoint = dir.join("current/breakable-worker.php");
     let srv = Spawn::http_entrypoint(Mode::Worker, &entrypoint.display().to_string())
-        .http_pool(pool)
+        .http_pool("max_boot_failures = 1")
         .php_ini(&ini)
         .json_log()
         .spawn();
@@ -621,11 +578,13 @@ fn wait_for_code_2(srv: &Server, within: Duration) {
 #[test]
 fn a_reload_after_a_failed_boot_runs_the_fixed_release() {
     let dir: PathBuf = scratch_dir();
-    // No failure limit, because with the default limit the worker process ends at the fifth failed boot.
-    let Some(srv) = breakable_server(&dir, "max_boot_failures = 0") else {
+    let Some(srv) = breakable_server(&dir) else {
         return;
     };
     let log = srv.log_file();
+    wait_app_record(&log, "boot failed");
+    let refused = http_get(srv.addr, "/", Duration::from_secs(10)).expect("request during retries");
+    assert_eq!(refused.status, 503, "\n{}", diagnostics(&srv));
     // The wait after the fourth failed boot is 4 s, so the reload arrives before the next boot.
     let Some(failed) = poll(Duration::from_secs(20), || {
         let boots = app_contexts(&log, "boot failed").len();
@@ -662,48 +621,10 @@ fn a_reload_after_a_failed_boot_runs_the_fixed_release() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A reload that finds no live worker process. Under steady traffic a worker whose boot fails ends as unhealthy, and the master forks the next one after a growing delay. That worker has no reload entry. Its boot reads the reload count and makes the reset call before the app starts, and it runs the fixed release, also with opcache.validate_timestamps = 0.
-#[test]
-fn a_reload_with_no_live_worker_runs_the_fixed_release() {
-    let dir: PathBuf = scratch_dir();
-    let Some(srv) = breakable_server(&dir, "") else {
-        return;
-    };
-    // Steady traffic during the failed boots. Each request gets 503. The fifth failed boot ends the worker process.
-    let stop = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let traffic = {
-        let stop = std::sync::Arc::clone(&stop);
-        let addr = srv.addr;
-        std::thread::spawn(move || {
-            while !stop.load(std::sync::atomic::Ordering::Relaxed) {
-                let _ = http_get(addr, "/", Duration::from_secs(1));
-                std::thread::sleep(Duration::from_millis(50));
-            }
-        })
-    };
-    let gone = poll(Duration::from_secs(30), || {
-        worker_pids(srv.pid()).is_empty().then_some(())
-    });
-    // A respawn can come before the reload. The reload then reaches a live worker, and the test checks that sequence.
-    std::fs::write(dir.join("releases/1/release.php"), "<?php return '2';\n")
-        .expect("write the fixed release.php");
-    signal(srv.pid(), libc::SIGUSR2);
-    stop.store(true, std::sync::atomic::Ordering::Relaxed);
-    traffic.join().expect("the traffic thread");
-    assert!(
-        gone.is_some(),
-        "the worker process ends as unhealthy\n{}",
-        diagnostics(&srv)
-    );
-    // The respawn delay of the master grows to at most 25.6 s.
-    wait_for_code_2(&srv, Duration::from_secs(40));
-    drop(srv);
-    let _ = std::fs::remove_dir_all(&dir);
-}
-
 /// A boot that fails for a cause outside OPcache, then a reload of a release that also changes cached files. Every worker then runs every file of the new release, also with opcache.validate_timestamps = 0.
 #[test]
 fn a_reload_after_a_failed_boot_runs_every_file_of_the_new_release() {
+    let workers = if is_zts() { 2 } else { 1 };
     let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
         .expect("read the shared php.ini");
     let ini = format!("{shared}\nopcache.enable = 1\nopcache.validate_timestamps = 0\n");
@@ -713,19 +634,19 @@ fn a_reload_after_a_failed_boot_runs_every_file_of_the_new_release() {
     write_old(&folder.join("extra.php"), "<?php return '1';\n");
     let entrypoint = dir.join("current/two-files-worker.php");
     let srv = Spawn::http_entrypoint(Mode::Worker, &entrypoint.display().to_string())
-        .processes(2)
+        .workers(workers)
         .php_ini(&ini)
         .json_log()
         .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
-    let [mut a, mut b] = pin_two_workers(&srv).expect("the fixture answers without OPcache");
+    wait_serving(&srv, "http", workers);
+    let before = serving_apps(&srv, workers, "release.php=1 extra.php=1");
 
     // Deploy step 1: extra.php is not there yet, so the boot of each worker fails.
     std::fs::remove_file(folder.join("extra.php")).expect("remove extra.php");
     signal(srv.pid(), libc::SIGUSR2);
     let log = srv.log_file();
     let failed = poll(Duration::from_secs(10), || {
-        (app_contexts(&log, "boot failed").len() >= 2).then_some(())
+        (app_contexts(&log, "boot failed").len() >= workers).then_some(())
     });
     assert!(
         failed.is_some(),
@@ -737,37 +658,25 @@ fn a_reload_after_a_failed_boot_runs_every_file_of_the_new_release() {
     std::fs::write(folder.join("extra.php"), "<?php return '2';\n").expect("write extra.php");
     signal(srv.pid(), libc::SIGUSR2);
 
-    let mut last_a = String::new();
-    let mut last_b = String::new();
-    let new_release = poll(Duration::from_secs(10), || {
-        last_a = get_on(&mut a, "/").body;
-        last_b = get_on(&mut b, "/").body;
-        let want = "release.php=2 extra.php=2";
-        (last_a.ends_with(want) && last_b.ends_with(want)).then_some(())
-    });
+    let after = serving_apps(&srv, workers, "release.php=2 extra.php=2");
     assert!(
-        new_release.is_some(),
-        "every worker runs release 2 of both files\n last A: {last_a}\n last B: {last_b}\n{}",
-        diagnostics(&srv)
+        before.is_disjoint(&after),
+        "both files must come from new apps"
     );
-    // The stop of the server waits for open connections.
-    drop([a, b]);
     drop(srv);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A symlink deploy whose link points at no folder, then a reload: each boot fails, a request gets 503, and an ERROR record names the entrypoint. A reload after the fix runs the fixed release in the same worker process.
+/// A symlink to a missing release causes a 503 and an ERROR record that names the entrypoint. A reload after the fix serves the new release.
 #[test]
 fn an_entrypoint_that_does_not_resolve_answers_503_until_a_reload_after_the_fix() {
     let dir: PathBuf = scratch_dir();
     let [release_1, release_2] = stage_releases(&dir, "dispatcher.php");
     let entrypoint = dir.join("current").join("dispatcher.php");
     let srv = Spawn::http_entrypoint(Mode::Dispatcher, &entrypoint.display().to_string())
-        // No failure limit, because with the default limit the worker process ends 7.5 s after the first failed boot.
-        .http_pool("max_boot_failures = 0")
         .json_log()
         .spawn();
-    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    wait_serving(&srv, "http", 1);
     assert_eq!(
         seen(&srv),
         format!("code=1 cwd={release_1} file=1"),
@@ -808,12 +717,6 @@ fn an_entrypoint_that_does_not_resolve_answers_503_until_a_reload_after_the_fix(
         "an ERROR record {named:?}\n{}",
         diagnostics(&srv)
     );
-    assert_eq!(
-        worker_pids(srv.pid()),
-        vec![pid],
-        "the worker process stays after the broken deploy\n{}",
-        diagnostics(&srv)
-    );
 
     switch("releases/2");
     signal(srv.pid(), libc::SIGUSR2);
@@ -827,135 +730,114 @@ fn an_entrypoint_that_does_not_resolve_answers_503_until_a_reload_after_the_fix(
         "after the fix and the reload\n want: {want}\n last: {last}\n{}",
         diagnostics(&srv)
     );
-    assert_eq!(
-        worker_pids(srv.pid()),
-        vec![pid],
-        "the worker process stays after the fix\n{}",
-        diagnostics(&srv)
-    );
+    wait_serving(&srv, "http", 1);
     drop(srv);
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The pid at the start of an answer `pid=<pid> ...`.
-fn pid_of(body: &str) -> u32 {
-    body.strip_prefix("pid=")
-        .and_then(|r| r.split(' ').next())
-        .and_then(|p| p.parse().ok())
-        .unwrap_or_else(|| panic!("unexpected body {body:?}"))
-}
-
-/// One kept connection to each of the 2 workers of `srv`, found by the pid at the start of each answer. None when the fixture answers `skip`.
-fn pin_two_workers(srv: &Server) -> Option<[Conn; 2]> {
-    let mut pids: Vec<u32> = Vec::new();
-    let mut pinned: Vec<Conn> = Vec::new();
-    for _ in 0..200 {
-        let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
-        let body = get_on(&mut c, "/").body;
-        if body == "skip" {
-            return None;
-        }
-        let pid = pid_of(&body);
-        if !pids.contains(&pid) {
-            pids.push(pid);
-            pinned.push(c);
-        }
-        if pinned.len() == 2 {
-            break;
-        }
-    }
-    assert_eq!(
-        pinned.len(),
-        2,
-        "a connection to each worker\n{}",
+/// Waits until all workers have restarted an app. Each status request gives one complete snapshot.
+fn wait_for_pool_reload(srv: &Server, pool: &str, workers: usize) {
+    let prefix = format!("pool={pool} worker=");
+    let reloaded = poll(Duration::from_secs(20), || {
+        wait_serving(srv, pool, workers);
+        let rows = records(&srv.log_file());
+        let recycled = rows
+            .iter()
+            .rev()
+            .filter(|r| r.message.starts_with(&prefix))
+            .take(workers)
+            .filter(|r| {
+                r.message.split_ascii_whitespace().any(|field| {
+                    field
+                        .strip_prefix("recycles=")
+                        .and_then(|n| n.parse::<u64>().ok())
+                        .is_some_and(|n| n > 0)
+                })
+            })
+            .count();
+        (recycled == workers).then_some(())
+    });
+    assert!(
+        reloaded.is_some(),
+        "not every {pool} worker recycled\n{}",
         diagnostics(srv)
     );
-    pinned.try_into().ok()
 }
 
-/// One GET on a kept connection. Returns the status and the body.
-fn get_on(c: &mut Conn, path: &str) -> StatusBody<String> {
-    let t = Duration::from_secs(30);
-    c.send(format!("GET {path} HTTP/1.1\r\nHost: e2e\r\n\r\n").as_bytes())
-        .expect("send the request");
-    let head = c.read_head(t).expect("read the head");
-    let len = head
-        .fields
-        .iter()
-        .find(|(k, _)| k == "content-length")
-        .and_then(|(_, v)| v.parse().ok())
-        .expect("content-length");
-    let body = c.read_n(len, t).expect("read the body");
-    StatusBody {
-        status: head.status,
-        body: String::from_utf8_lossy(&body).into_owned(),
-    }
+/// Submits the probes together. Each app holds its probe briefly, so distinct boot tokens identify the workers that served this batch.
+fn serving_apps(srv: &Server, workers: usize, expected: &str) -> BTreeSet<String> {
+    let mut last = Vec::new();
+    poll(Duration::from_secs(20), || {
+        let reads: Vec<_> = (0..workers)
+            .map(|_| submit(srv.addr, req("/?probe=1")).expect("GET probe"))
+            .collect();
+        last = reads.into_iter().map(drain).collect();
+        let mut apps = BTreeSet::new();
+        for reply in &last {
+            let (app, state) = reply.body.split_once(' ')?;
+            if reply.status != 200 || state != expected || app.len() != 16 {
+                return None;
+            }
+            apps.insert(app.to_owned());
+        }
+        (apps.len() == workers).then_some(apps)
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "expected {expected:?} from {workers} apps, got {last:?}\n{}",
+            diagnostics(srv)
+        )
+    })
 }
 
-/// A second reload while both workers serve long requests. An app can end with its reload entry still in the queue, so the next app of that worker takes the entry after the OPcache restart of the first reload has run. One reset per reload keeps that app from scheduling a second OPcache restart. No reload follows that restart, so no app ends to let it run.
+/// Holds one HTTP worker until the test creates `release-{name}`.
+fn hold(srv: &Server, name: &str) -> (Receiver<Frame>, String) {
+    let reply = submit(srv.addr, req(&format!("/?hold={name}"))).expect("submit held request");
+    let ctx = wait_app_record(&srv.log_file(), &format!("holding {name}"));
+    let ctx: serde_json::Value = serde_json::from_str(&ctx).expect("hold context");
+    (
+        reply,
+        ctx["app"].as_str().expect("app boot token").to_owned(),
+    )
+}
+
+const OPCACHE_ON: &str = "enabled=true pending=false";
+
+/// The second reload arrives after one app ends but while another request still holds the old code. Both requests finish. Both new apps must have OPcache enabled with no restart pending.
 #[test]
 fn two_reloads_during_long_requests_leave_opcache_on_in_every_worker() {
+    if !is_zts() {
+        return;
+    }
     let shared = std::fs::read_to_string(tests::fixture("ini/shared/php.ini"))
         .expect("read the shared php.ini");
     let srv = Spawn::http(
         Mode::Worker,
         fixture_path("lifecycle/opcache-restart-worker.php"),
     )
-    .processes(2)
+    .workers(2)
     .php_ini(&format!("{shared}\nopcache.enable = 1\n"))
+    .json_log()
     .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
-    // A connection stays with the worker that accepted it, so each long request goes to its own worker.
-    let Some([mut a, mut b]) = pin_two_workers(&srv) else {
+    wait_serving(&srv, "http", 2);
+    if seen(&srv) == "skip" {
         return;
-    };
-
-    let statuses = std::thread::scope(|scope| {
-        let held_a = scope.spawn(|| get_on(&mut a, "/?sleep=3").status);
-        std::thread::sleep(Duration::from_millis(300));
-        signal(srv.pid(), libc::SIGUSR2);
-        std::thread::sleep(Duration::from_millis(500));
-        let held_b = scope.spawn(|| get_on(&mut b, "/?sleep=5").status);
-        std::thread::sleep(Duration::from_millis(1700));
-        signal(srv.pid(), libc::SIGUSR2);
-        [
-            held_a.join().expect("the request thread of worker A"),
-            held_b.join().expect("the request thread of worker B"),
-        ]
-    });
-    assert_eq!(
-        statuses,
-        [200, 200],
-        "both long requests are served\n{}",
-        diagnostics(&srv)
-    );
-
-    let mut last_a = String::new();
-    let mut last_b = String::new();
-    let all_on = poll(Duration::from_secs(20), || {
-        last_a = get_on(&mut a, "/").body;
-        last_b = get_on(&mut b, "/").body;
-        (opcache_state(&last_a).on && opcache_state(&last_b).on).then_some(())
-    });
-    assert!(
-        all_on.is_some(),
-        "both workers have OPcache on and no restart pending\n last A: {last_a}\n last B: {last_b}\n{}",
-        diagnostics(&srv)
-    );
-}
-
-/// One answer of `opcache-restart-worker.php`.
-struct OpcacheState {
-    pid: u32,
-    /// OPcache is on and no restart is pending.
-    on: bool,
-}
-
-fn opcache_state(body: &str) -> OpcacheState {
-    OpcacheState {
-        pid: pid_of(body),
-        on: body.ends_with("enabled=true pending=false"),
     }
+    let (a, first) = hold(&srv, "a");
+    let (b, second) = hold(&srv, "b");
+    assert_ne!(first, second);
+    signal(srv.pid(), libc::SIGUSR2);
+    std::fs::write(srv.dir.join("http/release-a"), "").expect("release the first request");
+    assert_eq!(drain(a).status, 200);
+    wait_app_record(&srv.log_file(), &format!("ended {first}"));
+    signal(srv.pid(), libc::SIGUSR2);
+    std::fs::write(srv.dir.join("http/release-b"), "").expect("release the second request");
+    assert_eq!(drain(b).status, 200);
+    let after = serving_apps(&srv, 2, OPCACHE_ON);
+    assert!(
+        after.is_disjoint(&BTreeSet::from([first, second])),
+        "both apps restarted: {after:?}"
+    );
 }
 
 /// A scheduled OPcache restart waits until no app holds OPcache. Every app of every pool restarts, the restart runs, every http worker gets OPcache back, and no worker is killed, also with a request in flight on another worker. One WARN record names the reason of the restart.
@@ -970,7 +852,7 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
         /// A grpc pool runs next to the http pool. Its apps hold OPcache too.
         grpc: bool,
     }
-    const HTTP_WORKERS: usize = 2;
+    let workers = if is_zts() { 2 } else { 1 };
     let cases = [
         Case {
             name: "opcache_reset()",
@@ -996,67 +878,66 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
     // 223 hash slots and a waste threshold of 84 KB (1 % of 8 MB) make OPcache schedule a restart by itself.
     // php-src counts the force timeout in whole seconds. With 2, a kill can start 1 to 2 s after the schedule, after the boots that follow the schedule and before the 3 s request ends.
     let ini = format!(
-        "{shared}\nopcache.memory_consumption = 8\nopcache.interned_strings_buffer = 1\n\
+        "{shared}\nopcache.enable = 1\nopcache.memory_consumption = 8\nopcache.interned_strings_buffer = 1\n\
          opcache.max_accelerated_files = 200\nopcache.max_wasted_percentage = 1\n\
          opcache.force_restart_timeout = 2\nopcache.file_update_protection = 0\n\
          opcache.revalidate_freq = 0\n"
     );
     for case in cases {
+        if case.grpc && workers == 1 {
+            continue;
+        }
         let mut spawn = Spawn::http(
             Mode::Worker,
             fixture_path("lifecycle/opcache-restart-worker.php"),
         )
-        .processes(HTTP_WORKERS)
+        .workers(workers)
         .php_ini(&ini)
         .json_log();
         if case.grpc {
             spawn = spawn.with_grpc(fixture_path("grpc/echo-worker.php"));
         }
         let srv = spawn.spawn();
-        let workers = if case.grpc {
-            2 * HTTP_WORKERS
-        } else {
-            HTTP_WORKERS
-        };
-        let pids = wait_workers(&srv, Duration::from_secs(20), "every worker", |p| {
-            p.len() == workers
-        });
-        // A connection stays with the worker that accepted it, so the held request and the trigger run on two workers.
-        let Some([mut a, mut b]) = pin_two_workers(&srv) else {
+        wait_serving(&srv, "http", workers);
+        if case.grpc {
+            wait_serving(&srv, "grpc", workers);
+        }
+        if seen(&srv) == "skip" {
             return;
-        };
-        let held = std::thread::scope(|scope| {
-            let request = scope.spawn(|| get_on(&mut a, "/?sleep=3").status);
-            std::thread::sleep(Duration::from_millis(500));
-            let trigger = get_on(&mut b, case.trigger).body;
-            assert!(
-                trigger.ends_with("pending=true"),
-                "{}: OPcache scheduled a restart: {trigger:?}\n{}",
-                case.name,
-                diagnostics(&srv)
-            );
-            request.join().expect("the held request thread")
-        });
-        let all_on = poll(Duration::from_secs(20), || {
-            let states = fan_out(srv.addr, "/", 4, 2, opcache_state);
-            let mut on: Vec<u32> = states.iter().filter(|s| s.on).map(|s| s.pid).collect();
-            on.sort_unstable();
-            on.dedup();
-            (states.iter().all(|s| s.on) && on.len() == HTTP_WORKERS).then_some(())
-        });
+        }
+        let before = serving_apps(&srv, workers, OPCACHE_ON);
+        let held = (workers > 1).then(|| hold(&srv, "reader"));
+        let trigger = drain(submit(srv.addr, req(case.trigger)).expect("submit the restart"));
+        assert_eq!(trigger.status, 200, "{}: {trigger:?}", case.name);
         assert!(
-            all_on.is_some(),
-            "{}: every worker has OPcache on and no restart is pending\n{}",
-            case.name,
-            diagnostics(&srv)
+            trigger.body.ends_with("pending=true"),
+            "{}: {trigger:?}",
+            case.name
         );
-        assert_eq!(
-            held,
-            200,
-            "{}: the request in flight is served\n{}",
-            case.name,
-            diagnostics(&srv)
+        if let Some((reply, app)) = held {
+            assert!(
+                !trigger.body.starts_with(&app),
+                "the trigger runs on another worker"
+            );
+            // The request stays active past opcache.force_restart_timeout.
+            std::thread::sleep(Duration::from_secs(3));
+            std::fs::write(srv.dir.join("http/release-reader"), "").expect("release the reader");
+            assert_eq!(
+                drain(reply).status,
+                200,
+                "{}: the held request completes",
+                case.name
+            );
+        }
+        let after = serving_apps(&srv, workers, OPCACHE_ON);
+        assert!(
+            before.is_disjoint(&after),
+            "{}: every HTTP app restarted",
+            case.name
         );
+        if case.grpc {
+            wait_for_pool_reload(&srv, "grpc", workers);
+        }
         let restarts: Vec<String> = records(&srv.log_file())
             .into_iter()
             .filter(|r| {
@@ -1069,13 +950,6 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
         assert!(
             restarts.len() == 1 && restarts[0].starts_with(&want),
             "{}: one WARN record {want:?}\n got: {restarts:?}\n{}",
-            case.name,
-            diagnostics(&srv)
-        );
-        assert_eq!(
-            worker_pids(srv.pid()),
-            pids,
-            "{}: no worker is killed\n{}",
             case.name,
             diagnostics(&srv)
         );
