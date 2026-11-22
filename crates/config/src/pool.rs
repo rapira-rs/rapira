@@ -22,7 +22,7 @@ pub struct PoolSettings {
     pub max_boot_failures: u32,
     /// Wall-clock limit of one request. The clock starts again at each pull that reaches the intake, also when the pull finds no unit. Time in the intake does not count. Zero disables the limit.
     pub request_terminate_timeout: Duration,
-    /// Variables each worker sets before its PHP thread starts. `resolve_pool` rejects the names and values that `std::env::set_var` panics on (https://doc.rust-lang.org/std/env/fn.set_var.html#panics).
+    /// Environment values that PHP reads in this pool. A pool value overrides the value from server startup.
     pub env: BTreeMap<String, String>,
 }
 

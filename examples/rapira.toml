@@ -38,7 +38,7 @@ processes = 16                # a fixed worker count; defaults to the CPU count
 # max_memory_mb = 0           # drain and replace a worker whose RSS goes above this; the master checks it every second; 0 means no limit
 # max_boot_failures = 5       # stop a worker as unhealthy after N failed boots in sequence; 0 means no limit; for worker and dispatcher modes
 # request_terminate_timeout_secs = 0  # kill and replace a worker whose request runs longer; 0 turns it off
-# Environment variables of each worker of the pool. The $_SERVER of each request also gets them.
+# PHP reads these values through getenv(), $_ENV and $_SERVER. Child processes inherit the server environment.
 # [http.pool.env]
 # APP_ENV = "prod"
 

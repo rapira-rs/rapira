@@ -4,6 +4,7 @@ pub mod callbacks;
 mod classic_worker;
 mod context;
 mod diagnostics;
+mod env;
 pub mod exchange;
 mod log;
 mod module;

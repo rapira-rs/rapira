@@ -821,6 +821,8 @@ int rapira_request_shutdown(void) {
         zend_end_try();
     }
     zend_end_try();
+    // The putenv() writes end with the PHP request, after every RSHUTDOWN.
+    rapira_rs_env_clear();
     rapira_dispatcher_forget();
 #if PHP_VERSION_ID >= 80500
     // fast shutdown skips the backtrace release (zend_execute_API.c:282,309)

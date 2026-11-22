@@ -123,6 +123,8 @@ void rapira_dispatcher_forget(void);
 // rust glue
 // the seal of the current CGI reply (rapira_worker.rs)
 extern void rapira_rs_finish_response(void);
+// Drops the putenv() writes of the PHP request (env.rs).
+extern void rapira_rs_env_clear(void);
 
 // The unit behind a Work object. It is the first field of the C prefix of every
 // class that receive() hands out. Rust owns the two words (HeldPtr in work.rs);

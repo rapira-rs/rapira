@@ -11,6 +11,7 @@ const C_FILES: &[&str] = &[
     "rapira_classes.c",
     "rapira_dispatcher.c",
     "rapira_stream.c",
+    "rapira_env.c",
 ];
 
 // bindgen panics on the preserve_none opcode handlers of php-src master, so _zend_op stays opaque. https://clang.llvm.org/docs/AttributeReference.html#preserve-none

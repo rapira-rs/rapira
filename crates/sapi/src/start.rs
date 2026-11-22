@@ -143,6 +143,7 @@ pub fn boot_master(register: &'static [unsafe extern "C" fn()]) -> anyhow::Resul
         return Err(anyhow::anyhow!("php_module_startup failed"));
     }
     unsafe { rapira_register_post_reader() };
+    crate::env::install();
     Ok(module)
 }
 
@@ -194,10 +195,6 @@ impl Rapira {
         unsafe {
             zend_accel_schedule_restart_hook = Some(crate::rapira_worker::opcache_restart_scheduled)
         };
-        // SAFETY: the process has one thread here, because the PHP thread, the lifeline thread, the plugin threads and the signal thread start later. The master checked every pair before the fork, so set_var cannot panic.
-        for (name, value) in &env {
-            unsafe { std::env::set_var(name, value) };
-        }
         trace!(target: "rapira", "spawning worker thread");
         // PHP sets its stack limit from the stack size of this thread. 8 MiB matches the CLI and FPM main thread under the default RLIMIT_STACK. https://github.com/php/php-src/blob/php-8.5.11/Zend/zend_call_stack.c#L129-L173
         let worker: JoinHandle<()> = thread::Builder::new()
@@ -208,6 +205,7 @@ impl Rapira {
                 sb_set(slot);
                 crate::rapira_worker::RELOADS.set(Some(reloads));
                 crate::context::intern_server_env(&env);
+                crate::env::enter_pool(env);
                 crate::context::intern_server_strings();
                 quota::install(max_requests, stopper);
                 worker_main(

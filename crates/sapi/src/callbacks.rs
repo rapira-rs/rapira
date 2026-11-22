@@ -386,7 +386,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
     })
 }
 
-/// The variables of `php entrypoint.php`, in its order: the process environment, then the entrypoint path, which overrides an environment variable of the same name.
+/// The variables of `php entrypoint.php`, in its order: the env table (env.rs), then the entrypoint path, which overrides an env variable of the same name.
 /// https://github.com/php/php-src/blob/php-8.5.11/sapi/cli/php_cli.c#L316-L347
 unsafe fn register_boot_variables(track_vars_array: *mut zval, put: impl Fn(&CStr, &[u8])) {
     unsafe {

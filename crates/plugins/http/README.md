@@ -119,7 +119,11 @@ The `[http]` table. Unknown keys fail the boot.
 
 The drain window is not a key of this table. It is `[supervisor].process_control_timeout_secs` minus 5 seconds, or minus half of it when it is below 10 seconds. The drain therefore ends before the master sends SIGTERM.
 
-`[http.pool.env]` sets environment variables for the workers of the pool. Each worker sets them after the fork, before its PHP thread starts, so `getenv()`, the boot `$_SERVER` and `$_ENV` (when `variables_order` contains `E`) show them. Each request `$_SERVER` also gets them, and a request variable with the same name wins. The master runs MINIT and parses `php.ini` before it forks the workers, so an extension that reads a variable at MINIT, and `${VAR}` in `php.ini`, do not see them. A name that is empty or contains `=` or NUL, or a value that contains NUL, fails the boot.
+`[http.pool.env]` supplies environment variables to PHP. `getenv()` first reads changes from `putenv()`, then the pool table, then the environment at server startup. `putenv('NAME')` hides a name. `putenv('NAME=')` sets an empty value. Changes last for one request in classic mode and for one app instance in worker and dispatcher modes.
+
+The boot `$_SERVER` and `$_ENV` (when `variables_order` contains `E`) import the PHP environment. [PHP checks `HTTP_PROXY` against the process environment](https://github.com/php/php-src/blob/php-8.6.0/main/php_variables.c#L885-L897) in both arrays. The `$_SERVER` of an HTTP request gets the pool entries and the request variables. A request variable with the same name wins.
+
+Native libraries and child processes read the process environment. Pass an explicit environment to `proc_open()` if the child needs a pool value. A name that is empty or contains `=` or NUL, or a value that contains NUL, fails the boot.
 
 Each of these errors in the middleware list fails the boot with exit code 1:
 
