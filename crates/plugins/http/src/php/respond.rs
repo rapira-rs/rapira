@@ -72,7 +72,8 @@ pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<
         Err(TrySendError::Closed(_)) => Err(Closed),
         // Only Closed ends the park, because a slow consumer is backpressure, not cancellation.
         Err(TrySendError::Full(frame)) => {
-            stream::paused(|| tx.blocking_send(frame).map_err(|_| Closed))
+            // SAFETY: the engine is active, so this is a PHP thread.
+            unsafe { stream::paused(|| tx.blocking_send(frame).map_err(|_| Closed)) }
         }
     };
     // A frame pushed while the receiver drops stays in the channel until the last Sender drops, because tokio Rx::drop drains the channel only once. The drop of the Sender here frees the frame, so a lent string cannot delay the cycle end.

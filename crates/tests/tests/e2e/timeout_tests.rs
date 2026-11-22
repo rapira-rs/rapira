@@ -37,27 +37,24 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks the budget around a write that parks on a full frame channel. The budget counts CPU time, so a sleep before the park uses none of it, and the park keeps the time that the timer had left.
-/// The budget is 3 s. The client reads nothing for 1.5 s after the sleep, so the stream parks.
+/// Checks the budget around a write that parks on a full frame channel. The park does not use the budget, and after the park the timer has the time that it had left before the park.
+/// The budget is 3 s. The unit works before and after the write. The client reads the first byte of the response, then reads nothing for 3.5 s, so the write parks for more than the budget.
 #[test]
 fn parked_write_keeps_the_unused_budget() -> anyhow::Result<()> {
     struct Case {
         name: &'static str,
         target: &'static str,
-        wait: Duration,
         killed: bool,
     }
     let cases = [
         Case {
-            name: "a 3.5 s sleep before the park leaves the budget for 1.8 s of CPU",
-            target: "/?wait=3500&burn=1800",
-            wait: Duration::from_millis(3500),
+            name: "0.9 s of work before and after a park longer than the budget completes",
+            target: "/?before=900&after=900",
             killed: false,
         },
         Case {
-            name: "the timer runs again after the park and kills a 4 s burn",
-            target: "/?wait=0&burn=4000",
-            wait: Duration::ZERO,
+            name: "2 s of work before and after the park time out, because the park does not reset the budget",
+            target: "/?before=2000&after=2000",
             killed: true,
         },
     ];
@@ -79,8 +76,10 @@ fn parked_write_keeps_the_unused_budget() -> anyhow::Result<()> {
             "GET {} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
             c.target
         )?;
-        std::thread::sleep(c.wait + Duration::from_millis(1500));
-        let mut resp = Vec::new();
+        // The first byte arrives when the work before the write ends.
+        let mut resp = vec![0];
+        std::io::Read::read_exact(&mut client, &mut resp)?;
+        std::thread::sleep(Duration::from_millis(3500));
         // A killed unit ends the stream early, and the read can end with a reset. The bytes read before it stay in resp.
         let _ = std::io::Read::read_to_end(&mut client, &mut resp);
 
@@ -127,7 +126,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks that the per-unit re-arm with reset_signals=0 still delivers SIGPROF. A spin on a later unit in the same cycle is killed and does not keep running.
+/// Checks that the per-unit re-arm with reset_signals=0 still delivers the timer signal. A spin on a later unit in the same cycle is killed and does not keep running.
 #[test]
 fn max_execution_time_fires_on_rearmed_units() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("timeout_tests/timeout-worker.php"))
@@ -158,7 +157,7 @@ fn max_execution_time_fires_on_rearmed_units() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks that a unit that waits on a socket keeps its worker under static-file load. The execution timer counts the CPU time of all threads of the process, so the IO threads use up the budget during the wait. The hard timeout must not end the worker process.
+/// Checks that a unit that waits on a socket keeps its worker under static-file load. On NTS the execution timer counts the CPU time of all threads of the process, so the IO threads use up the budget during the wait. On ZTS the timer counts wall-clock time, so the wait itself uses up the budget. The hard timeout of NTS must not end the worker process.
 #[test]
 fn socket_wait_under_static_load_keeps_the_worker() -> anyhow::Result<()> {
     let backend = TcpListener::bind("127.0.0.1:0")?;

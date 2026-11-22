@@ -142,6 +142,70 @@ void rapira_receive_timed(void) {
     zend_set_timeout(rapira_unit_timeout, false);
 }
 
+#if !defined(ZEND_MAX_EXECUTION_TIMERS) && defined(HAVE_SETITIMER)
+// The timer of zend_set_timeout without the POSIX timers. https://github.com/php/php-src/blob/php-8.5.12/Zend/zend_execute_API.c#L1647-L1655
+#if defined(__CYGWIN__) || defined(__PASE__) ||                                \
+    (defined(__aarch64__) && defined(__APPLE__))
+#define RAPIRA_ZEND_ITIMER ITIMER_REAL
+#else
+#define RAPIRA_ZEND_ITIMER ITIMER_PROF
+#endif
+#endif
+
+bool rapira_timer_pause(rapira_timer *saved) {
+#if defined(ZEND_MAX_EXECUTION_TIMERS)
+    // zend_max_execution_timer_settime uses the same check for a missing timer.
+    if (!EG(pid)) {
+        return false;
+    }
+    // An expired timer is not set again, so its pending signal stays valid. https://man7.org/linux/man-pages/man2/timer_settime.2.html
+    struct itimerspec now = {0};
+    if (timer_gettime(EG(max_execution_timer_timer), &now) != 0 ||
+        (now.it_value.tv_sec == 0 && now.it_value.tv_nsec == 0)) {
+        return false;
+    }
+    struct itimerspec off = {0};
+    if (timer_settime(EG(max_execution_timer_timer), 0, &off, saved) != 0) {
+        return false;
+    }
+    return saved->it_value.tv_sec != 0 || saved->it_value.tv_nsec != 0;
+#elif defined(HAVE_SETITIMER)
+    // One call reads and stops the timer. https://man7.org/linux/man-pages/man2/setitimer.2.html
+    struct itimerval off = {0};
+    if (setitimer(RAPIRA_ZEND_ITIMER, &off, saved) != 0) {
+        return false;
+    }
+    return saved->it_value.tv_sec != 0 || saved->it_value.tv_usec != 0;
+#else
+    (void)saved;
+    return false;
+#endif
+}
+
+void rapira_timer_resume(const rapira_timer *saved) {
+#if defined(ZEND_MAX_EXECUTION_TIMERS)
+    timer_settime(EG(max_execution_timer_timer), 0, saved, NULL);
+#elif defined(HAVE_SETITIMER)
+    struct itimerval t = *saved;
+#ifdef __linux__
+    // Linux adds one tick to an ITIMER_PROF value at each arming, so take one tick off. https://github.com/torvalds/linux/blob/v7.3/kernel/time/itimer.c#L201-L205 A coarse clock has the resolution of one tick. https://github.com/torvalds/linux/blob/v7.3/include/vdso/ktime.h#L13
+    struct timespec tick = {0};
+    clock_getres(CLOCK_REALTIME_COARSE, &tick);
+    // A zero value stops the timer, so keep at least 1 us.
+    long long usec = (long long)t.it_value.tv_sec * 1000000 +
+                     t.it_value.tv_usec - tick.tv_nsec / 1000;
+    if (usec < 1) {
+        usec = 1;
+    }
+    t.it_value.tv_sec = (time_t)(usec / 1000000);
+    t.it_value.tv_usec = (suseconds_t)(usec % 1000000);
+#endif
+    setitimer(RAPIRA_ZEND_ITIMER, &t, NULL);
+#else
+    (void)saved;
+#endif
+}
+
 // Resets the per-request state as php_request_startup() does, because the
 // worker path skips that function.
 static void rapira_request_init(void) {
@@ -154,9 +218,7 @@ static void rapira_request_init(void) {
     // init_compiler clears this per cycle (zend_compile.c:461), not per unit
     CG(unclean_shutdown) = false;
 
-    // arms the unit budget as receive() does. rapira_receive_timed passes
-    // reset_signals false, because the php_request_startup of the cycle
-    // installed the SIGPROF handler
+    // Reuse the timer signal handler that php_request_startup installed for this cycle.
     rapira_receive_timed();
 
     if (PG(expose_php)) {

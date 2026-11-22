@@ -43,6 +43,8 @@ The PHP images without Rapira are `ghcr.io/rapira-rs/php:<minor>-nts` and the th
 
 Each HTTP example listens on `127.0.0.1:8000`. After it starts, run `curl http://127.0.0.1:8000/` in another terminal. Relative paths in `rapira.toml` resolve against its directory; the classic example's `entrypoint` is `public/index.php`, one directory below the file.
 
+On Linux, a ZTS PHP build with per-thread timers counts wall-clock time toward `max_execution_time`. A `sleep()` in PHP uses this budget. Rapira pauses the timer while PHP waits for the next unit or for room in a response stream.
+
 ### Classic
 
 [Classic mode](https://rapira.rs/docs/classic) runs the script for each request. Save this as `public/index.php`:

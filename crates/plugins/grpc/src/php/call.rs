@@ -373,7 +373,9 @@ fn add_core(st: &mut GrpcState, trailer: bool, binary: bool, name: &[u8], value:
 }
 
 /// Sends the one outcome of the call, with both metadata halves in wire form. On a streaming response the outcome is a status. Before the head, it goes out with both halves. After the head, it ends the stream with every trailer.
-fn finish(st: &mut GrpcState, result: Result<Bytes, ConnectError>) -> Verb {
+/// # Safety
+/// For a streaming response, the caller runs on a PHP thread.
+unsafe fn finish(st: &mut GrpcState, result: Result<Bytes, ConnectError>) -> Verb {
     if st.cancelled() {
         st.discard();
         return Verb::Discarded;
@@ -397,7 +399,8 @@ fn finish(st: &mut GrpcState, result: Result<Bytes, ConnectError>) -> Verb {
                     .with_headers(wire(&st.headers))
                     .with_trailers(trailers)))
                 .is_ok(),
-            None => push(&out, Part::Fail(err.with_trailers(trailers))),
+            // SAFETY: the caller runs on a PHP thread for a streaming response.
+            None => unsafe { push(&out, Part::Fail(err.with_trailers(trailers))) },
         },
         (Reply::Stream(_), Ok(_)) => unreachable!("only UnaryCall has respond(string)"),
     };
@@ -440,7 +443,9 @@ fn commit(out: &mut StreamReply, headers: &[MetadataField], trailers: &[Metadata
 }
 
 /// Puts one part on the channel of the response stream. On a full channel the PHP thread parks until the plugin takes the part before it, the plugin closes the call, or the deadline of the call passes. Returns false when the part has no destination.
-fn push(out: &StreamReply, part: Part) -> bool {
+/// # Safety
+/// The caller runs on a PHP thread.
+unsafe fn push(out: &StreamReply, part: Part) -> bool {
     let part = match out.parts.try_send(part) {
         Ok(()) => return true,
         Err(TrySendError::Closed(_)) => return false,
@@ -451,7 +456,8 @@ fn push(out: &StreamReply, part: Part) -> bool {
         None => Wait::Forever,
     };
     let room = async { out.parts.reserve().await.ok() };
-    match stream::wait(room, out.parts.closed(), wait) {
+    // SAFETY: the caller runs on a PHP thread.
+    match unsafe { stream::wait(room, out.parts.closed(), wait) } {
         Step::Item(permit) => {
             permit.send(part);
             true
@@ -461,7 +467,9 @@ fn push(out: &StreamReply, part: Part) -> bool {
 }
 
 /// Sends one message of a streaming response. The first message sends the head before it. Returns false when the message has no destination. The call is then discarded.
-fn send_core(st: &mut GrpcState, message: Bytes) -> bool {
+/// # Safety
+/// The caller runs on a PHP thread.
+unsafe fn send_core(st: &mut GrpcState, message: Bytes) -> bool {
     if st.cancelled() {
         st.discard();
         return false;
@@ -470,7 +478,9 @@ fn send_core(st: &mut GrpcState, message: Bytes) -> bool {
     let Some(Reply::Stream(out)) = st.reply.as_mut() else {
         return false;
     };
-    let sent = commit(out, &st.headers, &st.trailers) && push(out, Part::Message(message));
+    // SAFETY: the caller runs on a PHP thread.
+    let sent =
+        commit(out, &st.headers, &st.trailers) && unsafe { push(out, Part::Message(message)) };
     if !sent {
         st.discard();
     }
@@ -478,7 +488,9 @@ fn send_core(st: &mut GrpcState, message: Bytes) -> bool {
 }
 
 /// After the generator ends, sends the head of a stream with no message, then the end of the stream.
-fn end(st: &mut GrpcState) {
+/// # Safety
+/// The caller runs on a PHP thread.
+unsafe fn end(st: &mut GrpcState) {
     if st.cancelled() {
         st.discard();
         return;
@@ -487,7 +499,8 @@ fn end(st: &mut GrpcState) {
     let Some(Reply::Stream(mut out)) = st.reply.take() else {
         return;
     };
-    let sent = commit(&mut out, &st.headers, &st.trailers) && push(&out, Part::End);
+    // SAFETY: the caller runs on a PHP thread.
+    let sent = commit(&mut out, &st.headers, &st.trailers) && unsafe { push(&out, Part::End) };
     if out.late_trailer {
         tracing::debug!(target: "grpc", "{}: a trailer added after the first yield is not sent", st.req.method);
     }
@@ -691,7 +704,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_stream_begin(held: *const HeldPtr) -> bo
 
 /// Sends one message that the generator of respond(\Generator) yielded. Throws nothing. Returns false when the host closed the call.
 /// # Safety
-/// `held` is the slot of a live call. `message` points at `len` readable bytes.
+/// `held` is the slot of a live call. `message` points at `len` readable bytes. The caller runs on a PHP thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_stream_send(
     held: *const HeldPtr,
@@ -706,7 +719,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_stream_send(
 
 /// Runs when the generator of respond(\Generator) ends with the call open. Throws nothing.
 /// # Safety
-/// `held` is the slot of a live call.
+/// `held` is the slot of a live call. The caller runs on a PHP thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_stream_end(held: *const HeldPtr) {
     guard((), || unsafe { end(&mut *(*held).state::<GrpcState>()) });
@@ -1253,7 +1266,13 @@ mod tests {
             let mut st = state(tx);
             let _rx = match c.setup {
                 Setup::Responded => {
-                    assert_eq!(finish(&mut st, Ok(Bytes::new())), Verb::Ok, "{}", c.name);
+                    // SAFETY: a unary reply does not park.
+                    assert_eq!(
+                        unsafe { finish(&mut st, Ok(Bytes::new())) },
+                        Verb::Ok,
+                        "{}",
+                        c.name
+                    );
                     Some(rx)
                 }
                 Setup::HostClosed => {
@@ -1442,9 +1461,14 @@ mod tests {
             let verbs: Vec<Verb> = c
                 .finishes
                 .iter()
-                .map(|f| match f {
-                    Finish::Respond(message) => finish(&mut st, Ok(Bytes::from_static(message))),
-                    Finish::Fail(s) => finish(&mut st, Err(error(s))),
+                // SAFETY: a unary reply does not park.
+                .map(|f| unsafe {
+                    match f {
+                        Finish::Respond(message) => {
+                            finish(&mut st, Ok(Bytes::from_static(message)))
+                        }
+                        Finish::Fail(s) => finish(&mut st, Err(error(s))),
+                    }
                 })
                 .collect();
             assert_eq!(verbs, c.verbs, "{}", c.name);

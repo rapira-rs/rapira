@@ -55,6 +55,17 @@ zend_executor_globals *rapira_eg(void);
 php_core_globals *rapira_pg(void);
 zend_compiler_globals *rapira_cg(void);
 
+// The saved execution timer of this thread: a POSIX timer with ZEND_MAX_EXECUTION_TIMERS, else the setitimer timer of zend_set_timeout.
+#if defined(ZEND_MAX_EXECUTION_TIMERS)
+typedef struct itimerspec rapira_timer;
+#else
+typedef struct itimerval rapira_timer;
+#endif
+// Stops the timer and writes its old value to saved. Returns true only for a timer with time left. Call it on a PHP thread.
+bool rapira_timer_pause(rapira_timer *saved);
+// Arms the timer again with the value that rapira_timer_pause saved.
+void rapira_timer_resume(const rapira_timer *saved);
+
 // The Mode enum of rapira_config (crates/config/src/pool.rs). start_worker (start.rs) maps it to these values. Keep both in sync.
 enum {
     RAPIRA_MODE_CLASSIC = 0,

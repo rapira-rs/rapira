@@ -36,6 +36,8 @@
     "zend_update_property_long", "zend_update_property_double", "zend_update_property_null",
     // SG, EG, PG and CG are macros that read a thread-local struct on ZTS, so wrapper.c has accessors
     "rapira_sg", "rapira_eg", "rapira_pg", "rapira_cg",
+    // the execution timer pause of a park (module.c); rapira_timer is the native timer type of the build
+    "rapira_timer", "rapira_timer_pause", "rapira_timer_resume",
     // array_init_size is a macro, so wrapper.c has the rapira_array_init shim
     "rapira_array_init",
     // zend_array_is_list is inline, so wrapper.c has the rapira_array_is_list shim
