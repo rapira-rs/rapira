@@ -4,6 +4,7 @@ pub mod callbacks;
 mod classic_worker;
 mod context;
 mod diagnostics;
+mod engine;
 mod env;
 pub mod exchange;
 mod log;
@@ -23,8 +24,9 @@ pub mod zend;
 use std::ffi::c_int;
 
 pub use bindings::*;
+pub use engine::{Engine, has_execution_timers, linked_php_version, zts};
 pub use reload::reload;
-pub use start::{PhpModule, Rapira, StartedWorker, boot_master, linked_php_version};
+pub use start::Pool;
 pub use types::{Addr, Frame, Request};
 
 // bindgen names the Zend SUCCESS and FAILURE constants differently across php-src versions, so the values are hardcoded.
@@ -36,12 +38,6 @@ unsafe extern "C" {
     pub fn rapira_finish_output() -> c_int;
     pub fn rapira_clear_last_error();
     pub fn rapira_request_teardown() -> c_int;
-    // Starts TSRM on ZTS and the signal handling of Zend, before sapi_startup. rapira_process_shutdown stops the module, SAPI and TSRM. Both run on the main thread (module.c).
-    pub fn rapira_process_init(expected_threads: c_int);
-    pub fn rapira_process_shutdown();
-    pub fn rapira_child_init();
-    // Gives the calling thread its PHP globals on ZTS, its call stack limit, the SAPI options and the urlencoded post reader. It runs first on each PHP thread (module.c).
-    pub fn rapira_thread_start();
     pub fn rapira_release_temporary_streams();
     // Holds the shutdown functions of the boot until the cycle ends (module.c).
     pub fn rapira_stash_boot_shutdown_functions();

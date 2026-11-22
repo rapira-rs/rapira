@@ -13,7 +13,7 @@ extern size_t rapira_rs_ub_write(const char *str, size_t len, bool *aborted);
 size_t rapira_ub_write(const char *str, size_t len) {
     bool aborted = false;
     size_t written = rapira_rs_ub_write(str, len, &aborted);
-    if (aborted && rapira_mode != RAPIRA_MODE_WORKER) {
+    if (aborted && rapira_current_mode() != RAPIRA_MODE_WORKER) {
         php_handle_aborted_connection();
     } else if (aborted) {
         PG(connection_status) = PHP_CONNECTION_ABORTED;
@@ -55,7 +55,7 @@ int rapira_finish_output(void) {
 
 PHP_FUNCTION(rapira_finish_request) {
     ZEND_PARSE_PARAMETERS_NONE();
-    if (rapira_mode == RAPIRA_MODE_DISPATCHER) {
+    if (rapira_current_mode() == RAPIRA_MODE_DISPATCHER) {
         // without this check it would flush the app ob buffers into the log
         zend_throw_error(
             NULL, "rapira_finish_request() is not available in dispatcher "
@@ -142,6 +142,8 @@ void rapira_receive_timed(void) {
     zend_set_timeout(rapira_unit_timeout, false);
 }
 
+static bool rapira_timeouts_disabled;
+
 #if !defined(ZEND_MAX_EXECUTION_TIMERS) && defined(HAVE_SETITIMER)
 // The timer of zend_set_timeout without the POSIX timers. https://github.com/php/php-src/blob/php-8.5.12/Zend/zend_execute_API.c#L1647-L1655
 #if defined(__CYGWIN__) || defined(__PASE__) ||                                \
@@ -170,6 +172,9 @@ bool rapira_timer_pause(rapira_timer *saved) {
     }
     return saved->it_value.tv_sec != 0 || saved->it_value.tv_nsec != 0;
 #elif defined(HAVE_SETITIMER)
+    if (rapira_timeouts_disabled) {
+        return false;
+    }
     // One call reads and stops the timer. https://man7.org/linux/man-pages/man2/setitimer.2.html
     struct itimerval off = {0};
     if (setitimer(RAPIRA_ZEND_ITIMER, &off, saved) != 0) {
@@ -521,27 +526,53 @@ void rapira_clear_last_error(void) {
 #endif
 }
 
+bool rapira_zts(void) { return PHP_ZTS; }
+
+bool rapira_has_execution_timers(void) {
+#ifdef ZEND_MAX_EXECUTION_TIMERS
+    return true;
+#else
+    return false;
+#endif
+}
+
+// MINIT still owns the ini table that each worker copies. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_ini.c#L144-L171
+void rapira_lock_timeouts(void) {
+    if (rapira_timeouts_disabled) {
+        // set_time_limit() and ini_set() both require PHP_INI_USER. https://github.com/php/php-src/blob/php-8.6.0/main/main.c#L1603-L1617
+        zend_ini_entry *execution = zend_hash_str_find_ptr(
+            EG(ini_directives), ZEND_STRL("max_execution_time"));
+        zend_ini_entry *input = zend_hash_str_find_ptr(
+            EG(ini_directives), ZEND_STRL("max_input_time"));
+        execution->modifiable = PHP_INI_SYSTEM;
+        input->modifiable = PHP_INI_SYSTEM;
+    }
+}
+
 // Start TSRM before Zend signal handling and SAPI startup. https://github.com/php/php-src/blob/php-8.6.0/sapi/embed/php_embed.c#L167-L186
-void rapira_process_init(int expected_threads) {
+bool rapira_process_init(int expected_threads, bool disable_timeouts) {
+    rapira_timeouts_disabled = disable_timeouts;
 #ifdef ZTS
-    php_tsrm_startup_ex(expected_threads);
+    if (!php_tsrm_startup_ex(expected_threads)) {
+        return false;
+    }
+#else
+    (void)expected_threads;
 #endif
     zend_signal_startup();
+    return true;
 }
 
 // Only the thread that started TSRM can shut it down. https://github.com/php/php-src/blob/php-8.6.0/TSRM/TSRM.c#L194-L206
 void rapira_process_shutdown(void) {
+#if !defined(ZTS) && defined(ZEND_CHECK_STACK_LIMIT)
+    // The one NTS interpreter returns to the main stack for module shutdown.
+    zend_call_stack_init();
+#endif
     php_module_shutdown();
     sapi_shutdown();
 #ifdef ZTS
     tsrm_shutdown();
-#endif
-}
-
-// PHP 8.5 and later update the heap owner after a fork. PHP 8.7-dev also calls the child init hooks of extensions. https://github.com/php/php-src/blob/75679b1eeee47af1cdb0c0a4852e3dd8c7c88e81/main/main.c#L1859-L1870
-void rapira_child_init(void) {
-#if PHP_VERSION_ID >= 80500
-    php_child_init();
 #endif
 }
 
@@ -741,13 +772,15 @@ void rapira_register_post_reader(void) {
 }
 
 // The ZTS thread constructor copies the ini entries and initializes the stack limit and the timer. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend.c#L883-L891
-void rapira_thread_start(void) {
+void rapira_thread_start(int mode, const rapira_plugin *plugin,
+                         const char *name, size_t name_len) {
 #ifdef ZTS
     (void)ts_resource(0);
 #elif defined(ZEND_CHECK_STACK_LIMIT)
     // On NTS, MINIT set the limit for the main thread.
     zend_call_stack_init();
 #endif
+    rapira_set_dispatcher(mode, plugin, name, name_len);
     // Each thread has its own content type table. Keep the POST handler that mbstring selected. https://github.com/php/php-src/blob/php-8.6.0/main/SAPI.c#L50-L55
     sapi_post_entry *entry = zend_hash_str_find_ptr(
         &SG(known_post_content_types), DEFAULT_POST_CONTENT_TYPE,
@@ -755,6 +788,25 @@ void rapira_thread_start(void) {
     if (entry) {
         entry->post_reader = rapira_post_reader;
     }
+}
+
+void rapira_thread_end(void) {
+#ifdef ZTS
+#if PHP_VERSION_ID < 80700
+    // PHP 8.4 to 8.6 destroy only the lists still in TSRM at module shutdown. PHP 8.7 destroys the list in ts_free_thread(). https://github.com/php/php-src/commit/0a98b97933070124575e12c0bbdfd18371e5def9
+    dtor_func_t destructor = EG(persistent_list).pDestructor;
+    volatile bool completed = false;
+    do {
+        zend_try {
+            zend_hash_graceful_reverse_destroy(&EG(persistent_list));
+            completed = true;
+        }
+        zend_end_try();
+    } while (!completed);
+    zend_hash_init(&EG(persistent_list), 8, NULL, destructor, true);
+#endif
+    ts_free_thread();
+#endif
 }
 
 // Boot-registered shutdown functions run once, at cycle end.

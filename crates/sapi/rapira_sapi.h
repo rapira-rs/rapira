@@ -66,13 +66,12 @@ bool rapira_timer_pause(rapira_timer *saved);
 // Arms the timer again with the value that rapira_timer_pause saved.
 void rapira_timer_resume(const rapira_timer *saved);
 
-// The Mode enum of rapira_config (crates/config/src/pool.rs). start_worker (start.rs) maps it to these values. Keep both in sync.
+// The worker maps rapira_config::Mode to these values.
 enum {
     RAPIRA_MODE_CLASSIC = 0,
     RAPIRA_MODE_WORKER = 1,
     RAPIRA_MODE_DISPATCHER = 2,
 };
-extern int rapira_mode;
 
 // The plugin record. Each plugin defines one; its register function assigns the
 // classes in MINIT.
@@ -87,19 +86,25 @@ typedef struct {
     // nothing.
     void (*quiesce)(void);
 } rapira_plugin;
-// The plugin of this worker's pool. In dispatcher mode, start_worker
-// (start.rs) writes these globals once before the PHP thread starts.
-// NULL outside dispatcher mode.
-extern const rapira_plugin *rapira_plugin_current;
-// Plugin::name() of this worker's pool, without a NUL terminator.
-extern const char *rapira_plugin_name;
-extern size_t rapira_plugin_name_len;
+
+bool rapira_zts(void);
+bool rapira_has_execution_timers(void);
+void rapira_lock_timeouts(void);
+// Each PHP thread calls start before its first request and end after its last request.
+// The plugin and the name must live until the thread ends. The name has name_len bytes.
+void rapira_thread_start(int mode, const rapira_plugin *plugin,
+                         const char *name, size_t name_len);
+void rapira_thread_end(void);
+void rapira_set_dispatcher(int mode, const rapira_plugin *plugin,
+                           const char *name, size_t name_len);
+int rapira_current_mode(void);
+// The record is NULL outside dispatcher mode.
+const rapira_plugin *rapira_current_plugin(void);
 // A plugin register function calls it after it assigns the classes of the
 // record. It gives the shared handlers to the Dispatcher and DispatcherInfo
 // classes.
 void rapira_plugin_wire(const rapira_plugin *plugin);
-// The plugin register functions that MINIT calls after the base classes, in
-// array order; boot_master (start.rs) writes them once in the master.
+// The engine sets these functions before MINIT registers the plugin classes.
 extern void (*const *rapira_plugin_registers)(void);
 extern size_t rapira_plugin_register_count;
 

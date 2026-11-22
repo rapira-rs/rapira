@@ -13,11 +13,22 @@ extern bool rapira_rs_held_is_cancelled(const rapira_held *held);
 extern int rapira_rs_handle_request(zend_fcall_info *fci,
                                     zend_fcall_info_cache *fcc);
 
-int rapira_mode = RAPIRA_MODE_CLASSIC;
+ZEND_TLS int rapira_mode = RAPIRA_MODE_CLASSIC;
+ZEND_TLS const rapira_plugin *rapira_plugin_current;
+ZEND_TLS const char *rapira_plugin_name;
+ZEND_TLS size_t rapira_plugin_name_len;
 
-const rapira_plugin *rapira_plugin_current;
-const char *rapira_plugin_name;
-size_t rapira_plugin_name_len;
+void rapira_set_dispatcher(int mode, const rapira_plugin *plugin,
+                           const char *name, size_t name_len) {
+    rapira_mode = mode;
+    rapira_plugin_current = mode == RAPIRA_MODE_DISPATCHER ? plugin : NULL;
+    rapira_plugin_name = name;
+    rapira_plugin_name_len = name_len;
+}
+
+int rapira_current_mode(void) { return rapira_mode; }
+
+const rapira_plugin *rapira_current_plugin(void) { return rapira_plugin_current; }
 
 // the memoized plugin Dispatcher of this cycle; RSHUTDOWN releases it
 ZEND_TLS zval rapira_dispatcher_memo;
@@ -27,7 +38,6 @@ ZEND_FUNCTION(Rapira_get_version) {
     RETURN_STRINGL(RAPIRA_VERSION, sizeof(RAPIRA_VERSION) - 1);
 }
 
-// start.rs sets rapira_mode once before the PHP thread starts, so the case is stable for the process
 ZEND_FUNCTION(Rapira_get_mode) {
     ZEND_PARSE_PARAMETERS_NONE();
 

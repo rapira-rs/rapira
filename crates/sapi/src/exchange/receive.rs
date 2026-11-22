@@ -23,9 +23,9 @@ unsafe fn receive_into(rv: *mut zval, mode: RecvMode) -> bool {
         if let Some(ptr) = UNIT.get()
             && !(*ptr).settled()
         {
-            // SAFETY: a unit exists only in dispatcher mode, where start_worker points rapira_plugin_current at the static record of the plugin, and the record holds a static busy text.
+            // SAFETY: a dispatcher unit has a static plugin record and a static error message.
             zend::throw_error(std::ffi::CStr::from_ptr(
-                (*crate::rapira_plugin_current).busy,
+                (*crate::rapira_current_plugin()).busy,
             ));
             return false;
         }
@@ -60,7 +60,7 @@ unsafe fn receive_into(rv: *mut zval, mode: RecvMode) -> bool {
                     rapira_receive_untimed();
                 }
                 // The app instance takes no more units. It sees the source closed, and the worker stays.
-                Pull::Closed => {
+                Pull::Closed | Pull::Reload => {
                     zend::throw_exception(rapira_ce_closed_exception, CLOSED);
                     return false;
                 }

@@ -1,30 +1,37 @@
 use crate::{callbacks::guard, types::Context, *};
 use std::{
-    cell::Cell,
+    cell::{Cell, OnceCell},
     collections::BTreeMap,
-    ffi::{CString, c_char},
+    ffi::{CStr, c_char},
     fmt::NumBuffer,
     os::{raw::c_void, unix::ffi::OsStrExt},
     path::Path,
     ptr::{null, null_mut},
+    sync::{Arc, Mutex, OnceLock},
 };
 
-/// The script paths of the current app instance. In classic mode, they are the paths of the requests since the worker start or the last reload.
+/// The entrypoint paths of the worker since its last boot or classic reload.
+#[derive(Clone, Copy)]
 pub(crate) struct ScriptPaths {
-    /// `SG(request_info).path_translated` points at it while a unit runs.
-    pub(crate) filename: CString,
     /// `SCRIPT_FILENAME`, `SCRIPT_NAME` and `DOCUMENT_ROOT` of `$_SERVER`, as permanent interned strings.
-    pub(crate) server_filename: *mut zend_string,
-    pub(crate) server_script_name: *mut zend_string,
-    pub(crate) server_document_root: *mut zend_string,
+    pub(crate) server_filename: Permanent,
+    pub(crate) server_script_name: Permanent,
+    pub(crate) server_document_root: Permanent,
+}
+
+impl ScriptPaths {
+    pub(crate) fn filename(&self) -> &CStr {
+        // SAFETY: PHP terminates the permanent string with NUL. The configured path passed the file check, and a path from the file system has no NUL.
+        unsafe { CStr::from_ptr((*self.server_filename.0).val.as_ptr()) }
+    }
 }
 
 /// Declares `ServerStrings` and its constructor. The constructor makes one permanent interned string for each field.
 macro_rules! server_strings {
     ($($field:ident: $text:literal,)*) => {
-        /// The `$_SERVER` strings that are the same for every request of the worker, as permanent interned strings. PHP inserts each one with no hash, no allocation and no copy. They live until the worker process exits.
+        /// The fixed `$_SERVER` names and values. All workers share their precomputed hashes.
         pub(crate) struct ServerStrings {
-            $(pub(crate) $field: *mut zend_string,)*
+            $(pub(crate) $field: Permanent,)*
         }
 
         impl ServerStrings {
@@ -77,45 +84,83 @@ server_strings! {
 pub(crate) struct ServerIdentity {
     name: &'static str,
     port: u16,
-    pub(crate) server_name: *mut zend_string,
-    pub(crate) server_port: *mut zend_string,
+    pub(crate) server_name: Permanent,
+    pub(crate) server_port: Permanent,
 }
 
+static SERVER_STRINGS: OnceLock<ServerStrings> = OnceLock::new();
+
+type ServerEnv = [(Permanent, Permanent)];
+
 thread_local! {
-    /// A box from `resolve_script`, or null. Only the PHP thread sets and reads it, and it sets it between units only.
-    static SCRIPT: Cell<*mut ScriptPaths> = const { Cell::new(null_mut()) };
-    /// The env pairs of the pool as permanent interned strings, from `intern_server_env`.
-    pub(crate) static SERVER_ENV: Cell<&'static [(*mut zend_string, *mut zend_string)]> = const { Cell::new(&[]) };
-    /// Set by `intern_server_strings`.
-    static SERVER_STRINGS: Cell<Option<&'static ServerStrings>> = const { Cell::new(None) };
+    pub(crate) static SCRIPT: Cell<Option<ScriptPaths>> = const { Cell::new(None) };
+    static SERVER_ENV: OnceCell<Arc<ServerEnv>> = const { OnceCell::new() };
     /// The identity strings of the last request, from `server_identity`.
     static SERVER_IDENTITY: Cell<Option<ServerIdentity>> = const { Cell::new(None) };
 }
 
-/// Returns a permanent interned copy of `bytes`. PHP never refcounts or frees it, so it lives until the worker process exits, and the process exits without module teardown.
-fn permanent(bytes: &[u8]) -> *mut zend_string {
-    // SAFETY: the pointer and the length come from a live slice, and the shim copies the bytes.
-    unsafe { rapira_permanent_string(bytes.as_ptr().cast(), bytes.len()) }
+#[derive(Clone, Copy)]
+pub(crate) struct Permanent(*mut zend_string);
+
+// SAFETY: the bytes, flags and hash are immutable. Only the engine frees the allocation, after all PHP threads and modules have stopped.
+unsafe impl Send for Permanent {}
+unsafe impl Sync for Permanent {}
+
+impl Permanent {
+    pub(crate) fn as_ptr(self) -> *mut zend_string {
+        self.0
+    }
 }
 
-/// Makes the env pairs of the pool into permanent interned strings once, for the `$_SERVER` of each request.
-pub(crate) fn intern_server_env(env: &BTreeMap<String, String>) {
-    let rows: Box<[_]> = env
-        .iter()
+static PERMANENT: Mutex<BTreeMap<Box<[u8]>, Permanent>> = Mutex::new(BTreeMap::new());
+
+/// PHP's permanent intern table is read-only after MINIT. Workers add new entrypoint paths to this separate table. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_string.c#L41-L45
+fn permanent(bytes: &[u8]) -> Permanent {
+    let mut table = PERMANENT.lock().unwrap();
+    if let Some(s) = table.get(bytes) {
+        return *s;
+    }
+    // SAFETY: the shim copies the bytes and computes the hash before publication. Persistent allocation uses malloc and cannot raise a request bailout. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_alloc.c#L4069-L4076
+    let s = Permanent(unsafe { rapira_permanent_string(bytes.as_ptr().cast(), bytes.len()) });
+    table.insert(bytes.into(), s);
+    s
+}
+
+pub(crate) fn free_permanent_strings() {
+    for (_, s) in std::mem::take(&mut *PERMANENT.lock().unwrap()) {
+        // SAFETY: each allocation came from rapira_permanent_string. PHP and its extensions have finished using it.
+        unsafe { rapira_free_permanent_string(s.0) };
+    }
+}
+
+unsafe extern "C" {
+    fn rapira_free_permanent_string(s: *mut zend_string);
+}
+
+/// Prepare one immutable array of env pairs for all workers of the pool.
+pub(crate) fn intern_server_env(env: &BTreeMap<String, String>) -> Arc<ServerEnv> {
+    env.iter()
         .map(|(name, value)| (permanent(name.as_bytes()), permanent(value.as_bytes())))
-        .collect();
-    SERVER_ENV.set(Box::leak(rows));
+        .collect()
 }
 
-/// Builds the `ServerStrings` of this worker once, on the PHP thread.
+pub(crate) fn enter_server_env(env: Arc<ServerEnv>) {
+    SERVER_ENV.with(|slot| assert!(slot.set(env).is_ok()));
+}
+
+pub(crate) fn with_server_env(f: impl FnOnce(&ServerEnv)) {
+    SERVER_ENV.with(|slot| f(slot.get().map_or(&[], AsRef::as_ref)));
+}
+
+/// The engine initializes the fixed strings before it starts any workers.
 pub(crate) fn intern_server_strings() {
-    SERVER_STRINGS.set(Some(Box::leak(Box::new(ServerStrings::intern()))));
+    SERVER_STRINGS.get_or_init(ServerStrings::intern);
 }
 
 pub(crate) fn server_strings() -> &'static ServerStrings {
     SERVER_STRINGS
         .get()
-        .expect("the PHP thread interns the server strings before the first request")
+        .expect("the engine has initialized the server strings")
 }
 
 /// The identity strings for the server name and port of a request. Every request of a worker carries the same pair, so the first request builds the strings and the next requests reuse them.
@@ -143,34 +188,27 @@ pub(crate) fn resolve_script(configured: &Path) {
         tracing::error!(target: "rapira", "resolving the entrypoint {}: {e}", configured.display());
         configured.to_path_buf()
     });
-    // SAFETY: the pointer is null or a live box from this function.
-    let current = unsafe { SCRIPT.get().as_ref() };
-    if current.is_some_and(|paths| paths.filename.as_bytes() == real.as_os_str().as_bytes()) {
+    if SCRIPT
+        .get()
+        .is_some_and(|paths| paths.filename().to_bytes() == real.as_os_str().as_bytes())
+    {
         return;
     }
     let document_root = real.parent().map_or(&b""[..], |p| p.as_os_str().as_bytes());
     let script_name = configured
         .file_name()
         .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
-    let filename = CString::new(real.as_os_str().as_bytes()).unwrap_or_default();
-    let paths = Box::new(ScriptPaths {
-        server_filename: permanent(filename.as_bytes()),
+    SCRIPT.set(Some(ScriptPaths {
+        server_filename: permanent(real.as_os_str().as_bytes()),
         server_script_name: permanent(script_name.as_bytes()),
         server_document_root: permanent(document_root),
-        filename,
-    });
-    let old = SCRIPT.replace(Box::into_raw(paths));
-    if !old.is_null() {
-        // SAFETY: old came from Box::into_raw above. The PHP thread replaces the paths only between units, and no reader keeps the reference past its unit.
-        drop(unsafe { Box::from_raw(old) });
-    }
+    }));
 }
 
-/// Valid until the next `resolve_script` on this thread.
-pub(crate) fn script() -> &'static ScriptPaths {
-    // SAFETY: the pointer is null or a live box from resolve_script.
-    unsafe { SCRIPT.get().as_ref() }
-        .expect("the PHP thread resolves the script paths before the first request")
+pub(crate) fn script() -> ScriptPaths {
+    SCRIPT
+        .get()
+        .expect("the worker has resolved its entrypoint")
 }
 
 /// Empties the realpath cache of PHP, so a path through a switched symlink resolves again. A cache entry lives `realpath_cache_ttl` seconds, 120 by default.
@@ -232,7 +270,7 @@ pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     ri.request_method = reqc.method.as_ptr();
     ri.query_string = reqc.query.as_ptr() as *mut c_char;
     ri.request_uri = reqc.uri.as_ptr() as *mut c_char;
-    ri.path_translated = script().filename.as_ptr() as *mut c_char;
+    ri.path_translated = script().filename().as_ptr() as *mut c_char;
     ri.content_type = reqc.ctype.as_ref().map_or(null(), |s| s.as_ptr());
     ri.content_length = ctx.req.body.len() as i64;
 }

@@ -5,7 +5,7 @@
     "zend_fcall_info", "zend_fcall_info_cache",
     "sapi_startup", "php_module_startup", "php_request_startup",
     "php_execute_script", "zend_error", "zend_stream_init_filename", "zend_destroy_file_handle",
-    "rapira_mode", "RAPIRA_MODE_CLASSIC", "RAPIRA_MODE_WORKER",
+    "RAPIRA_MODE_CLASSIC", "RAPIRA_MODE_WORKER",
     "RAPIRA_MODE_DISPATCHER", "RAPIRA_OK", "RAPIRA_BAILOUT", "RAPIRA_THROW",
     "RAPIRA_HANDLE_STOP", "RAPIRA_HANDLE_CONTINUE", "RAPIRA_HANDLE_RECYCLE",
     // the two halves of the linked-libphp version check, and the linked version string
@@ -16,8 +16,9 @@
     "rapira_ce_timeout_exception", "rapira_ce_closed_exception",
     "zend_argument_type_error",
     "rapira_ce_work_discarded_exception",
-    // the plugin globals the Rust boot and worker start write (static mut), and the type of the plugin record that describes the dispatcher
-    "rapira_plugin", "rapira_plugin_current", "rapira_plugin_name", "rapira_plugin_name_len",
+    "rapira_zts", "rapira_has_execution_timers", "rapira_thread_start", "rapira_thread_end",
+    // Each worker reads its dispatcher record. The engine writes the register functions before MINIT.
+    "rapira_plugin", "rapira_current_plugin",
     "rapira_plugin_registers", "rapira_plugin_register_count",
     // the FOREACH macros are header-only, so the array walk uses the exported position API
     "zend_hash_internal_pointer_reset_ex", "zend_hash_get_current_key_ex",

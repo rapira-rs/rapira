@@ -1,4 +1,4 @@
-use crate::context::{ctx, with_ctx};
+use crate::context::{Permanent, ctx, with_ctx};
 use crate::diagnostics::syslog_to_level;
 use crate::types::StreamState;
 use crate::*;
@@ -291,26 +291,27 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
     with_ctx((), |ctx| {
         let reqc = &ctx.c;
         // One allocation for the whole array: the env pairs of the pool, the names below, one HTTP_* name per field, and the entries php_register_server_variables adds after this callback.
-        let server_env = crate::context::SERVER_ENV.get();
-        let size = SERVER_VARS_MAX + ctx.req.headers.keys_len() as u32 + server_env.len() as u32;
         let ht = unsafe { (*track_vars_array).value.arr };
-        unsafe { zend_hash_extend(ht, size, false) };
         // Inserts a permanent interned name and value. The insert takes no hash, no allocation and no copy.
-        let put_interned = |name: *mut zend_string, value: *mut zend_string| unsafe {
+        let put_interned = |name: Permanent, value: Permanent| unsafe {
             let mut v: zval = std::mem::zeroed();
-            v.value.str_ = value;
+            v.value.str_ = value.as_ptr();
             v.u1.type_info = IS_STRING;
-            zend_hash_update(ht, name, &mut v);
+            zend_hash_update(ht, name.as_ptr(), &mut v);
         };
         // Inserts a permanent interned name and a value of this request, which PHP copies.
-        let put = |name: *mut zend_string, value: &[u8]| unsafe {
-            rapira_hash_update_stringl(ht, name, value.as_ptr().cast(), value.len());
+        let put = |name: Permanent, value: &[u8]| unsafe {
+            rapira_hash_update_stringl(ht, name.as_ptr(), value.as_ptr().cast(), value.len());
         };
         // The env pairs of the pool go in first, so the request variables below override a pair with the same name.
         // Each name goes in as written. The environment import of PHP skips a name with a space, '.' or '[', and it stores an all-digit name as an integer key. Such a name is therefore different in the boot $_SERVER.
-        for &(name, value) in server_env {
-            put_interned(name, value);
-        }
+        crate::context::with_server_env(|env| {
+            let size = SERVER_VARS_MAX + ctx.req.headers.keys_len() as u32 + env.len() as u32;
+            unsafe { zend_hash_extend(ht, size, false) };
+            for &(name, value) in env {
+                put_interned(name, value);
+            }
+        });
         let s = crate::context::server_strings();
         let script = crate::context::script();
         let identity = crate::context::server_identity(ctx.req.server_name, ctx.req.server_port);
@@ -394,7 +395,10 @@ unsafe fn register_boot_variables(track_vars_array: *mut zval, put: impl Fn(&CSt
             import(track_vars_array);
         }
     }
-    let path = crate::context::script().filename.as_bytes();
+    let Some(script) = crate::context::SCRIPT.get() else {
+        return;
+    };
+    let path = script.filename().to_bytes();
     put(c"PHP_SELF", path);
     put(c"SCRIPT_NAME", path);
     put(c"SCRIPT_FILENAME", path);

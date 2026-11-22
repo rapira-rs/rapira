@@ -160,6 +160,7 @@ void rapira_plugin_wire(const rapira_plugin *plugin) {
 // the plugin classes extend the base classes, so the base classes register
 // first
 PHP_MINIT_FUNCTION(rapira) {
+    rapira_lock_timeouts();
     rapira_register_classes();
     for (size_t i = 0; i < rapira_plugin_register_count; i++) {
         rapira_plugin_registers[i]();
@@ -173,9 +174,9 @@ PHP_MINIT_FUNCTION(rapira) {
 // A write to a held unit from a later RSHUTDOWN would lend a string that the
 // memory manager then frees, so app code there must not write.
 PHP_RSHUTDOWN_FUNCTION(rapira) {
-    if (rapira_plugin_current != NULL &&
-        rapira_plugin_current->quiesce != NULL) {
-        rapira_plugin_current->quiesce();
+    const rapira_plugin *plugin = rapira_current_plugin();
+    if (plugin && plugin->quiesce) {
+        plugin->quiesce();
     }
 #ifdef HAVE_PHP_SESSION
     // the session RSHUTDOWN runs after this one (zend_collect_module_handlers),

@@ -1,11 +1,11 @@
 //! PHP reads the `putenv()` writes of its thread, then the pool values, then the process environment at startup. Children inherit only the process environment.
 //! C copies the result into PHP strings after each Rust call returns. No Rust borrow spans a PHP allocation.
 
-use std::cell::RefCell;
+use std::cell::{OnceCell, RefCell};
 use std::collections::{BTreeMap, HashMap};
 use std::ffi::c_char;
 use std::os::unix::ffi::OsStringExt;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 type Bytes = Box<[u8]>;
 
@@ -18,7 +18,7 @@ struct Boot {
 static BOOT: OnceLock<Boot> = OnceLock::new();
 
 thread_local! {
-    static POOL: RefCell<BTreeMap<String, String>> = const { RefCell::new(BTreeMap::new()) };
+    static POOL: OnceCell<Arc<BTreeMap<String, String>>> = const { OnceCell::new() };
     /// The putenv() writes, one per name in the order of the first write. None is a removal.
     static WRITES: RefCell<Vec<(Bytes, Option<Bytes>)>> = const { RefCell::new(Vec::new()) };
     static VIEW: RefCell<Vec<EnvPair>> = const { RefCell::new(Vec::new()) };
@@ -68,9 +68,9 @@ pub(crate) fn install() {
     unsafe { rapira_env_install() };
 }
 
-/// Move the pool table to its PHP thread.
-pub(crate) fn enter_pool(env: BTreeMap<String, String>) {
-    POOL.set(env);
+/// All workers of a pool read the same immutable table.
+pub(crate) fn enter_pool(env: Arc<BTreeMap<String, String>>) {
+    POOL.with(|slot| assert!(slot.set(env).is_ok()));
 }
 
 /// # Safety
@@ -101,7 +101,7 @@ pub unsafe extern "C" fn rapira_rs_env_get(
     });
     let found = write.unwrap_or_else(|| {
         let pool = std::str::from_utf8(name).ok().and_then(|name| {
-            POOL.with_borrow(|pool| pool.get(name).map(|v| (v.as_ptr(), v.len())))
+            POOL.with(|pool| pool.get()?.get(name).map(|v| (v.as_ptr(), v.len())))
         });
         pool.or_else(|| {
             let boot = BOOT.get()?;
@@ -160,11 +160,13 @@ pub unsafe extern "C" fn rapira_rs_env_view(len: *mut usize) -> *const EnvPair {
         if let Some(boot) = BOOT.get() {
             view.extend(boot.pairs.iter().map(|(n, v)| EnvPair::new(n, Some(v))));
         }
-        POOL.with_borrow(|pool| {
-            view.extend(
-                pool.iter()
-                    .map(|(n, v)| EnvPair::new(n.as_bytes(), Some(v.as_bytes()))),
-            );
+        POOL.with(|slot| {
+            if let Some(pool) = slot.get() {
+                view.extend(
+                    pool.iter()
+                        .map(|(n, v)| EnvPair::new(n.as_bytes(), Some(v.as_bytes()))),
+                );
+            }
         });
         WRITES.with_borrow(|writes| {
             view.extend(writes.iter().map(|(n, v)| EnvPair::new(n, v.as_deref())));

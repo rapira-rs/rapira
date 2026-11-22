@@ -36,3 +36,59 @@ fn the_same_file_applies_through_phprc() {
         harness::diagnostics(&srv)
     );
 }
+
+#[test]
+fn a_process_timer_can_only_run_with_one_worker() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        workers: usize,
+        run: bool,
+        disabled: bool,
+    }
+    let cases = [
+        Case {
+            name: "one worker uses the configured limits",
+            workers: 1,
+            run: true,
+            disabled: false,
+        },
+        Case {
+            name: "two workers use separate timers",
+            workers: 2,
+            run: rapira_sapi::zts() && rapira_sapi::has_execution_timers(),
+            disabled: false,
+        },
+        Case {
+            name: "two workers cannot enable the process timer",
+            workers: 2,
+            run: rapira_sapi::zts() && !rapira_sapi::has_execution_timers(),
+            disabled: true,
+        },
+    ];
+    for case in cases.into_iter().filter(|case| case.run) {
+        let srv = Spawn::http(Mode::Worker, fixture_path("ini/timeouts.php"))
+            .workers(case.workers)
+            .php_ini("max_execution_time=9\nmax_input_time=8\nopcache.enable=0\n")
+            .spawn();
+        let response = http_get(srv.addr, "/", REQ)?;
+        assert_eq!(response.status, 200, "{}", case.name);
+        let expected = if case.disabled {
+            serde_json::json!(["0", "-1", false, false, "0"])
+        } else {
+            serde_json::json!(["9", "8", "9", true, "6"])
+        };
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&response.body)?,
+            expected,
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            std::fs::read_to_string(srv.log_file())?.contains("no per-thread execution timers"),
+            case.disabled,
+            "{}: startup warning",
+            case.name
+        );
+    }
+    Ok(())
+}
