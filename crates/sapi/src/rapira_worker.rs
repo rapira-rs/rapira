@@ -191,7 +191,9 @@ pub(crate) fn opcache_restart_ran() -> bool {
     })
 }
 
-/// OPcache holds its lock and has not set restart_pending yet. Only the calling thread can report the restart after PHP returns. https://github.com/php/php-src/blob/php-8.6.0/ext/opcache/ZendAccelerator.c#L3797-L3814
+/// opcache_reset() holds the shared allocator lock while it schedules the restart. https://github.com/php/php-src/blob/php-8.6.0/ext/opcache/zend_accelerator_module.c#L935-L938
+/// OPcache calls this hook before it sets restart_pending. https://github.com/php/php-src/blob/php-8.6.0/ext/opcache/ZendAccelerator.c#L3797-L3811
+/// For app requests, the hook saves the reason on this thread. The thread wakes the workers after PHP releases the lock.
 pub(crate) unsafe extern "C" fn opcache_restart_scheduled(reason: c_int) {
     if !HOST_RESET.get() {
         OPCACHE_SCHEDULED.set(Some(reason));

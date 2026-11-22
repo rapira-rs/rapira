@@ -2,7 +2,7 @@
 
 $handler = static function (): void {
     if (isset($_GET['sleep'])) {
-        // macOS checks the flags when sleep returns. Other workers receive a wake signal.
+        // On macOS, PHP checks the interrupt flags after each one-second sleep. On other platforms, the wake signal interrupts sleep().
         $interval = PHP_OS_FAMILY === 'Darwin' ? 1 : 10;
         for ($elapsed = 0; $elapsed < 10; $elapsed += $interval) {
             sleep($interval);

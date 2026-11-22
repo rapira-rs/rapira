@@ -539,7 +539,8 @@ bool rapira_has_execution_timers(void) {
 // MINIT still owns the ini table that each worker copies. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_ini.c#L144-L171
 void rapira_lock_timeouts(void) {
     if (rapira_timeouts_disabled) {
-        // set_time_limit() and ini_set() both require PHP_INI_USER. https://github.com/php/php-src/blob/php-8.6.0/main/main.c#L1603-L1617
+        // set_time_limit() uses PHP_INI_USER to change max_execution_time. https://github.com/php/php-src/blob/php-8.6.0/main/main.c#L1603-L1616
+        // ini_set() also uses PHP_INI_USER. https://github.com/php/php-src/blob/php-8.6.0/ext/standard/basic_functions.c#L2008-L2054
         zend_ini_entry *execution = zend_hash_str_find_ptr(
             EG(ini_directives), ZEND_STRL("max_execution_time"));
         zend_ini_entry *input = zend_hash_str_find_ptr(

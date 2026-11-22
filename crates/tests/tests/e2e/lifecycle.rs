@@ -235,7 +235,7 @@ fn the_pidfile_names_the_server_until_its_exit() {
             Stop::SecondTerm => signal(srv.pid(), libc::SIGTERM),
             Stop::Deadline => {}
         }
-        // A forced stop must finish before the 30 s stop deadline.
+        // The wait covers the 2 s deadline. The other cases must exit before their 30 s deadline.
         let status = srv.wait_exit(Duration::from_secs(10));
         assert_exit_code(status, case.want_exit, &srv);
         if matches!(case.stop, Stop::Deadline) {

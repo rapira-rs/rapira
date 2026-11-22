@@ -58,7 +58,7 @@ mod tests {
                 ),
             },
             Case {
-                name: "both pools served before and now have no serving workers",
+                name: "neither pool has a serving worker",
                 http: [SLOT_DRAINING, SLOT_STARTING],
                 grpc: [SLOT_STARTING, SLOT_DRAINING],
                 want: (
@@ -71,9 +71,6 @@ mod tests {
             Arc::new(Pool::new("http", 2)),
             Arc::new(Pool::new("grpc", 2)),
         ];
-        for pool in &board {
-            pool.served.store(true, Relaxed);
-        }
         for case in cases {
             for (pool, states) in board.iter().zip([case.http, case.grpc]) {
                 for (worker, state) in pool.workers.iter().zip(states) {

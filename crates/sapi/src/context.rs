@@ -114,13 +114,14 @@ impl Permanent {
 
 static PERMANENT: Mutex<BTreeMap<Box<[u8]>, Permanent>> = Mutex::new(BTreeMap::new());
 
-/// PHP's permanent intern table is read-only after MINIT. Workers add new entrypoint paths to this separate table. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_string.c#L41-L45
+/// Workers share this table for new entrypoint paths. PHP's permanent intern table is read-only during requests. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_string.c#L265-L280
 fn permanent(bytes: &[u8]) -> Permanent {
     let mut table = PERMANENT.lock().unwrap();
     if let Some(s) = table.get(bytes) {
         return *s;
     }
-    // SAFETY: the shim copies the bytes and computes the hash before publication. Persistent allocation uses malloc and cannot raise a request bailout. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_alloc.c#L4069-L4076
+    // SAFETY: the shim copies the bytes and computes the hash. The persistent allocator calls zend_out_of_memory() if malloc fails. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_alloc.c#L4069-L4076
+    // zend_out_of_memory() aborts the process. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_alloc.c#L3403-L3407
     let s = Permanent(unsafe { rapira_permanent_string(bytes.as_ptr().cast(), bytes.len()) });
     table.insert(bytes.into(), s);
     s

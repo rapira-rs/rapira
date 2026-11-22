@@ -81,7 +81,8 @@ impl Engine {
             );
             sapi_startup(&mut module);
             if disable_timeouts {
-                // sapi_startup clears ini_entries. PHP reads it after php.ini and all scanned files. https://github.com/php/php-src/blob/php-8.6.0/main/php_ini.c#L722-L726
+                // sapi_startup() clears ini_entries. https://github.com/php/php-src/blob/php-8.6.0/main/SAPI.c#L66-L69
+                // PHP parses these entries last. https://github.com/php/php-src/blob/php-8.6.0/main/php_ini.c#L716-L727
                 module.ini_entries = c"max_execution_time=0\nmax_input_time=-1\n".as_ptr();
                 tracing::warn!(target: "rapira", "PHP has no per-thread execution timers; using max_execution_time=0 and max_input_time=-1 for {workers} workers");
             }
@@ -91,7 +92,9 @@ impl Engine {
             _main_thread: PhantomData,
         };
         ensure!(started, "php_module_startup failed");
-        // OPcache preloading can run a PHP request during startup. That request unblocks the timer signal. https://github.com/php/php-src/blob/php-8.6.0/ext/opcache/ZendAccelerator.c#L5164-L5174
+        // OPcache preloading starts a PHP request. https://github.com/php/php-src/blob/php-8.6.0/ext/opcache/ZendAccelerator.c#L5152-L5173
+        // Request startup sets the timeout with reset_signals enabled. https://github.com/php/php-src/blob/php-8.6.0/main/main.c#L1886-L1890
+        // This can unblock the timer signal on the main thread. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1656-L1672
         crate::watchdog::block_signals()?;
         crate::reload::check_opcache(workers)?;
         // SAFETY: MINIT is complete and no worker can read the hooks yet.

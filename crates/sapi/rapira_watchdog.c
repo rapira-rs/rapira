@@ -24,8 +24,7 @@ typedef struct {
 } rapira_interrupt;
 
 #ifdef SIGRTMIN
-// Use the same wake signal as FrankenPHP.
-// https://github.com/php/frankenphp/blob/30c6bb778ebbb56d7dceb939993160210fba01b2/frankenphp.h#L28-L33
+// Wake the PHP thread with a separate signal so Zend's SIGRTMIN timer handler does not run. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_max_execution_timer.c#L58-L63
 #define RAPIRA_WAKE_SIGNAL (SIGRTMIN + 3)
 
 static void rapira_watchdog_wake(int signo) { (void)signo; }
@@ -44,7 +43,7 @@ int rapira_watchdog_install(void) {
     return 0;
 }
 
-// Match zend_set_timeout_ex.
+// Only PHP workers may receive the signal for Zend's execution timer.
 // https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1668-L1697
 #ifdef ZEND_MAX_EXECUTION_TIMERS
 #define RAPIRA_TIMER_SIGNAL SIGRTMIN
