@@ -99,8 +99,8 @@ fn requests_during_the_boot_wait_get_503_and_start_no_boot() -> anyhow::Result<(
     let mut statuses = Vec::new();
     for _ in 0..4 {
         let mut rx = submit(srv.addr, req("/"))?;
-        let resp = drain_resp_deadline(&mut rx, deadline)
-            .expect("no response during the boot retry wait");
+        let resp =
+            drain_resp_deadline(&mut rx, deadline).expect("no response during the boot retry wait");
         statuses.push(resp.status());
     }
     assert_eq!(statuses, [503; 4], "each request during the wait gets 503");
