@@ -6,15 +6,17 @@ use std::time::Duration;
 const READ: Duration = Duration::from_secs(10);
 const REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: e2e\r\n\r\n";
 
-/// Runs one keep-alive exchange on `conn` and returns the response head. The body is read by content-length.
-fn exchange(conn: &mut Conn) -> std::io::Result<Head> {
-    conn.send(REQUEST)?;
+/// Send the request bytes and check the status, Connection header and body.
+fn exchange(conn: &mut Conn, bytes: &[u8], connection: Option<&str>) -> std::io::Result<()> {
+    conn.send(bytes)?;
     let head = conn.read_head(READ)?;
+    assert_eq!(head.status, 200);
+    assert_eq!(field(&head, "connection"), connection);
     let length = field(&head, "content-length")
         .and_then(|v| v.parse().ok())
         .expect("the response declares its length");
     assert_eq!(conn.read_n(length, READ)?, b"ok");
-    Ok(head)
+    Ok(())
 }
 
 fn field<'a>(head: &'a Head, name: &str) -> Option<&'a str> {
@@ -45,29 +47,29 @@ fn a_stopping_server_answers_requests_on_its_http_connections() {
     let mut used: Vec<Conn> = (0..4)
         .map(|_| {
             let mut conn = Conn::open(srv.addr, READ).expect("connect");
-            let head = exchange(&mut conn).expect("the first exchange");
-            assert_eq!(head.status, 200, "\n{}", diagnostics(&srv));
-            assert_eq!(field(&head, "connection"), None, "a kept-alive response");
+            exchange(&mut conn, REQUEST, None).expect("the first exchange");
             conn
         })
         .collect();
+    let mut fresh = Conn::open(srv.addr, READ).expect("connect before the stop");
+    // The 100 response on the next connection confirms that the listener accepted both. The POST keeps the drain open until we send its body.
+    let mut held = Conn::open(srv.addr, READ).expect("connect for the held POST");
+    held.send(b"POST / HTTP/1.1\r\nHost: e2e\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n")
+        .expect("send the POST headers");
+    assert_eq!(held.read_head(READ).expect("interim response").status, 100);
     signal(srv.pid(), libc::SIGQUIT);
     assert!(
-        wait_log_contains(&srv, "open connections", READ),
+        wait_log_contains(&srv, "draining 6 open connections", READ),
         "no drain record\n{}",
         diagnostics(&srv)
     );
     assert_new_connection_refused(&srv);
     for (i, conn) in used.iter_mut().enumerate() {
-        let head = exchange(conn)
+        exchange(conn, REQUEST, Some("close"))
             .unwrap_or_else(|e| panic!("held connection {i}: {e}\n{}", diagnostics(&srv)));
-        assert_eq!(head.status, 200, "held connection {i}");
-        assert_eq!(
-            field(&head, "connection"),
-            Some("close"),
-            "held connection {i}"
-        );
     }
+    exchange(&mut fresh, REQUEST, Some("close")).expect("the first request during the drain");
+    exchange(&mut held, b"x", Some("close")).expect("complete the held POST");
     assert_exit_code(srv.wait_exit(READ), EXIT_OK, &srv);
 }
 
