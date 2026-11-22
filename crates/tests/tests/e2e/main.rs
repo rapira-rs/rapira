@@ -40,4 +40,5 @@ mod reload;
 mod static_files;
 mod streaming;
 mod timeout_tests;
+mod watchdog;
 mod worker_mode;

@@ -15,6 +15,7 @@ pub mod scoreboard;
 mod start;
 pub mod stream;
 pub mod types;
+pub mod watchdog;
 pub mod work;
 pub mod zend;
 
