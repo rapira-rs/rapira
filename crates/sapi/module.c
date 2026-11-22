@@ -158,7 +158,7 @@ bool rapira_timer_pause(rapira_timer *saved) {
     if (!EG(pid)) {
         return false;
     }
-    // An expired timer is not set again, so its pending signal stays valid. https://man7.org/linux/man-pages/man2/timer_settime.2.html
+    // Leave an expired timer unchanged. Linux can discard its pending signal if the timer changes. https://github.com/torvalds/linux/blob/v7.3/kernel/time/posix-timers.c#L305-L311
     struct itimerspec now = {0};
     if (timer_gettime(EG(max_execution_timer_timer), &now) != 0 ||
         (now.it_value.tv_sec == 0 && now.it_value.tv_nsec == 0)) {
@@ -734,8 +734,7 @@ static int rapira_activate(void) {
     return SUCCESS;
 }
 
-// Runs after php_module_startup, because php_module_startup resets
-// default_post_reader (main/main.c:2329).
+// Register after PHP installs its default POST reader at startup. https://github.com/php/php-src/blob/php-8.6.0/main/php_content_types.c#L39-L46
 void rapira_register_post_reader(void) {
     sapi_register_default_post_reader(rapira_default_post_reader);
     sapi_module.activate = rapira_activate;

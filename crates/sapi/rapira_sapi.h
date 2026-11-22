@@ -205,8 +205,7 @@ rapira_prop_str_or_null(zend_class_entry *ce, zend_object *obj,
         zend_update_property_null(ce, obj, name, name_len);
     }
 }
-// called from start.rs after php_module_startup. It registers the default post
-// reader and the activate hook that hand the buffered body to PHP (module.c)
+// Call after php_module_startup to register the POST reader and the activation hook for buffered request bodies.
 void rapira_register_post_reader(void);
 
 // The Dispatcher, DispatcherInfo and Work methods that every plugin shares, and
