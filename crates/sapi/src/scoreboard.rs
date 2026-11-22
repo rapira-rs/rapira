@@ -70,7 +70,7 @@ pub fn sb_update(event: Event) {
     });
 }
 
-/// Active workers keep their request deadline during the drain.
+/// Workers with a request in progress stay active until their next pull or shutdown.
 pub fn begin_drain(board: &Board) {
     DRAINING.store(true, SeqCst);
     for pool in board.iter() {

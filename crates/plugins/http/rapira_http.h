@@ -3,8 +3,7 @@
 
 #include "../../sapi/rapira_sapi.h"
 
-// The server identity from the http config. The plugin writes it once before
-// the fork (src/lib.rs).
+// The HTTP plugin sets the server identity before PHP starts.
 extern const char *rapira_http_server_name;
 extern size_t rapira_http_server_name_len;
 extern zend_long rapira_http_server_port;

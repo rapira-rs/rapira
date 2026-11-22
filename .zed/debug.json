@@ -16,24 +16,5 @@
 			"RUST_LOG": "info"
 		},
 		"sourceLanguages": ["rust"]
-	},
-	{
-		"label": "rapira: serve .zed/rapira.toml - follow fork child",
-		"adapter": "CodeLLDB",
-		"request": "launch",
-		"program": "$ZED_WORKTREE_ROOT/target/debug/rapira",
-		"build": {
-			"command": "cargo",
-			"args": ["build", "--bin=rapira", "--package=rapira_core"]
-		},
-		"args": ["serve", ".zed/rapira.toml"],
-		"cwd": "$ZED_WORKTREE_ROOT",
-		"env": {
-			"DYLD_LIBRARY_PATH": "target/phplib",
-			"LD_LIBRARY_PATH": "target/phplib",
-			"RUST_LOG": "info"
-		},
-		"initCommands": ["settings set target.process.follow-fork-mode child"],
-		"sourceLanguages": ["rust"]
 	}
 ]
