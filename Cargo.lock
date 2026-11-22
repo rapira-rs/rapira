@@ -1072,9 +1072,6 @@ dependencies = [
 [[package]]
 name = "rapira_scoreboard"
 version = "0.9.2"
-dependencies = [
- "libc",
-]
 
 [[package]]
 name = "rapira_static_files"

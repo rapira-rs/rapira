@@ -5,6 +5,3 @@ edition.workspace = true
 
 [lints]
 workspace = true
-
-[dependencies]
-libc = { workspace = true }

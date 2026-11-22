@@ -1,253 +1,113 @@
-use std::ops::Range;
-use std::sync::atomic::{
-    AtomicU32, AtomicU64,
-    Ordering::{AcqRel, Acquire, Relaxed},
-};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering::Acquire};
+use std::time::Instant;
 
-pub const SB_MAX_SLOTS: usize = 4096;
-
-pub const SLOT_FREE: u32 = 0;
 pub const SLOT_STARTING: u32 = 1;
 pub const SLOT_IDLE: u32 = 2;
 pub const SLOT_ACTIVE: u32 = 3;
-pub const SLOT_DRAINING: u32 = 4; // The worker started its own exit, which is not complete yet.
+pub const SLOT_DRAINING: u32 = 4;
 
-/// Each field has one writing process at a time. The worker writes the IDLE, ACTIVE and DRAINING states, the STARTING state after a failed boot cycle, the request counters, `pending` and `failed_on_full_queue`. The master writes the STARTING and FREE states, and `pid` at spawn and at clear. It writes `pending` and the exit counters only while no worker owns the slot, that is, after the reap and before the next spawn. In the worker, the IO threads and the PHP thread both change `pending` with atomic operations.
-#[repr(C, align(64))]
-pub struct SharedSlot {
+pub type Board = Arc<[Arc<Pool>]>;
+
+pub struct Pool {
+    pub name: &'static str,
+    pub workers: Box<[Worker]>,
+    pub pending: AtomicU64,
+    pub failed_on_full_queue: AtomicU64,
+    /// Units refused before a worker could take them.
+    pub refused: AtomicU64,
+    pub served: AtomicBool,
+}
+
+impl Pool {
+    pub fn new(name: &'static str, count: usize) -> Self {
+        Self {
+            name,
+            workers: (0..count).map(|_| Worker::default()).collect(),
+            pending: AtomicU64::new(0),
+            failed_on_full_queue: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
+            served: AtomicBool::new(false),
+        }
+    }
+
+    pub fn ready(&self) -> bool {
+        self.workers.iter().any(Worker::serving)
+    }
+}
+
+pub struct Worker {
     pub state: AtomicU32,
-    pub pid: AtomicU32,
     pub handled: AtomicU64,
     pub errors: AtomicU64,
     pub recycles: AtomicU64,
-    /// [`now_millis`] when the worker last went ACTIVE. The request watchdog measures the request age from it.
     pub last_activity_ms: AtomicU64,
-    /// Units that the IO runtime handed to the intake, or that wait for room in a full intake, and that the PHP thread has not pulled yet.
-    pub pending: AtomicU64,
-    /// Worker exits per verdict. The master counts them.
-    pub exits_drained: AtomicU64,
-    pub exits_unhealthy: AtomicU64,
-    pub exits_timeout: AtomicU64,
-    pub exits_crashed: AtomicU64,
-    /// Units that found the intake full and never entered it. An IO thread of the worker counts them.
-    pub failed_on_full_queue: AtomicU64,
 }
 
-const _: () = assert!(size_of::<SharedSlot>() == 128 && align_of::<SharedSlot>() == 64);
-
-/// The part of the board that one pool owns.
-#[derive(Debug, PartialEq)]
-pub struct PoolRegion {
-    /// The config table of the pool ("http").
-    pub name: &'static str,
-    /// The indices of the pool's slots on the whole board, one per worker.
-    pub slots: Range<usize>,
-}
-
-/// Milliseconds on `CLOCK_MONOTONIC`. The values compare across processes within one boot. Wall-clock steps do not move them.
-pub fn now_millis() -> u64 {
-    let mut ts = libc::timespec {
-        tv_sec: 0,
-        tv_nsec: 0,
-    };
-    // SAFETY: ts is a live out-param; CLOCK_MONOTONIC always exists.
-    unsafe { libc::clock_gettime(libc::CLOCK_MONOTONIC, &mut ts) };
-    ts.tv_sec as u64 * 1000 + ts.tv_nsec as u64 / 1_000_000
-}
-
-/// The reloads of the whole server. OPcache is one cache for every pool, so a worker of any pool can make the reset for a reload.
-pub struct Reloads {
-    /// The reloads that the master sent.
-    sent: AtomicU64,
-    /// The highest `sent` value for which an `opcache_reset()` call has returned.
-    reset: AtomicU64,
-}
-
-/// Master-side. The mmap happens once, pre-fork, so the addresses are the same in every forked child.
-/// Callers pass a bounded count, because the master derives it from its pool regions, which stop at `SB_MAX_SLOTS`.
-pub fn create(nslots: usize) -> std::io::Result<&'static [SharedSlot]> {
-    // SAFETY: every field of SharedSlot is an atomic integer, for which zero is valid.
-    unsafe { map_zeroed(nslots) }
-}
-
-/// Master-side, one time before the first fork, as [`create`].
-pub fn create_reloads() -> std::io::Result<&'static Reloads> {
-    // SAFETY: both fields of Reloads are atomic integers, for which zero is valid.
-    Ok(&unsafe { map_zeroed::<Reloads>(1) }?[0])
-}
-
-/// `count` zero-filled values in a shared anonymous mapping.
-/// # Safety
-/// The all-zero bit pattern must be a valid `T`.
-unsafe fn map_zeroed<T>(count: usize) -> std::io::Result<&'static [T]> {
-    // SAFETY:
-    // MAP_SHARED|MAP_ANONYMOUS is page-aligned and zero-filled, and the mapping is never munmap'd, so the slice is 'static.
-    unsafe {
-        let ptr = libc::mmap(
-            std::ptr::null_mut(),
-            count * size_of::<T>(),
-            libc::PROT_READ | libc::PROT_WRITE,
-            libc::MAP_SHARED | libc::MAP_ANONYMOUS,
-            -1,
-            0,
-        );
-        if ptr == libc::MAP_FAILED {
-            return Err(std::io::Error::last_os_error());
+impl Default for Worker {
+    fn default() -> Self {
+        Self {
+            state: AtomicU32::new(SLOT_STARTING),
+            handled: AtomicU64::new(0),
+            errors: AtomicU64::new(0),
+            recycles: AtomicU64::new(0),
+            last_activity_ms: AtomicU64::new(0),
         }
-        Ok(std::slice::from_raw_parts(ptr.cast::<T>(), count))
     }
 }
 
-// The record publishes that a reset call has returned. reset_due loads with Acquire and record_reset writes with AcqRel, so a worker that skips its call sees the effects of the call that the record names.
-impl Reloads {
-    /// Master-side, before it signals the pools.
-    pub fn add_sent(&self) {
-        self.sent.fetch_add(1, Relaxed);
-    }
-
-    /// Worker-side, before each app boot and each classic request, at each app end and in the OPcache restart hook. Returns the `sent` value to reset for, or `None` when a reset call for it has returned already.
-    pub fn reset_due(&self) -> Option<u64> {
-        let sent = self.sent.load(Relaxed);
-        (self.reset.load(Acquire) < sent).then_some(sent)
-    }
-
-    /// Worker-side, after its `opcache_reset()` call for `sent` has returned.
-    pub fn record_reset(&self, sent: u64) {
-        self.reset.fetch_max(sent, AcqRel);
-    }
-}
-
-impl SharedSlot {
-    /// Serving means IDLE or ACTIVE. Under load, a replacement may never show IDLE between requests.
+impl Worker {
     pub fn serving(&self) -> bool {
-        matches!(self.state.load(Relaxed), SLOT_IDLE | SLOT_ACTIVE)
+        matches!(self.state.load(Acquire), SLOT_IDLE | SLOT_ACTIVE)
     }
+}
 
-    /// Master-side at fork time. It reserves the slot, so the next spawn cannot take it.
-    pub fn set_starting(&self) {
-        self.state.store(SLOT_STARTING, Relaxed);
-    }
-
-    /// Master-side, after the slot's worker is reaped. The intake of the dead worker is gone, so `pending` goes to 0. The slot can then go to a new fork.
-    pub fn clear(&self) {
-        self.pid.store(0, Relaxed);
-        self.pending.store(0, Relaxed);
-        self.state.store(SLOT_FREE, Relaxed);
-    }
+/// Monotonic milliseconds from the first call in this process.
+pub fn now_millis() -> u64 {
+    static START: std::sync::OnceLock<Instant> = std::sync::OnceLock::new();
+    START.get_or_init(Instant::now).elapsed().as_millis() as u64
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::sync::atomic::Ordering::Relaxed;
 
     #[test]
-    fn a_rebound_slot_keeps_its_counts_and_clear_empties_its_queue() {
-        let slot = &create(1).unwrap()[0];
-        slot.set_starting();
-        slot.pid.store(4242, Relaxed);
-        slot.handled.fetch_add(3, Relaxed);
-        slot.errors.fetch_add(1, Relaxed);
-        slot.recycles.fetch_add(1, Relaxed);
-        slot.pending.fetch_add(2, Relaxed);
-
-        slot.clear();
-        assert_eq!(slot.state.load(Relaxed), SLOT_FREE);
-        assert_eq!(slot.pid.load(Relaxed), 0);
-        assert_eq!(
-            slot.pending.load(Relaxed),
-            0,
-            "the queue died with the worker"
-        );
-
-        slot.set_starting();
-        slot.pid.store(4343, Relaxed);
-        assert_eq!(
-            (
-                slot.handled.load(Relaxed),
-                slot.errors.load(Relaxed),
-                slot.recycles.load(Relaxed)
-            ),
-            (3, 1, 1),
-            "the counts of the first worker stay in the slot"
-        );
-    }
-
-    #[test]
-    fn a_reset_is_due_until_a_reset_call_for_the_last_reload_has_returned() {
+    fn a_pool_is_ready_when_any_worker_can_serve() {
         struct Case {
             name: &'static str,
-            sent: u64,
-            reset_before: u64,
-            want_due: Option<u64>,
-            /// The value of the record call, None when the case makes no record call.
-            record: Option<u64>,
-            want_reset_after: u64,
+            states: [u32; 2],
+            ready: bool,
         }
         let cases = [
             Case {
-                name: "no reload yet",
-                sent: 0,
-                reset_before: 0,
-                want_due: None,
-                record: None,
-                want_reset_after: 0,
+                name: "both starting",
+                states: [SLOT_STARTING, SLOT_STARTING],
+                ready: false,
             },
             Case {
-                name: "one reload",
-                sent: 1,
-                reset_before: 0,
-                want_due: Some(1),
-                record: Some(1),
-                want_reset_after: 1,
+                name: "one idle",
+                states: [SLOT_STARTING, SLOT_IDLE],
+                ready: true,
             },
             Case {
-                name: "the reset of this reload is done",
-                sent: 1,
-                reset_before: 1,
-                want_due: None,
-                record: None,
-                want_reset_after: 1,
+                name: "one active",
+                states: [SLOT_ACTIVE, SLOT_DRAINING],
+                ready: true,
             },
             Case {
-                name: "two reloads before a reset",
-                sent: 2,
-                reset_before: 0,
-                want_due: Some(2),
-                record: Some(2),
-                want_reset_after: 2,
-            },
-            Case {
-                name: "a new reload after a reset",
-                sent: 2,
-                reset_before: 1,
-                want_due: Some(2),
-                record: Some(2),
-                want_reset_after: 2,
-            },
-            Case {
-                name: "a worker records an older reload after a newer one",
-                sent: 2,
-                reset_before: 2,
-                want_due: None,
-                record: Some(1),
-                want_reset_after: 2,
+                name: "last worker draining",
+                states: [SLOT_DRAINING, SLOT_STARTING],
+                ready: false,
             },
         ];
         for case in cases {
-            let reloads = Reloads {
-                sent: AtomicU64::new(case.sent),
-                reset: AtomicU64::new(case.reset_before),
-            };
-            let due = reloads.reset_due();
-            if let Some(sent) = case.record {
-                reloads.record_reset(sent);
+            let pool = Pool::new("http", 2);
+            for (worker, state) in pool.workers.iter().zip(case.states) {
+                worker.state.store(state, Relaxed);
             }
-            assert_eq!(
-                (due, reloads.reset.load(Relaxed)),
-                (case.want_due, case.want_reset_after),
-                "{}",
-                case.name
-            );
+            assert_eq!(pool.ready(), case.ready, "{}", case.name);
         }
     }
 }
