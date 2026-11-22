@@ -1,6 +1,6 @@
 # Contributing to Rapira
 
-This repository contains the server: the SAPI crate (`crates/sapi`), the plugins, the pre-fork master and the `rapira` binary. The documentation site is a separate repository, [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io) - docs changes go there (see [contributing to the docs](https://rapira.rs/docs/contributing)).
+This repository contains the `rapira` server, the PHP SAPI, the protocol plugins and their build and operating notes. The public manual is in [rapira-rs/rapira-rs.github.io](https://github.com/rapira-rs/rapira-rs.github.io).
 
 ## Contributor access
 
@@ -35,35 +35,35 @@ Repository administrators can find the activation requirements in [the Vouch set
 - Rust stable - `rust-toolchain.toml` selects the exact channel for you
 - A C compiler (the build compiles `crates/sapi/*.c` and the C method shells of each plugin against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
-- PHP 8.4, 8.5 or 8.6, **NTS**, built with the embed SAPI (`--enable-embed=shared`). ZTS builds are rejected at compile time.
+- PHP 8.4, 8.5 or 8.6 with `--enable-zts --enable-embed=shared --disable-zend-signals`. See the [runtime requirements](README.md#install) for multi-worker OPcache.
 
-```sh
-sudo apt install php8.4-dev libphp8.4-embed   # Debian/Ubuntu (deb.sury.org / ppa:ondrej)
-sudo dnf install php-devel php-embedded       # Fedora
-sudo pacman -S php php-embed                  # Arch
-```
+CI builds PHP directly from `php-src` on Linux and macOS. The version jobs use the release branches until all three minors have a release with the OPcache fix. The `master` jobs enable PHP debug checks. [The CI action](.github/actions/php-embed/action.yml) lists the system packages. [The shared configure flags](.github/php-configure-flags.txt) select the release extensions.
 
-macOS notes and building PHP from source - including the exact configure line used for releases (`.github/php-configure-flags.txt`) - are covered in [build from source](https://rapira.rs/docs/intro/build-from-source).
+For a local build, run `make php PHP_SRC=/path/to/php-src` in Rapira with a dedicated PHP source checkout. The default install prefix is `$HOME/.local/share/php-zts`. Distribution NTS embed packages also work for one pool with one worker.
 
 ## Build
 
 ```sh
+export PHP_CONFIG="$HOME/.local/share/php-zts/bin/php-config"
+export LD_LIBRARY_PATH="$("$PHP_CONFIG" --prefix)/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" # Linux
 export RUSTFLAGS="${RUSTFLAGS:+$RUSTFLAGS }--cfg tokio_unstable"
 cargo build --release
 ```
 
 The Tokio file reader uses io_uring on Linux when the kernel permits it. Keep `--cfg tokio_unstable` when you set custom Rust flags. The Makefile, CI, and release builds include it.
 
-PHP is discovered through `php-config`; point at a specific one with `PHP_CONFIG=/path/to/php-config`. The `make` targets run on Fedora: they find `libphp.so` under the prefix of `php-config` and put its directory on `LD_LIBRARY_PATH`. Debian/Ubuntu ship only a versioned `libphpX.Y.so`, and a direct `cargo build` needs a plain `libphp.so` next to it: `sudo ln -s /usr/lib/libphp8.4.so /usr/lib/libphp.so` (CI creates that symlink itself).
+Use the headers and library from the same PHP build. For a custom prefix on macOS, use `DYLD_LIBRARY_PATH` for its `lib` directory. The `make` test targets find `libphp.so` or `libphp.dylib` through `PHP_CONFIG`. A Linux package that only supplies `libphpX.Y.so` also needs a `libphp.so` symlink in the linker search path.
 
 ## Tests
 
+For a PHP 8.4 source build, load OPcache in a `.ini` file under `PHP_INI_SCAN_DIR`. Set `zend_extension` to the absolute path of `opcache.so` in the directory from `php-config --extension-dir`. The end-to-end tests set `PHPRC` themselves.
+
 ```sh
-make test   # runs test_nts, then test_e2e - sequentially on purpose
+make test
 ```
 
-- `make test_nts` - the unit tests of every crate (`cargo test --workspace`; the e2e suite is feature-gated off here).
-- `make test_e2e` - the end-to-end suite (`crates/tests`, `--features e2e`): each test spawns the `rapira` binary, which forks workers and binds ports, and drives it over HTTP, gRPC and signals. Single-threaded on purpose; never run it concurrently with `test_nts`.
+- `make test_unit` runs the workspace unit tests.
+- `make test_e2e` builds the server and runs the end-to-end suite serially. Tests start a server and drive it through HTTP, gRPC and signals. `make test` runs both suites in order. Use `PHP_CONFIG=/path/to/nts/php-config CARGO_TARGET_DIR=target/nts make test` to test the NTS fallback separately.
 - `cargo fuzz run --fuzz-dir crates/tests/tests/fuzz -s none multipart_raw crates/tests/tests/fuzz/corpus/multipart_raw crates/tests/tests/fuzz/seeds/multipart_raw -- -dict=crates/tests/tests/fuzz/dict/multipart_raw.dict -create_missing_dirs=1` - runs one fuzz target with its seeds and its dictionary until it finds a crash or you stop it. It needs `cargo install --locked cargo-fuzz@0.13.2`. The targets, their seeds and their dictionaries are in `crates/tests/tests/fuzz/`. The `Fuzz` workflow runs each target with its seeds and its dictionary for 60 s on each pull request, and for 30 min twice a week.
 - `make coverage` - writes the line coverage of the unit and e2e suites to `lcov.info`. It needs `cargo install --locked cargo-llvm-cov@0.9.1` and `rustup component add llvm-tools-preview`.
 - `make stubs` - maintainers only: regenerates each `*_arginfo.h` header under `crates/` from the `*.stub.php` stub next to it with PHP's `gen_stub.php`. Never edit the generated headers by hand.
@@ -84,14 +84,13 @@ C sources (`*.c`, `*.h` under `crates/`) follow `.clang-format`.
 
 | Crate                  | Directory                        | Role                                                                                                                                                  |
 | ---------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rapira_core`          | `src/`                           | the `rapira` binary: CLI, the `rapira.toml` file shape, the plugin list, boot, fork and the worker and observability process entries                  |
+| `rapira_core`          | `src/`                           | the `rapira` binary: CLI, configuration, plugin startup, shared IO runtime, signals and shutdown |
 | `rapira_php_build`     | `crates/php_build`               | build helper: `php-config` discovery and the C compile of the method shells, for `rapira_sapi` and every plugin with a PHP surface                    |
-| `rapira_net`           | `crates/net`                     | listeners: `ListenAddr`, `bind` and `PreparedListener` bind in the master before the fork, `Acceptor` adopts and accepts in the worker                |
-| `rapira_sapi`          | `crates/sapi`                    | the embed SAPI: boot, the PHP thread, the intake, the base PHP contract, the classic and worker modes, the `Plugin` and `Held` traits                 |
-| `rapira_config`        | `crates/config`                  | the shared config shapes: `[supervisor]`, `[log]`, the pool table, `listen`, the duration and path helpers                                            |
-| `rapira_master`        | `crates/master`                  | the pre-fork supervisor: forking, reaping, respawn, signals, reload                                                                                   |
-| `rapira_scoreboard`    | `crates/scoreboard`              | shared per-worker counters                                                                                                                            |
-| `rapira_observability` | `crates/observability`           | the `[observability]` table and the observability process: Prometheus metrics and the livez and readyz probes from the scoreboard, served without PHP |
+| `rapira_net`           | `crates/net`                     | listener binding and the async accept loop |
+| `rapira_sapi`          | `crates/sapi`                    | the embed SAPI, PHP engine, worker pools, intake, watchdog and dispatcher interfaces |
+| `rapira_config`        | `crates/config`                  | `[server]`, `[log]`, pool settings, listener addresses and config paths |
+| `rapira_scoreboard`    | `crates/scoreboard`              | in-process pool counters and worker state |
+| `rapira_observability` | `crates/observability`           | Prometheus metrics and the `/livez` and `/readyz` probes on a separate thread |
 | `rapira_http`          | `crates/plugins/http`            | the http plugin: HTTP/1.1, the `Rapira\Http` classes, the `[http]` table ([README](crates/plugins/http/README.md))                                    |
 | `rapira_grpc`          | `crates/plugins/grpc`            | the grpc plugin: gRPC, gRPC-Web and Connect, the `Rapira\Grpc` classes, the `[grpc]` table ([README](crates/plugins/grpc/README.md))                  |
 | `rapira_static_files`  | `crates/middleware/static_files` | the `static` http middleware, a tower layer; each built-in http middleware is one crate under `crates/middleware`                                     |
@@ -113,7 +112,7 @@ To add a plugin:
 - In the root `Cargo.toml`, add the crate to the workspace `members`, to `[workspace.dependencies]` and to the `[dependencies]` of `rapira_core`.
 - In `src/settings.rs`, add its table to `FileConfig` and its settings to `Settings`.
 - In `settings` in `src/settings.rs`, call its `resolve`, and add its table to the check that refuses a file with no plugin table.
-- In `serve` in `src/main.rs`, build the plugin with its pool.
+- In `serve` in `src/server.rs`, build the plugin with its pool.
 - In `src/main.rs`, add its register function to `PLUGIN_REGISTERS`.
 
 ## Pull requests
@@ -124,6 +123,6 @@ Sign off your commits (`git commit -s`) and fill in the PR template. Bug reports
 
 Releases run through [release-please](https://github.com/googleapis/release-please). Every merge to `main` updates a release pull request with the next version and the changelog. When a maintainer merges that PR, one pipeline run tags the release, builds Linux x86_64/aarch64 and macOS aarch64 artifacts and the docker images for PHP 8.4, 8.5 and 8.6, and publishes tarballs, `.deb`/`.rpm` packages and checksums to GitHub Releases. If a release run fails, re-run its failed jobs; the release stays a draft until the publish job completes. After a green CI run on `main`, a separate workflow re-points the `nightly-php*` docker tags and, except on the release commit, refreshes the rolling `nightly` prerelease with tarballs.
 
-The PHP images `ghcr.io/rapira-rs/php` come from [rapira-rs/docker](https://github.com/rapira-rs/docker). The root `Dockerfile` builds `rapira` on the NTS PHP image of a minor and installs the PHP extensions of the Rapira image. The `PHP rebuild` workflow checks the PHP images every 15 minutes. When the NTS PHP image of a minor changes, it builds the Rapira images of the newest release again on that image.
+The root `Dockerfile` builds `rapira` on `ghcr.io/rapira-rs/php:<minor>-zts` and installs the image extensions. The `PHP rebuild` workflow checks the recorded base image digest every 15 minutes. Tarballs, packages and container images must support two PHP workers with OPcache enabled.
 
 The version bump and the changelog come from the title of every commit that lands on `main`, so each title follows [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/): `feat:` for a minor bump, `fix:` for a patch, `!` or a `BREAKING CHANGE:` footer for a breaking change (a minor bump while the version is below 1.0.0). A squash merge collapses a PR into one commit, so its title is the one that counts. Put the issue reference at the end, `fix: register shutdown functions once (#84)`. A `[#84]:` prefix hides the commit from release-please, which needs the type at the start of the title.

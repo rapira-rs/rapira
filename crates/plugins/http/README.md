@@ -10,19 +10,19 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 - `modes()` accepts the classic, worker and dispatcher modes.
 - `dispatcher()` returns the address of `rapira_http_plugin`, the C record of the dispatcher surface: the dispatcher classes, the busy error of `receive()` and the quiesce hook of dispatcher mode.
 - The crate exports `rapira_http_register_classes`. MINIT calls it after the base classes to register the `Rapira\Http` classes.
-- `Server::from_settings` runs in the master before the fork, with no runtime. It sets the server identity and the `sendFile()` root that the workers inherit, removes the spool dirs of dead workers and binds the listener with `rapira_net::bind`.
-- `serve()` runs in the worker on the plugin thread `rapira-http`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the `Intake` to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
+- `Server::from_settings` sets the server identity and `sendFile()` root, removes spool directories of dead server processes and binds the listener before PHP starts.
+- `serve()` runs on the shared IO runtime. It receives the HTTP pool's `Intake`, the stop flag and the connection drain timeout.
 
-`serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. hyper's http1 builder serves each connection on the runtime. Each request goes through the admission checks, the middleware chain and the inner service. The inner service reads the body and submits the unit to the intake: a `Context` with the CGI view in the classic and worker modes, an `ExchangeState` in dispatcher mode. PHP writes the reply as frames (`Head`, `Chunk`, `File`, `End`), and the plugin writes them to the socket as they arrive.
+`PreparedListener::run` accepts connections. Each request goes through the admission checks and the middleware chain. The inner service reads the body and submits the unit to the pool: a `Context` in classic and worker modes, or an `ExchangeState` in dispatcher mode. Any available worker can serve it, including a later request on the same connection. PHP writes reply frames (`Head`, `Chunk`, `File`, `End`), which the plugin writes to the socket as they arrive.
 
 `ExchangeState` in `src/php/mod.rs` is the dispatcher-mode unit. It implements `rapira_sapi::work::Held`:
 
 - `cancelled()` returns true when the client is gone. `receive()` skips such a unit.
 - The SAPI keeps the state in the `Rapira\Http\Exchange` object from `receive()`, answers `isFinalized()` and `isCancelled()` from it, and reclaims it when the object is freed.
 - `lost()` sends a 500 head, or a truncated End after a sent head, when the object is freed before the unit is settled.
-- `shed()` answers 503 when the PHP boot of the worker failed.
+- `shed()` answers 503 during a boot retry if the pool has no ready worker.
 
-The client gets 503 when the intake of the worker stays full for 30 seconds or when the waiting request bodies use the 64 MiB body budget of the worker, and 500 when the PHP thread of the worker has stopped. PHP does not see these requests.
+The HTTP pool shares 1,024 intake slots and a 64 MiB budget for pending request bodies. If the pool cannot reserve the body bytes, the client gets 503 immediately. If no slot becomes free within 30 seconds, the client also gets 503. PHP does not see these requests.
 
 ## Crate layout
 
@@ -75,7 +75,7 @@ To add a built-in middleware:
 
 `rapira_static_files::StaticFiles` is the `static` middleware. It serves files from `[http.static].root`. A miss goes to the next layer, and to PHP when `static` is the last layer. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
 
-`StaticFiles` holds served files in memory. An entry stays fresh for one second. A rewritten file therefore reaches the client after that time. Each worker keeps its own cache of up to 16 MiB, and the cache stores no file above 256 KiB. The memory cost is 16 MiB for each process in `http.pool.processes`. A permission change does not stop the cache from serving a file. To stop it, delete the file or replace it. A restart empties the cache.
+`StaticFiles` holds served files in memory. All HTTP connections share one cache of up to 16 MiB. It stores files of at most 256 KiB. An entry stays fresh for one second. A permission change does not stop the cache from serving a file. To stop it, delete the file or replace it. A server restart empties the cache.
 
 ## Request handling
 
@@ -99,7 +99,7 @@ To add a built-in middleware:
 
 ## Shutdown
 
-On the stop signal the accept loop ends immediately, idle keepalive connections close, and in-flight requests drain within the drain window (see Config); requests still running past the deadline are cut short and reported.
+On stop, the listener closes. A connection accepted before the stop can finish a request during the drain, including its first request. The response carries `Connection: close`. Idle connections can stay open until the drain deadline. At the deadline the plugin closes remaining connections and reports any incomplete requests.
 
 ## Config
 
@@ -115,9 +115,9 @@ The `[http]` table. Unknown keys fail the boot.
 - `[http.uploads]`: the multipart limits of dispatcher mode: `dir` (default: the system temp dir), `max_file_size_mb` (2), `max_field_size_kb` (256), `max_files` (20), `max_parts` (1024), `max_part_headers` (32). This table under another mode fails the boot.
 - `[http.sendfile]`: `root`, the directory that must contain each `sendFile()` path. Default: the entrypoint directory.
 - `[http.static]`: the settings of the `static` middleware: `root` (required, an existing directory) and `forbid` (the file-name suffixes it never serves, default `[".php"]`).
-- `[http.pool]`: the worker pool: `entrypoint` (required), `mode`, `processes`, `max_requests`, `max_memory_mb`, `max_boot_failures`, `request_terminate_timeout_secs`, `env`. `examples/rapira.toml` shows each key.
+- `[http.pool]`: `entrypoint` (required), `mode`, `workers`, `max_requests`, `max_boot_failures`, `request_terminate_timeout_secs` and `env`. See the [example configuration](../../../examples/rapira.toml).
 
-The drain window is not a key of this table. It is `[supervisor].process_control_timeout_secs` minus 5 seconds, or minus half of it when it is below 10 seconds. The drain therefore ends before the master sends SIGTERM.
+The connection drain lasts for `[server].stop_timeout_secs` minus five seconds, or half the stop timeout if it is below ten seconds. The remaining time is for PHP shutdown. See [Run the server](../../../README.md#run-the-server) for request timeouts and exit codes.
 
 `[http.pool.env]` supplies environment variables to PHP. `getenv()` first reads changes from `putenv()`, then the pool table, then the environment at server startup. `putenv('NAME')` hides a name. `putenv('NAME=')` sets an empty value. Changes last for one request in classic mode and for one app instance in worker and dispatcher modes.
 

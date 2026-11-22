@@ -33,8 +33,10 @@ entrypoint = "dispatcher-sync.php" # relative paths resolve against this file's 
 mode = "dispatcher"           # "classic" | "worker" | "dispatcher" (the default)
 workers = 16                  # PHP interpreter threads; defaults to the CPU count
 # max_requests = 0            # recycle the app of a worker after about N requests, with jitter; 0 means no limit
-# max_boot_failures = 5       # exit after N consecutive boot failures in a pool that never served; 0 means no limit
-# request_terminate_timeout_secs = 0  # interrupt a unit at its time limit; exit 124 only if every worker in a pool is still blocked after its 5 s grace
+# max_boot_failures = 5       # exit 70 if one worker fails to boot N times in a row before its pool serves; 0 means no limit
+# request_terminate_timeout_secs = 0  # wall-clock limit per unit; 0 disables it for this pool
+# A positive limit in any pool reserves SIGRTMAX on systems that have it.
+# After an interrupt, a native call can keep waiting. Exit 124 requires every worker of one pool to be blocked after 5 more seconds.
 # PHP reads these values through getenv(), $_ENV and $_SERVER. Child processes inherit the server environment.
 # [http.pool.env]
 # APP_ENV = "prod"
@@ -71,6 +73,7 @@ workers = 16                  # PHP interpreter threads; defaults to the CPU cou
 
 # [server]
 # pidfile = "rapira.pid"      # relative to this file's directory
+# Exits 70, 101 and 124 can leave the pidfile. The next start overwrites it.
 # stop_timeout_secs = 30      # time for plugins and PHP threads to stop
 # io_threads = 2              # shared HTTP and gRPC IO threads; defaults to the Tokio runtime setting
 

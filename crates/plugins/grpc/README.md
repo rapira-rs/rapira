@@ -10,16 +10,16 @@ The grpc plugin of the `rapira` binary. It serves unary and server-streaming RPC
 - `modes()` accepts dispatcher mode only.
 - `dispatcher()` returns the address of `rapira_grpc_plugin`, the C record of the dispatcher surface: the dispatcher classes and the busy error of `receive()`.
 - The crate exports `rapira_grpc_register_classes`. MINIT calls it after the base classes to register the `Rapira\Grpc` classes.
-- `Server::from_settings` runs in the master before the fork, with no runtime. It sets the service list that `getServices()` returns, binds the listener with `rapira_net::bind`, and builds the routes that the plugin answers without PHP: health, and reflection when it is on.
-- `serve()` runs in the worker on the plugin thread `rapira-grpc`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the `Intake` to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
+- `Server::from_settings` sets the service list, binds the listener and prepares the health and reflection routes before PHP starts.
+- `serve()` runs on the shared IO runtime. It receives the gRPC pool's `Intake`, the stop flag and the connection drain timeout.
 
-`serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. `PhpDispatcher` routes each unary and server-streaming method of a configured service to PHP: it builds a `GrpcState` and submits it to the intake. PHP finalizes the call with `respond()` or `fail()`, and the plugin sends the outcome to the client. For a server-streaming method, `respond()` takes a generator, and the plugin sends each message when the generator yields it.
+`PreparedListener::run` accepts connections. `PhpDispatcher` submits a `GrpcState` to the pool for each unary or server-streaming call of a configured service. PHP finalizes the call with `respond()` or `fail()`. For a server-streaming method, `respond()` takes a generator and the plugin sends each message when the generator yields it.
 
 `GrpcState` in `src/php/call.rs` is the dispatcher-mode unit. It implements `rapira_sapi::work::Held`:
 
 - `cancelled()` returns true when the call is closed: the client cancelled it, closed the connection, or the deadline passed. `receive()` skips such a unit.
 - The SAPI keeps the `GrpcState` in the call object from `receive()`, answers `isFinalized()` and `isCancelled()` from it, and reclaims it when the object is freed. When the object is freed before the call is settled, the drop of the reply reports INTERNAL to the client.
-- `shed()` answers UNAVAILABLE when the PHP boot of the worker failed.
+- `shed()` answers UNAVAILABLE during a boot retry if the pool has no ready worker.
 - `class()` gives `receive()` the class of the call object, by the kind of the method.
 
 `respond()` of a server-streaming call runs its generator in `rapira_stream_run_generator` in `crates/sapi/rapira_stream.c`. The loop gives each yielded value to the callback `grpc_stream_send` in `rapira_grpc.c`. The callback checks that the value is a string and passes its bytes to Rust.
@@ -64,11 +64,11 @@ The remote address is in the request extensions as `rapira_sapi::Addr`. PHP gets
 
 ## Interceptors
 
-`[grpc].interceptors` lists the interceptor names in chain order. The only supported name is `"auth"`. The master builds each interceptor before the fork. Each worker adds them to its `ConnectRpcService` with `with_interceptor_arc`, in the configured order. The first listed interceptor runs first.
+`[grpc].interceptors` lists the interceptor names in chain order. The only supported name is `"auth"`. The plugin builds each interceptor at boot and adds it to `ConnectRpcService` with `with_interceptor_arc`. The first listed interceptor runs first.
 
 The chain covers every GET and POST request to the listener: the PHP methods, health, reflection, and paths that match no method. A request with another HTTP method gets 405 or 404 from connect-rust before any interceptor runs, and never reaches PHP. connect-rust runs the `intercept_head` of each interceptor before it reads the request body. A rejection in `intercept_head` reaches the client in the format of its protocol, and PHP does not see the call. An interceptor that must change the metadata that PHP sees uses `intercept_unary`, because `intercept_head` can read the headers but not change them.
 
-`rapira_grpc_auth::Auth` is the `auth` interceptor. It reads the bearer tokens from `[grpc.auth].tokens_file` in the master. Each call needs exactly one `authorization: Bearer <token>` value with a configured token. https://www.rfc-editor.org/rfc/rfc6750#section-2.1 `grpc.health.v1.Health` needs no token, because Kubernetes gRPC probes cannot send metadata. A call without a valid token gets UNAUTHENTICATED with `www-authenticate: Bearer`: the gRPC status 16, or the HTTP status 401 for a Connect unary request. PHP still sees the `authorization` metadata of a call that passes. A token crosses the network in clear text, so put a TLS proxy in front of the listener when clients connect over a network that you do not trust. https://www.rfc-editor.org/rfc/rfc6750#section-5.3 A changed tokens file needs a stop and a start of rapira.
+`rapira_grpc_auth::Auth` is the `auth` interceptor. It reads the bearer tokens from `[grpc.auth].tokens_file` at server boot. Each call needs exactly one `authorization: Bearer <token>` value with a configured token. https://www.rfc-editor.org/rfc/rfc6750#section-2.1 `grpc.health.v1.Health` needs no token, because Kubernetes gRPC probes cannot send metadata. A call without a valid token gets UNAUTHENTICATED with `www-authenticate: Bearer`: the gRPC status 16, or the HTTP status 401 for a Connect unary request. PHP still sees the `authorization` metadata of a call that passes. A token crosses the network in clear text, so put a TLS proxy in front of the listener when clients connect over a network that you do not trust. https://www.rfc-editor.org/rfc/rfc6750#section-5.3 A changed tokens file needs a stop and a start of rapira.
 
 To add a built-in interceptor:
 
@@ -87,7 +87,7 @@ To add a built-in interceptor:
 
 ## Schemas
 
-The master reads one descriptor set at boot: a binary `google.protobuf.FileDescriptorSet` that contains every imported file. The plugin routes and transcodes with these descriptors. A changed descriptor set needs a stop and a start of rapira, not a new `rapira` binary. A reload (SIGHUP or SIGUSR2) restarts the app in each worker and keeps the old descriptor set.
+The server reads one descriptor set at boot: a binary `google.protobuf.FileDescriptorSet` that contains every imported file. The plugin routes and transcodes with these descriptors. Restart the server to load a changed descriptor set. A reload (SIGHUP or SIGUSR2) recycles the app in each worker and keeps the loaded descriptor set.
 
 Build the set with `buf build`. https://buf.build/docs/reference/cli/buf/build/
 
@@ -103,7 +103,7 @@ protoc --include_imports --descriptor_set_out=api.binpb -I proto proto/billing/v
 
 `buf build` includes the imported files by default. `protoc` includes them only with `--include_imports`.
 
-`descriptor_set` is a path or a URL. A value that starts with `http://` or `https://` is a URL, as for a Buf image input: https://buf.build/docs/reference/inputs/#image-formats. The master downloads the set with a GET request at boot. A reload does not download it again.
+`descriptor_set` is a path or a URL. A value that starts with `http://` or `https://` is a URL, as for a Buf image input: https://buf.build/docs/reference/inputs/#image-formats. The server downloads the set with a GET request at boot. A reload does not download it again.
 
 - The download follows up to 10 redirects. It also follows a redirect from an `https://` URL to an `http://` URL. A response status of 400 or above fails the boot.
 - HTTPS trusts the certificate store of the system. On Linux, `SSL_CERT_FILE` and `SSL_CERT_DIR` replace that store. On macOS, the store is the keychain, and the two variables have no effect.
@@ -112,7 +112,7 @@ protoc --include_imports --descriptor_set_out=api.binpb -I proto proto/billing/v
 - The connection, the response head and the body have a time limit of 30 s each. The set has a size limit of 64 MiB.
 - The response body is the binary set. A compressed or JSON image does not decode.
 
-By default, the pool serves the services of the files that no other file of the set imports, in descriptor order. A file that another file imports is a dependency, for example `google/longrunning/operations.proto`, so its services are not served. The plugin answers `grpc.health.v1.Health` and the reflection services itself, so the pool never serves them. `services` sets the list of fully qualified names, for example `["billing.v1.InvoiceService"]`. Use it when several rapira instances share one set, or to serve a service of an imported file. The master loads the set before the fork, so each of these fails the boot once, with exit code 1:
+By default, the pool serves the services of the files that no other file of the set imports, in descriptor order. A file that another file imports is a dependency, for example `google/longrunning/operations.proto`, so its services are not served. The plugin answers `grpc.health.v1.Health` and the reflection services itself. `services` sets the list of fully qualified names, for example `["billing.v1.InvoiceService"]`. Use it when several Rapira instances share one set, or to serve a service of an imported file. The server exits with code 1 at boot for any of these errors:
 
 - a set that rapira cannot read, download or decode;
 - a set without its imports, for example with `unresolved type name ".google.protobuf.Timestamp"`;
@@ -156,7 +156,7 @@ The pool runs in dispatcher mode only. `\Rapira\get_dispatcher()` returns a `Rap
 - `fail()` takes the `google.rpc.Status` triple: a code, a message and a list of `ErrorDetail`. For gRPC and gRPC-Web, the plugin sends `grpc-status`, `grpc-message` and `grpc-status-details-bin`. For a unary Connect call, the plugin sends the HTTP status of the code and a JSON error body. A Connect stream has the HTTP status 200, and its end-of-stream message holds the error and the trailers. A Connect detail has the bare type name, for example `google.rpc.ErrorInfo`, and an unpadded base64 value.
 - `fail()` is the only way to send an error status. The plugin does not catch `Rapira\Grpc\Exception\GrpcException`. Catch it and call `$call->fail($e->status)`.
 - A call that PHP does not finalize is lost. The client gets INTERNAL with the message `internal error`, and the plugin logs a warning under the `grpc` target. A lost stream ends with this status after the messages that the client already got. An uncaught throwable also loses the call. The client does not see the message of the throwable.
-- The client gets UNAVAILABLE when the plugin refuses the call before PHP sees it: the intake of the worker stays full for 30 seconds, the pool stops, or the PHP boot of the worker failed.
+- The gRPC pool shares 1,024 intake slots and a 64 MiB budget for pending message bytes. The client gets UNAVAILABLE if the pool cannot reserve those bytes, no slot becomes free within 30 seconds, or a worker sheds the call during a boot retry.
 
 ## Deadlines
 
@@ -168,7 +168,7 @@ The plugin cannot stop PHP code, so PHP continues to run the call. A later `resp
 
 ## Health and reflection
 
-The plugin serves the gRPC health checking protocol (`grpc.health.v1.Health`) from Rust in each worker. `Check` and `Watch` report SERVING for the empty name `""` and for each configured service. Health does not check PHP: a worker whose PHP boot failed reports SERVING, and its calls get UNAVAILABLE. https://github.com/grpc/grpc/blob/master/doc/health-checking.md
+The plugin serves the [gRPC health checking protocol](https://github.com/grpc/grpc/blob/master/doc/health-checking.md) (`grpc.health.v1.Health`) on the IO runtime. `Check` and `Watch` report SERVING for the empty name `""` and for each configured service while the listener is serving. These routes do not check PHP. Enable `[observability.probes]` and use `/readyz` to check that every pool has a ready worker.
 
 With `reflection = true`, the plugin also serves server reflection, `grpc.reflection.v1` and `grpc.reflection.v1alpha`. `ListServices` returns the configured services. Each file and symbol of the descriptor set stays resolvable. Reflection is off by default. When it is on, each client can read the full descriptor set. `ListServices` does not list the plugin's own `grpc.health.v1.Health` service, and the descriptor set does not describe it unless it includes `health.proto`, so a reflection tool needs a protoset (https://github.com/fullstorydev/grpcurl#protoset-files) for `Health/Check`. A Connect JSON `POST` to `/grpc.health.v1.Health/Check` works without one. https://github.com/grpc/grpc/blob/master/doc/server-reflection.md
 
@@ -184,10 +184,10 @@ The listener sends an HTTP/2 keepalive PING to a connection that sends no reques
 
 ## Limits
 
-- One worker process serves each connection, and a PHP worker runs one call at a time. A gRPC client usually sends all calls of a channel on one HTTP/2 connection. Such a client gets the throughput of one worker, for all pool sizes. The other calls wait in the intake of that worker. A streaming call holds its worker until the stream ends. To use more workers, open several connections, or use an L7 load balancer that spreads the calls over several connections.
+- Concurrent calls on one HTTP/2 connection can use different workers in the same pool. A worker runs one call at a time. A streaming call holds its worker until the stream ends. When all workers are busy, other calls wait in the pool intake.
 - The message size limit is 4 MiB, and no key changes it. A larger request answers RESOURCE_EXHAUSTED.
 - The listener does not terminate TLS. `Context::$tls` is always null. Put a TLS proxy between the clients and the listener when clients need TLS.
-- The JSON decoder has no element memory limit. A 4 MiB JSON request with many small elements can use several hundred MiB of memory for repeated or map fields, and more than 1 GiB of memory and more than 1 s of CPU for `Struct` or `ListValue` fields, in the worker process. The 4 MiB limit applies after decompression, so a proxy between untrusted clients and the listener must limit the decompressed request size.
+- The JSON decoder has no element memory limit. A 4 MiB JSON request with many small elements can use several hundred MiB of server memory for repeated or map fields, and more than 1 GiB of memory and more than 1 s of CPU for `Struct` or `ListValue` fields. The 4 MiB limit applies after decompression, so a proxy between untrusted clients and the listener must limit the decompressed request size.
 - A JSON reply decodes the payload of each `google.protobuf.Any` again, under the default element memory limit of buffa (32 MiB). This limit holds about 524,000 repeated elements or 381,000 map entries in one payload. A larger payload answers INTERNAL to a JSON client, and the log names the limit. A proto client is not affected.
 
 ## Config
@@ -206,7 +206,7 @@ The `[grpc]` table. Unknown keys fail the boot.
 - `[grpc.auth]`: the `auth` interceptor. `tokens_file`: the file of bearer tokens, relative to the directory of `rapira.toml`. Required. One token per line. Blank lines and lines that start with `#` are skipped. Rapira removes the whitespace at the start and end of each line.
 - `[grpc.pool]`: the worker pool. It takes the keys of `[http.pool]`, and its `mode` must be `"dispatcher"`.
 
-The drain window is not a key of this table. It is `[supervisor].process_control_timeout_secs` minus 5 seconds, or minus half of it when it is below 10 seconds. The drain therefore ends before the master sends SIGTERM.
+The connection drain lasts for `[server].stop_timeout_secs` minus five seconds, or half the stop timeout if it is below ten seconds. The remaining time is for PHP shutdown. See [Run the server](../../../README.md#run-the-server) for the separate pool request timeout.
 
 These interceptor errors fail the boot with exit code 1:
 
