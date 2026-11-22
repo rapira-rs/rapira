@@ -60,28 +60,20 @@ pub(super) unsafe fn throw_verb(v: Verb) -> bool {
 
 pub(super) struct Closed;
 
-/// On a full channel, the thread parks with the execution timer paused (`stream::paused`).
+/// A full channel waits for space or an interrupt with the PHP execution timer paused.
 /// # Safety
 /// The engine is active on this thread.
 pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
     let Some(tx) = st.sender.as_ref() else {
         return Err(Closed);
     };
-    let sent = match tx.try_send(frame) {
-        Ok(()) => Ok(()),
-        Err(TrySendError::Closed(_)) => Err(Closed),
-        // Only Closed ends the park, because a slow consumer is backpressure, not cancellation.
-        Err(TrySendError::Full(frame)) => {
-            // SAFETY: the engine is active, so this is a PHP thread.
-            unsafe { stream::paused(|| tx.blocking_send(frame).map_err(|_| Closed)) }
-        }
-    };
+    let sent = unsafe { stream::send(tx, frame, None) };
     // A frame pushed while the receiver drops stays in the channel until the last Sender drops, because tokio Rx::drop drains the channel only once. The drop of the Sender here frees the frame, so a lent string cannot delay the cycle end.
-    if sent.is_ok() && tx.is_closed() {
+    if sent && tx.is_closed() {
         st.sender = None;
         return Err(Closed);
     }
-    sent
+    sent.then_some(()).ok_or(Closed)
 }
 
 /// `finalizing_len` is the body length of a one-shot response. It applies only when nothing streamed before. A declared content-length takes precedence, and a bodiless response ignores `finalizing_len`.
@@ -129,7 +121,6 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
     st.phase = Phase::Discarded;
     st.unlink_spools();
     sb_update(Event::Handled { errored: true });
-    // Every caller saw the channel closed first, so no frame can reach the plugin.
     st.sender = None;
 }
 
@@ -398,9 +389,9 @@ thread_local! {
     static QUIESCED_CYCLE: Cell<u64> = const { Cell::new(0) };
 }
 
-/// A piece can be lent while the cycle is not past its quiesce.
+/// A unit with a watchdog must be able to recycle while the IO thread still holds response bytes.
 fn lending() -> bool {
-    rapira_sapi::exchange::cycle() != QUIESCED_CYCLE.get()
+    !rapira_sapi::watchdog::enabled() && rapira_sapi::exchange::cycle() != QUIESCED_CYCLE.get()
 }
 
 fn lent_bytes() -> usize {

@@ -13,7 +13,7 @@ use connectrpc::{ConnectError, ErrorCode, ErrorDetail, MethodKind, Protocol};
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{add_list, build_address, header_key};
 use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::stream::{self, Step, Wait};
+use rapira_sapi::stream;
 use rapira_sapi::work::{Held, HeldPtr, now_unix_f64};
 use rapira_sapi::{
     HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
@@ -21,7 +21,6 @@ use rapira_sapi::{
     zend, zend_argument_type_error, zend_class_entry, zend_long, zend_object, zend_string,
     zend_zval_value_name, zval, zval_ptr_dtor,
 };
-use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, oneshot};
 
 use super::{
@@ -442,28 +441,11 @@ fn commit(out: &mut StreamReply, headers: &[MetadataField], trailers: &[Metadata
     .is_ok()
 }
 
-/// Puts one part on the channel of the response stream. On a full channel the PHP thread parks until the plugin takes the part before it, the plugin closes the call, or the deadline of the call passes. Returns false when the part has no destination.
+/// Sends one part with the deadline of the call. An interrupted or closed stream takes no more parts.
 /// # Safety
 /// The caller runs on a PHP thread.
 unsafe fn push(out: &StreamReply, part: Part) -> bool {
-    let part = match out.parts.try_send(part) {
-        Ok(()) => return true,
-        Err(TrySendError::Closed(_)) => return false,
-        Err(TrySendError::Full(part)) => part,
-    };
-    let wait = match out.until {
-        Some(until) => Wait::For(until.saturating_duration_since(Instant::now())),
-        None => Wait::Forever,
-    };
-    let room = async { out.parts.reserve().await.ok() };
-    // SAFETY: the caller runs on a PHP thread.
-    match unsafe { stream::wait(room, out.parts.closed(), wait) } {
-        Step::Item(permit) => {
-            permit.send(part);
-            true
-        }
-        _ => false,
-    }
+    unsafe { stream::send(&out.parts, part, out.until) }
 }
 
 /// Sends one message of a streaming response. The first message sends the head before it. Returns false when the message has no destination. The call is then discarded.

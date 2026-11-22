@@ -630,6 +630,31 @@ fn a_slow_client_reads_the_pieces_of_an_app_instance_that_ended() {
     }
 }
 
+/// The completed response fits in the frame channel. A worker with a request limit must be able to recycle while the IO thread still holds its response.
+#[test]
+fn a_timed_worker_can_recycle_before_a_completed_body_is_read() -> std::io::Result<()> {
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/large-body-worker.php"),
+    )
+    .http_pool("max_requests = 1\nrequest_terminate_timeout_secs = 60")
+    .spawn();
+    let first = instance(&srv);
+    let mut response = Conn::open(srv.addr, T)?;
+    response.send(b"GET /?probe=stall HTTP/1.0\r\n\r\n")?;
+    assert_eq!(response.read_head(T)?.status, 200);
+    let next = http_get(srv.addr, "/", Duration::from_secs(3))?;
+    assert_eq!(next.status, 200);
+    assert_ne!(next.body, first.as_bytes());
+    let body = response.read_remaining(T)?;
+    assert_eq!(body.len(), 12 << 20);
+    assert!(
+        body.chunks(first.len())
+            .all(|piece| piece == first.as_bytes())
+    );
+    Ok(())
+}
+
 /// A client reads nothing after the head. The write timeout closes the connection, and the cut body has no chunked terminator. max_requests = 1 is a quota of 2, so the app instance ends after the large unit, and the next boot comes after the cut.
 /// With 64 KiB pieces, the PHP thread waits on the full frame channel until the cut. The 1 MiB pieces fit in the channel, and the IO thread holds the first 8 of them in place (the 8 MiB cap), so the cycle end waits for the cut.
 #[test]

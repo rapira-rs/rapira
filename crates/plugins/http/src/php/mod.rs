@@ -18,7 +18,7 @@ use rapira_sapi::{
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_plugin, zend,
     zend_class_entry, zval, zval_ptr_dtor,
 };
-use tokio::sync::mpsc::{Sender, error::TrySendError};
+use tokio::sync::mpsc::Sender;
 
 use crate::multipart::{HeaderValues, MultipartBody, UploadedFile};
 

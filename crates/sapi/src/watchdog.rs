@@ -9,6 +9,7 @@ use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
 use rapira_scoreboard::{Pool, now_millis};
+use tokio::sync::watch;
 use tracing::{error, warn};
 
 const TICK: Duration = Duration::from_secs(1);
@@ -61,6 +62,7 @@ struct Worker {
     index: usize,
     timeout: Duration,
     interrupt: Interrupt,
+    wake: watch::Sender<bool>,
     unit: Unit,
 }
 
@@ -89,6 +91,7 @@ pub(crate) unsafe fn enter(pool: Arc<Pool>, index: usize, timeout: Duration) -> 
             index,
             timeout,
             interrupt: unsafe { rapira_watchdog_capture() },
+            wake: watch::Sender::new(false),
             unit: Unit::Idle,
         }));
         WORKERS.lock().unwrap().push(slot.clone());
@@ -116,6 +119,29 @@ pub(crate) fn clear() {
     set_unit(Unit::Idle);
 }
 
+/// True when the calling PHP worker has a request time limit.
+pub fn enabled() -> bool {
+    LOCAL.with_borrow(Option::is_some)
+}
+
+pub(crate) fn wake() -> Option<watch::Receiver<bool>> {
+    LOCAL.with_borrow(|slot| Some(slot.as_ref()?.lock().unwrap().wake.subscribe()))
+}
+
+/// # Safety
+/// The calling PHP thread paused this timer. A watchdog interrupt must keep the process timer disarmed.
+pub(crate) unsafe fn resume_timer(saved: &crate::rapira_timer) {
+    LOCAL.with_borrow(|slot| {
+        let worker = slot.as_ref().map(|slot| slot.lock().unwrap());
+        if worker
+            .as_ref()
+            .is_none_or(|w| !matches!(w.unit, Unit::Interrupted(_)))
+        {
+            unsafe { crate::rapira_timer_resume(saved) };
+        }
+    });
+}
+
 fn set_unit(unit: Unit) {
     LOCAL.with_borrow(|slot| {
         if let Some(slot) = slot {
@@ -123,6 +149,7 @@ fn set_unit(unit: Unit) {
             if matches!(worker.unit, Unit::Interrupted(_)) {
                 // The previous fire has returned. Withdraw its timeout before the next unit or boot.
                 unsafe { rapira_watchdog_clear(&worker.interrupt) };
+                worker.wake.send_replace(false);
             }
             worker.unit = unit;
         }
@@ -141,6 +168,7 @@ impl Worker {
             Unit::Active(since) if Duration::from_millis(now_millis() - since) >= timeout => {
                 unsafe { rapira_watchdog_fire(&self.interrupt) };
                 self.unit = Unit::Interrupted(Instant::now());
+                self.wake.send_replace(true);
                 warn!(target: "rapira", "{pool}.pool.request_terminate_timeout_secs exceeded on worker {index} ({timeout:?}); interrupting the request");
             }
             Unit::Interrupted(at) if at.elapsed() >= GRACE => {

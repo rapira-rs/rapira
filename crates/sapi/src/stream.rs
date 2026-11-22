@@ -3,8 +3,10 @@
 use std::future::Future;
 use std::mem::MaybeUninit;
 use std::sync::OnceLock;
+use std::time::Instant;
 
 use tokio::runtime::Handle;
+use tokio::sync::{mpsc, watch};
 
 pub use crate::start::Wait;
 
@@ -21,7 +23,7 @@ pub unsafe fn paused<R>(park: impl FnOnce() -> R) -> R {
     let result = park();
     if live {
         // SAFETY: a true pause wrote saved.
-        unsafe { crate::rapira_timer_resume(saved.as_ptr()) };
+        unsafe { crate::watchdog::resume_timer(saved.assume_init_ref()) };
     }
     result
 }
@@ -38,11 +40,12 @@ pub enum Step<T> {
     Timeout,
 }
 
-/// The first of three events, checked in this order: `closed` completes, `next` completes, the wait ends. `Wait::Never` polls each future once.
+/// An interrupt or a close takes priority over a ready item. A ready item takes priority over the end of the wait.
 async fn first<T>(
     next: impl Future<Output = Option<T>>,
     closed: impl Future<Output = ()>,
     wait: Wait,
+    mut interrupt: Option<watch::Receiver<bool>>,
 ) -> Step<T> {
     let time = async {
         match wait {
@@ -51,15 +54,24 @@ async fn first<T>(
             Wait::Never => {}
         }
     };
+    let wake = async {
+        match &mut interrupt {
+            Some(rx) => {
+                let _ = rx.wait_for(|&fired| fired).await;
+            }
+            None => std::future::pending().await,
+        }
+    };
     tokio::select! {
         biased;
+        () = wake => Step::Closed,
         () = closed => Step::Closed,
         item = next => item.map_or(Step::End, Step::Item),
         () = time => Step::Timeout,
     }
 }
 
-/// Blocks the PHP thread until `closed` completes, `next` completes or the wait ends, in this order. The IO threads handle the sockets and timers.
+/// Blocks the PHP thread until an interrupt, a close, an item or the end of the wait. The IO threads handle the sockets and timers.
 /// # Safety
 /// The caller runs on a PHP thread.
 pub unsafe fn wait<T>(
@@ -71,7 +83,23 @@ pub unsafe fn wait<T>(
         .get()
         .expect("the host sets the IO runtime before a plugin submits a unit");
     // SAFETY: the caller runs on a PHP thread.
-    unsafe { paused(|| handle.block_on(first(next, closed, wait))) }
+    unsafe { paused(|| handle.block_on(first(next, closed, wait, crate::watchdog::wake()))) }
+}
+
+/// Sends a response frame. A full channel parks the worker until space is available, the receiver closes, the watchdog fires, or the stream deadline expires.
+/// # Safety
+/// The calling thread runs an active PHP request.
+pub unsafe fn send<T>(tx: &mpsc::Sender<T>, item: T, until: Option<Instant>) -> bool {
+    let item = match tx.try_send(item) {
+        Ok(()) => return true,
+        Err(mpsc::error::TrySendError::Closed(_)) => return false,
+        Err(mpsc::error::TrySendError::Full(item)) => item,
+    };
+    let limit = until.map_or(Wait::Forever, |t| {
+        Wait::For(t.saturating_duration_since(Instant::now()))
+    });
+    let write = async { tx.send(item).await.ok() };
+    matches!(unsafe { wait(write, tx.closed(), limit) }, Step::Item(()))
 }
 
 #[cfg(test)]
@@ -141,8 +169,43 @@ mod tests {
                     pending::<()>().await;
                 }
             };
-            let got = first(next, closed, case.wait).await;
+            let got = first(next, closed, case.wait, None).await;
             assert_eq!(got, case.expected, "{}", case.name);
         }
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn an_interrupt_releases_a_parked_response_write_until_the_next_unit() {
+        use tokio::sync::{mpsc, watch};
+
+        let (tx, mut rx) = mpsc::channel(1);
+        tx.send(1).await.unwrap();
+        let wake = watch::Sender::new(false);
+        let write = || {
+            first(
+                async { tx.send(2).await.ok() },
+                tx.closed(),
+                Wait::Forever,
+                Some(wake.subscribe()),
+            )
+        };
+        let mut parked = std::pin::pin!(write());
+        assert!(
+            tokio::time::timeout(Duration::from_millis(1), &mut parked)
+                .await
+                .is_err()
+        );
+        wake.send_replace(true);
+        assert_eq!(
+            tokio::time::timeout(Duration::from_secs(1), parked)
+                .await
+                .expect("the interrupt wakes the writer"),
+            Step::Closed
+        );
+        assert_eq!(rx.recv().await, Some(1));
+        assert_eq!(write().await, Step::Closed, "a later park of the same unit");
+        wake.send_replace(false);
+        assert_eq!(write().await, Step::Item(()), "the next unit can write");
+        assert_eq!(rx.recv().await, Some(2));
     }
 }
