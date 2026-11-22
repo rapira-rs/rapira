@@ -535,6 +535,12 @@ fn cancelled_exchange_is_discarded_by_next_receive() {
     client
         .read_body_until(b"data: connected\n\n", BOOT)
         .unwrap_or_else(|e| panic!("/events body: {e}\n{}", diagnostics(&srv)));
+    // The bytes can reach the client before writeBody() returns to PHP.
+    assert!(
+        wait_log_contains(&srv, "waiting for exchange cancellation", BOOT),
+        "{}",
+        diagnostics(&srv)
+    );
     client.leave();
 
     let StatusBody { status, body } = http_get(srv.addr, "/next", BOOT)

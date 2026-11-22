@@ -8,23 +8,16 @@ permissions:
 jobs:
   coverage:
     runs-on: ubuntu-26.04
-    container:
-      image: fedora:44@sha256:43b29f65a41eb9c35e1cd5323e3bdf3b655c2357a9f4f1ff2f9c2798e5045d80
-      # An init as PID 1 reaps the workers that a forced stop leaves as orphans.
-      options: --init
-      env:
-        PATH: /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
     env:
       RUST_BACKTRACE: "1"
     permissions:
       contents: read
       id-token: write
     steps:
-      - name: Install PHP and build deps
-        run: dnf -y install --setopt=install_weak_deps=False git tar gzip xz findutils procps-ng gcc gcc-c++ make clang-devel php-cli php-devel php-embedded php-bcmath php-intl php-mbstring php-pdo php-pgsql php-process php-sodium php-xml php-pecl-igbinary php-pecl-redis6
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with: { persist-credentials: false }
+      - uses: ./.github/actions/php-embed
+        with: { version: "8.6" }
 
       - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
         with: { components: llvm-tools-preview }

@@ -1,4 +1,4 @@
-//! APM suites for CI only. Linux CI installs newrelic.so and ddtrace.so into the extension dir and does not enable them. Each suite loads its agent through its own php.ini and skips when the .so is absent.
+//! Each APM suite loads its agent through its own php.ini and skips when the library is absent. Linux ZTS CI installs the Datadog tracer.
 
 use std::collections::BTreeSet;
 use std::process::Command;

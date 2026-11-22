@@ -59,6 +59,11 @@ fn parked_write_keeps_the_unused_budget() -> anyhow::Result<()> {
         },
     ];
 
+    let clock = if rapira_sapi::has_execution_timers() {
+        "wall"
+    } else {
+        "cpu"
+    };
     let ini = format!("{}\nmax_execution_time = 3\n", timeout_ini());
     for c in cases {
         let srv = Spawn::http(
@@ -73,7 +78,7 @@ fn parked_write_keeps_the_unused_budget() -> anyhow::Result<()> {
         client.set_read_timeout(Some(Duration::from_secs(20)))?;
         write!(
             client,
-            "GET {} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+            "GET {}&clock={clock} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
             c.target
         )?;
         // The first byte arrives when the work before the write ends.

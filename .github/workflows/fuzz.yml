@@ -19,33 +19,15 @@ jobs:
     pull-request:
         if: github.event_name == 'pull_request'
         runs-on: ubuntu-26.04
-        timeout-minutes: 20
+        timeout-minutes: 45
         steps:
             - &checkout
               uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
               with: { persist-credentials: false }
 
             - &php
-              uses: shivammathur/setup-php@eb7c497e18156a6bbabfef1d3a82760b9eda3962 # v2
-              with:
-                  php-version: "8.5"
-                  coverage: none
-              env:
-                  phpts: nts
-
-            - &deps
-              name: Build deps for bindgen/cc
-              run: |
-                  sudo apt-get update && sudo apt-get install -y --no-install-recommends build-essential pkg-config libclang-dev
-                  # bindgen reads the include paths of the default clang and must load the libclang of the same version. The image has several, and clang-sys takes the newest one
-                  echo "LIBCLANG_PATH=$(dirname "$(dirname "$(clang -print-resource-dir)")")" >> "$GITHUB_ENV"
-
-            - &libphp
-              name: Expose the PHP embed lib
-              run: |
-                  mkdir -p "$RUNNER_TEMP/phplib"
-                  ln -sf /usr/lib/libphp8.5.so "$RUNNER_TEMP/phplib/libphp.so"
-                  echo "RUSTFLAGS=--cfg tokio_unstable -L native=$RUNNER_TEMP/phplib" >> "$GITHUB_ENV"
+              uses: ./.github/actions/php-embed
+              with: { version: "8.6" }
 
             - &toolchain
               uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
@@ -82,8 +64,6 @@ jobs:
         steps:
             - *checkout
             - *php
-            - *deps
-            - *libphp
             - *toolchain
             - *cargo-fuzz
 

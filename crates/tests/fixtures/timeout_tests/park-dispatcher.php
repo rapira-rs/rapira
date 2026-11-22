@@ -1,6 +1,6 @@
 <?php
 
-// The client stops reading while the unit writes 32 MiB. The work before and after the write uses both CPU time and wall-clock time.
+// The client stops reading while the unit writes 32 MiB. Use the same clock as PHP for the work on each side of the write.
 
 function cpu_ms(): float
 {
@@ -9,11 +9,14 @@ function cpu_ms(): float
         + ($u['ru_utime.tv_usec'] + $u['ru_stime.tv_usec']) / 1000;
 }
 
-function work(int $ms): void
+function work(int $ms, string $clock): void
 {
+    if ($clock === 'wall') {
+        usleep($ms * 1000);
+        return;
+    }
     $cpu = cpu_ms() + $ms;
-    $wall = hrtime(true) + $ms * 1_000_000;
-    while (cpu_ms() < $cpu || hrtime(true) < $wall) {
+    while (cpu_ms() < $cpu) {
     }
 }
 
@@ -22,12 +25,12 @@ try {
     while (true) {
         $ex = $d->receive();
         parse_str(parse_url($ex->getRequest()->target, PHP_URL_QUERY) ?: '', $q);
-        work((int) $q['before']);
+        work((int) $q['before'], $q['clock']);
         $chunk = str_repeat('x', 256 << 10);
         for ($i = 0; $i < 128; $i++) {
             $ex->writeBody($chunk, eos: false);
         }
-        work((int) $q['after']);
+        work((int) $q['after'], $q['clock']);
         $ex->writeBody('done', eos: true);
     }
 } catch (\Rapira\Exception\ClosedException) {
