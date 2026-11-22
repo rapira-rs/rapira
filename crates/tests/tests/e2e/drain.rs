@@ -1,5 +1,6 @@
 use crate::harness::*;
 use rapira_sapi::plugin::Mode;
+use std::net::TcpStream;
 use std::time::Duration;
 
 const READ: Duration = Duration::from_secs(10);
@@ -11,8 +12,8 @@ fn exchange(conn: &mut Conn) -> std::io::Result<Head> {
     let head = conn.read_head(READ)?;
     let length = field(&head, "content-length")
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    conn.read_n(length, READ)?;
+        .expect("the response declares its length");
+    assert_eq!(conn.read_n(length, READ)?, b"ok");
     Ok(head)
 }
 
@@ -23,11 +24,24 @@ fn field<'a>(head: &'a Head, name: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// A stopping worker keeps the connections it holds. A request on each gets a complete response with `connection: close`, and the worker exits after they close.
+fn assert_new_connection_refused(srv: &Server) {
+    tests::poll(READ, || {
+        TcpStream::connect_timeout(&srv.addr, READ)
+            .err()
+            .filter(|err| err.kind() == std::io::ErrorKind::ConnectionRefused)
+    })
+    .unwrap_or_else(|| panic!("new connections still get through\n{}", diagnostics(srv)));
+}
+
+/// During a stop, each accepted HTTP connection gets its last response with `connection: close`.
 #[test]
-fn a_stopping_worker_answers_requests_on_the_connections_it_holds() {
-    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php")).spawn();
-    let pid = wait_workers(&srv, READ, "1 worker", |p| p.len() == 1)[0];
+fn a_stopping_server_answers_requests_on_its_http_connections() {
+    let mut srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/boot-log-worker.php"),
+    )
+    .spawn();
+    wait_serving(&srv, "http", 1);
     let mut used: Vec<Conn> = (0..4)
         .map(|_| {
             let mut conn = Conn::open(srv.addr, READ).expect("connect");
@@ -37,17 +51,13 @@ fn a_stopping_worker_answers_requests_on_the_connections_it_holds() {
             conn
         })
         .collect();
-    let mut fresh: Vec<Conn> = (0..4)
-        .map(|_| Conn::open(srv.addr, READ).expect("connect"))
-        .collect();
-
-    signal(pid, libc::SIGQUIT);
+    signal(srv.pid(), libc::SIGQUIT);
     assert!(
         wait_log_contains(&srv, "open connections", READ),
         "no drain record\n{}",
         diagnostics(&srv)
     );
-
+    assert_new_connection_refused(&srv);
     for (i, conn) in used.iter_mut().enumerate() {
         let head = exchange(conn)
             .unwrap_or_else(|e| panic!("held connection {i}: {e}\n{}", diagnostics(&srv)));
@@ -58,16 +68,7 @@ fn a_stopping_worker_answers_requests_on_the_connections_it_holds() {
             "held connection {i}"
         );
     }
-    // The old worker or its replacement answers, depending on which one accepted the connection.
-    for (i, conn) in fresh.iter_mut().enumerate() {
-        let head = exchange(conn)
-            .unwrap_or_else(|e| panic!("new connection {i}: {e}\n{}", diagnostics(&srv)));
-        assert_eq!(head.status, 200, "new connection {i}");
-    }
-    // The 10 s wait is well under the 25 s drain grace period. It is enough because the drain ends when the last connection closes.
-    wait_workers(&srv, READ, "a new worker after the drain", |p| {
-        p.len() == 1 && p[0] != pid
-    });
+    assert_exit_code(srv.wait_exit(READ), EXIT_OK, &srv);
 }
 
 /// Sends one Connect unary call to EchoService/Echo on `conn`.
@@ -87,13 +88,13 @@ async fn connect_call(conn: &mut tests::grpc::Conn) -> tests::grpc::Response {
         .expect("the call")
 }
 
-/// A stopping gRPC worker answers the next Connect call on each HTTP/1.1 connection it holds, and that response closes the connection.
+/// During a stop, each accepted gRPC HTTP/1.1 connection gets its last Connect response.
 #[tokio::test]
-async fn a_stopping_grpc_worker_answers_on_its_http1_connections() {
+async fn a_stopping_server_answers_on_its_grpc_http1_connections() {
     let srv = Spawn::grpc(fixture_path("grpc/echo-worker.php"))
         .json_log()
         .spawn();
-    let pid = wait_workers(&srv, READ, "1 worker", |p| p.len() == 1)[0];
+    wait_serving(&srv, "grpc", 1);
     let mut conns = Vec::new();
     for _ in 0..4 {
         let mut conn = tests::grpc::Conn::open(&listen(&srv), tests::grpc::Wire::Http1)
@@ -104,12 +105,13 @@ async fn a_stopping_grpc_worker_answers_on_its_http1_connections() {
         conns.push(conn);
     }
 
-    signal(pid, libc::SIGQUIT);
+    signal(srv.pid(), libc::SIGQUIT);
     assert!(
         wait_log_contains(&srv, "draining open connections", READ),
         "no drain record\n{}",
         diagnostics(&srv)
     );
+    assert_new_connection_refused(&srv);
 
     for (i, conn) in conns.iter_mut().enumerate() {
         let response = connect_call(conn).await;
@@ -119,6 +121,7 @@ async fn a_stopping_grpc_worker_answers_on_its_http1_connections() {
             "connection {i}\n{}",
             diagnostics(&srv)
         );
+        assert_eq!(response.body.as_ref(), tests::grpc::HI, "connection {i}");
         assert_eq!(
             response
                 .headers
@@ -128,4 +131,7 @@ async fn a_stopping_grpc_worker_answers_on_its_http1_connections() {
             "connection {i}"
         );
     }
+    tokio::time::timeout(READ, exited(srv))
+        .await
+        .expect("the server exits after the last response");
 }

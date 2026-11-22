@@ -1,4 +1,4 @@
-//! The listeners that the master binds before the fork: the bound address, the unix socket file, one address per boot, and the accept loop of each worker.
+//! Listener addresses, socket files, queued connections and signals during boot and drain.
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpStream};
@@ -12,15 +12,15 @@ use rapira_sapi::plugin::Mode;
 use tests::{StatusBody, poll};
 
 use crate::harness::{
-    BOOT, Exited, Server, Spawn, diagnostics, fixture_path, free_port, http_get,
-    parse_status_and_body, scratch_dir, signal, wait_workers,
+    BOOT, EXIT_OK, Exited, Server, Spawn, assert_exit_code, diagnostics, fixture_path, free_port,
+    http_get, is_zts, parse_status_and_body, scratch_dir, signal, wait_log_contains, wait_serving,
 };
 
 const REQ: Duration = Duration::from_secs(10);
 const ECHO: &str = "shared/echo-worker.php";
 const GRPC_ECHO: &str = "grpc/echo-worker.php";
 
-/// With no server_port, PHP sees the port of the bound address, as `php -S 127.0.0.1:0` does, and port 80 on a unix socket. With port 0, the kernel picks the port. The `prepared listener on` record of the master and the `listening on` record of the worker name that port, and the server answers there.
+/// PHP sees the bound TCP port or port 80 on a Unix socket. The server logs the bound address once.
 #[test]
 fn the_default_server_port_is_the_bound_port() {
     struct Case {
@@ -66,16 +66,15 @@ fn the_default_server_port_is_the_bound_port() {
         },
     ];
     for case in cases {
-        let srv = Spawn::http(case.mode, tests::fixture(case.fixture))
+        let workers = if is_zts() { 2 } else { 1 };
+        let mut srv = Spawn::http(case.mode, tests::fixture(case.fixture))
             .http_listen(case.listen.clone())
-            // A TCP listen address is not a readiness target, so the spawn waits for the [grpc] pool.
-            .with_grpc(fixture_path(GRPC_ECHO))
+            .workers(workers)
+            .json_log()
             .spawn();
+        wait_serving(&srv, "http", workers);
         let (picked, response) = match &case.listen {
-            ListenAddr::Tcp(_) => {
-                let addr = logged_http_addr(&srv);
-                (Some(addr), http_get(addr, case.path, REQ))
-            }
+            ListenAddr::Tcp(_) => (Some(srv.addr), http_get(srv.addr, case.path, REQ)),
             ListenAddr::Unix(sock) => (None, unix_get(sock, case.path)),
         };
         let StatusBody { status, body } = response.unwrap_or_else(|e| {
@@ -100,24 +99,42 @@ fn the_default_server_port_is_the_bound_port() {
             case.name
         );
 
-        if let Some(addr) = picked {
-            let listening = format!("http: listening on http://{addr}");
-            let logged = poll(BOOT, || {
-                let log = std::fs::read_to_string(srv.log_file()).unwrap_or_default();
-                log.contains(&listening).then_some(())
-            });
-            assert!(
-                logged.is_some(),
-                "{}: no {listening:?} record\n{}",
-                case.name,
-                diagnostics(&srv)
-            );
-        }
+        srv.stop();
+        let bound = picked.map(ListenAddr::Tcp).unwrap_or(case.listen);
+        assert_one_listener(&srv, "http", &bound);
     }
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// The listener is close-on-exec, so a child process that PHP starts holds no socket of the worker. Fds 0 to 2 come from the shell of the fixture.
+#[test]
+fn grpc_logs_its_bound_port_once() {
+    let workers = if is_zts() { 2 } else { 1 };
+    let mut srv = Spawn::grpc(fixture_path(GRPC_ECHO))
+        .grpc_listen(ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], 0))))
+        .workers(workers)
+        .json_log()
+        .spawn();
+    wait_serving(&srv, "grpc", workers);
+    srv.stop();
+    assert_one_listener(&srv, "grpc", &ListenAddr::Tcp(srv.addr));
+}
+
+fn assert_one_listener(srv: &Server, pool: &str, bound: &ListenAddr) {
+    let records: Vec<_> = tests::server_log::records(&srv.log_file())
+        .into_iter()
+        .filter(|record| record.target == pool && record.message.contains("listen"))
+        .map(|record| record.message)
+        .collect();
+    let [record] = records.as_slice() else {
+        panic!(
+            "expected one {pool} listener record, got {records:?}\n{}",
+            diagnostics(srv)
+        );
+    };
+    assert_eq!(record, &format!("listening on {bound}"));
+}
+
+/// A child that PHP starts inherits no socket. The fixture shell supplies file descriptors 0 to 2.
 #[cfg(target_os = "linux")]
 #[test]
 fn php_child_processes_inherit_no_socket() {
@@ -145,7 +162,7 @@ fn php_child_processes_inherit_no_socket() {
     );
 }
 
-/// The socket file is world-connectable. A second master refuses a path that a live master listens on and leaves that socket alone. The file that a stopped master leaves behind does not block the next boot.
+/// A second server refuses a live Unix socket. A new server can use the same path after a stop.
 #[test]
 fn unix_socket_file_mode_live_refusal_and_stale_reclaim() {
     let dir = scratch_dir();
@@ -156,6 +173,7 @@ fn unix_socket_file_mode_live_refusal_and_stale_reclaim() {
     };
 
     let mut live = spawn().spawn();
+    wait_serving(&live, "http", 1);
     assert_eq!(mode(&sock), 0o666);
 
     let Exited { status, log } = spawn().boot_failure();
@@ -169,7 +187,7 @@ fn unix_socket_file_mode_live_refusal_and_stale_reclaim() {
     );
 
     live.stop();
-    assert!(sock.exists(), "a stopped master leaves its socket file");
+    assert!(sock.exists(), "a stopped server leaves its socket file");
 
     let next = spawn().spawn();
     assert_eq!(mode(&sock), 0o666);
@@ -224,11 +242,11 @@ fn two_pools_on_one_address_fail_the_boot() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// One worker takes every connection. The connections after the first wait in the backlog. After each accept, the worker moves its listener entry to the tail of the wait queue, and no new connection arrives to wake it again.
+/// Each queued TCP connection gets a response without a later connection to wake the accept loop.
 #[test]
 fn queued_connections_survive_each_accept() {
     let srv = Spawn::http(Mode::Dispatcher, fixture_path(ECHO)).spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
 
     let mut clients: Vec<TcpStream> = (0..16)
         .map(|_| TcpStream::connect_timeout(&srv.addr, REQ).expect("connect"))
@@ -248,53 +266,55 @@ fn queued_connections_survive_each_accept() {
     }
 }
 
-/// Signals that terminate by default stay pending while PHP starts, so a HUP, USR1 or USR2 during the boot does not stop the master. An OPcache preload script sends them to the master from inside the boot, before the master installs its handlers.
+/// The preload script holds PHP in MINIT while the test sends the three host signals.
 #[test]
-fn signals_during_the_boot_do_not_stop_the_master() {
-    let dir = scratch_dir();
-    let preload = dir.join("preload.php");
-    std::fs::write(
-        &preload,
-        format!(
-            "<?php\nif (!function_exists('posix_kill')) {{\n    return;\n}}\n\
-             foreach ([{hup}, {usr1}, {usr2}] as $signal) {{\n    posix_kill(posix_getpid(), $signal);\n}}\n",
-            hup = libc::SIGHUP,
-            usr1 = libc::SIGUSR1,
-            usr2 = libc::SIGUSR2,
-        ),
-    )
-    .expect("write preload.php");
+fn signals_during_the_boot_reach_the_server() {
+    let preload = fixture_path("listeners/preload.php");
     let ini = tests::fixture("ini/shared/php.ini");
     let mut ini = std::fs::read_to_string(&ini)
         .unwrap_or_else(|e| panic!("read {}: {e}", ini.display()))
-        + &format!("\nopcache.preload = {}\n", preload.display());
-    // PHP needs opcache.preload_user under uid 0. The value root keeps the preload in the master process, where the signals must arrive: https://www.php.net/manual/en/opcache.configuration.php#ini.opcache.preload-user
+        + &format!(
+            "\nopcache.enable = 1\nopcache.preload = {}\n",
+            preload.display()
+        );
+    // PHP requires a preload user when the server runs as root. https://www.php.net/manual/en/opcache.configuration.php#ini.opcache.preload-user
     if unsafe { libc::geteuid() } == 0 {
         ini.push_str("opcache.preload_user = root\n");
     }
 
-    let mut srv = Spawn::http(Mode::Dispatcher, fixture_path(ECHO))
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path(ECHO))
         .php_ini(&ini)
         .spawn();
-    let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
+    let marker = srv.dir.join("preloading");
+    poll(BOOT, || marker.is_file().then_some(()))
+        .unwrap_or_else(|| panic!("PHP did not enter preload\n{}", diagnostics(&srv)));
+    signal(srv.pid(), libc::SIGHUP);
+    signal(srv.pid(), libc::SIGUSR1);
+    signal(srv.pid(), libc::SIGUSR2);
+    std::fs::write(srv.dir.join("release-preload"), "").expect("release MINIT");
+
+    // Only the USR1 sent during MINIT can produce this record.
     assert!(
-        srv.child.try_wait().ok().flatten().is_none(),
-        "\n{}",
+        wait_log_contains(&srv, "pool=http worker=0 ", BOOT),
+        "no status after MINIT\n{}",
         diagnostics(&srv)
     );
-
-    drop(srv);
-    let _ = std::fs::remove_dir_all(&dir);
+    poll(BOOT, || {
+        let log = std::fs::read_to_string(srv.log_file()).expect("read server.log");
+        (log.matches("reloading all pools").count() == 2).then_some(())
+    })
+    .unwrap_or_else(|| panic!("expected both reload signals\n{}", diagnostics(&srv)));
+    let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
+    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
 }
 
-/// A stop closes the listener of the master, and each worker closes its listener before its drain. A new client then gets a refused connection at once, and the request in flight still gets its response. The socket file is in a scratch dir, so no other process can take its address.
+/// The server closes the Unix listener while a request is in flight. The held request still gets its response.
 #[test]
 fn a_stop_refuses_new_connections_during_the_drain() {
     let dir = scratch_dir();
     let sock = dir.join("http.sock");
     let release = dir.join("release");
-    let srv = Spawn::http(Mode::Worker, tests::fixture("worker/held-worker.php"))
+    let mut srv = Spawn::http(Mode::Worker, tests::fixture("worker/held-worker.php"))
         .http_listen(ListenAddr::Unix(sock.clone()))
         .json_log()
         .spawn();
@@ -321,24 +341,8 @@ fn a_stop_refuses_new_connections_during_the_drain() {
     let StatusBody { status: code, body } = parse_status_and_body(&raw)
         .unwrap_or_else(|e| panic!("{e}: {}", String::from_utf8_lossy(&raw)));
     assert_eq!((code, body), (200, &b"done"[..]), "\n{}", diagnostics(&srv));
-    drop(srv);
+    assert_exit_code(srv.wait_exit(REQ), EXIT_OK, &srv);
     let _ = std::fs::remove_dir_all(&dir);
-}
-
-/// The address of the `[http]` listener, from its `prepared listener on` record in the log of `srv`.
-fn logged_http_addr(srv: &Server) -> SocketAddr {
-    const RECORD: &str = "http: prepared listener on ";
-    poll(BOOT, || {
-        let log = std::fs::read_to_string(srv.log_file()).unwrap_or_default();
-        let line = log.lines().find(|line| line.contains(RECORD))?;
-        let (_, addr) = line.split_once(RECORD).expect("the record");
-        Some(
-            addr.trim()
-                .parse()
-                .unwrap_or_else(|e| panic!("address {addr:?}: {e}\n{log}")),
-        )
-    })
-    .unwrap_or_else(|| panic!("no {RECORD:?} record\n{}", diagnostics(srv)))
 }
 
 /// The permission bits of `path`.

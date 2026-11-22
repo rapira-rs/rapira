@@ -1,8 +1,80 @@
 use crate::harness::*;
 use rapira_sapi::plugin::Mode;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tests::wire::submit;
 use tests::{StatusBody, drain_resp, poll, req, server_log};
+
+#[test]
+fn nts_uses_one_worker_and_warns_when_four_are_configured() {
+    if is_zts() {
+        return;
+    }
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+        .workers(4)
+        .json_log()
+        .spawn();
+    wait_serving(&srv, "http", 1);
+    pool_line(&srv, "http", "workers=1 ");
+    assert!(
+        server_log::records(&srv.log_file()).iter().any(|record| {
+            record.level == tracing::Level::WARN && record.message.contains("--enable-zts")
+        }),
+        "no NTS worker limit warning\n{}",
+        diagnostics(&srv)
+    );
+    assert_eq!(http_get(srv.addr, "/", BOOT).expect("GET /").status, 200);
+}
+
+#[test]
+fn nts_refuses_two_pools() {
+    if is_zts() {
+        return;
+    }
+    let Exited { status, log } =
+        Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
+            .with_grpc(fixture_path("grpc/echo-worker.php"))
+            .boot_failure();
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(log.contains("NTS PHP supports one pool"), "{log}");
+}
+
+#[test]
+fn usr1_reports_the_current_worker_counters() {
+    struct Case {
+        name: &'static str,
+        mode: Mode,
+        fixture: &'static str,
+    }
+    let cases = [
+        Case {
+            name: "classic",
+            mode: Mode::Classic,
+            fixture: "classic/cwd.php",
+        },
+        Case {
+            name: "worker",
+            mode: Mode::Worker,
+            fixture: "lifecycle/boot-log-handle-worker.php",
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(case.mode, fixture_path(case.fixture)).spawn();
+        wait_serving(&srv, "http", 1);
+        let before = slot_line(&srv, "state=idle ");
+        assert!(
+            before.contains("handled=0 errors=0 "),
+            "{}: {before}",
+            case.name
+        );
+        assert_eq!(http_get(srv.addr, "/", BOOT).expect("GET /").status, 200);
+        let after = slot_line(&srv, "state=idle ");
+        assert!(
+            after.contains("handled=1 errors=0 "),
+            "{}: {after}",
+            case.name
+        );
+    }
+}
 
 #[test]
 fn retained_spl_tempfile_survives_next_request() {
@@ -12,7 +84,7 @@ fn retained_spl_tempfile_survives_next_request() {
     )
     .spawn();
     let timeout = Duration::from_secs(10);
-    let pid = wait_workers(&srv, timeout, "1 worker", |p| p.len() == 1)[0];
+    wait_serving(&srv, "http", 1);
 
     for (index, contents) in ["first export\n", "replacement export\n"]
         .into_iter()
@@ -29,7 +101,7 @@ fn retained_spl_tempfile_survives_next_request() {
         assert_eq!(code, 200, "\n{}", diagnostics(&srv));
         assert_eq!(
             body,
-            format!("{pid}:{}:stored", index * 2 + 1).into_bytes(),
+            format!("{}:stored", index * 2 + 1).into_bytes(),
             "\n{}",
             diagnostics(&srv)
         );
@@ -39,7 +111,7 @@ fn retained_spl_tempfile_survives_next_request() {
         assert_eq!(code, 200, "\n{}", diagnostics(&srv));
         assert_eq!(
             body,
-            format!("{pid}:{}:{contents}", index * 2 + 2).into_bytes(),
+            format!("{}:{contents}", index * 2 + 2).into_bytes(),
             "\n{}",
             diagnostics(&srv)
         );
@@ -47,155 +119,83 @@ fn retained_spl_tempfile_survives_next_request() {
 }
 
 #[test]
-fn killed_worker_respawns() {
-    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
-        .processes(2)
-        .spawn();
-    let pids0 = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
-    signal(pids0[0], libc::SIGKILL);
-    wait_workers(
-        &srv,
-        Duration::from_secs(20),
-        "respawn to 2 with a fresh pid",
-        |p| p.len() == 2 && p.iter().any(|x| !pids0.contains(x)),
-    );
-    let crash = format!(
-        "http pool: worker {} killed by signal {}",
-        pids0[0],
-        libc::SIGKILL
-    );
-    assert!(
-        wait_log_contains(&srv, &crash, Duration::from_secs(5)),
-        "no {crash:?} record\n{}",
-        diagnostics(&srv)
-    );
-    for _ in 0..5 {
-        let code = http_get(srv.addr, "/", Duration::from_secs(10))
-            .expect("GET /")
-            .status;
-        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    }
-}
-
-/// Workers ignore SIGUSR1, and SIGUSR2 only asks them to recycle their app, so `pkill -USR2 rapira` does not stop them. Classic mode starts PHP again for each request, and PHP sets its signal handlers again at each start.
-#[test]
-fn workers_ignore_usr_signals() {
+fn an_idle_server_stops_on_quit_term_or_int() {
     struct Case {
         name: &'static str,
         signal: i32,
     }
     let cases = [
         Case {
-            name: "SIGUSR1",
-            signal: libc::SIGUSR1,
+            name: "QUIT",
+            signal: libc::SIGQUIT,
         },
         Case {
-            name: "SIGUSR2",
-            signal: libc::SIGUSR2,
+            name: "TERM",
+            signal: libc::SIGTERM,
+        },
+        Case {
+            name: "INT",
+            signal: libc::SIGINT,
         },
     ];
-    let srv = Spawn::http(Mode::Classic, fixture_path("classic/cwd.php")).spawn();
-    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
-    for _ in 0..2 {
-        let code = http_get(srv.addr, "/", Duration::from_secs(10))
-            .expect("GET /")
-            .status;
-        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    }
     for case in cases {
-        signal(pid, case.signal);
-        // A worker that the signal stops exits in a few milliseconds.
-        std::thread::sleep(Duration::from_millis(200));
-        let code = http_get(srv.addr, "/", Duration::from_secs(10))
-            .unwrap_or_else(|e| panic!("{}: GET /: {e}\n{}", case.name, diagnostics(&srv)))
-            .status;
-        assert_eq!(code, 200, "{}\n{}", case.name, diagnostics(&srv));
-        assert_eq!(
-            worker_pids(srv.pid()),
-            [pid],
-            "{}: the worker must survive\n{}",
-            case.name,
-            diagnostics(&srv)
-        );
+        let mut srv = Spawn::http(Mode::Classic, fixture_path("classic/cwd.php")).spawn();
+        wait_serving(&srv, "http", 1);
+        assert_eq!(http_get(srv.addr, "/", BOOT).expect(case.name).status, 200);
+        signal(srv.pid(), case.signal);
+        assert_exit_code(srv.wait_exit(STOP_BUDGET), EXIT_OK, &srv);
     }
 }
 
-// After the master exits, its workers reparent and worker_pids cannot see them, so poll the captured pids directly.
-fn wait_pids_gone(pids: &[u32], timeout: Duration, srv: &Server) {
-    poll(timeout, || {
-        // SAFETY: kill(pid, 0) only probes existence; ESRCH means gone.
-        pids.iter()
-            .all(|&p| unsafe { libc::kill(p as libc::pid_t, 0) } == -1)
-            .then_some(())
-    })
-    .unwrap_or_else(|| {
-        panic!(
-            "workers survived the master: {pids:?}\n{}",
-            diagnostics(srv)
-        )
-    });
-}
-
+/// The held request keeps the stop open. The pidfile names the server until it exits.
 #[test]
-fn sigquit_master_graceful() {
-    let mut srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
-        .processes(2)
-        .spawn();
-    let pids = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
-    let code = http_get(srv.addr, "/", Duration::from_secs(10))
-        .expect("GET /")
-        .status;
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    signal(srv.pid(), libc::SIGQUIT);
-    let status = srv.wait_exit(STOP_BUDGET);
-    assert_exit_code(status, MASTER_EXIT_OK, &srv);
-    wait_pids_gone(&pids, Duration::from_secs(10), &srv);
-}
-
-#[test]
-fn sigterm_master_stops() {
-    let mut srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
-        .processes(2)
-        .spawn();
-    let pids = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
-    signal(srv.pid(), libc::SIGTERM);
-    let status = srv.wait_exit(STOP_BUDGET);
-    assert_exit_code(status, MASTER_EXIT_OK, &srv);
-    wait_pids_gone(&pids, Duration::from_secs(10), &srv);
-}
-
-/// The pidfile holds the pid of the master until the master exits after a stop. A second SIGTERM during the stop forces the exit with code 130 and stops the workers. A held request keeps the stop open.
-#[test]
-fn the_pidfile_names_the_master_until_its_exit() {
+fn the_pidfile_names_the_server_until_its_exit() {
+    enum Stop {
+        Release,
+        Deadline,
+        SecondTerm,
+    }
     struct Case {
         name: &'static str,
-        second_sigterm: bool,
+        stop: Stop,
+        timeout_secs: u64,
         want_exit: i32,
     }
     let cases = [
         Case {
-            name: "stop",
-            second_sigterm: false,
-            want_exit: MASTER_EXIT_OK,
+            name: "the held request completes",
+            stop: Stop::Release,
+            timeout_secs: 30,
+            want_exit: EXIT_OK,
         },
         Case {
-            name: "forced stop",
-            second_sigterm: true,
+            name: "the held request exceeds the stop deadline",
+            stop: Stop::Deadline,
+            timeout_secs: 2,
+            want_exit: EXIT_OK,
+        },
+        Case {
+            name: "a second TERM during the stop",
+            stop: Stop::SecondTerm,
+            timeout_secs: 30,
             want_exit: 130,
         },
     ];
     for case in cases {
         let mut srv = Spawn::http(Mode::Worker, tests::fixture("worker/held-worker.php"))
-            .toml("[supervisor]\npidfile = \"rapira.pid\"")
+            .toml(&format!(
+                "[server]\npidfile = \"rapira.pid\"\nstop_timeout_secs = {}",
+                case.timeout_secs
+            ))
             .json_log()
             .spawn();
         let pidfile = srv.dir.join("rapira.pid");
         let release = srv.dir.join("release");
-        let pids = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+        wait_serving(&srv, "http", 1);
         let mut held = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
         held.send(
             format!(
-                "GET /?release={} HTTP/1.1\r\nHost: e2e\r\n\r\n",
+                "GET /?release={} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
                 release.display()
             )
             .as_bytes(),
@@ -203,10 +203,11 @@ fn the_pidfile_names_the_master_until_its_exit() {
         .expect("send the held request");
         tests::server_log::wait_app_record(&srv.log_file(), "held");
 
+        let start = Instant::now();
         signal(srv.pid(), libc::SIGTERM);
-        // Two pending SIGTERMs merge into one, so the second goes after the master began the stop.
+        // Two pending TERM signals can merge. Wait for the server to take the first one.
         assert!(
-            wait_log_contains(&srv, "draining worker", Duration::from_secs(10)),
+            wait_log_contains(&srv, "stopping server", Duration::from_secs(10)),
             "{}: no drain\n{}",
             case.name,
             diagnostics(&srv)
@@ -218,48 +219,29 @@ fn the_pidfile_names_the_master_until_its_exit() {
             "{}: the pidfile during the stop",
             case.name
         );
-        // Without the release the held request ends only with its worker.
-        if case.second_sigterm {
-            signal(srv.pid(), libc::SIGTERM);
-        } else {
-            std::fs::write(&release, "").expect("write the release file");
+        match case.stop {
+            Stop::Release => {
+                std::fs::write(&release, "").expect("release the request");
+                let raw = held.read_remaining(BOOT).expect("read the held response");
+                let StatusBody { status, body } = parse_status_and_body(&raw).expect("response");
+                assert_eq!((status, body), (200, b"done".as_slice()), "{}", case.name);
+            }
+            Stop::SecondTerm => signal(srv.pid(), libc::SIGTERM),
+            Stop::Deadline => {}
         }
-        let status = srv.wait_exit(STOP_BUDGET);
+        // A forced stop must finish before the 30 s stop deadline.
+        let status = srv.wait_exit(Duration::from_secs(10));
         assert_exit_code(status, case.want_exit, &srv);
+        if matches!(case.stop, Stop::Deadline) {
+            assert!(
+                start.elapsed() >= Duration::from_secs(case.timeout_secs),
+                "the server stopped before its deadline"
+            );
+        }
         assert!(
             !pidfile.exists(),
             "{}: the pidfile stays after the exit",
             case.name
-        );
-        wait_pids_gone(&pids, Duration::from_secs(10), &srv);
-    }
-}
-
-/// Worker exit code after a clean drain (`rapira_master::WORKER_EXIT_DRAINED`).
-#[cfg(target_os = "linux")]
-const WORKER_EXIT_DRAINED: i32 = 0;
-
-/// The test process is a child subreaper while the master dies, so the orphaned workers become its children and their exit codes are visible. https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html
-#[cfg(target_os = "linux")]
-#[test]
-fn killed_master_leaves_workers_to_drain() {
-    let mut srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
-        .processes(2)
-        .spawn();
-    let pids = wait_workers(&srv, Duration::from_secs(20), "2 workers", |p| p.len() == 2);
-    let code = http_get(srv.addr, "/", Duration::from_secs(10))
-        .expect("GET /")
-        .status;
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-
-    kill_master_as_subreaper(&mut srv);
-
-    for pid in pids {
-        assert_eq!(
-            wait_child_exit(pid, Duration::from_secs(20), &srv),
-            Some(WORKER_EXIT_DRAINED),
-            "worker {pid} did not drain after the master died\n{}",
-            diagnostics(&srv)
         );
     }
 }
@@ -296,8 +278,7 @@ fn queued_clients_gone_do_not_use_the_max_requests_quota() -> anyhow::Result<()>
         server_log::wait_app_record(&srv.log_file(), "held");
         let rx_b = submit(srv.addr, req(&path))?;
         let rx_c = submit(srv.addr, req(&path))?;
-        // No signal shows that B and C are queued or that the server saw their close. A holds the worker until the release file exists, so each wait can be long.
-        std::thread::sleep(Duration::from_secs(1));
+        pool_line(&srv, "http", "pending=2 ");
         drop((rx_b, rx_c));
         std::thread::sleep(Duration::from_secs(1));
         std::fs::write(&release, "")?;
@@ -340,7 +321,7 @@ fn max_requests_restarts_the_app_without_losing_requests() {
             .http_pool("max_requests = 2")
             .json_log()
             .spawn();
-        let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+        wait_serving(&srv, "http", 1);
         let storm = storm(srv.addr, 8);
         std::thread::sleep(Duration::from_secs(2));
         let tally = storm.halt();
@@ -353,13 +334,6 @@ fn max_requests_restarts_the_app_without_losing_requests() {
             diagnostics(&srv)
         );
         assert!(tally.ok > 0, "{}: the storm got no response", case.name);
-        assert_eq!(
-            worker_pids(srv.pid()),
-            vec![pid],
-            "{}: the worker process stays\n{}",
-            case.name,
-            diagnostics(&srv)
-        );
         let log = srv.log_file();
         assert!(
             tests::server_log::app_contexts(&log, "booted").len() >= 2,
@@ -377,86 +351,19 @@ fn max_requests_restarts_the_app_without_losing_requests() {
     }
 }
 
-#[test]
-fn request_timeout_kills_and_replaces_worker() {
-    let srv = Spawn::http(Mode::Dispatcher, fixture_path("lifecycle/hang-worker.php"))
-        .http_pool("request_terminate_timeout_secs = 2")
-        .spawn();
-    let pids0 = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
-    let code = http_get(srv.addr, "/", Duration::from_secs(10))
-        .expect("GET /")
-        .status;
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    let hung = http_get(srv.addr, "/?hang=1", Duration::from_secs(15));
-    assert!(
-        hung.is_err(),
-        "hung request must die with the worker, got {hung:?}\n{}",
-        diagnostics(&srv)
-    );
-    wait_workers(
-        &srv,
-        Duration::from_secs(20),
-        "worker replaced after timeout kill",
-        |p| p.len() == 1 && p[0] != pids0[0],
-    );
-    let code = http_get(srv.addr, "/", Duration::from_secs(10))
-        .expect("GET / after kill")
-        .status;
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-}
-
-/// A worker whose RSS goes above max_memory_mb drains, and the master forks a new one. The drain starts while the request that grew the memory still runs, and that request completes. The new worker stays under the limit.
-#[test]
-fn a_worker_above_max_memory_is_replaced() {
-    let srv = Spawn::http(
-        Mode::Dispatcher,
-        fixture_path("lifecycle/memory-growth-worker.php"),
-    )
-    .http_pool("max_memory_mb = 128")
-    .spawn();
-    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
-    let code = http_get(srv.addr, "/?grow=160", Duration::from_secs(10))
-        .expect("GET /?grow=160")
-        .status;
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    let next = wait_workers(
-        &srv,
-        Duration::from_secs(10),
-        "worker replaced above the memory limit",
-        |p| p.len() == 1 && p[0] != pid,
-    )[0];
-    assert!(
-        wait_log_contains(&srv, "http.pool.max_memory_mb", Duration::from_secs(5)),
-        "the master logs why it drained the worker\n{}",
-        diagnostics(&srv)
-    );
-    let code = http_get(srv.addr, "/", Duration::from_secs(10))
-        .expect("GET / after the replacement")
-        .status;
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    // Three master ticks pass, and a new worker under the limit is not drained.
-    std::thread::sleep(Duration::from_secs(3));
-    assert_eq!(
-        worker_pids(srv.pid()),
-        vec![next],
-        "the new worker stays\n{}",
-        diagnostics(&srv)
-    );
-}
-
 /// A top-level `[pool]` table is a parse error, because the pool belongs under `[http.pool]`.
 #[test]
 fn a_top_level_pool_table_refuses_to_boot() {
     let Exited { status, log } =
         Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
-            .http_extra("[pool]\nprocesses = 1")
+            .http_extra("[pool]\nworkers = 1")
             .boot_failure();
     assert_eq!(status.code(), Some(1), "\n{log}");
     assert!(log.contains("parsing config file"), "\n{log}");
     assert!(log.contains("unknown field `pool`"), "\n{log}");
 }
 
-/// The entrypoint is fixed for the lifetime of the pool, so the master checks at boot that it is readable.
+/// The server checks at boot that the entrypoint is readable.
 #[test]
 fn a_missing_entrypoint_refuses_to_boot() {
     let Exited { status, log } =
@@ -487,49 +394,55 @@ fn an_unreadable_entrypoint_refuses_to_boot() {
     assert!(log.contains("is not readable"), "\n{log}");
 }
 
-/// A gen-0 pool whose boot always fails stops the master with exit code 70. No request is necessary, because each worker runs the boot again on its own, and the fifth failed boot flags it unhealthy. The pool has two workers, and a worker that fails its boot does not count as serving.
+/// One worker waits at boot. The other reaches the limit before the pool can serve.
 #[test]
-fn master_failboot_exits_70() {
-    let mut srv = Spawn::http(Mode::Dispatcher, fixture_path("lifecycle/fatal-worker.php"))
-        .processes(2)
-        .spawn();
-    let status = srv.wait_exit(Duration::from_secs(60));
-    assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
-    let log = std::fs::read_to_string(srv.log_file()).expect("read server.log");
-    assert!(
-        log.contains("worker keeps failing to boot; flagged unhealthy"),
-        "5 failed boots must flag the worker unhealthy\n{log}"
-    );
-}
-
-/// A gen-0 pool with a serving worker keeps the master up when another worker never boots. The fixture fails its boot while the other worker holds boot.lock. No request arrives.
-#[test]
-fn a_worker_that_never_boots_next_to_a_serving_worker_keeps_the_master_up() {
-    let observability = std::net::SocketAddr::from(([127, 0, 0, 1], free_port()));
+fn a_boot_failure_limit_in_one_worker_stops_a_pool_that_never_served() {
+    if !is_zts() {
+        return;
+    }
     let mut srv = Spawn::http(
         Mode::Dispatcher,
         fixture_path("lifecycle/lock-boot-worker.php"),
     )
-    .processes(2)
+    .workers(2)
+    .env("HOLD_BOOT", "1")
+    .http_pool("max_boot_failures = 2")
+    .json_log()
+    .spawn();
+    assert_exit_code(srv.wait_exit(Duration::from_secs(10)), EXIT_FAILBOOT, &srv);
+    assert_eq!(
+        server_log::app_contexts(&srv.log_file(), "waiting at boot").len(),
+        1
+    );
+    assert_eq!(
+        server_log::app_contexts(&srv.log_file(), "boot lock held").len(),
+        2
+    );
+}
+
+/// An idle worker makes the pool ready while the other worker retries past the boot failure limit.
+#[test]
+fn a_failing_worker_retries_next_to_a_serving_worker() {
+    if !is_zts() {
+        return;
+    }
+    let observability = std::net::SocketAddr::from(([127, 0, 0, 1], free_port()));
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/lock-boot-worker.php"),
+    )
+    .workers(2)
+    .http_pool("max_boot_failures = 2")
+    .json_log()
     .toml(&format!(
         "[observability]\nlisten = \"{observability}\"\n[observability.probes]"
     ))
     .spawn();
-    assert!(
-        wait_log_contains(
-            &srv,
-            "worker keeps failing to boot; flagged unhealthy",
-            Duration::from_secs(40)
-        ),
-        "\n{}",
-        diagnostics(&srv)
-    );
-    let status = srv.wait_exit(Duration::from_secs(5));
-    assert!(
-        status.is_none(),
-        "the master exited: {status:?}\n{}",
-        diagnostics(&srv)
-    );
+    wait_serving(&srv, "http", 1);
+    poll(Duration::from_secs(10), || {
+        (server_log::app_contexts(&srv.log_file(), "boot lock held").len() >= 3).then_some(())
+    })
+    .unwrap_or_else(|| panic!("no retry past the limit\n{}", diagnostics(&srv)));
     let StatusBody { status: code, body } =
         http_get(observability, "/readyz", Duration::from_secs(10)).expect("GET /readyz");
     assert_eq!(
@@ -540,24 +453,16 @@ fn a_worker_that_never_boots_next_to_a_serving_worker_keeps_the_master_up() {
     );
 }
 
-/// A worker-mode entrypoint that never calls handle_request() must make the master exit as a failed boot. The server must not hang or shed 503s forever.
+/// An entrypoint that returns before `handle_request()` fails its boot without a client.
 #[test]
 fn worker_bootstrap_that_never_serves_failboots() {
-    let mut srv = Spawn::http(
+    let Exited { status, log } = Spawn::http(
         Mode::Worker,
         fixture_path("lifecycle/never-loop-worker.php"),
     )
-    .spawn();
-    let addr = srv.addr;
-    let status = poll(Duration::from_secs(60), || {
-        if let Some(st) = srv.try_status() {
-            return Some(st);
-        }
-        let _ = http_get(addr, "/", Duration::from_secs(2));
-        None
-    })
-    .unwrap_or_else(|| panic!("master never exited\n{}", diagnostics(&srv)));
-    assert_exit_code(Some(status), MASTER_EXIT_FAILBOOT, &srv);
+    .http_pool("max_boot_failures = 1")
+    .boot_failure();
+    assert_eq!(status.code(), Some(EXIT_FAILBOOT), "{log}");
 }
 
 /// A client that leaves in the middle of the handler must not stop the worker. The abort ends only that unit, and the next request is served.
@@ -590,7 +495,7 @@ fn cancelled_exchange_is_discarded_by_next_receive() {
     .toml("[log]\nlevel = \"debug\"")
     .no_rust_log()
     .spawn();
-    let pid = wait_workers(&srv, BOOT, "1 dispatcher worker", |p| p.len() == 1)[0];
+    wait_serving(&srv, "http", 1);
     let mut client = Conn::open(srv.addr, BOOT).expect("connect");
     client
         .send(b"GET /events HTTP/1.1\r\nHost: e2e\r\n\r\n")
@@ -617,7 +522,7 @@ fn cancelled_exchange_is_discarded_by_next_receive() {
     assert_eq!(status, 200, "\n{}", diagnostics(&srv));
     assert_eq!(
         body,
-        format!("{pid}:2:cancelled active=0").into_bytes(),
+        b"2:cancelled active=0",
         "the next request must preserve the worker and script cycle\n{}",
         diagnostics(&srv)
     );
@@ -636,7 +541,7 @@ fn repeated_request_fields_reach_php_combined() {
         fixture_path("lifecycle/repeated-headers-worker.php"),
     )
     .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
     let StatusBody { status: code, body } = http_get_with_headers(
         srv.addr,
         "/",
@@ -666,7 +571,7 @@ fn alias_names_never_reach_a_cgi_variable() {
         fixture_path("lifecycle/repeated-headers-worker.php"),
     )
     .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
     let StatusBody { status: code, body } = http_get_with_headers(
         srv.addr,
         "/",
@@ -695,7 +600,7 @@ fn chunked_body_over_the_cap_answers_413() {
     )
     .http_extra("max_body_size_mb = 1")
     .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
 
     let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
     c.send(b"POST / HTTP/1.1\r\nHost: e2e\r\nTransfer-Encoding: chunked\r\n\r\n")
@@ -727,7 +632,7 @@ fn chunked_body_under_the_cap_is_served() {
     )
     .http_extra("max_body_size_mb = 1")
     .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
 
     let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
     c.send(
@@ -764,7 +669,7 @@ fn malformed_chunked_body_answers_400_before_dispatch() {
         fixture_path("lifecycle/fidelity-worker.php"),
     )
     .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
 
     for case in cases {
         let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
@@ -787,7 +692,7 @@ fn expect_100_continue_gets_the_interim_then_the_response() {
         fixture_path("lifecycle/fidelity-worker.php"),
     )
     .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
 
     let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
     c.send(b"POST / HTTP/1.1\r\nHost: e2e\r\nExpect: 100-continue\r\nContent-Length: 5\r\nConnection: close\r\n\r\n")
@@ -814,7 +719,7 @@ fn expect_100_continue_is_skipped_when_the_request_is_refused() {
     )
     .http_extra("max_body_size_mb = 1")
     .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
 
     let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
     c.send(
@@ -841,7 +746,7 @@ fn final_interim_status_becomes_502() {
         fixture_path("lifecycle/status-1xx-worker.php"),
     )
     .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
 
     let raw = http_raw_bytes(
         srv.addr,
@@ -866,7 +771,7 @@ fn a_second_host_field_line_answers_400() {
         fixture_path("lifecycle/fidelity-worker.php"),
     )
     .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
 
     let code = http_get_with_headers(
         srv.addr,
@@ -887,7 +792,7 @@ fn status_field_sets_the_code_and_never_reaches_the_client() {
         fixture_path("lifecycle/status-header-worker.php"),
     )
     .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
     let raw = http_get_raw(srv.addr, "/", &[], Duration::from_secs(10)).expect("GET /");
     let text = String::from_utf8_lossy(&raw).to_ascii_lowercase();
 
@@ -969,7 +874,7 @@ fn dispatcher_write_head_reaches_the_wire() {
         fixture_path("lifecycle/fidelity-worker.php"),
     )
     .spawn();
-    wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1);
+    wait_serving(&srv, "http", 1);
 
     let raw = http_get_raw(srv.addr, "/?probe=head", &[], Duration::from_secs(10))
         .expect("GET head probe");
@@ -1216,9 +1121,7 @@ fn the_request_watchdog_skips_the_boot_after_an_app_restart() {
     .http_pool("max_requests = 1\nrequest_terminate_timeout_secs = 3")
     .json_log()
     .spawn();
-    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
-    let log = srv.log_file();
-    tests::server_log::wait_app_record(&log, "booted");
+    wait_serving(&srv, "http", 1);
     // max_requests = 1 is a quota of 2, so the slow second request ends the app instance.
     for path in ["/", "/?slow"] {
         let code = http_get(srv.addr, path, Duration::from_secs(10))
@@ -1226,23 +1129,17 @@ fn the_request_watchdog_skips_the_boot_after_an_app_restart() {
             .status;
         assert_eq!(code, 200, "{path}\n{}", diagnostics(&srv));
     }
-    let booted = poll(Duration::from_secs(10), || {
-        (tests::server_log::app_contexts(&log, "booted").len() >= 2).then_some(())
-    });
-    assert!(
-        booted.is_some(),
-        "the app booted again\n{}",
-        diagnostics(&srv)
-    );
+    slot_line(&srv, "state=idle handled=2 errors=0 recycles=1 ");
+    assert_eq!(server_log::app_contexts(&srv.log_file(), "booted").len(), 2);
     assert_eq!(
-        worker_pids(srv.pid()),
-        vec![pid],
-        "the watchdog did not kill the worker during the boot\n{}",
-        diagnostics(&srv)
+        http_get(srv.addr, "/", BOOT)
+            .expect("GET after boot")
+            .status,
+        200
     );
 }
 
-/// SIGUSR2 to a worker whose app fails its boot boots the fixed app at once and logs no false "reload skipped" warning.
+/// A server reload during a failed boot starts the repaired app.
 #[test]
 fn a_reload_during_a_failing_boot_boots_the_fixed_app() {
     let srv = Spawn::http(
@@ -1251,19 +1148,19 @@ fn a_reload_during_a_failing_boot_boots_the_fixed_app() {
     )
     .json_log()
     .spawn();
-    let pid = wait_workers(&srv, Duration::from_secs(20), "1 worker", |p| p.len() == 1)[0];
+    wait_serving(&srv, "http", 1);
     let log = srv.log_file();
     tests::server_log::wait_app_record(&log, "booted");
     let flag = srv.dir.join("http/broken.flag");
     std::fs::write(&flag, "").expect("break the boot");
-    signal(pid, libc::SIGUSR2);
+    signal(srv.pid(), libc::SIGUSR2);
     assert!(
         wait_log_contains(&srv, "broken deploy", Duration::from_secs(10)),
         "no failed boot\n{}",
         diagnostics(&srv)
     );
     std::fs::remove_file(&flag).expect("fix the boot");
-    signal(pid, libc::SIGUSR2);
+    signal(srv.pid(), libc::SIGUSR2);
     let booted = poll(Duration::from_secs(10), || {
         (tests::server_log::app_contexts(&log, "booted").len() >= 2).then_some(())
     });

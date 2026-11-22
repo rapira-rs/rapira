@@ -26,10 +26,8 @@ hyper-util = { workspace = true, features = ["tokio"] }
 # The E2E tests (tests/e2e) use it for process control of the spawned rapira binary.
 libc = { workspace = true }
 
-# The E2E suite spawns the rapira binary, which forks worker processes, and sends
-# many concurrent requests. The e2e feature gates it, so `cargo test --workspace`
-# skips it. Build the rapira binary first. Then run the suite alone, for example:
-# cargo test -p tests --test e2e --features e2e
+# Build the rapira binary first. The e2e suite starts it and sends concurrent requests.
+# cargo test -p tests --test e2e --features e2e -- --test-threads=1
 [features]
 e2e = []
 

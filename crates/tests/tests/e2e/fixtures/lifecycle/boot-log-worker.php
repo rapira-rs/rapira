@@ -1,5 +1,5 @@
 <?php
-// Logs each boot and the end of each app instance. The tests use it to see each recycle inside one worker process.
+// Log the start and end of each app instance.
 
 use Rapira\Exception\ClosedException;
 
@@ -9,7 +9,7 @@ try {
     while (true) {
         $ex = $d->receive();
         $ex->writeHead(200, ['content-type' => ['text/plain']]);
-        $ex->writeBody((string) getmypid());
+        $ex->writeBody('ok');
     }
 } catch (ClosedException) {
     \Rapira\log('app loop ended');

@@ -1,7 +1,7 @@
-//! Tests the `[observability]` endpoint. It is the process without PHP that serves `GET /metrics`, `GET /livez` and `GET /readyz`.
+//! The observability thread serves `/metrics`, `/livez` and `/readyz`.
 
 use std::collections::BTreeMap;
-use std::net::SocketAddr;
+use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
 use rapira_net::ListenAddr;
@@ -10,14 +10,12 @@ use tests::wire::submit;
 use tests::{Resp, StatusBody, drain_resp_deadline, poll, req};
 
 use crate::harness::{
-    Conn, Exited, Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_raw,
-    php_version, rapira_version, serving_pid, signal, wait_log_contains, wait_workers, worker_pids,
+    Exited, Server, Spawn, diagnostics, fixture_path, free_port, http_get, http_raw, php_version,
+    rapira_version, signal, wait_log_contains, wait_serving,
 };
-#[cfg(target_os = "linux")]
-use crate::harness::{kill_master_as_subreaper, wait_child_exit};
 
 const REQ: Duration = Duration::from_secs(10);
-/// A dispatcher-mode fixture. `/` answers `ok:<pid>`, and `/?hang=1` holds the PHP thread forever.
+/// `/?hang=1` holds the PHP thread. Other requests get a short response.
 const HANG: &str = "lifecycle/hang-worker.php";
 const PROBE_TYPE: &str = "text/plain; charset=utf-8";
 const METRICS_TYPE: &str = "text/plain; version=0.0.4; charset=utf-8";
@@ -28,10 +26,6 @@ const STATES: [&str; 4] = ["starting", "idle", "active", "draining"];
 
 fn workers(state: &str) -> String {
     format!(r#"rapira_workers{{pool="http",state="{state}"}}"#)
-}
-
-fn exits(reason: &str) -> String {
-    format!(r#"rapira_worker_exits_total{{pool="http",reason="{reason}"}}"#)
 }
 
 /// A server and the address of its `[observability]` listener.
@@ -49,6 +43,10 @@ fn spawn(fixture: &str, pool: &str, tables: &str) -> ObservedServer {
             "[observability]\nlisten = \"{observability}\"\n{tables}\n"
         ))
         .spawn();
+    poll(REQ, || {
+        TcpStream::connect_timeout(&observability, Duration::from_millis(200)).ok()
+    })
+    .unwrap_or_else(|| panic!("observability listener did not open\n{}", diagnostics(&srv)));
     ObservedServer { srv, observability }
 }
 
@@ -105,6 +103,7 @@ fn scrape_until(
 #[test]
 fn a_scrape_reports_the_pool() {
     let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
+    wait_serving(&srv, "http", 1);
     for _ in 0..3 {
         let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
         assert_eq!(code, 200, "\n{}", diagnostics(&srv));
@@ -122,6 +121,14 @@ fn a_scrape_reports_the_pool() {
         samples
             .keys()
             .all(|series| !series.contains(r#"pool="observability""#)),
+        "{samples:#?}"
+    );
+    assert!(
+        samples
+            .keys()
+            .all(|series| !series.starts_with("rapira_worker_exits_total")
+                && !series.starts_with("rapira_worker_rss_bytes")
+                && !series.starts_with("rapira_worker_pss_bytes")),
         "{samples:#?}"
     );
     let build = format!(
@@ -202,7 +209,7 @@ fn an_idle_connection_closes_after_the_keepalive_timeout() {
     assert_eq!(status, 200);
 }
 
-/// A booting worker shows starting until its first pull, and its pool is not ready. The fixture sleeps 3 s before its first receive().
+/// The fixture waits for a file before its first pull. The pool becomes ready without client traffic.
 #[test]
 fn a_booting_worker_is_starting_and_not_ready_until_its_first_pull() {
     let ObservedServer { srv, observability } = spawn(
@@ -228,6 +235,7 @@ fn a_booting_worker_is_starting_and_not_ready_until_its_first_pull() {
         "starting and idle\n{samples:#?}\n{}",
         diagnostics(&srv)
     );
+    std::fs::write(srv.dir.join("http/release-boot"), "").expect("allow the first pull");
     scrape_until(&srv, observability, "an idle worker", |s| {
         value(s, &workers("idle")) == 1 && value(s, &workers("starting")) == 0
     });
@@ -298,10 +306,9 @@ fn a_pool_whose_boot_failed_turns_ready_without_a_request() {
 /// A failed re-boot after the app served shows starting, so the request watchdog skips the worker.
 #[test]
 fn a_failed_reboot_stays_starting() {
-    // No failure limit: with the default limit, the worker process ends 7.5 s after the first failed boot.
     let ObservedServer { srv, observability } = spawn(
         "lifecycle/reboot-fails-worker.php",
-        "request_terminate_timeout_secs = 1\nmax_boot_failures = 0",
+        "request_terminate_timeout_secs = 1\nmax_boot_failures = 1",
         "[observability.metrics]",
     );
     let StatusBody { status: code, body } = http_get(srv.addr, "/", REQ).expect("GET /");
@@ -322,66 +329,15 @@ fn a_failed_reboot_stays_starting() {
     assert_eq!(
         (
             value(&samples, &workers("starting")),
-            value(&samples, &workers("active")),
-            value(&samples, &exits("timeout"))
+            value(&samples, &workers("active"))
         ),
-        (1, 0, 0),
-        "starting, active and timeout exits\n{samples:#?}\n{}",
+        (1, 0),
+        "starting and active\n{samples:#?}\n{}",
         diagnostics(&srv)
     );
 }
 
-/// A worker above max_memory_mb shows draining, and its pool is not ready, while it drains. The master tick sends the stop signal after the request that grew the memory or during it. The idle keep-alive connection holds the drain for the drain grace.
-#[test]
-fn a_worker_in_a_memory_drain_is_draining_and_not_ready() {
-    struct Case {
-        name: &'static str,
-        grow: &'static str,
-    }
-    let cases = [
-        Case {
-            name: "the stop signal arrives in an idle worker",
-            // The request ends a few ms after the growth, so the master tick almost always finds the worker idle.
-            grow: "/?grow=160&hold_ms=0",
-        },
-        Case {
-            name: "the stop signal arrives during a request",
-            // The hold of 1.5 s is longer than one master tick. The slot shows draining from the next pull.
-            grow: "/?grow=160",
-        },
-    ];
-    for case in cases {
-        let ObservedServer { srv, observability } = spawn(
-            "lifecycle/memory-growth-worker.php",
-            "max_memory_mb = 128",
-            "[observability.metrics]\n[observability.probes]",
-        );
-        // A served request shows that the worker accepted the connection, so the connection holds the drain.
-        let mut idle = Conn::open(srv.addr, REQ).expect("connect");
-        idle.send(b"GET / HTTP/1.1\r\nHost: e2e\r\n\r\n")
-            .expect("send GET /");
-        let head = idle.read_head(REQ).expect("the response head");
-        assert_eq!(head.status, 200, "{}\n{}", case.name, diagnostics(&srv));
-        let code = http_get(srv.addr, case.grow, REQ).expect(case.name).status;
-        assert_eq!(code, 200, "{}\n{}", case.name, diagnostics(&srv));
-        scrape_until(
-            &srv,
-            observability,
-            &format!("{}: a draining worker", case.name),
-            |s| value(s, &workers("draining")) == 1,
-        );
-        let resp = get(observability, "/readyz");
-        assert_eq!(
-            (resp.status(), resp.body_string().as_str()),
-            (503, "pool http: no ready worker\n"),
-            "{}\n{}",
-            case.name,
-            diagnostics(&srv)
-        );
-    }
-}
-
-/// The master binds every listener in one boot, the observability listener first. The http pool then fails on the shared address.
+/// The HTTP and observability listeners cannot share an address.
 #[test]
 fn an_observability_listener_on_the_http_address_fails_the_boot() {
     let tcp = SocketAddr::from(([127, 0, 0, 1], free_port()));
@@ -391,107 +347,33 @@ fn an_observability_listener_on_the_http_address_fails_the_boot() {
             "[observability]\nlisten = \"{tcp}\"\n[observability.metrics]\n"
         ))
         .boot_failure();
-    assert!(!status.success(), "{status:?}\n{log}");
-    assert!(
-        log.contains("plugin http: prepare failed") && log.contains(&format!("bind {tcp}")),
-        "\n{log}"
-    );
+    assert_eq!(status.code(), Some(1), "{log}");
+    assert!(log.contains(&format!("bind {tcp}")), "{log}");
 }
 
-/// The master sends a USR2 reload to every pool. The observability process has no app to recycle, so it keeps running.
+/// A PHP reload keeps the observability endpoint and its request totals available.
 #[test]
-fn a_reload_leaves_the_observability_process_alone() {
+fn observability_keeps_its_request_total_across_a_reload() {
     let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
-    let mut before = wait_workers(
-        &srv,
-        Duration::from_secs(20),
-        "the worker and the observability process",
-        |p| p.len() == 2,
-    );
+    wait_serving(&srv, "http", 1);
+    assert_eq!(http_get(srv.addr, "/", REQ).expect("GET /").status, 200);
+    scrape_until(&srv, observability, "one request", |s| {
+        value(s, REQUESTS) == 1
+    });
     signal(srv.pid(), libc::SIGUSR2);
-    // Nothing must happen to the processes, so the test waits a fixed time before it looks.
-    std::thread::sleep(Duration::from_secs(1));
-    assert_eq!(get(observability, "/metrics").status(), 200);
-    let mut after = worker_pids(srv.pid());
-    before.sort();
-    after.sort();
-    assert_eq!(after, before, "the processes stay\n{}", diagnostics(&srv));
+    let samples = scrape_until(&srv, observability, "one recycle", |s| {
+        value(s, r#"rapira_script_restarts_total{pool="http"}"#) == 1
+    });
+    assert_eq!(value(&samples, REQUESTS), 1);
 }
 
-/// Linux only. The endpoint reads `/proc/<pid>/smaps_rollup` of each live worker.
-#[cfg(target_os = "linux")]
-#[test]
-fn each_live_worker_reports_its_memory() {
-    struct Case {
-        name: &'static str,
-        family: &'static str,
-    }
-    let cases = [
-        Case {
-            name: "rss",
-            family: "rapira_worker_rss_bytes",
-        },
-        Case {
-            name: "pss",
-            family: "rapira_worker_pss_bytes",
-        },
-    ];
-    let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
-    let samples = scrape_until(&srv, observability, "the memory of the worker", |s| {
-        s.contains_key(r#"rapira_worker_pss_bytes{pool="http",worker="0"}"#)
-    });
-    for case in &cases {
-        let prefix = format!("{}{{", case.family);
-        let series: Vec<(&String, &u64)> = samples
-            .iter()
-            .filter(|(k, _)| k.starts_with(&prefix))
-            .collect();
-        assert_eq!(
-            series.len(),
-            1,
-            "{}: one worker, one series: {series:?}",
-            case.name
-        );
-        assert_eq!(
-            series[0].0,
-            &format!(r#"{}{{pool="http",worker="0"}}"#, case.family),
-            "{}",
-            case.name
-        );
-        assert!(*series[0].1 > 0, "{}: {series:?}", case.name);
-    }
-}
-
-/// A worker that a signal kills, and that the master did not signal, counts as crashed. Its request counts stay in the totals after the master replaces it.
-#[test]
-fn a_killed_worker_counts_as_crashed() {
-    let ObservedServer { srv, observability } = spawn(HANG, "", "[observability.metrics]");
-    for _ in 0..2 {
-        let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
-        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    }
-    // serving_pid() sends the third request.
-    signal(serving_pid(&srv), libc::SIGKILL);
-    // The master counts the exit when it reaps the worker, so the next requests cannot reach the killed one.
-    scrape_until(&srv, observability, "1 crashed exit", |s| {
-        value(s, &exits("crashed")) == 1
-    });
-    for _ in 0..2 {
-        let code = http_get(srv.addr, "/", REQ).expect("GET /").status;
-        assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    }
-    scrape_until(&srv, observability, "5 requests", |s| {
-        value(s, REQUESTS) == 5
-    });
-}
-
-/// The held request takes the only PHP thread, so the next two requests wait in the intake. The held request never ends, so a 1 s control timeout ends the stop at the end of the test.
+/// The held request occupies the only PHP thread. The next two requests wait in the pool queue.
 #[test]
 fn requests_behind_a_held_worker_count_as_queued() {
     let ObservedServer { srv, observability } = spawn(
         HANG,
         "",
-        "[observability.metrics]\n[supervisor]\nprocess_control_timeout_secs = 1",
+        "[observability.metrics]\n[observability.probes]\n[server]\nstop_timeout_secs = 1",
     );
     let addr = srv.addr;
     // These clients never get an answer. Their threads end when the server stops at the end of the test and the connections close.
@@ -499,65 +381,11 @@ fn requests_behind_a_held_worker_count_as_queued() {
     scrape_until(&srv, observability, "an active worker", |s| {
         value(s, &workers("active")) == 1
     });
+    assert_eq!(get(observability, "/readyz").status(), 200);
     for _ in 0..2 {
         std::thread::spawn(move || http_get(addr, "/", Duration::from_secs(60)));
     }
     scrape_until(&srv, observability, "2 queued requests", |s| {
         value(s, QUEUED) == 2
     });
-}
-
-/// The master dies while its worker holds a request, and the orphaned worker drains for up to 55 s. A new server on the same observability address boots and answers in that time. The test process is a child subreaper while the master dies, so the orphaned processes become its children. https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html
-#[cfg(target_os = "linux")]
-#[test]
-fn a_new_server_takes_the_observability_address_while_an_orphan_drains() {
-    let ObservedServer {
-        srv: mut first,
-        observability,
-    } = spawn(
-        HANG,
-        "",
-        "[observability.metrics]\n[supervisor]\nprocess_control_timeout_secs = 60",
-    );
-    let pids = wait_workers(
-        &first,
-        Duration::from_secs(20),
-        "the worker and the observability process",
-        |p| p.len() == 2,
-    );
-    let worker = serving_pid(&first);
-    let obs: u32 = *pids
-        .iter()
-        .find(|&&pid| pid != worker)
-        .expect("the observability process");
-    let addr = first.addr;
-    // The client never gets an answer. Its thread ends when the test kills the orphan.
-    std::thread::spawn(move || http_get(addr, "/?hang=1", Duration::from_secs(120)));
-    scrape_until(&first, observability, "an active worker", |s| {
-        value(s, &workers("active")) == 1
-    });
-
-    kill_master_as_subreaper(&mut first);
-    // The first observability process closes its own listener when it exits.
-    wait_child_exit(obs, Duration::from_secs(10), &first);
-
-    let second = Spawn::http(Mode::Dispatcher, fixture_path(HANG))
-        .toml(&format!(
-            "[observability]\nlisten = \"{observability}\"\n[observability.probes]\n"
-        ))
-        .spawn();
-    let resp = get(observability, "/livez");
-    assert_eq!(
-        (resp.status(), resp.body_string().as_str()),
-        (200, "ok\n"),
-        "\n{}",
-        diagnostics(&second)
-    );
-    let mut status: libc::c_int = 0;
-    // SAFETY: non-blocking waitpid on a child of this process; status is a live out-param.
-    let rc = unsafe { libc::waitpid(worker as libc::pid_t, &mut status, libc::WNOHANG) };
-    assert_eq!(rc, 0, "the orphaned worker {worker} stopped draining");
-
-    signal(worker, libc::SIGKILL);
-    wait_child_exit(worker, Duration::from_secs(10), &first);
 }

@@ -1,9 +1,11 @@
 <?php
-// Sleeps 3 s before its first receive(), so the slot shows starting until the first pull.
+// Wait for the test before the first pull.
 
 use Rapira\Exception\ClosedException;
 
-sleep(3);
+while (!is_file(__DIR__ . '/release-boot')) {
+    usleep(10_000);
+}
 $d = \Rapira\get_dispatcher();
 try {
     while (true) {

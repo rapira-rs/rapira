@@ -1,6 +1,6 @@
 use std::cell::Cell;
 use std::fs::File;
-use std::io::{self, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
 use std::os::unix::net::UnixStream;
 use std::path::{Path, PathBuf};
@@ -15,22 +15,24 @@ use rapira_sapi::{Addr, plugin::Mode};
 use serde_json::Value;
 use tests::{StatusBody, poll, server_log};
 
-/// The connect timeout for a newly spawned master. The value covers the worst case on CI macOS.
+/// The boot timeout includes slow macOS CI hosts.
 pub const BOOT: Duration = Duration::from_secs(30);
 
-/// The master could not start a gen-0 pool that can serve.
-pub const MASTER_EXIT_FAILBOOT: i32 = 70;
-pub const MASTER_EXIT_OK: i32 = 0;
+/// A worker reached the boot failure limit before its pool served.
+pub const EXIT_FAILBOOT: i32 = 70;
+pub const EXIT_OK: i32 = 0;
 
-/// Must be longer than the default supervisor.process_control_timeout of 30s. After that timeout, the master sends TERM and then KILL to a stuck worker, and still exits 0.
+/// This includes the default `server.stop_timeout_secs` of 30 seconds.
 pub const STOP_BUDGET: Duration = Duration::from_secs(45);
 
-/// A running master and the scratch dir that holds its config and log.
+/// A server and the directory that holds its config and log.
 pub struct Server {
-    pub child: Child,
-    /// The TCP listener of the first pool. When every pool listens on a unix socket, nothing listens here.
+    child: Child,
+    /// The TCP address of the first pool. A Unix listener has no TCP address here.
     pub addr: SocketAddr,
     pub dir: PathBuf,
+    /// The first PHP pool in the config.
+    first_pool: &'static str,
     /// The listener of the `[grpc]` pool, when the config has one.
     pub grpc: Option<ListenAddr>,
 }
@@ -40,16 +42,16 @@ impl Server {
         self.child.id()
     }
 
-    /// The stdout and stderr of the master and its workers.
+    /// The stdout and stderr of the server.
     pub fn log_file(&self) -> PathBuf {
         self.dir.join("server.log")
     }
 
-    /// Sends SIGQUIT to the master and waits for its exit, so the log holds the last record of every worker. The scratch dir stays until the drop.
+    /// Sends SIGQUIT and waits for the server to exit. The log stays available until drop.
     pub fn stop(&mut self) {
         signal(self.pid(), libc::SIGQUIT);
         let status = self.wait_exit(STOP_BUDGET);
-        assert_exit_code(status, MASTER_EXIT_OK, self);
+        assert_exit_code(status, EXIT_OK, self);
     }
 
     pub fn wait_exit(&mut self, timeout: Duration) -> Option<ExitStatus> {
@@ -63,16 +65,12 @@ impl Server {
 }
 
 impl Drop for Server {
-    /// Signals and snapshots only while the master is unreaped, because the kernel can reuse a reaped pid.
+    /// Signal only an unreaped process. The kernel can reuse a reaped PID.
     fn drop(&mut self) {
-        if self.child.try_wait().ok().flatten().is_none() {
+        if matches!(self.child.try_wait(), Ok(None)) {
             signal(self.child.id(), libc::SIGTERM);
             if self.wait_exit(Duration::from_secs(5)).is_none() {
-                let kids = worker_pids(self.child.id());
-                signal(self.child.id(), libc::SIGKILL);
-                for k in kids {
-                    signal(k, libc::SIGKILL);
-                }
+                let _ = self.child.kill();
                 let _ = self.child.wait();
             }
         }
@@ -84,7 +82,7 @@ impl Drop for Server {
     }
 }
 
-/// The bin belongs to the root package, so CARGO_BIN_EXE is unset here. `RAPIRA_BIN` gives the bin as a name on PATH or as a path. Without it, the function finds the bin in the nearest directory above the test binary that holds it. A relative path becomes absolute, because the master starts in the scratch dir.
+/// The root package builds the binary. Use `RAPIRA_BIN`, or find `rapira` in a directory above the test binary. Make a relative path absolute because the server starts in the scratch directory.
 fn rapira_bin() -> PathBuf {
     if let Ok(p) = std::env::var("RAPIRA_BIN") {
         if !p.contains('/') {
@@ -124,25 +122,36 @@ pub fn php_version() -> String {
     php_config("--version").expect("run php-config --version")
 }
 
+/// The thread safety setting of the linked PHP build.
+pub fn is_zts() -> bool {
+    rapira_sapi::zts()
+}
+
 /// The `listen` value of a TCP pool on `port`.
 fn tcp(port: u16) -> String {
     format!("127.0.0.1:{port}")
 }
 
-/// Spawns on a fresh port each time until a listener accepts a connection. The listener is the port that `render` gets, or the unix socket when no pool listens on TCP.
+/// Tries up to three ports. Another process can bind a port between its allocation and the server boot.
 fn spawn_ready(spawn: &Spawn, dir: PathBuf, render: &dyn Fn(u16) -> String) -> Server {
     let mut last_log = String::new();
     for _ in 0..3 {
         let Attempt { mut child, addr } = spawn_attempt(spawn, &dir, render);
-        let ready = match spawn.unix_only() {
-            Some(path) => ListenAddr::Unix(path.to_owned()),
-            None => ListenAddr::Tcp(addr),
+        let first_pool = spawn.first_pool();
+        let listen = match first_pool {
+            "http" => &spawn.http_listen,
+            _ => &spawn.grpc_listen,
         };
-        if wait_for_listener(&ready, &mut child, BOOT) {
+        let listen = listen.clone().unwrap_or(ListenAddr::Tcp(addr));
+        if let Some(bound) = wait_for_listener(listen, first_pool, &dir, &mut child) {
             return Server {
                 child,
-                addr,
+                addr: match bound {
+                    ListenAddr::Tcp(bound) => bound,
+                    ListenAddr::Unix(_) => addr,
+                },
                 dir,
+                first_pool,
                 grpc: None,
             };
         }
@@ -154,14 +163,14 @@ fn spawn_ready(spawn: &Spawn, dir: PathBuf, render: &dyn Fn(u16) -> String) -> S
     panic!("rapira never accepted a connection after 3 attempts\n{last_log}");
 }
 
-/// A master that one spawn started.
+/// One attempt to start the server.
 struct Attempt {
     child: Child,
     /// The TCP address of the port that `render` got.
     addr: SocketAddr,
 }
 
-/// One spawn on a fresh port; `render` writes the config for that port, and the caller decides how to wait. The master starts in `dir`, next to the `php.ini`.
+/// Starts the server in `dir` with a config for a fresh port. The caller decides how to wait.
 fn spawn_attempt(spawn: &Spawn, dir: &Path, render: &dyn Fn(u16) -> String) -> Attempt {
     let port = free_port();
     let addr = SocketAddr::from(([127, 0, 0, 1], port));
@@ -190,7 +199,7 @@ fn spawn_attempt(spawn: &Spawn, dir: &Path, render: &dyn Fn(u16) -> String) -> A
     Attempt { child, addr }
 }
 
-/// A master that exited.
+/// A server that exited.
 pub struct Exited {
     pub status: ExitStatus,
     /// The whole server.log.
@@ -204,6 +213,7 @@ fn exit_of(spawn: &Spawn, dir: PathBuf, render: &dyn Fn(u16) -> String) -> Exite
         child,
         addr,
         dir,
+        first_pool: spawn.first_pool(),
         grpc: None,
     };
     let Some(status) = srv.wait_exit(BOOT) else {
@@ -218,22 +228,22 @@ fn exit_of(spawn: &Spawn, dir: PathBuf, render: &dyn Fn(u16) -> String) -> Exite
 /// `http_extra` renders last, so a header it opens ends the file.
 fn render_config(
     listen: &str,
-    processes: usize,
+    workers: usize,
     fixture: &str,
     http_extra: &str,
     extra: &str,
 ) -> String {
     format!(
-        "[http.pool]\nprocesses = {processes}\nentrypoint = \"{fixture}\"\n{extra}\n[http]\nlisten = \"{listen}\"\n{http_extra}"
+        "[http.pool]\nworkers = {workers}\nentrypoint = \"{fixture}\"\n{extra}\n[http]\nlisten = \"{listen}\"\n{http_extra}"
     )
 }
 
 pub use tests::grpc::ECHO_SERVICE;
 
-/// A `[grpc]` pool of `processes` workers over `entrypoint`. `listen`, `descriptor_set`, `extra` (keys inside `[grpc]`) and `pool` (keys inside `[grpc.pool]`) go into the file verbatim; `services` becomes a TOML string array, and None leaves the key out.
+/// Renders a `[grpc]` pool with `workers` threads. A `None` value for `services` leaves the key out.
 fn render_grpc(
     listen: &str,
-    processes: usize,
+    workers: usize,
     entrypoint: &str,
     descriptor_set: &str,
     services: Option<&[String]>,
@@ -246,12 +256,12 @@ fn render_grpc(
     });
     format!(
         "[grpc]\nlisten = \"{listen}\"\ndescriptor_set = \"{descriptor_set}\"\n{services}{extra}\n\
-         [grpc.pool]\nprocesses = {processes}\nentrypoint = \"{entrypoint}\"\n{pool}"
+         [grpc.pool]\nworkers = {workers}\nentrypoint = \"{entrypoint}\"\n{pool}"
     )
 }
 
-/// A master to spawn: [`Spawn::http`] or [`Spawn::grpc`] starts the config, and each setter adds to it. Each pool runs one worker process unless [`Spawn::processes`] sets the count.
-/// The directory of each pool's fixture is copied into `http/` or `grpc/` in the scratch dir, so a fixture can include its siblings. The master starts in the scratch dir.
+/// [`Spawn::http`] or [`Spawn::grpc`] starts the config. Each pool has one worker unless [`Spawn::workers`] sets its count.
+/// Each fixture directory is copied to `http/` or `grpc/`, so the fixture can include its siblings. The server starts in the scratch directory.
 /// PHPRC names a `php.ini` in the scratch dir with the contents of `crates/tests/fixtures/ini/shared/php.ini`, unless [`Spawn::php_ini`] replaces them or [`Spawn::no_phprc`] leaves PHPRC unset.
 pub struct Spawn {
     http: Option<HttpPool>,
@@ -264,8 +274,8 @@ pub struct Spawn {
     services: Option<Vec<String>>,
     /// The `[grpc] descriptor_set`; None stages `echo.binpb`.
     descriptor_set: Option<PathBuf>,
-    /// Worker processes of every pool.
-    processes: usize,
+    /// Number of worker threads in each pool.
+    workers: usize,
     http_extra: String,
     /// Keys inside `[http.pool]`, after `mode`.
     http_pool: String,
@@ -335,7 +345,7 @@ impl Spawn {
             grpc_listen: None,
             services: Some(vec![ECHO_SERVICE.to_owned()]),
             descriptor_set: None,
-            processes: 1,
+            workers: 1,
             http_extra: String::new(),
             http_pool: String::new(),
             grpc_extra: String::new(),
@@ -355,13 +365,13 @@ impl Spawn {
         self
     }
 
-    /// The `[http]` pool listens on `listen`. A TCP address here is not a readiness target, so [`Spawn::spawn`] waits for another pool.
+    /// The `[http]` pool listens on `listen`.
     pub fn http_listen(mut self, listen: ListenAddr) -> Spawn {
         self.http_listen = Some(listen);
         self
     }
 
-    /// The `[grpc]` pool listens on `listen`. A TCP address here is not a readiness target, so [`Spawn::spawn`] waits for another pool.
+    /// The `[grpc]` pool listens on `listen`.
     pub fn grpc_listen(mut self, listen: ListenAddr) -> Spawn {
         self.grpc_listen = Some(listen);
         self
@@ -379,9 +389,9 @@ impl Spawn {
         self
     }
 
-    /// Worker processes of every pool; one when not set.
-    pub fn processes(mut self, count: usize) -> Spawn {
-        self.processes = count;
+    /// Sets the number of worker threads in each pool.
+    pub fn workers(mut self, count: usize) -> Spawn {
+        self.workers = count;
         self
     }
 
@@ -413,7 +423,7 @@ impl Spawn {
         self
     }
 
-    /// Top-level tables at the end of the config, for example `[supervisor]`.
+    /// Top-level tables at the end of the config, for example `[server]`.
     pub fn toml(mut self, tables: &str) -> Spawn {
         self.toml += tables;
         self.toml.push('\n');
@@ -431,19 +441,19 @@ impl Spawn {
         self
     }
 
-    /// Leaves PHPRC unset. PHP then reads its compiled-in php.ini, and the `php.ini` in the scratch dir is only a file in the cwd of the master.
+    /// Leaves PHPRC unset. PHP then reads the php.ini at its configured path.
     pub fn no_phprc(mut self) -> Spawn {
         self.phprc = false;
         self
     }
 
-    /// An environment variable of the master and its workers.
+    /// An environment variable of the server.
     pub fn env(mut self, key: &str, value: &str) -> Spawn {
         self.env.push((key.to_owned(), value.to_owned()));
         self
     }
 
-    /// The RUST_LOG filter of the master and its workers; `info` when not set.
+    /// The RUST_LOG filter of the server. The default is `info`.
     pub fn rust_log(mut self, filter: &str) -> Spawn {
         self.rust_log = Some(filter.to_owned());
         self
@@ -455,7 +465,7 @@ impl Spawn {
         self
     }
 
-    /// Spawns the master and returns when its first listener accepts a connection.
+    /// Starts the server and waits for its first listener. Use [`wait_serving`] to wait for PHP.
     pub fn spawn(self) -> Server {
         let grpc_port = Cell::new(0);
         let dir = scratch_dir();
@@ -463,6 +473,9 @@ impl Spawn {
         let mut srv = spawn_ready(&self, dir, &render);
         if self.grpc.is_some() {
             srv.grpc = Some(match &self.grpc_listen {
+                Some(ListenAddr::Tcp(addr)) if self.http.is_none() && addr.port() == 0 => {
+                    ListenAddr::Tcp(srv.addr)
+                }
                 Some(listen) => listen.clone(),
                 None => ListenAddr::Tcp(SocketAddr::from(([127, 0, 0, 1], grpc_port.get()))),
             });
@@ -470,22 +483,11 @@ impl Spawn {
         srv
     }
 
-    /// The unix socket of the first pool that listens on one, when no pool listens on a port that the harness picks.
-    fn unix_only(&self) -> Option<&Path> {
-        let picked = (self.http.is_some() && self.http_listen.is_none())
-            || (self.grpc.is_some() && self.grpc_listen.is_none());
-        if picked {
-            return None;
-        }
-        [&self.http_listen, &self.grpc_listen]
-            .into_iter()
-            .find_map(|listen| match listen {
-                Some(ListenAddr::Unix(sock)) => Some(sock.as_path()),
-                _ => None,
-            })
+    fn first_pool(&self) -> &'static str {
+        if self.http.is_some() { "http" } else { "grpc" }
     }
 
-    /// Spawns a master that must fail its boot and waits for its exit.
+    /// Starts a server that must fail its boot and waits for its exit.
     pub fn boot_failure(self) -> Exited {
         let grpc_port = Cell::new(0);
         let dir = scratch_dir();
@@ -530,7 +532,7 @@ impl Spawn {
             }
         });
         move |port| {
-            // The spawn waits for port, so it goes to the first pool without a listen address.
+            // The first pool without a listen address gets this port.
             let mut port = Some(port);
             let mut config = String::new();
             if let Some(StagedHttp { mode, entrypoint }) = &http {
@@ -540,7 +542,7 @@ impl Spawn {
                 };
                 let pool = format!("mode = \"{mode}\"\n{}", self.http_pool);
                 config +=
-                    &render_config(&listen, self.processes, entrypoint, &self.http_extra, &pool);
+                    &render_config(&listen, self.workers, entrypoint, &self.http_extra, &pool);
                 config.push('\n');
             }
             if let Some(StagedGrpc {
@@ -557,7 +559,7 @@ impl Spawn {
                 };
                 config += &render_grpc(
                     &listen,
-                    self.processes,
+                    self.workers,
                     entrypoint,
                     descriptor_set,
                     self.services.as_deref(),
@@ -591,26 +593,48 @@ fn stage_dir(dir: &Path, sub: &str, fixture: &Path) -> String {
     format!("{sub}/{name}")
 }
 
-/// Waits until a connect succeeds and the master still runs. The master binds the listen socket before the fork, so a successful connect means that it booted far enough to serve.
-fn wait_for_listener(listen: &ListenAddr, child: &mut Child, timeout: Duration) -> bool {
-    let end = Instant::now() + timeout;
-    while Instant::now() < end {
-        let accepted = match listen {
+/// Port zero takes its bound address from the listener log.
+fn logged_tcp_addr(dir: &Path, pool: &str) -> Option<SocketAddr> {
+    let log = std::fs::read_to_string(dir.join("server.log")).ok()?;
+    let prefix = format!("{pool}: listening on ");
+    log.lines().find_map(|line| {
+        if let Some((_, addr)) = line.split_once(&prefix) {
+            return addr.parse().ok();
+        }
+        let record: Value = serde_json::from_str(line).ok()?;
+        if record["target"] != pool {
+            return None;
+        }
+        record["fields"]["message"]
+            .as_str()?
+            .strip_prefix("listening on ")?
+            .parse()
+            .ok()
+    })
+}
+
+fn wait_for_listener(
+    mut listen: ListenAddr,
+    pool: &str,
+    dir: &Path,
+    child: &mut Child,
+) -> Option<ListenAddr> {
+    poll(BOOT, || {
+        if child.try_wait().expect("check server exit").is_some() {
+            return Some(None);
+        }
+        if matches!(&listen, ListenAddr::Tcp(addr) if addr.port() == 0) {
+            listen = ListenAddr::Tcp(logged_tcp_addr(dir, pool)?);
+        }
+        let connected = match &listen {
             ListenAddr::Tcp(addr) => {
                 TcpStream::connect_timeout(addr, Duration::from_millis(200)).is_ok()
             }
             ListenAddr::Unix(path) => UnixStream::connect(path).is_ok(),
         };
-        if accepted {
-            std::thread::sleep(Duration::from_millis(100));
-            return child.try_wait().ok().flatten().is_none();
-        }
-        if child.try_wait().ok().flatten().is_some() {
-            return false;
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
-    false
+        connected.then(|| Some(listen.clone()))
+    })
+    .flatten()
 }
 
 /// An HTTP/1.1 GET with `Connection: close`. The body is close-delimited, so the client needs no chunked or keep-alive parsing.
@@ -689,17 +713,6 @@ pub fn http_raw(
     })
 }
 
-/// The pid of the worker that serves one `GET /`. The fixture answers `ok:<pid>`.
-pub fn serving_pid(srv: &Server) -> u32 {
-    let StatusBody { status: code, body } =
-        http_get(srv.addr, "/", Duration::from_secs(10)).expect("GET /");
-    assert_eq!(code, 200, "\n{}", diagnostics(srv));
-    let body = String::from_utf8_lossy(&body);
-    body.strip_prefix("ok:")
-        .and_then(|pid| pid.parse().ok())
-        .unwrap_or_else(|| panic!("unexpected body {body:?}"))
-}
-
 /// A POST like [`http_get`], with a body. `content_type` is bytes, because a multipart boundary is opaque octets and obs-text is legal in a field value.
 pub fn http_post(
     addr: SocketAddr,
@@ -754,91 +767,11 @@ pub fn patterned(len: usize) -> Vec<u8> {
     (0..len).map(|i| (i % 251) as u8).collect()
 }
 
-/// The direct children of `master`. The `ps` field syntax is valid on procps and BSD ps. The `Z` state does not count, so a dead but unreaped worker is not in the list.
-pub fn worker_pids(master: u32) -> Vec<u32> {
-    let out = match Command::new("ps")
-        .args(["-axo", "pid=,ppid=,state="])
-        .output()
-    {
-        Ok(o) => o,
-        Err(_) => return Vec::new(),
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut pids = Vec::new();
-    for line in text.lines() {
-        let mut it = line.split_whitespace();
-        let (Some(pid), Some(ppid), Some(state)) = (it.next(), it.next(), it.next()) else {
-            continue;
-        };
-        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.parse::<u32>()) else {
-            continue;
-        };
-        if ppid == master && !state.starts_with('Z') {
-            pids.push(pid);
-        }
-    }
-    pids.sort_unstable();
-    pids
-}
-
-/// Polls `worker_pids` until `pred` holds. Panics with diagnostics at the deadline.
-pub fn wait_workers(
-    srv: &Server,
-    deadline: Duration,
-    what: &str,
-    pred: impl Fn(&[u32]) -> bool,
-) -> Vec<u32> {
-    let master = srv.child.id();
-    poll(deadline, || {
-        let pids = worker_pids(master);
-        pred(&pids).then_some(pids)
-    })
-    .unwrap_or_else(|| {
-        panic!(
-            "timed out after {deadline:?} waiting for {what}\n{}",
-            diagnostics(srv)
-        )
-    })
-}
-
 pub fn signal(pid: u32, sig: i32) {
     // SAFETY: kill is a plain syscall; a stale pid returns ESRCH, which we ignore.
     unsafe {
         libc::kill(pid as libc::pid_t, sig);
     }
-}
-
-/// Reaps `pid`, a child of this process, and returns its exit code; `None` if it was killed by a signal.
-#[cfg(target_os = "linux")]
-pub fn wait_child_exit(pid: u32, timeout: Duration, srv: &Server) -> Option<i32> {
-    let end = Instant::now() + timeout;
-    loop {
-        let mut status: libc::c_int = 0;
-        // SAFETY: non-blocking waitpid on a child of this process; status is a live out-param.
-        let rc = unsafe { libc::waitpid(pid as libc::pid_t, &mut status, libc::WNOHANG) };
-        if rc == pid as libc::pid_t {
-            return libc::WIFEXITED(status).then(|| libc::WEXITSTATUS(status));
-        }
-        assert_eq!(rc, 0, "waitpid({pid}): {}", std::io::Error::last_os_error());
-        assert!(
-            Instant::now() < end,
-            "process {pid} survived the master\n{}",
-            diagnostics(srv)
-        );
-        std::thread::sleep(Duration::from_millis(50));
-    }
-}
-
-/// Kills the master with SIGKILL while the test process is a child subreaper, so the orphaned workers become children of the test process. https://man7.org/linux/man-pages/man2/PR_SET_CHILD_SUBREAPER.2const.html
-#[cfg(target_os = "linux")]
-pub fn kill_master_as_subreaper(srv: &mut Server) {
-    // SAFETY: prctl with integer arguments only.
-    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 1) };
-    signal(srv.pid(), libc::SIGKILL);
-    let status = srv.wait_exit(Duration::from_secs(10));
-    // SAFETY: prctl with integer arguments only.
-    unsafe { libc::prctl(libc::PR_SET_CHILD_SUBREAPER, 0) };
-    assert!(status.is_some(), "master survived SIGKILL");
 }
 
 /// Per-thread outcome counters. `refused` means the listener closed, and `failed` means a non-200 response, a hang, or a corrupt reply. A connection drop counts in `dropped` and not in `failed`, because the balancer retries a dropped connection. It also records `last_err`.
@@ -930,46 +863,15 @@ pub fn assert_exit_code(status: Option<ExitStatus>, expected: i32, srv: &Server)
         Some(code) if code == expected => {}
         Some(code) => panic!("expected exit {expected}, got {code}\n{}", diagnostics(srv)),
         None => panic!(
-            "expected exit {expected}, but the master was killed by a signal or is still running\n{}",
+            "expected exit {expected}, but the server got a fatal signal or still runs\n{}",
             diagnostics(srv)
         ),
     }
 }
 
-/// The worker pids, the `ps` subtree and the server-log tail, for failure messages.
+/// The server PID and recent log records for failure messages.
 pub fn diagnostics(srv: &Server) -> String {
-    let master = srv.child.id();
-    format!(
-        "master pid {master}, workers {:?}\n{}\n{}",
-        worker_pids(master),
-        ps_snapshot(master),
-        log_tail(&srv.dir)
-    )
-}
-
-fn ps_snapshot(master: u32) -> String {
-    let out = match Command::new("ps")
-        .args(["-axo", "pid=,ppid=,state=,command"])
-        .output()
-    {
-        Ok(o) => o,
-        Err(e) => return format!("ps failed: {e}"),
-    };
-    let text = String::from_utf8_lossy(&out.stdout);
-    let mut lines = vec![format!("--- ps (master {master} subtree) ---")];
-    for line in text.lines() {
-        let mut it = line.split_whitespace();
-        let (Some(pid), Some(ppid)) = (it.next(), it.next()) else {
-            continue;
-        };
-        let (Ok(pid), Ok(ppid)) = (pid.parse::<u32>(), ppid.parse::<u32>()) else {
-            continue;
-        };
-        if pid == master || ppid == master {
-            lines.push(line.trim().to_owned());
-        }
-    }
-    lines.join("\n")
+    format!("server pid {}\n{}", srv.pid(), log_tail(&srv.dir))
 }
 
 fn log_tail(dir: &Path) -> String {
@@ -1053,23 +955,6 @@ pub fn fan_out<T: Send + 'static>(
         }
     }
     all
-}
-
-/// The master's children must be exactly `workers`, and no worker may have a child.
-pub fn assert_only_workers(srv: &Server, workers: &[u32]) {
-    assert_eq!(
-        worker_pids(srv.pid()),
-        workers,
-        "the master's children must be the workers only\n{}",
-        diagnostics(srv)
-    );
-    for &w in workers {
-        assert!(
-            worker_pids(w).is_empty(),
-            "worker {w} must not have child processes\n{}",
-            diagnostics(srv)
-        );
-    }
 }
 
 /// Polls `path` until every needle appears. At the deadline, the Err holds the file state.
@@ -1266,24 +1151,73 @@ pub fn wait_log_contains(srv: &Server, needle: &str, deadline: Duration) -> bool
     .is_some()
 }
 
-/// Sends SIGUSR1 until the master logs a scoreboard line of slot 0 that contains `fragment`, for at most 10 s; returns that line.
-pub fn slot_line(srv: &Server, fragment: &str) -> String {
-    let deadline = Instant::now() + Duration::from_secs(10);
-    loop {
+/// Reads one complete pool snapshot per signal. A new search starts at the current end of the log.
+fn with_status<T>(
+    srv: &Server,
+    pool: &str,
+    what: &str,
+    check: impl Fn(&str, &[&str]) -> Option<T>,
+) -> T {
+    let mut log = File::open(srv.log_file()).expect("open server.log");
+    let header = format!("pool={pool} workers=");
+    let worker = format!("pool={pool} worker=");
+    let deadline = Instant::now() + BOOT;
+    while Instant::now() < deadline {
+        log.seek(SeekFrom::End(0))
+            .expect("seek to the next snapshot");
         signal(srv.pid(), libc::SIGUSR1);
-        std::thread::sleep(Duration::from_millis(20));
-        let log = std::fs::read_to_string(srv.log_file()).unwrap_or_default();
-        if let Some(line) = log
-            .lines()
-            .find(|l| l.contains("slot 0 pid") && l.contains(fragment))
-        {
-            return line.to_owned();
+        let mut text = String::new();
+        let snapshot = poll(deadline.saturating_duration_since(Instant::now()), || {
+            log.read_to_string(&mut text).expect("read server.log");
+            let (complete, _) = text.rsplit_once('\n')?;
+            let mut lines = complete[complete.rfind(&header)?..].lines();
+            let summary = lines.next()?;
+            let count: usize = summary
+                .strip_prefix(&header)?
+                .split_whitespace()
+                .next()?
+                .parse()
+                .ok()?;
+            let rows: Vec<_> = lines.filter(|line| line.contains(&worker)).collect();
+            (rows.len() == count).then(|| check(summary, &rows))
+        });
+        match snapshot {
+            Some(Some(result)) => return result,
+            Some(None) => std::thread::sleep(Duration::from_millis(20)),
+            None => break,
         }
-        assert!(
-            Instant::now() < deadline,
-            "no slot 0 line with {fragment:?} within 10s\n{log}"
-        );
     }
+    panic!(
+        "no {what} for pool {pool} within {BOOT:?}\n{}",
+        diagnostics(srv)
+    );
+}
+
+/// Waits until at least `count` workers in the pool are idle or active in one snapshot.
+pub fn wait_serving(srv: &Server, pool: &str, count: usize) {
+    with_status(srv, pool, &format!("{count} serving workers"), |_, rows| {
+        let serving = rows
+            .iter()
+            .filter(|line| line.contains(" state=idle ") || line.contains(" state=active "))
+            .count();
+        (serving >= count).then_some(())
+    });
+}
+
+/// Returns a fresh status line for worker zero of the first pool.
+pub fn slot_line(srv: &Server, fragment: &str) -> String {
+    with_status(srv, srv.first_pool, fragment, |_, rows| {
+        rows.iter()
+            .find(|line| line.contains(" worker=0 ") && line.contains(fragment))
+            .map(|line| (*line).to_owned())
+    })
+}
+
+/// Returns a fresh pool summary that contains `fragment`.
+pub fn pool_line(srv: &Server, pool: &str, fragment: &str) -> String {
+    with_status(srv, pool, fragment, |summary, _| {
+        summary.contains(fragment).then(|| summary.to_owned())
+    })
 }
 
 /// The listener of the `[grpc]` pool of `srv`.
@@ -1299,7 +1233,7 @@ pub fn calls(srv: &Server) -> Vec<Value> {
         .collect()
 }
 
-/// The text of the `plugin grpc` error that a worker logs when its plugin returns an error.
+/// The server error record when the gRPC plugin returns an error.
 pub fn plugin_error(srv: &Server) -> Option<String> {
     server_log::records(&srv.log_file())
         .into_iter()
@@ -1315,11 +1249,11 @@ pub fn logged_remote(peer: &Addr) -> String {
     }
 }
 
-/// Waits on a blocking thread for the master to exit 0, so the clients on the test runtime keep running during the drain.
+/// Waits for exit 0 on a blocking thread. The clients on the test runtime can continue during the drain.
 pub async fn exited(mut srv: Server) -> Server {
     tokio::task::spawn_blocking(move || {
         let status = srv.wait_exit(STOP_BUDGET);
-        assert_exit_code(status, MASTER_EXIT_OK, &srv);
+        assert_exit_code(status, EXIT_OK, &srv);
         srv
     })
     .await
