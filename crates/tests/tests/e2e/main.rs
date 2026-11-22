@@ -33,6 +33,7 @@ mod observer_tests;
 mod php_ext_tests;
 mod plugin_tests;
 mod pool_env;
+mod pool_threads;
 mod ported_tests;
 mod registry;
 mod reload;
