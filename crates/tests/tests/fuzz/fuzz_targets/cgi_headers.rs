@@ -5,7 +5,7 @@
 use http::header::COOKIE;
 use rapira_fuzz::safe_name;
 use rapira_http::check::drop_unsafe_field_names;
-use rapira_sapi::callbacks::cgi_header_vars;
+use rapira_sapi::callbacks::CgiHeaders;
 
 /// Fields that do not combine into a list, so the first line gives the value: https://www.rfc-editor.org/rfc/rfc9110#section-5.3
 const SINGLETONS: [&str; 6] = [
@@ -40,7 +40,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         want.push((var, value.escape_ascii().to_string()));
     }
     let mut got = Vec::new();
-    cgi_header_vars(&headers, |name, value| {
+    CgiHeaders::new(headers).register(|name, value| {
         got.push((
             name.to_string_lossy().into_owned(),
             value.escape_ascii().to_string(),

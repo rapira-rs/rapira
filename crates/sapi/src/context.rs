@@ -268,7 +268,7 @@ pub(crate) unsafe fn apply_proto_num(ctx: &Context) {
 
 /// Resets `http_response_code`, because the engine keeps the status of the previous request. The reset in main/SAPI.c:435-437 is commented out.
 pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
-    let reqc = &ctx.c;
+    let reqc = &ctx.req;
     let sg = unsafe { rapira_sg() };
     unsafe { (*sg).sapi_headers.http_response_code = 200 };
     let ri: &mut sapi_request_info = unsafe { &mut (*sg).request_info };

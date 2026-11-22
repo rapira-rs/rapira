@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, HeaderMap, HeaderName};
+use http::header::{AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, HeaderMap, HeaderName};
 use std::ffi::CString;
 use std::path::PathBuf;
 use tokio::sync::mpsc::{Sender, error::TrySendError};
@@ -126,16 +126,20 @@ fn status_field_code(value: &[u8]) -> Option<u16> {
     (100..=599).contains(&code).then_some(code)
 }
 
-/// Owns the strings for $_SERVER, so `register_server_variables` only borrows them. That frame must not hold owned Rust values, because a bailout longjmp over pending drops is UB.
-pub struct ReqC {
+/// The CGI input stays valid until the PHP thread unbinds the exchange.
+pub(crate) struct CgiRequest {
     pub method: CString,
     pub query: CString,
     pub uri: CString,
+    pub path_len: usize,
     pub ctype: Option<CString>,
-    pub cookie: Option<CString>,
     pub authorization: Option<CString>,
     pub remote_addr: String,
     pub remote_port: String,
+    pub https: bool,
+    pub protocol: &'static str,
+    pub headers: crate::callbacks::CgiHeaders,
+    pub body: Chunks,
 }
 
 /// The REMOTE_ADDR and REMOTE_PORT values of one peer.
@@ -160,46 +164,43 @@ fn cgi_addr_strings(addr: &Addr) -> CgiAddr {
 }
 
 /// A NUL byte cannot cross the CGI boundary, so the value becomes empty.
-fn cgi_cstring(field: &str, bytes: &[u8]) -> CString {
+pub(crate) fn cgi_cstring(field: &str, bytes: impl Into<Vec<u8>>) -> CString {
     CString::new(bytes).unwrap_or_else(|_| {
         tracing::warn!(target: "rapira", "{field} carries a NUL byte; registered empty");
         CString::default()
     })
 }
 
-impl ReqC {
-    /// Cookie repeats join on "; ", the cookie-string form that the php-src parser expects.
-    pub fn build(r: &Request) -> Self {
-        let mut joined = Vec::new();
-        let cookie: Option<CString> =
-            crate::callbacks::joined_field(&r.headers, &COOKIE, &mut joined)
-                .map(|v| cgi_cstring("Cookie", v));
-
-        let authorization: Option<CString> = r
-            .headers
-            .get(AUTHORIZATION)
-            .map(|v| cgi_cstring("Authorization", v.as_bytes()));
-
+impl From<Request> for CgiRequest {
+    fn from(r: Request) -> Self {
         let CgiAddr {
             addr: remote_addr,
             port: remote_port,
         } = cgi_addr_strings(&r.remote);
 
+        let (path, query) = r.uri.split_once('?').unwrap_or((&r.uri, ""));
+        let path_len = path.len();
+        let query = cgi_cstring("QUERY_STRING", query.as_bytes());
+        let uri = cgi_cstring("REQUEST_URI", r.uri.into_bytes());
         Self {
-            method: cgi_cstring("REQUEST_METHOD", r.method.as_bytes()),
-            query: cgi_cstring(
-                "QUERY_STRING",
-                r.uri.split_once('?').map_or("", |(_, q)| q).as_bytes(),
-            ),
-            uri: cgi_cstring("REQUEST_URI", r.uri.as_bytes()),
-            cookie,
-            authorization,
+            method: cgi_cstring("REQUEST_METHOD", r.method.into_bytes()),
+            query,
+            path_len: path_len.min(uri.as_bytes().len()),
+            uri,
+            authorization: r
+                .headers
+                .get(AUTHORIZATION)
+                .map(|v| cgi_cstring("Authorization", v.as_bytes())),
             ctype: r
                 .headers
                 .get(CONTENT_TYPE)
                 .map(|v| cgi_cstring("CONTENT_TYPE", v.as_bytes())),
             remote_addr,
             remote_port,
+            https: r.https,
+            protocol: r.protocol,
+            headers: crate::callbacks::CgiHeaders::new(r.headers),
+            body: r.body,
         }
     }
 }
@@ -213,8 +214,7 @@ pub enum StreamState {
 }
 
 pub struct Context {
-    pub(crate) req: Request,
-    pub(crate) c: ReqC,
+    pub(crate) req: CgiRequest,
     pub(crate) sender: Option<Sender<Frame>>,
     pub(crate) head: Option<ResponseHead>,
     pub(crate) body: Vec<u8>,
@@ -228,10 +228,8 @@ pub struct Context {
 impl Context {
     /// Builds the CGI view here, because the http plugin calls it on the IO thread.
     pub fn new(req: Request, sender: Sender<Frame>) -> Self {
-        let c = ReqC::build(&req);
         Self {
-            req,
-            c,
+            req: req.into(),
             sender: Some(sender),
             head: None,
             body: Vec::new(),
@@ -282,7 +280,7 @@ impl Context {
         let body = std::mem::take(&mut self.body);
         if let Some(head) = self.head.take() {
             let no_content = matches!(head.status, 204 | 304) || (100..200).contains(&head.status);
-            let bodiless = no_content || self.req.method == "HEAD";
+            let bodiless = no_content || self.req.method.as_bytes() == b"HEAD";
             let content_length = if no_content {
                 None
             } else if bodiless {
@@ -352,17 +350,8 @@ pub(crate) mod tests {
                 headers: HeaderMap::new(),
                 body: Chunks::default(),
                 received_at: 0.0,
-            },
-            c: ReqC {
-                method: CString::default(),
-                query: CString::default(),
-                uri: CString::default(),
-                ctype: None,
-                cookie: None,
-                authorization: None,
-                remote_addr: String::new(),
-                remote_port: String::new(),
-            },
+            }
+            .into(),
             sender: None,
             head: None,
             body: Vec::new(),
@@ -509,7 +498,7 @@ pub(crate) mod tests {
         for case in cases {
             let (tx, mut rx) = tokio::sync::mpsc::channel(8);
             let mut ctx = context();
-            ctx.req.method = case.method.into();
+            ctx.req.method = CString::new(case.method).unwrap();
             ctx.sender = Some(tx);
             if let Some(status) = case.head {
                 ctx.commit_head(status, HeaderMap::new());

@@ -336,14 +336,25 @@ fn server_keys_keep_order_and_mangling() -> anyhow::Result<()> {
             content_type: None,
             headers: &[],
             keys: &["CONTENT_LENGTH", "HTTP_HOST"],
-            values: &[("CONTENT_LENGTH", "0"), ("AUTH_TYPE", "")],
+            values: &[
+                ("CONTENT_LENGTH", "0"),
+                ("AUTH_TYPE", ""),
+                ("DOCUMENT_URI", "/order"),
+                ("REQUEST_URI", "/order?one=a%00b?two"),
+                ("QUERY_STRING", "one=a%00b?two"),
+            ],
         },
         Case {
             name: "repeated field lines join into one value",
             content_type: None,
-            headers: &[("x-rep", "1"), ("x-rep", "2")],
-            keys: &["CONTENT_LENGTH", "HTTP_HOST", "HTTP_X_REP"],
-            values: &[("HTTP_X_REP", "1, 2")],
+            headers: &[
+                ("cookie", "a=1"),
+                ("x-rep", "1"),
+                ("cookie", "b=2"),
+                ("x-rep", "2"),
+            ],
+            keys: &["CONTENT_LENGTH", "HTTP_HOST", "HTTP_COOKIE", "HTTP_X_REP"],
+            values: &[("HTTP_COOKIE", "a=1; b=2"), ("HTTP_X_REP", "1, 2")],
         },
         Case {
             name: "every optional key in its place",
@@ -375,7 +386,7 @@ fn server_keys_keep_order_and_mangling() -> anyhow::Result<()> {
 
     let srv = Spawn::http(Mode::Worker, fixture("worker/server-pairs-worker.php")).spawn();
     for case in &cases {
-        let mut rq = req("/");
+        let mut rq = req("/order?one=a%00b?two");
         for &(field, value) in case.headers {
             rq.headers_mut().append(
                 HeaderName::from_static(field),
