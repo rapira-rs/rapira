@@ -1,40 +1,11 @@
-use std::sync::Arc;
-use std::sync::atomic::Ordering::Relaxed;
-
-use rapira_scoreboard::{Pool, SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SLOT_STARTING};
-
-/// A worker state and its `state` label value.
-pub(crate) struct StateLabel {
-    pub state: u32,
-    pub label: &'static str,
-}
-
-/// Worker states in output order.
-pub(crate) const STATES: [StateLabel; 4] = [
-    StateLabel {
-        state: SLOT_STARTING,
-        label: "starting",
-    },
-    StateLabel {
-        state: SLOT_IDLE,
-        label: "idle",
-    },
-    StateLabel {
-        state: SLOT_ACTIVE,
-        label: "active",
-    },
-    StateLabel {
-        state: SLOT_DRAINING,
-        label: "draining",
-    },
-];
+use rapira_sapi::pool::PoolSnapshot;
 
 /// The values of one pool at one scrape.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct PoolStats {
     pub name: &'static str,
     pub configured: usize,
-    /// Worker counts in `STATES` order.
+    /// Worker counts in `State::ALL` order.
     pub states: [u64; 4],
     pub requests: u64,
     pub failed: u64,
@@ -43,56 +14,58 @@ pub(crate) struct PoolStats {
     pub script_restarts: u64,
 }
 
-pub(crate) fn board_stats(board: &[Arc<Pool>]) -> Vec<PoolStats> {
-    board.iter().map(|pool| pool_stats(pool)).collect()
-}
-
-fn pool_stats(pool: &Pool) -> PoolStats {
-    let refused = pool.refused.load(Relaxed);
+pub(crate) fn pool_stats(pool: &PoolSnapshot) -> PoolStats {
     let mut stats = PoolStats {
         name: pool.name,
         configured: pool.workers.len(),
-        requests: refused,
-        failed: refused,
-        queued: pool.pending.load(Relaxed),
-        failed_on_full_queue: pool.failed_on_full_queue.load(Relaxed),
+        requests: pool.refused,
+        failed: pool.refused,
+        queued: pool.pending,
+        failed_on_full_queue: pool.failed_on_full_queue,
         ..Default::default()
     };
     for worker in &pool.workers {
-        let state = worker.state.load(Relaxed);
-        if let Some(i) = STATES.iter().position(|known| known.state == state) {
-            stats.states[i] += 1;
-        }
-        let (handled, failed) = worker.totals();
-        stats.requests += handled;
-        stats.failed += failed;
-        stats.script_restarts += worker.recycles.load(Relaxed);
+        stats.states[worker.state as usize] += 1;
+        stats.requests += worker.handled;
+        stats.failed += worker.errors;
+        stats.script_restarts += worker.recycles;
     }
     stats
 }
 
 #[cfg(test)]
 mod tests {
+    use rapira_sapi::pool::{State, WorkerSnapshot};
+
     use super::*;
 
+    fn worker(state: State, handled: u64, errors: u64, recycles: u64) -> WorkerSnapshot {
+        WorkerSnapshot {
+            state,
+            handled,
+            errors,
+            recycles,
+            last_activity_ms: 0,
+        }
+    }
+
     #[test]
-    fn board_stats_sums_each_pool() {
+    fn pool_stats_sums_the_workers_of_a_pool() {
         struct Case {
             name: &'static str,
-            // State, handled units, errors and recycles for each worker.
-            workers: &'static [(u32, u64, u64, u64)],
-            refused: u64,
-            failed_on_full_queue: u64,
-            pending: u64,
+            pool: PoolSnapshot,
             want: PoolStats,
         }
         let cases = [
             Case {
                 name: "host refusals count once in both totals",
-                workers: &[(SLOT_ACTIVE, 7, 2, 1), (SLOT_IDLE, 4, 1, 2)],
-                refused: 5,
-                failed_on_full_queue: 3,
-                pending: 6,
+                pool: PoolSnapshot {
+                    name: "http",
+                    pending: 6,
+                    failed_on_full_queue: 3,
+                    refused: 5,
+                    workers: vec![worker(State::Active, 7, 2, 1), worker(State::Idle, 4, 1, 2)],
+                },
                 want: PoolStats {
                     name: "http",
                     configured: 2,
@@ -106,15 +79,18 @@ mod tests {
             },
             Case {
                 name: "a second pool has its own queue and worker counts",
-                workers: &[
-                    (SLOT_STARTING, 0, 0, 0),
-                    (SLOT_DRAINING, 3, 1, 4),
-                    (SLOT_DRAINING, 0, 0, 0),
-                    (SLOT_ACTIVE, 9, 0, 2),
-                ],
-                refused: 2,
-                failed_on_full_queue: 0,
-                pending: 1,
+                pool: PoolSnapshot {
+                    name: "grpc",
+                    pending: 1,
+                    failed_on_full_queue: 0,
+                    refused: 2,
+                    workers: vec![
+                        worker(State::Starting, 0, 0, 0),
+                        worker(State::Draining, 3, 1, 4),
+                        worker(State::Draining, 0, 0, 0),
+                        worker(State::Active, 9, 0, 2),
+                    ],
+                },
                 want: PoolStats {
                     name: "grpc",
                     configured: 4,
@@ -127,30 +103,8 @@ mod tests {
                 },
             },
         ];
-        let board: Vec<_> = cases
-            .iter()
-            .map(|case| {
-                let pool = Pool::new(case.want.name, case.workers.len());
-                pool.refused.store(case.refused, Relaxed);
-                pool.failed_on_full_queue
-                    .store(case.failed_on_full_queue, Relaxed);
-                pool.pending.store(case.pending, Relaxed);
-                for (worker, &(state, handled, errors, recycles)) in
-                    pool.workers.iter().zip(case.workers)
-                {
-                    worker.state.store(state, Relaxed);
-                    for i in 0..handled {
-                        worker.record_outcome(i < errors);
-                    }
-                    worker.recycles.store(recycles, Relaxed);
-                }
-                Arc::new(pool)
-            })
-            .collect();
-        let stats = board_stats(&board);
-        assert_eq!(stats.len(), cases.len());
-        for (stats, case) in stats.into_iter().zip(cases) {
-            assert_eq!(stats, case.want, "{}", case.name);
+        for case in cases {
+            assert_eq!(pool_stats(&case.pool), case.want, "{}", case.name);
         }
     }
 }

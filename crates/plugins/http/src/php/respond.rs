@@ -120,7 +120,7 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
     }
     st.phase = Phase::Discarded;
     st.unlink_spools();
-    sb_update(Event::Handled { errored: true });
+    record(Event::Handled { errored: true });
     st.sender = None;
 }
 
@@ -330,7 +330,7 @@ pub(super) unsafe fn seal(st: &mut ExchangeState) {
     unsafe { release_done() };
     st.unlink_spools();
     st.phase = Phase::Sealed;
-    sb_update(Event::Handled { errored: false });
+    record(Event::Handled { errored: false });
     let _ = unsafe { send_frame(st, Frame::End { truncated: false }) };
     st.sender = None;
 }
@@ -435,7 +435,7 @@ pub unsafe extern "C" fn rapira_rs_http_quiesce() {
             }
             if polls == 0 {
                 // The request watchdog does not count the wait as a stuck request.
-                sb_update(Event::Idle);
+                record(Event::Idle);
             }
             if polls % 5000 == 4999 {
                 tracing::warn!(

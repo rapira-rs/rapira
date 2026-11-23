@@ -75,6 +75,7 @@ impl Workers {
 /// The main thread owns PHP startup, the worker roster and PHP shutdown.
 pub struct Engine {
     pub(crate) workers: Arc<Workers>,
+    pub(crate) pools: Vec<Arc<pool::Pool>>,
     _main_thread: PhantomData<Rc<()>>,
 }
 
@@ -118,6 +119,7 @@ impl Engine {
         };
         let engine = Self {
             workers: Arc::default(),
+            pools: Vec::new(),
             _main_thread: PhantomData,
         };
         ensure!(started, "php_module_startup failed");
@@ -149,6 +151,18 @@ impl Engine {
     pub fn reload(&self) {
         crate::reload::request_reset();
         self.workers.wake();
+    }
+
+    /// The record of each pool, in start order.
+    pub fn pools(&self) -> &[Arc<pool::Pool>] {
+        &self.pools
+    }
+
+    /// Starts the drain. A worker with a unit in progress stays active until its next pull.
+    pub fn begin_drain(&self) {
+        for pool in &self.pools {
+            pool.begin_drain();
+        }
     }
 }
 

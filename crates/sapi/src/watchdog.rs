@@ -9,9 +9,10 @@ use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use rapira_scoreboard::{Pool, now_millis};
 use tokio::sync::watch;
 use tracing::{error, warn};
+
+use crate::pool::{Pool, now_millis};
 
 const TICK: Duration = Duration::from_secs(1);
 const GRACE: Duration = Duration::from_secs(5);

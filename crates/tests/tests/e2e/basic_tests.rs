@@ -454,7 +454,7 @@ fn failboot_classic() -> anyhow::Result<()> {
 }
 
 #[test]
-fn scoreboard_counts_worker() -> anyhow::Result<()> {
+fn status_counts_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/throw-worker.php")).spawn();
     let _ = drain(submit(srv.addr, req("/?boom=0"))?);
     let _ = drain(submit(srv.addr, req("/?boom=0"))?);
@@ -464,7 +464,7 @@ fn scoreboard_counts_worker() -> anyhow::Result<()> {
 }
 
 #[test]
-fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
+fn status_counts_recycles_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/shutdown-fatal-worker.php")).spawn();
     let _ = drain(submit(srv.addr, req("/?boom=1"))?);
     let s2 = drain(submit(srv.addr, req("/"))?).status;
@@ -478,7 +478,7 @@ fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
 }
 
 #[test]
-fn scoreboard_counts_classic() -> anyhow::Result<()> {
+fn status_counts_classic() -> anyhow::Result<()> {
     struct Case {
         name: &'static str,
         script: &'static str,

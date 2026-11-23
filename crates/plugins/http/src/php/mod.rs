@@ -10,7 +10,7 @@ use http::header::{HeaderMap, HeaderName, HeaderValue};
 use hyper::body::Bytes;
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{add_list, build_address, header_key, ip_text};
-use rapira_sapi::scoreboard::{Event, sb_update};
+use rapira_sapi::pool::{Event, record};
 use rapira_sapi::types::{Addr, Frame, Request, ResponseHead};
 use rapira_sapi::work::{Held, HeldPtr};
 use rapira_sapi::{

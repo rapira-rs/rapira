@@ -10,7 +10,7 @@ description = "Prometheus metrics and health probes for Rapira worker pools"
 workspace = true
 
 [dependencies]
-rapira_scoreboard = { workspace = true }
+rapira_sapi = { workspace = true }
 rapira_net = { workspace = true }
 rapira_config = { workspace = true }
 anyhow = { workspace = true }

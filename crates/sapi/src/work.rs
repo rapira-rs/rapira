@@ -5,11 +5,10 @@ use std::sync::atomic::Ordering;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
-use rapira_scoreboard::Pool;
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::callbacks::guard;
-use crate::scoreboard::{Event, sb_update};
+use crate::pool::{Event, Pool, record};
 use crate::types::Context;
 use crate::zend_class_entry;
 
@@ -48,7 +47,7 @@ pub(crate) unsafe fn release(ptr: *mut dyn Held) -> Box<dyn Held> {
     crate::exchange::forget_held(ptr.cast::<()>());
     let st = unsafe { Box::from_raw(ptr) };
     if !st.settled() {
-        sb_update(Event::Handled { errored: true });
+        record(Event::Handled { errored: true });
     }
     st
 }
@@ -194,7 +193,7 @@ pub fn now_unix_f64() -> f64 {
 pub struct Intake {
     tx: Sender<Entry>,
     pub(crate) boot_retry: Arc<crate::start::BootRetry>,
-    stats: Arc<Pool>,
+    pool: Arc<Pool>,
     /// The bytes of the pending units.
     budget: Arc<Semaphore>,
     /// The semaphore wakes the waiting submitters in arrival order.
@@ -203,42 +202,42 @@ pub struct Intake {
 
 /// Counts a pending unit until the send succeeds or the submitter leaves.
 struct PendingGuard<'a> {
-    stats: Option<&'a Pool>,
+    pool: Option<&'a Pool>,
     found_full: bool,
 }
 
 impl<'a> PendingGuard<'a> {
-    fn arm(stats: &'a Pool) -> Self {
-        stats.pending.fetch_add(1, Ordering::Relaxed);
+    fn arm(pool: &'a Pool) -> Self {
+        pool.pending.fetch_add(1, Ordering::Relaxed);
         Self {
-            stats: Some(stats),
+            pool: Some(pool),
             found_full: false,
         }
     }
     fn disarm(mut self) {
-        self.stats = None;
+        self.pool = None;
     }
 }
 
 impl Drop for PendingGuard<'_> {
     fn drop(&mut self) {
-        if let Some(stats) = self.stats {
-            stats.pending.fetch_sub(1, Ordering::Relaxed);
+        if let Some(pool) = self.pool {
+            pool.pending.fetch_sub(1, Ordering::Relaxed);
             if self.found_full {
-                stats.failed_on_full_queue.fetch_add(1, Ordering::Relaxed);
+                pool.failed_on_full_queue.fetch_add(1, Ordering::Relaxed);
             }
         }
     }
 }
 
 impl Intake {
-    pub(crate) fn new(stats: Arc<Pool>) -> (Self, Receiver<Entry>) {
+    pub(crate) fn new(pool: Arc<Pool>) -> (Self, Receiver<Entry>) {
         let (tx, rx) = unbounded();
         (
             Self {
                 tx,
                 boot_retry: Arc::default(),
-                stats,
+                pool,
                 budget: Arc::new(Semaphore::new(BODY_BUDGET)),
                 slots: Arc::new(Semaphore::new(INTAKE_SLOTS)),
             },
@@ -251,11 +250,11 @@ impl Intake {
         let Ok(held) =
             Arc::clone(&self.budget).try_acquire_many_owned(bytes.min(BODY_BUDGET) as u32)
         else {
-            self.stats.refused.fetch_add(1, Ordering::Relaxed);
+            self.pool.refused.fetch_add(1, Ordering::Relaxed);
             return Err(Refused::OverBudget);
         };
         // Count the unit before a worker can take it.
-        let mut pending = PendingGuard::arm(&self.stats);
+        let mut pending = PendingGuard::arm(&self.pool);
         let slot = match Arc::clone(&self.slots).try_acquire_owned() {
             Ok(slot) => slot,
             Err(_) => {
@@ -265,9 +264,9 @@ impl Intake {
                     tracing::warn!(
                         target: "rapira",
                         "intake full for {INTAKE_WAIT:?} ({} pending); shedding the request",
-                        self.stats.pending.load(Ordering::Relaxed)
+                        self.pool.pending.load(Ordering::Relaxed)
                     );
-                    self.stats.refused.fetch_add(1, Ordering::Relaxed);
+                    self.pool.refused.fetch_add(1, Ordering::Relaxed);
                     return Err(Refused::Saturated);
                 };
                 slot.expect("the intake never closes its slot semaphore")
@@ -328,7 +327,7 @@ mod tests {
     }
 
     fn intake() -> (Intake, crossbeam_channel::Receiver<Entry>) {
-        Intake::new(Arc::new(rapira_scoreboard::Pool::new("http", 2)))
+        Intake::new(Arc::new(Pool::new("http", 2)))
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -367,9 +366,9 @@ mod tests {
             assert_eq!(result, case.result, "{}", case.name);
             assert_eq!(
                 (
-                    intake.stats.pending.load(Ordering::Relaxed),
-                    intake.stats.refused.load(Ordering::Relaxed),
-                    intake.stats.failed_on_full_queue.load(Ordering::Relaxed),
+                    intake.pool.pending.load(Ordering::Relaxed),
+                    intake.pool.refused.load(Ordering::Relaxed),
+                    intake.pool.failed_on_full_queue.load(Ordering::Relaxed),
                 ),
                 (case.pending, case.refused, 0),
                 "{}",
@@ -436,7 +435,7 @@ mod tests {
         ];
         for case in cases {
             let (intake, rx) = intake();
-            let stats = &intake.stats;
+            let pool = &intake.pool;
             for _ in 0..INTAKE_SLOTS {
                 intake.submit(probe(), 0).await.unwrap();
             }
@@ -456,9 +455,9 @@ mod tests {
             assert_eq!(result, case.result, "{}", case.name);
             assert_eq!(
                 (
-                    stats.refused.load(Ordering::Relaxed),
-                    stats.failed_on_full_queue.load(Ordering::Relaxed),
-                    stats.pending.load(Ordering::Relaxed),
+                    pool.refused.load(Ordering::Relaxed),
+                    pool.failed_on_full_queue.load(Ordering::Relaxed),
+                    pool.pending.load(Ordering::Relaxed),
                 ),
                 (
                     case.want.refused,

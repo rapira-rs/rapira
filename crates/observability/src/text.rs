@@ -1,6 +1,8 @@
 use std::fmt::Write as _;
 
-use crate::stats::{PoolStats, STATES};
+use rapira_sapi::pool::State;
+
+use crate::stats::PoolStats;
 
 /// The versions for `rapira_build_info`.
 #[derive(Debug)]
@@ -30,11 +32,11 @@ pub(crate) fn render(pools: &[PoolStats], build: &Build) -> String {
 
     family(&mut out, "rapira_workers", "gauge", "Workers per state.");
     for p in pools {
-        for (s, &count) in STATES.iter().zip(&p.states) {
+        for (state, &count) in State::ALL.iter().zip(&p.states) {
             sample(
                 &mut out,
                 "rapira_workers",
-                &[("pool", p.name), ("state", s.label)],
+                &[("pool", p.name), ("state", state.label())],
                 count,
             );
         }

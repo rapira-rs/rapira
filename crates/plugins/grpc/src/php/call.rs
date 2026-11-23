@@ -12,7 +12,7 @@ use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
 use connectrpc::{ConnectError, ErrorCode, ErrorDetail, MethodKind, Protocol};
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{add_list, build_address, header_key};
-use rapira_sapi::scoreboard::{Event, sb_update};
+use rapira_sapi::pool::{Event, record};
 use rapira_sapi::stream;
 use rapira_sapi::work::{Held, HeldPtr, now_unix_f64};
 use rapira_sapi::{
@@ -263,7 +263,7 @@ impl Held for GrpcState {
         }
         self.discarded = true;
         self.reply = None;
-        sb_update(Event::Handled { errored: true });
+        record(Event::Handled { errored: true });
     }
 
     /// The drop of `reply` reports the lost call as INTERNAL.
@@ -411,7 +411,7 @@ unsafe fn finish(st: &mut GrpcState, result: Result<&[u8], ConnectError>) -> Ver
 
 /// Counts the call as handled. A `sent` of false means that the plugin closed the call before the outcome went out.
 fn settle(st: &mut GrpcState, sent: bool) -> Verb {
-    sb_update(Event::Handled { errored: !sent });
+    record(Event::Handled { errored: !sent });
     if sent {
         Verb::Ok
     } else {

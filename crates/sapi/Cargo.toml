@@ -13,7 +13,6 @@ crossbeam-channel = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt", "time", "macros"] }
 rapira_config = { workspace = true }
-rapira_scoreboard = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
 libc = { workspace = true }

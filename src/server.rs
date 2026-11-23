@@ -6,7 +6,7 @@ use std::time::{Duration, Instant};
 use anyhow::{Context, Result, ensure};
 use rapira_config::{Mode, PoolSettings};
 use rapira_sapi::plugin::{Plugin, Worker};
-use rapira_scoreboard::{Board, Pool, SLOT_ACTIVE, SLOT_DRAINING, SLOT_IDLE, SLOT_STARTING};
+use rapira_sapi::pool::Pool;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
 use tracing::{error, info, warn};
@@ -51,10 +51,6 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
         .try_fold(0usize, |n, (_, pool)| n.checked_add(pool.workers))
         .context("too many PHP workers")?;
     let mut engine = rapira_sapi::Engine::start(&crate::PLUGIN_REGISTERS, count)?;
-    let board: Board = plugins
-        .iter()
-        .map(|(plugin, pool)| Arc::new(Pool::new(plugin.name(), pool.workers)))
-        .collect();
     let timed = plugins
         .iter()
         .any(|(_, pool)| !pool.request_terminate_timeout.is_zero());
@@ -81,10 +77,10 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
     let (stop, _) = watch::channel(false);
     let grace = settings.server.drain_grace();
     let mut services = Vec::new();
-    for ((plugin, cfg), record) in plugins.into_iter().zip(board.iter()) {
+    for (plugin, cfg) in plugins {
         // SAFETY: both plugins supply static dispatcher records.
         let intake = or_exit(
-            unsafe { engine.start_pool(cfg, Arc::clone(record), &*plugin, rt.handle()) },
+            unsafe { engine.start_pool(cfg, &*plugin, rt.handle()) },
             &mut pidfile,
         );
         services.push((
@@ -96,6 +92,7 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
             },
         ));
     }
+    let pools: Arc<[Arc<Pool>]> = engine.pools().into();
     let failed = Arc::new(AtomicBool::new(false));
     let mut tasks = JoinSet::new();
     for (plugin, worker) in services {
@@ -120,13 +117,13 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
         };
         let stopped = stop.subscribe();
         let flag = Arc::clone(&failed);
-        let board = Arc::clone(&board);
+        let pools = Arc::clone(&pools);
         or_exit(
             thread::Builder::new()
                 .name("rapira-obs".into())
                 .spawn(move || {
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        server.serve(board, build, stopped.clone(), grace)
+                        server.serve(pools, build, stopped.clone(), grace)
                     }))
                     .unwrap_or_else(|_| Err(anyhow::anyhow!("observability thread panicked")));
                     service_end("observability", result, &stopped, &flag);
@@ -152,7 +149,7 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
         }
         match sig {
             libc::SIGTERM | libc::SIGINT | libc::SIGQUIT => break,
-            libc::SIGUSR1 => status(&board),
+            libc::SIGUSR1 => status(&pools),
             libc::SIGUSR2 | libc::SIGHUP => {
                 info!(target: "rapira", "reloading all pools");
                 engine.reload();
@@ -163,7 +160,7 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
 
     let deadline = Instant::now() + settings.server.stop_timeout;
     info!(target: "rapira", "stopping server");
-    rapira_sapi::scoreboard::begin_drain(&board);
+    engine.begin_drain();
     stop.send_replace(true);
     drop(watchdog);
     loop {
@@ -172,7 +169,7 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
             &mut pidfile,
         ) {
             Some(libc::SIGTERM | libc::SIGINT) => exit(130, &mut pidfile),
-            Some(libc::SIGUSR1) => status(&board),
+            Some(libc::SIGUSR1) => status(&pools),
             _ => {}
         }
         if plugins.is_finished()
@@ -211,20 +208,12 @@ fn service_end(name: &str, result: Result<()>, stop: &watch::Receiver<bool>, fai
     }
 }
 
-fn status(board: &Board) {
-    use Ordering::Relaxed;
-    for p in board.iter() {
-        info!(target: "rapira", "pool={} workers={} pending={} failed_on_full_queue={} refused={}", p.name, p.workers.len(), p.pending.load(Relaxed), p.failed_on_full_queue.load(Relaxed), p.refused.load(Relaxed));
+fn status(pools: &[Arc<Pool>]) {
+    for pool in pools {
+        let p = pool.snapshot();
+        info!(target: "rapira", "pool={} workers={} pending={} failed_on_full_queue={} refused={}", p.name, p.workers.len(), p.pending, p.failed_on_full_queue, p.refused);
         for (i, w) in p.workers.iter().enumerate() {
-            let state = match w.state.load(Ordering::Acquire) {
-                SLOT_STARTING => "starting",
-                SLOT_IDLE => "idle",
-                SLOT_ACTIVE => "active",
-                SLOT_DRAINING => "draining",
-                _ => unreachable!(),
-            };
-            let (handled, errors) = w.totals();
-            info!(target: "rapira", "pool={} worker={i} state={state} handled={handled} errors={errors} recycles={} last_activity_ms={}", p.name, w.recycles.load(Relaxed), w.last_activity_ms.load(Relaxed));
+            info!(target: "rapira", "pool={} worker={i} state={} handled={} errors={} recycles={} last_activity_ms={}", p.name, w.state.label(), w.handled, w.errors, w.recycles, w.last_activity_ms);
         }
     }
 }

@@ -930,14 +930,9 @@ dependencies = [
  "libmimalloc-sys",
  "rapira_config",
  "rapira_php_build",
- "rapira_scoreboard",
  "tokio",
  "tracing",
 ]
-
-[[package]]
-name = "rapira_scoreboard"
-version = "0.9.2"
 
 [[package]]
 name = "rapira_static_files"

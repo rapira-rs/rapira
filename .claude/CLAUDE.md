@@ -21,7 +21,7 @@
 
 ## Tests
 
-- Test behavior through simple results a client or operator sees: responses, log records, exit statuses or scoreboard lines. Assert on these results, not internal counters, queues or join handles.
+- Test behavior through simple results a client or operator sees: responses, log records, exit statuses or status lines. Assert on these results, not internal counters, queues or join handles.
 - Do not add public or private production API or branches only for tests. This includes functions, methods, constructors, accessors, `Default` implementations and feature flags. Do not add generics or traits with one production type and one test type. `#[cfg(test)]` and `pub(crate)` are not exceptions. Helpers inside `#[cfg(test)] mod tests` are test code.
 - If no external path reaches a behavior, test its pure logic in a unit test or leave it untested. Do not add test hooks. Delete tests of sequences that production never runs.
 - Unit tests belong in their crate's `#[cfg(test)] mod tests`. Test one small piece of code in its own scope. Private items are allowed. No fixtures: files, directories, sockets, child processes, signals, environment variables or PHP. Do not copy other rapira components as test doubles. In-memory inputs (futures, writers, wakers or paused tokio clocks) are not fixtures. An AF_UNIX socketpair counts as an in-memory input.

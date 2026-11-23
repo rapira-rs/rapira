@@ -20,10 +20,6 @@ _Avoid_: restart, respawn, reboot
 The part of a server stop when listeners close and open connections have time to finish.
 _Avoid_: graceful shutdown, graceful stop, wind down
 
-**Scoreboard**:
-The server's record of pool counters and the state and counters of each worker.
-_Avoid_: status table, stats, registry
-
 ## Sides of the boundary
 
 **Host**:

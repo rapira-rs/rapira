@@ -89,7 +89,7 @@ fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     Ok(())
 }
 
-// The worker path must run the handler of set_exception_handler as zend_execute_scripts does, and a handled exception must not raise a 500 or a scoreboard error.
+// The worker path must run the handler of set_exception_handler as zend_execute_scripts does, and a handled exception must not raise a 500 or count as an error.
 #[test]
 fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     let srv = Spawn::http(

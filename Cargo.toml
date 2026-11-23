@@ -26,7 +26,6 @@ members = [
     "crates/middleware/static_files",
     "crates/interceptors/auth",
     "crates/sapi",
-    "crates/scoreboard",
     "crates/net",
     "crates/plugins/http",
     "crates/plugins/grpc"
@@ -46,7 +45,6 @@ rapira_http = { path = "crates/plugins/http" }
 rapira_grpc = { path = "crates/plugins/grpc" }
 rapira_net = { path = "crates/net" }
 rapira_observability = { path = "crates/observability" }
-rapira_scoreboard = { path = "crates/scoreboard" }
 serde = { version = "1", features = ["derive"] }
 toml = "1.1"
 tokio = { version = "1", features = ["sync", "io-uring"] }
@@ -80,7 +78,6 @@ rapira_config = { workspace = true }
 rapira_http = { workspace = true }
 rapira_grpc = { workspace = true }
 rapira_observability = { workspace = true }
-rapira_scoreboard = { workspace = true }
 libc = { workspace = true }
 mimalloc = "0.1"
 serde = { workspace = true }

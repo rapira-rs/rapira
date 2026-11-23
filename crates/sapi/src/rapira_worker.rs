@@ -3,8 +3,8 @@ use tracing::{error, info, warn};
 use crate::{
     callbacks::*,
     diagnostics::{Severity, error_type_to_level},
+    pool::{Event, Pool, record},
     quota::End,
-    scoreboard::sb_update,
     start::{BootRetry, Pull, Wait, pull, pull_unit_to_shed, run_script},
 };
 use std::{
@@ -229,7 +229,7 @@ fn give_up_boot(failures: u32, limit: u32, served: bool) -> bool {
 pub(crate) fn rapira_worker(
     script: &Path,
     max_boot_failures: u32,
-    pool: &rapira_scoreboard::Pool,
+    pool: &Pool,
     index: usize,
     retry: &Weak<BootRetry>,
 ) {
@@ -241,11 +241,11 @@ pub(crate) fn rapira_worker(
             Some(End::Recycle) => true,
             None => false,
         };
-        let was_serving = pool.workers[index].serving();
-        sb_update(if recycled {
-            scoreboard::Event::Recycled
+        let was_serving = pool.state(index).serving();
+        record(if recycled {
+            Event::Recycled
         } else {
-            scoreboard::Event::Starting
+            Event::Starting
         });
         if was_serving && let Some(retry) = retry.upgrade() {
             retry.wake();
@@ -256,12 +256,7 @@ pub(crate) fn rapira_worker(
             continue;
         }
         failures = failures.saturating_add(1);
-        if give_up_boot(
-            failures,
-            max_boot_failures,
-            pool.served.load(std::sync::atomic::Ordering::Acquire),
-        ) && !scoreboard::draining()
-        {
+        if give_up_boot(failures, max_boot_failures, pool.served()) && !pool.draining() {
             error!(target: "rapira", "{} pool: worker {index} failed to boot {failures} times; the pool never served; exiting with code 70", pool.name);
             unsafe { libc::_exit(70) };
         }
@@ -273,7 +268,7 @@ pub(crate) fn rapira_worker(
                 Pull::Closed => break 'cycles,
                 Pull::Unit(unit) => {
                     unit.shed();
-                    sb_update(scoreboard::Event::Shed);
+                    record(Event::Shed);
                 }
                 Pull::Reload | Pull::NoUnit => break,
             }
@@ -327,7 +322,7 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     let errored: bool = recycle || [outcome, teardown].contains(&(RAPIRA_THROW as c_int));
 
     log_and_clear_last_error();
-    sb_update(scoreboard::Event::Handled { errored });
+    record(Event::Handled { errored });
     if recycle {
         crate::quota::end(End::Recycle);
         RAPIRA_HANDLE_RECYCLE

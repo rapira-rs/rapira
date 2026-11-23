@@ -1,7 +1,6 @@
 use anyhow::Context as _;
 use crossbeam_channel::{Receiver, Select, Sender, bounded, never, select_biased};
 use rapira_config::{Mode, PoolSettings};
-use rapira_scoreboard::Pool as PoolStats;
 use std::cell::RefCell;
 use std::ffi::{CStr, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -13,9 +12,9 @@ use tracing::{error, info};
 
 use crate::engine::Workers;
 use crate::plugin::Plugin;
+use crate::pool::{self, Event, Pool, record};
 use crate::quota::{self, End};
 use crate::rapira_worker::rapira_worker;
-use crate::scoreboard::{Event, sb_set, sb_update};
 use crate::work::{Entry, Intake, Unit};
 use crate::{
     RAPIRA_MODE_CLASSIC, RAPIRA_MODE_DISPATCHER, RAPIRA_MODE_WORKER,
@@ -30,7 +29,6 @@ thread_local! {
 pub(crate) struct UnitRx {
     rx: Receiver<Entry>,
     control: Receiver<()>,
-    stats: Arc<PoolStats>,
     workers: Arc<Workers>,
 }
 
@@ -56,17 +54,12 @@ const IDLE_PURGE_AFTER: Duration = Duration::from_secs(2);
 const OPCACHE_POLL: Duration = Duration::from_secs(1);
 
 impl UnitRx {
-    fn new(
-        rx: Receiver<Entry>,
-        stats: Arc<PoolStats>,
-        workers: Arc<Workers>,
-    ) -> (Self, Sender<()>) {
+    fn new(rx: Receiver<Entry>, workers: Arc<Workers>) -> (Self, Sender<()>) {
         let (tx, control) = bounded(1);
         (
             Self {
                 rx,
                 control,
-                stats,
                 workers,
             },
             tx,
@@ -77,7 +70,7 @@ impl UnitRx {
         select_biased! {
             recv(self.control) -> msg => msg.map_or(Pull::Closed, |()| Pull::Reload),
             recv(units) -> msg => msg.map_or(Pull::Closed, |entry| {
-                self.stats.pending.fetch_sub(1, Ordering::Relaxed);
+                pool::with(|pool| pool.pending.fetch_sub(1, Ordering::Relaxed));
                 Pull::Unit(entry.unit)
             }),
             default(timeout) => Pull::NoUnit,
@@ -146,7 +139,6 @@ impl crate::Engine {
     pub unsafe fn start_pool(
         &mut self,
         settings: PoolSettings,
-        stats: Arc<PoolStats>,
         plugin: &dyn Plugin,
         io: &tokio::runtime::Handle,
     ) -> anyhow::Result<Intake> {
@@ -166,16 +158,17 @@ impl crate::Engine {
                 std::ptr::null()
             },
         };
-        let (intake, rx) = Intake::new(Arc::clone(&stats));
+        let pool = Arc::new(Pool::new(name, settings.workers));
+        self.pools.push(Arc::clone(&pool));
+        let (intake, rx) = Intake::new(Arc::clone(&pool));
         let env = Arc::new(settings.env);
         let server_env = crate::context::intern_server_env(&env);
         for index in 0..settings.workers {
-            let (units, control) =
-                UnitRx::new(rx.clone(), Arc::clone(&stats), Arc::clone(&self.workers));
+            let (units, control) = UnitRx::new(rx.clone(), Arc::clone(&self.workers));
             let io = io.clone();
             let init = Arc::clone(&worker_init);
             let boot_retry = Arc::downgrade(&intake.boot_retry);
-            let stats = Arc::clone(&stats);
+            let pool = Arc::clone(&pool);
             let server_env = Arc::clone(&server_env);
             let env = Arc::clone(&env);
             let entrypoint = settings.entrypoint.clone();
@@ -194,12 +187,12 @@ impl crate::Engine {
                         unsafe { plugin.enter() };
                         let guard = unsafe {
                             crate::watchdog::enter(
-                                Arc::clone(&stats),
+                                Arc::clone(&pool),
                                 index,
                                 settings.request_terminate_timeout,
                             )
                         };
-                        sb_set(Arc::clone(&stats), index);
+                        pool.bind(index);
                         UNIT_RX.set(Some(units));
                         init();
                         crate::context::enter_server_env(server_env);
@@ -208,10 +201,10 @@ impl crate::Engine {
                         match mode {
                             Mode::Classic => classic_worker(&entrypoint),
                             Mode::Worker | Mode::Dispatcher => {
-                                rapira_worker(&entrypoint, settings.max_boot_failures, &stats, index, &boot_retry);
+                                rapira_worker(&entrypoint, settings.max_boot_failures, &pool, index, &boot_retry);
                             }
                         }
-                        sb_update(Event::Stopped);
+                        record(Event::Stopped);
                         drop(guard);
                         // SAFETY: the last request ended and the watchdog released the PHP globals.
                         unsafe { rapira_thread_end() };
@@ -279,9 +272,9 @@ pub(crate) fn pull_with(select: impl FnOnce(&UnitRx) -> Pull) -> Pull {
         if quota::ended() {
             return Pull::Closed;
         }
-        sb_update(Event::Idle);
+        record(Event::Idle);
         let got = select(units);
-        sb_update(Event::Active);
+        record(Event::Active);
         got
     })
 }
@@ -314,7 +307,7 @@ impl UnitRx {
             };
             match &got {
                 Pull::Unit(unit) if unit.cancelled() => {
-                    sb_update(Event::Shed);
+                    record(Event::Shed);
                     continue;
                 }
                 Pull::Unit(_) => quota::received(),
@@ -345,7 +338,8 @@ pub(crate) fn pull_unit_to_shed(deadline: Instant, retry: &Weak<BootRetry>) -> P
                 let Some(changes) = retry.upgrade().map(|retry| retry.changes()) else {
                     return Pull::Closed;
                 };
-                let units = if rx.stats.ready() { &disabled } else { &rx.rx };
+                let ready = pool::with(Pool::ready).unwrap_or(false);
+                let units = if ready { &disabled } else { &rx.rx };
                 let got = rx.recv(units, Duration::ZERO);
                 if !matches!(got, Pull::NoUnit) {
                     return got;
@@ -365,19 +359,14 @@ pub(crate) fn pull_unit_to_shed(deadline: Instant, retry: &Weak<BootRetry>) -> P
 }
 
 pub(crate) fn pending_depth() -> u64 {
-    UNIT_RX.with_borrow(|slot| {
-        slot.as_ref()
-            .map_or(0, |unit_r| unit_r.stats.pending.load(Ordering::Relaxed))
-    })
+    pool::with(|pool| pool.pending.load(Ordering::Relaxed)).unwrap_or(0)
 }
 
 #[cfg(test)]
 mod tests {
-    use std::sync::atomic::Ordering::Relaxed;
     use std::time::Instant;
 
     use super::*;
-    use crate::scoreboard::sb_set;
     use crate::work::Held;
 
     /// A unit on the intake. `cancelled` is true when its client left.
@@ -402,20 +391,20 @@ mod tests {
 
     /// One worker with a private control channel and an in-memory intake.
     struct TestWorker {
-        stats: Arc<PoolStats>,
+        pool: Arc<Pool>,
         control: crossbeam_channel::Sender<()>,
         intake: Intake,
     }
 
     fn worker(max_requests: u64) -> TestWorker {
-        let stats = Arc::new(PoolStats::new("http", 1));
-        sb_set(Arc::clone(&stats), 0);
+        let pool = Arc::new(Pool::new("http", 1));
+        pool.bind(0);
         quota::install(max_requests);
-        let (intake, rx) = Intake::new(Arc::clone(&stats));
-        let (units, tx) = UnitRx::new(rx, Arc::clone(&stats), Arc::default());
+        let (intake, rx) = Intake::new(Arc::clone(&pool));
+        let (units, tx) = UnitRx::new(rx, Arc::default());
         UNIT_RX.set(Some(units));
         TestWorker {
-            stats,
+            pool,
             intake,
             control: tx,
         }
@@ -447,11 +436,11 @@ mod tests {
             },
         ];
         for case in cases {
-            let stats = Arc::new(PoolStats::new("http", 2));
-            let (intake, rx) = Intake::new(Arc::clone(&stats));
+            let pool = Arc::new(Pool::new("http", 2));
+            let (intake, rx) = Intake::new(Arc::clone(&pool));
             let workers = [
-                UnitRx::new(rx.clone(), Arc::clone(&stats), Arc::default()),
-                UnitRx::new(rx, Arc::clone(&stats), Arc::default()),
+                UnitRx::new(rx.clone(), Arc::default()),
+                UnitRx::new(rx, Arc::default()),
             ];
             for _ in 0..case.queued {
                 intake
@@ -461,7 +450,7 @@ mod tests {
             }
             for (index, (worker, control)) in workers.into_iter().enumerate() {
                 control.try_send(()).unwrap();
-                sb_set(Arc::clone(&stats), index);
+                pool.bind(index);
                 quota::install(0);
                 UNIT_RX.set(Some(worker));
                 assert_eq!(
@@ -702,7 +691,7 @@ mod tests {
         ];
         for case in cases {
             let TestWorker {
-                stats,
+                pool,
                 control,
                 intake,
             } = worker(case.max_requests);
@@ -762,9 +751,10 @@ mod tests {
                 "{}: ended, outcome",
                 case.name
             );
-            let (handled, errors) = stats.workers[0].totals();
+            let snapshot = pool.snapshot();
+            let row = &snapshot.workers[0];
             assert_eq!(
-                (handled, errors, stats.pending.load(Relaxed),),
+                (row.handled, row.errors, snapshot.pending),
                 (case.counts.handled, case.counts.errors, case.counts.pending),
                 "{}: handled, errors, pending",
                 case.name

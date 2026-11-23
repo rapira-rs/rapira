@@ -10,7 +10,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
 use rapira_net::{PreparedListener, Serve};
-use rapira_scoreboard::Board;
+use rapira_sapi::pool::Pool;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 
@@ -41,7 +41,7 @@ impl Server {
     /// Runs on the observability thread. When `stop` is true, waits up to `drain_grace` for open connections to close.
     pub fn serve(
         self,
-        board: Board,
+        pools: Arc<[Arc<Pool>]>,
         build: Build,
         stop: watch::Receiver<bool>,
         drain_grace: Duration,
@@ -57,7 +57,7 @@ impl Server {
                 .header_read_timeout(self.keepalive_timeout);
             let serving = Serving {
                 routes: Arc::new(Routes {
-                    board,
+                    pools,
                     build,
                     metrics: self.metrics,
                     probes: self.probes,
@@ -76,7 +76,7 @@ impl Server {
 }
 
 struct Routes {
-    board: Board,
+    pools: Arc<[Arc<Pool>]>,
     build: Build,
     metrics: bool,
     probes: bool,
@@ -125,7 +125,11 @@ const PROBE_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<String> {
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/metrics") if routes.metrics => {
-            let pools = stats::board_stats(&routes.board);
+            let pools: Vec<_> = routes
+                .pools
+                .iter()
+                .map(|pool| stats::pool_stats(&pool.snapshot()))
+                .collect();
             reply(
                 StatusCode::OK,
                 text::CONTENT_TYPE,
@@ -136,7 +140,8 @@ fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<String> {
             reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
         }
         (&Method::GET, "/readyz") if routes.probes => {
-            let (status, body) = probes::readyz(&routes.board);
+            let pools: Vec<_> = routes.pools.iter().map(|pool| pool.snapshot()).collect();
+            let (status, body) = probes::readyz(&pools);
             reply(status, PROBE_CONTENT_TYPE, body)
         }
         _ => {

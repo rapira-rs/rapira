@@ -1,7 +1,7 @@
 use crate::{
     callbacks::fatal_error_recorded,
     context::{bind_server_context, populate_request_context, unbind_server_context},
-    scoreboard::{Event, sb_update},
+    pool::{Event, record},
     start::{Pull, Wait, pull, run_script},
     types::Context,
     *,
@@ -14,9 +14,9 @@ pub(crate) fn classic_worker(entrypoint: &Path) {
         crate::context::clean_realpath_cache();
         loop {
             match pull(Wait::Forever) {
-                Pull::Unit(unit) => sb_update(classic_executor(&mut unit.into_cgi())),
+                Pull::Unit(unit) => record(classic_executor(&mut unit.into_cgi())),
                 Pull::Reload => {
-                    sb_update(Event::Starting);
+                    record(Event::Starting);
                     crate::quota::renew();
                     tracing::info!(target: "rapira", "reload requested; resolving the entrypoint again");
                     break;
