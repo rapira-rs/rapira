@@ -43,18 +43,10 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
             pool.workers = 1;
         }
     }
-    let count = plugins
-        .iter()
-        .try_fold(0usize, |n, (_, pool)| n.checked_add(pool.workers))
-        .context("too many PHP workers")?;
-    let mut engine = rapira_sapi::Engine::start(&crate::PLUGIN_REGISTERS, count)?;
-    let timed = plugins
-        .iter()
-        .any(|(_, pool)| !pool.request_terminate_timeout.is_zero());
-    if timed {
-        rapira_sapi::watchdog::reserve_wake_signal()
-            .context("the request watchdog requires a free SIGRTMAX")?;
-    }
+    let mut engine = rapira_sapi::Engine::start(
+        &crate::PLUGIN_REGISTERS,
+        plugins.iter().map(|(_, pool)| pool),
+    )?;
     let mut pidfile = settings
         .server
         .pidfile
@@ -123,12 +115,6 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
             &mut pidfile,
         )
     });
-    let watchdog = timed.then(|| {
-        or_exit(
-            rapira_sapi::watchdog::start().context("starting the watchdog"),
-            &mut pidfile,
-        )
-    });
 
     loop {
         let sig = or_exit(
@@ -153,7 +139,6 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
     info!(target: "rapira", "stopping server");
     engine.begin_drain();
     stop.send_replace(true);
-    drop(watchdog);
     loop {
         match or_exit(
             signals.pending().context("checking signals during stop"),

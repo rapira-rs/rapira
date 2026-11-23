@@ -221,6 +221,9 @@ impl crate::Engine {
                 })
                 .with_context(|| format!("spawning {name} worker {index}"))?;
         }
+        if !settings.request_terminate_timeout.is_zero() && self.watchdog.is_none() {
+            self.watchdog = Some(crate::watchdog::start().context("starting the watchdog")?);
+        }
         Ok(intake)
     }
 }

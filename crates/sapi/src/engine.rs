@@ -7,6 +7,7 @@ use std::thread::{Builder, JoinHandle};
 
 use anyhow::{Context, ensure};
 use crossbeam_channel::Sender;
+use rapira_config::PoolSettings;
 
 use crate::*;
 
@@ -76,17 +77,27 @@ impl Workers {
 pub struct Engine {
     pub(crate) workers: Arc<Workers>,
     pub(crate) pools: Vec<Arc<pool::Pool>>,
+    /// Runs from the start of the first pool with a request time limit until the drain starts.
+    pub(crate) watchdog: Option<crate::watchdog::Watchdog>,
     _main_thread: PhantomData<Rc<()>>,
 }
 
 impl Engine {
-    /// Start TSRM and PHP. MINIT calls the plugin register functions in order.
-    pub fn start(
+    /// Starts TSRM and PHP for the workers of `pools`. MINIT calls the plugin register functions in order.
+    pub fn start<'a>(
         register: &'static [unsafe extern "C" fn()],
-        workers: usize,
+        pools: impl IntoIterator<Item = &'a PoolSettings>,
     ) -> anyhow::Result<Self> {
         static STARTED: AtomicBool = AtomicBool::new(false);
         check_linked_php()?;
+        let mut workers = 0usize;
+        let mut timed = false;
+        for pool in pools {
+            workers = workers
+                .checked_add(pool.workers)
+                .context("too many PHP workers")?;
+            timed |= !pool.request_terminate_timeout.is_zero();
+        }
         let expected_threads = c_int::try_from(workers.saturating_add(1))
             .context("too many PHP worker threads for TSRM")?;
         ensure!(
@@ -116,6 +127,7 @@ impl Engine {
         let engine = Self {
             workers: Arc::default(),
             pools: Vec::new(),
+            watchdog: None,
             _main_thread: PhantomData,
         };
         ensure!(started, "php_module_startup failed");
@@ -132,6 +144,11 @@ impl Engine {
         }
         crate::env::install();
         crate::context::intern_server_strings();
+        if timed {
+            // The reservation blocks the wake signal on this thread, and each later thread inherits the mask.
+            crate::watchdog::reserve_wake_signal()
+                .context("the request watchdog requires a free SIGRTMAX")?;
+        }
         Ok(engine)
     }
 
@@ -154,11 +171,12 @@ impl Engine {
         &self.pools
     }
 
-    /// Starts the drain. A worker with a unit in progress stays active until its next pull.
-    pub fn begin_drain(&self) {
+    /// Starts the drain and stops the watchdog. A worker with a unit in progress stays active until its next pull.
+    pub fn begin_drain(&mut self) {
         for pool in &self.pools {
             pool.begin_drain();
         }
+        self.watchdog = None;
     }
 }
 

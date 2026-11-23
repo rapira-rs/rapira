@@ -49,7 +49,7 @@ pub fn block_timer_signal() -> io::Result<()> {
 }
 
 /// Call on the main thread after PHP module startup and before any pool starts.
-pub fn reserve_wake_signal() -> io::Result<()> {
+pub(crate) fn reserve_wake_signal() -> io::Result<()> {
     signal_result(unsafe { rapira_watchdog_install() })
 }
 
@@ -188,13 +188,13 @@ impl Worker {
     }
 }
 
-pub struct Watchdog {
+pub(crate) struct Watchdog {
     stop: mpsc::Sender<()>,
     thread: Option<JoinHandle<()>>,
 }
 
 /// Start after worker startup when at least one pool has a request timeout.
-pub fn start() -> io::Result<Watchdog> {
+pub(crate) fn start() -> io::Result<Watchdog> {
     let (stop, rx) = mpsc::channel();
     let thread = thread::Builder::new()
         .name("rapira-watchdog".into())
