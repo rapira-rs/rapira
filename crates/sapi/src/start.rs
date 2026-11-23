@@ -1,6 +1,6 @@
 use anyhow::Context as _;
 use crossbeam_channel::{Receiver, Select, Sender, bounded, never, select_biased};
-use rapira_config::{Mode, PoolSettings};
+use rapira_config::{ExecutionClock, Mode, PoolSettings};
 use std::cell::RefCell;
 use std::ffi::{CStr, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
@@ -113,6 +113,7 @@ struct ThreadPlugin {
     mode: c_int,
     record: *const rapira_plugin,
     name: &'static str,
+    cpu_clock: bool,
 }
 
 // SAFETY: the record is null or immutable from MINIT until all worker threads end.
@@ -126,6 +127,7 @@ impl ThreadPlugin {
                 self.record,
                 self.name.as_ptr().cast(),
                 self.name.len(),
+                self.cpu_clock,
             )
         };
     }
@@ -157,6 +159,7 @@ impl crate::Engine {
             } else {
                 std::ptr::null()
             },
+            cpu_clock: settings.execution_clock == ExecutionClock::Cpu,
         };
         let pool = Arc::new(Pool::new(name, settings.workers));
         self.pools.push(Arc::clone(&pool));

@@ -224,3 +224,63 @@ async fn http_and_grpc_keep_their_pool_settings_in_one_process() -> anyhow::Resu
     }
     Ok(())
 }
+
+/// Checks that each pool has its own execution clock. The budget is 1 s, and each unit sleeps for 2 s. A sleep uses wall-clock time and no CPU time.
+#[tokio::test]
+#[cfg_attr(
+    not(all(php_zts, php_execution_timers)),
+    ignore = "needs ZTS PHP with per-thread execution timers"
+)]
+async fn http_and_grpc_keep_their_execution_clocks_in_one_process() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        http_pool: &'static str,
+        grpc_pool: &'static str,
+        http_completes: bool,
+    }
+    let cases = [
+        Case {
+            name: "only the HTTP pool uses the cpu clock",
+            http_pool: "execution_clock = \"cpu\"",
+            grpc_pool: "",
+            http_completes: true,
+        },
+        Case {
+            name: "only the gRPC pool uses the cpu clock",
+            http_pool: "",
+            grpc_pool: "execution_clock = \"cpu\"",
+            http_completes: false,
+        },
+    ];
+    let ini = std::fs::read_to_string(fixture("ini/timeout_tests/timeout.php.ini"))?;
+    for case in cases {
+        let srv = Spawn::http(
+            Mode::Dispatcher,
+            fixture("timeout_tests/timeout-dispatcher.php"),
+        )
+        .with_grpc(fixture("timeout_tests/sleep-grpc.php"))
+        .http_pool(case.http_pool)
+        .grpc_pool(case.grpc_pool)
+        .php_ini(&ini)
+        .spawn();
+        wait_serving(&srv, "http", 1);
+        wait_serving(&srv, "grpc", 1);
+
+        let mut conn = timeout(WAIT, Conn::open(&listen(&srv), Wire::H2)).await??;
+        // A killed call can end with an error status or with a reset stream.
+        let grpc = timeout(WAIT, conn.grpc(ECHO_PATH, &[], HI_FRAME)).await?;
+        let http = timeout(WAIT, drain_async(get(srv.addr, "/?sleep=2000").await?)).await?;
+        assert_eq!(
+            (
+                http.status == 200,
+                grpc.is_ok_and(|reply| reply.grpc_status() == Some("0"))
+            ),
+            (case.http_completes, !case.http_completes),
+            "{}: (HTTP unit completed, gRPC call completed)",
+            case.name
+        );
+        drop(conn);
+        stop(srv).await;
+    }
+    Ok(())
+}

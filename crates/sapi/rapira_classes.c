@@ -168,6 +168,12 @@ PHP_MINIT_FUNCTION(rapira) {
     return SUCCESS;
 }
 
+// RINIT runs one time in each php_request_startup, after that function arms the execution timer. https://github.com/php/php-src/blob/php-8.6.0/main/main.c#L1886-L1917
+PHP_RINIT_FUNCTION(rapira) {
+    rapira_timer_use_cpu_clock();
+    return SUCCESS;
+}
+
 // The quiesce hook runs after the shutdown functions, the destructors, the
 // output flush and the timer stop, and before the memory manager shutdown:
 // https://github.com/php/php-src/blob/php-8.5.11/main/main.c#L1974-L2050
@@ -208,7 +214,7 @@ zend_module_entry rapira_module_entry = {
     ext_functions,
     PHP_MINIT(rapira),
     NULL,
-    NULL,
+    PHP_RINIT(rapira),
     PHP_RSHUTDOWN(rapira),
     NULL,
     RAPIRA_VERSION,

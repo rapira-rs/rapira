@@ -79,6 +79,8 @@ typedef struct itimerval rapira_timer;
 bool rapira_timer_pause(rapira_timer *saved);
 // Arms the timer again with the value that rapira_timer_pause saved.
 void rapira_timer_resume(const rapira_timer *saved);
+// Moves the execution timer of this thread to the CPU clock of the thread, if the pool of the thread uses the cpu clock. RINIT calls it.
+void rapira_timer_use_cpu_clock(void);
 
 // The worker maps rapira_config::Mode to these values.
 enum {
@@ -106,8 +108,9 @@ bool rapira_has_execution_timers(void);
 void rapira_lock_timeouts(void);
 // Each PHP thread calls start before its first request and end after its last request.
 // The plugin and the name must live until the thread ends. The name has name_len bytes.
+// cpu_clock is true when the pool of the thread sets execution_clock to cpu.
 void rapira_thread_start(int mode, const rapira_plugin *plugin,
-                         const char *name, size_t name_len);
+                         const char *name, size_t name_len, bool cpu_clock);
 void rapira_thread_end(void);
 void rapira_set_dispatcher(int mode, const rapira_plugin *plugin,
                            const char *name, size_t name_len);

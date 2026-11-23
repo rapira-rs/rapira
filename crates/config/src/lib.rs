@@ -9,7 +9,7 @@ mod server;
 
 pub use listen::ListenAddr;
 pub use log::{LogFormat, LogLevel, LogSettings, resolve_log};
-pub use pool::{Mode, PoolSection, PoolSettings, check_entrypoint, resolve_pool};
+pub use pool::{ExecutionClock, Mode, PoolSection, PoolSettings, check_entrypoint, resolve_pool};
 pub use server::{ServerSection, ServerSettings, resolve_server};
 
 /// `value` resolved against the config directory `dir`. An empty string counts as absent.

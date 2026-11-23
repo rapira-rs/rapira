@@ -313,3 +313,102 @@ fn queued_unit_gets_a_fresh_budget() -> anyhow::Result<()> {
     }
     Ok(())
 }
+
+/// Checks the clock that max_execution_time uses in a pool. The budget is 1 s. A sleep uses wall-clock time and no CPU time. A spin uses both.
+#[test]
+#[cfg_attr(
+    not(php_execution_timers),
+    ignore = "needs PHP with per-thread execution timers"
+)]
+fn execution_clock_selects_the_time_that_uses_the_budget() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        mode: Mode,
+        fixture: &'static str,
+        pool: &'static str,
+        target: &'static str,
+        done: &'static str,
+        killed: bool,
+    }
+    let cases = [
+        Case {
+            name: "the default clock counts a sleep",
+            mode: Mode::Dispatcher,
+            fixture: "timeout_tests/timeout-dispatcher.php",
+            pool: "",
+            target: "/?sleep=2000",
+            done: "pending=0",
+            killed: true,
+        },
+        Case {
+            name: "the wall clock counts a sleep",
+            mode: Mode::Dispatcher,
+            fixture: "timeout_tests/timeout-dispatcher.php",
+            pool: "execution_clock = \"wall\"",
+            target: "/?sleep=2000",
+            done: "pending=0",
+            killed: true,
+        },
+        Case {
+            name: "the cpu clock does not count a sleep",
+            mode: Mode::Dispatcher,
+            fixture: "timeout_tests/timeout-dispatcher.php",
+            pool: "execution_clock = \"cpu\"",
+            target: "/?sleep=2000",
+            done: "pending=0",
+            killed: false,
+        },
+        Case {
+            name: "the cpu clock counts a spin",
+            mode: Mode::Dispatcher,
+            fixture: "timeout_tests/timeout-dispatcher.php",
+            pool: "execution_clock = \"cpu\"",
+            target: "/?spin",
+            done: "pending=0",
+            killed: true,
+        },
+        Case {
+            name: "the cpu clock in classic mode does not count a sleep",
+            mode: Mode::Classic,
+            fixture: "timeout_tests/clock-classic.php",
+            pool: "execution_clock = \"cpu\"",
+            target: "/?sleep=2000",
+            done: "done",
+            killed: false,
+        },
+        Case {
+            name: "the cpu clock in classic mode counts a spin",
+            mode: Mode::Classic,
+            fixture: "timeout_tests/clock-classic.php",
+            pool: "execution_clock = \"cpu\"",
+            target: "/?spin",
+            done: "done",
+            killed: true,
+        },
+    ];
+
+    let ini = timeout_ini();
+    for c in cases {
+        let srv = Spawn::http(c.mode, fixture(c.fixture))
+            .http_pool(c.pool)
+            .php_ini(&ini)
+            .json_log()
+            .spawn();
+
+        let mut rx = submit(srv.addr, req(c.target))?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let resp = drain_resp_deadline(&mut rx, deadline)
+            .unwrap_or_else(|| panic!("{}: the unit never ended", c.name));
+        let completed = resp.status() == 200 && resp.body_string() == c.done;
+        let fatal = server_log::records(&srv.log_file())
+            .iter()
+            .any(|e| e.target == "php" && e.message.contains("Maximum execution time"));
+        assert_eq!(
+            (completed, fatal),
+            (!c.killed, c.killed),
+            "{}: (unit completed, timeout fatal logged)",
+            c.name
+        );
+    }
+    Ok(())
+}
