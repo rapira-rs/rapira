@@ -44,7 +44,7 @@ pub(crate) fn finish_reset(sent: u64, started: bool) {
 pub(crate) fn check_opcache(total_workers: usize) -> anyhow::Result<()> {
     // Both calls read startup state. They need no PHP request.
     let (version, enabled) = unsafe { (crate::php_version_id(), rapira_opcache_enabled()) };
-    if let Some(needed) = missing_opcache_fix(version, crate::zts(), enabled, total_workers) {
+    if let Some(needed) = missing_opcache_fix(version, enabled, total_workers) {
         anyhow::bail!(
             "PHP {} cannot run {total_workers} workers with OPcache. Use PHP {needed} or later in this minor.",
             crate::linked_php_version()
@@ -54,13 +54,8 @@ pub(crate) fn check_opcache(total_workers: usize) -> anyhow::Result<()> {
 }
 
 // The fix protects shared memory while other threads use it. https://github.com/php/php-src/commit/36c6d1f500f7ec477f6eae0b0f5c46b041d82347
-fn missing_opcache_fix(
-    version: u32,
-    zts: bool,
-    enabled: bool,
-    total_workers: usize,
-) -> Option<&'static str> {
-    if !zts || !enabled || total_workers <= 1 {
+fn missing_opcache_fix(version: u32, enabled: bool, total_workers: usize) -> Option<&'static str> {
+    if !enabled || total_workers <= 1 {
         return None;
     }
     match version {
@@ -80,24 +75,14 @@ mod tests {
         struct Case {
             name: &'static str,
             version: u32,
-            zts: bool,
             enabled: bool,
             workers: usize,
             required: Option<&'static str>,
         }
         let cases = [
             Case {
-                name: "NTS has only one interpreter",
-                version: 80428,
-                zts: false,
-                enabled: true,
-                workers: 4,
-                required: None,
-            },
-            Case {
                 name: "OPcache is off",
                 version: 80513,
-                zts: true,
                 enabled: false,
                 workers: 2,
                 required: None,
@@ -105,7 +90,6 @@ mod tests {
             Case {
                 name: "one worker",
                 version: 80600,
-                zts: true,
                 enabled: true,
                 workers: 1,
                 required: None,
@@ -113,7 +97,6 @@ mod tests {
             Case {
                 name: "8.4 before the fix",
                 version: 80428,
-                zts: true,
                 enabled: true,
                 workers: 2,
                 required: Some("8.4.29"),
@@ -121,7 +104,6 @@ mod tests {
             Case {
                 name: "8.4 with the fix",
                 version: 80429,
-                zts: true,
                 enabled: true,
                 workers: 2,
                 required: None,
@@ -129,7 +111,6 @@ mod tests {
             Case {
                 name: "8.5 before the fix",
                 version: 80513,
-                zts: true,
                 enabled: true,
                 workers: 2,
                 required: Some("8.5.14"),
@@ -137,7 +118,6 @@ mod tests {
             Case {
                 name: "8.5 with the fix",
                 version: 80514,
-                zts: true,
                 enabled: true,
                 workers: 2,
                 required: None,
@@ -145,7 +125,6 @@ mod tests {
             Case {
                 name: "8.6 before the fix",
                 version: 80600,
-                zts: true,
                 enabled: true,
                 workers: 2,
                 required: Some("8.6.1"),
@@ -153,7 +132,6 @@ mod tests {
             Case {
                 name: "8.6 with the fix",
                 version: 80601,
-                zts: true,
                 enabled: true,
                 workers: 2,
                 required: None,
@@ -161,7 +139,6 @@ mod tests {
             Case {
                 name: "8.7 includes the fix",
                 version: 80700,
-                zts: true,
                 enabled: true,
                 workers: 2,
                 required: None,
@@ -169,7 +146,7 @@ mod tests {
         ];
         for case in cases {
             assert_eq!(
-                missing_opcache_fix(case.version, case.zts, case.enabled, case.workers),
+                missing_opcache_fix(case.version, case.enabled, case.workers),
                 case.required,
                 "{}",
                 case.name

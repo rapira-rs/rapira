@@ -87,10 +87,6 @@ impl Engine {
     ) -> anyhow::Result<Self> {
         static STARTED: AtomicBool = AtomicBool::new(false);
         check_linked_php()?;
-        ensure!(
-            workers <= 1 || zts(),
-            "more than one PHP worker requires --enable-zts"
-        );
         let expected_threads = c_int::try_from(workers.saturating_add(1))
             .context("too many PHP worker threads for TSRM")?;
         ensure!(
