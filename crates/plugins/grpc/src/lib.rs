@@ -3,13 +3,12 @@
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
-use connectrpc::Router;
+use connectrpc::{ConnectionConfig, DeadlinePolicy, Router};
 use connectrpc_health::Status;
-use connectrpc_reflection::Reflector;
-use rapira_net::{ListenAddr, PreparedListener};
-use rapira_sapi::plugin::{Mode, Plugin, ServeFuture, Worker};
+use rapira_net::PreparedListener;
+use rapira_sapi::plugin::{Plugin, ServeFuture};
 use rapira_sapi::rapira_plugin;
+use rapira_sapi::work::Intake;
 use tokio::sync::watch;
 
 mod call;
@@ -24,53 +23,19 @@ use call::{Call, Head, Part, UnaryReply};
 pub use php::rapira_grpc_register_classes;
 use schema::{MethodInfo, Schema};
 
-pub(crate) struct Config {
-    pub listen: ListenAddr,
-    pub schema: Arc<Schema>,
-    /// Serve `grpc.reflection.v1` and `v1alpha` for the configured services.
-    pub reflection: bool,
-    /// The timeout of a call whose client sets no deadline.
-    pub default_timeout: Option<Duration>,
-    /// The longest timeout that a client can set.
-    pub max_timeout: Option<Duration>,
-    /// Idle time before the listener sends an HTTP/2 PING.
-    pub keepalive_interval: Duration,
-    /// The wait for the PING ACK. A peer that is gone without a FIN sends no ACK. So its connection closes within the sum of both values and does not hold a later drain.
-    pub keepalive_timeout: Duration,
-    /// The configured order. The first interceptor runs first.
-    pub interceptors: Vec<Arc<dyn connectrpc::Interceptor>>,
-}
-
+/// The listener and the values that `from_settings` loads before PHP starts.
 pub struct Server {
-    config: Config,
-    prepared: Prepared,
-}
-
-/// What `prepare` leaves for `serve`: the listener and the routes that the plugin answers without PHP.
-pub(crate) struct Prepared {
-    pub(crate) listener: PreparedListener,
-    pub(crate) router: Router,
-    pub(crate) health: watch::Sender<Status>,
-}
-
-/// Binds the listener and prepares the routes before PHP starts.
-fn prepare(config: &Config) -> Result<Prepared> {
-    let listener = rapira_net::bind(&config.listen)?;
-
-    let names = config.schema.services().iter().map(|s| s.name.clone());
-    let (mut router, health) = health::install(names.clone());
-    if config.reflection {
-        let reflector = Reflector::from_descriptor_pool(Arc::clone(config.schema.pool()))
-            .map_err(|e| anyhow!("building grpc reflection: {e}"))?
-            .with_services(names);
-        router = connectrpc_reflection::install(router, reflector);
-    }
-    tracing::info!(target: "grpc", "listening on {}", listener.addr());
-    Ok(Prepared {
-        listener,
-        router,
-        health,
-    })
+    listener: PreparedListener,
+    schema: Arc<Schema>,
+    /// The routes that the plugin answers without PHP: health and, when configured, reflection.
+    router: Router,
+    health: watch::Sender<Status>,
+    /// The timeout of a call whose client sets no deadline, and the longest timeout that a client can set.
+    deadlines: DeadlinePolicy,
+    /// The HTTP/2 PING interval and the wait for the PING ACK. A peer that is gone without a FIN sends no ACK. So its connection closes within the sum of both values and does not hold a later drain.
+    connection: ConnectionConfig,
+    /// The configured order. The first interceptor runs first.
+    interceptors: Vec<Arc<dyn connectrpc::Interceptor>>,
 }
 
 impl Plugin for Server {
@@ -78,21 +43,21 @@ impl Plugin for Server {
         "grpc"
     }
 
-    fn modes(&self) -> &'static [Mode] {
-        &[Mode::Dispatcher]
-    }
-
     fn dispatcher(&self) -> *const rapira_plugin {
         &raw const php::rapira_grpc_plugin
     }
 
     fn worker_init(&self) -> Arc<dyn Fn() + Send + Sync> {
-        let schema = Arc::clone(&self.config.schema);
+        let schema = Arc::clone(&self.schema);
         Arc::new(move || schema::enter(Arc::clone(&schema)))
     }
 
-    fn serve(self: Box<Self>, worker: Worker) -> ServeFuture {
-        let Self { config, prepared } = *self;
-        Box::pin(serve::serve(config, prepared, worker))
+    fn serve(
+        self: Box<Self>,
+        intake: Intake,
+        stop: watch::Receiver<bool>,
+        drain_grace: Duration,
+    ) -> ServeFuture {
+        Box::pin(serve::serve(*self, intake, stop, drain_grace))
     }
 }

@@ -9,20 +9,19 @@ use anyhow::{Result, anyhow};
 use connectrpc::server::serve_connection;
 use connectrpc::{
     Chain, CompressionRegistry, ConnectRpcBody, ConnectRpcService, ConnectionConfig,
-    ConnectionInfo, DeadlinePolicy, GzipProvider, Router, http,
+    ConnectionInfo, GzipProvider, Router, http,
 };
 use connectrpc_health::Status;
 use rapira_net::{Connections, Serve};
 use rapira_sapi::Addr;
-use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::{Notify, watch};
 use tokio_util::io::InspectWriter;
 use tower::Service as _;
 
+use crate::Server;
 use crate::dispatch::PhpDispatcher;
-use crate::{Config, Prepared};
 
 /// Everything the accept loop hands to a connection, and the drain that follows it.
 struct Serving {
@@ -51,46 +50,6 @@ impl Drop for InFlight {
 }
 
 impl Serving {
-    fn start(
-        intake: Intake,
-        config: &Config,
-        router: Router,
-        health: watch::Sender<Status>,
-    ) -> Self {
-        let mut deadlines = DeadlinePolicy::new();
-        if let Some(timeout) = config.default_timeout {
-            deadlines = deadlines.with_default_timeout(timeout);
-        }
-        if let Some(max) = config.max_timeout {
-            deadlines = deadlines.with_max(max);
-        }
-        let inflight = Arc::new(AtomicUsize::new(0));
-        let dispatcher = PhpDispatcher {
-            schema: Arc::clone(&config.schema),
-            intake,
-            inflight: Arc::clone(&inflight),
-        };
-        // The plugin routes come first, so a configured service cannot hide health or reflection.
-        let mut service = ConnectRpcService::new(Chain(router, dispatcher))
-            .with_deadline_policy(deadlines)
-            // The default registry offers every codec that the build compiles, zstd included.
-            // The default policy compresses a reply of 1 KiB or more for a client that accepts gzip. The dispatcher turns it off per reply.
-            .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
-        // Interceptors cover GET and POST requests to every route: PHP, health, reflection and unknown paths.
-        for interceptor in &config.interceptors {
-            service = service.with_interceptor_arc(Arc::clone(interceptor));
-        }
-        Self {
-            service,
-            connection: ConnectionConfig::new()
-                .with_http2_keepalive_interval(config.keepalive_interval)
-                .with_http2_keepalive_timeout(config.keepalive_timeout),
-            health,
-            connections: Connections::default(),
-            inflight,
-        }
-    }
-
     fn spawn<I>(&self, io: I, info: ConnectionInfo)
     where
         I: AsyncRead + AsyncWrite + Unpin + Send + 'static,
@@ -179,8 +138,35 @@ fn status_in_trailers(
     response
 }
 
-pub(crate) async fn serve(config: Config, prepared: Prepared, worker: Worker) -> Result<()> {
-    let serving = Serving::start(worker.intake, &config, prepared.router, prepared.health);
-    prepared.listener.run(worker.stop, &serving).await?;
-    serving.drain(worker.drain_grace).await
+pub(crate) async fn serve(
+    server: Server,
+    intake: Intake,
+    stop: watch::Receiver<bool>,
+    drain_grace: Duration,
+) -> Result<()> {
+    let inflight = Arc::new(AtomicUsize::new(0));
+    let dispatcher = PhpDispatcher {
+        schema: server.schema,
+        intake,
+        inflight: Arc::clone(&inflight),
+    };
+    // The plugin routes come first, so a configured service cannot hide health or reflection.
+    let mut service = ConnectRpcService::new(Chain(server.router, dispatcher))
+        .with_deadline_policy(server.deadlines)
+        // The default registry offers every codec that the build compiles, zstd included.
+        // The default policy compresses a reply of 1 KiB or more for a client that accepts gzip. The dispatcher turns it off per reply.
+        .with_compression(CompressionRegistry::new().register(GzipProvider::default()));
+    // Interceptors cover GET and POST requests to every route: PHP, health, reflection and unknown paths.
+    for interceptor in server.interceptors {
+        service = service.with_interceptor_arc(interceptor);
+    }
+    let serving = Serving {
+        service,
+        connection: server.connection,
+        health: server.health,
+        connections: Connections::default(),
+        inflight,
+    };
+    server.listener.run(stop, &serving).await?;
+    serving.drain(drain_grace).await
 }

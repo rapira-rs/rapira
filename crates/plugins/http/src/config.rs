@@ -14,7 +14,7 @@ use rapira_config::{
 use serde::Deserialize;
 
 use crate::multipart::Limits;
-use crate::{Config, Server, prepare};
+use crate::{Config, Server};
 
 /// The `[http]` table.
 #[derive(Debug, Deserialize)]
@@ -246,7 +246,14 @@ impl Server {
         }
 
         let prepared = rapira_net::bind(&settings.listen).context("plugin http: prepare failed")?;
-        let mut config = Config {
+        let mut uploads = settings.uploads;
+        let spool = uploads
+            .as_mut()
+            .map(crate::multipart::SpoolDir::prepare)
+            .transpose()
+            .context("plugin http: prepare failed")?;
+        crate::php::set_sendfile_root(settings.sendfile_root);
+        let config = Config {
             // The bound address, because the kernel picks the port for a listen port 0.
             listen: prepared.addr().clone(),
             server_name: settings.server_name,
@@ -259,10 +266,8 @@ impl Server {
             superglobals: settings.pool.mode != Mode::Dispatcher,
             keepalive_timeout: settings.keepalive_timeout,
             middleware,
-            uploads: settings.uploads,
-            sendfile_root: settings.sendfile_root,
+            uploads,
         };
-        let spool = prepare(&mut config).context("plugin http: prepare failed")?;
         tracing::info!(target: "http", "listening on {}", prepared.addr());
         Ok(Self {
             config,

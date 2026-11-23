@@ -1,13 +1,13 @@
 //! The http plugin. It serves HTTP/1.1 on the configured listener, and PHP answers every request.
 
-use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
 use rapira_net::{ListenAddr, PreparedListener};
-use rapira_sapi::plugin::{Mode, Plugin, ServeFuture, Worker};
+use rapira_sapi::plugin::{Plugin, ServeFuture};
 use rapira_sapi::rapira_plugin;
+use rapira_sapi::work::Intake;
+use tokio::sync::watch;
 
 mod bridge;
 pub mod check;
@@ -35,8 +35,6 @@ pub struct Config {
     pub middleware: Vec<middleware::Layer>,
     /// The multipart limits and the process spool directory for dispatcher mode.
     pub uploads: Option<multipart::Limits>,
-    /// The containment root of sendFile().
-    pub sendfile_root: PathBuf,
 }
 
 pub struct Server {
@@ -45,24 +43,9 @@ pub struct Server {
     spool: Option<multipart::SpoolDir>,
 }
 
-/// Prepares the spool directory and the values that PHP can read at boot.
-fn prepare(config: &mut Config) -> Result<Option<multipart::SpoolDir>> {
-    let spool = config
-        .uploads
-        .as_mut()
-        .map(multipart::SpoolDir::prepare)
-        .transpose()?;
-    php::set_sendfile_root(config.sendfile_root.clone());
-    Ok(spool)
-}
-
 impl Plugin for Server {
     fn name(&self) -> &'static str {
         "http"
-    }
-
-    fn modes(&self) -> &'static [Mode] {
-        &[Mode::Classic, Mode::Worker, Mode::Dispatcher]
     }
 
     fn dispatcher(&self) -> *const rapira_plugin {
@@ -75,7 +58,12 @@ impl Plugin for Server {
         Arc::new(move || identity.enter())
     }
 
-    fn serve(self: Box<Self>, worker: Worker) -> ServeFuture {
-        Box::pin(serve::serve(*self, worker))
+    fn serve(
+        self: Box<Self>,
+        intake: Intake,
+        stop: watch::Receiver<bool>,
+        drain_grace: Duration,
+    ) -> ServeFuture {
+        Box::pin(serve::serve(*self, intake, stop, drain_grace))
     }
 }

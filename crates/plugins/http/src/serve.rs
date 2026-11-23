@@ -10,7 +10,6 @@ use hyper::server::conn::http1;
 use hyper_util::rt::{TokioIo, TokioTimer};
 use rapira_net::{Connections, ListenAddr, Serve};
 use rapira_sapi::Addr;
-use rapira_sapi::plugin::Worker;
 use rapira_sapi::work::Intake;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
@@ -124,15 +123,20 @@ impl Serve for Serving {
     }
 }
 
-pub(crate) async fn serve(server: Server, worker: Worker) -> Result<()> {
+pub(crate) async fn serve(
+    server: Server,
+    intake: Intake,
+    stop: watch::Receiver<bool>,
+    drain_grace: Duration,
+) -> Result<()> {
     let Server {
         config,
         prepared,
         spool: _spool,
     } = server;
-    let serving = Serving::start(worker.intake, config);
-    prepared.run(worker.stop, &serving).await?;
-    serving.drain(worker.drain_grace).await
+    let serving = Serving::start(intake, config);
+    prepared.run(stop, &serving).await?;
+    serving.drain(drain_grace).await
 }
 
 fn listen_addr(listen: &ListenAddr) -> Addr {

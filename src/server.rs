@@ -4,8 +4,8 @@ use std::thread;
 use std::time::{Duration, Instant};
 
 use anyhow::{Context, Result, ensure};
-use rapira_config::{Mode, PoolSettings};
-use rapira_sapi::plugin::{Plugin, Worker};
+use rapira_config::PoolSettings;
+use rapira_sapi::plugin::Plugin;
 use rapira_sapi::pool::Pool;
 use tokio::sync::watch;
 use tokio::task::JoinSet;
@@ -30,9 +30,6 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
     if let Some(grpc) = settings.grpc {
         let pool = grpc.pool.clone();
         plugins.push((Box::new(rapira_grpc::Server::from_settings(grpc)?), pool));
-    }
-    for (plugin, pool) in &plugins {
-        check_mode(plugin.name(), plugin.modes(), pool.mode)?;
     }
 
     if !rapira_sapi::zts() {
@@ -83,22 +80,16 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
             unsafe { engine.start_pool(cfg, &*plugin, rt.handle()) },
             &mut pidfile,
         );
-        services.push((
-            plugin,
-            Worker {
-                intake,
-                stop: stop.subscribe(),
-                drain_grace: grace,
-            },
-        ));
+        services.push((plugin, intake));
     }
     let pools: Arc<[Arc<Pool>]> = engine.pools().into();
     let failed = Arc::new(AtomicBool::new(false));
     let mut tasks = JoinSet::new();
-    for (plugin, worker) in services {
+    for (plugin, intake) in services {
         let name = plugin.name();
+        let stop = stop.subscribe();
         tasks.spawn_on(
-            async move { (name, plugin.serve(worker).await) },
+            async move { (name, plugin.serve(intake, stop, grace).await) },
             rt.handle(),
         );
     }
@@ -229,29 +220,4 @@ fn exit(code: i32, pidfile: &mut Option<PidFile>) -> ! {
     drop(pidfile.take());
     // SAFETY: threads can still be inside PHP. Skip process destructors.
     unsafe { libc::_exit(code) }
-}
-
-fn check_mode(name: &str, served: &[Mode], mode: Mode) -> Result<()> {
-    if served.contains(&mode) {
-        return Ok(());
-    }
-    let served: Vec<String> = served.iter().map(Mode::to_string).collect();
-    anyhow::bail!(
-        "{name}.pool.mode = {mode}: this plugin serves {}",
-        served.join(", ")
-    )
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn a_pool_mode_the_plugin_does_not_serve_fails_the_boot() {
-        let err = check_mode("grpc", &[Mode::Dispatcher], Mode::Worker).unwrap_err();
-        assert_eq!(
-            err.to_string(),
-            "grpc.pool.mode = worker: this plugin serves dispatcher"
-        );
-    }
 }

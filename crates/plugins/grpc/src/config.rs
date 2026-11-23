@@ -5,15 +5,17 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use connectrpc::{ConnectionConfig, DeadlinePolicy};
+use connectrpc_reflection::Reflector;
 use rapira_config::{
-    ListenAddr, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, opt_path,
+    ListenAddr, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, opt_path,
     parse_listen, resolve_pool,
 };
 use serde::Deserialize;
 
 use crate::schema::Source;
-use crate::{Config, Schema, Server, prepare};
+use crate::{Schema, Server};
 
 /// The `[grpc]` table.
 #[derive(Debug, Deserialize)]
@@ -118,6 +120,12 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
     let interceptors = resolve_interceptors(section.interceptors, auth)?;
 
     let pool = resolve_pool(section.pool, "grpc.pool", dir)?;
+    if pool.mode != Mode::Dispatcher {
+        bail!(
+            "grpc.pool.mode = {}: this plugin serves dispatcher",
+            pool.mode
+        );
+    }
 
     Ok(Settings {
         listen,
@@ -169,7 +177,7 @@ fn resolve_interceptors(
 }
 
 impl Server {
-    /// Loads the schema and interceptors and binds the listener before the workers start.
+    /// Loads the schema and the interceptors, binds the listener and prepares the routes before PHP starts.
     pub fn from_settings(settings: Settings) -> Result<Self> {
         let schema = Arc::new(Schema::load(
             &settings.descriptor_set,
@@ -184,18 +192,36 @@ impl Server {
                 }
             }
         }
-        let config = Config {
-            listen: settings.listen,
+        let mut deadlines = DeadlinePolicy::new();
+        if let Some(timeout) = settings.default_timeout {
+            deadlines = deadlines.with_default_timeout(timeout);
+        }
+        if let Some(max) = settings.max_timeout {
+            deadlines = deadlines.with_max(max);
+        }
+
+        let listener = rapira_net::bind(&settings.listen).context("plugin grpc: prepare failed")?;
+        let names = schema.services().iter().map(|s| s.name.clone());
+        let (mut router, health) = crate::health::install(names.clone());
+        if settings.reflection {
+            let reflector = Reflector::from_descriptor_pool(Arc::clone(schema.pool()))
+                .map_err(|e| anyhow!("building grpc reflection: {e}"))
+                .context("plugin grpc: prepare failed")?
+                .with_services(names);
+            router = connectrpc_reflection::install(router, reflector);
+        }
+        tracing::info!(target: "grpc", "listening on {}", listener.addr());
+        Ok(Self {
+            listener,
             schema,
-            reflection: settings.reflection,
-            default_timeout: settings.default_timeout,
-            max_timeout: settings.max_timeout,
-            keepalive_interval: settings.keepalive_interval,
-            keepalive_timeout: settings.keepalive_timeout,
+            router,
+            health,
+            deadlines,
+            connection: ConnectionConfig::new()
+                .with_http2_keepalive_interval(settings.keepalive_interval)
+                .with_http2_keepalive_timeout(settings.keepalive_timeout),
             interceptors,
-        };
-        let prepared = prepare(&config).context("plugin grpc: prepare failed")?;
-        Ok(Self { config, prepared })
+        })
     }
 }
 
@@ -367,6 +393,11 @@ mod tests {
                 name: "unknown key",
                 toml: toml("foo = 1\n"),
                 expected: Err("unknown field `foo`"),
+            },
+            Case {
+                name: "worker mode",
+                toml: "descriptor_set = \"a.binpb\"\n[pool]\nentrypoint = \"g.php\"\nmode = \"worker\"\n".into(),
+                expected: Err("grpc.pool.mode = worker: this plugin serves dispatcher"),
             },
         ];
         for case in cases {
