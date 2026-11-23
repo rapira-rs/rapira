@@ -43,7 +43,7 @@ fn usr2_reload_restarts_the_apps_while_serving() {
     );
     assert!(tally.ok > 0, "the storm got no response");
     assert!(app_contexts(&log, "app loop ended").len() >= workers);
-    wait_for_pool_reload(&srv, "http", workers);
+    wait_recycled(&srv, "http");
 }
 
 /// SIGUSR2 recycles an idle app without a request.
@@ -735,35 +735,6 @@ fn an_entrypoint_that_does_not_resolve_answers_503_until_a_reload_after_the_fix(
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Waits until all workers have restarted an app. Each status request gives one complete snapshot.
-fn wait_for_pool_reload(srv: &Server, pool: &str, workers: usize) {
-    let prefix = format!("pool={pool} worker=");
-    let reloaded = poll(Duration::from_secs(20), || {
-        wait_serving(srv, pool, workers);
-        let rows = records(&srv.log_file());
-        let recycled = rows
-            .iter()
-            .rev()
-            .filter(|r| r.message.starts_with(&prefix))
-            .take(workers)
-            .filter(|r| {
-                r.message.split_ascii_whitespace().any(|field| {
-                    field
-                        .strip_prefix("recycles=")
-                        .and_then(|n| n.parse::<u64>().ok())
-                        .is_some_and(|n| n > 0)
-                })
-            })
-            .count();
-        (recycled == workers).then_some(())
-    });
-    assert!(
-        reloaded.is_some(),
-        "not every {pool} worker recycled\n{}",
-        diagnostics(srv)
-    );
-}
-
 /// Submits the probes together. Each app holds its probe briefly, so distinct boot tokens identify the workers that served this batch.
 fn serving_apps(srv: &Server, workers: usize, expected: &str) -> BTreeSet<String> {
     let mut last = Vec::new();
@@ -934,7 +905,7 @@ fn an_opcache_restart_runs_and_every_app_gets_opcache_back() {
             case.name
         );
         if case.grpc {
-            wait_for_pool_reload(&srv, "grpc", workers);
+            wait_recycled(&srv, "grpc");
         }
         let restarts: Vec<String> = records(&srv.log_file())
             .into_iter()

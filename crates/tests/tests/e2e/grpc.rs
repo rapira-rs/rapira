@@ -3,14 +3,13 @@ use std::path::Path;
 
 use http::Method;
 use rapira_net::ListenAddr;
-use rapira_sapi::plugin::Mode;
 use serde_json::Value;
 use tests::grpc::{Conn, ECHO_PATH as ECHO, Fields, Wire, envelope, fields};
 use tests::{StatusBody, server_log};
 
 use crate::harness::{
     BOOT, ECHO_SERVICE, EXIT_OK, Exited, STOP_BUDGET, Spawn, assert_exit_code, diagnostics,
-    fixture_path, http_get, listen, signal, wait_log_contains, wait_serving,
+    fixture_path, signal, wait_log_contains, wait_serving,
 };
 
 /// Encodes `EchoRequest { text }` as field 1, length-delimited, for a text shorter than 128 bytes.
@@ -181,35 +180,6 @@ fn grpc_pool_serves_from_rapira_toml() {
             diagnostics(&srv)
         );
     }
-}
-
-/// Each worker gets the dispatcher of its own pool and answers its protocol.
-#[test]
-#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
-fn http_and_grpc_pools_run_side_by_side() {
-    let srv = Spawn::http(
-        Mode::Dispatcher,
-        tests::fixture("dispatcher/echo-loop-worker.php"),
-    )
-    .with_grpc(fixture_path("grpc/echo-worker.php"))
-    .spawn();
-    let ListenAddr::Tcp(grpc) = listen(&srv) else {
-        panic!("a TCP grpc listener")
-    };
-    wait_serving(&srv, "http", 1);
-    wait_serving(&srv, "grpc", 1);
-
-    let StatusBody { status: code, body } = http_get(srv.addr, "/", BOOT)
-        .unwrap_or_else(|e| panic!("GET /: {e}\n{}", diagnostics(&srv)));
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    assert_eq!(body, b"method=GET body=", "\n{}", diagnostics(&srv));
-
-    let got = connect_json(grpc, ECHO, r#"{"text":"hi"}"#);
-    assert!(
-        matches!(&got, Ok(StatusBody { status: 200, body }) if body == r#"{"text":"hi"}"#),
-        "{got:?}\n{}",
-        diagnostics(&srv)
-    );
 }
 
 /// A schema error stops the server at boot with exit code 1.

@@ -1193,14 +1193,25 @@ fn with_status<T>(
     );
 }
 
+/// True when the status line shows an idle or active worker.
+fn is_serving(line: &str) -> bool {
+    line.contains(" state=idle ") || line.contains(" state=active ")
+}
+
 /// Waits until at least `count` workers in the pool are idle or active in one snapshot.
 pub fn wait_serving(srv: &Server, pool: &str, count: usize) {
     with_status(srv, pool, &format!("{count} serving workers"), |_, rows| {
-        let serving = rows
-            .iter()
-            .filter(|line| line.contains(" state=idle ") || line.contains(" state=active "))
-            .count();
+        let serving = rows.iter().filter(|line| is_serving(line)).count();
         (serving >= count).then_some(())
+    });
+}
+
+/// Waits until every worker in the pool serves and has recycled its app, in one snapshot.
+pub fn wait_recycled(srv: &Server, pool: &str) {
+    with_status(srv, pool, "a recycle of every worker", |_, rows| {
+        rows.iter()
+            .all(|line| is_serving(line) && !line.contains(" recycles=0 "))
+            .then_some(())
     });
 }
 
