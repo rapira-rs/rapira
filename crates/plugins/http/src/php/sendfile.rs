@@ -4,7 +4,7 @@ use std::cell::RefCell;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
-use super::respond::{Verb, discard_unit, send_body, throw_verb};
+use super::respond::{Verb, closed, send_body, throw_verb};
 use super::*;
 
 /// The configured root, with its symlinks.
@@ -105,12 +105,8 @@ pub(super) unsafe fn send_file_core(
     length: Option<u64>,
     eos: bool,
 ) -> Verb {
-    if st.cancelled() {
-        discard_unit(st);
-        return Verb::Discarded;
-    }
-    if st.settled() {
-        return Verb::Finalized;
+    if let Some(verb) = closed(st) {
+        return verb;
     }
     let FileSlice { file, len } = match open_send_file(path, cwd, offset, length) {
         Ok(opened) => opened,

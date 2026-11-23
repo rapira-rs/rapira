@@ -124,15 +124,20 @@ pub(super) fn discard_unit(st: &mut ExchangeState) {
     st.sender = None;
 }
 
+/// The check before a write. It discards a cancelled unit. A settled unit takes no more writes.
+pub(super) fn closed(st: &mut ExchangeState) -> Option<Verb> {
+    if st.cancelled() {
+        discard_unit(st);
+        return Some(Verb::Discarded);
+    }
+    st.settled().then_some(Verb::Finalized)
+}
+
 /// # Safety
 /// The rules of `send_frame` apply.
 pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState) -> Verb {
-    if st.cancelled() {
-        discard_unit(st);
-        return Verb::Discarded;
-    }
-    if st.settled() {
-        return Verb::Finalized;
+    if let Some(verb) = closed(st) {
+        return verb;
     }
     if matches!(st.phase, Phase::Open) {
         return Verb::HeadNotWritten;
@@ -250,12 +255,8 @@ pub(super) unsafe fn write_body_core(
     eos: bool,
 ) -> Verb {
     unsafe { release_done() };
-    if st.cancelled() {
-        discard_unit(st);
-        return Verb::Discarded;
-    }
-    if st.settled() {
-        return Verb::Finalized;
+    if let Some(verb) = closed(st) {
+        return verb;
     }
     let len = unsafe { (*s).len };
     if len == 0 && !eos {
@@ -338,12 +339,8 @@ pub(super) unsafe fn seal(st: &mut ExchangeState) {
 /// # Safety
 /// The rules of `send_frame` apply.
 pub(super) unsafe fn flush_core(st: &mut ExchangeState) -> Verb {
-    if st.cancelled() {
-        discard_unit(st);
-        return Verb::Discarded;
-    }
-    if st.settled() {
-        return Verb::Finalized;
+    if let Some(verb) = closed(st) {
+        return verb;
     }
     match unsafe { emit_head(st, None) } {
         Ok(()) => Verb::Ok,
