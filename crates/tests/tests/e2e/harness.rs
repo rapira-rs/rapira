@@ -521,7 +521,7 @@ impl Spawn {
             let descriptor_set = match &self.descriptor_set {
                 Some(path) => path.display().to_string(),
                 None => {
-                    std::fs::copy(tests::echo_descriptor_set(), dir.join("echo.binpb"))
+                    copy_file(&tests::echo_descriptor_set(), &dir.join("echo.binpb"))
                         .expect("copy echo.binpb");
                     "echo.binpb".to_owned()
                 }
@@ -573,6 +573,11 @@ impl Spawn {
     }
 }
 
+/// Copies a file with a read and a write. `std::fs::copy` calls `copy_file_range`, and a libphp with zend_test replaces that symbol with a wrapper that needs a started PHP thread.
+pub fn copy_file(from: &Path, to: &Path) -> io::Result<()> {
+    std::fs::write(to, std::fs::read(from)?)
+}
+
 /// Copies the files of the directory of `fixture` into `dir/sub`; returns the entrypoint relative to `dir`.
 fn stage_dir(dir: &Path, sub: &str, fixture: &Path) -> String {
     let name = fixture
@@ -586,7 +591,7 @@ fn stage_dir(dir: &Path, sub: &str, fixture: &Path) -> String {
     {
         let path = entry.expect("fixture dir entry").path();
         if path.is_file() {
-            std::fs::copy(&path, to.join(path.file_name().expect("file name")))
+            copy_file(&path, &to.join(path.file_name().expect("file name")))
                 .unwrap_or_else(|e| panic!("copy {}: {e}", path.display()));
         }
     }

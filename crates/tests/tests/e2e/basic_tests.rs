@@ -6,7 +6,9 @@ use std::time::Duration;
 use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
-use crate::harness::{Server, Spawn, diagnostics, free_port, http_get, scratch_dir, slot_line};
+use crate::harness::{
+    Server, Spawn, copy_file, diagnostics, free_port, http_get, scratch_dir, slot_line,
+};
 
 #[test]
 fn fibers_stress_classic() -> anyhow::Result<()> {
@@ -359,7 +361,7 @@ fn script_name_keeps_the_name_of_a_symlinked_entrypoint() -> anyhow::Result<()> 
     ];
     for case in &cases {
         let dir = scratch_dir();
-        std::fs::copy(fixture("boot_server/values.php"), dir.join("values.php"))?;
+        copy_file(&fixture("boot_server/values.php"), &dir.join("values.php"))?;
         std::fs::write(dir.join("front.php"), case.script)?;
         std::os::unix::fs::symlink("front.php", dir.join("index.php"))?;
         let srv =
