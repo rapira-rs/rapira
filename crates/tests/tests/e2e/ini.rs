@@ -1,5 +1,5 @@
 use crate::harness::{self, Spawn, fixture_path, http_get};
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use std::time::Duration;
 use tests::StatusBody;
 
@@ -55,13 +55,13 @@ fn a_process_timer_can_only_run_with_one_worker() -> anyhow::Result<()> {
         Case {
             name: "two workers use separate timers",
             workers: 2,
-            run: rapira_sapi::zts() && rapira_sapi::has_execution_timers(),
+            run: cfg!(all(php_zts, php_execution_timers)),
             disabled: false,
         },
         Case {
             name: "two workers cannot enable the process timer",
             workers: 2,
-            run: rapira_sapi::zts() && !rapira_sapi::has_execution_timers(),
+            run: cfg!(all(php_zts, not(php_execution_timers))),
             disabled: true,
         },
     ];

@@ -1,4 +1,4 @@
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use serde_json::{Value, json};
 use tests::wire::submit;
 use tests::{StatusBody, drain, fixture, req};

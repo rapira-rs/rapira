@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::net::{SocketAddr, TcpStream};
 use std::time::{Duration, Instant};
 
+use rapira_config::Mode;
 use rapira_net::ListenAddr;
-use rapira_sapi::plugin::Mode;
 use tests::wire::submit;
 use tests::{Resp, StatusBody, drain_resp_deadline, poll, req};
 

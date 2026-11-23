@@ -6,7 +6,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp_deadline, fixture, req, server_log};
 
@@ -59,7 +59,7 @@ fn parked_write_keeps_the_unused_budget() -> anyhow::Result<()> {
         },
     ];
 
-    let clock = if rapira_sapi::has_execution_timers() {
+    let clock = if cfg!(php_execution_timers) {
         "wall"
     } else {
         "cpu"

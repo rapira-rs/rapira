@@ -329,7 +329,7 @@ async fn each_protocol_reaches_php_over_the_wire() {
             .map(|call| call["remote"].clone())
             .collect();
         let want: Vec<Value> = if case.php {
-            vec![json!(logged_remote(&conn.peer))]
+            vec![json!(logged_remote(conn.peer))]
         } else {
             Vec::new()
         };
@@ -919,7 +919,7 @@ async fn request_facts_reach_php() {
             "{}: deadline {deadline:?} for a 60 s timeout at {wall}",
             case.name
         );
-        assert_eq!(call["remote"], logged_remote(&conn.peer), "{}", case.name);
+        assert_eq!(call["remote"], logged_remote(conn.peer), "{}", case.name);
     }
     stop(srv).await;
 }

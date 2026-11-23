@@ -3,14 +3,33 @@
 use std::net::SocketAddr;
 use std::sync::OnceLock;
 
+use http::HeaderMap;
 use http::header::CONTENT_LENGTH;
-use http::{Method, StatusCode};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper_util::rt::TokioIo;
-use rapira_sapi::{Frame, types::ResponseHead};
 use tokio::net::TcpStream;
 use tokio::sync::mpsc;
+
+/// One part of a response. A complete response is `Head`, one `Chunk` for each body frame, then `End`.
+pub enum Frame {
+    Head {
+        head: ResponseHead,
+        /// The value of the Content-Length field.
+        content_length: Option<u64>,
+    },
+    Chunk(Bytes),
+    End {
+        /// The body ended with an error.
+        truncated: bool,
+    },
+}
+
+#[derive(Debug)]
+pub struct ResponseHead {
+    pub status: u16,
+    pub headers: HeaderMap,
+}
 
 /// The connections run here, so the frames arrive while a sync caller blocks on the receiver.
 fn runtime() -> &'static tokio::runtime::Runtime {
@@ -40,13 +59,12 @@ pub async fn submit_async(
     req: http::Request<Vec<u8>>,
 ) -> anyhow::Result<mpsc::Receiver<Frame>> {
     let request = req.map(|body| Full::new(Bytes::from(body)));
-    let head_only = request.method() == Method::HEAD;
     let stream = runtime().spawn(TcpStream::connect(addr)).await??;
     let (tx, rx) = mpsc::channel(16);
     runtime().spawn(async move {
         tokio::select! {
             () = tx.closed() => {}
-            () = exchange(stream, request, head_only, &tx) => {}
+            () = exchange(stream, request, &tx) => {}
         }
     });
     Ok(rx)
@@ -55,7 +73,6 @@ pub async fn submit_async(
 async fn exchange(
     stream: TcpStream,
     request: http::Request<Full<Bytes>>,
-    head_only: bool,
     tx: &mpsc::Sender<Frame>,
 ) {
     let Ok((mut sender, conn)) = hyper::client::conn::http1::handshake(TokioIo::new(stream)).await
@@ -64,35 +81,25 @@ async fn exchange(
     };
     let reply = async move {
         if let Ok(response) = sender.send_request(request).await {
-            forward(response, head_only, tx).await;
+            forward(response, tx).await;
         }
     };
     // The reply future owns sender. When the reply ends, sender drops and the connection ends, so both futures finish.
     let _ = tokio::join!(conn, reply);
 }
 
-async fn forward(
-    response: http::Response<hyper::body::Incoming>,
-    head_only: bool,
-    tx: &mpsc::Sender<Frame>,
-) {
+async fn forward(response: http::Response<hyper::body::Incoming>, tx: &mpsc::Sender<Frame>) {
     let (parts, mut body) = response.into_parts();
     let content_length = parts
         .headers
         .get(CONTENT_LENGTH)
         .and_then(|v| v.to_str().ok()?.parse().ok());
-    let bodiless = head_only
-        || matches!(
-            parts.status,
-            StatusCode::NO_CONTENT | StatusCode::NOT_MODIFIED
-        );
     let head = Frame::Head {
         head: ResponseHead {
             status: parts.status.as_u16(),
             headers: parts.headers,
         },
         content_length,
-        bodiless,
     };
     if tx.send(head).await.is_err() {
         return;

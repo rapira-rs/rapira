@@ -7,8 +7,6 @@ use tokio::sync::watch;
 use crate::rapira_plugin;
 use crate::work::Intake;
 
-pub use rapira_config::Mode;
-
 pub type ServeFuture = Pin<Box<dyn Future<Output = anyhow::Result<()>> + Send + 'static>>;
 
 pub trait Plugin: Send + 'static {

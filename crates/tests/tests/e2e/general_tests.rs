@@ -1,6 +1,6 @@
 use http::Method;
 use http::header::{CONTENT_TYPE, HeaderValue};
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, fixture, req, server_log};
 

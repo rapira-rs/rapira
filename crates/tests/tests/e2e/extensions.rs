@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 use std::time::Duration;
 
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use tests::StatusBody;
 
 use crate::harness::{

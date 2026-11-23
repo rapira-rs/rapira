@@ -1,5 +1,5 @@
+use crate::wire::{Frame, ResponseHead};
 use http::{HeaderMap, HeaderName, HeaderValue};
-use rapira_sapi::Frame;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -57,7 +57,7 @@ pub fn echo_descriptor_set() -> PathBuf {
 /// A response stream collected until its `End`, or until the producer stops.
 #[derive(Debug, Default)]
 pub struct Resp {
-    pub head: Option<rapira_sapi::types::ResponseHead>,
+    pub head: Option<ResponseHead>,
     pub content_length: Option<u64>,
     pub body: Vec<u8>,
     pub truncated: bool,
@@ -86,7 +86,6 @@ impl Resp {
             Frame::Head {
                 head,
                 content_length,
-                ..
             } => {
                 self.head = Some(head);
                 self.content_length = content_length;
@@ -96,9 +95,6 @@ impl Resp {
                 self.truncated = truncated;
                 self.ended = true;
                 return true;
-            }
-            Frame::File { .. } => {
-                unreachable!("the wire client sends only Head, Chunk and End")
             }
         }
         false

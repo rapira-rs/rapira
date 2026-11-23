@@ -2,7 +2,7 @@ use std::io;
 use std::os::unix::net::UnixListener;
 use std::time::{Duration, Instant};
 
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use tests::{StatusBody, fixture, poll, server_log};
 
 use crate::harness::{
@@ -77,7 +77,7 @@ fn a_pool_with_no_worker_left_after_the_grace_exits_124() -> io::Result<()> {
         .http_pool("request_terminate_timeout_secs = 1")
         .php_ini("max_execution_time = 4\nmax_input_time = -1\nhard_timeout = 0")
         .json_log();
-    if rapira_sapi::zts() {
+    if cfg!(php_zts) {
         spawn = spawn.with_grpc(fixture_path("grpc/echo-worker.php"));
     }
     let mut srv = spawn.spawn();

@@ -1,11 +1,10 @@
 use crate::harness::*;
-use rapira_sapi::Frame;
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use std::collections::BTreeSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, SystemTime};
 use tests::server_log::{app_contexts, records, wait_app_record};
-use tests::wire::submit;
+use tests::wire::{Frame, submit};
 use tests::{drain, poll, req};
 use tokio::sync::mpsc::Receiver;
 

@@ -7,8 +7,8 @@ use std::os::unix::net::UnixStream;
 use std::path::Path;
 use std::time::Duration;
 
+use rapira_config::Mode;
 use rapira_net::ListenAddr;
-use rapira_sapi::plugin::Mode;
 use tests::{StatusBody, poll};
 
 use crate::harness::{

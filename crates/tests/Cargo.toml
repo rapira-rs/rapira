@@ -10,7 +10,7 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 http = { workspace = true }
-rapira_sapi = { workspace = true }
+rapira_config = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "net"] }
 tracing = { workspace = true }
 # The server.log readers (src/server_log.rs) use it.

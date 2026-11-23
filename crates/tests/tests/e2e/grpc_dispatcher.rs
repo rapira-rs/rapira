@@ -1,8 +1,8 @@
 use std::time::{Duration, UNIX_EPOCH};
 
 use http::{HeaderMap, Method};
+use rapira_config::Mode;
 use rapira_net::ListenAddr;
-use rapira_sapi::plugin::Mode;
 use serde_json::{Value, json};
 use tests::grpc::{
     Conn, ECHO_PATH, ERROR_INFO, Fields, Response, Wire, envelope, fields, status_bytes,
@@ -520,7 +520,7 @@ async fn call_context_reports_the_request_facts() -> anyhow::Result<()> {
         }
         assert_eq!(
             fields.remove("remote"),
-            Some(json!(logged_remote(&conn.peer))),
+            Some(json!(logged_remote(conn.peer))),
             "{}",
             c.name
         );

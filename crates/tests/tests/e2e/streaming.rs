@@ -1,8 +1,7 @@
 use std::time::{Duration, Instant};
 
-use rapira_sapi::Frame;
-use rapira_sapi::plugin::Mode;
-use tests::wire::submit;
+use rapira_config::Mode;
+use tests::wire::{Frame, submit};
 use tests::{Resp, StatusBody, drain_resp_deadline, poll, req, server_log};
 use tokio::sync::mpsc::Receiver;
 

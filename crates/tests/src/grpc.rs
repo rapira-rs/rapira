@@ -7,7 +7,7 @@ use http_body_util::{BodyExt, Full};
 use hyper::body::Bytes;
 use hyper_util::rt::{TokioExecutor, TokioIo};
 use rapira_net::ListenAddr;
-use rapira_sapi::Addr;
+use std::net::SocketAddr;
 use tokio::io::{AsyncRead, AsyncWrite};
 
 pub const ECHO_SERVICE: &str = "rapira.test.v1.EchoService";
@@ -65,8 +65,8 @@ enum Sender {
 /// One client connection.
 pub struct Conn {
     sender: Sender,
-    /// The remote address that the server sees for this client.
-    pub peer: Addr,
+    /// The remote address that the server sees for this client. None is an unnamed unix socket.
+    pub peer: Option<SocketAddr>,
 }
 
 /// A collected response.
@@ -100,15 +100,15 @@ impl Response {
 
 impl Conn {
     pub async fn open(listen: &ListenAddr, wire: Wire) -> anyhow::Result<Conn> {
-        let (io, peer): (Box<dyn Io>, Addr) = match listen {
+        let (io, peer): (Box<dyn Io>, Option<SocketAddr>) = match listen {
             ListenAddr::Tcp(addr) => {
                 let stream = tokio::net::TcpStream::connect(addr).await?;
                 let local = stream.local_addr()?;
-                (Box::new(stream), Addr::Inet(local))
+                (Box::new(stream), Some(local))
             }
             ListenAddr::Unix(path) => {
                 let stream = tokio::net::UnixStream::connect(path).await?;
-                (Box::new(stream), Addr::Unix(None))
+                (Box::new(stream), None)
             }
         };
         let io = TokioIo::new(io);

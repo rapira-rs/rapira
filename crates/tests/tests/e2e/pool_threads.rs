@@ -4,9 +4,10 @@ use std::time::Duration;
 use anyhow::Context;
 use http::{HeaderMap, Method};
 use http_body_util::BodyExt;
-use rapira_sapi::{Frame, plugin::Mode};
+use rapira_config::Mode;
 use serde_json::{Value, json};
 use tests::grpc::{Conn, ECHO_PATH, HI_FRAME, WATCH_PATH, Wire, envelope};
+use tests::wire::Frame;
 use tests::{drain_async, fixture, req, server_log, wire};
 use tokio::sync::mpsc::Receiver;
 use tokio::time::timeout;
@@ -103,7 +104,7 @@ async fn two_grpc_calls_overlap_on_one_http2_connection() -> anyhow::Result<()> 
         .spawn();
     wait_serving(&srv, "grpc", 2);
     let mut conn = timeout(WAIT, Conn::open(&listen(&srv), Wire::H2)).await??;
-    let peer = logged_remote(&conn.peer);
+    let peer = logged_remote(conn.peer);
     let watch = timeout(
         WAIT,
         conn.request(

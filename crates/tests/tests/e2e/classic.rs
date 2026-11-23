@@ -1,5 +1,5 @@
 use crate::harness::{self, Spawn, http_get, slot_line};
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use std::time::Duration;
 use tests::wire::submit;
 use tests::{StatusBody, drain_resp, req};

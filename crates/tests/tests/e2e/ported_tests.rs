@@ -2,7 +2,7 @@ use std::{ops::Deref, path::Path, time::Duration};
 
 use http::Method;
 use http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderValue, SET_COOKIE};
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use tests::wire::submit;
 use tests::{Resp, StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 

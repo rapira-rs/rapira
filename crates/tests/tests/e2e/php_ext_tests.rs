@@ -1,4 +1,4 @@
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use tests::wire::submit;
 use tests::{Resp, drain_resp, fixture, req};
 

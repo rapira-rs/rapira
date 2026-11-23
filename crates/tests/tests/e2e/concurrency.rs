@@ -1,6 +1,6 @@
 use std::time::Duration;
 
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use tests::StatusBody;
 
 use crate::harness::{Spawn, fixture_path, http_get, is_zts, wait_serving};

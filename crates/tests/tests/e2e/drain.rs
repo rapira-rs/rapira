@@ -1,5 +1,5 @@
 use crate::harness::*;
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use std::time::Duration;
 
 const READ: Duration = Duration::from_secs(10);

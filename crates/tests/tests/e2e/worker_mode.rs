@@ -3,7 +3,7 @@ use std::time::{Duration, Instant};
 
 use http::Method;
 use http::header::{CONTENT_TYPE, HeaderName, HeaderValue};
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use serde_json::Value;
 use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, drain_resp_deadline, fixture, poll, req, server_log};

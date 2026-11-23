@@ -1,7 +1,7 @@
 use std::net::SocketAddr;
 
 use http::header::SET_COOKIE;
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use tests::wire::submit_async;
 use tests::{Resp, drain_resp_async, fixture, req};
 

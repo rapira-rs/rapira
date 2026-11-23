@@ -10,8 +10,8 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::thread::JoinHandle;
 use std::time::{Duration, Instant};
 
+use rapira_config::Mode;
 use rapira_net::ListenAddr;
-use rapira_sapi::{Addr, plugin::Mode};
 use serde_json::Value;
 use tests::{StatusBody, poll, server_log};
 
@@ -122,9 +122,9 @@ pub fn php_version() -> String {
     php_config("--version").expect("run php-config --version")
 }
 
-/// The thread safety setting of the linked PHP build.
+/// The thread safety setting of the PHP build that `php-config` names.
 pub fn is_zts() -> bool {
-    rapira_sapi::zts()
+    cfg!(php_zts)
 }
 
 /// The `listen` value of a TCP pool on `port`.
@@ -1258,11 +1258,8 @@ pub fn plugin_error(srv: &Server) -> Option<String> {
 }
 
 /// The `remote` that PHP reports for a client at `peer`. `Conn::open` connects from an unnamed unix socket, which PHP reports as `unix:NULL`.
-pub fn logged_remote(peer: &Addr) -> String {
-    match peer {
-        Addr::Inet(addr) => addr.to_string(),
-        Addr::Unix(_) => "unix:NULL".to_owned(),
-    }
+pub fn logged_remote(peer: Option<SocketAddr>) -> String {
+    peer.map_or_else(|| "unix:NULL".to_owned(), |addr| addr.to_string())
 }
 
 /// Waits for exit 0 on a blocking thread. The clients on the test runtime can continue during the drain.

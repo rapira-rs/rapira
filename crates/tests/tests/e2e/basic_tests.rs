@@ -1,6 +1,6 @@
 use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use http::{Method, Version};
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tests::wire::submit;

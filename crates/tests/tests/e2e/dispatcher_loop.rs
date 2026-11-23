@@ -7,9 +7,9 @@ use std::time::Duration;
 use anyhow::Context;
 use http::header::{CONTENT_TYPE, HOST};
 use http::{HeaderValue, Method, Version};
+use rapira_config::Mode;
 use rapira_net::ListenAddr;
-use rapira_sapi::{Frame, plugin::Mode};
-use tests::wire::submit;
+use tests::wire::{Frame, submit};
 use tests::{StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::{
