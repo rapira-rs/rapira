@@ -215,12 +215,10 @@ void rapira_timer_use_cpu_clock(void) {
     sev.sigev_notify_thread_id = (pid_t)syscall(SYS_gettid);
     timer_t cpu;
     if (timer_create(CLOCK_THREAD_CPUTIME_ID, &sev, &cpu) == 0) {
-        // php_request_startup armed the timer of Zend before RINIT.
-        struct itimerspec armed = {0};
-        timer_gettime(EG(max_execution_timer_timer), &armed);
         timer_delete(EG(max_execution_timer_timer));
         EG(max_execution_timer_timer) = cpu;
-        timer_settime(cpu, 0, &armed, NULL);
+        // Arms the full budget of php_request_startup on the new timer, and clears a timeout that the wall clock recorded before RINIT. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1724-L1730
+        zend_set_timeout(EG(timeout_seconds), false);
     }
 #endif
 }

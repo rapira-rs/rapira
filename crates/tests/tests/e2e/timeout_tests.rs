@@ -412,3 +412,65 @@ fn execution_clock_selects_the_time_that_uses_the_budget() -> anyhow::Result<()>
     }
     Ok(())
 }
+
+/// Checks that a cpu pool gives a classic request its full budget when the request waits before its script starts. With session.auto_start, the RINIT of the session extension opens the session, and the second request waits there for the session lock of the first request. The budget is 1 s, and the wait is longer.
+#[test]
+#[cfg_attr(
+    not(all(php_zts, php_execution_timers)),
+    ignore = "needs ZTS PHP with per-thread execution timers"
+)]
+fn a_wait_before_the_script_does_not_use_the_cpu_budget() -> anyhow::Result<()> {
+    let sessions = scratch_dir();
+    // PHP 8.6 and later refuse a session ID from a cookie that has no session, unless strict mode is off. https://github.com/php/php-src/blob/php-8.6.0/ext/session/session.c#L1000
+    let ini = format!(
+        "{}\nsession.auto_start = 1\nsession.use_strict_mode = 0\nsession.save_path = \"{}\"\n",
+        timeout_ini(),
+        sessions.display()
+    );
+    let srv = Spawn::http(Mode::Classic, fixture("timeout_tests/clock-classic.php"))
+        .workers(2)
+        .http_pool("execution_clock = \"cpu\"")
+        .php_ini(&ini)
+        .json_log()
+        .spawn();
+    wait_serving(&srv, "http", 2);
+
+    let with_session = |target: &str| {
+        let mut request = req(target);
+        request.headers_mut().insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("PHPSESSID=clock"),
+        );
+        request
+    };
+    // The first request keeps the session lock while it sleeps for 2 s.
+    let holder = submit(srv.addr, with_session("/?sleep=2000"))?;
+    let session_file = sessions.join("sess_clock");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !session_file.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the first request never opened its session"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let waiter = drain(submit(srv.addr, with_session("/"))?);
+    let fatal = server_log::records(&srv.log_file())
+        .iter()
+        .any(|e| e.target == "php" && e.message.contains("Maximum execution time"));
+    assert_eq!(
+        (waiter.status, waiter.body.as_str(), fatal),
+        (200, "done", false),
+        "(status, body, timeout fatal logged) of the request that waited for the session lock"
+    );
+    assert_eq!(
+        drain(holder),
+        StatusBody {
+            status: 200,
+            body: "done".to_owned()
+        },
+        "the request that kept the session lock"
+    );
+    Ok(())
+}
