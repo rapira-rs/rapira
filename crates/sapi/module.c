@@ -144,16 +144,6 @@ void rapira_receive_timed(void) {
 
 static bool rapira_timeouts_disabled;
 
-#if !defined(ZEND_MAX_EXECUTION_TIMERS) && defined(HAVE_SETITIMER)
-// The timer of zend_set_timeout without the POSIX timers. https://github.com/php/php-src/blob/php-8.5.12/Zend/zend_execute_API.c#L1647-L1655
-#if defined(__CYGWIN__) || defined(__PASE__) ||                                \
-    (defined(__aarch64__) && defined(__APPLE__))
-#define RAPIRA_ZEND_ITIMER ITIMER_REAL
-#else
-#define RAPIRA_ZEND_ITIMER ITIMER_PROF
-#endif
-#endif
-
 bool rapira_timer_pause(rapira_timer *saved) {
 #if defined(ZEND_MAX_EXECUTION_TIMERS)
     // zend_max_execution_timer_settime uses the same check for a missing timer.

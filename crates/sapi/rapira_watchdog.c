@@ -61,20 +61,6 @@ int rapira_watchdog_install(void) {
 }
 
 // Only PHP workers may receive the signal for Zend's execution timer.
-// https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1668-L1697
-#ifdef ZEND_MAX_EXECUTION_TIMERS
-#define RAPIRA_TIMER_SIGNAL SIGRTMIN
-#elif defined(HAVE_SETITIMER)
-#if defined(__CYGWIN__) || defined(__PASE__) ||                                \
-    (defined(__aarch64__) && defined(__APPLE__))
-#define RAPIRA_TIMER_SIGNAL SIGALRM
-#define RAPIRA_ITIMER ITIMER_REAL
-#else
-#define RAPIRA_TIMER_SIGNAL SIGPROF
-#define RAPIRA_ITIMER ITIMER_PROF
-#endif
-#endif
-
 int rapira_watchdog_mask(int how, bool wake) {
     sigset_t set;
     sigemptyset(&set);
@@ -95,13 +81,13 @@ rapira_interrupt rapira_watchdog_capture(void) {
 }
 
 void rapira_watchdog_fire(const rapira_interrupt *slot) {
-#if !defined(ZTS) && defined(RAPIRA_ITIMER)
+#if !defined(ZTS) && defined(RAPIRA_ZEND_ITIMER)
     // NTS treats a timer signal with timed_out set as a hard timeout.
     // Stop its process timer if the watchdog expires first.
     // https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1559-L1587
     if (!rapira_load_flag(slot->timed_out)) {
         struct itimerval off = {0};
-        setitimer(RAPIRA_ITIMER, &off, NULL);
+        setitimer(RAPIRA_ZEND_ITIMER, &off, NULL);
     }
 #endif
     rapira_store_flag(slot->timed_out, true);

@@ -55,6 +55,20 @@ zend_executor_globals *rapira_eg(void);
 php_core_globals *rapira_pg(void);
 zend_compiler_globals *rapira_cg(void);
 
+// The signal and the interval timer of zend_set_timeout. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1656-L1697
+#ifdef ZEND_MAX_EXECUTION_TIMERS
+#define RAPIRA_TIMER_SIGNAL SIGRTMIN
+#elif defined(HAVE_SETITIMER)
+#if defined(__CYGWIN__) || defined(__PASE__) ||                                \
+    (defined(__aarch64__) && defined(__APPLE__))
+#define RAPIRA_TIMER_SIGNAL SIGALRM
+#define RAPIRA_ZEND_ITIMER ITIMER_REAL
+#else
+#define RAPIRA_TIMER_SIGNAL SIGPROF
+#define RAPIRA_ZEND_ITIMER ITIMER_PROF
+#endif
+#endif
+
 // The saved execution timer of this thread: a POSIX timer with ZEND_MAX_EXECUTION_TIMERS, else the setitimer timer of zend_set_timeout.
 #if defined(ZEND_MAX_EXECUTION_TIMERS)
 typedef struct itimerspec rapira_timer;
