@@ -1,0 +1,196 @@
+#!/usr/bin/env bash
+# Prepares an Amp orb for rapira. The script installs the build packages of the CI PHP action and
+# builds the PHP versions of the CI test matrix from the php-src release branches with
+# .github/build-php.sh. It makes PHP 8.6 ZTS the default PHP, installs the Rust toolchain of
+# rust-toolchain.toml, clones the contract into ../contract and builds the CI cargo commands into
+# target/.
+# Amp runs this script again on top of an older snapshot. Each step checks its state first.
+set -euo pipefail
+
+repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$repo_root"
+
+timed() {
+	local name="$1" start=$SECONDS
+	shift
+	echo "==> $name"
+	"$@"
+	echo "<== $name: $((SECONDS - start))s"
+}
+
+# The packages of .github/actions/php-embed/action.yml, clang for bindgen and ps for the e2e tests.
+packages=(
+	build-essential autoconf bison re2c pkg-config clang libclang-dev procps
+	libssl-dev libcurl4-openssl-dev libxml2-dev libonig-dev libsqlite3-dev zlib1g-dev libffi-dev
+	libicu-dev libpq-dev libsodium-dev
+)
+
+# The PHP builds of the CI test matrix, as <minor>-<model>. The first build is the default PHP.
+php_builds=(8.6-zts 8.5-zts 8.4-zts 8.5-nts)
+php_root="$HOME/.local/share"
+php_logs="$HOME/.cache/rapira-php"
+
+install_packages() {
+	local missing=() p
+	for p in "${packages[@]}"; do
+		dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -qx 'install ok installed' || missing+=("$p")
+	done
+	if [ ${#missing[@]} -eq 0 ]; then
+		echo "all packages are installed"
+		return
+	fi
+	sudo apt-get update -qq
+	sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends "${missing[@]}"
+}
+
+# Builds one PHP into $php_root/php-<minor>-<model>. The script builds PHP again only when
+# .github/build-php.sh or .github/php-configure-flags.txt change. A build does not follow each new
+# commit on the php-src branch, because each build takes minutes.
+build_php() {
+	local minor="${1%-*}" model="${1#*-}" prefix="$php_root/php-$1" recipe sha src
+	recipe="$(cat .github/build-php.sh .github/php-configure-flags.txt | sha256sum | cut -c1-16)"
+	if [ "$(cut -d' ' -f1 "$prefix/.orb-build" 2>/dev/null)" = "$recipe" ]; then
+		echo "$1 is built: $(cat "$prefix/.orb-build")"
+		return
+	fi
+	sha="$(git ls-remote --exit-code https://github.com/php/php-src.git "refs/heads/PHP-$minor" | cut -f1)"
+	src="$(mktemp -d)"
+	# shellcheck disable=SC2064 # The trap runs after the function returns, so it takes the value now.
+	trap "rm -rf '$src'" EXIT
+	curl -fsSL --retry 3 "https://codeload.github.com/php/php-src/tar.gz/$sha" | tar -xz -C "$src" --strip-components=1
+	rm -rf "$prefix"
+	(cd "$src" && PHP_PREFIX="$prefix" sh "$repo_root/.github/build-php.sh" "$minor" "$model")
+	# The CI action loads the shared OPcache of PHP 8.4 from this file through PHP_INI_SCAN_DIR.
+	if [ "$minor" = 8.4 ]; then
+		mkdir -p "$prefix/conf.d"
+		echo "zend_extension=$("$prefix/bin/php-config" --extension-dir)/opcache.so" > "$prefix/conf.d/opcache.ini"
+	fi
+	echo "$recipe php-src $sha" > "$prefix/.orb-build"
+	echo "$1 is built: $(cat "$prefix/.orb-build")"
+}
+
+# Two builds run at a time. build-php.sh runs make with one job for each CPU, so more builds at a
+# time use more memory and save no time. A failed build stops setup only for the default PHP.
+build_all_php() {
+	local b running=0 failed_builds=()
+	mkdir -p "$php_logs"
+	rm -f "$php_logs/failed"
+	for b in "${php_builds[@]}"; do
+		if [ "$running" -ge 2 ]; then
+			wait -n
+			running=$((running - 1))
+		fi
+		( build_php "$b" ) > "$php_logs/$b.log" 2>&1 || echo "$b" >> "$php_logs/failed" &
+		running=$((running + 1))
+	done
+	wait
+	for b in "${php_builds[@]}"; do
+		if grep -qx "$b" "$php_logs/failed" 2>/dev/null; then
+			failed_builds+=("$b")
+			echo "PHP $b failed. The end of $php_logs/$b.log:" >&2
+			tail -n 30 "$php_logs/$b.log" >&2
+		else
+			tail -n 1 "$php_logs/$b.log"
+		fi
+	done
+	if [ ${#failed_builds[@]} -gt 0 ] && [ "${failed_builds[0]}" = "${php_builds[0]}" ]; then
+		return 1
+	fi
+	[ ${#failed_builds[@]} -eq 0 ] || echo "warning: setup continues without PHP ${failed_builds[*]}" >&2
+}
+
+# The Makefile finds the default PHP in $HOME/.local/share/php-zts, cargo finds it through
+# php-config on PATH, and the dynamic loader finds libphp.so through ld.so.conf.
+register_default_php() {
+	local prefix="$php_root/php-${php_builds[0]}" tool
+	ln -sfn "php-${php_builds[0]}" "$php_root/php-zts"
+	for tool in php php-config phpize; do
+		sudo ln -sfn "$prefix/bin/$tool" "/usr/local/bin/$tool"
+	done
+	echo "$prefix/lib" | sudo tee /etc/ld.so.conf.d/rapira-php.conf > /dev/null
+	sudo ldconfig
+	php -r 'echo PHP_VERSION, PHP_ZTS ? " ZTS" : " NTS", PHP_EOL;'
+}
+
+install_rust() {
+	if [ ! -x "$HOME/.cargo/bin/rustup" ]; then
+		curl --proto '=https' --tlsv1.2 -fsSL https://sh.rustup.rs | sh -s -- -y --default-toolchain none --profile minimal
+	fi
+	# rustup adds ~/.cargo/bin to PATH in the shell profiles. This running script needs it now.
+	export PATH="$HOME/.cargo/bin:$PATH"
+	# Without an argument, rustup installs the toolchain and the components of rust-toolchain.toml.
+	rustup toolchain install
+	rustc --version
+}
+
+# CI, the Makefile and the release builds pass --cfg tokio_unstable in RUSTFLAGS. Amp does not keep
+# exports from the shell profiles in a snapshot, so the orb sets the flag in the cargo config of the
+# checkout. .gitignore ignores .cargo. RUSTFLAGS replaces this value when it is set.
+write_cargo_config() {
+	if [ -f .cargo/config.toml ]; then
+		grep -q tokio_unstable .cargo/config.toml || echo "warning: .cargo/config.toml has no --cfg tokio_unstable" >&2
+		return
+	fi
+	mkdir -p .cargo
+	cat > .cargo/config.toml <<-'EOF'
+		# Written by .agents/setup for Amp orbs. CI and the Makefile set the same flag in RUSTFLAGS.
+		[build]
+		rustflags = ["--cfg", "tokio_unstable"]
+	EOF
+}
+
+# .claude/CLAUDE.md tells agents to read the PHP contract in ../contract.
+checkout_contract() {
+	local dir
+	dir="$(dirname "$repo_root")/contract"
+	if [ -d "$dir/.git" ]; then
+		git -C "$dir" pull --ff-only --quiet || echo "warning: cannot update $dir" >&2
+	else
+		git clone --quiet https://github.com/rapira-rs/contract "$dir"
+	fi
+	git -C "$dir" log -1 --format='contract at %h %s'
+}
+
+# Builds the dependencies of the CI cargo commands in target/. A failure here does not stop setup:
+# a broken base branch must not block the snapshot, and the agent can fix the build.
+warm_target() {
+	local failed=0
+	cargo fetch --locked || failed=1
+	cargo test --workspace --locked --no-run || failed=1
+	cargo build -p rapira_core --bin rapira --locked || failed=1
+	cargo test -p tests --test e2e --features e2e --locked --no-run || failed=1
+	cargo clippy --workspace --all-targets --locked -- -D warnings || failed=1
+	cargo clippy -p tests --features e2e --tests --locked -- -D warnings || failed=1
+	[ "$failed" = 0 ] || echo "warning: a warm-up build failed; setup continues" >&2
+}
+
+# Orb notes for agents in the global Amp guidance file of the orb. The script replaces its block
+# each time.
+write_agent_notes() {
+	local notes="$HOME/.config/amp/AGENTS.md" start="<!-- rapira orb: start -->" end="<!-- rapira orb: end -->"
+	mkdir -p "$(dirname "$notes")"
+	touch "$notes"
+	sed -i "\|^$start\$|,\|^$end\$|d" "$notes"
+	cat >> "$notes" <<-EOF
+		$start
+		# rapira orb environment
+
+		- .agents/setup built PHP ${php_builds[*]} from the php-src release branches with .github/build-php.sh, in $php_root/php-<minor>-<model>. Each .orb-build file records the php-src commit.
+		- The default PHP is ${php_builds[0]}: $php_root/php-zts (the Makefile default), /usr/local/bin/php-config and libphp.so in ld.so.conf.
+		- To use another build, set PHP_CONFIG=$php_root/php-<minor>-<model>/bin/php-config and a separate CARGO_TARGET_DIR. The make targets then set LD_LIBRARY_PATH. Direct cargo test and rapira runs need LD_LIBRARY_PATH=$php_root/php-<minor>-<model>/lib. For PHP 8.4, also set PHP_INI_SCAN_DIR=$php_root/php-8.4-zts/conf.d to load OPcache, as CI does.
+		- The builds stay on their php-src commit until .github/build-php.sh or .github/php-configure-flags.txt change. To build the newest commits, remove $php_root/php-*/.orb-build and run .agents/setup. The builds take about 13 minutes on 4 CPUs.
+		- .cargo/config.toml (ignored by git) sets --cfg tokio_unstable. If you set RUSTFLAGS, include --cfg tokio_unstable, as the Makefile does.
+		- target/ has the CI cargo commands built. The make targets use target/zts and build from cold.
+		- The PHP contract is checked out in $(dirname "$repo_root")/contract.
+		$end
+	EOF
+}
+
+timed "system packages" install_packages
+timed "rust toolchain" install_rust
+timed "contract checkout" checkout_contract
+timed "php builds" build_all_php
+timed "default php" register_default_php
+timed "cargo config" write_cargo_config
+timed "agent notes" write_agent_notes
+timed "cargo warm-up" warm_target

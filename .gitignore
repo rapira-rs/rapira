@@ -14,3 +14,6 @@ lcov.info
 .claude/CLAUDE.local.md
 
 .superpowers/
+
+# Amp orb portal records
+.amp/portals/*
