@@ -2,18 +2,15 @@
 #include <errno.h>
 #include <pthread.h>
 #include <signal.h>
-#include <sys/time.h>
 #include <time.h>
 
 #if PHP_VERSION_ID >= 80700
 #include <stdatomic.h>
 typedef atomic_bool rapira_interrupt_flag;
-#define rapira_load_flag atomic_load
 #define rapira_store_flag atomic_store
 #else
 #include <Zend/zend_atomic.h>
 typedef zend_atomic_bool rapira_interrupt_flag;
-#define rapira_load_flag zend_atomic_bool_load_ex
 #define rapira_store_flag zend_atomic_bool_store_ex
 #endif
 
@@ -81,15 +78,6 @@ rapira_interrupt rapira_watchdog_capture(void) {
 }
 
 void rapira_watchdog_fire(const rapira_interrupt *slot) {
-#if !defined(ZTS) && defined(RAPIRA_ZEND_ITIMER)
-    // NTS treats a timer signal with timed_out set as a hard timeout.
-    // Stop its process timer if the watchdog expires first.
-    // https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1559-L1587
-    if (!rapira_load_flag(slot->timed_out)) {
-        struct itimerval off = {0};
-        setitimer(RAPIRA_ZEND_ITIMER, &off, NULL);
-    }
-#endif
     rapira_store_flag(slot->timed_out, true);
     rapira_store_flag(slot->vm_interrupt, true);
 #ifdef SIGRTMAX

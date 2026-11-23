@@ -181,21 +181,7 @@ void rapira_timer_resume(const rapira_timer *saved) {
 #if defined(ZEND_MAX_EXECUTION_TIMERS)
     timer_settime(EG(max_execution_timer_timer), 0, saved, NULL);
 #elif defined(HAVE_SETITIMER)
-    struct itimerval t = *saved;
-#ifdef __linux__
-    // Linux adds one tick to an ITIMER_PROF value at each arming, so take one tick off. https://github.com/torvalds/linux/blob/v7.3/kernel/time/itimer.c#L201-L205 A coarse clock has the resolution of one tick. https://github.com/torvalds/linux/blob/v7.3/include/vdso/ktime.h#L13
-    struct timespec tick = {0};
-    clock_getres(CLOCK_REALTIME_COARSE, &tick);
-    // A zero value stops the timer, so keep at least 1 us.
-    long long usec = (long long)t.it_value.tv_sec * 1000000 +
-                     t.it_value.tv_usec - tick.tv_nsec / 1000;
-    if (usec < 1) {
-        usec = 1;
-    }
-    t.it_value.tv_sec = (time_t)(usec / 1000000);
-    t.it_value.tv_usec = (suseconds_t)(usec % 1000000);
-#endif
-    setitimer(RAPIRA_ZEND_ITIMER, &t, NULL);
+    setitimer(RAPIRA_ZEND_ITIMER, saved, NULL);
 #else
     (void)saved;
 #endif
