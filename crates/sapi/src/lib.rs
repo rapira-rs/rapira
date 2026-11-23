@@ -10,7 +10,7 @@ pub mod exchange;
 mod log;
 mod module;
 pub mod plugin;
-pub mod quota;
+mod quota;
 mod rapira_worker;
 mod reload;
 pub mod scoreboard;

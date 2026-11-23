@@ -13,8 +13,8 @@ use tracing::{error, info};
 
 use crate::engine::Workers;
 use crate::plugin::Plugin;
-use crate::quota;
-use crate::rapira_worker::{CLOSED_SEEN, RECEIVED, rapira_worker};
+use crate::quota::{self, End};
+use crate::rapira_worker::rapira_worker;
 use crate::scoreboard::{Event, sb_set, sb_update};
 use crate::work::{Entry, Intake, Unit};
 use crate::{
@@ -272,11 +272,11 @@ pub(crate) fn pull(wait: Wait) -> Pull {
 pub(crate) fn pull_with(select: impl FnOnce(&UnitRx) -> Pull) -> Pull {
     UNIT_RX.with_borrow(|slot| {
         let Some(units) = slot else {
-            CLOSED_SEEN.set(true);
+            quota::end(End::Stop);
             return Pull::Closed;
         };
         crate::rapira_worker::reload_for_opcache_restart();
-        if quota::exhausted() {
+        if quota::ended() {
             return Pull::Closed;
         }
         sb_update(Event::Idle);
@@ -296,7 +296,7 @@ impl UnitRx {
         loop {
             if crate::rapira_worker::opcache_restart_ran() {
                 info!(target: "rapira", "the OPcache restart has run; restarting the app");
-                quota::exhaust();
+                quota::end(End::Recycle);
                 return Pull::Closed;
             }
             let got = if matches!(wait, Wait::Never) {
@@ -317,9 +317,9 @@ impl UnitRx {
                     sb_update(Event::Shed);
                     continue;
                 }
-                Pull::Unit(_) => RECEIVED.set(true),
-                Pull::Reload => quota::exhaust(),
-                Pull::Closed => CLOSED_SEEN.set(true),
+                Pull::Unit(_) => quota::received(),
+                Pull::Reload => quota::end(End::Recycle),
+                Pull::Closed => quota::end(End::Stop),
                 Pull::NoUnit
                     if !matches!(wait, Wait::Never)
                         && deadline.is_none_or(|d| Instant::now() < d) =>
@@ -411,8 +411,6 @@ mod tests {
         let stats = Arc::new(PoolStats::new("http", 1));
         sb_set(Arc::clone(&stats), 0);
         quota::install(max_requests);
-        RECEIVED.set(false);
-        CLOSED_SEEN.set(false);
         let (intake, rx) = Intake::new(Arc::clone(&stats));
         let (units, tx) = UnitRx::new(rx, Arc::clone(&stats), Arc::default());
         UNIT_RX.set(Some(units));
@@ -510,9 +508,10 @@ mod tests {
             feed: &'static [Feed],
             wait: Wait,
             want: &'static str,
-            received: bool,
-            closed_seen: bool,
-            exhausted: bool,
+            /// The app instance takes no more units.
+            ended: bool,
+            /// How the app instance ends if its cycle ends after this pull. None is a failed boot.
+            outcome: Option<End>,
             counts: Counts,
             /// The pull returns within this time.
             max_elapsed: Duration,
@@ -526,9 +525,8 @@ mod tests {
                 feed: &[Feed::Unit],
                 wait: Wait::Never,
                 want: "unit",
-                received: true,
-                closed_seen: false,
-                exhausted: false,
+                ended: false,
+                outcome: Some(End::Recycle),
                 counts: Counts {
                     handled: 0,
                     errors: 0,
@@ -542,9 +540,8 @@ mod tests {
                 feed: &[Feed::Cancelled, Feed::Unit],
                 wait: Wait::Never,
                 want: "unit",
-                received: true,
-                closed_seen: false,
-                exhausted: false,
+                ended: false,
+                outcome: Some(End::Recycle),
                 counts: Counts {
                     handled: 1,
                     errors: 1,
@@ -558,9 +555,8 @@ mod tests {
                 feed: &[Feed::Cgi],
                 wait: Wait::Never,
                 want: "unit",
-                received: true,
-                closed_seen: false,
-                exhausted: false,
+                ended: false,
+                outcome: Some(End::Recycle),
                 counts: Counts {
                     handled: 0,
                     errors: 0,
@@ -574,9 +570,8 @@ mod tests {
                 feed: &[Feed::CgiGone, Feed::Cgi],
                 wait: Wait::Never,
                 want: "unit",
-                received: true,
-                closed_seen: false,
-                exhausted: false,
+                ended: false,
+                outcome: Some(End::Recycle),
                 counts: Counts {
                     handled: 1,
                     errors: 1,
@@ -590,9 +585,8 @@ mod tests {
                 feed: &[Feed::Cancelled],
                 wait: Wait::Never,
                 want: "no unit",
-                received: false,
-                closed_seen: false,
-                exhausted: false,
+                ended: false,
+                outcome: None,
                 counts: Counts {
                     handled: 1,
                     errors: 1,
@@ -606,9 +600,8 @@ mod tests {
                 feed: &[Feed::Cancelled, Feed::Unit],
                 wait: Wait::Never,
                 want: "unit",
-                received: true,
-                closed_seen: false,
-                exhausted: false,
+                ended: false,
+                outcome: Some(End::Recycle),
                 counts: Counts {
                     handled: 1,
                     errors: 1,
@@ -622,9 +615,8 @@ mod tests {
                 feed: &[Feed::Unit, Feed::Reload],
                 wait: Wait::Never,
                 want: "reload",
-                received: false,
-                closed_seen: false,
-                exhausted: true,
+                ended: true,
+                outcome: Some(End::Recycle),
                 counts: Counts {
                     handled: 0,
                     errors: 0,
@@ -638,9 +630,8 @@ mod tests {
                 feed: &[Feed::Cgi, Feed::Reload],
                 wait: Wait::Forever,
                 want: "reload",
-                received: false,
-                closed_seen: false,
-                exhausted: true,
+                ended: true,
+                outcome: Some(End::Recycle),
                 counts: Counts {
                     handled: 0,
                     errors: 0,
@@ -654,9 +645,8 @@ mod tests {
                 feed: &[Feed::Served, Feed::Unit],
                 wait: Wait::Never,
                 want: "closed",
-                received: false,
-                closed_seen: false,
-                exhausted: true,
+                ended: true,
+                outcome: Some(End::Recycle),
                 counts: Counts {
                     handled: 0,
                     errors: 0,
@@ -670,9 +660,8 @@ mod tests {
                 feed: &[Feed::Close],
                 wait: Wait::Forever,
                 want: "closed",
-                received: false,
-                closed_seen: true,
-                exhausted: false,
+                ended: true,
+                outcome: Some(End::Stop),
                 counts: Counts {
                     handled: 0,
                     errors: 0,
@@ -686,9 +675,8 @@ mod tests {
                 feed: &[],
                 wait: Wait::For(TIMED),
                 want: "no unit",
-                received: false,
-                closed_seen: false,
-                exhausted: false,
+                ended: false,
+                outcome: None,
                 counts: Counts {
                     handled: 0,
                     errors: 0,
@@ -702,9 +690,8 @@ mod tests {
                 feed: &[Feed::Cancelled],
                 wait: Wait::For(TIMED),
                 want: "no unit",
-                received: false,
-                closed_seen: false,
-                exhausted: false,
+                ended: false,
+                outcome: None,
                 counts: Counts {
                     handled: 1,
                     errors: 1,
@@ -770,9 +757,9 @@ mod tests {
                 case.max_elapsed
             );
             assert_eq!(
-                (RECEIVED.get(), CLOSED_SEEN.get(), quota::exhausted()),
-                (case.received, case.closed_seen, case.exhausted),
-                "{}: received, closed seen, exhausted",
+                (quota::ended(), quota::outcome()),
+                (case.ended, case.outcome),
+                "{}: ended, outcome",
                 case.name
             );
             let (handled, errors) = stats.workers[0].totals();

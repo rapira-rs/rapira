@@ -3,6 +3,7 @@ use tracing::{error, info, warn};
 use crate::{
     callbacks::*,
     diagnostics::{Severity, error_type_to_level},
+    quota::End,
     scoreboard::sb_update,
     start::{BootRetry, Pull, Wait, pull, pull_unit_to_shed, run_script},
 };
@@ -24,13 +25,8 @@ use crate::{
 };
 
 thread_local! {
-    /// The app took a unit in this cycle.
-    pub(crate) static RECEIVED: Cell<bool> = const { Cell::new(false) };
-    /// A pull in this cycle saw the intake close.
-    pub(crate) static CLOSED_SEEN: Cell<bool> = const { Cell::new(false) };
     /// The next handle_request() call tears down the boot request first.
     static FIRST_CALL: Cell<bool> = const { Cell::new(true) };
-    static RECYCLE: Cell<bool> = const { Cell::new(false) };
     /// Set while the app instance runs with OPcache off until the OPcache restart has run. It holds the last_restart_time that the pull waits to see change.
     pub(crate) static OPCACHE_WAIT: Cell<Option<zend_long>> = const { Cell::new(None) };
     /// The last_restart_time at the end of the previous app instance of this thread.
@@ -49,12 +45,6 @@ const OPCACHE_RESTARTING: c_int = 4;
 const BOOT_RETRY_BASE: Duration = Duration::from_millis(500);
 /// The longest wait between two boots. The boot repeats without a request, because a load balancer that reads `/readyz` sends no requests to a pool that is not ready.
 const BOOT_RETRY_MAX: Duration = Duration::from_secs(5);
-
-enum Cycle {
-    Stop,
-    Recycle,
-    Failed,
-}
 
 /// Starts the boot request with the argv of `php entrypoint.php` and builds $_SERVER before the entrypoint runs, as the CLI does.
 /// After this, argc is 0 again. With argc set, each later $_SERVER build adds a reference to the $argv global, and that crashes when $argv holds null, an int or [].
@@ -86,14 +76,13 @@ fn boot_request_startup() -> bool {
     }
 }
 
-/// Returns the handler's recycle request when PHP completes shutdown.
-fn run_app(script: &Path) -> bool {
+fn run_app(script: &Path) {
     crate::quota::renew();
     crate::context::resolve_script(script);
     crate::context::clean_realpath_cache();
     if !reset_opcache_before_request() {
         error!(target: "rapira", "OPcache reset request failed; restarting the app");
-        return false;
+        return;
     }
     // the cycle number changes after the reset request, because its quiesce hook stores the number of the cycle that it ends
     crate::exchange::begin_cycle();
@@ -110,30 +99,20 @@ fn run_app(script: &Path) -> bool {
     }
 
     FIRST_CALL.set(true);
-    let recycle = RECYCLE.take();
-
     log_and_clear_last_error();
     let shutdown = unsafe { rapira_request_shutdown() };
     // A script can schedule a restart and exit before its next pull. Its shutdown functions can also schedule a restart.
     reload_for_opcache_restart();
     if shutdown == RAPIRA_BAILOUT as c_int {
         error!(target: "rapira", "php_request_shutdown() bailed; restarting the app");
-        return false;
     }
-    recycle
 }
 
-fn run_cycle(script: &Path) -> Cycle {
-    let recycle = run_app(script);
+/// Runs one app instance and reclaims its last unit. None is a failed boot.
+fn run_cycle(script: &Path) -> Option<End> {
+    run_app(script);
     crate::exchange::reclaim_current();
-    let received = RECEIVED.take();
-    if CLOSED_SEEN.take() {
-        Cycle::Stop
-    } else if recycle || received || crate::quota::exhausted() {
-        Cycle::Recycle
-    } else {
-        Cycle::Failed
-    }
+    crate::quota::outcome()
 }
 
 /// What an app boot does about OPcache.
@@ -183,7 +162,7 @@ fn note_opcache_at_boot() {
     OPCACHE_WAIT.set(None);
     match opcache_boot(state, last_restart, PREVIOUS_END.get()) {
         OpcacheBoot::Run => {}
-        OpcacheBoot::LeaveAtFirstPull => crate::quota::exhaust(),
+        OpcacheBoot::LeaveAtFirstPull => crate::quota::end(End::Recycle),
         OpcacheBoot::Wait { seen } => {
             info!(target: "rapira", "the app booted with OPcache off; it restarts when the OPcache restart has run");
             OPCACHE_WAIT.set(Some(seen));
@@ -258,9 +237,9 @@ pub(crate) fn rapira_worker(
     let mut retry_delay = BOOT_RETRY_BASE;
     'cycles: loop {
         let recycled = match run_cycle(script) {
-            Cycle::Stop => break,
-            Cycle::Recycle => true,
-            Cycle::Failed => false,
+            Some(End::Stop) => break,
+            Some(End::Recycle) => true,
+            None => false,
         };
         let was_serving = pool.workers[index].serving();
         sb_update(if recycled {
@@ -316,12 +295,9 @@ pub extern "C" fn rapira_rs_handle_request(
 
 /// Flushes before rapira_request_teardown, because SG(sapi_headers) holds the real head and teardown destroys it. The real head has the status, the cookies and the 500 of php_error_cb.
 fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> u32 {
-    let Some(mut ctx) = next_unit() else {
-        return if RECYCLE.get() {
-            RAPIRA_HANDLE_RECYCLE
-        } else {
-            RAPIRA_HANDLE_STOP
-        };
+    let mut ctx = match next_unit() {
+        Ok(ctx) => ctx,
+        Err(action) => return action,
     };
 
     bind_server_context(&mut ctx);
@@ -353,29 +329,29 @@ fn handle_request_impl(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cach
     log_and_clear_last_error();
     sb_update(scoreboard::Event::Handled { errored });
     if recycle {
-        RECYCLE.set(true);
+        crate::quota::end(End::Recycle);
         RAPIRA_HANDLE_RECYCLE
     } else {
         RAPIRA_HANDLE_CONTINUE
     }
 }
 
-/// The first call tears down the boot request that php_request_startup() left open, before the app serves a unit.
-fn next_unit() -> Option<Box<Context>> {
+/// The first call tears down the boot request that php_request_startup() left open, before the app serves a unit. Err is the action of a handle_request() call that gets no unit.
+fn next_unit() -> Result<Box<Context>, u32> {
     if FIRST_CALL.take() {
         if unsafe { rapira_request_teardown() } == RAPIRA_BAILOUT as c_int {
             error!(target: "rapira", "rapira_request_teardown() bailed on first call; recycling");
-            RECYCLE.set(true);
-            return None;
+            crate::quota::end(End::Recycle);
+            return Err(RAPIRA_HANDLE_RECYCLE);
         }
         // hide the shutdown functions of the boot from the per-unit shutdown pass; they run at the cycle end
         unsafe { rapira_stash_boot_shutdown_functions() };
     }
     log_and_clear_last_error();
     match pull(Wait::Forever) {
-        Pull::Unit(unit) => Some(unit.into_cgi()),
+        Pull::Unit(unit) => Ok(unit.into_cgi()),
         // The app instance takes no more units. handle_request() returns false, and the worker stays.
-        Pull::Closed | Pull::Reload | Pull::NoUnit => None,
+        Pull::Closed | Pull::Reload | Pull::NoUnit => Err(RAPIRA_HANDLE_STOP),
     }
 }
 
