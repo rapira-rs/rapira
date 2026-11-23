@@ -31,6 +31,12 @@ jobs:
                              xmlreader xmlwriter zend_test zlib; do
                       grep -qix "$ext" <<<"$mods" || { echo "missing extension: $ext"; exit 1; }
                   done
+            # The x86_64 job links with LLD, the Rust default for that target. https://blog.rust-lang.org/2025/09/01/rust-lld-on-1.90.0-stable/
+            - name: Link with LLD on Linux arm64
+              if: runner.os == 'Linux' && runner.arch == 'ARM64'
+              run: |
+                  sudo apt-get install -y --no-install-recommends lld
+                  echo "RUSTFLAGS=$RUSTFLAGS -C link-arg=-fuse-ld=lld" >> "$GITHUB_ENV"
             - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
             - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
               with: { cache-on-failure: true }
