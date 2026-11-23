@@ -1,17 +1,10 @@
 #include "rapira_sapi.h"
 
-typedef struct {
-    const char *name;
-    size_t name_len;
-    const char *value;
-    size_t value_len;
-} rapira_env_pair;
-
-extern bool rapira_rs_env_get(const char *name, size_t name_len,
-                              const char **value, size_t *value_len);
+// Returns the permanent string of a name in the table of the pool. For a putenv() value it returns NULL and sets value.
+extern zend_string *rapira_rs_env_get(const char *name, size_t name_len,
+                                      const char **value, size_t *value_len);
 extern void rapira_rs_env_put(const char *name, size_t name_len,
                               const char *value, size_t value_len);
-extern const rapira_env_pair *rapira_rs_env_view(size_t *len);
 
 // PHP 8.6 added the NUL byte check to getenv() and putenv(). https://github.com/php/php-src/commit/701d8a66d327beae2b83d6c7d53711717bec14fb
 #if PHP_VERSION_ID >= 80600
@@ -42,7 +35,12 @@ static ZEND_NAMED_FUNCTION(rapira_getenv) {
     }
     const char *value = NULL;
     size_t value_len = 0;
-    if (rapira_rs_env_get(name, strnlen(name, name_len), &value, &value_len)) {
+    zend_string *fixed =
+        rapira_rs_env_get(name, strnlen(name, name_len), &value, &value_len);
+    if (fixed) {
+        RETURN_INTERNED_STR(fixed);
+    }
+    if (value) {
         RETURN_STRINGL(value, value_len);
     }
     RETURN_FALSE;
@@ -73,31 +71,6 @@ static ZEND_NAMED_FUNCTION(rapira_putenv) {
     RETURN_TRUE;
 }
 
-// PHP skips malformed names during import. It stores a numeric name as an integer key. https://github.com/php/php-src/blob/php-8.5.11/main/php_variables.c#L592-L627
-static void rapira_env_import(zval *array_ptr) {
-    size_t len = 0;
-    const rapira_env_pair *pairs = rapira_rs_env_view(&len);
-    HashTable *ht = Z_ARRVAL_P(array_ptr);
-    for (size_t i = 0; i < len; i++) {
-        const rapira_env_pair *p = &pairs[i];
-        if (p->name_len == 0 || p->name[0] == '=' ||
-            memchr(p->name, ' ', p->name_len) ||
-            memchr(p->name, '.', p->name_len) ||
-            memchr(p->name, '[', p->name_len)) {
-            continue;
-        }
-        zend_string *key = zend_string_init(p->name, p->name_len, 0);
-        if (p->value) {
-            zval value;
-            ZVAL_STRINGL_FAST(&value, p->value, p->value_len);
-            zend_symtable_update_ind(ht, key, &value);
-        } else {
-            zend_symtable_del(ht, key);
-        }
-        zend_string_release_ex(key, 0);
-    }
-}
-
 static void rapira_env_swap(const char *name, size_t len, zif_handler handler) {
     // PHP removes disabled functions from this table. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_API.c#L3701-L3712
     zend_function *func = zend_hash_str_find_ptr(CG(function_table), name, len);
@@ -108,7 +81,6 @@ static void rapira_env_swap(const char *name, size_t len, zif_handler handler) {
 
 // Each ZTS thread copies the function table and shares the internal function records. https://github.com/php/php-src/blob/php-8.5.11/Zend/zend.c#L718-L721
 void rapira_env_install(void) {
-    php_import_environment_variables = rapira_env_import;
     rapira_env_swap(ZEND_STRL("getenv"), rapira_getenv);
     rapira_env_swap(ZEND_STRL("putenv"), rapira_putenv);
 }

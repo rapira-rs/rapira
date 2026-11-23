@@ -321,10 +321,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         let ht = unsafe { (*track_vars_array).value.arr };
         // Inserts a permanent interned name and value. The insert takes no hash, no allocation and no copy.
         let put_interned = |name: Permanent, value: Permanent| unsafe {
-            let mut v: zval = std::mem::zeroed();
-            v.value.str_ = value.as_ptr();
-            v.u1.type_info = IS_STRING;
-            zend_hash_update(ht, name.as_ptr(), &mut v);
+            zend_hash_update(ht, name.as_ptr(), &mut value.zval());
         };
         // Inserts a permanent interned name and a value of this request, which PHP copies.
         let put = |name: Permanent, value: &[u8]| unsafe {
@@ -332,7 +329,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         };
         // The env pairs of the pool go in first, so the request variables below override a pair with the same name.
         // Each name goes in as written. The environment import of PHP skips a name with a space, '.' or '[', and it stores an all-digit name as an integer key. Such a name is therefore different in the boot $_SERVER.
-        crate::context::with_server_env(|env| {
+        crate::env::with_pool_pairs(|env| {
             let size = SERVER_VARS_MAX + reqc.headers.raw.keys_len() as u32 + env.len() as u32;
             unsafe { zend_hash_extend(ht, size, false) };
             for &(name, value) in env {

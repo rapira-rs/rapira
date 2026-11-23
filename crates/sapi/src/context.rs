@@ -1,13 +1,13 @@
 use crate::{callbacks::guard, types::Context, *};
 use std::{
-    cell::{Cell, OnceCell},
+    cell::Cell,
     collections::BTreeMap,
     ffi::{CStr, c_char},
     fmt::NumBuffer,
     os::{raw::c_void, unix::ffi::OsStrExt},
     path::Path,
     ptr::{null, null_mut},
-    sync::{Arc, Mutex, OnceLock},
+    sync::{Mutex, OnceLock},
 };
 
 /// The entrypoint paths of the worker since its last boot or classic reload.
@@ -89,11 +89,8 @@ pub struct HttpIdentity {
 
 static SERVER_STRINGS: OnceLock<ServerStrings> = OnceLock::new();
 
-type ServerEnv = [(Permanent, Permanent)];
-
 thread_local! {
     pub(crate) static SCRIPT: Cell<Option<ScriptPaths>> = const { Cell::new(None) };
-    static SERVER_ENV: OnceCell<Arc<ServerEnv>> = const { OnceCell::new() };
     static SERVER_IDENTITY: Cell<Option<HttpIdentity>> = const { Cell::new(None) };
 }
 
@@ -108,12 +105,21 @@ impl Permanent {
     pub(crate) fn as_ptr(self) -> *mut zend_string {
         self.0
     }
+
+    /// A zval of the string. PHP counts no references to an interned string, so the zval needs no destructor.
+    pub(crate) fn zval(self) -> zval {
+        // SAFETY: zval is plain data, and all zero bits are a valid value of it.
+        let mut v: zval = unsafe { std::mem::zeroed() };
+        v.value.str_ = self.0;
+        v.u1.type_info = IS_STRING;
+        v
+    }
 }
 
 static PERMANENT: Mutex<BTreeMap<Box<[u8]>, Permanent>> = Mutex::new(BTreeMap::new());
 
 /// Workers share this table for new entrypoint paths. PHP's permanent intern table is read-only during requests. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_string.c#L265-L280
-fn permanent(bytes: &[u8]) -> Permanent {
+pub(crate) fn permanent(bytes: &[u8]) -> Permanent {
     let mut table = PERMANENT.lock().unwrap();
     if let Some(s) = table.get(bytes) {
         return *s;
@@ -123,21 +129,6 @@ fn permanent(bytes: &[u8]) -> Permanent {
     let s = Permanent(unsafe { rapira_permanent_string(bytes.as_ptr().cast(), bytes.len()) });
     table.insert(bytes.into(), s);
     s
-}
-
-/// Prepare one immutable array of env pairs for all workers of the pool.
-pub(crate) fn intern_server_env(env: &BTreeMap<String, String>) -> Arc<ServerEnv> {
-    env.iter()
-        .map(|(name, value)| (permanent(name.as_bytes()), permanent(value.as_bytes())))
-        .collect()
-}
-
-pub(crate) fn enter_server_env(env: Arc<ServerEnv>) {
-    SERVER_ENV.with(|slot| assert!(slot.set(env).is_ok()));
-}
-
-pub(crate) fn with_server_env(f: impl FnOnce(&ServerEnv)) {
-    SERVER_ENV.with(|slot| f(slot.get().map_or(&[], AsRef::as_ref)));
 }
 
 /// The engine initializes the fixed strings before it starts any workers.

@@ -161,15 +161,13 @@ impl crate::Engine {
         let pool = Arc::new(Pool::new(name, settings.workers));
         self.pools.push(Arc::clone(&pool));
         let (intake, rx) = Intake::new(Arc::clone(&pool));
-        let env = Arc::new(settings.env);
-        let server_env = crate::context::intern_server_env(&env);
+        let env = Arc::new(crate::env::PoolEnv::new(&settings.env));
         for index in 0..settings.workers {
             let (units, control) = UnitRx::new(rx.clone(), Arc::clone(&self.workers));
             let io = io.clone();
             let init = Arc::clone(&worker_init);
             let boot_retry = Arc::downgrade(&intake.boot_retry);
             let pool = Arc::clone(&pool);
-            let server_env = Arc::clone(&server_env);
             let env = Arc::clone(&env);
             let entrypoint = settings.entrypoint.clone();
             let max_requests = if mode == Mode::Classic {
@@ -195,7 +193,6 @@ impl crate::Engine {
                         pool.bind(index);
                         UNIT_RX.set(Some(units));
                         init();
-                        crate::context::enter_server_env(server_env);
                         crate::env::enter_pool(env);
                         quota::install(max_requests);
                         match mode {
