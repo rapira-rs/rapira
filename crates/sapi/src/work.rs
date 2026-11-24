@@ -364,11 +364,12 @@ mod tests {
             let other = intake.clone();
             let result = other.submit(probe(), case.next_bytes).await;
             assert_eq!(result, case.result, "{}", case.name);
+            let snapshot = intake.pool.snapshot();
             assert_eq!(
                 (
-                    intake.pool.pending.load(Ordering::Relaxed),
-                    intake.pool.refused.load(Ordering::Relaxed),
-                    intake.pool.failed_on_full_queue.load(Ordering::Relaxed),
+                    snapshot.pending,
+                    snapshot.refused,
+                    snapshot.failed_on_full_queue,
                 ),
                 (case.pending, case.refused, 0),
                 "{}",
@@ -453,11 +454,12 @@ mod tests {
                 }
             };
             assert_eq!(result, case.result, "{}", case.name);
+            let snapshot = pool.snapshot();
             assert_eq!(
                 (
-                    pool.refused.load(Ordering::Relaxed),
-                    pool.failed_on_full_queue.load(Ordering::Relaxed),
-                    pool.pending.load(Ordering::Relaxed),
+                    snapshot.refused,
+                    snapshot.failed_on_full_queue,
+                    snapshot.pending,
                 ),
                 (
                     case.want.refused,

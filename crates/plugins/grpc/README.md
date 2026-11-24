@@ -7,8 +7,8 @@ The grpc plugin of the `rapira` binary. It serves unary and server-streaming RPC
 `Server` implements `rapira_sapi::plugin::Plugin`:
 
 - `name()` returns `grpc`: the TOML table and the dispatcher name that PHP sees.
-- `modes()` accepts dispatcher mode only.
 - `dispatcher()` returns the address of `rapira_grpc_plugin`, the C record of the dispatcher surface: the dispatcher classes and the busy error of `receive()`.
+- `worker_init()` returns the function that binds the schema on each PHP thread before its first entrypoint. `getServices()` reads it.
 - The crate exports `rapira_grpc_register_classes`. MINIT calls it after the base classes to register the `Rapira\Grpc` classes.
 - `Server::from_settings` sets the service list, binds the listener and prepares the health and reflection routes before PHP starts.
 - `serve()` runs on the shared IO runtime. It receives the gRPC pool's `Intake`, the stop flag and the connection drain timeout.
@@ -33,7 +33,7 @@ The grpc plugin of the `rapira` binary. It serves unary and server-streaming RPC
 - `rapira_grpc.h`: the C layout of the call object, and the class entries. The two call classes share this layout. The call object is also its own response metadata.
 - `rapira_grpc_classes.c`: the `rapira_grpc_plugin` record, `rapira_grpc_register_classes` and the object handlers of the call. MINIT calls `rapira_grpc_register_classes` after the base classes. The stub aliases the constructors of the internal classes, `name()`, `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters to the shared shells in `crates/sapi/rapira_dispatcher.c`.
 - `rapira_grpc.c`: the constructors of the value classes, the `MethodKind` predicates, the method shell of `getServices()` of the dispatcher, and the method shells of the call, with its `ResponseMetadata` methods.
-- `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
+- `src/lib.rs`: `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set, builds the interceptors and binds the listener.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, the PHP outcome as a connectrpc response or error, and the body of a streaming response.

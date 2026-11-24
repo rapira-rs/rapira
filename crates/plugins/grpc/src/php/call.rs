@@ -1,7 +1,6 @@
 //! The `GrpcState` unit, the request Metadata and Context, the services list, and the Rust behind the methods of UnaryCall, ServerStreamingCall and ResponseMetadata.
 
 use std::ffi::{CStr, c_char};
-use std::time::Instant;
 
 use base64::Engine as _;
 use base64::alphabet;
@@ -397,8 +396,8 @@ unsafe fn finish(st: &mut GrpcState, result: Result<&[u8], ConnectError>) -> Ver
                 .is_ok(),
             // SAFETY: the caller runs on a PHP thread for a streaming response.
             None => unsafe {
-                push(
-                    &out,
+                stream::send(
+                    &out.parts,
                     Part::Fail(err.with_trailers(trailers)),
                     st.req.until(),
                 )
@@ -444,13 +443,6 @@ fn commit(out: &mut StreamReply, headers: &[MetadataField], trailers: &[Metadata
     .is_ok()
 }
 
-/// Sends one part with the deadline of the call. An interrupted or closed stream takes no more parts.
-/// # Safety
-/// The caller runs on a PHP thread.
-unsafe fn push(out: &StreamReply, part: Part, until: Option<Instant>) -> bool {
-    unsafe { stream::send(&out.parts, part, until) }
-}
-
 /// Sends one message of a streaming response. The first message sends the head before it. Returns false when the message has no destination. The call is then discarded.
 /// # Safety
 /// The caller runs on a PHP thread.
@@ -466,8 +458,8 @@ unsafe fn send_core(st: &mut GrpcState, message: &[u8]) -> bool {
     // SAFETY: the caller runs on a PHP thread.
     let sent = commit(out, &st.headers, &st.trailers)
         && unsafe {
-            push(
-                out,
+            stream::send(
+                &out.parts,
                 Part::Message(Bytes::copy_from_slice(message)),
                 st.req.until(),
             )
@@ -492,7 +484,7 @@ unsafe fn end(st: &mut GrpcState) {
     };
     // SAFETY: the caller runs on a PHP thread.
     let sent = commit(&mut out, &st.headers, &st.trailers)
-        && unsafe { push(&out, Part::End, st.req.until()) };
+        && unsafe { stream::send(&out.parts, Part::End, st.req.until()) };
     if out.late_trailer {
         tracing::debug!(target: "grpc", "{}: a trailer added after the first yield is not sent", st.req.method);
     }

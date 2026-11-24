@@ -7,8 +7,8 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 `Server` implements `rapira_sapi::plugin::Plugin`:
 
 - `name()` returns `http`: the TOML table and the dispatcher name that PHP sees.
-- `modes()` accepts the classic, worker and dispatcher modes.
 - `dispatcher()` returns the address of `rapira_http_plugin`, the C record of the dispatcher surface: the dispatcher classes, the busy error of `receive()` and the quiesce hook of dispatcher mode.
+- `worker_init()` returns the function that binds the server name and port on each PHP thread before its first entrypoint.
 - The crate exports `rapira_http_register_classes`. MINIT calls it after the base classes to register the `Rapira\Http` classes.
 - `Server::from_settings` sets the server identity and `sendFile()` root, removes spool directories of dead server processes and binds the listener before PHP starts.
 - `serve()` runs on the shared IO runtime. It receives the HTTP pool's `Intake`, the stop flag and the connection drain timeout.
@@ -125,7 +125,7 @@ The connection drain lasts for `[server].stop_timeout_secs` minus five seconds, 
 
 The boot `$_SERVER` and `$_ENV` (when `variables_order` contains `E`) import the PHP environment. [PHP checks `HTTP_PROXY` against the process environment](https://github.com/php/php-src/blob/php-8.6.0/main/php_variables.c#L885-L897) in both arrays. The `$_SERVER` of an HTTP request gets the pool entries and the request variables. A request variable with the same name wins.
 
-Native libraries and child processes read the process environment, and `putenv()` does not change it. `exec()`, `shell_exec()`, `system()`, `passthru()`, `popen()` and `proc_open()` with no environment argument give the child the process environment. To give a child the pool values and the `putenv()` changes, pass `getenv()` as the environment argument of `proc_open()`. A name that is empty or contains `=` or NUL, or a value that contains NUL, fails the boot.
+Native libraries and child processes read the process environment, and `putenv()` does not change it. `exec()`, `shell_exec()`, `system()`, `passthru()`, `popen()` and `proc_open()` with no environment argument give the child the process environment. To give a child the pool values and the `putenv()` changes, pass `getenv()` as the environment argument of `proc_open()`. [PHP leaves a variable with an empty value out of that environment](https://github.com/php/php-src/blob/php-8.6.0/ext/standard/proc_open.c#L186-L192). A name that is empty or contains `=` or NUL, or a value that contains NUL, fails the boot.
 
 Symfony Process can give a child only the variables whose names are also keys of `$_SERVER` or `$_ENV`. The `$_SERVER` of a request has no process variables, so such a child can have no `PATH` and no `HOME`. Add these names to `[http.pool.env]`, or put `E` into `variables_order`.
 

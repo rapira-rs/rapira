@@ -90,7 +90,7 @@ At the end of a classic request or an app instance, PHP restores the directory i
 
 On ZTS, each PHP thread has its own working directory. `proc_open()` without a `$cwd` starts the child in the directory where Rapira started. Pass `getcwd()` as `$cwd` to use the app's directory. `exec()`, `shell_exec()` and `popen()` use the PHP working directory.
 
-Rapira resolves the entrypoint path at worker startup, at each app restart and on a classic reload. After you switch a symlink in that path, send SIGHUP or SIGUSR2 so that every worker loads the new release.
+Rapira resolves the entrypoint path at worker startup, at each recycle and on a classic reload. After you switch a symlink in that path, send SIGHUP or SIGUSR2 so that every worker loads the new release.
 
 ### Worker
 

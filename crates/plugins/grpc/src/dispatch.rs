@@ -340,22 +340,16 @@ mod tests {
                 cancelled: true,
             },
         ];
-        let path = "rapira.test.v1.EchoService/Echo";
-        let descriptors = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
-            .join("../../tests/fixtures/grpc/echo.binpb");
-        let schema = Schema::load(&crate::schema::Source::File(descriptors), None).unwrap();
         for case in cases {
-            let mut ctx = RequestContext::new(http::HeaderMap::new()).with_deadline(case.until);
-            ctx.extensions_mut().insert(Addr::Unix(None));
-            let req = call(
-                &schema,
-                schema.method(path).unwrap(),
-                path,
-                &mut ctx,
-                Bytes::new(),
-                CodecFormat::Proto,
-            )
-            .unwrap();
+            let req = Call {
+                method: "rapira.test.v1.EchoService/Echo".to_owned(),
+                kind: MethodKind::Unary,
+                protocol: Protocol::Grpc,
+                metadata: http::HeaderMap::new(),
+                deadline: case.until.map(|at| Deadline { at, unix: 0.0 }),
+                remote: Addr::Unix(None),
+                message: Bytes::new(),
+            };
             let (tx, _receiver) = oneshot::channel();
             let state = GrpcState::new(req, Reply::Unary(tx));
             assert_eq!(state.cancelled(), case.cancelled, "{}", case.name);
