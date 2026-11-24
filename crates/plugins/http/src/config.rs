@@ -245,13 +245,14 @@ impl Server {
             middleware.push(rapira_static_files::StaticFiles::new(st.root, st.forbid).layer());
         }
 
-        let prepared = rapira_net::bind(&settings.listen).context("plugin http: prepare failed")?;
         let mut uploads = settings.uploads;
+        // The spool sweep ends before the listener opens.
         let spool = uploads
             .as_mut()
             .map(crate::multipart::SpoolDir::prepare)
             .transpose()
             .context("plugin http: prepare failed")?;
+        let prepared = rapira_net::bind(&settings.listen).context("plugin http: prepare failed")?;
         crate::php::set_sendfile_root(settings.sendfile_root);
         let config = Config {
             // The bound address, because the kernel picks the port for a listen port 0.
