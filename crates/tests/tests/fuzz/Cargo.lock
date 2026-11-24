@@ -834,7 +834,6 @@ dependencies = [
  "libfuzzer-sys",
  "rapira_grpc",
  "rapira_http",
- "rapira_net",
  "rapira_sapi",
 ]
 

@@ -20,7 +20,6 @@ httparse = "1"
 libfuzzer-sys = "0.4"
 rapira_grpc = { path = "../../../plugins/grpc" }
 rapira_http = { path = "../../../plugins/http" }
-rapira_net = { path = "../../../net" }
 rapira_sapi = { path = "../../../sapi" }
 
 [[bin]]
