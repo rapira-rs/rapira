@@ -305,13 +305,6 @@ impl Conn {
     }
 }
 
-/// The fields of the reply's `Frame::Head`.
-struct ReplyHead {
-    head: ResponseHead,
-    content_length: Option<u64>,
-    bodiless: bool,
-}
-
 async fn serve_php<B>(
     shared: &Shared,
     closed: &tokio::sync::watch::Receiver<bridge::ConnectionState>,
@@ -415,29 +408,19 @@ where
         }
     };
 
-    let ReplyHead {
+    let Some(frame) = reply.recv().await else {
+        tracing::error!(target: "http", "php worker died before a response head");
+        return refused(http::StatusCode::BAD_GATEWAY, guard);
+    };
+    // Every producer sends the head first, so a body frame here means that the head is missing.
+    let Frame::Head {
         head: ResponseHead { status, headers },
         content_length,
         bodiless,
-    } = match reply.recv().await {
-        None => {
-            tracing::error!(target: "http", "php worker died before a response head");
-            return refused(http::StatusCode::BAD_GATEWAY, guard);
-        }
-        Some(Frame::Head {
-            head,
-            content_length,
-            bodiless,
-        }) => ReplyHead {
-            head,
-            content_length,
-            bodiless,
-        },
-        // Every producer sends the head first, so a body frame here means that the head is missing.
-        Some(Frame::End { .. } | Frame::Chunk(_) | Frame::File { .. }) => {
-            tracing::error!(target: "http", "php produced no response head");
-            return refused(http::StatusCode::BAD_GATEWAY, guard);
-        }
+    } = frame
+    else {
+        tracing::error!(target: "http", "php produced no response head");
+        return refused(http::StatusCode::BAD_GATEWAY, guard);
     };
 
     let status = match http::StatusCode::from_u16(status) {
