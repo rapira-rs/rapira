@@ -189,6 +189,39 @@ fn a_child_process_gets_only_the_boot_env() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// `${NAME}` in INI text reads the same layers as getenv(). The getenv callback of a SAPI cannot report a removal, so a name that putenv() removed reads the boot environment.
+/// https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_ini_parser.y#L172-L193
+#[test]
+fn ini_text_reads_the_env_layers() -> anyhow::Result<()> {
+    let srv = spawn(Mode::Worker);
+    assert_eq!(
+        get(&srv, "/ini")?,
+        json!({
+            "POOL_PROBE": "config",
+            "POOL_INHERITED": "inherited",
+            "POOL_EMPTY": "",
+            "POOL_ONLY": "config",
+            "POOL_DROP": "config",
+            "POOL_NEW": "undefined",
+        }),
+        "before putenv()"
+    );
+    get(&srv, "/put")?;
+    assert_eq!(
+        get(&srv, "/ini")?,
+        json!({
+            "POOL_PROBE": "put",
+            "POOL_INHERITED": "inherited",
+            "POOL_EMPTY": "",
+            "POOL_ONLY": "",
+            "POOL_DROP": "inherited",
+            "POOL_NEW": "a=b",
+        }),
+        "after putenv()"
+    );
+    Ok(())
+}
+
 /// getenv($name) finds any name of every layer. getenv(), `$_ENV` and the boot `$_SERVER` skip a name with a space, a dot or a bracket, and key a numeric name as an integer, as php-src does. `$_ENV` and the boot `$_SERVER` do not see a later putenv(). The arguments behave as in php-src.
 /// https://github.com/php/php-src/blob/php-8.5.11/main/php_variables.c#L592-L627
 /// https://github.com/php/php-src/blob/php-8.5.11/ext/standard/basic_functions.c#L705-L763

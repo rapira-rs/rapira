@@ -3,8 +3,9 @@
 // Returns the permanent string of a name in the table of the pool. For a putenv() value it returns NULL and sets value.
 extern zend_string *rapira_rs_env_get(const char *name, size_t name_len,
                                       const char **value, size_t *value_len);
+// value is a C string, or NULL for a removal.
 extern void rapira_rs_env_put(const char *name, size_t name_len,
-                              const char *value, size_t value_len);
+                              const char *value);
 
 // PHP 8.6 added the NUL byte check to getenv() and putenv(). https://github.com/php/php-src/commit/701d8a66d327beae2b83d6c7d53711717bec14fb
 #if PHP_VERSION_ID >= 80600
@@ -15,7 +16,7 @@ extern void rapira_rs_env_put(const char *name, size_t name_len,
 #define RAPIRA_PARAM_ENV_OR_NULL Z_PARAM_STRING_OR_NULL
 #endif
 
-// This SAPI has no getenv hook. Both values of local_only use the same table.
+// The getenv callback of this SAPI reads the same table, so both values of local_only give the same result.
 static ZEND_NAMED_FUNCTION(rapira_getenv) {
     char *name = NULL;
     size_t name_len = 0;
@@ -62,11 +63,9 @@ static ZEND_NAMED_FUNCTION(rapira_putenv) {
     setting_len = strnlen(setting, setting_len);
     const char *eq = memchr(setting, '=', setting_len);
     if (eq) {
-        size_t name_len = (size_t)(eq - setting);
-        rapira_rs_env_put(setting, name_len, eq + 1,
-                          setting_len - name_len - 1);
+        rapira_rs_env_put(setting, (size_t)(eq - setting), eq + 1);
     } else {
-        rapira_rs_env_put(setting, setting_len, NULL, 0);
+        rapira_rs_env_put(setting, setting_len, NULL);
     }
     RETURN_TRUE;
 }

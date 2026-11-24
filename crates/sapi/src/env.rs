@@ -3,7 +3,6 @@
 //! No Rust borrow spans a PHP allocation, because the allocation can bail out.
 
 use crate::context::{Permanent, permanent};
-use crate::zend::ptr_or_empty;
 use crate::{
     php_import_environment_variables, rapira_zval_stringl, zend_hash_index_del,
     zend_hash_index_update, zend_hash_str_del, zend_hash_str_update, zend_hash_update, zend_long,
@@ -12,10 +11,10 @@ use crate::{
 use std::cell::{OnceCell, RefCell};
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeMap, HashMap};
-use std::ffi::c_char;
+use std::ffi::{CStr, CString, c_char};
 use std::fmt::NumBuffer;
 use std::os::unix::ffi::OsStringExt;
-use std::ptr::null_mut;
+use std::ptr::{null, null_mut};
 use std::sync::Arc;
 
 type Bytes = Box<[u8]>;
@@ -90,8 +89,8 @@ fn index_key(name: &[u8]) -> Option<zend_long> {
 
 thread_local! {
     static POOL: OnceCell<Arc<PoolEnv>> = const { OnceCell::new() };
-    /// The putenv() writes, one per name in the order of the first write. None is a removal.
-    static WRITES: RefCell<Vec<(Bytes, Option<Bytes>)>> = const { RefCell::new(Vec::new()) };
+    /// The putenv() writes, one per name in the order of the first write. None is a removal. A value is a C string, because the getenv callback of the SAPI returns it as one.
+    static WRITES: RefCell<Vec<(Bytes, Option<CString>)>> = const { RefCell::new(Vec::new()) };
 }
 
 unsafe extern "C" {
@@ -160,7 +159,7 @@ unsafe extern "C" fn import(array: *mut zval) {
                 continue;
             };
             let mut copy: zval = std::mem::zeroed();
-            rapira_zval_stringl(&mut copy, ptr_or_empty(value), value.len());
+            rapira_zval_stringl(&mut copy, value.as_ptr(), value.count_bytes());
             match index {
                 Some(index) => zend_hash_index_update(ht, index as zend_ulong, &mut copy),
                 None => zend_hash_str_update(ht, name.as_ptr().cast(), name.len(), &mut copy),
@@ -176,7 +175,7 @@ unsafe fn bytes<'a>(ptr: *const c_char, len: usize) -> &'a [u8] {
     unsafe { std::slice::from_raw_parts(ptr.cast(), len) }
 }
 
-/// Returns the permanent string of `name` from the table of the pool, or null. A `putenv()` write hides the table: a written value goes to the output pointers, and a removal leaves them unchanged. The written bytes stay valid until the next `putenv()` or the end of this PHP request.
+/// Returns the permanent string of `name` from the table of the pool, or null. A `putenv()` write hides the table: a written value goes to the output pointers, and a removal leaves them unchanged. The written value is a C string. It stays valid until the next `putenv()` or the end of this PHP request.
 ///
 /// # Safety
 /// `name` points to `name_len` readable bytes. `value` and `value_len` are writable.
@@ -196,8 +195,8 @@ pub unsafe extern "C" fn rapira_rs_env_get(
         if let Some(write) = write {
             // SAFETY: the caller gives writable out pointers.
             unsafe {
-                *value = write.as_ptr().cast();
-                *value_len = write.len();
+                *value = write.as_ptr();
+                *value_len = write.count_bytes();
             }
         }
         true
@@ -212,21 +211,36 @@ pub unsafe extern "C" fn rapira_rs_env_get(
     })
 }
 
+/// The getenv callback of the SAPI. PHP reads it for `${NAME}` in INI text and copies the string at once. For null, PHP reads the process environment: this is the result for a name that `putenv()` removed, and for each name on a thread with no pool. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_ini_parser.y#L172-L193
+///
+/// # Safety
+/// `name` points to `name_len` readable bytes.
+pub(crate) unsafe extern "C" fn getenv(name: *const c_char, name_len: usize) -> *mut c_char {
+    let mut value = null();
+    let mut value_len = 0;
+    // SAFETY: the caller gives a live buffer of name_len bytes, and the out pointers are writable.
+    let fixed = unsafe { rapira_rs_env_get(name, name_len, &mut value, &mut value_len) };
+    if fixed.is_null() {
+        return value.cast_mut();
+    }
+    // SAFETY: a permanent string is live and ends with a NUL byte.
+    unsafe { (&raw mut (*fixed).val).cast() }
+}
+
 /// Writes `name` into the putenv() layer. A null `value` is a removal.
 ///
 /// # Safety
-/// `name` points to `name_len` readable bytes. A non-null `value` points to `value_len` readable bytes.
+/// `name` points to `name_len` readable bytes. A non-null `value` is a C string.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_env_put(
     name: *const c_char,
     name_len: usize,
     value: *const c_char,
-    value_len: usize,
 ) {
     // SAFETY: the caller gives a live buffer of name_len bytes.
     let name = unsafe { bytes(name, name_len) };
-    // SAFETY: the caller gives a live buffer of value_len bytes when value is not null.
-    let value = (!value.is_null()).then(|| unsafe { bytes(value, value_len) }.into());
+    // SAFETY: the caller gives a C string when value is not null.
+    let value = (!value.is_null()).then(|| unsafe { CStr::from_ptr(value) }.into());
     WRITES.with_borrow_mut(
         |writes| match writes.iter_mut().find(|(n, _)| **n == *name) {
             Some((_, old)) => *old = value,

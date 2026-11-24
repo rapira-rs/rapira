@@ -1,5 +1,5 @@
 <?php
-// The env routes of the pool_env tests: /put writes with putenv() and then reads, /child reads the env of a child process, /shape reads names that the env arrays skip or key as integers, and every other path reads.
+// The env routes of the pool_env tests: /put writes with putenv() and then reads, /child reads the env of a child process, /ini reads ${NAME} in INI text, /shape reads names that the env arrays skip or key as integers, and every other path reads.
 
 const ENV_NAMES = ['POOL_PROBE', 'POOL_INHERITED', 'POOL_EMPTY', 'POOL_ONLY', 'POOL_DROP', 'POOL_NEW'];
 
@@ -35,6 +35,16 @@ function env_child(): array
     $out = [];
     foreach (ENV_NAMES as $name) {
         $out[$name] = $seen[$name] ?? false;
+    }
+    return $out;
+}
+
+// ${NAME} of each name in INI text. A name that no layer defines gives the fallback.
+function env_ini(): array
+{
+    $out = [];
+    foreach (ENV_NAMES as $name) {
+        $out[$name] = parse_ini_string('value = ${' . $name . ':-undefined}')['value'];
     }
     return $out;
 }
@@ -75,6 +85,7 @@ function env_route(string $path, array $bootServer = []): array
     return match ($path) {
         '/put' => env_put(),
         '/child' => env_child(),
+        '/ini' => env_ini(),
         '/shape' => env_shape($bootServer),
         default => env_view(),
     };
