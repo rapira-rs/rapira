@@ -16,6 +16,8 @@ $handler = static function () use ($app): void {
 	echo implode("\n", $out);
 	if ($probe) {
 		echo "\napp=" . $app;
+		// A probe holds its worker for 50 ms, so the other probes reach the other workers.
+		usleep(50_000);
 	}
 };
 while (\Rapira\handle_request($handler)) {
