@@ -16,6 +16,8 @@ readme = "README.md"
 name = "rapira"
 path = "src/main.rs"
 
+[lints]
+workspace = true
 
 [workspace]
 members = [
