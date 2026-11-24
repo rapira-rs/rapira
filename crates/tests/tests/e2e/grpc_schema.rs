@@ -32,7 +32,7 @@ fn boot_failure(path: &Path, services: &[&str]) -> Exited {
         .boot_failure()
 }
 
-/// The listing keeps streaming methods, in echo.proto order. echo.proto imports dep.proto, so the default list skips DepService.
+/// The listing keeps streaming methods, in echo.proto order. An explicit list keeps the order of its entries. echo.proto imports dep.proto, so the default list skips DepService.
 ///
 /// Expected values: echo.proto, and MethodInfo and MethodKind of the contract.
 #[test]
@@ -72,6 +72,14 @@ fn services_report_every_configured_method() {
         "no list serves every service of the files that no other file imports, in descriptor order"
     );
     assert_eq!(every[0], want);
+
+    let reversed = services_of(Some(&["rapira.test.v1.OtherService", ECHO_SERVICE]));
+    let names: Vec<&str> = reversed.iter().filter_map(|s| s["name"].as_str()).collect();
+    assert_eq!(
+        names,
+        ["rapira.test.v1.OtherService", "rapira.test.v1.EchoService"],
+        "an explicit list keeps its order"
+    );
 
     let dep = services_of(Some(&["rapira.test.dep.v1.DepService"]));
     assert_eq!(

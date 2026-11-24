@@ -9,7 +9,9 @@ use std::time::Duration;
 
 use anyhow::anyhow;
 use buffa_descriptor::generated::descriptor::method_options::IdempotencyLevel;
-use buffa_descriptor::{DescriptorPool, DynamicMessage, MessageIndex, ServiceDescriptor};
+use buffa_descriptor::{
+    DescriptorPool, DynamicMessage, MessageIndex, ServiceDescriptor, ServiceIndex,
+};
 use connectrpc::MethodKind;
 use ureq::tls::{RootCerts, TlsConfig};
 
@@ -66,22 +68,8 @@ pub struct Schema {
     pool: Arc<DescriptorPool>,
     /// The key is `package.Service/Method`, the request path without its leading slash.
     methods: HashMap<String, Method>,
-    services: Vec<ServiceInfo>,
-}
-
-/// A configured service with every method it declares.
-pub(crate) struct ServiceInfo {
-    pub name: String,
-    pub methods: Vec<MethodInfo>,
-}
-
-/// A method with fully qualified message type names.
-pub(crate) struct MethodInfo {
-    pub name: String,
-    pub input_type: String,
-    pub output_type: String,
-    pub client_streaming: bool,
-    pub server_streaming: bool,
+    /// The configured services in configuration order.
+    services: Vec<ServiceIndex>,
 }
 
 thread_local! {
@@ -92,13 +80,8 @@ pub(crate) fn enter(schema: Arc<Schema>) {
     SCHEMA.with(|slot| assert!(slot.set(schema).is_ok()));
 }
 
-pub(crate) fn with_services<T>(f: impl FnOnce(&[ServiceInfo]) -> T) -> T {
-    SCHEMA.with(|slot| {
-        f(slot
-            .get()
-            .expect("the gRPC worker has its schema")
-            .services())
-    })
+pub(crate) fn with<T>(f: impl FnOnce(&Schema) -> T) -> T {
+    SCHEMA.with(|slot| f(slot.get().expect("the gRPC worker has its schema")))
 }
 
 /// A method that rapira routes to PHP: unary or server-streaming.
@@ -208,7 +191,11 @@ impl Schema {
         let mut methods = HashMap::new();
         let mut listed = Vec::with_capacity(selected.len());
         for service in &selected {
-            listed.push(service_info(&pool, service, &mut methods));
+            add_routes(service, &mut methods);
+            let index = pool
+                .service_index(service.full_name())
+                .expect("the pool holds each selected service");
+            listed.push(index);
         }
 
         Ok(Schema {
@@ -218,9 +205,9 @@ impl Schema {
         })
     }
 
-    /// Every method of the configured services, streaming ones included, in descriptor order.
-    pub(crate) fn services(&self) -> &[ServiceInfo] {
-        &self.services
+    /// The configured services in configuration order. A descriptor has every method of its service, streaming ones included, in descriptor order.
+    pub(crate) fn services(&self) -> impl ExactSizeIterator<Item = &ServiceDescriptor> {
+        self.services.iter().map(|&index| self.pool.service(index))
     }
 
     pub fn pool(&self) -> &Arc<DescriptorPool> {
@@ -249,13 +236,8 @@ impl Schema {
     }
 }
 
-/// The listing of `service`, with its unary and server-streaming methods added to `methods` as routes.
-fn service_info(
-    pool: &DescriptorPool,
-    service: &ServiceDescriptor,
-    methods: &mut HashMap<String, Method>,
-) -> ServiceInfo {
-    let mut infos = Vec::with_capacity(service.methods().len());
+/// Adds the unary and server-streaming methods of `service` to `methods` as routes.
+fn add_routes(service: &ServiceDescriptor, methods: &mut HashMap<String, Method>) {
     for m in service.methods() {
         let route = format!("{}/{}", service.full_name(), m.name());
         if m.is_client_streaming() {
@@ -276,17 +258,6 @@ fn service_info(
             };
             methods.insert(route, method);
         }
-        infos.push(MethodInfo {
-            name: m.name().to_owned(),
-            input_type: pool.message(m.input()).full_name().to_owned(),
-            output_type: pool.message(m.output()).full_name().to_owned(),
-            client_streaming: m.is_client_streaming(),
-            server_streaming: m.is_server_streaming(),
-        });
-    }
-    ServiceInfo {
-        name: service.full_name().to_owned(),
-        methods: infos,
     }
 }
 

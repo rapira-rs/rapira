@@ -21,7 +21,7 @@ mod serve;
 
 use call::{Call, Head, Part, UnaryReply};
 pub use php::rapira_grpc_register_classes;
-use schema::{MethodInfo, Schema};
+use schema::Schema;
 
 /// The listener and the values that `from_settings` loads before PHP starts.
 pub struct Server {

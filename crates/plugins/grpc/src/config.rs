@@ -201,8 +201,11 @@ impl Server {
         }
 
         let listener = rapira_net::bind(&settings.listen).context("plugin grpc: prepare failed")?;
-        let names = schema.services().iter().map(|s| s.name.clone());
-        let (mut router, health) = crate::health::install(names.clone());
+        let names: Vec<String> = schema
+            .services()
+            .map(|s| s.full_name().to_owned())
+            .collect();
+        let (mut router, health) = crate::health::install(names.iter().cloned());
         if settings.reflection {
             let reflector = Reflector::from_descriptor_pool(Arc::clone(schema.pool()))
                 .map_err(|e| anyhow!("building grpc reflection: {e}"))

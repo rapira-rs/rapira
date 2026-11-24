@@ -6,6 +6,7 @@ use base64::Engine as _;
 use base64::alphabet;
 use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD_NO_PAD};
+use buffa_descriptor::{DescriptorPool, MethodDescriptor};
 use bytes::Bytes;
 use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
 use connectrpc::{ConnectError, ErrorCode, ErrorDetail, Protocol};
@@ -28,19 +29,21 @@ use super::{
     rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind, rapira_ce_grpc_protocol,
     rapira_ce_grpc_server_streaming_call, rapira_ce_grpc_service_info, rapira_ce_grpc_unary_call,
 };
-use crate::{Call, Head, MethodInfo, Part, UnaryReply};
+use crate::{Call, Head, Part, UnaryReply};
 
 /// # Safety
 /// `dst` is writable. The engine is active on this thread.
-unsafe fn method_info(dst: *mut zval, m: &MethodInfo) {
+unsafe fn method_info(dst: *mut zval, pool: &DescriptorPool, m: &MethodDescriptor) {
     unsafe {
         let ce = rapira_ce_grpc_method_info;
         let _ = object_init_ex(dst, ce);
         let obj = (*dst).value.obj;
-        zend::prop_stringl(ce, obj, c"name", m.name.as_bytes());
-        zend::prop_stringl(ce, obj, c"inputType", m.input_type.as_bytes());
-        zend::prop_stringl(ce, obj, c"outputType", m.output_type.as_bytes());
-        let case = match (m.client_streaming, m.server_streaming) {
+        zend::prop_stringl(ce, obj, c"name", m.name().as_bytes());
+        let input = pool.message(m.input()).full_name();
+        zend::prop_stringl(ce, obj, c"inputType", input.as_bytes());
+        let output = pool.message(m.output()).full_name();
+        zend::prop_stringl(ce, obj, c"outputType", output.as_bytes());
+        let case = match (m.is_client_streaming(), m.is_server_streaming()) {
             (false, false) => c"Unary",
             (false, true) => c"ServerStreaming",
             (true, false) => c"ClientStreaming",
@@ -59,20 +62,21 @@ unsafe fn method_info(dst: *mut zval, m: &MethodInfo) {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_services(rv: *mut zval) -> bool {
     guard(false, || {
-        crate::schema::with_services(|services| unsafe {
+        crate::schema::with(|schema| unsafe {
+            let services = schema.services();
             rapira_array_init(rv, services.len() as u32);
             for s in services {
                 let mut methods: zval = std::mem::zeroed();
-                rapira_array_init(&mut methods, s.methods.len() as u32);
-                for m in &s.methods {
+                rapira_array_init(&mut methods, s.methods().len() as u32);
+                for m in s.methods() {
                     let mut info: zval = std::mem::zeroed();
-                    method_info(&mut info, m);
+                    method_info(&mut info, schema.pool(), m);
                     let _ = add_next_index_object(&mut methods, info.value.obj);
                 }
                 let ce = rapira_ce_grpc_service_info;
                 let mut service: zval = std::mem::zeroed();
                 let _ = object_init_ex(&mut service, ce);
-                zend::prop_stringl(ce, service.value.obj, c"name", s.name.as_bytes());
+                zend::prop_stringl(ce, service.value.obj, c"name", s.full_name().as_bytes());
                 zend::prop_zval(ce, service.value.obj, c"methods", &mut methods);
                 zval_ptr_dtor(&mut methods);
                 let _ = add_next_index_object(rv, service.value.obj);
