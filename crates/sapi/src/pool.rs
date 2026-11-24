@@ -39,7 +39,7 @@ impl State {
 }
 
 pub struct Pool {
-    pub(crate) name: &'static str,
+    pub name: &'static str,
     pub(crate) workers: Box<[Worker]>,
     /// Units that wait for a worker.
     pub(crate) pending: AtomicU64,
@@ -115,7 +115,7 @@ impl Pool {
     }
 
     /// A worker can serve a unit.
-    pub(crate) fn ready(&self) -> bool {
+    pub fn ready(&self) -> bool {
         (0..self.workers.len()).any(|index| self.state(index).serving())
     }
 

@@ -140,8 +140,13 @@ fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<String> {
             reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
         }
         (&Method::GET, "/readyz") if routes.probes => {
-            let pools: Vec<_> = routes.pools.iter().map(|pool| pool.snapshot()).collect();
-            let (status, body) = probes::readyz(&pools);
+            let mut unready = Vec::new();
+            for pool in routes.pools.iter() {
+                if !pool.ready() {
+                    unready.push(pool.name);
+                }
+            }
+            let (status, body) = probes::readyz(&unready);
             reply(status, PROBE_CONTENT_TYPE, body)
         }
         _ => {
