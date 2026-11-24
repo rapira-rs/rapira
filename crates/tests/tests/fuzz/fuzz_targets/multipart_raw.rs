@@ -1,12 +1,11 @@
-//! Passes raw bytes through the multipart parser of the dispatcher mode. The bytes before the first LF are the Content-Type value and the rest is the body. The calls follow parse_multipart in crates/plugins/http/src/handler.rs. The target parses the body once as one part and once split into parts, and the two results must agree.
+//! Passes raw bytes through the multipart parser of the dispatcher mode. The bytes before the first LF are the Content-Type value and the rest is the body. The calls follow Form::open in crates/plugins/http/src/handler.rs. The target parses the body once as one part, once split into parts and once byte by byte, and the results must agree.
 
 #![no_main]
 
 use std::sync::LazyLock;
 
-use bytes::Bytes;
 use rapira_http::check::Rejection;
-use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart, parse};
+use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart};
 
 /// Small limits, so that a 4 KiB input can go over each count and size limit.
 static LIMITS: LazyLock<Limits> = LazyLock::new(|| Limits {
@@ -59,14 +58,16 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         return;
     }
     let l = &*LIMITS;
-    let whole = parse(&[Bytes::copy_from_slice(body)], &b, l);
+    let whole = rapira_fuzz::parse(&[body], &b, l);
     let parts = rapira_fuzz::split(body);
-    let lens: Vec<usize> = parts.iter().map(Bytes::len).collect();
+    let lens: Vec<usize> = parts.iter().map(|p| p.len()).collect();
     rapira_fuzz::assert_same_parse(
         format_args!("parts {lens:?}"),
         &whole,
-        &parse(&parts, &b, l),
+        &rapira_fuzz::parse(&parts, &b, l),
     );
+    let single: Vec<&[u8]> = body.chunks(1).collect();
+    rapira_fuzz::assert_same_parse("single bytes", &whole, &rapira_fuzz::parse(&single, &b, l));
     let form = match whole {
         Ok(form) => form,
         Err(e) => return rejected(e, &[400, 413]),

@@ -423,18 +423,25 @@ fn uploads_server(fixture_name: &str) -> Server {
         .spawn()
 }
 
-/// The files in the server's spool directory, read again until they are gone, for at most 5 s.
+/// The files in the subdirectories of the server's spool directory, read again until they are gone, for at most 5 s.
 /// The client can get the last byte of the response before seal() unlinks the spool files.
 fn spooled_files(srv: &Server) -> Vec<PathBuf> {
     let spool = srv
         .dir
         .join("uploads")
         .join(format!("rapira-spool-{}", srv.pid()));
-    let read = || -> Vec<PathBuf> {
-        std::fs::read_dir(&spool)
-            .unwrap_or_else(|e| panic!("read {}: {e}", spool.display()))
+    let entries = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
             .map(|e| e.expect("spool dir entry").path())
             .collect()
+    };
+    let read = || -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for subdir in entries(&spool) {
+            files.extend(entries(&subdir));
+        }
+        files
     };
     poll(Duration::from_secs(5), || {
         Some(read()).filter(Vec::is_empty)
@@ -797,7 +804,7 @@ fn multipart_file_part_across_frames_keeps_its_bytes() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, a file part in a body over 256 KiB reaches PHP after the parse on the blocking pool, an empty name is a 400, and a field over the limit after a file part is a 413.
+/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, a file part of 300 KiB reaches PHP complete, an empty name is a 400, and a field over the limit after a file part is a 413.
 /// Part header names keep the case that the client sent, and the values of one name keep their line order (contract FormField and UploadedFile `$headers`).
 /// No spool file outlives its request, also when a later part rejects the body after a file part was spooled.
 #[test]
@@ -858,7 +865,7 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
             lines: &[],
         },
         Case {
-            name: "file part in a body over 256 KiB",
+            name: "file part of 300 KiB",
             parts: vec![Part {
                 headers: "content-disposition: form-data; name=\"f\"; filename=\"big.bin\"",
                 content: &big,

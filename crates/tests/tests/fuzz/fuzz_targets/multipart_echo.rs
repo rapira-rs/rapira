@@ -1,14 +1,13 @@
-//! Encodes generated parts the way a browser does, parses the body, and compares the result with the parts byte for byte. The target parses the body once as one part and once split into parts, and the two results must agree.
+//! Encodes generated parts the way a browser does, parses the body, and compares the result with the parts byte for byte. The target parses the body once as one part, once split into parts and once byte by byte, and the results must agree.
 
 #![no_main]
 
 use std::sync::LazyLock;
 
 use arbitrary::{Arbitrary, Unstructured};
-use bytes::Bytes;
 use rapira_fuzz::MAX_LEN;
 use rapira_http::check::Rejection;
-use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart, parse};
+use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart};
 
 #[derive(Arbitrary)]
 struct EchoPart<'a> {
@@ -217,13 +216,19 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     body.extend_from_slice(b"--\r\n");
 
     let ctx = body.escape_ascii();
-    let whole = parse(&[Bytes::copy_from_slice(&body)], &bnd, &LIMITS);
+    let whole = rapira_fuzz::parse(&[&body[..]], &bnd, &LIMITS);
     let parts = rapira_fuzz::split(&body);
-    let lens: Vec<usize> = parts.iter().map(Bytes::len).collect();
+    let lens: Vec<usize> = parts.iter().map(|p| p.len()).collect();
     rapira_fuzz::assert_same_parse(
         format_args!("parts {lens:?} of {ctx}"),
         &whole,
-        &parse(&parts, &bnd, &LIMITS),
+        &rapira_fuzz::parse(&parts, &bnd, &LIMITS),
+    );
+    let single: Vec<&[u8]> = body.chunks(1).collect();
+    rapira_fuzz::assert_same_parse(
+        format_args!("single bytes of {ctx}"),
+        &whole,
+        &rapira_fuzz::parse(&single, &bnd, &LIMITS),
     );
     let got = match whole {
         Ok(got) => got,

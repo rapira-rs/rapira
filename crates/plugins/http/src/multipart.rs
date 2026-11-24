@@ -3,7 +3,6 @@
 use std::io::Write;
 use std::path::{Path, PathBuf};
 
-use hyper::body::Bytes;
 use memchr::memmem;
 
 use crate::check::Rejection;
@@ -195,190 +194,409 @@ pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
     Err(bad("multipart/form-data without a boundary parameter"))
 }
 
-/// The body parts as one byte sequence. Every method takes global byte indices.
-struct View<'a> {
-    parts: &'a [Bytes],
-    /// The global index of the first byte of each part.
-    starts: Vec<usize>,
-    len: usize,
+/// The tail of a delimiter line after the delimiter bytes: the two dashes of a close-delimiter, transport padding and the line ending (RFC 2046 §5.1.1).
+#[derive(Clone, Copy, Default)]
+struct Tail {
+    dashes: u8,
+    padded: bool,
+    cr: bool,
 }
 
-impl<'a> View<'a> {
-    fn new(parts: &'a [Bytes]) -> Self {
-        let mut starts = Vec::with_capacity(parts.len());
-        let mut len = 0;
-        for part in parts {
-            starts.push(len);
-            len += part.len();
+/// The result of one tail byte.
+enum Step {
+    More,
+    /// The byte ends a delimiter line.
+    Delimiter,
+    /// The line is content.
+    Content,
+}
+
+impl Tail {
+    fn step(&mut self, byte: u8) -> Step {
+        if self.cr {
+            return if byte == b'\n' {
+                Step::Delimiter
+            } else {
+                Step::Content
+            };
         }
-        Self { parts, starts, len }
-    }
-
-    /// The bytes from i towards b that the part of i holds. i is less than b, and b is at most len.
-    fn run(&self, i: usize, b: usize) -> &'a [u8] {
-        // The last part that starts at or before i holds i. An empty part starts at the index of the next part, so it is never that last part.
-        let k = self.starts.partition_point(|&s| s <= i) - 1;
-        let local = i - self.starts[k];
-        let part = &self.parts[k];
-        &part[local..part.len().min(local + b - i)]
-    }
-
-    /// The first match at or after from. A match inside a part comes before a match that starts in that part and ends after it.
-    fn find(&self, finder: &memmem::Finder<'_>, from: usize) -> Option<usize> {
-        let reach = finder.needle().len() - 1;
-        let mut i = from;
-        while i < self.len {
-            let run = self.run(i, self.len);
-            if let Some(o) = finder.find(run) {
-                return Some(i + o);
-            }
-            let end = i + run.len();
-            // Each match in this window starts before end and ends after it.
-            let a = i.max(end.saturating_sub(reach));
-            let window = self.copy(a, self.len.min(end + reach));
-            if let Some(o) = finder.find(&window) {
-                return Some(a + o);
-            }
-            i = end;
+        match byte {
+            b'-' if !self.padded && self.dashes < 2 => self.dashes += 1,
+            // One dash is not a close-delimiter.
+            _ if self.dashes == 1 => return Step::Content,
+            b' ' | b'\t' => self.padded = true,
+            b'\r' => self.cr = true,
+            b'\n' => return Step::Delimiter,
+            _ => return Step::Content,
         }
-        None
+        Step::More
     }
 
-    fn memchr(&self, b: u8, from: usize) -> Option<usize> {
-        let mut i = from;
-        while i < self.len {
-            let run = self.run(i, self.len);
-            if let Some(o) = memchr::memchr(b, run) {
-                return Some(i + o);
-            }
-            i += run.len();
+    fn is_close(self) -> bool {
+        self.dashes == 2
+    }
+}
+
+#[derive(Clone, Copy)]
+enum State {
+    /// In the header section of a part.
+    Headers,
+    /// Inside a line of the preamble or of a part content.
+    Content,
+    /// After a CR that can start the line ending before a delimiter line.
+    Cr,
+    /// At a line start, after this number of delimiter bytes.
+    LineStart(usize),
+    /// After the delimiter bytes of a line.
+    Tail(Tail),
+    /// After the close-delimiter. The parser ignores the epilogue.
+    Done,
+}
+
+/// The target of the content bytes.
+enum Sink {
+    /// The preamble, or no open part.
+    None,
+    /// The part has this error. The parser reports it at the delimiter line that ends the part.
+    Skip(Rejection),
+    Field(FormField),
+    File {
+        file: UploadedFile,
+        out: std::fs::File,
+    },
+}
+
+/// Parses a body while the transport delivers it. `feed` takes the body bytes in order, in pieces of any size, and `finish` ends the body. A file part goes to its spool file piece by piece, so the parser never holds the body.
+/// https://www.rfc-editor.org/rfc/rfc7578
+pub struct Parser<'a> {
+    limits: &'a Limits,
+    /// Finds `--boundary`.
+    finder: memmem::Finder<'static>,
+    state: State,
+    sink: Sink,
+    /// The bytes of a possible delimiter line so far: the line ending before it, the delimiter bytes and the tail. They are content when the line is not a delimiter line.
+    held: Vec<u8>,
+    /// The header section of the current part so far.
+    head: Vec<u8>,
+    /// The start of the current line in `head`.
+    line: usize,
+    /// The opening delimiter line is complete.
+    opened: bool,
+    fields: Vec<FormField>,
+    files: Vec<UploadedFile>,
+}
+
+impl<'a> Parser<'a> {
+    pub fn new(boundary: &[u8], limits: &'a Limits) -> Self {
+        let delimiter = [b"--".as_slice(), boundary].concat();
+        Self {
+            limits,
+            finder: memmem::Finder::new(&delimiter).into_owned(),
+            // The body starts at a line start.
+            state: State::LineStart(0),
+            sink: Sink::None,
+            held: Vec::new(),
+            head: Vec::new(),
+            line: 0,
+            opened: false,
+            fields: Vec::new(),
+            files: Vec::new(),
         }
-        None
     }
 
-    fn get(&self, i: usize) -> Option<u8> {
-        (i < self.len).then(|| self.run(i, i + 1)[0])
-    }
-
-    fn starts_with(&self, i: usize, needle: &[u8]) -> bool {
-        (i..).zip(needle).all(|(at, &b)| self.get(at) == Some(b))
-    }
-
-    fn copy(&self, a: usize, b: usize) -> Vec<u8> {
-        let mut out = Vec::with_capacity(b - a);
-        let mut i = a;
-        while i < b {
-            let run = self.run(i, b);
-            out.extend_from_slice(run);
-            i += run.len();
-        }
-        out
-    }
-
-    fn write_to(&self, file: &mut std::fs::File, a: usize, b: usize) -> std::io::Result<()> {
-        let mut i = a;
-        while i < b {
-            let run = self.run(i, b);
-            file.write_all(run)?;
-            i += run.len();
+    /// Takes the next bytes of the body. After an error the parser takes no more bytes.
+    pub fn feed(&mut self, mut bytes: &[u8]) -> Result<(), Rejection> {
+        while !bytes.is_empty() {
+            bytes = match self.state {
+                State::Headers => self.headers(bytes)?,
+                State::Content => self.content(bytes),
+                State::Cr => self.after_cr(bytes),
+                State::LineStart(matched) => self.line_start(bytes, matched),
+                State::Tail(tail) => self.tail(bytes, tail)?,
+                State::Done => return Ok(()),
+            };
         }
         Ok(())
     }
-}
 
-struct DelimHit {
-    line_start: usize,
-    after: usize,
-    close: bool,
-}
+    /// Ends the body. A close-delimiter can end the body without a line ending.
+    pub fn finish(mut self) -> Result<MultipartBody, Rejection> {
+        match self.state {
+            State::Done => {}
+            State::Tail(tail) if tail.is_close() && !tail.cr => self.end_part(true)?,
+            State::Headers if self.is_delimiter_line(&self.head[self.line..], true) => {
+                return Err(bad("part without a header/body separator"));
+            }
+            _ if self.opened => return Err(bad("no closing boundary line")),
+            _ => return Err(bad("no opening boundary line")),
+        }
+        Ok(MultipartBody {
+            fields: self.fields,
+            files: self.files,
+        })
+    }
 
-/// A delimiter must start a line. A line that only begins with the boundary bytes is content, so the scan continues at the next line. The scan is linear in the body, because it skips a run of boundary bytes inside a line in one step.
-fn next_delimiter(
-    view: &View<'_>,
-    mut from: usize,
-    finder: &memmem::Finder<'_>,
-    dlen: usize,
-) -> Option<DelimHit> {
-    while let Some(i) = view.find(finder, from) {
-        if i == 0 || view.get(i - 1) == Some(b'\n') {
-            let mut j = i + dlen;
-            if view.starts_with(j, b"--") {
-                // After the dashes, a close-delimiter allows only transport padding and a line ending or the end of the body (RFC 2046 §5.1.1).
-                let mut k = j + 2;
-                while matches!(view.get(k), Some(b' ' | b'\t')) {
-                    k += 1;
-                }
-                if matches!(view.get(k), None | Some(b'\n')) || view.starts_with(k, b"\r\n") {
-                    return Some(DelimHit {
-                        line_start: i,
-                        after: j + 2,
-                        close: true,
-                    });
-                }
+    /// Takes header lines up to the empty line, CRLF or bare LF. A line starts at the part start or after a LF, as in httparse. A delimiter line before the empty line ends a part that has no header/body separator.
+    fn headers<'b>(&mut self, bytes: &'b [u8]) -> Result<&'b [u8], Rejection> {
+        let mut from = 0;
+        while let Some(lf) = memchr::memchr(b'\n', &bytes[from..]) {
+            let end = from + lf + 1;
+            self.head.extend_from_slice(&bytes[from..end]);
+            from = end;
+            let line = &self.head[self.line..];
+            if matches!(line, b"\n" | b"\r\n") {
+                self.sink = self.open_part().unwrap_or_else(Sink::Skip);
+                // The content starts at a line start.
+                self.state = State::LineStart(0);
+                return Ok(&bytes[from..]);
             }
-            while matches!(view.get(j), Some(b' ' | b'\t')) {
-                j += 1;
+            if self.is_delimiter_line(line, false) {
+                return Err(bad("part without a header/body separator"));
             }
-            match view.get(j) {
-                Some(b'\n') => {
-                    return Some(DelimHit {
-                        line_start: i,
-                        after: j + 1,
-                        close: false,
-                    });
-                }
-                Some(b'\r') if view.get(j + 1) == Some(b'\n') => {
-                    return Some(DelimHit {
-                        line_start: i,
-                        after: j + 2,
-                        close: false,
-                    });
-                }
-                _ => {}
+            self.line = self.head.len();
+        }
+        self.head.extend_from_slice(&bytes[from..]);
+        Ok(&[])
+    }
+
+    /// `at_end` is true for the last line of a body, which has no line ending.
+    fn is_delimiter_line(&self, line: &[u8], at_end: bool) -> bool {
+        let Some(rest) = line.strip_prefix(self.finder.needle()) else {
+            return false;
+        };
+        let mut tail = Tail::default();
+        for &byte in rest {
+            match tail.step(byte) {
+                Step::More => {}
+                Step::Delimiter => return true,
+                Step::Content => return false,
             }
         }
-        from = view.memchr(b'\n', i)? + 1;
+        at_end && tail.is_close() && !tail.cr
     }
-    None
-}
 
-/// Parses a non-empty body from the parts that the transport delivered. An empty body takes the string arm of the contract (`$body === ''`).
-/// https://www.rfc-editor.org/rfc/rfc7578
-pub fn parse(body: &[Bytes], boundary: &[u8], limits: &Limits) -> Result<MultipartBody, Rejection> {
-    let view = View::new(body);
-    let delim: Vec<u8> = [b"--".as_slice(), boundary].concat();
-    let finder = memmem::Finder::new(&delim);
-
-    let mut fields: Vec<FormField> = Vec::new();
-    let mut files: Vec<UploadedFile> = Vec::new();
-
-    let opening = next_delimiter(&view, 0, &finder, delim.len())
-        .ok_or_else(|| bad("no opening boundary line"))?;
-    if opening.close {
-        return Ok(MultipartBody { fields, files });
+    /// Scans bytes that start inside a line. A delimiter must start a line. A line that only begins with the delimiter bytes is content, so the scan continues at the next line. The scan is linear in the body, because it skips a run of delimiter bytes inside a line in one step.
+    fn content<'b>(&mut self, bytes: &'b [u8]) -> &'b [u8] {
+        let delimiter = self.finder.needle().len();
+        let mut from = 0;
+        while let Some(found) = self.finder.find(&bytes[from..]) {
+            let at = from + found;
+            if at > 0 && bytes[at - 1] == b'\n' {
+                // The line terminator before a delimiter line belongs to the delimiter, not to the part (RFC 2046 §5.1.1).
+                let mut end = at - 1;
+                if end > 0 && bytes[end - 1] == b'\r' {
+                    end -= 1;
+                }
+                self.emit(&bytes[..end]);
+                self.held.extend_from_slice(&bytes[end..at + delimiter]);
+                self.state = State::Tail(Tail::default());
+                return &bytes[at + delimiter..];
+            }
+            match memchr::memchr(b'\n', &bytes[at..]) {
+                Some(lf) => from = at + lf,
+                None => break,
+            }
+        }
+        // The last bytes can start a delimiter line: a line ending with delimiter bytes after it, or a CR.
+        let window = bytes.len().saturating_sub(delimiter);
+        let keep = match memchr::memrchr(b'\n', &bytes[window..]) {
+            Some(lf) if self.finder.needle().starts_with(&bytes[window + lf + 1..]) => {
+                let lf = window + lf;
+                let start = if lf > 0 && bytes[lf - 1] == b'\r' {
+                    lf - 1
+                } else {
+                    lf
+                };
+                Some((start, State::LineStart(bytes.len() - lf - 1)))
+            }
+            _ if bytes.last() == Some(&b'\r') => Some((bytes.len() - 1, State::Cr)),
+            _ => None,
+        };
+        match keep {
+            Some((start, state)) => {
+                self.emit(&bytes[..start]);
+                self.held.extend_from_slice(&bytes[start..]);
+                self.state = state;
+            }
+            None => self.emit(bytes),
+        }
+        &[]
     }
-    let mut part_start = opening.after;
 
-    loop {
-        if fields.len() + files.len() + 1 > limits.max_parts {
+    fn after_cr<'b>(&mut self, bytes: &'b [u8]) -> &'b [u8] {
+        if bytes[0] != b'\n' {
+            self.release();
+            return bytes;
+        }
+        self.held.push(b'\n');
+        self.state = State::LineStart(0);
+        &bytes[1..]
+    }
+
+    fn line_start<'b>(&mut self, bytes: &'b [u8], matched: usize) -> &'b [u8] {
+        let want = &self.finder.needle()[matched..];
+        let len = want.len().min(bytes.len());
+        if bytes[..len] != want[..len] {
+            self.release();
+            return bytes;
+        }
+        self.state = if len == want.len() {
+            State::Tail(Tail::default())
+        } else {
+            State::LineStart(matched + len)
+        };
+        self.held.extend_from_slice(&bytes[..len]);
+        &bytes[len..]
+    }
+
+    fn tail<'b>(&mut self, bytes: &'b [u8], mut tail: Tail) -> Result<&'b [u8], Rejection> {
+        for (i, &byte) in bytes.iter().enumerate() {
+            match tail.step(byte) {
+                Step::More => {}
+                Step::Delimiter => {
+                    self.end_part(tail.is_close())?;
+                    return Ok(&bytes[i + 1..]);
+                }
+                Step::Content => {
+                    self.release();
+                    self.emit(&bytes[..i]);
+                    return Ok(&bytes[i..]);
+                }
+            }
+        }
+        self.held.extend_from_slice(bytes);
+        self.state = State::Tail(tail);
+        Ok(&[])
+    }
+
+    /// The held bytes are content, and the next byte is inside a line.
+    fn release(&mut self) {
+        let held = std::mem::take(&mut self.held);
+        self.emit(&held);
+        self.held = held;
+        self.held.clear();
+        self.state = State::Content;
+    }
+
+    /// Gives content bytes to the current part.
+    fn emit(&mut self, bytes: &[u8]) {
+        let error = match &mut self.sink {
+            Sink::None | Sink::Skip(_) => return,
+            Sink::Field(field) => {
+                if field.value.len() + bytes.len() <= self.limits.max_field_size {
+                    field.value.extend_from_slice(bytes);
+                    return;
+                }
+                over("field part over max_field_size")
+            }
+            Sink::File { file, out } => {
+                if file.size + bytes.len() as u64 > self.limits.max_file_size {
+                    over("file part over max_file_size")
+                } else if let Err(e) = out.write_all(bytes) {
+                    spool_failed(e)
+                } else {
+                    file.size += bytes.len() as u64;
+                    return;
+                }
+            }
+        };
+        // The drop of a file part removes its spool file.
+        self.sink = Sink::Skip(error);
+    }
+
+    /// Ends the preamble or the current part at a delimiter line.
+    fn end_part(&mut self, close: bool) -> Result<(), Rejection> {
+        // The delimiter line has no line ending before it when it follows the empty line of the header section.
+        let bare = self.held.first() == Some(&b'-');
+        self.held.clear();
+        match std::mem::replace(&mut self.sink, Sink::None) {
+            Sink::None => {}
+            _ if bare => return Err(bad("part without a header/body separator")),
+            Sink::Skip(rejection) => return Err(rejection),
+            Sink::Field(field) => self.fields.push(field),
+            Sink::File { file, .. } => self.files.push(file),
+        }
+        self.opened = true;
+        if close {
+            self.state = State::Done;
+            return Ok(());
+        }
+        if self.fields.len() + self.files.len() + 1 > self.limits.max_parts {
             return Err(over("part count over max_parts"));
         }
-        let ending = next_delimiter(&view, part_start, &finder, delim.len())
-            .ok_or_else(|| bad("no closing boundary line"))?;
-        // The line terminator before a delimiter line belongs to the delimiter, not to the part (RFC 2046 §5.1.1).
-        let mut part_end = ending.line_start;
-        if part_end > part_start && view.get(part_end - 1) == Some(b'\n') {
-            part_end -= 1;
-            if part_end > part_start && view.get(part_end - 1) == Some(b'\r') {
-                part_end -= 1;
+        self.head.clear();
+        self.line = 0;
+        self.state = State::Headers;
+        Ok(())
+    }
+
+    /// Reads the header section and opens the field or the file of the part. A filename parameter, even an empty one, makes the part a file part.
+    fn open_part(&self) -> Result<Sink, Rejection> {
+        let mut hbuf = vec![httparse::EMPTY_HEADER; self.limits.max_part_headers];
+        let parsed = match httparse::parse_headers(&self.head, &mut hbuf) {
+            Ok(httparse::Status::Complete((_, headers))) => headers,
+            Ok(httparse::Status::Partial) => {
+                return Err(bad("part without a header/body separator"));
+            }
+            Err(httparse::Error::TooManyHeaders) => {
+                return Err(over("part headers over max_part_headers"));
+            }
+            // httparse accepts only RFC 9110 token field names. This is stricter than rfc1867.c.
+            Err(_) => return Err(bad("unparseable part header section")),
+        };
+
+        let mut headers: Vec<HeaderValues> = Vec::with_capacity(parsed.len());
+        let mut disposition: Option<&[u8]> = None;
+        let mut media_type: Option<&[u8]> = None;
+        for h in parsed {
+            if h.name.eq_ignore_ascii_case("content-disposition") {
+                if disposition.replace(h.value).is_some() {
+                    return Err(bad("duplicated content-disposition in a part"));
+                }
+            } else if h.name.eq_ignore_ascii_case("content-type") && media_type.is_none() {
+                media_type = Some(h.value);
+            }
+            match headers.iter_mut().find(|header| header.name == h.name) {
+                Some(header) => header.values.push(h.value.to_vec()),
+                None => headers.push(HeaderValues {
+                    name: h.name.to_owned(),
+                    values: vec![h.value.to_vec()],
+                }),
             }
         }
-        parse_part(&view, part_start, part_end, limits, &mut fields, &mut files)?;
+        let Some(disposition) = disposition else {
+            return Err(bad("part without content-disposition"));
+        };
 
-        if ending.close {
-            return Ok(MultipartBody { fields, files });
+        let Disposition { name, filename } = disposition_params(disposition)?;
+        let Some(name) = name.filter(|n| !n.is_empty()) else {
+            return Err(bad(
+                "content-disposition without a non-empty name parameter",
+            ));
+        };
+        let Some(client_filename) = filename else {
+            return Ok(Sink::Field(FormField {
+                name,
+                value: Vec::new(),
+                headers,
+            }));
+        };
+        if self.files.len() + 1 > self.limits.max_files {
+            return Err(over("file parts over max_files"));
         }
-        part_start = ending.after;
+        let (out, file) = spool(&self.limits.dir).map_err(spool_failed)?;
+        Ok(Sink::File {
+            file: UploadedFile {
+                name,
+                client_filename,
+                // httparse trims the value already.
+                client_media_type: media_type.filter(|v| !v.is_empty()).map(<[u8]>::to_vec),
+                headers,
+                file,
+                size: 0,
+            },
+            out,
+        })
     }
 }
 
@@ -452,127 +670,46 @@ fn disposition_params(v: &[u8]) -> Result<Disposition, Rejection> {
 /// Spool file names are unique per process; the fuzz targets share one dir across processes, so the pid stays in the name.
 static SPOOL_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
-/// The SpooledFile wraps the path before the write, so a failed write unlinks the file on drop.
-fn spool(view: &View<'_>, a: usize, b: usize, dir: &Path) -> std::io::Result<SpooledFile> {
+/// The number of subdirectories of the spool directory. A file create and an unlink take the lock of their directory. With one directory, all IO threads and PHP threads wait for the same lock.
+const SPOOL_SUBDIRS: u64 = 64;
+
+/// Creates the spool file of a file part. The SpooledFile removes the file when it drops.
+fn spool(dir: &Path) -> std::io::Result<(std::fs::File, SpooledFile)> {
     use std::os::unix::fs::OpenOptionsExt;
     let n = SPOOL_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let path = dir.join(format!("{}-{n}", std::process::id()));
-    let mut file = std::fs::File::options()
-        .write(true)
-        .create_new(true)
-        .mode(0o600)
-        .open(&path)?;
-    let spooled = SpooledFile {
+    let subdir = dir.join((n % SPOOL_SUBDIRS).to_string());
+    let path = subdir.join(format!("{}-{n}", std::process::id()));
+    let open = || {
+        std::fs::File::options()
+            .write(true)
+            .create_new(true)
+            .mode(0o600)
+            .open(&path)
+    };
+    let out = match open() {
+        // The first file of a subdirectory creates it. Another thread can create it at the same time.
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            if let Err(e) = std::fs::create_dir(&subdir)
+                && e.kind() != std::io::ErrorKind::AlreadyExists
+            {
+                return Err(e);
+            }
+            open()?
+        }
+        out => out?,
+    };
+    let file = SpooledFile {
         path,
         unlinked: false,
     };
-    view.write_to(&mut file, a, b)?;
-    Ok(spooled)
+    Ok((out, file))
 }
 
-/// The part is the range from part_start to part_end of the view. A filename parameter, even an empty one, makes the part a file part.
-fn parse_part(
-    view: &View<'_>,
-    part_start: usize,
-    part_end: usize,
-    limits: &Limits,
-    fields: &mut Vec<FormField>,
-    files: &mut Vec<UploadedFile>,
-) -> Result<(), Rejection> {
-    // The header section ends at the first empty line, CRLF or bare LF. A line starts at the part start or after a LF, as in httparse.
-    let mut line = part_start;
-    let section_end = loop {
-        if line < part_end && view.get(line) == Some(b'\n') {
-            break line + 1;
-        }
-        if line + 2 <= part_end && view.starts_with(line, b"\r\n") {
-            break line + 2;
-        }
-        match view.memchr(b'\n', line) {
-            Some(lf) if lf < part_end => line = lf + 1,
-            _ => return Err(bad("part without a header/body separator")),
-        }
-    };
-    let section = view.copy(part_start, section_end);
-    let mut hbuf = vec![httparse::EMPTY_HEADER; limits.max_part_headers];
-    let (content_start, parsed) = match httparse::parse_headers(&section, &mut hbuf) {
-        // len includes the empty line
-        Ok(httparse::Status::Complete((len, headers))) => (part_start + len, headers),
-        Ok(httparse::Status::Partial) => return Err(bad("part without a header/body separator")),
-        Err(httparse::Error::TooManyHeaders) => {
-            return Err(over("part headers over max_part_headers"));
-        }
-        // httparse accepts only RFC 9110 token field names. This is stricter than rfc1867.c.
-        Err(_) => return Err(bad("unparseable part header section")),
-    };
-
-    let mut headers: Vec<HeaderValues> = Vec::with_capacity(parsed.len());
-    let mut disposition: Option<&[u8]> = None;
-    let mut media_type: Option<&[u8]> = None;
-    for h in parsed {
-        if h.name.eq_ignore_ascii_case("content-disposition") {
-            if disposition.replace(h.value).is_some() {
-                return Err(bad("duplicated content-disposition in a part"));
-            }
-        } else if h.name.eq_ignore_ascii_case("content-type") && media_type.is_none() {
-            media_type = Some(h.value);
-        }
-        match headers.iter_mut().find(|header| header.name == h.name) {
-            Some(header) => header.values.push(h.value.to_vec()),
-            None => headers.push(HeaderValues {
-                name: h.name.to_owned(),
-                values: vec![h.value.to_vec()],
-            }),
-        }
+fn spool_failed(e: std::io::Error) -> Rejection {
+    Rejection {
+        status: http::StatusCode::INTERNAL_SERVER_ERROR,
+        reason: format!("upload spool failed: {e}"),
     }
-    let Some(disposition) = disposition else {
-        return Err(bad("part without content-disposition"));
-    };
-
-    let Disposition { name, filename } = disposition_params(disposition)?;
-    let Some(name) = name.filter(|n| !n.is_empty()) else {
-        return Err(bad(
-            "content-disposition without a non-empty name parameter",
-        ));
-    };
-    // httparse trims the value already.
-    let client_media_type = media_type.filter(|v| !v.is_empty()).map(<[u8]>::to_vec);
-
-    let len = part_end - content_start;
-    match filename {
-        Some(client_filename) => {
-            if files.len() + 1 > limits.max_files {
-                return Err(over("file parts over max_files"));
-            }
-            if len as u64 > limits.max_file_size {
-                return Err(over("file part over max_file_size"));
-            }
-            let file =
-                spool(view, content_start, part_end, &limits.dir).map_err(|e| Rejection {
-                    status: http::StatusCode::INTERNAL_SERVER_ERROR,
-                    reason: format!("upload spool failed: {e}"),
-                })?;
-            files.push(UploadedFile {
-                name,
-                client_filename,
-                client_media_type,
-                headers,
-                file,
-                size: len as u64,
-            });
-        }
-        None => {
-            if len > limits.max_field_size {
-                return Err(over("field part over max_field_size"));
-            }
-            fields.push(FormField {
-                name,
-                value: view.copy(content_start, part_end),
-                headers,
-            });
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -580,8 +717,11 @@ mod tests {
     use super::*;
 
     fn limits() -> Limits {
+        // The spool makes subdirectories, so the tests use a directory of their own.
+        let dir = std::env::temp_dir().join("rapira-unit-spool");
+        std::fs::create_dir_all(&dir).expect("creating the spool dir");
         Limits {
-            dir: std::env::temp_dir(),
+            dir,
             max_file_size: 2 * 1024 * 1024,
             max_field_size: 256 * 1024,
             max_files: 20,
@@ -590,14 +730,26 @@ mod tests {
         }
     }
 
+    /// Feeds the pieces in order and ends the body.
+    fn parse(
+        pieces: &[&[u8]],
+        boundary: &[u8],
+        limits: &Limits,
+    ) -> Result<MultipartBody, Rejection> {
+        let mut parser = Parser::new(boundary, limits);
+        for piece in pieces {
+            parser.feed(piece)?;
+        }
+        parser.finish()
+    }
+
     fn ok(body: &[u8]) -> MultipartBody {
-        parse(&[Bytes::copy_from_slice(body)], b"B", &limits())
-            .unwrap_or_else(|_| panic!("expected a parse"))
+        parse(&[body], b"B", &limits()).unwrap_or_else(|_| panic!("expected a parse"))
     }
 
     /// The status of the rejection.
     fn rejected(body: &[u8], l: &Limits) -> u16 {
-        match parse(&[Bytes::copy_from_slice(body)], b"B", l) {
+        match parse(&[body], b"B", l) {
             Err(Rejection { status, .. }) => status.as_u16(),
             Ok(_) => panic!("expected a rejection"),
         }
@@ -634,6 +786,69 @@ mod tests {
         let mb = ok(body);
         assert_eq!(mb.fields.len(), 1);
         assert_eq!(mb.fields[0].value, b"before\r\n--B--junk\r\nafter");
+    }
+
+    /// A delimiter line is the line ending, `--boundary`, optional `--`, padding and a line ending (RFC 2046 §5.1.1). Every other byte sequence is content.
+    #[test]
+    fn content_keeps_the_bytes_that_are_not_a_delimiter_line() {
+        struct Case {
+            name: &'static str,
+            content: &'static [u8],
+            want: &'static [u8],
+        }
+        let cases = [
+            Case {
+                name: "a CR before the line ending",
+                content: b"v\r\r\n--B--",
+                want: b"v\r",
+            },
+            Case {
+                name: "one dash after the delimiter bytes",
+                content: b"a\r\n--B-\r\nb\r\n--B--",
+                want: b"a\r\n--B-\r\nb",
+            },
+            Case {
+                name: "a CR without a LF after the delimiter bytes",
+                content: b"a\r\n--B\rb\r\n--B--",
+                want: b"a\r\n--B\rb",
+            },
+            Case {
+                name: "junk after the padding of a close-delimiter",
+                content: b"a\r\n--B-- x\r\n--B--",
+                want: b"a\r\n--B-- x",
+            },
+            Case {
+                name: "delimiter bytes inside a line",
+                content: b"a--B--\r\n--B--",
+                want: b"a--B--",
+            },
+            Case {
+                name: "a part of the delimiter bytes at a line start",
+                content: b"a\r\n--\r\n-\r\n--B--",
+                want: b"a\r\n--\r\n-",
+            },
+            Case {
+                name: "an empty content",
+                content: b"\r\n--B--",
+                want: b"",
+            },
+            Case {
+                name: "a content that ends with a line ending",
+                content: b"a\r\n\r\n--B--",
+                want: b"a\r\n",
+            },
+            Case {
+                name: "a bare LF before the delimiter line",
+                content: b"a\r\n\n--B--",
+                want: b"a\r\n",
+            },
+        ];
+        let head = b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\n";
+        for case in cases {
+            let body = [head.as_slice(), case.content].concat();
+            let mb = ok(&body);
+            assert_eq!(mb.fields[0].value, case.want, "{}", case.name);
+        }
     }
 
     #[test]
@@ -743,6 +958,18 @@ mod tests {
             Case {
                 name: "part without a header/body separator",
                 body: b"--B\r\nheaderwithoutseparator",
+            },
+            Case {
+                name: "close-delimiter inside the header section",
+                body: b"--B\r\nx: y\r\n--B--",
+            },
+            Case {
+                name: "delimiter line directly after the empty line",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\n--B--",
+            },
+            Case {
+                name: "CR without a LF after the close-delimiter",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\n--B--\r",
             },
         ];
         let l = limits();
@@ -876,7 +1103,7 @@ mod tests {
         assert_eq!(b, b"RAP\xff\xfeIRA");
         let mut body = Vec::new();
         body.extend_from_slice(b"--RAP\xff\xfeIRA\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\n--RAP\xff\xfeIRA--");
-        let mb = parse(&[Bytes::from(body)], &b, &limits())
+        let mb = parse(&[&body], &b, &limits())
             .map_err(|_| ())
             .expect("parses");
         assert_eq!(mb.fields[0].value, b"v");
@@ -963,17 +1190,32 @@ mod tests {
                 name: "part without a header/body separator",
                 body: b"--B\r\nheaderwithoutseparator\r\n--B--",
             },
+            Case {
+                name: "delimiter line directly after the empty line",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\n--B--",
+            },
+            Case {
+                name: "CR, dash and delimiter look-alike lines inside a value",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\r\n--B-\r\n--B\rb\r\n--\r\n-\r\n--B-- x\r\n\n--B--",
+            },
+            Case {
+                name: "delimiter look-alike lines inside a file",
+                body: b"--B\r\ncontent-disposition: form-data; name=f; filename=a.bin\r\n\r\nPAY\r\n--Bx\r\n-\r\r\n--B \t\r\ncontent-disposition: form-data; name=a\r\n\r\n\r\n--B--",
+            },
+            Case {
+                name: "CR without a LF after the close-delimiter",
+                body: b"--B\r\ncontent-disposition: form-data; name=x\r\n\r\nv\r\n--B--\r",
+            },
         ];
         let l = limits();
         for case in cases {
-            let whole = parse(&[Bytes::from_static(case.body)], b"B", &l);
+            let whole = parse(&[case.body], b"B", &l);
             for at in 1..case.body.len() {
                 let (head, tail) = case.body.split_at(at);
-                let split = [Bytes::from_static(head), Bytes::from_static(tail)];
                 let name = format!("{} split at {at}", case.name);
-                assert_same(&name, &whole, &parse(&split, b"B", &l));
+                assert_same(&name, &whole, &parse(&[head, tail], b"B", &l));
             }
-            let single: Vec<Bytes> = case.body.chunks(1).map(Bytes::from_static).collect();
+            let single: Vec<&[u8]> = case.body.chunks(1).collect();
             let name = format!("{} in single bytes", case.name);
             assert_same(&name, &whole, &parse(&single, b"B", &l));
         }

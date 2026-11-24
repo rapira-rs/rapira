@@ -80,6 +80,7 @@ To add a built-in middleware:
 ## Request handling
 
 - The request body is buffered before dispatch and capped by `max_body_size_mb`: a declared `Content-Length` over the cap answers 413 before the body is read, an over-long streamed body answers 413 when the cap is crossed.
+- In dispatcher mode the plugin parses a `multipart/form-data` body while it arrives. It writes each file part to the spool directory and holds only the field parts in memory.
 - `Expect: 100-continue` is honored by hyper: the interim 100 goes out when the body is first read and is skipped entirely when the request is refused first.
 - A missing or empty `Host` on HTTP/1.1, and more than one `Host` line in any version, answer 400 (RFC 9112 §3.2); the `Host` value is the authority. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 - In dispatcher mode, a multipart request with more than one `Content-Type` line answers 400: the plugin and a PHP consumer could split the body on different boundaries (RFC 9110 §8.3). https://www.rfc-editor.org/rfc/rfc9110#section-8.3

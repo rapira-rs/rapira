@@ -329,6 +329,12 @@ where
     let mut collected: Vec<Bytes> = Vec::new();
     // A kept frame holds hyper's whole read buffer, and hyper then reads the next frame into a new buffer of at least 8 KiB. A client that sends a body in small reads can make the worker allocate many times the body size. So the host copies each frame below KEEP_FRAME_MIN into one buffer with its neighbors.
     let mut small: Vec<u8> = Vec::new();
+    // A repeated Content-Type refuses a request with or without a body. The first body byte opens the form, so an empty body takes the string arm of the contract.
+    let mut form = cfg
+        .uploads
+        .as_ref()
+        .and_then(|_| repeated_content_type(&parts.headers))
+        .map(Form::Refused);
     let mut received = 0;
     loop {
         // hyper only times the head read, so each body frame gets its own progress bound here.
@@ -351,13 +357,25 @@ where
                     tracing::warn!(target: "http", "request body exceeds max_body_size");
                     return refused(http::StatusCode::PAYLOAD_TOO_LARGE, guard);
                 }
-                if data.len() < KEEP_FRAME_MIN {
-                    small.extend_from_slice(&data);
-                } else {
-                    if !small.is_empty() {
-                        collected.push(Bytes::from(std::mem::take(&mut small)));
+                if data.is_empty() {
+                    continue;
+                }
+                let open = || Form::open(&parts.headers, cfg.uploads.as_ref());
+                match form.get_or_insert_with(open) {
+                    Form::Multipart(parser) => {
+                        if let Err(r) = parser.feed(&data) {
+                            form = Some(Form::Refused(r));
+                        }
                     }
-                    collected.push(data);
+                    // The host reads the rest of the body, so the client gets the refusal as a complete response.
+                    Form::Refused(_) => {}
+                    Form::Raw if data.len() < KEEP_FRAME_MIN => small.extend_from_slice(&data),
+                    Form::Raw => {
+                        if !small.is_empty() {
+                            collected.push(Bytes::from(std::mem::take(&mut small)));
+                        }
+                        collected.push(data);
+                    }
                 }
             }
             Some(Err(e)) => {
@@ -370,8 +388,17 @@ where
         collected.push(Bytes::from(small));
     }
 
+    let multipart = match form {
+        Some(Form::Multipart(parser)) => parser.finish().map(Some),
+        Some(Form::Refused(r)) => Err(r),
+        Some(Form::Raw) | None => Ok(None),
+    };
     let request = request::build(parts, authority, Chunks::new(collected), peer);
-    let mut reply = match submit(shared, request).await {
+    let submitted = match multipart {
+        Ok(multipart) => submit(shared, request, multipart, received).await,
+        Err(r) => Err(r),
+    };
+    let mut reply = match submitted {
         Ok(reply) => reply,
         Err(r) => {
             tracing::warn!(target: "http", "rejected before dispatch: {r}");
@@ -468,13 +495,13 @@ const FRAME_CAP: usize = 16;
 /// A body frame at or above this size travels as hyper delivered it. The host copies a smaller frame into one buffer with its neighbors. hyper reads up to 400 KiB per frame on a fast link, so a bulk body keeps its frames.
 const KEEP_FRAME_MIN: usize = 64 << 10;
 
-/// Both refusals come before dispatch: the multipart parse, then the intake.
+/// `bytes` is the length of the received body. The intake reserves it in the body budget of the pool.
 async fn submit(
     shared: &Shared,
-    mut request: Request,
+    request: Request,
+    multipart: Option<multipart::MultipartBody>,
+    bytes: usize,
 ) -> Result<tokio::sync::mpsc::Receiver<Frame>, Rejection> {
-    let bytes = request.body.len();
-    let multipart = parse_multipart(&mut request, shared.cfg.uploads.as_ref()).await?;
     let (tx, reply) = tokio::sync::mpsc::channel(FRAME_CAP);
     // The host builds the CGI view of the classic and worker modes here, on the IO thread.
     let unit = if shared.cfg.superglobals {
@@ -486,51 +513,43 @@ async fn submit(
     Ok(reply)
 }
 
-/// The largest multipart body that the IO thread parses. The parse and the spool writes use a thread for about 0.1 to 0.25 ms per MiB, and each file part adds one file create of about 15 us on xfs. During that time the other connections on that IO thread wait.
-const INLINE_PARSE_MAX: usize = 256 << 10;
+/// The body of a request while it arrives. Dispatcher mode parses a multipart form before submit, so a refused body never reaches the pending and active counters.
+enum Form<'a> {
+    /// PHP gets the raw body.
+    Raw,
+    /// The parser takes each frame when it arrives, so the host never holds the body. It runs on the IO thread, where the bytes of the frame are in the CPU cache.
+    Multipart(Box<multipart::Parser<'a>>),
+    Refused(Rejection),
+}
 
-/// Parses a multipart body before submit, so a rejected body never reaches the pending and active counters. `limits` is None outside dispatcher mode.
-/// The IO thread parses a body up to INLINE_PARSE_MAX, which saves the switch to the blocking pool. The blocking pool parses a larger body.
-/// The parse takes the raw chunks out of `req`, so the host frees them after the parse.
-async fn parse_multipart(
-    req: &mut Request,
-    limits: Option<&multipart::Limits>,
-) -> Result<Option<multipart::MultipartBody>, Rejection> {
-    let Some(limits) = limits else {
-        return Ok(None);
-    };
-    // Content-Type is a singleton field. With repeated lines, the plugin and a PHP consumer could split the body on different boundaries. https://www.rfc-editor.org/rfc/rfc9110#section-8.3
-    let lines = req.headers.get_all(CONTENT_TYPE);
-    if lines.iter().nth(1).is_some() && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()))
-    {
-        return Err(Rejection {
-            status: http::StatusCode::BAD_REQUEST,
-            reason: "repeated content-type field lines with a multipart body".into(),
-        });
+impl<'a> Form<'a> {
+    /// `limits` is None outside dispatcher mode.
+    fn open(headers: &http::HeaderMap, limits: Option<&'a multipart::Limits>) -> Self {
+        let Some(limits) = limits else {
+            return Self::Raw;
+        };
+        let Some(content_type) = headers.get(CONTENT_TYPE) else {
+            return Self::Raw;
+        };
+        if !multipart::is_multipart(content_type.as_bytes()) {
+            return Self::Raw;
+        }
+        match multipart::boundary(content_type.as_bytes()) {
+            Ok(boundary) => Self::Multipart(Box::new(multipart::Parser::new(&boundary, limits))),
+            Err(r) => Self::Refused(r),
+        }
     }
-    if req.body.is_empty() {
-        return Ok(None);
-    }
-    let Some(content_type) = req.headers.get(CONTENT_TYPE) else {
-        return Ok(None);
-    };
-    if !multipart::is_multipart(content_type.as_bytes()) {
-        return Ok(None);
-    }
-    let boundary = multipart::boundary(content_type.as_bytes())?;
-    let raw = std::mem::take(&mut req.body);
-    if raw.len() <= INLINE_PARSE_MAX {
-        return multipart::parse(raw.parts(), &boundary, limits).map(Some);
-    }
-    let limits = limits.clone();
-    let parsed =
-        tokio::task::spawn_blocking(move || multipart::parse(raw.parts(), &boundary, &limits))
-            .await
-            .map_err(|e| Rejection {
-                status: http::StatusCode::INTERNAL_SERVER_ERROR,
-                reason: format!("multipart parse task failed: {e}"),
-            })?;
-    parsed.map(Some)
+}
+
+/// Content-Type is a singleton field. With repeated lines, the plugin and a PHP consumer could split the body on different boundaries. https://www.rfc-editor.org/rfc/rfc9110#section-8.3
+fn repeated_content_type(headers: &http::HeaderMap) -> Option<Rejection> {
+    let lines = headers.get_all(CONTENT_TYPE);
+    let repeated = lines.iter().nth(1).is_some()
+        && lines.iter().any(|v| multipart::is_multipart(v.as_bytes()));
+    repeated.then(|| Rejection {
+        status: http::StatusCode::BAD_REQUEST,
+        reason: "repeated content-type field lines with a multipart body".into(),
+    })
 }
 
 #[cfg(test)]

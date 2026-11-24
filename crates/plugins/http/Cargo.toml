@@ -24,7 +24,7 @@ tokio = { workspace = true, features = ["rt", "net", "time", "macros"] }
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 tower = { workspace = true }
-# The multipart parser of the buffered body uses these crates.
+# The multipart parser uses these crates.
 memchr = "2"
 httparse = "1"
 

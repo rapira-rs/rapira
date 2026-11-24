@@ -6,7 +6,7 @@ use std::path::PathBuf;
 use bytes::Bytes;
 use http::{HeaderMap, HeaderName, HeaderValue};
 use rapira_http::check::Rejection;
-use rapira_http::multipart::{MultipartBody, UploadedFile};
+use rapira_http::multipart::{Limits, MultipartBody, Parser, UploadedFile};
 
 /// The largest input of connect_json and multipart_echo. The CI runs use the same -max_len.
 pub const MAX_LEN: usize = 4096;
@@ -18,7 +18,7 @@ pub fn spool_dir() -> PathBuf {
     dir
 }
 
-/// Splits the body into up to 8 parts. Each split position is the little-endian u16 of the two bytes at index 0, 97, 194 and so on, modulo len + 1; a position of 0 or len gives an empty part, which the view accepts and the transport never delivers.
+/// Splits the body into up to 8 parts. Each split position is the little-endian u16 of the two bytes at index 0, 97, 194 and so on, modulo len + 1; a position of 0 or len gives an empty part, which the parser accepts and the transport never delivers.
 pub fn split(body: &[u8]) -> Vec<Bytes> {
     let mut at = Vec::new();
     for i in (0..body.len().saturating_sub(1)).step_by(97).take(7) {
@@ -34,6 +34,19 @@ pub fn split(body: &[u8]) -> Vec<Bytes> {
     }
     parts.push(Bytes::copy_from_slice(&body[start..]));
     parts
+}
+
+/// Feeds the pieces to the parser in order and ends the body, as serve_php in crates/plugins/http/src/handler.rs does with the frames of a body.
+pub fn parse<P: AsRef<[u8]>>(
+    pieces: &[P],
+    boundary: &[u8],
+    limits: &Limits,
+) -> Result<MultipartBody, Rejection> {
+    let mut parser = Parser::new(boundary, limits);
+    for piece in pieces {
+        parser.feed(piece.as_ref())?;
+    }
+    parser.finish()
 }
 
 /// Asserts that two parses of one body agree: the status and the reason of a rejection, or each field and each file with the bytes of its spooled file.
