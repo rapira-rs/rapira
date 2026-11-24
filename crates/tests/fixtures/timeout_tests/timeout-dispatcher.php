@@ -15,6 +15,8 @@ try {
         if (isset($q['limit'])) {
             set_time_limit((int) $q['limit']);
         }
+        // Sleep for N ms. A sleep uses wall-clock time and no CPU time.
+        usleep((int) ($q['sleep'] ?? 0) * 1000);
         // Spin for N ms of wall-clock time. The loop also uses CPU time.
         $end = hrtime(true) + (int) ($q['burn'] ?? 0) * 1_000_000;
         while (hrtime(true) < $end) {

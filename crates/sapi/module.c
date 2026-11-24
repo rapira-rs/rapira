@@ -1,6 +1,9 @@
 #include "rapira_sapi.h"
 
 #include <main/php_content_types.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#endif
 
 // True while rapira_run_handler runs the handler and its shutdown functions.
 ZEND_TLS bool rapira_in_handler = false;
@@ -184,6 +187,39 @@ void rapira_timer_resume(const rapira_timer *saved) {
     setitimer(RAPIRA_ZEND_ITIMER, saved, NULL);
 #else
     (void)saved;
+#endif
+}
+
+#if defined(ZEND_MAX_EXECUTION_TIMERS) && defined(__linux__)
+// glibc has no name for this field. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_max_execution_timer.c#L36-L40
+#ifndef sigev_notify_thread_id
+#define sigev_notify_thread_id _sigev_un._tid
+#endif
+#endif
+
+// True when the pool of this thread sets execution_clock to cpu.
+ZEND_TLS bool rapira_cpu_clock = false;
+
+// Zend creates the execution timer of this thread on a wall clock in each request startup. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_max_execution_timer.c#L49-L85
+// For a pool with the cpu clock, this function moves the timer to the CPU clock of the thread. https://man7.org/linux/man-pages/man2/timer_create.2.html
+void rapira_timer_use_cpu_clock(void) {
+    if (!rapira_cpu_clock) {
+        return;
+    }
+#if defined(ZEND_MAX_EXECUTION_TIMERS) && defined(__linux__)
+    struct sigevent sev = {0};
+    sev.sigev_notify = SIGEV_THREAD_ID;
+    sev.sigev_signo = RAPIRA_TIMER_SIGNAL;
+    // zend_timeout_handler accepts only a signal with this value. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1535
+    sev.sigev_value.sival_ptr = &EG(max_execution_timer_timer);
+    sev.sigev_notify_thread_id = (pid_t)syscall(SYS_gettid);
+    timer_t cpu;
+    if (timer_create(CLOCK_THREAD_CPUTIME_ID, &sev, &cpu) == 0) {
+        timer_delete(EG(max_execution_timer_timer));
+        EG(max_execution_timer_timer) = cpu;
+        // Arms the full budget of php_request_startup on the new timer, and clears a timeout that the wall clock recorded before RINIT. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1724-L1730
+        zend_set_timeout(EG(timeout_seconds), false);
+    }
 #endif
 }
 
@@ -750,7 +786,7 @@ void rapira_register_post_reader(void) {
 
 // The ZTS thread constructor copies the ini entries and initializes the stack limit and the timer. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend.c#L883-L891
 void rapira_thread_start(int mode, const rapira_plugin *plugin,
-                         const char *name, size_t name_len) {
+                         const char *name, size_t name_len, bool cpu_clock) {
 #ifdef ZTS
     (void)ts_resource(0);
 #elif defined(ZEND_CHECK_STACK_LIMIT)
@@ -758,6 +794,7 @@ void rapira_thread_start(int mode, const rapira_plugin *plugin,
     zend_call_stack_init();
 #endif
     rapira_set_dispatcher(mode, plugin, name, name_len);
+    rapira_cpu_clock = cpu_clock;
     // Each thread has its own content type table. Keep the POST handler that mbstring selected. https://github.com/php/php-src/blob/php-8.6.0/main/SAPI.c#L50-L55
     sapi_post_entry *entry = zend_hash_str_find_ptr(
         &SG(known_post_content_types), DEFAULT_POST_CONTENT_TYPE,

@@ -37,6 +37,7 @@ workers = 16                  # PHP interpreter threads; defaults to the CPU cou
 # request_terminate_timeout_secs = 0  # wall-clock limit per unit; 0 disables it for this pool
 # A positive limit in any pool reserves SIGRTMAX on systems that have it.
 # After an interrupt, a native call can keep waiting. Exit 124 requires every worker of one pool to be blocked after 5 more seconds.
+# execution_clock = "wall"    # the clock of PHP's max_execution_time: "wall" (the default) | "cpu" (the CPU time of the worker thread); has an effect only on Linux with per-thread PHP timers
 # PHP reads these values through getenv(), $_ENV and $_SERVER. Child processes inherit the server environment.
 # [http.pool.env]
 # APP_ENV = "prod"

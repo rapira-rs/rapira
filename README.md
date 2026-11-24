@@ -57,7 +57,7 @@ If `[server].pidfile` is set, a direct exit 70 (a worker reached its boot failur
 
 Each HTTP example listens on `127.0.0.1:8000`. After it starts, run `curl http://127.0.0.1:8000/` in another terminal. Relative paths in `rapira.toml` resolve against its directory; the classic example's `entrypoint` is `public/index.php`, one directory below the file.
 
-On Linux, a ZTS PHP build with per-thread timers counts wall-clock time toward `max_execution_time`. A `sleep()` in PHP uses this budget. Rapira pauses the timer while PHP waits for the next unit or for room in a response stream. If the PHP build has no per-thread timers and the server runs several workers, Rapira sets `max_execution_time=0` and `max_input_time=-1`. The pool's wall-clock request limit still applies.
+On Linux, a ZTS PHP build with per-thread timers counts wall-clock time toward `max_execution_time`. A `sleep()` in PHP uses this budget. Rapira pauses the timer while PHP waits for the next unit or for room in a response stream. Set `execution_clock = "cpu"` in a pool to count only the CPU time of the worker thread. Then a `sleep()` or a wait for a database does not use the budget. The setting has an effect only on Linux with per-thread timers. If the PHP build has no per-thread timers and the server runs several workers, Rapira sets `max_execution_time=0` and `max_input_time=-1`. The pool's wall-clock request limit still applies.
 
 ### Classic
 

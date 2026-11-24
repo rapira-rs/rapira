@@ -117,7 +117,7 @@ The `[http]` table. Unknown keys fail the boot.
 - `[http.uploads]`: the multipart limits of dispatcher mode: `dir` (default: the system temp dir), `max_file_size_mb` (2), `max_field_size_kb` (256), `max_files` (20), `max_parts` (1024), `max_part_headers` (32). This table under another mode fails the boot.
 - `[http.sendfile]`: `root`, the directory that must contain each `sendFile()` path. Default: the entrypoint directory.
 - `[http.static]`: the settings of the `static` middleware: `root` (required, an existing directory) and `forbid` (the file-name suffixes it never serves, default `[".php"]`).
-- `[http.pool]`: `entrypoint` (required), `mode`, `workers`, `max_requests`, `max_boot_failures`, `request_terminate_timeout_secs` and `env`. See the [example configuration](../../../examples/rapira.toml).
+- `[http.pool]`: `entrypoint` (required), `mode`, `workers`, `max_requests`, `max_boot_failures`, `request_terminate_timeout_secs`, `execution_clock` and `env`. See the [example configuration](../../../examples/rapira.toml).
 
 The connection drain lasts for `[server].stop_timeout_secs` minus five seconds, or half the stop timeout if it is below ten seconds. The remaining time is for PHP shutdown. See [Run the server](../../../README.md#run-the-server) for request timeouts and exit codes.
 

@@ -20,6 +20,8 @@ pub struct PoolSettings {
     pub max_boot_failures: u32,
     /// Wall-clock limit of one request. The clock starts again at each pull that reaches the intake, also when the pull finds no unit. Time in the intake does not count. Zero disables the limit.
     pub request_terminate_timeout: Duration,
+    /// The clock that PHP's `max_execution_time` uses. It has an effect only on Linux with a PHP build that has per-thread execution timers.
+    pub execution_clock: ExecutionClock,
     /// Environment values that PHP reads in this pool. A pool value overrides the value from server startup.
     pub env: BTreeMap<String, String>,
 }
@@ -43,6 +45,16 @@ impl fmt::Display for Mode {
     }
 }
 
+/// The clock of PHP's `max_execution_time` in a pool.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ExecutionClock {
+    /// Wall-clock time. PHP uses this clock for its per-thread timers.
+    Wall,
+    /// The CPU time of the worker thread.
+    Cpu,
+}
+
 /// The `pool` table of a plugin. A plugin embeds it by name, because serde does not support `#[serde(flatten)]` together with `deny_unknown_fields`.
 #[derive(Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -53,6 +65,7 @@ pub struct PoolSection {
     max_requests: Option<u64>,
     max_boot_failures: Option<u32>,
     request_terminate_timeout_secs: Option<u64>,
+    execution_clock: Option<ExecutionClock>,
     env: Option<BTreeMap<String, String>>,
 }
 
@@ -93,6 +106,7 @@ pub fn resolve_pool(section: PoolSection, table: &str, dir: &Path) -> anyhow::Re
             "request_terminate_timeout_secs",
             section.request_terminate_timeout_secs.unwrap_or(0),
         )?,
+        execution_clock: section.execution_clock.unwrap_or(ExecutionClock::Wall),
         env,
     })
 }
@@ -136,6 +150,7 @@ mod tests {
             max_requests: 0,
             max_boot_failures: 5,
             request_terminate_timeout: Duration::ZERO,
+            execution_clock: ExecutionClock::Wall,
             env: BTreeMap::new(),
         }
     }
@@ -220,6 +235,19 @@ mod tests {
                 want: base(),
             },
             Case {
+                name: "wall execution clock",
+                toml: "entrypoint = \"a.php\"\nworkers = 4\nexecution_clock = \"wall\"\n",
+                want: base(),
+            },
+            Case {
+                name: "cpu execution clock",
+                toml: "entrypoint = \"a.php\"\nworkers = 4\nexecution_clock = \"cpu\"\n",
+                want: PoolSettings {
+                    execution_clock: ExecutionClock::Cpu,
+                    ..base()
+                },
+            },
+            Case {
                 name: "request timeout at the cap",
                 toml: "entrypoint = \"a.php\"\nworkers = 4\nrequest_terminate_timeout_secs = 86400\n",
                 want: PoolSettings {
@@ -297,6 +325,11 @@ mod tests {
                 name: "unknown mode",
                 toml: "entrypoint = \"a.php\"\nmode = \"async\"\n",
                 error: "unknown variant `async`",
+            },
+            ErrCase {
+                name: "unknown execution clock",
+                toml: "entrypoint = \"a.php\"\nexecution_clock = \"monotonic\"\n",
+                error: "unknown variant `monotonic`",
             },
             ErrCase {
                 name: "unknown key",
