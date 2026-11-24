@@ -40,9 +40,11 @@ impl Serving {
             closing: AtomicBool::new(false),
         });
         let mut builder = http1::Builder::new();
+        // A read buffer of 64 KiB stays in the CPU cache between the socket read and the consumer of the body. It also limits the request head. https://docs.rs/hyper/latest/hyper/server/conn/http1/struct.Builder.html#method.max_buf_size
         builder
             .timer(TokioTimer::new())
-            .header_read_timeout(shared.cfg.keepalive_timeout);
+            .header_read_timeout(shared.cfg.keepalive_timeout)
+            .max_buf_size(64 << 10);
         Self {
             shared,
             connections: Connections::default(),

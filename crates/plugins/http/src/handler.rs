@@ -492,8 +492,8 @@ async fn timeout_lazy<F: Future>(
 /// A cap of 16 lets a buffered Head, Chunk and End queue without a park of the PHP thread. It also keeps a 1 MiB body in 64 KiB writes to about one park. tokio allocates one 32-slot block for any cap up to 32.
 const FRAME_CAP: usize = 16;
 
-/// A body frame at or above this size travels as hyper delivered it. The host copies a smaller frame into one buffer with its neighbors. hyper reads up to 400 KiB per frame on a fast link, so a bulk body keeps its frames.
-const KEEP_FRAME_MIN: usize = 64 << 10;
+/// A body frame at or above this size travels as hyper delivered it. The host copies a smaller frame into one buffer with its neighbors. hyper reads up to 64 KiB per frame, so a bulk body keeps its frames.
+const KEEP_FRAME_MIN: usize = 16 << 10;
 
 /// `bytes` is the length of the received body. The intake reserves it in the body budget of the pool.
 async fn submit(
