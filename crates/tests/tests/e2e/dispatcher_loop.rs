@@ -13,8 +13,8 @@ use tests::wire::{Frame, submit};
 use tests::{StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::{
-    Server, Spawn, fixture_path, is_zts, parse_status_and_body, patterned, scratch_dir, signal,
-    slot_line, wait_log_contains,
+    Server, Spawn, fixture_path, is_zts, parse_status_and_body, patterned, pool_line, scratch_dir,
+    signal, slot_line, wait_log_contains,
 };
 
 /// The read timeout of a raw socket exchange.
@@ -801,6 +801,42 @@ fn multipart_file_part_across_frames_keeps_its_bytes() -> anyhow::Result<()> {
         echoed.starts_with(&file) && echoed.get(file.len()) == Some(&b'\n'),
         "the echoed file bytes differ from the sent bytes"
     );
+    Ok(())
+}
+
+/// The file parts of a multipart body are in the spool directory. A queued upload must reserve only the rest of its body in the 64 MiB body budget of the pool, so three queued uploads with a file part of 22 MiB each get their responses.
+#[test]
+fn queued_uploads_leave_the_body_budget_free() -> anyhow::Result<()> {
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/held-worker.php"))
+        .json_log()
+        .http_extra(
+            "max_body_size_mb = 32\n[http.uploads]\ndir = \"uploads\"\nmax_file_size_mb = 32",
+        )
+        .spawn();
+    let release = srv.dir.join("release");
+    let uri = format!("/?release={}", release.display());
+    // The first unit holds the only worker, so each upload waits in the queue.
+    let held = submit(srv.addr, req(&uri))?;
+    server_log::wait_app_record(&srv.log_file(), "held");
+    let content = "x".repeat(22 << 20);
+    let mut uploads = Vec::new();
+    for _ in 0..3 {
+        let part = Part {
+            headers: "content-disposition: form-data; name=\"f\"; filename=\"a.bin\"",
+            content: &content,
+        };
+        uploads.push(submit(srv.addr, multipart(&uri, &[part]))?);
+    }
+    pool_line(&srv, "http", "pending=3 ");
+    std::fs::write(release, "")?;
+    assert_eq!(drain(held).body, "done");
+    for upload in uploads {
+        let done = StatusBody {
+            status: 200,
+            body: "done".to_owned(),
+        };
+        assert_eq!(drain(upload), done);
+    }
     Ok(())
 }
 

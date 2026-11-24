@@ -395,7 +395,16 @@ where
     };
     let request = request::build(parts, authority, Chunks::new(collected), peer);
     let submitted = match multipart {
-        Ok(multipart) => submit(shared, request, multipart, received).await,
+        Ok(multipart) => {
+            // The file parts are in the spool directory, so the body budget counts only the rest of the body.
+            let mut held = received;
+            if let Some(body) = &multipart {
+                for file in &body.files {
+                    held -= file.size as usize;
+                }
+            }
+            submit(shared, request, multipart, held).await
+        }
         Err(r) => Err(r),
     };
     let mut reply = match submitted {
@@ -495,7 +504,7 @@ const FRAME_CAP: usize = 16;
 /// A body frame at or above this size travels as hyper delivered it. The host copies a smaller frame into one buffer with its neighbors. hyper reads up to 64 KiB per frame, so a bulk body keeps its frames.
 const KEEP_FRAME_MIN: usize = 16 << 10;
 
-/// `bytes` is the length of the received body. The intake reserves it in the body budget of the pool.
+/// `bytes` is the number of body bytes that the host holds in memory. The intake reserves it in the body budget of the pool.
 async fn submit(
     shared: &Shared,
     request: Request,
