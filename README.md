@@ -43,7 +43,7 @@ Rapira uses the [official PHP images](https://hub.docker.com/_/php): `php:8.4-zt
 
 Run `rapira serve /path/to/rapira.toml` in the foreground. With systemd, use this command as `ExecStart` and set `Restart=on-failure`. In Docker, use `docker run --init` so that an init process reaps orphaned child processes. Set memory and CPU limits on the service or container.
 
-`[http.pool].workers` and `[grpc.pool].workers` set the interpreter count for each pool. Both plugins share the IO threads set by `[server].io_threads`. A build linked to NTS PHP runs one worker, warns if the configured count is higher, and refuses a second PHP pool. With ZTS, PHP working directories are per thread. The process ID, `umask()` and `setlocale()` are shared.
+`[http.pool].workers` and `[grpc.pool].workers` set the interpreter count for each pool. Both plugins share the IO threads. The server starts one IO thread for each CPU that it can use. A build linked to NTS PHP runs one worker, warns if the configured count is higher, and refuses a second PHP pool. With ZTS, PHP working directories are per thread. The process ID, `umask()` and `setlocale()` are shared.
 
 Send `SIGUSR1` to the server for pool and worker status. Send `SIGHUP` or `SIGUSR2` to reload the apps. `SIGTERM`, `SIGINT` and `SIGQUIT` stop the listeners and drain open connections. `[server].stop_timeout_secs` sets the stop deadline (default: 30 seconds). A second `SIGTERM` or `SIGINT` forces exit 130.
 

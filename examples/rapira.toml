@@ -75,7 +75,6 @@ workers = 16                  # PHP interpreter threads; defaults to the CPU cou
 # pidfile = "rapira.pid"      # relative to this file's directory
 # Exits 70, 101 and 124 can leave the pidfile. The next start overwrites it.
 # stop_timeout_secs = 30      # time for plugins and PHP threads to stop
-# io_threads = 2              # shared HTTP and gRPC IO threads; defaults to the Tokio runtime setting
 
 [log]
 # level = "error"             # error | warn | info | debug | trace

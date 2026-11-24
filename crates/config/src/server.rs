@@ -1,5 +1,4 @@
 use serde::Deserialize;
-use std::num::NonZeroUsize;
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 
@@ -9,7 +8,6 @@ use crate::{nonzero_timeout, opt_path};
 pub struct ServerSettings {
     pub stop_timeout: Duration,
     pub pidfile: Option<PathBuf>,
-    pub io_threads: Option<NonZeroUsize>,
 }
 
 impl ServerSettings {
@@ -26,7 +24,6 @@ impl ServerSettings {
 pub struct ServerSection {
     pidfile: Option<String>,
     stop_timeout_secs: Option<u64>,
-    io_threads: Option<NonZeroUsize>,
 }
 
 pub fn resolve_server(section: ServerSection, dir: &Path) -> anyhow::Result<ServerSettings> {
@@ -39,7 +36,6 @@ pub fn resolve_server(section: ServerSection, dir: &Path) -> anyhow::Result<Serv
             section.stop_timeout_secs.unwrap_or(30),
         )?,
         pidfile,
-        io_threads: section.io_threads,
     })
 }
 
@@ -68,11 +64,6 @@ mod tests {
     #[test]
     fn server_errors_name_the_key() {
         let cases = [
-            Case {
-                name: "zero IO threads",
-                toml: "io_threads = 0",
-                error: "expected a nonzero usize",
-            },
             Case {
                 name: "zero stop timeout",
                 toml: "stop_timeout_secs = 0\n",

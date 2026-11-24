@@ -54,11 +54,7 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
         .map(PidFile::write)
         .transpose()
         .context("writing pidfile")?;
-    let mut builder = tokio::runtime::Builder::new_multi_thread();
-    if let Some(n) = settings.server.io_threads {
-        builder.worker_threads(n.get());
-    }
-    let rt = builder
+    let rt = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
         .thread_name("rapira-io")
         .build()
