@@ -58,18 +58,13 @@ int rapira_watchdog_install(void) {
 }
 
 // Only PHP workers may receive the signal for Zend's execution timer.
-int rapira_watchdog_mask(int how, bool wake) {
+int rapira_watchdog_block_timer(void) {
     sigset_t set;
     sigemptyset(&set);
 #ifdef RAPIRA_TIMER_SIGNAL
     sigaddset(&set, RAPIRA_TIMER_SIGNAL);
 #endif
-#ifdef SIGRTMAX
-    if (wake) {
-        sigaddset(&set, SIGRTMAX);
-    }
-#endif
-    return pthread_sigmask(how, &set, NULL);
+    return pthread_sigmask(SIG_BLOCK, &set, NULL);
 }
 
 rapira_interrupt rapira_watchdog_capture(void) {

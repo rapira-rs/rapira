@@ -33,6 +33,19 @@ fn worker_serves_with_per_unit_superglobals() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// A child process inherits the signal mask of the PHP thread that starts it. The default signal of proc_terminate() must end a sleep child, so proc_close() returns the signal number, as it does in the PHP CLI.
+#[test]
+fn proc_terminate_ends_a_child_of_a_worker() -> anyhow::Result<()> {
+    let srv = Spawn::http(Mode::Worker, fixture("worker/terminate-child-worker.php")).spawn();
+
+    let ended_by_sigterm = StatusBody {
+        status: 200,
+        body: libc::SIGTERM.to_string(),
+    };
+    assert_eq!(drain(submit(srv.addr, req("/"))?), ended_by_sigterm);
+    Ok(())
+}
+
 /// Closing the intake makes handle_request() return false, and the post-loop code runs exactly once.
 #[test]
 fn drain_returns_false_and_the_script_completes() -> anyhow::Result<()> {

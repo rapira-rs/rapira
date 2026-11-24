@@ -29,7 +29,7 @@ unsafe impl Send for Interrupt {}
 
 unsafe extern "C" {
     fn rapira_watchdog_install() -> c_int;
-    fn rapira_watchdog_mask(how: c_int, wake: bool) -> c_int;
+    fn rapira_watchdog_block_timer() -> c_int;
     fn rapira_watchdog_capture() -> Interrupt;
     fn rapira_watchdog_fire(slot: &Interrupt);
     fn rapira_watchdog_clear(slot: &Interrupt);
@@ -45,7 +45,7 @@ fn signal_result(code: c_int) -> io::Result<()> {
 
 /// Only PHP workers may receive the execution timer signal.
 pub fn block_timer_signal() -> io::Result<()> {
-    signal_result(unsafe { rapira_watchdog_mask(libc::SIG_BLOCK, false) })
+    signal_result(unsafe { rapira_watchdog_block_timer() })
 }
 
 /// Call on the main thread after PHP module startup and before any pool starts.
@@ -81,17 +81,31 @@ thread_local! {
     static LOCAL: RefCell<Option<Slot>> = const { RefCell::new(None) };
 }
 
-/// The guard must stay on the PHP thread that owns the flags.
+/// The guard must stay on the PHP thread that owns the flags. It keeps the signal mask that the thread inherited.
 #[must_use]
-pub(crate) struct Guard(PhantomData<Rc<()>>);
+pub(crate) struct Guard {
+    inherited: libc::sigset_t,
+    thread: PhantomData<Rc<()>>,
+}
 
 /// # Safety
 /// Call once after this worker's `rapira_thread_start`. Drop the guard before `rapira_thread_end`.
 pub(crate) unsafe fn enter(pool: Arc<Pool>, index: usize, timeout: Duration) -> Guard {
-    let enabled = !timeout.is_zero();
-    signal_result(unsafe { rapira_watchdog_mask(libc::SIG_UNBLOCK, enabled) })
+    // A child process inherits the signal mask of the thread that starts it, so a PHP thread blocks no signal. https://man7.org/linux/man-pages/man7/signal.7.html
+    // SAFETY: sigemptyset initializes the new mask, and pthread_sigmask writes the old mask.
+    let inherited = unsafe {
+        let mut none = std::mem::zeroed();
+        let mut inherited = std::mem::zeroed();
+        libc::sigemptyset(&mut none);
+        signal_result(libc::pthread_sigmask(
+            libc::SIG_SETMASK,
+            &none,
+            &mut inherited,
+        ))
         .expect("unblock the PHP thread signals");
-    if enabled {
+        inherited
+    };
+    if !timeout.is_zero() {
         let slot = Arc::new(Mutex::new(Worker {
             pool,
             index,
@@ -103,20 +117,24 @@ pub(crate) unsafe fn enter(pool: Arc<Pool>, index: usize, timeout: Duration) -> 
         WORKERS.lock().unwrap().push(slot.clone());
         LOCAL.set(Some(slot));
     }
-    Guard(PhantomData)
+    Guard {
+        inherited,
+        thread: PhantomData,
+    }
 }
 
 impl Drop for Guard {
     fn drop(&mut self) {
         clear();
-        let slot = LOCAL.take();
-        let timed = slot.is_some();
-        if let Some(slot) = slot {
+        if let Some(slot) = LOCAL.take() {
             // A tick keeps this lock until its last access to the flags and the pthread ID.
             WORKERS.lock().unwrap().retain(|s| !Arc::ptr_eq(s, &slot));
         }
-        signal_result(unsafe { rapira_watchdog_mask(libc::SIG_BLOCK, timed) })
-            .expect("block the PHP thread signals before shutdown");
+        // SAFETY: pthread_sigmask copies the mask that it wrote in enter.
+        signal_result(unsafe {
+            libc::pthread_sigmask(libc::SIG_SETMASK, &self.inherited, std::ptr::null_mut())
+        })
+        .expect("block the PHP thread signals before shutdown");
     }
 }
 

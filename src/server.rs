@@ -173,7 +173,7 @@ fn service_end(name: &str, result: Result<()>, stop: &watch::Receiver<bool>, fai
     }
     if !*stop.borrow() {
         failed.store(true, Ordering::Release);
-        // SAFETY: all threads block SIGUSR1. The main thread accepts it and checks the failure flag.
+        // SAFETY: kill takes two integers. The main thread accepts SIGUSR1 and checks the failure flag.
         unsafe {
             libc::kill(libc::getpid(), libc::SIGUSR1);
         }
