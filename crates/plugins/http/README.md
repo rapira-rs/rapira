@@ -119,13 +119,17 @@ The `[http]` table. Unknown keys fail the boot.
 
 The connection drain lasts for `[server].stop_timeout_secs` minus five seconds, or half the stop timeout if it is below ten seconds. The remaining time is for PHP shutdown. See [Run the server](../../../README.md#run-the-server) for request timeouts and exit codes.
 
-`[http.pool.env]` supplies environment variables to PHP. `getenv()` first reads changes from `putenv()`, then the pool table, then the environment at server startup. `putenv('NAME')` hides a name. `putenv('NAME=')` sets an empty value. Changes last for one request in classic mode and for one app instance in worker and dispatcher modes.
+`[http.pool.env]` supplies environment variables to PHP. `getenv()` first reads changes from `putenv()`, then the pool table, then the environment at server startup. `putenv('NAME')` hides a name. `putenv('NAME=')` sets an empty value. Changes last for one request in classic mode and for one app instance in worker and dispatcher modes. `${NAME}` in the text of `parse_ini_file()` and `parse_ini_string()` reads the same values. After `putenv('NAME')`, `${NAME}` reads the environment at server startup.
 
 The boot `$_SERVER` and `$_ENV` (when `variables_order` contains `E`) import the PHP environment. [PHP checks `HTTP_PROXY` against the process environment](https://github.com/php/php-src/blob/php-8.6.0/main/php_variables.c#L885-L897) in both arrays. The `$_SERVER` of an HTTP request gets the pool entries and the request variables. A request variable with the same name wins.
 
-Native libraries and child processes read the process environment. Pass an explicit environment to `proc_open()` if the child needs a pool value. A name that is empty or contains `=` or NUL, or a value that contains NUL, fails the boot.
+Native libraries and child processes read the process environment, and `putenv()` does not change it. `exec()`, `shell_exec()`, `system()`, `passthru()`, `popen()` and `proc_open()` with no environment argument give the child the process environment. To give a child the pool values and the `putenv()` changes, pass `getenv()` as the environment argument of `proc_open()`. A name that is empty or contains `=` or NUL, or a value that contains NUL, fails the boot.
+
+Symfony Process can give a child only the variables whose names are also keys of `$_SERVER` or `$_ENV`. The `$_SERVER` of a request has no process variables, so such a child can have no `PATH` and no `HOME`. Add these names to `[http.pool.env]`, or put `E` into `variables_order`.
 
 A pool `TMPDIR` or a `putenv()` call can change the value of `getenv('TMPDIR')`. To select the PHP temporary directory that `sys_get_temp_dir()` returns, set [`sys_temp_dir`](https://www.php.net/manual/en/filesystem.configuration.php#ini.sys-temp-dir) in `php.ini` or set `TMPDIR` before starting Rapira. The INI setting takes precedence. For dispatcher uploads, set `dir` in `[http.uploads]`.
+
+GD reads `GDFONTPATH` from the process environment. `setlocale()` with an empty locale name reads `LC_ALL`, the `LC_*` variables and `LANG` from it. Set these variables before starting Rapira, or pass a full font path and a locale name.
 
 Each of these errors in the middleware list fails the boot with exit code 1:
 
