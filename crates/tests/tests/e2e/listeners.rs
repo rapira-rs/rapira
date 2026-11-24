@@ -293,7 +293,7 @@ fn signals_during_the_boot_reach_the_server() {
     signal(srv.pid(), libc::SIGUSR2);
     std::fs::write(srv.dir.join("release-preload"), "").expect("release MINIT");
 
-    // Only the USR1 sent during MINIT can produce this record.
+    // Only the SIGUSR1 sent during MINIT can produce this record.
     assert!(
         wait_log_contains(&srv, "pool=http worker=0 ", BOOT),
         "no status after MINIT\n{}",

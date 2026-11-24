@@ -47,11 +47,11 @@ Run `rapira serve /path/to/rapira.toml` in the foreground. With systemd, use thi
 
 Send `SIGUSR1` to the server for pool and worker status. Send `SIGHUP` or `SIGUSR2` to reload the apps. `SIGTERM`, `SIGINT` and `SIGQUIT` stop the listeners and drain open connections. `[server].stop_timeout_secs` sets the stop deadline (default: 30 seconds). A second `SIGTERM` or `SIGINT` forces exit 130.
 
-`request_terminate_timeout_secs` sets a pool's wall-clock limit for a unit. At the limit, the watchdog interrupts PHP and wakes a blocked response write. Native IO can continue waiting. Set timeouts on sockets and database calls. After five more seconds, Rapira logs a still-blocked worker once. Other workers keep serving. The blocked worker can recycle its app when the call returns. Rapira exits **124** only if every worker of one pool is blocked after the grace period.
+`request_terminate_timeout_secs` sets a pool's wall-clock limit for a unit. At the limit, the watchdog interrupts PHP and wakes a blocked response write. Native IO can continue waiting. Set timeouts on sockets and database calls. After five more seconds, Rapira logs a still-blocked worker once. Other workers keep serving. The blocked worker can recycle its app when the call returns. Rapira exits 124 only if every worker of one pool is blocked after the grace period.
 
 On platforms with `SIGRTMAX`, an enabled watchdog reserves that signal before workers start. Startup fails if the main thread blocks it or the process already handles or ignores it. Apps and extensions must leave the signal available. macOS uses PHP's interrupt flags without a native wake signal.
 
-If `[server].pidfile` is set, a direct exit **70** (a worker reached its boot failure limit before its pool served), **101** (a PHP worker thread panicked), or **124** can leave the pidfile on disk. The next start overwrites it.
+If `[server].pidfile` is set, a direct exit 70 (a worker reached its boot failure limit before its pool served), 101 (a PHP worker thread panicked), or 124 can leave the pidfile on disk. The next start overwrites it.
 
 ## Usage
 

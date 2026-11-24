@@ -131,7 +131,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks that the per-unit re-arm with reset_signals=0 still delivers the timer signal. A spin on a later unit in the same cycle is killed and does not keep running.
+/// Checks that the per-unit re-arm with reset_signals=0 still delivers the timer signal. The timer ends a spin on a later unit in the same cycle.
 #[test]
 fn max_execution_time_fires_on_rearmed_units() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("timeout_tests/timeout-worker.php"))

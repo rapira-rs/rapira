@@ -73,7 +73,7 @@ impl Workers {
     }
 }
 
-/// The main thread owns PHP startup, the worker roster and PHP shutdown.
+/// The main thread owns PHP startup, the list of worker threads and PHP shutdown.
 pub struct Engine {
     pub(crate) workers: Arc<Workers>,
     pub(crate) pools: Vec<Arc<pool::Pool>>,

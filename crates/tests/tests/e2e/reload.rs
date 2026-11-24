@@ -8,7 +8,7 @@ use tests::wire::{Frame, submit};
 use tests::{drain, poll, req};
 use tokio::sync::mpsc::Receiver;
 
-/// USR2 recycles every app while the listener continues to serve requests.
+/// SIGUSR2 recycles every app while the listener continues to serve requests.
 #[test]
 fn usr2_reload_restarts_the_apps_while_serving() {
     let workers = if is_zts() { 3 } else { 1 };
@@ -421,7 +421,7 @@ fn the_first_classic_request_after_a_reload_runs_the_new_release() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// A chdir() of a worker app stays for the next units of the same app instance. After a reload the next app instance starts in the entrypoint directory. A proc_open() child without a cwd starts in the PHP cwd on NTS and in the launch dir of the server on ZTS.
+/// A chdir() of a worker app stays for the next units of the same app instance. After a reload the next app instance starts in the entrypoint directory. A proc_open() child without a cwd starts in the PHP cwd on NTS and in the launch directory of the server on ZTS.
 #[test]
 fn a_worker_chdir_lasts_until_the_reload() {
     let srv = Spawn::http(Mode::Worker, fixture_path("lifecycle/cwd-worker.php"))
@@ -461,7 +461,7 @@ fn a_worker_chdir_lasts_until_the_reload() {
         "the chdir() of the previous unit still holds\n{}",
         diagnostics(&srv)
     );
-    // proc_open() without a cwd starts the child in the cwd of the process. On ZTS the PHP cwd is per thread, and the process stays in its launch dir. On NTS the chdir() moves the process.
+    // proc_open() without a cwd starts the child in the cwd of the process. On ZTS the PHP cwd is per thread, and the process stays in its launch directory. On NTS the chdir() moves the process.
     let launch_dir = std::fs::canonicalize(&srv.dir)
         .expect("canonicalize the scratch dir")
         .display()
@@ -734,7 +734,7 @@ fn an_entrypoint_that_does_not_resolve_answers_503_until_a_reload_after_the_fix(
     let _ = std::fs::remove_dir_all(&dir);
 }
 
-/// Submits the probes together. Each app holds its probe briefly, so distinct boot tokens identify the workers that served this batch.
+/// Submits the probes together. Each app holds its probe for 50 ms, so distinct boot tokens identify the workers that served this batch.
 fn serving_apps(srv: &Server, workers: usize, expected: &str) -> BTreeSet<String> {
     let mut last = Vec::new();
     poll(Duration::from_secs(20), || {

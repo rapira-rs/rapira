@@ -52,7 +52,7 @@ unsafe fn receive_into(rv: *mut zval, mode: RecvMode) -> bool {
                 rapira_receive_timed();
                 let ptr = NonNull::from(Box::leak(unit.into_held()));
                 UNIT.set(Some(ptr.as_ptr()));
-                // A Zend OOM bailout in the allocation longjmps through this frame, so it holds no value with Drop glue; the cycle slot then reclaims the unit.
+                // A Zend OOM bailout in the allocation longjmps through this frame, so the frame holds no value with Drop glue. The cycle slot then reclaims the unit.
                 rapira_unit_object(rv, ptr.as_ref().class())
                     .cast::<HeldPtr>()
                     .write(HeldPtr(Some(ptr)));

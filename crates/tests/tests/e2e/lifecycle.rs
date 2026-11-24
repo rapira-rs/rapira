@@ -211,7 +211,7 @@ fn the_pidfile_names_the_server_until_its_exit() {
 
         let start = Instant::now();
         signal(srv.pid(), libc::SIGTERM);
-        // Two pending TERM signals can merge. Wait for the server to take the first one.
+        // Two pending SIGTERM signals can merge. Wait for the server to take the first one.
         assert!(
             wait_log_contains(&srv, "stopping server", Duration::from_secs(10)),
             "{}: no drain\n{}",
@@ -1100,7 +1100,7 @@ fn dispatcher_multipart_over_the_wire() {
     assert_eq!(code, 413, "over-limit file part must answer 413");
 }
 
-/// A relative TMPDIR names the default spool dir of file parts. The host resolves it against its launch dir at boot, so a spool path stays valid after PHP enters the entrypoint directory.
+/// A relative TMPDIR names the default spool directory of file parts. The host resolves it against its launch directory at boot, so a spool path stays valid after PHP enters the entrypoint directory.
 #[test]
 fn a_relative_tmpdir_gives_an_absolute_spool_path() {
     let srv = Spawn::http(

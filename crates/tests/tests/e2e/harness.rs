@@ -15,7 +15,7 @@ use rapira_net::ListenAddr;
 use serde_json::Value;
 use tests::{StatusBody, poll, server_log};
 
-/// The boot timeout includes slow macOS CI hosts.
+/// The boot timeout is long enough for slow macOS CI hosts.
 pub const BOOT: Duration = Duration::from_secs(30);
 
 /// A worker reached the boot failure limit before its pool served.

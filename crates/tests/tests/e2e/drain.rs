@@ -42,7 +42,7 @@ fn a_stopping_server_answers_requests_on_its_http_connections() {
         })
         .collect();
     let mut fresh = Conn::open(srv.addr, READ).expect("connect before the stop");
-    // The 100 response on the next connection confirms that the listener accepted both. The POST keeps the drain open until we send its body.
+    // The 100 response on the next connection confirms that the listener accepted both. The POST keeps the drain open until the test sends its body.
     let mut held = Conn::open(srv.addr, READ).expect("connect for the held POST");
     held.send(b"POST / HTTP/1.1\r\nHost: e2e\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n")
         .expect("send the POST headers");

@@ -37,7 +37,7 @@
     "zend_update_property_long", "zend_update_property_double", "zend_update_property_null",
     // SG, EG, PG and CG are macros that read a thread-local struct on ZTS, so wrapper.c has accessors
     "rapira_sg", "rapira_eg", "rapira_pg", "rapira_cg",
-    // the execution timer pause of a park (module.c); rapira_timer is the native timer type of the build
+    // A park pauses the execution timer through these functions (module.c). rapira_timer is the native timer type of the build.
     "rapira_timer", "rapira_timer_pause", "rapira_timer_resume",
     // array_init_size is a macro, so wrapper.c has the rapira_array_init shim
     "rapira_array_init",
@@ -62,7 +62,7 @@
     "zend_object", "zend_class_entry", "zval_ptr_dtor", // zval_ptr_dtor_nogc is inline-only, so the Rust side uses zval_ptr_dtor
     // zend_string_init is inline-only; the exported interner function pointer covers startup-time strings
     "zend_hash_str_update", "zend_string_init_interned",
-    // the realpath cache of PHP, per thread on ZTS (Zend/zend_virtual_cwd.c); each app start empties it
+    // Each app start empties the realpath cache of PHP. The cache is per thread on ZTS (Zend/zend_virtual_cwd.c).
     "realpath_cache_clean",
     "php_default_post_reader", "php_default_treat_data", "php_default_input_filter",
     "SAPI_HEADER_SENT_SUCCESSFULLY", "SAPI_HEADER_SEND_FAILED", "IS_STRING",

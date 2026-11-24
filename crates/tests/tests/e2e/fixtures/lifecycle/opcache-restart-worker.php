@@ -1,7 +1,7 @@
 <?php
 // Answers with the OPcache state of the worker. ?reset=1 calls opcache_reset().
 // ?fill=1 wastes OPcache memory with a changed file and then fills the hash table, so OPcache schedules a restart by itself.
-// ?hold=NAME waits for release-NAME. ?probe=1 holds a worker briefly so other probes can reach other workers.
+// ?hold=NAME waits for release-NAME. ?probe=1 holds a worker for 50 ms so other probes can reach other workers.
 $app = bin2hex(random_bytes(8));
 $fill = static function (): void {
     $dir = __DIR__ . '/gen';

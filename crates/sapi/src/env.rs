@@ -121,7 +121,7 @@ pub(crate) fn with_pool_pairs(f: impl FnOnce(&[(Permanent, Permanent)])) {
     });
 }
 
-/// The import hook of PHP. It fills `$_ENV`, the `$_SERVER` of a boot and the array of `getenv()`: the table of the pool goes in with no copy, then the `putenv()` writes of this thread.
+/// The import hook of PHP. It fills `$_ENV`, the `$_SERVER` of a boot and the array of `getenv()`. The table of the pool goes in with no copy, then the `putenv()` writes of this thread.
 unsafe extern "C" fn import(array: *mut zval) {
     // SAFETY: PHP gives a new array.
     let ht = unsafe { (*array).value.arr };
@@ -175,7 +175,7 @@ unsafe fn bytes<'a>(ptr: *const c_char, len: usize) -> &'a [u8] {
     unsafe { std::slice::from_raw_parts(ptr.cast(), len) }
 }
 
-/// Returns the permanent string of `name` from the table of the pool, or null. A `putenv()` write hides the table: a written value goes to the output pointers, and a removal leaves them unchanged. The written value is a C string. It stays valid until the next `putenv()` or the end of this PHP request.
+/// Returns the permanent string of `name` from the table of the pool, or null. A `putenv()` write hides the table. A written value goes to the output pointers, and a removal leaves them unchanged. The written value is a C string. It stays valid until the next `putenv()` or the end of this PHP request.
 ///
 /// # Safety
 /// `name` points to `name_len` readable bytes. `value` and `value_len` are writable.
@@ -211,7 +211,7 @@ pub unsafe extern "C" fn rapira_rs_env_get(
     })
 }
 
-/// The getenv callback of the SAPI. PHP reads it for `${NAME}` in INI text and copies the string at once. For null, PHP reads the process environment: this is the result for a name that `putenv()` removed, and for each name on a thread with no pool. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_ini_parser.y#L172-L193
+/// The getenv callback of the SAPI. PHP reads it for `${NAME}` in INI text and copies the string at once. For null, PHP reads the process environment. This is the result for a name that `putenv()` removed, and for each name on a thread with no pool. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_ini_parser.y#L172-L193
 ///
 /// # Safety
 /// `name` points to `name_len` readable bytes.
