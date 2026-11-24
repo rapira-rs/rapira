@@ -49,7 +49,7 @@ pub unsafe fn send<T>(tx: &mpsc::Sender<T>, item: T, until: Option<Instant>) -> 
     let live = unsafe { crate::rapira_timer_pause(saved.as_mut_ptr()) };
     let sent = Handle::current().block_on(send_parked(tx, item, until, crate::watchdog::wake()));
     if live {
-        unsafe { crate::watchdog::resume_timer(saved.assume_init_ref()) };
+        unsafe { crate::rapira_timer_resume(saved.as_ptr()) };
     }
     sent
 }

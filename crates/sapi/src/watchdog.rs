@@ -137,17 +137,6 @@ pub(crate) fn wake() -> Option<watch::Receiver<bool>> {
     LOCAL.with_borrow(|slot| Some(slot.as_ref()?.lock().unwrap().wake.subscribe()))
 }
 
-/// # Safety
-/// The calling PHP thread paused this timer. A watchdog interrupt must keep the process timer disarmed.
-pub(crate) unsafe fn resume_timer(saved: &crate::rapira_timer) {
-    LOCAL.with_borrow(|slot| {
-        let worker = slot.as_ref().map(|slot| slot.lock().unwrap());
-        if worker.as_ref().is_none_or(|w| !w.unit.interrupted()) {
-            unsafe { crate::rapira_timer_resume(saved) };
-        }
-    });
-}
-
 fn set_unit(unit: Unit) {
     LOCAL.with_borrow(|slot| {
         if let Some(slot) = slot {
