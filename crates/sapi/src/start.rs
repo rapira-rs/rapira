@@ -116,7 +116,7 @@ struct ThreadPlugin {
     cpu_clock: bool,
 }
 
-// SAFETY: the record is null or immutable from MINIT until all worker threads end.
+// SAFETY: the record is immutable from MINIT until all worker threads end.
 unsafe impl Send for ThreadPlugin {}
 
 impl ThreadPlugin {
@@ -154,11 +154,7 @@ impl crate::Engine {
                 Mode::Worker => RAPIRA_MODE_WORKER,
                 Mode::Dispatcher => RAPIRA_MODE_DISPATCHER,
             } as c_int,
-            record: if mode == Mode::Dispatcher {
-                plugin.dispatcher()
-            } else {
-                std::ptr::null()
-            },
+            record: plugin.dispatcher(),
             cpu_clock: settings.execution_clock == ExecutionClock::Cpu,
         };
         let pool = Arc::new(Pool::new(name, settings.workers));
