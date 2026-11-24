@@ -8,7 +8,7 @@ use base64::engine::DecodePaddingMode;
 use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD_NO_PAD};
 use bytes::Bytes;
 use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
-use connectrpc::{ConnectError, ErrorCode, ErrorDetail, MethodKind, Protocol};
+use connectrpc::{ConnectError, ErrorCode, ErrorDetail, Protocol};
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{add_list, build_address, header_key};
 use rapira_sapi::pool::{Event, record};
@@ -290,8 +290,8 @@ impl Held for GrpcState {
     fn class(&self) -> *mut zend_class_entry {
         // SAFETY: MINIT sets the class entries before any worker starts.
         unsafe {
-            match self.req.kind {
-                MethodKind::ServerStreaming => rapira_ce_grpc_server_streaming_call,
+            match self.reply {
+                Some(Reply::Stream(_)) => rapira_ce_grpc_server_streaming_call,
                 _ => rapira_ce_grpc_unary_call,
             }
         }
@@ -789,7 +789,6 @@ mod tests {
     fn state(reply: oneshot::Sender<UnaryReply>) -> GrpcState {
         let req = Call {
             method: "rapira.test.v1.EchoService/Echo".into(),
-            kind: MethodKind::Unary,
             protocol: Protocol::Grpc,
             metadata: HeaderMap::new(),
             deadline: None,

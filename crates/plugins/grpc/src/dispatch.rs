@@ -122,7 +122,6 @@ fn call(
     };
     Ok(Call {
         method: path.to_owned(),
-        kind: method.kind,
         protocol: ctx.protocol().unwrap_or(Protocol::Connect),
         metadata: std::mem::take(ctx.headers_mut()),
         deadline: ctx.deadline().map(|at| Deadline {
@@ -343,7 +342,6 @@ mod tests {
         for case in cases {
             let req = Call {
                 method: "rapira.test.v1.EchoService/Echo".to_owned(),
-                kind: MethodKind::Unary,
                 protocol: Protocol::Grpc,
                 metadata: http::HeaderMap::new(),
                 deadline: case.until.map(|at| Deadline { at, unix: 0.0 }),

@@ -1,8 +1,8 @@
 //! The call that the plugin hands to PHP, and what PHP sends back.
 
 use bytes::Bytes;
+use connectrpc::ConnectError;
 use connectrpc::http::HeaderMap;
-use connectrpc::{ConnectError, MethodKind};
 use rapira_sapi::types::Addr;
 use std::time::Instant;
 
@@ -20,7 +20,6 @@ pub(crate) fn expired(until: Option<Instant>) -> bool {
 pub(crate) struct Call {
     /// `package.Service/Method`, without a leading slash.
     pub method: String,
-    pub kind: MethodKind,
     pub protocol: connectrpc::Protocol,
     /// The request headers as received. `getContext()` drops the transport names and decodes `-bin` values when it builds `Context::$metadata`.
     pub metadata: HeaderMap,
