@@ -1,7 +1,8 @@
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
-use std::sync::Arc;
 use std::sync::atomic::Ordering;
+use std::sync::{Arc, Mutex};
+use std::thread::Thread;
 use std::time::Duration;
 
 use crossbeam_channel::{Receiver, Sender, unbounded};
@@ -188,10 +189,76 @@ pub fn now_unix_f64() -> f64 {
         .unwrap_or(0.0)
 }
 
+/// The workers of one pool that wait for a unit.
+#[derive(Default)]
+pub(crate) struct Idle(Mutex<Waiting>);
+
+#[derive(Default)]
+struct Waiting {
+    /// The worker that started its wait last is at the end.
+    workers: Vec<Thread>,
+    /// The workers that a submit woke and that are not back from their wait.
+    waking: usize,
+}
+
+impl Idle {
+    pub(crate) fn enter(&self, worker: &Thread) {
+        self.0.lock().unwrap().workers.push(worker.clone());
+    }
+
+    /// Ends the wait of `worker`.
+    pub(crate) fn leave(&self, worker: &Thread) {
+        let mut waiting = self.0.lock().unwrap();
+        let at = waiting.workers.iter().rposition(|w| w.id() == worker.id());
+        match at {
+            Some(at) => {
+                waiting.workers.remove(at);
+            }
+            // A wake took the worker from the list. The wake on close is not in the count.
+            None => waiting.waking = waiting.waking.saturating_sub(1),
+        }
+    }
+
+    /// Wakes the worker that started its wait last, unless a wake is in progress for each of the `queued` units. The caches of this worker are warm, and under a partial load the other workers stay asleep.
+    pub(crate) fn wake_one(&self, queued: usize) {
+        let mut waiting = self.0.lock().unwrap();
+        if waiting.waking >= queued {
+            return;
+        }
+        let Some(worker) = waiting.workers.pop() else {
+            return;
+        };
+        waiting.waking += 1;
+        drop(waiting);
+        worker.unpark();
+    }
+}
+
+/// Wakes every waiting worker when the last intake clone drops. Each worker then reads the closed queue.
+struct WakeOnClose(Arc<Idle>);
+
+impl Drop for WakeOnClose {
+    fn drop(&mut self) {
+        let workers = std::mem::take(&mut self.0.0.lock().unwrap().workers);
+        for worker in workers {
+            worker.unpark();
+        }
+    }
+}
+
+/// The pull end of the pool queue. Each worker holds a clone.
+#[derive(Clone)]
+pub(crate) struct Units {
+    pub(crate) rx: Receiver<Entry>,
+    pub(crate) idle: Arc<Idle>,
+}
+
 /// The submit end of the pool queue. Each plugin task can hold a clone.
 #[derive(Clone)]
 pub struct Intake {
     tx: Sender<Entry>,
+    /// The field is after `tx`, so the queue is closed when the last clone wakes the waiting workers.
+    idle: Arc<WakeOnClose>,
     pub(crate) boot_retry: Arc<crate::start::BootRetry>,
     pool: Arc<Pool>,
     /// The bytes of the pending units.
@@ -231,17 +298,19 @@ impl Drop for PendingGuard<'_> {
 }
 
 impl Intake {
-    pub(crate) fn new(pool: Arc<Pool>) -> (Self, Receiver<Entry>) {
+    pub(crate) fn new(pool: Arc<Pool>) -> (Self, Units) {
         let (tx, rx) = unbounded();
+        let idle = Arc::<Idle>::default();
         (
             Self {
                 tx,
+                idle: Arc::new(WakeOnClose(Arc::clone(&idle))),
                 boot_retry: Arc::default(),
                 pool,
                 budget: Arc::new(Semaphore::new(BODY_BUDGET)),
                 slots: Arc::new(Semaphore::new(INTAKE_SLOTS)),
             },
-            rx,
+            Units { rx, idle },
         )
     }
 
@@ -280,6 +349,7 @@ impl Intake {
         self.tx
             .send(entry)
             .expect("workers keep the receiver until the last intake drops");
+        self.idle.0.wake_one(self.tx.len());
         pending.disarm();
         Ok(())
     }
@@ -326,7 +396,7 @@ mod tests {
         );
     }
 
-    fn intake() -> (Intake, crossbeam_channel::Receiver<Entry>) {
+    fn intake() -> (Intake, Units) {
         Intake::new(Arc::new(Pool::new("http", 2)))
     }
 
@@ -448,7 +518,7 @@ mod tests {
                     let (result, ()) = tokio::join!(submit, async {
                         tokio::time::sleep(ACTION_DELAY).await;
                         // The pull drops the entry, and its slot goes to the waiting submit.
-                        drop(rx.try_recv().unwrap());
+                        drop(rx.rx.try_recv().unwrap());
                     });
                     Some(result)
                 }

@@ -1,5 +1,5 @@
 use anyhow::Context as _;
-use crossbeam_channel::{Receiver, Select, Sender, bounded, never, select_biased};
+use crossbeam_channel::{Receiver, Select, Sender, TryRecvError, bounded, never};
 use rapira_config::{ExecutionClock, Mode, PoolSettings};
 use std::cell::RefCell;
 use std::ffi::{CStr, c_int};
@@ -15,7 +15,7 @@ use crate::plugin::Plugin;
 use crate::pool::{self, Event, Pool, record};
 use crate::quota::{self, End};
 use crate::rapira_worker::rapira_worker;
-use crate::work::{Entry, Intake, Unit};
+use crate::work::{Entry, Idle, Intake, Unit, Units};
 use crate::{
     RAPIRA_MODE_CLASSIC, RAPIRA_MODE_DISPATCHER, RAPIRA_MODE_WORKER,
     classic_worker::classic_worker, php_execute_script, rapira_plugin, rapira_thread_end,
@@ -28,6 +28,7 @@ thread_local! {
 
 pub(crate) struct UnitRx {
     rx: Receiver<Entry>,
+    idle: Arc<Idle>,
     control: Receiver<()>,
     workers: Arc<Workers>,
 }
@@ -54,11 +55,12 @@ const IDLE_PURGE_AFTER: Duration = Duration::from_secs(2);
 const OPCACHE_POLL: Duration = Duration::from_secs(1);
 
 impl UnitRx {
-    fn new(rx: Receiver<Entry>, workers: Arc<Workers>) -> (Self, Sender<()>) {
+    fn new(units: Units, workers: Arc<Workers>) -> (Self, Sender<()>) {
         let (tx, control) = bounded(1);
         (
             Self {
-                rx,
+                rx: units.rx,
+                idle: units.idle,
                 control,
                 workers,
             },
@@ -66,14 +68,57 @@ impl UnitRx {
         )
     }
 
-    fn recv(&self, units: &Receiver<Entry>, timeout: Duration) -> Pull {
-        select_biased! {
-            recv(self.control) -> msg => msg.map_or(Pull::Closed, |()| Pull::Reload),
-            recv(units) -> msg => msg.map_or(Pull::Closed, |entry| {
+    /// Takes what is ready. A reload comes before a queued unit.
+    fn take(&self, units: &Receiver<Entry>) -> Option<Pull> {
+        match self.control.try_recv() {
+            Ok(()) => return Some(Pull::Reload),
+            Err(TryRecvError::Disconnected) => return Some(Pull::Closed),
+            Err(TryRecvError::Empty) => {}
+        }
+        match units.try_recv() {
+            Ok(entry) => {
                 pool::with(|pool| pool.pending.fetch_sub(1, Ordering::Relaxed));
-                Pull::Unit(entry.unit)
-            }),
-            default(timeout) => Pull::NoUnit,
+                Some(Pull::Unit(entry.unit))
+            }
+            Err(TryRecvError::Disconnected) => Some(Pull::Closed),
+            Err(TryRecvError::Empty) => None,
+        }
+    }
+
+    /// A wait with a timeout above zero needs the queue of the pool as `units`, because the submit wakes the workers of that queue.
+    fn recv(&self, units: &Receiver<Entry>, timeout: Duration) -> Pull {
+        if let Some(pull) = self.take(units) {
+            return pull;
+        }
+        if timeout.is_zero() {
+            return Pull::NoUnit;
+        }
+        let deadline = Instant::now().checked_add(timeout);
+        let me = thread::current();
+        loop {
+            self.idle.enter(&me);
+            // A unit can arrive between the last check and the entry.
+            let mut got = self.take(units);
+            let mut expired = false;
+            if got.is_none() {
+                match deadline {
+                    None => thread::park(),
+                    Some(deadline) => {
+                        thread::park_timeout(deadline.saturating_duration_since(Instant::now()));
+                        expired = Instant::now() >= deadline;
+                    }
+                }
+            }
+            self.idle.leave(&me);
+            // A woken worker takes the unit, the reload or the close that caused the wake.
+            if got.is_none() {
+                got = self.take(units);
+            }
+            match got {
+                Some(pull) => return pull,
+                None if expired => return Pull::NoUnit,
+                None => {}
+            }
         }
     }
 }

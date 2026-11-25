@@ -70,6 +70,30 @@ async fn a_free_worker_answers_a_second_http_connection() -> anyhow::Result<()> 
 
 #[tokio::test]
 #[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
+async fn the_worker_that_waited_last_answers_the_next_request() -> anyhow::Result<()> {
+    let srv = Spawn::http(Mode::Dispatcher, fixture("pool_threads/overlap/http.php"))
+        .workers(4)
+        .json_log()
+        .spawn();
+    wait_serving(&srv, "http", 4);
+    let mut apps = Vec::new();
+    for _ in 0..8 {
+        let view = http_view(get(srv.addr, "/short").await?).await?;
+        apps.push(view["app"].as_str().context("app token")?.to_owned());
+        // The worker starts its next wait before the next request arrives.
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    let first = apps[0].clone();
+    assert_eq!(
+        apps,
+        vec![first; 8],
+        "one worker answers the requests that do not overlap"
+    );
+    Ok(())
+}
+
+#[tokio::test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 async fn pending_is_per_pool_and_active_is_per_worker() -> anyhow::Result<()> {
     let srv = two_http_workers();
     let log = srv.log_file();

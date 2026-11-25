@@ -66,9 +66,10 @@ impl Workers {
     }
 
     pub(crate) fn wake(&self) {
-        for (control, _) in self.0.lock().unwrap().iter() {
+        for (control, worker) in self.0.lock().unwrap().iter() {
             // A full channel already holds a reload for this worker.
             let _ = control.try_send(());
+            worker.thread().unpark();
         }
     }
 }
@@ -185,6 +186,7 @@ impl Drop for Engine {
         let workers = std::mem::take(&mut *self.workers.0.lock().unwrap());
         for (control, worker) in workers {
             drop(control);
+            worker.thread().unpark();
             worker.join().expect("the worker catches its panics");
         }
         // SAFETY: this is the thread that started TSRM. Every PHP worker has joined.
