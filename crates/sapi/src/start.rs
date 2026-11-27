@@ -12,7 +12,7 @@ use crate::engine::Workers;
 use crate::plugin::Plugin;
 use crate::pool::{Event, Pool};
 use crate::work::{Entry, Idle, Intake, Unit, Units};
-use crate::worker::{LivePhp, Worker};
+use crate::worker::Worker;
 use crate::{
     RAPIRA_MODE_CLASSIC, RAPIRA_MODE_DISPATCHER, RAPIRA_MODE_WORKER, php_execute_script,
     rapira_plugin, rapira_thread_end, rapira_thread_start, zend_destroy_file_handle,
@@ -279,12 +279,11 @@ impl crate::Engine {
                             index,
                             opcache,
                             max_requests,
-                            LivePhp,
                         );
                         match mode {
-                            Mode::Classic => worker.run_classic_live(&entrypoint),
+                            Mode::Classic => worker.run_classic(&entrypoint),
                             Mode::Worker | Mode::Dispatcher => {
-                                worker.run_resident_live(
+                                worker.run_resident(
                                     &entrypoint,
                                     settings.max_boot_failures,
                                     &boot_retry,

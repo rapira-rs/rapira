@@ -1,8 +1,4 @@
-//! One per-worker runtime owning the Cycle, Pull, quota, OPcache reload state, and active Dispatcher Unit.
-//!
-//! `Worker<P>` is generic over an internal `PhpRuntime` seam (`LivePhp` in production, `FakePhp` in tests)
-//! so production monomorphizes with zero dynamic dispatch while multi-cycle, quota, boot-retry, and OPcache
-//! coordination run in-process without PHP or thread-local test setup.
+//! Per-worker runtime owning the Cycle, Pull, quota, OPcache reload state, and active Dispatcher Unit.
 
 use std::cell::Cell;
 use std::ffi::{CStr, c_int};
@@ -44,7 +40,7 @@ const OPCACHE_ON: c_int = 1;
 const OPCACHE_PENDING: c_int = 2;
 const OPCACHE_RESTARTING: c_int = 4;
 
-/// Initial wait after a failed boot; doubles per consecutive failure up to `BOOT_RETRY_MAX`.
+/// Wait after the first failed boot of a sequence; doubles per consecutive failure up to `BOOT_RETRY_MAX`.
 const BOOT_RETRY_BASE: Duration = Duration::from_millis(500);
 /// Longest wait between two failed boots so `/readyz`-gated pools recover without incoming requests.
 const BOOT_RETRY_MAX: Duration = Duration::from_secs(5);
@@ -64,7 +60,7 @@ enum OpcacheBoot {
     Run,
     /// OPcache is on and a restart is pending. This app instance holds the usage lock, so it leaves at its first pull.
     LeaveAtFirstPull,
-    /// OPcache is off for this app instance. It leaves when `last_restart_time` is no longer `seen`.
+    /// OPcache is off for this app instance. It leaves when `last_restart_time` is not `seen`.
     Wait {
         seen: zend_long,
     },
@@ -75,67 +71,16 @@ enum RecvMode {
     Try,
 }
 
-/// Outcome of `Worker::receive_dispatcher` before translating into PHP return values or exceptions.
-enum ReceiveOutcome {
-    Unit(*mut dyn Held),
-    Busy,
-    Closed,
-    TimedOut,
-    Empty,
-}
-
-/// Internal seam separating `Worker` lifecycle logic from live Zend/SAPI FFI calls.
-pub(crate) trait PhpRuntime: Sized {
-    fn prepare_entrypoint(&self, script: &Path);
-    /// Runs a standalone PHP request calling `opcache_reset()`. Returns `(started, clean_shutdown)`.
-    fn run_opcache_reset_request(&self, worker: &Worker<Self>) -> (bool, bool);
-    /// Reads `(state, last_restart_time)` from `rapira_opcache_state()`.
-    fn opcache_state(&self) -> (c_int, zend_long);
-    fn boot_request_startup(&self) -> bool;
-    /// Runs the entrypoint script while `worker` is active for re-entrant PHP callbacks.
-    fn execute_entrypoint(worker: &Worker<Self>);
-    /// Tears down the active request. Returns true when a bailout occurred.
-    fn teardown_request(&self) -> bool;
-    fn stash_boot_shutdown_functions(&self);
-    /// Shuts down the active request. Returns true when a bailout occurred.
-    fn shutdown_request(&self) -> bool;
-    fn log_and_clear_last_error(&self);
-    fn disarm_timer(&self);
-    fn arm_timer(&self);
-    /// Runs one Classic-mode request for `ctx`. Returns true when the request errored.
-    fn run_classic_unit(&self, ctx: &mut Context) -> bool;
-    /// Runs one Worker-mode handler invocation. Returns `(outcome, flushed, teardown)`.
-    fn run_worker_handler(
-        &self,
-        ctx: &mut Context,
-        fci: *mut zend_fcall_info,
-        fcc: *mut zend_fcall_info_cache,
-    ) -> (c_int, c_int, c_int);
-    /// Exits the process when consecutive boot failures hit the limit before the pool served.
-    fn exit_boot_failed(&self, code: i32) -> bool;
-    /// Waits for a unit to shed during a failed-boot backoff window.
-    fn pull_to_shed(
-        &self,
-        worker: &Worker<Self>,
-        retry_at: Instant,
-        retry: &Weak<BootRetry>,
-    ) -> Pull;
-}
-
-/// Zero-sized production adapter backed by live Zend/SAPI calls.
-pub(crate) struct LivePhp;
-
 thread_local! {
-    /// Scoped pointer to the stack-owned `Worker<LivePhp>` on this PHP thread, active during worker execution.
-    static ACTIVE_WORKER: Cell<*const Worker<LivePhp>> = const { Cell::new(null()) };
+    /// Scoped pointer to the stack-owned `Worker` on this PHP thread, active during worker execution.
+    static ACTIVE_WORKER: Cell<*const Worker> = const { Cell::new(null()) };
 }
 
-struct ActiveWorkerGuard(*const Worker<LivePhp>);
+struct ActiveWorkerGuard(*const Worker);
 
 impl ActiveWorkerGuard {
-    fn enter(worker: &Worker<LivePhp>) -> Self {
-        let prev = ACTIVE_WORKER.replace(std::ptr::from_ref(worker));
-        Self(prev)
+    fn enter(worker: &Worker) -> Self {
+        Self(ACTIVE_WORKER.replace(std::ptr::from_ref(worker)))
     }
 }
 
@@ -145,9 +90,9 @@ impl Drop for ActiveWorkerGuard {
     }
 }
 
-/// Runs `f` against the active `Worker<LivePhp>` on this thread, if one is bound.
+/// Runs `f` against the active `Worker` on this thread, if one is bound.
 #[inline]
-fn with_active<R>(f: impl FnOnce(&Worker<LivePhp>) -> R) -> Option<R> {
+fn with_active<R>(f: impl FnOnce(&Worker) -> R) -> Option<R> {
     let ptr = ACTIVE_WORKER.get();
     if ptr.is_null() {
         return None;
@@ -167,21 +112,20 @@ pub(crate) fn forget_held(ptr: *const ()) {
     let _ = with_active(|w| w.forget_held(ptr));
 }
 
-/// Per-worker state machine owning Cycle, Pull, quota, OPcache wait/reload, and active Dispatcher Unit.
-pub(crate) struct Worker<P: PhpRuntime> {
+/// Per-worker state owning Cycle, Pull, quota, OPcache wait/reload, and active Dispatcher Unit.
+pub(crate) struct Worker {
     units: UnitRx,
     pool: Arc<Pool>,
     index: usize,
     opcache: Arc<OpcacheCoordinator>,
     max_requests: u64,
-    php: P,
     /// Cycle counter on this worker thread (1 in the first cycle).
     cycle: Cell<u64>,
     /// Served units in the current app instance.
     served: Cell<u64>,
     /// True once the current app instance pulled at least one unit.
     received: Cell<bool>,
-    /// Set once the current app instance should stop taking units.
+    /// Set once the current app instance takes no more units.
     end: Cell<Option<End>>,
     /// True until the first `handle_request()` call tears down the boot request.
     first_call: Cell<bool>,
@@ -191,22 +135,21 @@ pub(crate) struct Worker<P: PhpRuntime> {
     previous_end: Cell<Option<zend_long>>,
     /// Restart reason saved by `opcache_restart_scheduled` while PHP holds the OPcache lock.
     opcache_scheduled: Cell<Option<c_int>>,
-    /// True while this thread runs a host-initiated `opcache_reset()` request.
+    /// True while this thread runs a host-initiated `opcache_reset()`.
     host_reset: Cell<bool>,
     /// Last Dispatcher unit handed to PHP, kept so bailouts can reclaim it.
     current_unit: Cell<Option<*mut dyn Held>>,
-    /// True once `current_unit` has been counted against `served` / `max_requests`.
+    /// True once `current_unit` has been counted against `served` and `max_requests`.
     current_unit_counted: Cell<bool>,
 }
 
-impl<P: PhpRuntime> Worker<P> {
+impl Worker {
     pub(crate) fn new(
         units: UnitRx,
         pool: Arc<Pool>,
         index: usize,
         opcache: Arc<OpcacheCoordinator>,
         max_requests: u64,
-        php: P,
     ) -> Self {
         Self {
             units,
@@ -218,7 +161,6 @@ impl<P: PhpRuntime> Worker<P> {
             } else {
                 max_requests
             },
-            php,
             cycle: Cell::new(0),
             served: Cell::new(0),
             received: Cell::new(false),
@@ -272,7 +214,7 @@ impl<P: PhpRuntime> Worker<P> {
     }
 
     /// Clears the Dispatcher unit slot if it still points at `ptr` and counts its quota once.
-    pub(crate) fn forget_held(&self, ptr: *const ()) {
+    fn forget_held(&self, ptr: *const ()) {
         if self
             .current_unit
             .get()
@@ -285,13 +227,13 @@ impl<P: PhpRuntime> Worker<P> {
         }
     }
 
-    /// Reclaims a Dispatcher unit that `free_obj` never saw (for example after a shutdown or OOM bailout).
+    /// Reclaims a Dispatcher unit that `free_obj` never saw, for example after a shutdown or OOM bailout.
     fn reclaim_current(&self) {
         if let Some(ptr) = self.current_unit.take() {
             if !self.current_unit_counted.replace(true) {
                 self.tick_quota();
             }
-            // SAFETY: `ptr` came from `Box::into_raw` in `receive_dispatcher` and `current_unit` owned it.
+            // SAFETY: `ptr` came from `Box::into_raw` in `receive_into` and `current_unit` owned it.
             let st = unsafe { Box::from_raw(ptr) };
             if !st.settled() {
                 self.pool
@@ -306,10 +248,28 @@ impl<P: PhpRuntime> Worker<P> {
             .is_some_and(|ptr| unsafe { !(*ptr).is_finalized() })
     }
 
-    fn with_host_reset(&self, f: impl FnOnce()) {
-        self.host_reset.set(true);
-        f();
-        self.host_reset.set(false);
+    /// Verifies the previous Dispatcher unit is settled (discarding if cancelled) and counts its quota once.
+    /// Returns false when the previous unit is still live and unsettled.
+    fn settle_previous_unit(&self) -> bool {
+        let Some(ptr) = self.current_unit.get() else {
+            return true;
+        };
+        // SAFETY: `current_unit` points to a leaked `Held` box owned until `forget_held` clears the slot.
+        let held = unsafe { &mut *ptr };
+        if !held.settled() && held.cancelled() {
+            tracing::debug!(
+                target: "rapira",
+                "receive() discarded an unfinalized unit whose client left"
+            );
+            held.discard();
+        }
+        if !held.settled() {
+            return false;
+        }
+        if !self.current_unit_counted.replace(true) {
+            self.tick_quota();
+        }
+        true
     }
 
     fn on_opcache_restart_scheduled(&self, reason: c_int) {
@@ -333,21 +293,27 @@ impl<P: PhpRuntime> Worker<P> {
         warn!(target: "rapira", "OPcache scheduled a restart ({why}); every app restarts so that the restart can run");
     }
 
-    /// Claims and runs a host-requested `opcache_reset()` before loading a script.
+    /// Runs a standalone request calling `opcache_reset()` when a host reload requested one.
     #[must_use = "start the app or run the unit only after the reset request succeeds"]
     fn reset_opcache_before_request(&self) -> bool {
         let Some(sent) = self.opcache.claim_reset() else {
             return true;
         };
-        let (started, clean_shutdown) = self.php.run_opcache_reset_request(self);
+        let started = unsafe { php_request_startup() } == SUCCESS;
+        if started {
+            self.host_reset.set(true);
+            unsafe { rapira_opcache_reset() };
+            self.host_reset.set(false);
+        }
+        let shutdown = unsafe { rapira_request_shutdown() };
         self.opcache.finish_reset(sent, started);
         self.reload_for_opcache_restart();
-        started && clean_shutdown
+        started && shutdown != RAPIRA_BAILOUT as c_int
     }
 
     /// Reads OPcache state once at app boot (requires an active PHP request).
     fn note_opcache_at_boot(&self) {
-        let (state, last_restart) = self.php.opcache_state();
+        let (state, last_restart) = opcache_state();
         self.opcache_wait.set(None);
         match opcache_boot(state, last_restart, self.previous_end.get()) {
             OpcacheBoot::Run => {}
@@ -359,16 +325,16 @@ impl<P: PhpRuntime> Worker<P> {
         }
     }
 
-    /// True when the app booted with OPcache off and the pending restart has now finished (or state read failed).
+    /// True when the app booted with OPcache off and the pending restart ran (or the state read failed).
     fn opcache_restart_ran(&self) -> bool {
         self.opcache_wait.get().is_some_and(|seen| {
-            let (state, last_restart) = self.php.opcache_state();
+            let (state, last_restart) = opcache_state();
             // A read fails here only at the memory limit, and the app instance must end then.
             state < 0 || last_restart != seen
         })
     }
 
-    /// Keeps the worker idle across the pull and transitions it back to active before returning to PHP.
+    /// Marks the worker idle across the pull and active before returning to PHP.
     fn pull_with(&self, select: impl FnOnce(&Self) -> Pull) -> Pull {
         self.reload_for_opcache_restart();
         if self.ended() {
@@ -380,7 +346,7 @@ impl<P: PhpRuntime> Worker<P> {
         got
     }
 
-    /// Pulls the next ready event, skipping cancelled units and keeping a single deadline across OPcache polls.
+    /// Pulls the next ready event, skipping cancelled units and keeping one deadline across OPcache polls.
     fn next_pull(&self, wait: Wait) -> Pull {
         let deadline = match wait {
             Wait::For(t) => Some(Instant::now() + t),
@@ -435,20 +401,22 @@ impl<P: PhpRuntime> Worker<P> {
                     return got;
                 }
             }
-            w.php.disarm_timer();
+            unsafe { rapira_receive_untimed() };
             disarmed = true;
             w.next_pull(wait)
         });
         if !matches!(got, Pull::Unit(_)) && !disarmed {
-            self.php.disarm_timer();
+            unsafe { rapira_receive_untimed() };
         }
         got
     }
 
     /// Classic mode: resolves the entrypoint and executes it once per pulled CGI unit.
     pub(crate) fn run_classic(&self, entrypoint: &Path) {
+        let _active = ActiveWorkerGuard::enter(self);
         loop {
-            self.php.prepare_entrypoint(entrypoint);
+            resolve_script(entrypoint);
+            clean_realpath_cache();
             loop {
                 match self.pull_with(|w| w.next_pull(Wait::Forever)) {
                     Pull::Unit(unit) => {
@@ -458,7 +426,7 @@ impl<P: PhpRuntime> Worker<P> {
                             ctx.refuse(500);
                             true
                         } else {
-                            self.php.run_classic_unit(&mut ctx)
+                            run_classic_unit(&mut ctx)
                         };
                         self.pool
                             .record_worker(self.index, Event::Handled { errored });
@@ -475,33 +443,33 @@ impl<P: PhpRuntime> Worker<P> {
         }
     }
 
-    /// Runs one resident app cycle (Worker or Dispatcher mode) and returns how it ended (`None` = failed boot).
+    /// Runs one resident app cycle (Worker or Dispatcher mode) and returns how it ended (`None` is a failed boot).
     fn run_cycle(&self, entrypoint: &Path) -> Option<End> {
         self.renew_quota();
-        self.php.prepare_entrypoint(entrypoint);
+        resolve_script(entrypoint);
+        clean_realpath_cache();
         if !self.reset_opcache_before_request() {
             error!(target: "rapira", "OPcache reset request failed; restarting the app");
             self.reclaim_current();
             return self.outcome();
         }
         self.cycle.set(self.cycle.get() + 1);
-        let started = self.php.boot_request_startup();
-        if started {
+        if boot_request_startup() {
             self.note_opcache_at_boot();
-            P::execute_entrypoint(self);
+            unsafe { run_script(script().filename()) };
             // The boot of the next app instance compares `last_restart_time` with this value.
-            let (state, last_restart) = self.php.opcache_state();
+            let (state, last_restart) = opcache_state();
             self.previous_end.set((state >= 0).then_some(last_restart));
         } else {
             error!(target: "rapira", "php_request_startup() failed");
         }
 
         self.first_call.set(true);
-        self.php.log_and_clear_last_error();
-        let bailed = self.php.shutdown_request();
+        log_and_clear_last_error();
+        let shutdown = unsafe { rapira_request_shutdown() };
         // A script or its shutdown functions can schedule a restart before leaving.
         self.reload_for_opcache_restart();
-        if bailed {
+        if shutdown == RAPIRA_BAILOUT as c_int {
             error!(target: "rapira", "php_request_shutdown() bailed; restarting the app");
         }
         self.reclaim_current();
@@ -515,6 +483,7 @@ impl<P: PhpRuntime> Worker<P> {
         max_boot_failures: u32,
         retry: &Weak<BootRetry>,
     ) {
+        let _active = ActiveWorkerGuard::enter(self);
         let mut failures: u32 = 0;
         let mut retry_delay = BOOT_RETRY_BASE;
         'cycles: loop {
@@ -550,15 +519,13 @@ impl<P: PhpRuntime> Worker<P> {
                     self.pool.name,
                     self.index
                 );
-                if self.php.exit_boot_failed(70) {
-                    break;
-                }
+                crate::exit::exit(70);
             }
             // Units that arrive during the wait do not change the next boot time.
             let retry_at = Instant::now() + retry_delay;
             retry_delay = (retry_delay * 2).min(BOOT_RETRY_MAX);
             loop {
-                match self.php.pull_to_shed(self, retry_at, retry) {
+                match self.units.pull_to_shed(retry_at, retry) {
                     Pull::Closed => break 'cycles,
                     Pull::Unit(unit) => {
                         unit.shed();
@@ -573,236 +540,29 @@ impl<P: PhpRuntime> Worker<P> {
     /// Worker-mode `handle_request()` core: tears down boot request on first call, pulls one CGI unit, runs handler, and counts quota.
     fn handle_request(&self, fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> u32 {
         if self.first_call.replace(false) {
-            if self.php.teardown_request() {
+            if unsafe { rapira_request_teardown() } == RAPIRA_BAILOUT as c_int {
                 error!(target: "rapira", "rapira_request_teardown() bailed on first call; recycling");
                 self.mark_end(End::Recycle);
                 return RAPIRA_HANDLE_RECYCLE;
             }
             // Hide boot shutdown functions from the per-unit pass; they run at cycle end.
-            self.php.stash_boot_shutdown_functions();
+            unsafe { rapira_stash_boot_shutdown_functions() };
         }
-        self.php.log_and_clear_last_error();
+        log_and_clear_last_error();
         let mut ctx = match self.pull_timed(Wait::Forever) {
             Pull::Unit(unit) => unit.into_cgi(),
             Pull::Closed | Pull::Reload | Pull::NoUnit => return RAPIRA_HANDLE_STOP,
         };
 
-        let (outcome, flushed, teardown) = self.php.run_worker_handler(&mut ctx, fci, fcc);
-
-        let recycle = [outcome, flushed, teardown].contains(&(RAPIRA_BAILOUT as c_int));
-        let errored = recycle || [outcome, teardown].contains(&(RAPIRA_THROW as c_int));
-
-        self.php.log_and_clear_last_error();
-        self.pool
-            .record_worker(self.index, Event::Handled { errored });
-        self.tick_quota();
-        if recycle {
-            self.mark_end(End::Recycle);
-            RAPIRA_HANDLE_RECYCLE
-        } else {
-            RAPIRA_HANDLE_CONTINUE
-        }
-    }
-
-    /// Dispatcher-mode `receive()` / `tryReceive()` core: checks prior unit, counts quota, pulls next unit, and tracks the slot.
-    fn receive_dispatcher(&self, mode: RecvMode) -> ReceiveOutcome {
-        if let Some(ptr) = self.current_unit.get() {
-            // SAFETY: `current_unit` points to a leaked `Held` box owned until `forget_held` clears the slot.
-            let held = unsafe { &mut *ptr };
-            if !held.settled() && held.cancelled() {
-                tracing::debug!(
-                    target: "rapira",
-                    "receive() discarded an unfinalized unit whose client left"
-                );
-                held.discard();
-            }
-            if !held.settled() {
-                return ReceiveOutcome::Busy;
-            }
-            if !self.current_unit_counted.replace(true) {
-                self.tick_quota();
-            }
-        }
-        let wait = match mode {
-            RecvMode::Try | RecvMode::Wait(0) => Wait::Never,
-            RecvMode::Wait(-1) => Wait::Forever,
-            RecvMode::Wait(t) => Wait::For(Duration::from_micros(t as u64)),
-        };
-        match self.pull_timed(wait) {
-            Pull::Unit(unit) => {
-                self.php.arm_timer();
-                let ptr = Box::into_raw(unit.into_held());
-                self.current_unit.set(Some(ptr));
-                self.current_unit_counted.set(false);
-                ReceiveOutcome::Unit(ptr)
-            }
-            Pull::Closed | Pull::Reload => ReceiveOutcome::Closed,
-            Pull::NoUnit if matches!(mode, RecvMode::Try) => ReceiveOutcome::Empty,
-            Pull::NoUnit => ReceiveOutcome::TimedOut,
-        }
-    }
-}
-
-impl Worker<LivePhp> {
-    /// Runs Classic mode with `ACTIVE_WORKER` bound for FFI callbacks.
-    pub(crate) fn run_classic_live(&self, entrypoint: &Path) {
-        let _active = ActiveWorkerGuard::enter(self);
-        self.run_classic(entrypoint);
-    }
-
-    /// Runs Worker or Dispatcher mode with `ACTIVE_WORKER` bound for FFI callbacks.
-    pub(crate) fn run_resident_live(
-        &self,
-        entrypoint: &Path,
-        max_boot_failures: u32,
-        retry: &Weak<BootRetry>,
-    ) {
-        let _active = ActiveWorkerGuard::enter(self);
-        self.run_resident(entrypoint, max_boot_failures, retry);
-    }
-}
-
-impl PhpRuntime for LivePhp {
-    fn prepare_entrypoint(&self, entrypoint: &Path) {
-        resolve_script(entrypoint);
-        clean_realpath_cache();
-    }
-
-    fn run_opcache_reset_request(&self, worker: &Worker<Self>) -> (bool, bool) {
-        let started = unsafe { php_request_startup() } == SUCCESS;
-        if started {
-            worker.with_host_reset(|| unsafe { rapira_opcache_reset() });
-        }
-        let shutdown = unsafe { rapira_request_shutdown() };
-        (started, shutdown != RAPIRA_BAILOUT as c_int)
-    }
-
-    fn opcache_state(&self) -> (c_int, zend_long) {
-        let mut last_restart: zend_long = 0;
-        let state = unsafe { rapira_opcache_state(&mut last_restart) };
-        (state, last_restart)
-    }
-
-    /// Starts the boot request with `argv` of `php entrypoint.php` and builds `$_SERVER`, matching CLI.
-    /// After this, `argc` is 0 again so later `$_SERVER` builds do not reference a modified `$argv`.
-    /// https://github.com/php/php-src/blob/php-8.5.11/sapi/cli/php_cli.c#L941
-    /// https://github.com/php/php-src/blob/php-8.5.11/main/php_variables.c#L881-L887
-    fn boot_request_startup(&self) -> bool {
-        let mut argv = [script().filename().as_ptr().cast_mut()];
+        bind_server_context(&mut ctx);
         unsafe {
-            let sg = rapira_sg();
-            (*sg).request_info.argc = 1;
-            (*sg).request_info.argv = argv.as_mut_ptr();
-            // PHP 8.4 adds argv only with register_argc_argv on, matching embed SAPI.
-            // https://github.com/php/php-src/blob/php-8.4.26/sapi/embed/php_embed.c#L26-L32
-            #[cfg(php84)]
-            let register_argc_argv =
-                std::ptr::replace(&raw mut (*rapira_pg()).register_argc_argv, true);
-            let started = php_request_startup() == SUCCESS;
-            if started {
-                zend_is_auto_global_str(c"_SERVER".as_ptr(), c"_SERVER".count_bytes());
-            }
-            #[cfg(php84)]
-            {
-                (*rapira_pg()).register_argc_argv = register_argc_argv;
-            }
-            (*sg).request_info.argc = 0;
-            (*sg).request_info.argv = null_mut();
-            started
-        }
-    }
-
-    fn execute_entrypoint(_worker: &Worker<Self>) {
-        unsafe { run_script(script().filename()) };
-    }
-
-    fn teardown_request(&self) -> bool {
-        unsafe { rapira_request_teardown() == RAPIRA_BAILOUT as c_int }
-    }
-
-    fn stash_boot_shutdown_functions(&self) {
-        unsafe { rapira_stash_boot_shutdown_functions() };
-    }
-
-    fn shutdown_request(&self) -> bool {
-        unsafe { rapira_request_shutdown() == RAPIRA_BAILOUT as c_int }
-    }
-
-    /// Logs the last unmasked PHP diagnostic that `php_error_cb` did not log, then clears it.
-    fn log_and_clear_last_error(&self) {
-        unsafe {
-            let pg = rapira_pg();
-            let msg = (*pg).last_error_message;
-            let mask = (*rapira_eg()).error_reporting;
-            let php_logged = (*pg).last_error_type & (mask | E_CORE as c_int) != 0
-                && (*pg).log_errors
-                && (*pg).error_log.is_null();
-            if !msg.is_null() && !php_logged {
-                let lineno = (*pg).last_error_lineno;
-                let Severity { level, label } = error_type_to_level((*pg).last_error_type, mask);
-                crate::diagnostics::event_at!(
-                    "php",
-                    level,
-                    "{label}: {} in {}:{}",
-                    String::from_utf8_lossy(zend::zstr_bytes(msg)),
-                    String::from_utf8_lossy(zend::zstr_bytes((*pg).last_error_file)),
-                    lineno
-                );
-            }
-            rapira_clear_last_error();
-        }
-    }
-
-    fn disarm_timer(&self) {
-        unsafe { rapira_receive_untimed() };
-    }
-
-    fn arm_timer(&self) {
-        unsafe { rapira_receive_timed() };
-    }
-
-    // `run_script` also returns false for exit() and die(), so only a recorded fatal error marks a failure.
-    fn run_classic_unit(&self, ctx: &mut Context) -> bool {
-        bind_server_context(ctx);
-        let errored = unsafe {
-            populate_request_context(ctx);
-            if php_request_startup() == FAILURE {
-                // Refuse before shutdown so `php_header()` in RSHUTDOWN does not commit a 200 head first.
-                ctx.refuse(500);
-                rapira_request_shutdown();
-                unbind_server_context();
-                return true;
-            }
-            crate::context::apply_proto_num(ctx);
-
-            let failed = !run_script(script().filename());
-            let exec_err = failed && fatal_error_recorded();
-            ctx.tearing_down = true;
-            ctx.errored = exec_err;
-            rapira_request_shutdown();
-            // RSHUTDOWN seals inside a zend_try; a bailout there leaves the seal to this call.
-            ctx.end(exec_err);
-            exec_err
-        };
-        unbind_server_context();
-        errored
-    }
-
-    fn run_worker_handler(
-        &self,
-        ctx: &mut Context,
-        fci: *mut zend_fcall_info,
-        fcc: *mut zend_fcall_info_cache,
-    ) -> (c_int, c_int, c_int) {
-        bind_server_context(ctx);
-        unsafe {
-            populate_request_context(ctx);
+            populate_request_context(&mut ctx);
             rapira_release_temporary_streams();
         }
         let mut outcome = unsafe { rapira_request_activate() };
         if outcome != RAPIRA_BAILOUT as c_int {
             unsafe {
-                crate::context::apply_proto_num(ctx);
+                crate::context::apply_proto_num(&ctx);
                 outcome = rapira_run_handler(fci, fcc);
             }
         }
@@ -814,21 +574,148 @@ impl PhpRuntime for LivePhp {
         };
         ctx.errored = outcome != RAPIRA_OK as c_int || flushed == RAPIRA_BAILOUT as c_int;
         let teardown = unsafe { rapira_request_teardown() };
-        (outcome, flushed, teardown)
+
+        let recycle = [outcome, flushed, teardown].contains(&(RAPIRA_BAILOUT as c_int));
+        let errored = recycle || [outcome, teardown].contains(&(RAPIRA_THROW as c_int));
+
+        log_and_clear_last_error();
+        self.pool
+            .record_worker(self.index, Event::Handled { errored });
+        self.tick_quota();
+        if recycle {
+            self.mark_end(End::Recycle);
+            RAPIRA_HANDLE_RECYCLE
+        } else {
+            RAPIRA_HANDLE_CONTINUE
+        }
     }
 
-    fn exit_boot_failed(&self, code: i32) -> bool {
-        crate::exit::exit(code)
+    /// Dispatcher-mode `receive()` / `tryReceive()` core: verifies previous unit, pulls next unit, and writes its PHP object.
+    /// # Safety
+    /// `rv` is writable and the PHP engine is active on this thread.
+    unsafe fn receive_into(&self, rv: *mut zval, mode: RecvMode) -> bool {
+        if !self.settle_previous_unit() {
+            // SAFETY: a dispatcher unit has a static plugin record and a static error message.
+            unsafe { zend::throw_error(CStr::from_ptr((*rapira_current_plugin()).busy)) };
+            return false;
+        }
+        let wait = match mode {
+            RecvMode::Try | RecvMode::Wait(0) => Wait::Never,
+            RecvMode::Wait(-1) => Wait::Forever,
+            RecvMode::Wait(t) => Wait::For(Duration::from_micros(t as u64)),
+        };
+        unsafe {
+            match self.pull_timed(wait) {
+                Pull::Unit(unit) => {
+                    rapira_receive_timed();
+                    let ptr = NonNull::from(Box::leak(unit.into_held()));
+                    self.current_unit.set(Some(ptr.as_ptr()));
+                    self.current_unit_counted.set(false);
+                    // A Zend OOM bailout in `rapira_unit_object` longjmps past this frame, so this frame holds no Drop values; `current_unit` reclaims the box.
+                    rapira_unit_object(rv, ptr.as_ref().class())
+                        .cast::<HeldPtr>()
+                        .write(HeldPtr(Some(ptr)));
+                    true
+                }
+                Pull::Closed | Pull::Reload => {
+                    zend::throw_exception(rapira_ce_closed_exception, CLOSED_MSG);
+                    false
+                }
+                Pull::NoUnit if matches!(mode, RecvMode::Try) => false,
+                Pull::NoUnit => {
+                    zend::throw_exception(rapira_ce_timeout_exception, TIMEOUT_MSG);
+                    false
+                }
+            }
+        }
     }
+}
 
-    fn pull_to_shed(
-        &self,
-        worker: &Worker<Self>,
-        retry_at: Instant,
-        retry: &Weak<BootRetry>,
-    ) -> Pull {
-        worker.units.pull_to_shed(retry_at, retry)
+fn opcache_state() -> (c_int, zend_long) {
+    let mut last_restart: zend_long = 0;
+    let state = unsafe { rapira_opcache_state(&mut last_restart) };
+    (state, last_restart)
+}
+
+/// Starts the boot request with `argv` of `php entrypoint.php` and builds `$_SERVER`, matching CLI.
+/// After this, `argc` is 0 again so later `$_SERVER` builds do not reference a modified `$argv`.
+/// https://github.com/php/php-src/blob/php-8.5.11/sapi/cli/php_cli.c#L941
+/// https://github.com/php/php-src/blob/php-8.5.11/main/php_variables.c#L881-L887
+fn boot_request_startup() -> bool {
+    let mut argv = [script().filename().as_ptr().cast_mut()];
+    unsafe {
+        let sg = rapira_sg();
+        (*sg).request_info.argc = 1;
+        (*sg).request_info.argv = argv.as_mut_ptr();
+        // PHP 8.4 adds argv only with register_argc_argv on, matching embed SAPI.
+        // https://github.com/php/php-src/blob/php-8.4.26/sapi/embed/php_embed.c#L26-L32
+        #[cfg(php84)]
+        let register_argc_argv =
+            std::ptr::replace(&raw mut (*rapira_pg()).register_argc_argv, true);
+        let started = php_request_startup() == SUCCESS;
+        if started {
+            zend_is_auto_global_str(c"_SERVER".as_ptr(), c"_SERVER".count_bytes());
+        }
+        #[cfg(php84)]
+        {
+            (*rapira_pg()).register_argc_argv = register_argc_argv;
+        }
+        (*sg).request_info.argc = 0;
+        (*sg).request_info.argv = null_mut();
+        started
     }
+}
+
+/// Logs the last unmasked PHP diagnostic that `php_error_cb` did not log, then clears it.
+fn log_and_clear_last_error() {
+    unsafe {
+        let pg = rapira_pg();
+        let msg = (*pg).last_error_message;
+        let mask = (*rapira_eg()).error_reporting;
+        let php_logged = (*pg).last_error_type & (mask | E_CORE as c_int) != 0
+            && (*pg).log_errors
+            && (*pg).error_log.is_null();
+        if !msg.is_null() && !php_logged {
+            let lineno = (*pg).last_error_lineno;
+            let Severity { level, label } = error_type_to_level((*pg).last_error_type, mask);
+            crate::diagnostics::event_at!(
+                "php",
+                level,
+                "{label}: {} in {}:{}",
+                String::from_utf8_lossy(zend::zstr_bytes(msg)),
+                String::from_utf8_lossy(zend::zstr_bytes((*pg).last_error_file)),
+                lineno
+            );
+        }
+        rapira_clear_last_error();
+    }
+}
+
+// `run_script` also returns false for exit() and die(), so only a recorded fatal error marks a failure.
+fn run_classic_unit(ctx: &mut Context) -> bool {
+    bind_server_context(ctx);
+    let errored = unsafe {
+        populate_request_context(ctx);
+        if php_request_startup() == FAILURE {
+            // Refuse before shutdown so `php_header()` in RSHUTDOWN does not commit a 200 head first.
+            ctx.refuse(500);
+            rapira_request_shutdown();
+            unbind_server_context();
+            return true;
+        }
+        crate::context::apply_proto_num(ctx);
+
+        let failed = !run_script(script().filename());
+        let exec_err = failed && fatal_error_recorded();
+        ctx.tearing_down = true;
+        ctx.errored = exec_err;
+        rapira_request_shutdown();
+        // RSHUTDOWN seals inside a zend_try; a bailout there leaves the seal to this call.
+        ctx.end(exec_err);
+        exec_err
+    };
+    unbind_server_context();
+    errored
 }
 
 /// Decides how an app boot reacts to OPcache state and the previous instance's `last_restart_time`.
@@ -900,43 +787,16 @@ pub extern "C" fn rapira_rs_finish_response() {
 }
 
 /// # Safety
-/// `rv` is writable and the PHP engine is active on this thread.
-unsafe fn receive_into_zval(rv: *mut zval, mode: RecvMode) -> bool {
-    let outcome = with_active(|w| w.receive_dispatcher(mode)).unwrap_or(ReceiveOutcome::Closed);
-    unsafe {
-        match outcome {
-            ReceiveOutcome::Unit(ptr) => {
-                let ptr = NonNull::new_unchecked(ptr);
-                // A Zend OOM bailout in `rapira_unit_object` longjmps past this frame, so this frame holds no Drop values; `current_unit` reclaims the box.
-                rapira_unit_object(rv, ptr.as_ref().class())
-                    .cast::<HeldPtr>()
-                    .write(HeldPtr(Some(ptr)));
-                true
-            }
-            ReceiveOutcome::Busy => {
-                // SAFETY: a dispatcher unit has a static plugin record and a static error message.
-                zend::throw_error(CStr::from_ptr((*rapira_current_plugin()).busy));
-                false
-            }
-            ReceiveOutcome::Closed => {
-                zend::throw_exception(rapira_ce_closed_exception, CLOSED_MSG);
-                false
-            }
-            ReceiveOutcome::TimedOut => {
-                zend::throw_exception(rapira_ce_timeout_exception, TIMEOUT_MSG);
-                false
-            }
-            ReceiveOutcome::Empty => false,
-        }
-    }
-}
-
-/// # Safety
 /// `timeout_us >= -1`. `rv` is the return value of the receive shell, and the engine is active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_receive(timeout_us: i64, rv: *mut zval) -> bool {
-    guard(false, || unsafe {
-        receive_into_zval(rv, RecvMode::Wait(timeout_us))
+    guard(false, || {
+        with_active(|w| unsafe { w.receive_into(rv, RecvMode::Wait(timeout_us)) }).unwrap_or_else(
+            || {
+                unsafe { zend::throw_exception(rapira_ce_closed_exception, CLOSED_MSG) };
+                false
+            },
+        )
     })
 }
 
@@ -944,7 +804,12 @@ pub unsafe extern "C" fn rapira_rs_receive(timeout_us: i64, rv: *mut zval) -> bo
 /// As `rapira_rs_receive`.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_try_receive(rv: *mut zval) -> bool {
-    guard(false, || unsafe { receive_into_zval(rv, RecvMode::Try) })
+    guard(false, || {
+        with_active(|w| unsafe { w.receive_into(rv, RecvMode::Try) }).unwrap_or_else(|| {
+            unsafe { zend::throw_exception(rapira_ce_closed_exception, CLOSED_MSG) };
+            false
+        })
+    })
 }
 
 /// Writes the two counts of a `DispatcherInfo` object: intake depth and whether the last handed-out unit is unfinalized.
@@ -962,30 +827,25 @@ pub unsafe extern "C" fn rapira_rs_dispatcher_counts(pending: *mut i64, active: 
 
 #[cfg(test)]
 mod tests {
-    use std::cell::RefCell;
-    use std::collections::VecDeque;
-    use std::rc::Rc;
     use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
-    use crossbeam_channel::{Sender, bounded, never};
+    use crossbeam_channel::bounded;
 
     use super::*;
     use crate::engine::Workers;
-    use crate::work::{Entry, Idle, Unit, Units};
+    use crate::work::{Idle, Units};
 
     #[derive(Default)]
-    struct FakeHeldState {
+    struct StubState {
         settled: AtomicBool,
         cancelled: AtomicBool,
         discarded: AtomicUsize,
-        lost: AtomicUsize,
-        shed: AtomicUsize,
         dropped: AtomicUsize,
     }
 
-    struct FakeHeld(Arc<FakeHeldState>);
+    struct StubHeld(Arc<StubState>);
 
-    impl Held for FakeHeld {
+    impl Held for StubHeld {
         fn settled(&self) -> bool {
             self.0.settled.load(Ordering::Relaxed)
         }
@@ -996,304 +856,52 @@ mod tests {
             self.0.discarded.fetch_add(1, Ordering::Relaxed);
             self.0.settled.store(true, Ordering::Relaxed);
         }
-        fn lost(&mut self) {
-            self.0.lost.fetch_add(1, Ordering::Relaxed);
-        }
-        fn shed(self: Box<Self>) {
-            self.0.shed.fetch_add(1, Ordering::Relaxed);
-        }
+        fn lost(&mut self) {}
+        fn shed(self: Box<Self>) {}
         fn class(&self) -> *mut crate::zend_class_entry {
             null_mut()
         }
     }
 
-    impl Drop for FakeHeld {
+    impl Drop for StubHeld {
         fn drop(&mut self) {
             self.0.dropped.fetch_add(1, Ordering::Relaxed);
         }
     }
 
-    fn dispatcher_unit(cancelled: bool) -> (Unit, Arc<FakeHeldState>) {
-        let state = Arc::new(FakeHeldState {
+    fn test_worker(max_requests: u64) -> (Worker, Arc<Pool>) {
+        let pool = Arc::new(Pool::new("test", 1));
+        let (_tx, rx) = bounded(1);
+        let units = Units {
+            rx,
+            idle: Arc::<Idle>::default(),
+            pool: Arc::clone(&pool),
+        };
+        let (unit_rx, _control) = UnitRx::new(units, Arc::<Workers>::default());
+        let worker = Worker::new(
+            unit_rx,
+            Arc::clone(&pool),
+            0,
+            Arc::<OpcacheCoordinator>::default(),
+            max_requests,
+        );
+        (worker, pool)
+    }
+
+    fn attach_held(
+        worker: &Worker,
+        settled: bool,
+        cancelled: bool,
+    ) -> (*mut dyn Held, Arc<StubState>) {
+        let state = Arc::new(StubState {
+            settled: AtomicBool::new(settled),
             cancelled: AtomicBool::new(cancelled),
-            ..FakeHeldState::default()
+            ..StubState::default()
         });
-        (
-            Unit::Dispatcher(Box::new(FakeHeld(Arc::clone(&state)))),
-            state,
-        )
-    }
-
-    fn cgi_unit(cancelled: bool) -> (Unit, Arc<std::sync::Mutex<Vec<String>>>) {
-        let (responder, log) = crate::types::tests::responder(cancelled);
-        let mut ctx = crate::types::tests::context();
-        ctx.responder = Some(responder);
-        (Unit::Cgi(Box::new(ctx)), log)
-    }
-
-    struct ResetScript {
-        started: bool,
-        clean_shutdown: bool,
-        hook_during_reset: Option<c_int>,
-        hook_after_reset: Option<c_int>,
-    }
-
-    struct FakeState {
-        prepare_calls: usize,
-        reset_calls: usize,
-        reset_scripts: VecDeque<ResetScript>,
-        opcache_states: VecDeque<(c_int, zend_long)>,
-        last_opcache_state: (c_int, zend_long),
-        boot_starts: VecDeque<bool>,
-        teardown_bailouts: VecDeque<bool>,
-        teardown_calls: usize,
-        stash_calls: usize,
-        shutdown_bailouts: VecDeque<bool>,
-        shutdown_calls: usize,
-        disarm_calls: usize,
-        arm_calls: usize,
-        classic_calls: usize,
-        classic_errors: VecDeque<bool>,
-        handler_calls: usize,
-        handler_outcomes: VecDeque<(c_int, c_int, c_int)>,
-        exit_codes: Vec<i32>,
-        shed_pulls: usize,
-        script_cycles: Vec<u64>,
-    }
-
-    impl Default for FakeState {
-        fn default() -> Self {
-            Self {
-                prepare_calls: 0,
-                reset_calls: 0,
-                reset_scripts: VecDeque::new(),
-                opcache_states: VecDeque::new(),
-                last_opcache_state: (-1, 0),
-                boot_starts: VecDeque::new(),
-                teardown_bailouts: VecDeque::new(),
-                teardown_calls: 0,
-                stash_calls: 0,
-                shutdown_bailouts: VecDeque::new(),
-                shutdown_calls: 0,
-                disarm_calls: 0,
-                arm_calls: 0,
-                classic_calls: 0,
-                classic_errors: VecDeque::new(),
-                handler_calls: 0,
-                handler_outcomes: VecDeque::new(),
-                exit_codes: Vec::new(),
-                shed_pulls: 0,
-                script_cycles: Vec::new(),
-            }
-        }
-    }
-
-    type ScriptFn = Rc<dyn Fn(&Worker<FakePhp>)>;
-
-    struct FakePhp {
-        state: Rc<RefCell<FakeState>>,
-        script: ScriptFn,
-    }
-
-    impl FakePhp {
-        fn new(state: Rc<RefCell<FakeState>>, script: impl Fn(&Worker<FakePhp>) + 'static) -> Self {
-            Self {
-                state,
-                script: Rc::new(script),
-            }
-        }
-    }
-
-    impl PhpRuntime for FakePhp {
-        fn prepare_entrypoint(&self, _script: &Path) {
-            self.state.borrow_mut().prepare_calls += 1;
-        }
-
-        fn run_opcache_reset_request(&self, worker: &Worker<Self>) -> (bool, bool) {
-            let script = {
-                let mut st = self.state.borrow_mut();
-                st.reset_calls += 1;
-                st.reset_scripts.pop_front().unwrap_or(ResetScript {
-                    started: true,
-                    clean_shutdown: true,
-                    hook_during_reset: None,
-                    hook_after_reset: None,
-                })
-            };
-            if script.started {
-                worker.with_host_reset(|| {
-                    if let Some(reason) = script.hook_during_reset {
-                        worker.on_opcache_restart_scheduled(reason);
-                    }
-                });
-            }
-            if let Some(reason) = script.hook_after_reset {
-                worker.on_opcache_restart_scheduled(reason);
-            }
-            (script.started, script.clean_shutdown)
-        }
-
-        fn opcache_state(&self) -> (c_int, zend_long) {
-            let mut st = self.state.borrow_mut();
-            if let Some(next) = st.opcache_states.pop_front() {
-                st.last_opcache_state = next;
-                next
-            } else {
-                st.last_opcache_state
-            }
-        }
-
-        fn boot_request_startup(&self) -> bool {
-            self.state
-                .borrow_mut()
-                .boot_starts
-                .pop_front()
-                .unwrap_or(true)
-        }
-
-        fn execute_entrypoint(worker: &Worker<Self>) {
-            worker
-                .php
-                .state
-                .borrow_mut()
-                .script_cycles
-                .push(worker.cycle());
-            let script = Rc::clone(&worker.php.script);
-            script(worker);
-        }
-
-        fn teardown_request(&self) -> bool {
-            let mut st = self.state.borrow_mut();
-            st.teardown_calls += 1;
-            st.teardown_bailouts.pop_front().unwrap_or(false)
-        }
-
-        fn stash_boot_shutdown_functions(&self) {
-            self.state.borrow_mut().stash_calls += 1;
-        }
-
-        fn shutdown_request(&self) -> bool {
-            let mut st = self.state.borrow_mut();
-            st.shutdown_calls += 1;
-            st.shutdown_bailouts.pop_front().unwrap_or(false)
-        }
-
-        fn log_and_clear_last_error(&self) {}
-
-        fn disarm_timer(&self) {
-            self.state.borrow_mut().disarm_calls += 1;
-        }
-
-        fn arm_timer(&self) {
-            self.state.borrow_mut().arm_calls += 1;
-        }
-
-        fn run_classic_unit(&self, ctx: &mut Context) -> bool {
-            let errored = {
-                let mut st = self.state.borrow_mut();
-                st.classic_calls += 1;
-                st.classic_errors.pop_front().unwrap_or(false)
-            };
-            ctx.end(errored);
-            errored
-        }
-
-        fn run_worker_handler(
-            &self,
-            ctx: &mut Context,
-            _fci: *mut zend_fcall_info,
-            _fcc: *mut zend_fcall_info_cache,
-        ) -> (c_int, c_int, c_int) {
-            let out = {
-                let mut st = self.state.borrow_mut();
-                st.handler_calls += 1;
-                st.handler_outcomes.pop_front().unwrap_or((
-                    RAPIRA_OK as c_int,
-                    RAPIRA_OK as c_int,
-                    RAPIRA_OK as c_int,
-                ))
-            };
-            let errored = out.0 != RAPIRA_OK as c_int || out.1 == RAPIRA_BAILOUT as c_int;
-            ctx.end(errored);
-            out
-        }
-
-        fn exit_boot_failed(&self, code: i32) -> bool {
-            self.state.borrow_mut().exit_codes.push(code);
-            true
-        }
-
-        fn pull_to_shed(
-            &self,
-            worker: &Worker<Self>,
-            _retry_at: Instant,
-            _retry: &Weak<BootRetry>,
-        ) -> Pull {
-            self.state.borrow_mut().shed_pulls += 1;
-            let disabled = never();
-            let rx = if worker.pool.ready() {
-                &disabled
-            } else {
-                &worker.units.rx
-            };
-            worker.units.recv(rx, Duration::ZERO)
-        }
-    }
-
-    struct Harness {
-        worker: Worker<FakePhp>,
-        tx: Sender<Entry>,
-        control: Sender<()>,
-        pool: Arc<Pool>,
-        opcache: Arc<OpcacheCoordinator>,
-        retry: Arc<BootRetry>,
-        state: Rc<RefCell<FakeState>>,
-    }
-
-    impl Harness {
-        fn new(
-            max_requests: u64,
-            state: FakeState,
-            script: impl Fn(&Worker<FakePhp>) + 'static,
-        ) -> Self {
-            let pool = Arc::new(Pool::new("test", 1));
-            let (tx, rx) = bounded(16);
-            let units = Units {
-                rx,
-                idle: Arc::<Idle>::default(),
-                pool: Arc::clone(&pool),
-            };
-            let workers = Arc::<Workers>::default();
-            let (unit_rx, control) = UnitRx::new(units, workers);
-            let opcache = Arc::<OpcacheCoordinator>::default();
-            let state = Rc::new(RefCell::new(state));
-            let worker = Worker::new(
-                unit_rx,
-                Arc::clone(&pool),
-                0,
-                Arc::clone(&opcache),
-                max_requests,
-                FakePhp::new(Rc::clone(&state), script),
-            );
-            Self {
-                worker,
-                tx,
-                control,
-                pool,
-                opcache,
-                retry: Arc::default(),
-                state,
-            }
-        }
-
-        fn push(&self, unit: Unit) {
-            self.tx
-                .send(Entry {
-                    unit,
-                    budget_bytes: 0,
-                })
-                .unwrap();
-        }
+        let ptr = Box::into_raw(Box::new(StubHeld(Arc::clone(&state))) as Box<dyn Held>);
+        worker.current_unit.set(Some(ptr));
+        worker.current_unit_counted.set(false);
+        (ptr, state)
     }
 
     #[test]
@@ -1441,735 +1049,166 @@ mod tests {
     }
 
     #[test]
-    fn worker_mode_handle_request_enforces_quota_teardown_and_outcomes() {
+    fn dispatcher_unit_accounting_counts_once_and_reclaims_unsettled() {
         struct Case {
             name: &'static str,
-            max_requests: u64,
-            units: usize,
-            teardown_bailouts: &'static [bool],
-            handler_outcomes: &'static [(c_int, c_int, c_int)],
-            want_actions: &'static [u32],
-            want_handled: u64,
+            settled: bool,
+            cancelled: bool,
+            forget_first: bool,
+            reclaim_instead_of_forget: bool,
+            want_can_receive: bool,
+            want_discarded: usize,
+            want_served: u64,
             want_errors: u64,
-            want_recycles: u64,
-            want_stashes: usize,
         }
-        const OK: (c_int, c_int, c_int) =
-            (RAPIRA_OK as c_int, RAPIRA_OK as c_int, RAPIRA_OK as c_int);
         let cases = [
             Case {
-                name: "quota recycles after max_requests and starts a second cycle",
-                max_requests: 2,
-                units: 3,
-                teardown_bailouts: &[false, false],
-                handler_outcomes: &[OK, OK, OK],
-                want_actions: &[
-                    RAPIRA_HANDLE_CONTINUE,
-                    RAPIRA_HANDLE_CONTINUE,
-                    RAPIRA_HANDLE_STOP,
-                    RAPIRA_HANDLE_CONTINUE,
-                    RAPIRA_HANDLE_STOP,
-                ],
-                want_handled: 3,
+                name: "settled unit counts once across repeat settle and later forget_held",
+                settled: true,
+                cancelled: false,
+                forget_first: false,
+                reclaim_instead_of_forget: false,
+                want_can_receive: true,
+                want_discarded: 0,
+                want_served: 1,
                 want_errors: 0,
-                want_recycles: 1,
-                want_stashes: 2,
             },
             Case {
-                name: "first call teardown bailout recycles without stashing or pulling",
-                max_requests: 0,
-                units: 1,
-                teardown_bailouts: &[true, false],
-                handler_outcomes: &[OK],
-                want_actions: &[
-                    RAPIRA_HANDLE_RECYCLE,
-                    RAPIRA_HANDLE_CONTINUE,
-                    RAPIRA_HANDLE_STOP,
-                ],
-                want_handled: 1,
+                name: "early forget_held counts once and leaves slot empty for next receive",
+                settled: true,
+                cancelled: false,
+                forget_first: true,
+                reclaim_instead_of_forget: false,
+                want_can_receive: true,
+                want_discarded: 0,
+                want_served: 1,
                 want_errors: 0,
-                want_recycles: 1,
-                want_stashes: 1,
             },
             Case {
-                name: "handler bailout marks errored and recycles before next unit",
-                max_requests: 0,
-                units: 2,
-                teardown_bailouts: &[false, false],
-                handler_outcomes: &[
-                    (
-                        RAPIRA_BAILOUT as c_int,
-                        RAPIRA_OK as c_int,
-                        RAPIRA_OK as c_int,
-                    ),
-                    OK,
-                ],
-                want_actions: &[
-                    RAPIRA_HANDLE_RECYCLE,
-                    RAPIRA_HANDLE_CONTINUE,
-                    RAPIRA_HANDLE_STOP,
-                ],
-                want_handled: 2,
-                want_errors: 1,
-                want_recycles: 1,
-                want_stashes: 2,
+                name: "unsettled live unit blocks next receive without counting quota",
+                settled: false,
+                cancelled: false,
+                forget_first: false,
+                reclaim_instead_of_forget: false,
+                want_can_receive: false,
+                want_discarded: 0,
+                want_served: 0,
+                want_errors: 0,
             },
             Case {
-                name: "handler throw marks errored and continues in same cycle",
-                max_requests: 0,
-                units: 2,
-                teardown_bailouts: &[false],
-                handler_outcomes: &[
-                    (
-                        RAPIRA_THROW as c_int,
-                        RAPIRA_OK as c_int,
-                        RAPIRA_OK as c_int,
-                    ),
-                    OK,
-                ],
-                want_actions: &[
-                    RAPIRA_HANDLE_CONTINUE,
-                    RAPIRA_HANDLE_CONTINUE,
-                    RAPIRA_HANDLE_STOP,
-                ],
-                want_handled: 2,
-                want_errors: 1,
-                want_recycles: 0,
-                want_stashes: 1,
+                name: "unsettled cancelled unit is discarded and counted once",
+                settled: false,
+                cancelled: true,
+                forget_first: false,
+                reclaim_instead_of_forget: false,
+                want_can_receive: true,
+                want_discarded: 1,
+                want_served: 1,
+                want_errors: 0,
             },
             Case {
-                name: "teardown bailout after ok handler marks errored and recycles",
-                max_requests: 0,
-                units: 2,
-                teardown_bailouts: &[false, false],
-                handler_outcomes: &[
-                    (
-                        RAPIRA_OK as c_int,
-                        RAPIRA_OK as c_int,
-                        RAPIRA_BAILOUT as c_int,
-                    ),
-                    OK,
-                ],
-                want_actions: &[
-                    RAPIRA_HANDLE_RECYCLE,
-                    RAPIRA_HANDLE_CONTINUE,
-                    RAPIRA_HANDLE_STOP,
-                ],
-                want_handled: 2,
+                name: "leaked unsettled unit is reclaimed and recorded as errored at cycle end",
+                settled: false,
+                cancelled: false,
+                forget_first: false,
+                reclaim_instead_of_forget: true,
+                want_can_receive: false,
+                want_discarded: 0,
+                want_served: 1,
                 want_errors: 1,
-                want_recycles: 1,
-                want_stashes: 2,
             },
         ];
 
         for case in cases {
-            let actions = Rc::new(RefCell::new(Vec::new()));
-            let actions_ref = Rc::clone(&actions);
-            let fake = FakeState {
-                teardown_bailouts: case.teardown_bailouts.iter().copied().collect(),
-                handler_outcomes: case.handler_outcomes.iter().copied().collect(),
-                ..FakeState::default()
-            };
-            let h = Harness::new(case.max_requests, fake, move |w| {
-                loop {
-                    let action = w.handle_request(null_mut(), null_mut());
-                    actions_ref.borrow_mut().push(action);
-                    if action != RAPIRA_HANDLE_CONTINUE {
-                        break;
-                    }
-                }
-            });
-            for _ in 0..case.units {
-                let (unit, _log) = cgi_unit(false);
-                h.push(unit);
-            }
-            drop(h.tx);
-            let retry_weak = Arc::downgrade(&h.retry);
-            h.worker
-                .run_resident(Path::new("worker.php"), 3, &retry_weak);
+            let (worker, pool) = test_worker(1);
+            let (ptr, state) = attach_held(&worker, case.settled, case.cancelled);
 
-            let snap = h.pool.snapshot();
-            let ws = &snap.workers[0];
+            if case.forget_first {
+                worker.forget_held(ptr.cast::<()>());
+                drop(unsafe { Box::from_raw(ptr) });
+            }
+
+            let can_receive = worker.settle_previous_unit();
+            assert_eq!(can_receive, case.want_can_receive, "{}", case.name);
+            // Calling settle_previous_unit again (as after an empty tryReceive) must never double-count.
             assert_eq!(
-                actions.borrow().as_slice(),
-                case.want_actions,
+                worker.settle_previous_unit(),
+                case.want_can_receive,
                 "{}",
                 case.name
             );
-            assert_eq!(ws.handled, case.want_handled, "{}", case.name);
-            assert_eq!(ws.errors, case.want_errors, "{}", case.name);
-            assert_eq!(ws.recycles, case.want_recycles, "{}", case.name);
+
+            if case.reclaim_instead_of_forget {
+                worker.reclaim_current();
+                assert!(!worker.has_active_unit(), "{}", case.name);
+            } else if !case.forget_first {
+                // If still unsettled, free directly without ticking via forget_held so served stays 0.
+                if case.want_can_receive {
+                    worker.forget_held(ptr.cast::<()>());
+                } else {
+                    worker.current_unit.set(None);
+                }
+                drop(unsafe { Box::from_raw(ptr) });
+            }
+
             assert_eq!(
-                h.state.borrow().stash_calls,
-                case.want_stashes,
+                state.discarded.load(Ordering::Relaxed),
+                case.want_discarded,
                 "{}",
                 case.name
             );
-            let expected_cycles: Vec<u64> = (1..=case.want_recycles + 1).collect();
+            assert_eq!(state.dropped.load(Ordering::Relaxed), 1, "{}", case.name);
+            assert_eq!(worker.served.get(), case.want_served, "{}", case.name);
+            assert_eq!(worker.ended(), case.want_served >= 1, "{}", case.name);
             assert_eq!(
-                h.state.borrow().script_cycles,
-                expected_cycles,
+                pool.snapshot().workers[0].errors,
+                case.want_errors,
                 "{}",
                 case.name
             );
-            drop(h.control);
         }
     }
 
     #[test]
-    fn dispatcher_mode_receive_tracks_quota_busy_cancelled_and_reclaim() {
-        enum Scenario {
-            SettledCountsOnceAndRecycles,
-            ForgetHeldCountsOnceAndIgnoresStale,
-            TryReceiveEmptyDoesNotDoubleCount,
-            UnsettledLiveReturnsBusy,
-            UnsettledCancelledDiscardsAndProceeds,
-            LeakedUnitReclaimedAtCycleEnd,
-        }
+    fn stale_forget_held_and_host_reset_hook_flags_keep_isolation() {
         struct Case {
             name: &'static str,
-            scenario: Scenario,
+            host_reset: bool,
+            want_scheduled: Option<c_int>,
         }
         let cases = [
             Case {
-                name: "settled unit counts quota once on next receive and recycles at max_requests",
-                scenario: Scenario::SettledCountsOnceAndRecycles,
+                name: "host opcache_reset suppresses restart hook",
+                host_reset: true,
+                want_scheduled: None,
             },
             Case {
-                name: "forget_held counts quota once and stale pointer does not disturb next unit",
-                scenario: Scenario::ForgetHeldCountsOnceAndIgnoresStale,
-            },
-            Case {
-                name: "settled unit followed by empty try_receive does not double count on forget_held",
-                scenario: Scenario::TryReceiveEmptyDoesNotDoubleCount,
-            },
-            Case {
-                name: "unsettled live unit returns Busy without counting quota",
-                scenario: Scenario::UnsettledLiveReturnsBusy,
-            },
-            Case {
-                name: "unsettled cancelled unit is discarded before pulling next unit",
-                scenario: Scenario::UnsettledCancelledDiscardsAndProceeds,
-            },
-            Case {
-                name: "unreclaimed unit at cycle end is reclaimed and recorded as errored",
-                scenario: Scenario::LeakedUnitReclaimedAtCycleEnd,
+                name: "script restart hook records reason",
+                host_reset: false,
+                want_scheduled: Some(0),
             },
         ];
-
         for case in cases {
-            match case.scenario {
-                Scenario::SettledCountsOnceAndRecycles => {
-                    let h = Harness::new(1, FakeState::default(), |_| {});
-                    let (u1, s1) = dispatcher_unit(false);
-                    let (u2, s2) = dispatcher_unit(false);
-                    h.push(u1);
-                    h.push(u2);
+            let (worker, _pool) = test_worker(2);
+            let (p1, _s1) = attach_held(&worker, true, false);
+            let (p2, _s2) = attach_held(&worker, false, false);
+            // Stale forget_held(p1) must not disturb p2 or tick quota.
+            worker.forget_held(p1.cast::<()>());
+            assert!(worker.has_active_unit(), "{}", case.name);
+            assert_eq!(worker.served.get(), 0, "{}", case.name);
 
-                    let ReceiveOutcome::Unit(p1) = h.worker.receive_dispatcher(RecvMode::Wait(-1))
-                    else {
-                        panic!("{}: expected first unit", case.name);
-                    };
-                    assert!(h.worker.has_active_unit(), "{}", case.name);
-                    assert_eq!(h.state.borrow().arm_calls, 1, "{}", case.name);
+            worker.host_reset.set(case.host_reset);
+            worker.on_opcache_restart_scheduled(0);
+            assert_eq!(
+                worker.opcache_scheduled.get(),
+                case.want_scheduled,
+                "{}",
+                case.name
+            );
 
-                    s1.settled.store(true, Ordering::Relaxed);
-                    assert!(!h.worker.has_active_unit(), "{}", case.name);
-                    assert!(
-                        matches!(
-                            h.worker.receive_dispatcher(RecvMode::Wait(-1)),
-                            ReceiveOutcome::Closed
-                        ),
-                        "{}: quota=1 should close on next receive",
-                        case.name
-                    );
-                    assert_eq!(h.worker.outcome(), Some(End::Recycle), "{}", case.name);
-                    assert_eq!(h.state.borrow().disarm_calls, 1, "{}", case.name);
-
-                    // Clean up leaked p1 and verify u2 stayed queued.
-                    h.worker.forget_held(p1.cast::<()>());
-                    drop(unsafe { Box::from_raw(p1) });
-                    assert_eq!(s1.dropped.load(Ordering::Relaxed), 1, "{}", case.name);
-                    assert_eq!(s2.dropped.load(Ordering::Relaxed), 0, "{}", case.name);
-                }
-                Scenario::ForgetHeldCountsOnceAndIgnoresStale => {
-                    let h = Harness::new(2, FakeState::default(), |_| {});
-                    let (u1, s1) = dispatcher_unit(false);
-                    let (u2, s2) = dispatcher_unit(false);
-                    let (u3, _s3) = dispatcher_unit(false);
-                    h.push(u1);
-                    h.push(u2);
-                    h.push(u3);
-
-                    let ReceiveOutcome::Unit(p1) = h.worker.receive_dispatcher(RecvMode::Wait(-1))
-                    else {
-                        panic!("{}: expected u1", case.name);
-                    };
-                    s1.settled.store(true, Ordering::Relaxed);
-                    // Drop u1 via forget_held before calling receive().
-                    h.worker.forget_held(p1.cast::<()>());
-                    drop(unsafe { Box::from_raw(p1) });
-                    assert_eq!(h.worker.served.get(), 1, "{}", case.name);
-
-                    // Pull u2.
-                    let ReceiveOutcome::Unit(p2) = h.worker.receive_dispatcher(RecvMode::Wait(-1))
-                    else {
-                        panic!("{}: expected u2", case.name);
-                    };
-                    // Stale forget_held(p1) must not clear p2 or tick quota.
-                    h.worker.forget_held(p1.cast::<()>());
-                    assert!(h.worker.has_active_unit(), "{}", case.name);
-                    assert_eq!(h.worker.served.get(), 1, "{}", case.name);
-
-                    s2.settled.store(true, Ordering::Relaxed);
-                    assert!(
-                        matches!(
-                            h.worker.receive_dispatcher(RecvMode::Wait(-1)),
-                            ReceiveOutcome::Closed
-                        ),
-                        "{}: second unit hits quota=2",
-                        case.name
-                    );
-                    assert_eq!(h.worker.served.get(), 2, "{}", case.name);
-                    h.worker.forget_held(p2.cast::<()>());
-                    drop(unsafe { Box::from_raw(p2) });
-                }
-                Scenario::TryReceiveEmptyDoesNotDoubleCount => {
-                    let h = Harness::new(2, FakeState::default(), |_| {});
-                    let (u1, s1) = dispatcher_unit(false);
-                    h.push(u1);
-
-                    let ReceiveOutcome::Unit(p1) = h.worker.receive_dispatcher(RecvMode::Try)
-                    else {
-                        panic!("{}: expected u1", case.name);
-                    };
-                    s1.settled.store(true, Ordering::Relaxed);
-                    assert!(
-                        matches!(
-                            h.worker.receive_dispatcher(RecvMode::Try),
-                            ReceiveOutcome::Empty
-                        ),
-                        "{}",
-                        case.name
-                    );
-                    assert_eq!(h.worker.served.get(), 1, "{}", case.name);
-                    h.worker.forget_held(p1.cast::<()>());
-                    drop(unsafe { Box::from_raw(p1) });
-                    assert_eq!(h.worker.served.get(), 1, "{}", case.name);
-                    assert!(!h.worker.ended(), "{}", case.name);
-                }
-                Scenario::UnsettledLiveReturnsBusy => {
-                    let h = Harness::new(2, FakeState::default(), |_| {});
-                    let (u1, s1) = dispatcher_unit(false);
-                    let (u2, _s2) = dispatcher_unit(false);
-                    h.push(u1);
-                    h.push(u2);
-
-                    let ReceiveOutcome::Unit(p1) = h.worker.receive_dispatcher(RecvMode::Wait(-1))
-                    else {
-                        panic!("{}: expected u1", case.name);
-                    };
-                    assert!(
-                        matches!(
-                            h.worker.receive_dispatcher(RecvMode::Wait(-1)),
-                            ReceiveOutcome::Busy
-                        ),
-                        "{}",
-                        case.name
-                    );
-                    assert_eq!(h.worker.served.get(), 0, "{}", case.name);
-                    s1.settled.store(true, Ordering::Relaxed);
-                    let ReceiveOutcome::Unit(p2) = h.worker.receive_dispatcher(RecvMode::Wait(-1))
-                    else {
-                        panic!("{}: expected u2 after settling u1", case.name);
-                    };
-                    assert_eq!(h.worker.served.get(), 1, "{}", case.name);
-                    drop(unsafe { Box::from_raw(p1) });
-                    h.worker.forget_held(p2.cast::<()>());
-                    drop(unsafe { Box::from_raw(p2) });
-                }
-                Scenario::UnsettledCancelledDiscardsAndProceeds => {
-                    let h = Harness::new(0, FakeState::default(), |_| {});
-                    let (u1, s1) = dispatcher_unit(false);
-                    let (u2, _s2) = dispatcher_unit(false);
-                    h.push(u1);
-                    h.push(u2);
-
-                    let ReceiveOutcome::Unit(p1) = h.worker.receive_dispatcher(RecvMode::Wait(-1))
-                    else {
-                        panic!("{}: expected u1", case.name);
-                    };
-                    s1.cancelled.store(true, Ordering::Relaxed);
-                    let ReceiveOutcome::Unit(p2) = h.worker.receive_dispatcher(RecvMode::Wait(-1))
-                    else {
-                        panic!("{}: expected u2 after discarding cancelled u1", case.name);
-                    };
-                    assert_eq!(s1.discarded.load(Ordering::Relaxed), 1, "{}", case.name);
-                    assert_eq!(h.worker.served.get(), 1, "{}", case.name);
-                    drop(unsafe { Box::from_raw(p1) });
-                    h.worker.forget_held(p2.cast::<()>());
-                    drop(unsafe { Box::from_raw(p2) });
-                }
-                Scenario::LeakedUnitReclaimedAtCycleEnd => {
-                    let (u1, s1) = dispatcher_unit(false);
-                    let h = Harness::new(0, FakeState::default(), |w| {
-                        let ReceiveOutcome::Unit(_ptr) = w.receive_dispatcher(RecvMode::Wait(-1))
-                        else {
-                            panic!("expected leaked unit");
-                        };
-                        // Return from script without freeing the unit (simulates OOM/bailout).
-                    });
-                    h.push(u1);
-                    let end = h.worker.run_cycle(Path::new("dispatcher.php"));
-                    assert_eq!(end, Some(End::Recycle), "{}", case.name);
-                    assert_eq!(s1.dropped.load(Ordering::Relaxed), 1, "{}", case.name);
-                    assert!(!h.worker.has_active_unit(), "{}", case.name);
-                    let snap = h.pool.snapshot();
-                    assert_eq!(snap.workers[0].handled, 1, "{}", case.name);
-                    assert_eq!(snap.workers[0].errors, 1, "{}", case.name);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn resident_loop_handles_boot_failures_shedding_and_exit_70() {
-        enum ModeCase {
-            HitLimitExits70,
-            ShedThenRecover,
-            AlreadyServedDoesNotExit70,
-            DrainingSuppressesExit70,
-        }
-        struct Case {
-            name: &'static str,
-            mode: ModeCase,
-        }
-        let cases = [
-            Case {
-                name: "consecutive boot failures hit limit before pool serves and exit 70",
-                mode: ModeCase::HitLimitExits70,
-            },
-            Case {
-                name: "boot failures shed queued units during backoff and recover on next boot",
-                mode: ModeCase::ShedThenRecover,
-            },
-            Case {
-                name: "boot failure after pool already served does not exit 70",
-                mode: ModeCase::AlreadyServedDoesNotExit70,
-            },
-            Case {
-                name: "draining pool suppresses exit 70 on boot failure",
-                mode: ModeCase::DrainingSuppressesExit70,
-            },
-        ];
-
-        for case in cases {
-            match case.mode {
-                ModeCase::HitLimitExits70 => {
-                    let fake = FakeState {
-                        boot_starts: VecDeque::from([false, false, false]),
-                        ..FakeState::default()
-                    };
-                    let h = Harness::new(0, fake, |_| {});
-                    let retry_weak = Arc::downgrade(&h.retry);
-                    h.worker.run_resident(Path::new("bad.php"), 3, &retry_weak);
-                    assert_eq!(h.state.borrow().exit_codes, vec![70], "{}", case.name);
-                    assert_eq!(h.pool.snapshot().workers[0].recycles, 0, "{}", case.name);
-                    drop(h.tx);
-                    drop(h.control);
-                }
-                ModeCase::ShedThenRecover => {
-                    let fake = FakeState {
-                        boot_starts: VecDeque::from([false, true]),
-                        ..FakeState::default()
-                    };
-                    let tx_slot: Rc<RefCell<Option<Sender<Entry>>>> = Rc::new(RefCell::new(None));
-                    let tx_for_script = Rc::clone(&tx_slot);
-                    let h = Harness::new(0, fake, move |w| {
-                        if let Some(tx) = tx_for_script.borrow_mut().take() {
-                            let (u, _log) = cgi_unit(false);
-                            tx.send(Entry {
-                                unit: u,
-                                budget_bytes: 0,
-                            })
-                            .unwrap();
-                            drop(tx);
-                        }
-                        while w.handle_request(null_mut(), null_mut()) == RAPIRA_HANDLE_CONTINUE {}
-                    });
-                    let (u_shed, s_shed) = dispatcher_unit(false);
-                    h.push(u_shed);
-                    *tx_slot.borrow_mut() = Some(h.tx);
-                    let retry_weak = Arc::downgrade(&h.retry);
-                    h.worker
-                        .run_resident(Path::new("recover.php"), 3, &retry_weak);
-
-                    assert!(h.state.borrow().exit_codes.is_empty(), "{}", case.name);
-                    assert_eq!(s_shed.shed.load(Ordering::Relaxed), 1, "{}", case.name);
-                    let ws = &h.pool.snapshot().workers[0];
-                    assert_eq!(ws.handled, 2, "{}", case.name);
-                    assert_eq!(ws.errors, 1, "{}", case.name);
-                    drop(h.control);
-                }
-                ModeCase::AlreadyServedDoesNotExit70 => {
-                    let fake = FakeState {
-                        boot_starts: VecDeque::from([false, false]),
-                        ..FakeState::default()
-                    };
-                    let h = Harness::new(0, fake, |_| {});
-                    // Mark pool as having served previously.
-                    h.pool.record_worker(0, Event::Idle);
-                    h.pool.record_worker(0, Event::Starting);
-                    assert!(h.pool.served(), "{}", case.name);
-                    drop(h.tx);
-                    let retry_weak = Arc::downgrade(&h.retry);
-                    h.worker.run_resident(Path::new("bad.php"), 1, &retry_weak);
-                    assert!(h.state.borrow().exit_codes.is_empty(), "{}", case.name);
-                    drop(h.control);
-                }
-                ModeCase::DrainingSuppressesExit70 => {
-                    let fake = FakeState {
-                        boot_starts: VecDeque::from([false]),
-                        ..FakeState::default()
-                    };
-                    let h = Harness::new(0, fake, |_| {});
-                    h.pool.begin_drain();
-                    drop(h.tx);
-                    let retry_weak = Arc::downgrade(&h.retry);
-                    h.worker.run_resident(Path::new("bad.php"), 1, &retry_weak);
-                    assert!(h.state.borrow().exit_codes.is_empty(), "{}", case.name);
-                    drop(h.control);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn opcache_lifecycle_handles_boot_wait_leave_reset_and_scheduled_restart() {
-        enum Scenario {
-            LeaveAtFirstPull,
-            WaitUntilRestartTimeChanges,
-            HostResetSuppressesHookWhileScriptHookWakes,
-            FailedHostResetFailsCycleAndStaysPending,
-        }
-        struct Case {
-            name: &'static str,
-            scenario: Scenario,
-        }
-        let cases = [
-            Case {
-                name: "LeaveAtFirstPull recycles without taking queued unit and next cycle serves it",
-                scenario: Scenario::LeaveAtFirstPull,
-            },
-            Case {
-                name: "Wait recycles once last_restart_time changes",
-                scenario: Scenario::WaitUntilRestartTimeChanges,
-            },
-            Case {
-                name: "host reset ignores hook inside with_host_reset while script hook sets scheduled restart",
-                scenario: Scenario::HostResetSuppressesHookWhileScriptHookWakes,
-            },
-            Case {
-                name: "failed host opcache reset fails cycle without booting and keeps reset pending",
-                scenario: Scenario::FailedHostResetFailsCycleAndStaysPending,
-            },
-        ];
-
-        for case in cases {
-            match case.scenario {
-                Scenario::LeaveAtFirstPull => {
-                    // Cycle 1 boot: ON|PENDING, Cycle 1 end: ON|PENDING, Cycle 2 boot: ON, Cycle 2 end: ON.
-                    let fake = FakeState {
-                        opcache_states: VecDeque::from([
-                            (OPCACHE_ON | OPCACHE_PENDING, 10),
-                            (OPCACHE_ON | OPCACHE_PENDING, 10),
-                            (OPCACHE_ON, 11),
-                            (OPCACHE_ON, 11),
-                        ]),
-                        ..FakeState::default()
-                    };
-                    let h = Harness::new(0, fake, |w| {
-                        while w.handle_request(null_mut(), null_mut()) == RAPIRA_HANDLE_CONTINUE {}
-                    });
-                    let (u1, _log) = cgi_unit(false);
-                    h.push(u1);
-                    drop(h.tx);
-                    let retry_weak = Arc::downgrade(&h.retry);
-                    h.worker.run_resident(Path::new("app.php"), 3, &retry_weak);
-                    assert_eq!(h.state.borrow().script_cycles, vec![1, 2], "{}", case.name);
-                    let ws = &h.pool.snapshot().workers[0];
-                    assert_eq!(ws.handled, 1, "{}", case.name);
-                    assert_eq!(ws.recycles, 1, "{}", case.name);
-                    drop(h.control);
-                }
-                Scenario::WaitUntilRestartTimeChanges => {
-                    // Cycle 1 boot: PENDING (off, last_restart=7) -> opcache_wait=Some(7).
-                    // First next_pull checks opcache_restart_ran(): returns (ON, 8) -> changes -> recycles.
-                    // Cycle 1 end: (ON, 8), Cycle 2 boot: (ON, 8), Cycle 2 end: (ON, 8).
-                    let fake = FakeState {
-                        opcache_states: VecDeque::from([
-                            (OPCACHE_PENDING, 7),
-                            (OPCACHE_ON, 8),
-                            (OPCACHE_ON, 8),
-                            (OPCACHE_ON, 8),
-                            (OPCACHE_ON, 8),
-                        ]),
-                        ..FakeState::default()
-                    };
-                    let h = Harness::new(0, fake, |w| {
-                        while w.handle_request(null_mut(), null_mut()) == RAPIRA_HANDLE_CONTINUE {}
-                    });
-                    let (u1, _log) = cgi_unit(false);
-                    h.push(u1);
-                    drop(h.tx);
-                    let retry_weak = Arc::downgrade(&h.retry);
-                    h.worker.run_resident(Path::new("app.php"), 3, &retry_weak);
-                    assert_eq!(h.state.borrow().script_cycles, vec![1, 2], "{}", case.name);
-                    let ws = &h.pool.snapshot().workers[0];
-                    assert_eq!(ws.handled, 1, "{}", case.name);
-                    assert_eq!(ws.recycles, 1, "{}", case.name);
-                    drop(h.control);
-                }
-                Scenario::HostResetSuppressesHookWhileScriptHookWakes => {
-                    let fake = FakeState {
-                        reset_scripts: VecDeque::from([ResetScript {
-                            started: true,
-                            clean_shutdown: true,
-                            hook_during_reset: Some(2),
-                            hook_after_reset: None,
-                        }]),
-                        ..FakeState::default()
-                    };
-                    let saw_scheduled_before_script = Rc::new(Cell::new(true));
-                    let saw_ref = Rc::clone(&saw_scheduled_before_script);
-                    let h = Harness::new(0, fake, move |w| {
-                        saw_ref.set(w.opcache_scheduled.get().is_some());
-                        // Simulate PHP script triggering OOM OPcache restart.
-                        w.on_opcache_restart_scheduled(0);
-                        assert_eq!(w.opcache_scheduled.get(), Some(0));
-                    });
-                    h.opcache.request_reset();
-                    let end = h.worker.run_cycle(Path::new("app.php"));
-                    assert_eq!(end, None, "{}", case.name);
-                    assert!(!saw_scheduled_before_script.get(), "{}", case.name);
-                    // Cycle shutdown flushed opcache_scheduled via reload_for_opcache_restart().
-                    assert_eq!(h.worker.opcache_scheduled.get(), None, "{}", case.name);
-                    assert_eq!(h.opcache.claim_reset(), None, "{}", case.name);
-                    drop(h.tx);
-                    drop(h.control);
-                }
-                Scenario::FailedHostResetFailsCycleAndStaysPending => {
-                    let fake = FakeState {
-                        reset_scripts: VecDeque::from([ResetScript {
-                            started: false,
-                            clean_shutdown: true,
-                            hook_during_reset: None,
-                            hook_after_reset: None,
-                        }]),
-                        ..FakeState::default()
-                    };
-                    let h = Harness::new(0, fake, |_| {
-                        panic!("entrypoint must not execute after failed opcache reset");
-                    });
-                    h.opcache.request_reset();
-                    let end = h.worker.run_cycle(Path::new("app.php"));
-                    assert_eq!(end, None, "{}", case.name);
-                    assert_eq!(h.worker.cycle(), 0, "{}", case.name);
-                    assert!(h.opcache.claim_reset().is_some(), "{}", case.name);
-                    h.opcache.finish_reset(1, true);
-                    drop(h.tx);
-                    drop(h.control);
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn classic_mode_handles_units_opcache_reset_failure_and_reload() {
-        enum Scenario {
-            ServesUnitsAndSkipsCancelled,
-            FailedOpcacheResetRefuses500,
-            ReloadReResolvesEntrypoint,
-        }
-        struct Case {
-            name: &'static str,
-            scenario: Scenario,
-        }
-        let cases = [
-            Case {
-                name: "serves CGI units, counts cancelled unit as shed, and stops on Closed",
-                scenario: Scenario::ServesUnitsAndSkipsCancelled,
-            },
-            Case {
-                name: "failed OPcache reset refuses CGI unit with 500 without running executor",
-                scenario: Scenario::FailedOpcacheResetRefuses500,
-            },
-            Case {
-                name: "Reload re-resolves entrypoint and serves subsequent unit",
-                scenario: Scenario::ReloadReResolvesEntrypoint,
-            },
-        ];
-
-        for case in cases {
-            match case.scenario {
-                Scenario::ServesUnitsAndSkipsCancelled => {
-                    let h = Harness::new(0, FakeState::default(), |_| {});
-                    let (u_cancelled, _log1) = cgi_unit(true);
-                    let (u_ok, _log2) = cgi_unit(false);
-                    h.push(u_cancelled);
-                    h.push(u_ok);
-                    drop(h.tx);
-                    h.worker.run_classic(Path::new("index.php"));
-                    let ws = &h.pool.snapshot().workers[0];
-                    assert_eq!(ws.handled, 2, "{}", case.name);
-                    assert_eq!(ws.errors, 1, "{}", case.name);
-                    assert_eq!(h.state.borrow().classic_calls, 1, "{}", case.name);
-                    assert_eq!(h.state.borrow().prepare_calls, 1, "{}", case.name);
-                    drop(h.control);
-                }
-                Scenario::FailedOpcacheResetRefuses500 => {
-                    let fake = FakeState {
-                        reset_scripts: VecDeque::from([ResetScript {
-                            started: false,
-                            clean_shutdown: true,
-                            hook_during_reset: None,
-                            hook_after_reset: None,
-                        }]),
-                        ..FakeState::default()
-                    };
-                    let h = Harness::new(0, fake, |_| {});
-                    h.opcache.request_reset();
-                    let (u1, log1) = cgi_unit(false);
-                    h.push(u1);
-                    drop(h.tx);
-                    h.worker.run_classic(Path::new("index.php"));
-                    assert_eq!(
-                        log1.lock().unwrap().as_slice(),
-                        ["respond 500 truncated=false body="],
-                        "{}",
-                        case.name
-                    );
-                    assert_eq!(h.state.borrow().classic_calls, 0, "{}", case.name);
-                    let ws = &h.pool.snapshot().workers[0];
-                    assert_eq!(ws.handled, 1, "{}", case.name);
-                    assert_eq!(ws.errors, 1, "{}", case.name);
-                    drop(h.control);
-                }
-                Scenario::ReloadReResolvesEntrypoint => {
-                    let h = Harness::new(0, FakeState::default(), |_| {});
-                    let (u1, _log1) = cgi_unit(false);
-                    h.control.send(()).unwrap();
-                    h.push(u1);
-                    drop(h.tx);
-                    h.worker.run_classic(Path::new("index.php"));
-                    assert_eq!(h.state.borrow().prepare_calls, 2, "{}", case.name);
-                    assert_eq!(h.state.borrow().classic_calls, 1, "{}", case.name);
-                    let ws = &h.pool.snapshot().workers[0];
-                    assert_eq!(ws.handled, 1, "{}", case.name);
-                    assert_eq!(ws.errors, 0, "{}", case.name);
-                    drop(h.control);
-                }
-            }
+            worker.current_unit.set(None);
+            drop(unsafe { Box::from_raw(p1) });
+            drop(unsafe { Box::from_raw(p2) });
         }
     }
 }
