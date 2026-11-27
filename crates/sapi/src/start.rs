@@ -1,32 +1,26 @@
 use anyhow::Context as _;
 use crossbeam_channel::{Receiver, Select, Sender, TryRecvError, bounded, never};
 use rapira_config::{ExecutionClock, Mode, PoolSettings};
-use std::cell::RefCell;
 use std::ffi::{CStr, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
-use tracing::{error, info};
+use tracing::error;
 
 use crate::engine::Workers;
 use crate::plugin::Plugin;
-use crate::pool::{self, Event, Pool, record};
-use crate::quota::{self, End};
-use crate::rapira_worker::rapira_worker;
+use crate::pool::{Event, Pool};
 use crate::work::{Entry, Idle, Intake, Unit, Units};
+use crate::worker::{LivePhp, Worker};
 use crate::{
-    RAPIRA_MODE_CLASSIC, RAPIRA_MODE_DISPATCHER, RAPIRA_MODE_WORKER,
-    classic_worker::classic_worker, php_execute_script, rapira_plugin, rapira_thread_end,
-    rapira_thread_start, zend_destroy_file_handle, zend_file_handle, zend_stream_init_filename,
+    RAPIRA_MODE_CLASSIC, RAPIRA_MODE_DISPATCHER, RAPIRA_MODE_WORKER, php_execute_script,
+    rapira_plugin, rapira_thread_end, rapira_thread_start, zend_destroy_file_handle,
+    zend_file_handle, zend_stream_init_filename,
 };
 
-thread_local! {
-    static UNIT_RX: RefCell<Option<UnitRx>> = const { RefCell::new(None) };
-}
-
 pub(crate) struct UnitRx {
-    rx: Receiver<Entry>,
+    pub(crate) rx: Receiver<Entry>,
     idle: Arc<Idle>,
     pool: Arc<Pool>,
     control: Receiver<()>,
@@ -52,10 +46,10 @@ impl BootRetry {
 /// An idle worker returns unused pages after this wait.
 const IDLE_PURGE_AFTER: Duration = Duration::from_secs(2);
 /// An idle pull checks for a pending OPcache restart at this interval.
-const OPCACHE_POLL: Duration = Duration::from_secs(1);
+pub(crate) const OPCACHE_POLL: Duration = Duration::from_secs(1);
 
 impl UnitRx {
-    fn new(units: Units, workers: Arc<Workers>) -> (Self, Sender<()>) {
+    pub(crate) fn new(units: Units, workers: Arc<Workers>) -> (Self, Sender<()>) {
         let (tx, control) = bounded(1);
         (
             Self {
@@ -67,6 +61,10 @@ impl UnitRx {
             },
             tx,
         )
+    }
+
+    pub(crate) fn wake_workers(&self) {
+        self.workers.wake();
     }
 
     /// Takes what is ready. A reload comes before a queued unit.
@@ -87,7 +85,7 @@ impl UnitRx {
     }
 
     /// A wait with a timeout above zero needs the queue of the pool as `units`, because the submit wakes the workers of that queue.
-    fn recv(&self, units: &Receiver<Entry>, timeout: Duration) -> Pull {
+    pub(crate) fn recv(&self, units: &Receiver<Entry>, timeout: Duration) -> Pull {
         if let Some(pull) = self.take(units) {
             if self.idle.has_waiters() {
                 let rem = units.len();
@@ -137,9 +135,38 @@ impl UnitRx {
             }
         }
     }
+
+    /// A failed-boot retry takes a queued unit only while no worker in the pool can serve it.
+    pub(crate) fn pull_to_shed(&self, deadline: Instant, retry: &Weak<BootRetry>) -> Pull {
+        let disabled = never();
+        idle_wait(deadline.saturating_duration_since(Instant::now()), |t| {
+            let until = deadline.min(Instant::now() + t);
+            while Instant::now() < until {
+                // Subscribe before checking readiness so the last serving worker can wake this wait.
+                let Some(changes) = retry.upgrade().map(|retry| retry.changes()) else {
+                    return Pull::Closed;
+                };
+                let ready = self.pool.ready();
+                let units = if ready { &disabled } else { &self.rx };
+                let got = self.recv(units, Duration::ZERO);
+                if !matches!(got, Pull::NoUnit) {
+                    return got;
+                }
+                // Wait without taking a unit. A worker can become ready before the next unit arrives.
+                let mut wait = Select::new();
+                wait.recv(&self.control);
+                wait.recv(&changes);
+                wait.recv(units);
+                if wait.ready_deadline(until).is_err() {
+                    break;
+                }
+            }
+            Pull::NoUnit
+        })
+    }
 }
 
-fn idle_wait(timeout: Duration, select: impl Fn(Duration) -> Pull) -> Pull {
+pub(crate) fn idle_wait(timeout: Duration, select: impl Fn(Duration) -> Pull) -> Pull {
     let first = timeout.min(IDLE_PURGE_AFTER);
     let got = select(first);
     if matches!(got, Pull::NoUnit) && first == IDLE_PURGE_AFTER {
@@ -148,15 +175,6 @@ fn idle_wait(timeout: Duration, select: impl Fn(Duration) -> Pull) -> Pull {
         return select(timeout - first);
     }
     got
-}
-
-pub(crate) fn wake_workers() {
-    UNIT_RX.with_borrow(|slot| {
-        slot.as_ref()
-            .expect("a running worker has an intake")
-            .workers
-            .wake()
-    });
 }
 
 /// The jitter spreads the recycles across workers.
@@ -228,6 +246,7 @@ impl crate::Engine {
             let init = Arc::clone(&worker_init);
             let boot_retry = Arc::downgrade(&intake.boot_retry);
             let pool = Arc::clone(&pool);
+            let opcache = Arc::clone(&self.opcache);
             let env = Arc::clone(&env);
             let entrypoint = settings.entrypoint.clone();
             let max_requests = if mode == Mode::Classic {
@@ -238,7 +257,8 @@ impl crate::Engine {
             let builder = thread::Builder::new()
                 .name(format!("rapira-{name}-{index}"))
                 .stack_size(8 << 20);
-            self.workers.spawn(builder, control, move || {
+            self.workers
+                .spawn(builder, control, move || {
                     let _entered = io.enter();
                     let result = catch_unwind(AssertUnwindSafe(|| {
                         // SAFETY: MINIT has finished. This is the first PHP call on this thread.
@@ -251,17 +271,27 @@ impl crate::Engine {
                             )
                         };
                         pool.bind(index);
-                        UNIT_RX.set(Some(units));
                         init();
                         crate::env::enter_pool(env);
-                        quota::install(max_requests);
+                        let worker = Worker::new(
+                            units,
+                            Arc::clone(&pool),
+                            index,
+                            opcache,
+                            max_requests,
+                            LivePhp,
+                        );
                         match mode {
-                            Mode::Classic => classic_worker(&entrypoint),
+                            Mode::Classic => worker.run_classic_live(&entrypoint),
                             Mode::Worker | Mode::Dispatcher => {
-                                rapira_worker(&entrypoint, settings.max_boot_failures, &pool, index, &boot_retry);
+                                worker.run_resident_live(
+                                    &entrypoint,
+                                    settings.max_boot_failures,
+                                    &boot_retry,
+                                );
                             }
                         }
-                        record(Event::Stopped);
+                        pool.record_worker(index, Event::Stopped);
                         drop(guard);
                         // SAFETY: the last request ended and the watchdog released the PHP globals.
                         unsafe { rapira_thread_end() };
@@ -317,504 +347,25 @@ pub(crate) enum Pull {
     NoUnit,
 }
 
-pub(crate) fn pull(wait: Wait) -> Pull {
-    pull_with(|units| units.next(wait))
-}
-
-/// The worker stays idle until the caller returns to PHP, including across an empty probe.
-pub(crate) fn pull_with(select: impl FnOnce(&UnitRx) -> Pull) -> Pull {
-    UNIT_RX.with_borrow(|slot| {
-        let Some(units) = slot else {
-            quota::end(End::Stop);
-            return Pull::Closed;
-        };
-        crate::rapira_worker::reload_for_opcache_restart();
-        if quota::ended() {
-            return Pull::Closed;
-        }
-        record(Event::Idle);
-        let got = select(units);
-        record(Event::Active);
-        got
-    })
-}
-
-impl UnitRx {
-    /// A timed wait keeps its deadline across cancelled units and OPcache checks.
-    pub(crate) fn next(&self, wait: Wait) -> Pull {
-        let deadline = match wait {
-            Wait::For(t) => Some(Instant::now() + t),
-            _ => None,
-        };
-        loop {
-            if crate::rapira_worker::opcache_restart_ran() {
-                info!(target: "rapira", "the OPcache restart has run; restarting the app");
-                quota::end(End::Recycle);
-                return Pull::Closed;
-            }
-            let got = if matches!(wait, Wait::Never) {
-                self.recv(&self.rx, Duration::ZERO)
-            } else {
-                let left = deadline.map_or(Duration::MAX, |d| {
-                    d.saturating_duration_since(Instant::now())
-                });
-                let timeout = if crate::rapira_worker::OPCACHE_WAIT.get().is_some() {
-                    left.min(OPCACHE_POLL)
-                } else {
-                    left
-                };
-                idle_wait(timeout, |t| self.recv(&self.rx, t))
-            };
-            match &got {
-                Pull::Unit(unit) if unit.cancelled() => {
-                    record(Event::Shed);
-                    continue;
-                }
-                Pull::Unit(_) => quota::received(),
-                Pull::Reload => quota::end(End::Recycle),
-                Pull::Closed => quota::end(End::Stop),
-                Pull::NoUnit
-                    if !matches!(wait, Wait::Never)
-                        && deadline.is_none_or(|d| Instant::now() < d) =>
-                {
-                    continue;
-                }
-                Pull::NoUnit => {}
-            }
-            return got;
-        }
-    }
-}
-
-/// A retry takes a queued unit only while no worker can serve it.
-pub(crate) fn pull_unit_to_shed(deadline: Instant, retry: &Weak<BootRetry>) -> Pull {
-    UNIT_RX.with_borrow(|slot| {
-        let Some(rx) = slot else { return Pull::Closed };
-        let disabled = never();
-        idle_wait(deadline.saturating_duration_since(Instant::now()), |t| {
-            let until = deadline.min(Instant::now() + t);
-            while Instant::now() < until {
-                // Subscribe before checking readiness so the last serving worker can wake this wait.
-                let Some(changes) = retry.upgrade().map(|retry| retry.changes()) else {
-                    return Pull::Closed;
-                };
-                let ready = pool::with(Pool::ready).unwrap_or(false);
-                let units = if ready { &disabled } else { &rx.rx };
-                let got = rx.recv(units, Duration::ZERO);
-                if !matches!(got, Pull::NoUnit) {
-                    return got;
-                }
-                // Wait without taking a unit. A worker can become ready before the next unit arrives.
-                let mut wait = Select::new();
-                wait.recv(&rx.control);
-                wait.recv(&changes);
-                wait.recv(units);
-                if wait.ready_deadline(until).is_err() {
-                    break;
-                }
-            }
-            Pull::NoUnit
-        })
-    })
-}
-
-pub(crate) fn pending_depth() -> u64 {
-    pool::with(Pool::pending).unwrap_or(0)
-}
-
 #[cfg(test)]
 mod tests {
-    use std::time::Instant;
-
     use super::*;
     use crate::work::Held;
 
-    /// A unit on the intake. `cancelled` is true when its client left.
-    struct Probe {
-        cancelled: bool,
-    }
+    struct Probe;
 
     impl Held for Probe {
         fn settled(&self) -> bool {
             false
         }
         fn cancelled(&self) -> bool {
-            self.cancelled
+            false
         }
         fn discard(&mut self) {}
         fn lost(&mut self) {}
         fn shed(self: Box<Self>) {}
         fn class(&self) -> *mut crate::zend_class_entry {
             std::ptr::null_mut()
-        }
-    }
-
-    /// One worker with a private control channel and an in-memory intake.
-    struct TestWorker {
-        pool: Arc<Pool>,
-        control: crossbeam_channel::Sender<()>,
-        intake: Intake,
-    }
-
-    fn worker(max_requests: u64) -> TestWorker {
-        let pool = Arc::new(Pool::new("http", 1));
-        pool.bind(0);
-        quota::install(max_requests);
-        let (intake, rx) = Intake::new(Arc::clone(&pool));
-        let (units, tx) = UnitRx::new(rx, Arc::default());
-        UNIT_RX.set(Some(units));
-        TestWorker {
-            pool,
-            intake,
-            control: tx,
-        }
-    }
-
-    fn kind(pull: &Pull) -> &'static str {
-        match pull {
-            Pull::Unit(_) => "unit",
-            Pull::Reload => "reload",
-            Pull::Closed => "closed",
-            Pull::NoUnit => "no unit",
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn a_pending_reload_takes_priority_on_each_intake_receiver() {
-        struct Case {
-            name: &'static str,
-            queued: usize,
-        }
-        let cases = [
-            Case {
-                name: "both workers wait on an empty intake",
-                queued: 0,
-            },
-            Case {
-                name: "a full intake leaves room for every reload",
-                queued: crate::work::INTAKE_SLOTS,
-            },
-        ];
-        for case in cases {
-            let pool = Arc::new(Pool::new("http", 2));
-            let (intake, rx) = Intake::new(Arc::clone(&pool));
-            let workers = [
-                UnitRx::new(rx.clone(), Arc::default()),
-                UnitRx::new(rx, Arc::default()),
-            ];
-            for _ in 0..case.queued {
-                intake
-                    .submit(Unit::Dispatcher(Box::new(Probe { cancelled: false })), 0)
-                    .await
-                    .unwrap();
-            }
-            for (index, (worker, control)) in workers.into_iter().enumerate() {
-                control.try_send(()).unwrap();
-                pool.bind(index);
-                quota::install(0);
-                UNIT_RX.set(Some(worker));
-                assert_eq!(
-                    kind(&pull(Wait::Never)),
-                    "reload",
-                    "{}: worker {index}",
-                    case.name
-                );
-                assert_eq!(
-                    kind(&pull(Wait::Never)),
-                    "closed",
-                    "{}: same app",
-                    case.name
-                );
-            }
-            assert_eq!(pending_depth(), case.queued as u64, "{}", case.name);
-        }
-    }
-
-    #[tokio::test(flavor = "current_thread")]
-    async fn the_pull_applies_the_app_rules() {
-        /// What enters the intake before the pull, in order.
-        enum Feed {
-            Unit,
-            Cancelled,
-            /// A CGI unit whose client waits.
-            Cgi,
-            /// A CGI unit whose client left.
-            CgiGone,
-            Reload,
-            /// The app served one unit, so the quota ticks.
-            Served,
-            /// Every intake clone is dropped.
-            Close,
-        }
-        struct Counts {
-            handled: u64,
-            errors: u64,
-            pending: u64,
-        }
-        struct Case {
-            name: &'static str,
-            max_requests: u64,
-            feed: &'static [Feed],
-            wait: Wait,
-            want: &'static str,
-            /// The app instance takes no more units.
-            ended: bool,
-            /// How the app instance ends if its cycle ends after this pull. None is a failed boot.
-            outcome: Option<End>,
-            counts: Counts,
-            /// The pull returns within this time.
-            max_elapsed: Duration,
-        }
-        const NO_LIMIT: Duration = Duration::from_secs(5);
-        const TIMED: Duration = Duration::from_millis(400);
-        let cases = [
-            Case {
-                name: "a unit is pulled",
-                max_requests: 0,
-                feed: &[Feed::Unit],
-                wait: Wait::Never,
-                want: "unit",
-                ended: false,
-                outcome: Some(End::Recycle),
-                counts: Counts {
-                    handled: 0,
-                    errors: 0,
-                    pending: 0,
-                },
-                max_elapsed: NO_LIMIT,
-            },
-            Case {
-                name: "a cancelled unit is skipped and counted as shed",
-                max_requests: 0,
-                feed: &[Feed::Cancelled, Feed::Unit],
-                wait: Wait::Never,
-                want: "unit",
-                ended: false,
-                outcome: Some(End::Recycle),
-                counts: Counts {
-                    handled: 1,
-                    errors: 1,
-                    pending: 0,
-                },
-                max_elapsed: NO_LIMIT,
-            },
-            Case {
-                name: "a CGI unit is pulled",
-                max_requests: 0,
-                feed: &[Feed::Cgi],
-                wait: Wait::Never,
-                want: "unit",
-                ended: false,
-                outcome: Some(End::Recycle),
-                counts: Counts {
-                    handled: 0,
-                    errors: 0,
-                    pending: 0,
-                },
-                max_elapsed: NO_LIMIT,
-            },
-            Case {
-                name: "a CGI unit whose client left is skipped and counted as shed",
-                max_requests: 0,
-                feed: &[Feed::CgiGone, Feed::Cgi],
-                wait: Wait::Never,
-                want: "unit",
-                ended: false,
-                outcome: Some(End::Recycle),
-                counts: Counts {
-                    handled: 1,
-                    errors: 1,
-                    pending: 0,
-                },
-                max_elapsed: NO_LIMIT,
-            },
-            Case {
-                name: "a cancelled unit alone gives no unit",
-                max_requests: 0,
-                feed: &[Feed::Cancelled],
-                wait: Wait::Never,
-                want: "no unit",
-                ended: false,
-                outcome: None,
-                counts: Counts {
-                    handled: 1,
-                    errors: 1,
-                    pending: 0,
-                },
-                max_elapsed: NO_LIMIT,
-            },
-            Case {
-                name: "a cancelled unit does not use the quota",
-                max_requests: 1,
-                feed: &[Feed::Cancelled, Feed::Unit],
-                wait: Wait::Never,
-                want: "unit",
-                ended: false,
-                outcome: Some(End::Recycle),
-                counts: Counts {
-                    handled: 1,
-                    errors: 1,
-                    pending: 0,
-                },
-                max_elapsed: NO_LIMIT,
-            },
-            Case {
-                name: "a reload closes the app before it takes a queued unit",
-                max_requests: 10,
-                feed: &[Feed::Unit, Feed::Reload],
-                wait: Wait::Never,
-                want: "reload",
-                ended: true,
-                outcome: Some(End::Recycle),
-                counts: Counts {
-                    handled: 0,
-                    errors: 0,
-                    pending: 1,
-                },
-                max_elapsed: NO_LIMIT,
-            },
-            Case {
-                name: "a classic reload returns to the loop before it takes the next unit",
-                max_requests: 0,
-                feed: &[Feed::Cgi, Feed::Reload],
-                wait: Wait::Forever,
-                want: "reload",
-                ended: true,
-                outcome: Some(End::Recycle),
-                counts: Counts {
-                    handled: 0,
-                    errors: 0,
-                    pending: 1,
-                },
-                max_elapsed: NO_LIMIT,
-            },
-            Case {
-                name: "an exhausted quota pulls nothing",
-                max_requests: 1,
-                feed: &[Feed::Served, Feed::Unit],
-                wait: Wait::Never,
-                want: "closed",
-                ended: true,
-                outcome: Some(End::Recycle),
-                counts: Counts {
-                    handled: 0,
-                    errors: 0,
-                    pending: 1,
-                },
-                max_elapsed: NO_LIMIT,
-            },
-            Case {
-                name: "a closed intake ends a blocking pull with a live control sender",
-                max_requests: 0,
-                feed: &[Feed::Close],
-                wait: Wait::Forever,
-                want: "closed",
-                ended: true,
-                outcome: Some(End::Stop),
-                counts: Counts {
-                    handled: 0,
-                    errors: 0,
-                    pending: 0,
-                },
-                max_elapsed: NO_LIMIT,
-            },
-            Case {
-                name: "an empty intake ends a timed pull",
-                max_requests: 0,
-                feed: &[],
-                wait: Wait::For(TIMED),
-                want: "no unit",
-                ended: false,
-                outcome: None,
-                counts: Counts {
-                    handled: 0,
-                    errors: 0,
-                    pending: 0,
-                },
-                max_elapsed: TIMED + TIMED / 2,
-            },
-            Case {
-                name: "a timed pull keeps one deadline across a skipped unit",
-                max_requests: 0,
-                feed: &[Feed::Cancelled],
-                wait: Wait::For(TIMED),
-                want: "no unit",
-                ended: false,
-                outcome: None,
-                counts: Counts {
-                    handled: 1,
-                    errors: 1,
-                    pending: 0,
-                },
-                max_elapsed: TIMED + TIMED / 2,
-            },
-        ];
-        for case in cases {
-            let TestWorker {
-                pool,
-                control,
-                intake,
-            } = worker(case.max_requests);
-            let mut intake = Some(intake);
-            for feed in case.feed {
-                match feed {
-                    Feed::Unit | Feed::Cancelled => {
-                        let cancelled = matches!(feed, Feed::Cancelled);
-                        intake
-                            .as_ref()
-                            .unwrap()
-                            .submit(Unit::Dispatcher(Box::new(Probe { cancelled })), 0)
-                            .await
-                            .unwrap();
-                    }
-                    Feed::Cgi | Feed::CgiGone => {
-                        let cancelled = matches!(feed, Feed::CgiGone);
-                        let (responder, _log) = crate::types::tests::responder(cancelled);
-                        let mut ctx = crate::types::tests::context();
-                        ctx.responder = Some(responder);
-                        intake
-                            .as_ref()
-                            .unwrap()
-                            .submit(Unit::Cgi(Box::new(ctx)), 0)
-                            .await
-                            .unwrap();
-                    }
-                    Feed::Reload => control.try_send(()).unwrap(),
-                    Feed::Served => quota::tick(),
-                    Feed::Close => drop(intake.take()),
-                }
-            }
-            let started = Instant::now();
-            let got = pull(case.wait);
-            let elapsed = started.elapsed();
-            assert_eq!(kind(&got), case.want, "{}", case.name);
-            if let Wait::For(wait) = case.wait {
-                assert!(
-                    elapsed >= wait,
-                    "{}: {elapsed:?} is below the wait",
-                    case.name
-                );
-            }
-            assert!(
-                elapsed < case.max_elapsed,
-                "{}: {elapsed:?} is not below {:?}",
-                case.name,
-                case.max_elapsed
-            );
-            assert_eq!(
-                (quota::ended(), quota::outcome()),
-                (case.ended, case.outcome),
-                "{}: ended, outcome",
-                case.name
-            );
-            let snapshot = pool.snapshot();
-            let row = &snapshot.workers[0];
-            assert_eq!(
-                (row.handled, row.errors, snapshot.pending),
-                (case.counts.handled, case.counts.errors, case.counts.pending),
-                "{}: handled, errors, pending",
-                case.name
-            );
         }
     }
 
@@ -850,7 +401,6 @@ mod tests {
                 let _ = got_tx.send(matches!(pull, Pull::Unit(_)));
             });
 
-            // Wait until worker 2 is parked in `idle`.
             let spin_deadline = Instant::now() + Duration::from_secs(2);
             while !idle.has_waiters() {
                 assert!(
@@ -862,7 +412,7 @@ mod tests {
             }
 
             let entry = Entry {
-                unit: Unit::Dispatcher(Box::new(Probe { cancelled: false })),
+                unit: Unit::Dispatcher(Box::new(Probe)),
                 budget_bytes: 0,
             };
 
@@ -873,7 +423,6 @@ mod tests {
                     let pull = w1.recv(&rx_u_w1, Duration::from_secs(2));
                     let _ = w1_done_tx.send(matches!(pull, Pull::Reload));
                 });
-                // Give w1 time to park at the tail of the LIFO waiter stack behind w2.
                 thread::sleep(Duration::from_millis(20));
                 tx1.try_send(()).unwrap();
                 tx_u.send(entry).unwrap();

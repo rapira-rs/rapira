@@ -150,6 +150,35 @@ impl Pool {
         self.draining.store(true, Relaxed);
     }
 
+    /// Records an event for worker `index` directly without reading thread-local state.
+    pub(crate) fn record_worker(&self, index: usize, event: Event) {
+        let worker = &self.workers[index];
+        if matches!(
+            event,
+            Event::Idle | Event::Active | Event::Recycled | Event::Handled { errored: false }
+        ) && !self.served()
+        {
+            self.served.store(true, Relaxed);
+        }
+        match event {
+            Event::Handled { errored } => worker.count(errored),
+            Event::Shed => worker.count(true),
+            Event::Recycled => {
+                worker.recycles.fetch_add(1, Relaxed);
+                worker.inactive(State::Starting);
+            }
+            Event::Idle => worker.inactive(State::Idle),
+            Event::Active => {
+                let since = now_millis();
+                crate::watchdog::arm(since);
+                worker.last_activity_ms.store(since, Relaxed);
+                worker.state.store(State::Active as u8, Relaxed);
+            }
+            Event::Starting => worker.inactive(State::Starting),
+            Event::Stopped => worker.state.store(State::Draining as u8, Relaxed),
+        }
+    }
+
     pub fn snapshot(&self) -> PoolSnapshot {
         let mut workers = Vec::with_capacity(self.workers.len());
         for (index, worker) in self.workers.iter().enumerate() {
@@ -200,11 +229,6 @@ thread_local! {
     static BOUND: RefCell<Option<Bound>> = const { RefCell::new(None) };
 }
 
-/// Runs `f` on the pool of the calling worker thread. Gives None on a thread that runs no worker.
-pub(crate) fn with<R>(f: impl FnOnce(&Pool) -> R) -> Option<R> {
-    BOUND.with_borrow(|bound| bound.as_ref().map(|bound| f(&bound.pool)))
-}
-
 pub enum Event {
     Handled { errored: bool },
     Shed,
@@ -218,36 +242,8 @@ pub enum Event {
 /// Records an event of the worker that runs on the calling thread.
 pub fn record(event: Event) {
     BOUND.with_borrow(|bound| {
-        let Some(Bound { pool, index }) = bound else {
-            return;
-        };
-        let worker = &pool.workers[*index];
-        if matches!(
-            event,
-            Event::Idle | Event::Active | Event::Recycled | Event::Handled { errored: false }
-        ) && !pool.served()
-        {
-            pool.served.store(true, Relaxed);
-        }
-        match event {
-            Event::Handled { errored } => {
-                worker.count(errored);
-                crate::quota::tick();
-            }
-            Event::Shed => worker.count(true),
-            Event::Recycled => {
-                worker.recycles.fetch_add(1, Relaxed);
-                worker.inactive(State::Starting);
-            }
-            Event::Idle => worker.inactive(State::Idle),
-            Event::Active => {
-                let since = now_millis();
-                crate::watchdog::arm(since);
-                worker.last_activity_ms.store(since, Relaxed);
-                worker.state.store(State::Active as u8, Relaxed);
-            }
-            Event::Starting => worker.inactive(State::Starting),
-            Event::Stopped => worker.state.store(State::Draining as u8, Relaxed),
+        if let Some(Bound { pool, index }) = bound {
+            pool.record_worker(*index, event);
         }
     });
 }

@@ -5,39 +5,46 @@ unsafe extern "C" {
     fn rapira_opcache_enabled() -> bool;
 }
 
-static SENT: AtomicU64 = AtomicU64::new(0);
-static RESET: AtomicU64 = AtomicU64::new(0);
-static RESETTING: Mutex<bool> = Mutex::new(false);
-static RESET_DONE: Condvar = Condvar::new();
-
-pub(crate) fn request_reset() {
-    SENT.fetch_add(1, Ordering::Release);
+/// Process-wide coordinator ensuring one worker resets OPcache per reload generation while peers wait.
+#[derive(Default)]
+pub(crate) struct OpcacheCoordinator {
+    sent: AtomicU64,
+    reset: AtomicU64,
+    resetting: Mutex<bool>,
+    reset_done: Condvar,
 }
 
-fn reset_due() -> Option<u64> {
-    let sent = SENT.load(Ordering::Acquire);
-    (sent > RESET.load(Ordering::Acquire)).then_some(sent)
-}
-
-/// One worker resets the cache for all reloads through the returned sequence number. Other workers wait before they can load a script from the cache.
-pub(crate) fn claim_reset() -> Option<u64> {
-    reset_due()?;
-    let mut active = RESET_DONE
-        .wait_while(RESETTING.lock().unwrap(), |active| *active)
-        .unwrap();
-    let sent = reset_due()?;
-    *active = true;
-    Some(sent)
-}
-
-/// A failed request startup leaves the reset due for the next worker.
-pub(crate) fn finish_reset(sent: u64, started: bool) {
-    let mut active = RESETTING.lock().unwrap();
-    if started {
-        RESET.store(sent, Ordering::Release);
+impl OpcacheCoordinator {
+    pub(crate) fn request_reset(&self) {
+        self.sent.fetch_add(1, Ordering::Release);
     }
-    *active = false;
-    RESET_DONE.notify_all();
+
+    fn reset_due(&self) -> Option<u64> {
+        let sent = self.sent.load(Ordering::Acquire);
+        (sent > self.reset.load(Ordering::Acquire)).then_some(sent)
+    }
+
+    /// One worker resets the cache for all reloads through the returned sequence number. Other workers wait before loading a script.
+    pub(crate) fn claim_reset(&self) -> Option<u64> {
+        self.reset_due()?;
+        let mut active = self
+            .reset_done
+            .wait_while(self.resetting.lock().unwrap(), |active| *active)
+            .unwrap();
+        let sent = self.reset_due()?;
+        *active = true;
+        Some(sent)
+    }
+
+    /// A failed request startup leaves the reset due for the next worker.
+    pub(crate) fn finish_reset(&self, sent: u64, started: bool) {
+        let mut active = self.resetting.lock().unwrap();
+        if started {
+            self.reset.store(sent, Ordering::Release);
+        }
+        *active = false;
+        self.reset_done.notify_all();
+    }
 }
 
 /// Call on the main thread after module startup and before the workers start.
@@ -69,6 +76,44 @@ fn missing_opcache_fix(version: u32, enabled: bool, total_workers: usize) -> Opt
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opcache_coordinator_serializes_resets_and_retries_failures() {
+        struct Case {
+            name: &'static str,
+            first_started: bool,
+            want_second_claim: bool,
+        }
+        let cases = [
+            Case {
+                name: "successful reset satisfies pending generation for later callers",
+                first_started: true,
+                want_second_claim: false,
+            },
+            Case {
+                name: "failed reset leaves generation pending for next worker",
+                first_started: false,
+                want_second_claim: true,
+            },
+        ];
+        for case in cases {
+            let coord = OpcacheCoordinator::default();
+            assert_eq!(coord.claim_reset(), None, "{}", case.name);
+            coord.request_reset();
+            let sent = coord.claim_reset().expect("first claim");
+            assert_eq!(sent, 1, "{}", case.name);
+            coord.finish_reset(sent, case.first_started);
+            assert_eq!(
+                coord.claim_reset().is_some(),
+                case.want_second_claim,
+                "{}",
+                case.name
+            );
+            if case.want_second_claim {
+                coord.finish_reset(sent, true);
+            }
+        }
+    }
 
     #[test]
     fn opcache_version_for_several_workers() {

@@ -44,8 +44,8 @@ pub trait Held: Send + 'static {
 /// Reclaims the Box that receive() handed out: clears the cycle slot if it still points here, and counts an unsettled unit as handled.
 /// # Safety
 /// `ptr` came from `Box::leak` in receive and was not reclaimed before.
-pub(crate) unsafe fn release(ptr: *mut dyn Held) -> Box<dyn Held> {
-    crate::exchange::forget_held(ptr.cast::<()>());
+unsafe fn release(ptr: *mut dyn Held) -> Box<dyn Held> {
+    crate::worker::forget_held(ptr.cast::<()>());
     let st = unsafe { Box::from_raw(ptr) };
     if !st.settled() {
         record(Event::Handled { errored: true });

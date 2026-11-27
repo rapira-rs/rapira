@@ -134,7 +134,7 @@ void rapira_plugin_wire(const rapira_plugin *plugin);
 extern void (*const *rapira_plugin_registers)(void);
 extern size_t rapira_plugin_register_count;
 
-// Return values of rapira_rs_handle_request (rapira_worker.rs);
+// Return values of rapira_rs_handle_request (worker.rs);
 // rapira_dispatcher.c reads them.
 enum {
     RAPIRA_HANDLE_STOP = 0,
@@ -152,7 +152,7 @@ void rapira_dispatcher_release(void);
 void rapira_dispatcher_forget(void);
 
 // rust glue
-// the seal of the current CGI reply (rapira_worker.rs)
+// the seal of the current CGI reply (worker.rs)
 extern void rapira_rs_finish_response(void);
 // Drops the putenv() writes of the PHP request (env.rs).
 extern void rapira_rs_env_clear(void);

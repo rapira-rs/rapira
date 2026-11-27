@@ -1,50 +1,16 @@
-pub(crate) use std::{cell::Cell, ffi::c_char, ptr::NonNull, time::Duration};
-use std::{fmt::NumBuffer, io::Write, net::IpAddr, os::unix::ffi::OsStrExt, sync::OnceLock};
-
-use crate::context::{Permanent, permanent};
-pub(crate) use crate::work::{Held, HeldPtr, release};
-pub(crate) use crate::{
-    add_assoc_zval_ex,
-    callbacks::guard,
-    object_init_ex, rapira_array_init, rapira_ce_closed_exception, rapira_ce_inet_address,
-    rapira_ce_timeout_exception, rapira_ce_unix_address, rapira_receive_timed,
-    rapira_receive_untimed, rapira_unit_object,
-    start::{Pull, Wait, pending_depth, pull_with},
-    types::Addr,
-    zend, zend_hash_update, zval,
+use std::{
+    ffi::c_char, fmt::NumBuffer, io::Write, net::IpAddr, os::unix::ffi::OsStrExt, sync::OnceLock,
 };
 
-mod receive;
-
-thread_local! {
-    /// The Box pointer of the unit handed out last, so a path where free_obj never runs, such as a bailout, can still reclaim it.
-    pub(crate) static UNIT: Cell<Option<*mut dyn Held>> = const { Cell::new(None) };
-    /// The count of the cycles this PHP thread ran, 1 in the first cycle.
-    static CYCLE: Cell<u64> = const { Cell::new(0) };
-}
+use crate::context::{Permanent, permanent};
+use crate::{
+    add_assoc_zval_ex, object_init_ex, rapira_array_init, rapira_ce_inet_address,
+    rapira_ce_unix_address, types::Addr, zend, zend_hash_update, zval,
+};
 
 /// The number of the current cycle of this PHP thread. A plugin that closes something at the cycle end reopens it when the number changes.
 pub fn cycle() -> u64 {
-    CYCLE.get()
-}
-
-/// Clears the cycle slot if it still points at `ptr`.
-pub(crate) fn forget_held(ptr: *const ()) {
-    if UNIT.get().is_some_and(|u| std::ptr::addr_eq(u, ptr)) {
-        UNIT.set(None);
-    }
-}
-
-pub(crate) fn begin_cycle() {
-    CYCLE.set(CYCLE.get() + 1);
-}
-
-/// Reclaims a unit that free_obj never saw, after a shutdown bailout or an allocation bailout.
-pub(crate) fn reclaim_current() {
-    if let Some(ptr) = UNIT.get() {
-        // SAFETY: the pointer came from Box::leak in receive, and rapira_rs_held_drop clears the cycle slot before it reclaims.
-        drop(unsafe { release(ptr) });
-    }
+    crate::worker::current_cycle()
 }
 
 /// Writes the text of `ip` into `buf` and returns it, the same bytes as its `Display`.

@@ -116,6 +116,7 @@ impl Workers {
 pub struct Engine {
     pub(crate) workers: Arc<Workers>,
     pub(crate) pools: Vec<Arc<pool::Pool>>,
+    pub(crate) opcache: Arc<crate::reload::OpcacheCoordinator>,
     /// Runs from the start of the first pool with a request time limit until the drain starts.
     pub(crate) watchdog: Option<crate::watchdog::Watchdog>,
     _main_thread: PhantomData<Rc<()>>,
@@ -166,6 +167,7 @@ impl Engine {
         let engine = Self {
             workers: Arc::default(),
             pools: Vec::new(),
+            opcache: Arc::default(),
             watchdog: None,
             _main_thread: PhantomData,
         };
@@ -178,8 +180,7 @@ impl Engine {
         // SAFETY: MINIT is complete and no worker can read the hooks yet.
         unsafe {
             rapira_register_post_reader();
-            zend_accel_schedule_restart_hook =
-                Some(crate::rapira_worker::opcache_restart_scheduled);
+            zend_accel_schedule_restart_hook = Some(crate::worker::opcache_restart_scheduled);
         }
         crate::env::install();
         crate::context::intern_server_strings();
@@ -204,7 +205,7 @@ impl Engine {
     }
 
     pub fn reload(&self) {
-        crate::reload::request_reset();
+        self.opcache.request_reset();
         self.workers.wake();
     }
 

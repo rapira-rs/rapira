@@ -1,7 +1,6 @@
 pub mod bindings;
 
 pub mod callbacks;
-mod classic_worker;
 mod context;
 mod diagnostics;
 mod engine;
@@ -12,14 +11,13 @@ mod log;
 mod module;
 pub mod plugin;
 pub mod pool;
-mod quota;
-mod rapira_worker;
 mod reload;
 mod start;
 pub mod stream;
 pub mod types;
 pub mod watchdog;
 pub mod work;
+mod worker;
 pub mod zend;
 
 use std::ffi::c_int;
