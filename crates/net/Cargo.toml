@@ -15,4 +15,4 @@ rapira_config = { workspace = true }
 tracing = { workspace = true }
 libc = { workspace = true }
 socket2 = "0.6"
-tokio = { workspace = true, features = ["net", "time", "macros"] }
+tokio = { workspace = true, features = ["net", "rt", "time", "macros"] }

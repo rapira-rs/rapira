@@ -1,4 +1,4 @@
-use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, SocketAddr};
+use std::net::SocketAddr;
 use std::os::fd::AsRawFd;
 use std::path::PathBuf;
 use std::time::Duration;
@@ -188,6 +188,8 @@ fn sockaddr_to_std(
     storage: &libc::sockaddr_storage,
     len: libc::socklen_t,
 ) -> std::io::Result<SocketAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
+
     let len = len as usize;
     match i32::from(storage.ss_family) {
         libc::AF_INET if len >= std::mem::size_of::<libc::sockaddr_in>() => {
