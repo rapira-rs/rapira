@@ -38,7 +38,7 @@ struct ServeArgs {
 
 fn main() -> anyhow::Result<()> {
     let signals = signals::Signals::block()?;
-    rapira_sapi::watchdog::block_timer_signal()?;
+    rapira_sapi::block_timer_signal()?;
     // Transparent huge pages increase the resident size of allocator regions. https://man7.org/linux/man-pages/man2/PR_SET_THP_DISABLE.2const.html
     #[cfg(target_os = "linux")]
     // SAFETY: prctl with integer arguments only; the kernel reads all four as unsigned long.

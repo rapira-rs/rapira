@@ -1,6 +1,6 @@
 use crate::context::{Permanent, ctx, with_ctx};
 use crate::diagnostics::syslog_to_level;
-use crate::types::{BodyCursor, RequestHeaders, ResponseHeaders, StreamState};
+use crate::types::{BodyCursor, RequestHeaders, ResponseHeaders};
 use crate::*;
 use ::http::header::{AUTHORIZATION, COOKIE, HeaderName, HeaderValue};
 use core::slice;
@@ -24,7 +24,7 @@ pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     })
 }
 
-pub const MAX_BUFFERED_BODY: usize = 1 << 30;
+pub use crate::types::MAX_BUFFERED_BODY;
 
 /// http_response_code is a c_int that the app controls, so the clamp stops a wrap of the u16 cast.
 fn head_status(h: &sapi_headers_struct) -> u16 {
@@ -240,50 +240,21 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
     aborted: *mut bool,
 ) -> usize {
     guard(None, || {
-        let ctx = unsafe {
-            let Some(c) = ctx() else {
-                let data = slice::from_raw_parts(buf.cast::<u8>(), len);
-                tracing::info!(target: "php", "{}", String::from_utf8_lossy(data));
-                return Some(len);
-            };
-            c
+        let data = unsafe { slice::from_raw_parts(buf.cast::<u8>(), len) };
+        let Some(ex) = (unsafe { ctx() }) else {
+            tracing::info!(target: "php", "{}", String::from_utf8_lossy(data));
+            return Some(len);
         };
-
-        if ctx.stream == StreamState::NotSent {
-            let status = unsafe {
-                let headers = &raw const (*rapira_sg()).sapi_headers;
-                head_status(&*headers)
-            };
-            ctx.commit_head(status, ResponseHeaders::new());
-        }
-
-        if let Some(responder) = &ctx.responder {
-            if responder.is_cancelled() {
-                ctx.finish(false);
+        match ex.write_body(data, || unsafe {
+            let headers = &raw const (*rapira_sg()).sapi_headers;
+            head_status(&*headers)
+        }) {
+            Ok(written) => Some(written),
+            Err(()) => {
                 unsafe { *aborted = true };
-                return Some(0);
-            }
-            if ctx.body.len() + len > MAX_BUFFERED_BODY {
-                tracing::error!(
-                    target: "rapira",
-                    "response body exceeds the host buffer cap ({} + {len} > {MAX_BUFFERED_BODY} bytes); aborting the request",
-                    ctx.body.len()
-                );
-                ctx.finish(true);
-                unsafe { *aborted = true };
-                return Some(0);
-            }
-            if ctx.body.is_empty() && len > 0 {
-                ctx.body.reserve(len.max(4096));
-            }
-            let buf = unsafe { slice::from_raw_parts(buf.cast::<u8>(), len) };
-            ctx.body.extend_from_slice(buf);
-            if !ctx.tearing_down {
-                ctx.stream = StreamState::BodyStreamed;
+                Some(0)
             }
         }
-
-        Some(len)
     })
     // None means that guard caught a panic in the body.
     .unwrap_or_else(|| {
@@ -296,24 +267,17 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
 /// A SAPI callback that PHP calls. `h` must be a valid `*mut sapi_headers_struct`
 pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
     guard(SAPI_HEADER_SEND_FAILED as c_int, || {
-        let ctx = unsafe {
-            let Some(ctx) = ctx() else {
-                return SAPI_HEADER_SENT_SUCCESSFULLY as c_int;
-            };
-
-            if ctx.stream != StreamState::NotSent {
-                return SAPI_HEADER_SENT_SUCCESSFULLY as c_int;
-            }
-
-            ctx
+        let Some(ex) = (unsafe { ctx() }) else {
+            return SAPI_HEADER_SENT_SUCCESSFULLY as c_int;
         };
-
-        let h = unsafe { &*h };
-        let mut headers = ResponseHeaders::new();
-        for (name, value) in head_lines(h).filter_map(header_field) {
-            headers.append(name, value);
-        }
-        ctx.commit_head(head_status(h), headers);
+        ex.send_headers(|| {
+            let h = unsafe { &*h };
+            let mut headers = ResponseHeaders::new();
+            for (name, value) in head_lines(h).filter_map(header_field) {
+                headers.append(name, value);
+            }
+            (head_status(h), headers)
+        });
         SAPI_HEADER_SENT_SUCCESSFULLY as c_int
     })
 }
@@ -321,13 +285,13 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
 pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usize {
     with_ctx(0, |ctx| {
         let dst = unsafe { std::slice::from_raw_parts_mut(buf.cast::<u8>(), count) };
-        ctx.req.body.read(dst).unwrap_or(0)
+        ctx.req_mut().body.read(dst).unwrap_or(0)
     })
 }
 /// Opens a zero-copy seekable body cursor backed by the bound request's raw byte chunks. Returns NULL when the body is empty.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_body_open() -> *mut c_void {
-    with_ctx(null_mut(), |ctx| match ctx.req.body.body_data() {
+    with_ctx(null_mut(), |ctx| match ctx.req_mut().body.body_data() {
         Some(data) => Box::into_raw(Box::new(BodyCursor::new(data))).cast(),
         None => null_mut(),
     })
@@ -420,7 +384,7 @@ pub unsafe extern "C" fn rapira_rs_body_drop(cursor: *mut c_void) {
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_authorization() -> *const c_char {
     with_ctx(null(), |ctx| {
-        ctx.req
+        ctx.req()
             .authorization
             .as_ref()
             .map_or(null(), |a| a.as_ptr())
@@ -428,7 +392,7 @@ pub extern "C" fn rapira_rs_authorization() -> *const c_char {
 }
 pub(crate) unsafe extern "C" fn read_cookies() -> *mut c_char {
     with_ctx(null_mut(), |ctx| {
-        ctx.req
+        ctx.req()
             .headers
             .cookie
             .as_ref()
@@ -457,7 +421,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         return;
     }
     with_ctx((), |ctx| {
-        let reqc = &mut ctx.req;
+        let reqc = ctx.req_mut();
         // One allocation for the whole array: the env pairs of the pool, the names below, one HTTP_* name per field, and the entries php_register_server_variables adds after this callback.
         let ht = unsafe { (*track_vars_array).value.arr };
         // Inserts a permanent interned name and value. The insert takes no hash, no allocation and no copy.

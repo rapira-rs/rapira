@@ -249,16 +249,11 @@ fn send_complete(st: &mut ExchangeState, body: &[u8], accepted_len: u64) -> Verb
 }
 
 /// # Safety
-/// `st` is valid. `s` is a live string. The engine is active.
-pub(super) unsafe fn write_body_core(
-    st: &mut ExchangeState,
-    s: *mut zend_string,
-    eos: bool,
-) -> Verb {
+/// `st` is valid. For streamed chunks, the caller runs inside a Tokio handle context.
+pub(super) unsafe fn write_body_core(st: &mut ExchangeState, bytes: &[u8], eos: bool) -> Verb {
     if let Some(verb) = closed(st) {
         return verb;
     }
-    let bytes = unsafe { zend::zstr_bytes(s) };
     let len = bytes.len();
     if len == 0 && !eos {
         return Verb::Ok;
@@ -323,7 +318,8 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
 ) -> bool {
     guard(false, || unsafe {
         let st = &mut *(*held).state::<ExchangeState>();
-        throw_verb(write_body_core(st, s, eos))
+        let bytes = zend::zstr_bytes(s);
+        throw_verb(write_body_core(st, bytes, eos))
     })
 }
 
@@ -360,8 +356,3 @@ pub unsafe extern "C" fn rapira_rs_exchange_flush(held: *const HeldPtr) -> bool 
         throw_verb(flush_core(st))
     })
 }
-
-/// The quiesce hook of the http plugin record in rapira_http_classes.c.
-/// Response bytes are copied or pooled before handoff, so quiesce is an immediate no-op.
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_http_quiesce() {}

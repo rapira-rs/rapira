@@ -9,7 +9,7 @@ use std::{
 use http::header::{HeaderName, HeaderValue};
 use rapira_http_middleware::{ResponseHead, ResponseHeaders};
 use rapira_sapi::callbacks::guard;
-use rapira_sapi::exchange::{add_list_with_keys, build_address, header_keys, ip_text};
+use rapira_sapi::exchange::{build_address, ip_text};
 use rapira_sapi::pool::{Event, record};
 use rapira_sapi::types::{Addr, Request};
 use rapira_sapi::work::{Held, HeldPtr};

@@ -104,11 +104,6 @@ typedef struct {
     zend_class_entry *info;
     // the error of receive() and tryReceive() while a unit is unfinalized
     const char *busy;
-    // RSHUTDOWN calls it on the PHP thread before the memory manager frees the
-    // request strings. The plugin waits until its IO thread holds no request
-    // string, then releases the strings. It is NULL when the plugin lends
-    // nothing.
-    void (*quiesce)(void);
 } rapira_plugin;
 
 bool rapira_zts(void);
@@ -176,19 +171,21 @@ static zend_always_inline rapira_held *rapira_held_of(zend_object *obj) {
 // reclaims the unit (work.rs)
 extern void rapira_rs_held_drop(rapira_held *held);
 
-// The plugin takes one value that the generator of the unit yielded. It returns
-// false with an exception pending when the plugin refused the value. It returns
-// false with no exception when the host closed the unit, so the value has no
-// destination.
-typedef bool (*rapira_stream_send_t)(const rapira_held *held, zval *value);
+// Shared C prefix for every dispatcher unit class (HTTP Exchange, gRPC
+// UnaryCall, gRPC ServerStreamingCall). zend_object_alloc zeroes the prefix,
+// so held is None and memos start as IS_UNDEF.
+typedef struct {
+    rapira_held held;
+    zval memos[2];
+    zend_object std;
+} rapira_unit_obj;
+static_assert(offsetof(rapira_unit_obj, held) == 0,
+              "the held word must be the first field of rapira_unit_obj");
 
-// Runs a generator to its end and gives each yielded value to send
-// (rapira_stream.c). Returns true when the generator ended and the unit is
-// open. Returns false when an exception is pending or the host closed the unit.
-// An exit() is a pending exception too.
-bool rapira_stream_run_generator(zend_object *generator,
-                                 const rapira_held *held,
-                                 rapira_stream_send_t send);
+static zend_always_inline rapira_unit_obj *
+rapira_unit_from(zend_object *obj) {
+    return (rapira_unit_obj *)((char *)obj - offsetof(rapira_unit_obj, std));
+}
 
 // The counts of a DispatcherInfo object are before zend_object std:
 // https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
@@ -248,23 +245,8 @@ rapira_prop_obj_or_null(zend_class_entry *ce, zend_object *obj,
         zend_update_property_null(ce, obj, name, name_len);
     }
 }
-// Initializes a private copy of std_object_handlers for a non-cloneable unit
-// class with a C prefix.
-static zend_always_inline void
-rapira_unit_handlers_init(zend_object_handlers *handlers, size_t offset,
-                          zend_object_free_obj_t free_obj) {
-    *handlers = std_object_handlers;
-    handlers->clone_obj = NULL;
-    handlers->offset = offset;
-    handlers->free_obj = free_obj;
-}
-// Binds create_object and default_object_handlers for a unit class.
-static zend_always_inline void
-rapira_unit_class_wire(zend_class_entry *ce,
-                       const zend_object_handlers *handlers) {
-    ce->create_object = rapira_object_create;
-    ce->default_object_handlers = handlers;
-}
+// Binds create_object and the shared rapira_unit_obj handlers for a unit class.
+void rapira_unit_wire(zend_class_entry *ce);
 // Call after php_module_startup to register the POST reader and the activation
 // hook for buffered request bodies.
 void rapira_register_post_reader(void);

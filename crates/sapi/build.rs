@@ -10,7 +10,6 @@ const C_FILES: &[&str] = &[
     "module.c",
     "rapira_classes.c",
     "rapira_dispatcher.c",
-    "rapira_stream.c",
     "rapira_env.c",
     "rapira_watchdog.c",
     "rapira_opcache.c",

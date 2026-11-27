@@ -15,7 +15,7 @@ use hyper::server::conn::http1;
 use hyper::service::service_fn;
 use rapira_http_middleware::{MiddlewareChain, Peer, PeerAddr};
 use rapira_net::{ListenAddr, Serve};
-use rapira_sapi::types::Context as SapiContext;
+use rapira_sapi::CgiExchange;
 use rapira_sapi::work::{Intake, Refused, Unit};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::LocalSet;
@@ -141,7 +141,7 @@ async fn handle_request(
     let (responder, slot) = HttpResponder::pair(is_head);
     scope.attach_slot(slot);
     let unit = if shared.cfg.superglobals {
-        Unit::Cgi(Box::new(SapiContext::new(request, Box::new(responder))))
+        Unit::Cgi(Box::new(CgiExchange::new(request, Box::new(responder))))
     } else {
         Unit::Dispatcher(Box::new(ExchangeState::new(request, multipart, responder)))
     };

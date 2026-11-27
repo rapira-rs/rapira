@@ -23,20 +23,6 @@ rapira_plugin rapira_grpc_plugin = {
             "unfinalized; finalize it first",
 };
 
-// a private copy, because std_object_handlers is shared engine state
-static zend_object_handlers rapira_grpc_call_handlers;
-
-// free_obj hands the call back to Rust
-static void rapira_grpc_call_free(zend_object *std) {
-    rapira_grpc_call_obj *obj = rapira_grpc_call_from(std);
-    rapira_rs_held_drop(&obj->held);
-    // no-op on IS_UNDEF
-    zval_ptr_dtor(&obj->message);
-    zval_ptr_dtor(&obj->context);
-
-    zend_object_std_dtor(std);
-}
-
 void rapira_grpc_register_classes(void) {
     rapira_ce_grpc_status_code = register_class_Rapira_Grpc_StatusCode();
     rapira_ce_grpc_method_kind = register_class_Rapira_Grpc_MethodKind();
@@ -99,13 +85,6 @@ void rapira_grpc_register_classes(void) {
         register_class_Rapira_Internal_Grpc_ServerStreamingCall(
             grpc_server_streaming_call, grpc_response_metadata);
     rapira_plugin_wire(&rapira_grpc_plugin);
-
-    // the call classes share one object layout
-    rapira_unit_handlers_init(&rapira_grpc_call_handlers,
-                              offsetof(rapira_grpc_call_obj, std),
-                              rapira_grpc_call_free);
-    rapira_unit_class_wire(rapira_ce_grpc_unary_call,
-                           &rapira_grpc_call_handlers);
-    rapira_unit_class_wire(rapira_ce_grpc_server_streaming_call,
-                           &rapira_grpc_call_handlers);
+    rapira_unit_wire(rapira_ce_grpc_unary_call);
+    rapira_unit_wire(rapira_ce_grpc_server_streaming_call);
 }

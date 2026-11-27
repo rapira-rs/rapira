@@ -8,7 +8,6 @@ use http_body::Body as _;
 use http_body_util::BodyExt;
 use rapira_http_middleware::{MiddlewareChain, RequestHeaders};
 use rapira_sapi::types::{Authority, Chunks, Request, RequestUri};
-use rapira_sapi::zend_string;
 
 use super::headers::*;
 use super::respond::*;
@@ -37,31 +36,6 @@ fn hdrs(lines: &[(&'static str, &'static str)]) -> ResponseHeaders {
         h.append(HeaderName::from_static(k), HeaderValue::from_static(v));
     }
     h
-}
-
-/// A zend_string in test memory.
-struct Piece(Vec<u64>);
-
-impl Piece {
-    fn new(bytes: &[u8]) -> Self {
-        let head = std::mem::offset_of!(zend_string, val);
-        let mut words = vec![0u64; (head + bytes.len() + 1).div_ceil(8)];
-        let s = words.as_mut_ptr().cast::<zend_string>();
-        // SAFETY: words holds the header and bytes.len() + 1 bytes from val on.
-        unsafe {
-            (*s).len = bytes.len();
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                (&raw mut (*s).val).cast::<u8>(),
-                bytes.len(),
-            );
-        }
-        Self(words)
-    }
-
-    fn ptr(&mut self) -> *mut zend_string {
-        self.0.as_mut_ptr().cast()
-    }
 }
 
 struct Captured {
@@ -161,7 +135,7 @@ fn seal_drops_the_body_for_304() {
         write_head_core(&mut a.state, 304, ResponseHeaders::new()),
         Verb::Ok
     );
-    let v = unsafe { write_body_core(&mut a.state, Piece::new(b"gone").ptr(), true) };
+    let v = unsafe { write_body_core(&mut a.state, b"gone", true) };
     assert_eq!(v, Verb::Ok);
     let cap = a.build_and_collect();
     assert_eq!(cap.status, StatusCode::NOT_MODIFIED);
@@ -173,7 +147,7 @@ fn seal_drops_the_body_for_304() {
 #[test]
 fn empty_non_eos_chunk_commits_nothing() {
     let mut a = state();
-    let v = unsafe { write_body_core(&mut a.state, Piece::new(b"").ptr(), false) };
+    let v = unsafe { write_body_core(&mut a.state, b"", false) };
     assert_eq!(v, Verb::Ok);
     assert!(a.try_recv_start().is_none());
     assert_eq!(
@@ -181,7 +155,7 @@ fn empty_non_eos_chunk_commits_nothing() {
         Verb::Ok,
         "the head slot must still be open"
     );
-    let v = unsafe { write_body_core(&mut a.state, Piece::new(b"x").ptr(), true) };
+    let v = unsafe { write_body_core(&mut a.state, b"x", true) };
     assert_eq!(v, Verb::Ok);
     let cap = a.build_and_collect();
     assert_eq!(cap.status, StatusCode::NOT_FOUND);
@@ -300,7 +274,7 @@ fn uri_abs_spells_the_uri() {
 fn head_frame_length_follows_the_write_shape() {
     let mut a = state();
     assert_eq!(
-        unsafe { write_body_core(&mut a.state, Piece::new(b"abc").ptr(), true) },
+        unsafe { write_body_core(&mut a.state, b"abc", true) },
         Verb::Ok
     );
     let cap = a.build_and_collect();
@@ -311,7 +285,7 @@ fn head_frame_length_follows_the_write_shape() {
     {
         let _enter = b.rt.enter();
         assert_eq!(
-            unsafe { write_body_core(&mut b.state, Piece::new(b"abc").ptr(), false) },
+            unsafe { write_body_core(&mut b.state, b"abc", false) },
             Verb::Ok
         );
         unsafe { seal(&mut b.state) };
@@ -330,7 +304,7 @@ fn content_length_exceeded_sends_the_prefix_and_seals() {
         write_head_core(&mut a.state, 200, hdrs(&[("content-length", "5")])),
         Verb::Ok
     );
-    let v = unsafe { write_body_core(&mut a.state, Piece::new(b"0123456789").ptr(), true) };
+    let v = unsafe { write_body_core(&mut a.state, b"0123456789", true) };
     assert_eq!(v, Verb::ContentLengthExceeded);
 
     let cap = a.build_and_collect();
@@ -338,7 +312,7 @@ fn content_length_exceeded_sends_the_prefix_and_seals() {
     assert_eq!(cap.body, b"01234");
     assert!(!cap.aborted);
 
-    let v = unsafe { write_body_core(&mut a.state, Piece::new(b"x").ptr(), true) };
+    let v = unsafe { write_body_core(&mut a.state, b"x", true) };
     assert_eq!(v, Verb::Finalized, "nothing written after it");
 }
 
@@ -381,9 +355,9 @@ fn interim_head_sends_nothing_and_leaves_the_final_head_open() {
 fn gone_client_discards_once_and_stays_discarded() {
     let mut a = state();
     a.slot.cancel_if_incomplete();
-    let v = unsafe { write_body_core(&mut a.state, Piece::new(b"x").ptr(), false) };
+    let v = unsafe { write_body_core(&mut a.state, b"x", false) };
     assert_eq!(v, Verb::Discarded);
-    let v = unsafe { write_body_core(&mut a.state, Piece::new(b"y").ptr(), true) };
+    let v = unsafe { write_body_core(&mut a.state, b"y", true) };
     assert_eq!(v, Verb::Discarded, "sticky across repeat writes");
     assert!(a.state.is_finalized());
     assert!(a.state.cancelled());
@@ -407,7 +381,7 @@ fn a_101_head_drops_body_chunks() {
         write_head_core(&mut a.state, 101, ResponseHeaders::new()),
         Verb::Ok
     );
-    let v = unsafe { write_body_core(&mut a.state, Piece::new(b"upgrade").ptr(), true) };
+    let v = unsafe { write_body_core(&mut a.state, b"upgrade", true) };
     assert_eq!(v, Verb::Ok);
     let cap = a.build_and_collect();
     assert_eq!(cap.status, StatusCode::BAD_GATEWAY);
@@ -497,7 +471,7 @@ fn a_lost_unit_fails_or_truncates_the_reply() {
     {
         let _enter = c.rt.enter();
         assert_eq!(
-            unsafe { write_body_core(&mut c.state, Piece::new(b"abc").ptr(), false) },
+            unsafe { write_body_core(&mut c.state, b"abc", false) },
             Verb::Ok
         );
         c.state.lost();
@@ -590,7 +564,7 @@ fn declared_content_length_underrun_preserves_length_and_aborts() {
         write_head_core(&mut a.state, 200, hdrs(&[("content-length", "10")])),
         Verb::Ok
     );
-    let v = unsafe { write_body_core(&mut a.state, Piece::new(b"abc").ptr(), true) };
+    let v = unsafe { write_body_core(&mut a.state, b"abc", true) };
     assert_eq!(v, Verb::Ok);
     let cap = a.build_and_collect();
     assert_eq!(cap.status, StatusCode::OK);

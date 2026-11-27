@@ -1,4 +1,4 @@
-use crate::{callbacks::guard, types::Context, *};
+use crate::{callbacks::guard, types::CgiExchange, *};
 use std::{
     cell::Cell,
     collections::BTreeMap,
@@ -191,14 +191,19 @@ thread_local! {
 }
 
 #[derive(Clone, Copy)]
-pub(crate) struct Permanent(*mut zend_string);
+pub struct Permanent(*mut zend_string);
 
 // SAFETY: the bytes, flags and hash stay immutable for the life of the process.
 unsafe impl Send for Permanent {}
 unsafe impl Sync for Permanent {}
 
 impl Permanent {
-    pub(crate) fn as_ptr(self) -> *mut zend_string {
+    /// Interns `bytes` as a process-lifetime Zend string shared across workers.
+    pub fn intern(bytes: &[u8]) -> Self {
+        permanent(bytes)
+    }
+
+    pub fn as_ptr(self) -> *mut zend_string {
         self.0
     }
 
@@ -311,20 +316,20 @@ pub(crate) fn clean_realpath_cache() {
 
 /// # Safety
 /// The result aliases the per-thread `SG(server_context)`. It is sound only while a worker serves one request at a time. Do not hold the reference across another `ctx()` call.
-pub unsafe fn ctx<'a>() -> Option<&'a mut Context> {
-    unsafe { ((*rapira_sg()).server_context as *mut Context).as_mut() }
+pub unsafe fn ctx<'a>() -> Option<&'a mut CgiExchange> {
+    unsafe { ((*rapira_sg()).server_context as *mut CgiExchange).as_mut() }
 }
 
-pub fn with_ctx<T: Copy>(default: T, f: impl FnOnce(&mut Context) -> T) -> T {
+pub fn with_ctx<T: Copy>(default: T, f: impl FnOnce(&mut CgiExchange) -> T) -> T {
     guard(default, move || match unsafe { ctx() } {
         Some(ctx) => f(ctx),
         None => default,
     })
 }
 
-pub(crate) fn bind_server_context(ctx: &mut Context) {
+pub(crate) fn bind_server_context(ctx: &mut CgiExchange) {
     unsafe {
-        (*rapira_sg()).server_context = (ctx as *mut Context) as *mut c_void;
+        (*rapira_sg()).server_context = (ctx as *mut CgiExchange) as *mut c_void;
     }
 }
 
@@ -344,8 +349,8 @@ pub(crate) fn unbind_server_context() {
 }
 
 /// Must run after sapi_activate, which resets proto_num to 1000 (main/SAPI.c:448).
-pub(crate) unsafe fn apply_proto_num(ctx: &Context) {
-    let proto_num = match ctx.req.protocol {
+pub(crate) unsafe fn apply_proto_num(ctx: &CgiExchange) {
+    let proto_num = match ctx.req().protocol {
         "HTTP/1.0" => 1000,
         "HTTP/2.0" => 2000,
         _ => 1001,
@@ -354,8 +359,8 @@ pub(crate) unsafe fn apply_proto_num(ctx: &Context) {
 }
 
 /// Resets `http_response_code`, because the engine keeps the status of the previous request. The reset in main/SAPI.c:435-437 is commented out.
-pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
-    let reqc = &ctx.req;
+pub(crate) unsafe fn populate_request_context(ctx: &mut CgiExchange) {
+    let reqc = ctx.req();
     let sg = unsafe { rapira_sg() };
     unsafe { (*sg).sapi_headers.http_response_code = 200 };
     let ri: &mut sapi_request_info = unsafe { &mut (*sg).request_info };
@@ -364,5 +369,5 @@ pub(crate) unsafe fn populate_request_context(ctx: &mut Context) {
     ri.request_uri = reqc.uri.as_ptr() as *mut c_char;
     ri.path_translated = script().filename().as_ptr() as *mut c_char;
     ri.content_type = reqc.ctype.as_ref().map_or(null(), |s| s.as_ptr());
-    ri.content_length = ctx.req.body.len() as i64;
+    ri.content_length = reqc.body.len() as i64;
 }

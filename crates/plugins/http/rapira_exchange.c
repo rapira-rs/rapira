@@ -109,14 +109,14 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
     RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_exchange_flush(held), "flush");
 }
 
-// Rust builds the request graph (src/php/). This shell owns the memo.
+// Rust builds the request graph (src/php/). This shell owns memo slot 0 (Request).
 ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest) {
     ZEND_PARSE_PARAMETERS_NONE();
-    rapira_exchange_obj *ex = rapira_exchange_from(Z_OBJ_P(ZEND_THIS));
-    if (Z_ISUNDEF(ex->request)) {
+    rapira_unit_obj *ex = rapira_unit_from(Z_OBJ_P(ZEND_THIS));
+    if (Z_ISUNDEF(ex->memos[0])) {
         RAPIRA_RETURN_THROWS_UNLESS(
-            rapira_rs_exchange_build_request(&ex->held, &ex->request),
+            rapira_rs_exchange_build_request(&ex->held, &ex->memos[0]),
             "getRequest");
     }
-    RETURN_COPY(&ex->request);
+    RETURN_COPY(&ex->memos[0]);
 }

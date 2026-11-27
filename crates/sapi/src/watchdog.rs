@@ -3,7 +3,7 @@ use std::ffi::{c_int, c_void};
 use std::io;
 use std::marker::PhantomData;
 use std::rc::Rc;
-use std::sync::atomic::Ordering::Relaxed;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::sync::mpsc::{self, RecvTimeoutError};
 use std::sync::{Arc, Mutex};
 use std::thread::{self, JoinHandle};
@@ -53,6 +53,13 @@ pub(crate) fn reserve_wake_signal() -> io::Result<()> {
     signal_result(unsafe { rapira_watchdog_install() })
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Escalation {
+    None,
+    Interrupt,
+    Blocked { all_blocked: bool },
+}
+
 enum Unit {
     Idle,
     Active(u64),
@@ -63,6 +70,41 @@ enum Unit {
 impl Unit {
     fn interrupted(&self) -> bool {
         matches!(self, Self::Interrupted(_) | Self::Blocked)
+    }
+
+    /// Replaces the unit state, updating `blocked` and returning true when an active interrupt must be cleared.
+    fn replace(&mut self, next: Self, blocked: &AtomicUsize) -> bool {
+        if matches!(self, Self::Blocked) {
+            blocked.fetch_sub(1, Relaxed);
+        }
+        let clear_interrupt = self.interrupted();
+        *self = next;
+        clear_interrupt
+    }
+
+    /// Evaluates deadline escalation at `(now_ms, now)` without side effects on signals or process exit.
+    fn check_deadline(
+        &mut self,
+        now_ms: u64,
+        now: Instant,
+        timeout: Duration,
+        blocked: &AtomicUsize,
+        total_workers: usize,
+    ) -> Escalation {
+        match *self {
+            Self::Active(since)
+                if Duration::from_millis(now_ms.saturating_sub(since)) >= timeout =>
+            {
+                *self = Self::Interrupted(now);
+                Escalation::Interrupt
+            }
+            Self::Interrupted(at) if now.saturating_duration_since(at) >= GRACE => {
+                *self = Self::Blocked;
+                let all_blocked = blocked.fetch_add(1, Relaxed) + 1 == total_workers;
+                Escalation::Blocked { all_blocked }
+            }
+            _ => Escalation::None,
+        }
     }
 }
 
@@ -146,11 +188,6 @@ pub(crate) fn clear() {
     set_unit(Unit::Idle);
 }
 
-/// True when the calling PHP worker has a request time limit.
-pub fn enabled() -> bool {
-    LOCAL.with_borrow(Option::is_some)
-}
-
 pub(crate) fn wake() -> Option<watch::Receiver<bool>> {
     LOCAL.with_borrow(|slot| Some(slot.as_ref()?.lock().unwrap().wake.subscribe()))
 }
@@ -158,16 +195,13 @@ pub(crate) fn wake() -> Option<watch::Receiver<bool>> {
 fn set_unit(unit: Unit) {
     LOCAL.with_borrow(|slot| {
         if let Some(slot) = slot {
-            let mut worker = slot.lock().unwrap();
-            if matches!(worker.unit, Unit::Blocked) {
-                worker.pool.blocked.fetch_sub(1, Relaxed);
-            }
-            if worker.unit.interrupted() {
+            let mut guard = slot.lock().unwrap();
+            let worker = &mut *guard;
+            if worker.unit.replace(unit, &worker.pool.blocked) {
                 // The previous fire has returned. Withdraw its timeout before the next unit or boot.
                 unsafe { rapira_watchdog_clear(&worker.interrupt) };
                 worker.wake.send_replace(false);
             }
-            worker.unit = unit;
         }
     });
 }
@@ -175,22 +209,26 @@ fn set_unit(unit: Unit) {
 impl Worker {
     fn tick(&mut self) {
         let (pool, index, timeout) = (self.pool.name, self.index, self.timeout);
-        match self.unit {
-            Unit::Active(since) if Duration::from_millis(now_millis() - since) >= timeout => {
+        match self.unit.check_deadline(
+            now_millis(),
+            Instant::now(),
+            timeout,
+            &self.pool.blocked,
+            self.pool.workers.len(),
+        ) {
+            Escalation::None => {}
+            Escalation::Interrupt => {
                 unsafe { rapira_watchdog_fire(&self.interrupt) };
-                self.unit = Unit::Interrupted(Instant::now());
                 self.wake.send_replace(true);
                 warn!(target: "rapira", "{pool}.pool.request_terminate_timeout_secs exceeded on worker {index} ({timeout:?}); interrupting the request");
             }
-            Unit::Interrupted(at) if at.elapsed() >= GRACE => {
-                self.unit = Unit::Blocked;
+            Escalation::Blocked { all_blocked } => {
                 error!(target: "rapira", "{pool} worker {index} is blocked {GRACE:?} after its interrupt; the unit will end when its native call returns");
-                if self.pool.blocked.fetch_add(1, Relaxed) + 1 == self.pool.workers.len() {
+                if all_blocked {
                     error!(target: "rapira", "every worker of pool {pool} is blocked; exiting with code 124");
                     crate::exit::exit(124);
                 }
             }
-            _ => {}
         }
     }
 }
@@ -230,5 +268,151 @@ impl Drop for Watchdog {
             .unwrap()
             .join()
             .expect("join the watchdog");
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn watchdog_unit_escalation_and_recovery() {
+        enum Start {
+            Idle,
+            Active(u64),
+            InterruptedAgo(Duration),
+            Blocked,
+        }
+        struct Case {
+            name: &'static str,
+            start: Start,
+            now_ms: u64,
+            timeout: Duration,
+            initial_blocked: usize,
+            total_workers: usize,
+            want_escalation: Escalation,
+            want_blocked_after_tick: usize,
+            want_clear_on_idle: bool,
+            want_blocked_after_idle: usize,
+        }
+        let cases = [
+            Case {
+                name: "idle worker never escalates",
+                start: Start::Idle,
+                now_ms: 10_000,
+                timeout: Duration::from_secs(2),
+                initial_blocked: 0,
+                total_workers: 2,
+                want_escalation: Escalation::None,
+                want_blocked_after_tick: 0,
+                want_clear_on_idle: false,
+                want_blocked_after_idle: 0,
+            },
+            Case {
+                name: "active worker below timeout stays active",
+                start: Start::Active(1_000),
+                now_ms: 2_999,
+                timeout: Duration::from_secs(2),
+                initial_blocked: 0,
+                total_workers: 2,
+                want_escalation: Escalation::None,
+                want_blocked_after_tick: 0,
+                want_clear_on_idle: false,
+                want_blocked_after_idle: 0,
+            },
+            Case {
+                name: "active worker at timeout interrupts and requires clear on recovery",
+                start: Start::Active(1_000),
+                now_ms: 3_000,
+                timeout: Duration::from_secs(2),
+                initial_blocked: 0,
+                total_workers: 2,
+                want_escalation: Escalation::Interrupt,
+                want_blocked_after_tick: 0,
+                want_clear_on_idle: true,
+                want_blocked_after_idle: 0,
+            },
+            Case {
+                name: "interrupted worker before grace period stays interrupted",
+                start: Start::InterruptedAgo(GRACE - Duration::from_millis(1)),
+                now_ms: 10_000,
+                timeout: Duration::from_secs(2),
+                initial_blocked: 0,
+                total_workers: 2,
+                want_escalation: Escalation::None,
+                want_blocked_after_tick: 0,
+                want_clear_on_idle: true,
+                want_blocked_after_idle: 0,
+            },
+            Case {
+                name: "interrupted worker past grace marks blocked without all_blocked when peers remain",
+                start: Start::InterruptedAgo(GRACE),
+                now_ms: 10_000,
+                timeout: Duration::from_secs(2),
+                initial_blocked: 0,
+                total_workers: 2,
+                want_escalation: Escalation::Blocked { all_blocked: false },
+                want_blocked_after_tick: 1,
+                want_clear_on_idle: true,
+                want_blocked_after_idle: 0,
+            },
+            Case {
+                name: "last interrupted worker past grace triggers all_blocked",
+                start: Start::InterruptedAgo(GRACE),
+                now_ms: 10_000,
+                timeout: Duration::from_secs(2),
+                initial_blocked: 1,
+                total_workers: 2,
+                want_escalation: Escalation::Blocked { all_blocked: true },
+                want_blocked_after_tick: 2,
+                want_clear_on_idle: true,
+                want_blocked_after_idle: 1,
+            },
+            Case {
+                name: "already blocked worker does not increment blocked count again",
+                start: Start::Blocked,
+                now_ms: 10_000,
+                timeout: Duration::from_secs(2),
+                initial_blocked: 1,
+                total_workers: 2,
+                want_escalation: Escalation::None,
+                want_blocked_after_tick: 1,
+                want_clear_on_idle: true,
+                want_blocked_after_idle: 0,
+            },
+        ];
+
+        let t0 = Instant::now();
+        for case in cases {
+            let blocked = AtomicUsize::new(case.initial_blocked);
+            let (mut unit, tick_now) = match case.start {
+                Start::Idle => (Unit::Idle, t0),
+                Start::Active(since) => (Unit::Active(since), t0),
+                Start::InterruptedAgo(elapsed) => (Unit::Interrupted(t0), t0 + elapsed),
+                Start::Blocked => (Unit::Blocked, t0),
+            };
+            let got = unit.check_deadline(
+                case.now_ms,
+                tick_now,
+                case.timeout,
+                &blocked,
+                case.total_workers,
+            );
+            assert_eq!(got, case.want_escalation, "{}", case.name);
+            assert_eq!(
+                blocked.load(Relaxed),
+                case.want_blocked_after_tick,
+                "{}",
+                case.name
+            );
+            let cleared = unit.replace(Unit::Idle, &blocked);
+            assert_eq!(cleared, case.want_clear_on_idle, "{}", case.name);
+            assert_eq!(
+                blocked.load(Relaxed),
+                case.want_blocked_after_idle,
+                "{}",
+                case.name
+            );
+        }
     }
 }

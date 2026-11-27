@@ -7,7 +7,7 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 `Server` implements `rapira_sapi::plugin::Plugin`:
 
 - `name()` returns `http`: the TOML table and the dispatcher name that PHP sees.
-- `dispatcher()` returns the address of `rapira_http_plugin`, the C record of the dispatcher surface: the dispatcher classes, the busy error of `receive()` and the quiesce hook of dispatcher mode.
+- `dispatcher()` returns the address of `rapira_http_plugin`, the C record of the dispatcher surface: the dispatcher classes and the busy error of `receive()`.
 - `worker_init()` returns the function that binds the server name and port on each PHP thread before its first entrypoint.
 - The crate exports `rapira_http_register_classes`. MINIT calls it after the base classes to register the `Rapira\Http` classes.
 - `Server::from_settings` sets the server identity and `sendFile()` root, removes spool directories of dead server processes and binds the listener before PHP starts.

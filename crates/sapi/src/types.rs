@@ -400,6 +400,8 @@ impl From<Request> for CgiRequest {
     }
 }
 
+pub const MAX_BUFFERED_BODY: usize = 1 << 30;
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StreamState {
     NotSent,
@@ -408,19 +410,20 @@ pub enum StreamState {
     BodyStreamed,
 }
 
-pub struct Context {
-    pub(crate) req: CgiRequest,
-    pub(crate) responder: Option<Box<dyn CgiResponder>>,
-    pub(crate) head: Option<ResponseHead>,
-    pub(crate) body: Vec<u8>,
-    pub(crate) stream: StreamState,
+/// Encapsulated per-request CGI exchange state for classic and worker modes.
+pub struct CgiExchange {
+    req: CgiRequest,
+    responder: Option<Box<dyn CgiResponder>>,
+    head: Option<ResponseHead>,
+    body: Vec<u8>,
+    stream: StreamState,
     /// True while the teardown flush runs. Its output does not count as a streamed body.
-    pub(crate) tearing_down: bool,
+    tearing_down: bool,
     /// The error result of the cycle before the C shutdown. The seal inside the shutdown reads it.
-    pub(crate) errored: bool,
+    errored: bool,
 }
 
-impl Context {
+impl CgiExchange {
     /// Builds the CGI view here, because the http plugin calls it on the IO thread.
     pub fn new(req: Request, responder: Box<dyn CgiResponder>) -> Self {
         Self {
@@ -434,8 +437,77 @@ impl Context {
         }
     }
 
+    #[inline]
+    pub(crate) fn req(&self) -> &CgiRequest {
+        &self.req
+    }
+
+    #[inline]
+    pub(crate) fn req_mut(&mut self) -> &mut CgiRequest {
+        &mut self.req
+    }
+
     pub(crate) fn is_cancelled(&self) -> bool {
         self.responder.as_ref().is_none_or(|r| r.is_cancelled())
+    }
+
+    /// Commits headers once if no head has been sent yet, running `build` only when needed.
+    #[inline]
+    pub(crate) fn send_headers(&mut self, build: impl FnOnce() -> (u16, ResponseHeaders)) {
+        if self.stream == StreamState::NotSent {
+            let (status, headers) = build();
+            self.commit_head(status, headers);
+        }
+    }
+
+    /// Buffers response body bytes from PHP `ub_write`, committing an implicit head on first write.
+    /// Returns `Err(())` and seals the exchange when the client cancelled or the buffer cap is exceeded.
+    pub(crate) fn write_body(
+        &mut self,
+        data: &[u8],
+        fallback_status: impl FnOnce() -> u16,
+    ) -> Result<usize, ()> {
+        if self.stream == StreamState::NotSent {
+            self.commit_head(fallback_status(), ResponseHeaders::new());
+        }
+        if let Some(responder) = &self.responder {
+            if responder.is_cancelled() {
+                self.finish(false);
+                return Err(());
+            }
+            if self.body.len().saturating_add(data.len()) > MAX_BUFFERED_BODY {
+                tracing::error!(
+                    target: "rapira",
+                    "response body exceeds the host buffer cap ({} + {} > {MAX_BUFFERED_BODY} bytes); aborting the request",
+                    self.body.len(),
+                    data.len()
+                );
+                self.finish(true);
+                return Err(());
+            }
+            if self.body.is_empty() && !data.is_empty() {
+                self.body.reserve(data.len().max(4096));
+            }
+            self.body.extend_from_slice(data);
+            if !self.tearing_down {
+                self.stream = StreamState::BodyStreamed;
+            }
+        }
+        Ok(data.len())
+    }
+
+    pub(crate) fn begin_teardown(&mut self) {
+        self.tearing_down = true;
+    }
+
+    pub(crate) fn mark_errored(&mut self, errored: bool) {
+        self.errored = errored;
+    }
+
+    /// Final seal invoked from RSHUTDOWN after shutdown functions and destructors finish.
+    pub(crate) fn finish_response(&mut self, fatal_recorded: bool) {
+        let errored = self.errored || fatal_recorded;
+        self.end(errored);
     }
 
     /// The seal of a cycle. A failure gets a 500 head when none was sent, and a body cut mid-stream gets no content-length.
@@ -455,7 +527,7 @@ impl Context {
         self.finish(false);
     }
 
-    pub(crate) fn commit_head(&mut self, mut status: u16, mut headers: ResponseHeaders) {
+    fn commit_head(&mut self, mut status: u16, mut headers: ResponseHeaders) {
         for value in headers.get_all(&STATUS) {
             match status_field_code(value.as_bytes()) {
                 Some(code) => status = code,
@@ -472,7 +544,7 @@ impl Context {
     }
 
     /// Seals the buffered response through the responder; the responder applies transport framing rules.
-    pub(crate) fn finish(&mut self, truncated: bool) {
+    fn finish(&mut self, truncated: bool) {
         let body = std::mem::take(&mut self.body);
         let Some(responder) = self.responder.take() else {
             return;
@@ -534,34 +606,25 @@ pub(crate) mod tests {
         assert_eq!(status_field_code(b"70000"), None);
     }
 
-    /// A GET with no responder; a test sets the responder it needs.
-    pub(crate) fn context() -> Context {
-        Context {
-            req: Request {
-                method: Cow::Borrowed(""),
-                uri: RequestUri::Static(""),
-                target: None,
-                authority: Authority::None,
-                https: false,
-                protocol: "HTTP/1.1",
-                remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-                server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-                headers: RequestHeaders::new(),
-                body: Chunks::default(),
-                received_at: 0.0,
-            }
-            .into(),
-            responder: None,
-            head: None,
-            body: Vec::new(),
-            stream: StreamState::NotSent,
-            tearing_down: false,
-            errored: false,
+    pub(crate) fn empty_request() -> Request {
+        Request {
+            method: Cow::Borrowed(""),
+            uri: RequestUri::Static(""),
+            target: None,
+            authority: Authority::None,
+            https: false,
+            protocol: "HTTP/1.1",
+            remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
+            server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
+            headers: RequestHeaders::new(),
+            body: Chunks::default(),
+            received_at: 0.0,
         }
     }
 
     fn head_of(status: u16, headers: &[(&str, &str)]) -> ResponseHead {
-        let mut ctx = context();
+        let (resp, _log) = responder(false);
+        let mut ex = CgiExchange::new(empty_request(), resp);
         let mut hdrs = ResponseHeaders::new();
         for (k, v) in headers {
             hdrs.append(
@@ -569,8 +632,8 @@ pub(crate) mod tests {
                 http::HeaderValue::from_str(v).unwrap(),
             );
         }
-        ctx.commit_head(status, hdrs);
-        ctx.head.expect("commit_head records a head")
+        ex.send_headers(|| (status, hdrs));
+        ex.head.expect("send_headers records a head")
     }
 
     /// The seal publishes the reply once: a failure gets a 500 head when none was sent, a body cut mid-stream gets no content-length, and a refusal gets its status head.
@@ -581,8 +644,8 @@ pub(crate) mod tests {
             /// The head the cycle committed before the seal.
             head: Option<u16>,
             body: &'static str,
-            stream: StreamState,
-            seal: fn(&mut Context),
+            teardown_write: bool,
+            seal: fn(&mut CgiExchange),
             want: &'static [&'static str],
         }
         let cases = [
@@ -590,7 +653,7 @@ pub(crate) mod tests {
                 name: "a buffered reply ends as one response",
                 head: Some(200),
                 body: "ok",
-                stream: StreamState::HeadSent,
+                teardown_write: true,
                 seal: |c| c.end(false),
                 want: &["respond 200 truncated=false body=ok"],
             },
@@ -598,15 +661,15 @@ pub(crate) mod tests {
                 name: "a failure before any head sends a 500",
                 head: None,
                 body: "",
-                stream: StreamState::NotSent,
+                teardown_write: false,
                 seal: |c| c.end(true),
                 want: &["respond 500 truncated=false body="],
             },
             Case {
-                name: "a failure after the head keeps the head and the buffered body",
+                name: "a failure after teardown flush keeps the head and buffered body without truncation",
                 head: Some(200),
                 body: "ok",
-                stream: StreamState::HeadSent,
+                teardown_write: true,
                 seal: |c| c.end(true),
                 want: &["respond 200 truncated=false body=ok"],
             },
@@ -614,7 +677,7 @@ pub(crate) mod tests {
                 name: "a failure after a streamed body marks truncation",
                 head: Some(200),
                 body: "part",
-                stream: StreamState::BodyStreamed,
+                teardown_write: false,
                 seal: |c| c.end(true),
                 want: &["respond 200 truncated=true body=part"],
             },
@@ -622,7 +685,7 @@ pub(crate) mod tests {
                 name: "a second seal sends nothing",
                 head: Some(200),
                 body: "ok",
-                stream: StreamState::HeadSent,
+                teardown_write: true,
                 seal: |c| {
                     c.end(false);
                     c.end(true);
@@ -633,22 +696,102 @@ pub(crate) mod tests {
                 name: "a refusal sends the status head",
                 head: None,
                 body: "",
-                stream: StreamState::NotSent,
+                teardown_write: false,
                 seal: |c| c.refuse(503),
                 want: &["respond 503 truncated=false body="],
             },
         ];
         for case in cases {
             let (resp, log) = responder(false);
-            let mut ctx = context();
-            ctx.responder = Some(resp);
+            let mut ex = CgiExchange::new(empty_request(), resp);
             if let Some(status) = case.head {
-                ctx.commit_head(status, ResponseHeaders::new());
+                ex.send_headers(|| (status, ResponseHeaders::new()));
             }
-            ctx.body = case.body.into();
-            ctx.stream = case.stream;
-            (case.seal)(&mut ctx);
+            if case.teardown_write {
+                ex.begin_teardown();
+            }
+            if !case.body.is_empty() {
+                assert_eq!(
+                    ex.write_body(case.body.as_bytes(), || 200),
+                    Ok(case.body.len()),
+                    "{}",
+                    case.name
+                );
+            }
+            (case.seal)(&mut ex);
             assert_eq!(log.lock().unwrap().as_slice(), case.want, "{}", case.name);
+        }
+    }
+
+    #[test]
+    fn write_body_and_send_headers_invariants() {
+        struct Case {
+            name: &'static str,
+            cancelled: bool,
+            first_head: Option<u16>,
+            second_head: Option<u16>,
+            write: &'static [u8],
+            fallback_status: u16,
+            want_write_ok: bool,
+            want_log: &'static [&'static str],
+        }
+        let cases = [
+            Case {
+                name: "write_body commits implicit fallback status when no head was sent",
+                cancelled: false,
+                first_head: None,
+                second_head: None,
+                write: b"hi",
+                fallback_status: 201,
+                want_write_ok: true,
+                want_log: &["respond 201 truncated=false body=hi"],
+            },
+            Case {
+                name: "second send_headers is ignored after head is committed",
+                cancelled: false,
+                first_head: Some(202),
+                second_head: Some(404),
+                write: b"ok",
+                fallback_status: 200,
+                want_write_ok: true,
+                want_log: &["respond 202 truncated=false body=ok"],
+            },
+            Case {
+                name: "write_body on cancelled client returns Err and seals without truncation",
+                cancelled: true,
+                first_head: Some(200),
+                second_head: None,
+                write: b"drop",
+                fallback_status: 200,
+                want_write_ok: false,
+                want_log: &["respond 200 truncated=false body="],
+            },
+        ];
+        for case in cases {
+            let (resp, log) = responder(case.cancelled);
+            let mut ex = CgiExchange::new(empty_request(), resp);
+            if let Some(s) = case.first_head {
+                ex.send_headers(|| (s, ResponseHeaders::new()));
+            }
+            if let Some(s) = case.second_head {
+                ex.send_headers(|| {
+                    assert!(
+                        case.first_head.is_none(),
+                        "{}: second send_headers must not invoke builder",
+                        case.name
+                    );
+                    (s, ResponseHeaders::new())
+                });
+            }
+            let res = ex.write_body(case.write, || case.fallback_status);
+            assert_eq!(res.is_ok(), case.want_write_ok, "{}", case.name);
+            ex.end(false);
+            assert_eq!(
+                log.lock().unwrap().as_slice(),
+                case.want_log,
+                "{}",
+                case.name
+            );
         }
     }
 

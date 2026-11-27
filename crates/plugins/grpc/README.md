@@ -22,7 +22,7 @@ The grpc plugin of the `rapira` binary. It serves unary and server-streaming RPC
 - `shed()` answers UNAVAILABLE during a boot retry if the pool has no ready worker.
 - `class()` gives `receive()` the class of the call object, by the kind of its reply: unary or stream.
 
-`respond()` of a server-streaming call runs its generator in `rapira_stream_run_generator` in `crates/sapi/rapira_stream.c`. The loop gives each yielded value to the callback `grpc_stream_send` in `rapira_grpc.c`. The callback checks that the value is a string and passes its bytes to Rust.
+`respond()` of a server-streaming call runs its generator in `grpc_run_generator` in `rapira_grpc.c`. The loop passes each yielded value to `grpc_stream_send`, which checks that the value is a string and passes its bytes to Rust.
 
 ## Crate layout
 

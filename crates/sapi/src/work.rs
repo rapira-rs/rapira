@@ -3,7 +3,7 @@ use std::ptr::NonNull;
 
 use crate::callbacks::guard;
 use crate::pool::{Event, record};
-use crate::types::Context;
+use crate::types::CgiExchange;
 use crate::zend_class_entry;
 
 pub use crate::queue::{Intake, Refused};
@@ -103,7 +103,7 @@ pub unsafe extern "C" fn rapira_rs_held_drop(held: *mut HeldPtr) {
 
 /// One unit on the intake: the CGI reply of the classic and worker modes, or a dispatcher-mode unit.
 pub enum Unit {
-    Cgi(Box<Context>),
+    Cgi(Box<CgiExchange>),
     Dispatcher(Box<dyn Held>),
 }
 
@@ -125,7 +125,7 @@ impl Unit {
     }
 
     /// The classic and worker modes take the CGI reply.
-    pub(crate) fn into_cgi(self) -> Box<Context> {
+    pub(crate) fn into_cgi(self) -> Box<CgiExchange> {
         match self {
             Self::Cgi(ctx) => ctx,
             Self::Dispatcher(_) => unreachable!("a dispatcher unit on a classic or worker intake"),
@@ -156,8 +156,7 @@ mod tests {
     #[test]
     fn a_cgi_shed_refuses_with_503() {
         let (responder, log) = crate::types::tests::responder(false);
-        let mut ctx = crate::types::tests::context();
-        ctx.responder = Some(responder);
+        let ctx = CgiExchange::new(crate::types::tests::empty_request(), responder);
         Unit::Cgi(Box::new(ctx)).shed();
         assert_eq!(
             log.lock().unwrap().as_slice(),

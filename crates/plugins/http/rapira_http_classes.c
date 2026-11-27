@@ -1,9 +1,6 @@
 #include "rapira_http.h"
 #include "rapira_http_arginfo.h"
 
-// Rust defines this function in src/php/respond.rs.
-extern void rapira_rs_http_quiesce(void);
-
 zend_class_entry *rapira_ce_http_multipart;
 zend_class_entry *rapira_ce_http_form_field;
 zend_class_entry *rapira_ce_http_uploaded_file;
@@ -19,20 +16,7 @@ zend_class_entry *rapira_ce_http_exchange;
 rapira_plugin rapira_http_plugin = {
     .busy = "this worker holds one unit at a time, and its "
             "Rapira\\Http\\Exchange is unfinalized; finalize it first",
-    .quiesce = rapira_rs_http_quiesce,
 };
-
-// The handlers are a copy, because std_object_handlers is shared engine state.
-static zend_object_handlers rapira_exchange_handlers;
-
-// free_obj gives the unit back to Rust.
-static void rapira_exchange_free(zend_object *std) {
-    rapira_rs_held_drop(&rapira_exchange_from(std)->held);
-    // This does nothing on IS_UNDEF, that is, when getRequest was never called.
-    zval_ptr_dtor(&rapira_exchange_from(std)->request);
-
-    zend_object_std_dtor(std);
-}
 
 ZEND_METHOD(Rapira_Internal_Http_DispatcherInfo, serverName) {
     ZEND_PARSE_PARAMETERS_NONE();
@@ -77,9 +61,5 @@ void rapira_http_register_classes(void) {
     rapira_ce_http_exchange =
         register_class_Rapira_Internal_Http_Exchange(http_exchange);
     rapira_plugin_wire(&rapira_http_plugin);
-
-    rapira_unit_handlers_init(&rapira_exchange_handlers,
-                              offsetof(rapira_exchange_obj, std),
-                              rapira_exchange_free);
-    rapira_unit_class_wire(rapira_ce_http_exchange, &rapira_exchange_handlers);
+    rapira_unit_wire(rapira_ce_http_exchange);
 }

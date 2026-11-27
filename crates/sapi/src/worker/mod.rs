@@ -20,7 +20,7 @@ use crate::pool::{Event, Pool};
 use crate::queue::{Pull, Wait, WorkerSlot};
 use crate::reload::OpcacheCoordinator;
 use crate::start::run_script;
-use crate::types::Context;
+use crate::types::CgiExchange;
 use crate::work::{Held, HeldPtr};
 use crate::{
     E_CORE, FAILURE, RAPIRA_BAILOUT, RAPIRA_HANDLE_CONTINUE, RAPIRA_HANDLE_RECYCLE,
@@ -568,13 +568,13 @@ impl Worker {
                 outcome = rapira_run_handler(fci, fcc);
             }
         }
-        ctx.tearing_down = true;
+        ctx.begin_teardown();
         let flushed = if outcome == RAPIRA_OK as c_int {
             RAPIRA_OK as c_int
         } else {
             unsafe { rapira_finish_output() }
         };
-        ctx.errored = outcome != RAPIRA_OK as c_int || flushed == RAPIRA_BAILOUT as c_int;
+        ctx.mark_errored(outcome != RAPIRA_OK as c_int || flushed == RAPIRA_BAILOUT as c_int);
         let teardown = unsafe { rapira_request_teardown() };
 
         let recycle = [outcome, flushed, teardown].contains(&(RAPIRA_BAILOUT as c_int));
@@ -694,7 +694,7 @@ fn log_and_clear_last_error() {
 }
 
 // `run_script` also returns false for exit() and die(), so only a recorded fatal error marks a failure.
-fn run_classic_unit(ctx: &mut Context) -> bool {
+fn run_classic_unit(ctx: &mut CgiExchange) -> bool {
     bind_server_context(ctx);
     let errored = unsafe {
         populate_request_context(ctx);
@@ -709,8 +709,8 @@ fn run_classic_unit(ctx: &mut Context) -> bool {
 
         let failed = !run_script(script().filename());
         let exec_err = failed && fatal_error_recorded();
-        ctx.tearing_down = true;
-        ctx.errored = exec_err;
+        ctx.begin_teardown();
+        ctx.mark_errored(exec_err);
         rapira_request_shutdown();
         // RSHUTDOWN seals inside a zend_try; a bailout there leaves the seal to this call.
         ctx.end(exec_err);
@@ -776,14 +776,13 @@ pub extern "C" fn rapira_rs_handle_request(
 }
 
 /// # Safety
-/// Called from C (`rapira_finish_request`) on a worker thread inside an active request whose `Context` is bound in `SG(server_context)`.
+/// Called from C (`rapira_finish_request`) on a worker thread inside an active request whose `CgiExchange` is bound in `SG(server_context)`.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_finish_response() {
     guard((), || unsafe {
         if let Some(c) = ctx() {
-            // Shutdown functions, destructors, and teardown flush run after `ctx.errored` is set.
-            let errored = c.errored || fatal_error_recorded();
-            c.end(errored);
+            // Shutdown functions, destructors, and teardown flush run after `mark_errored` is set.
+            c.finish_response(fatal_error_recorded());
         }
     });
 }
