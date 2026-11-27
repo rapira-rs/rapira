@@ -5,7 +5,7 @@
 
 use base64::Engine as _;
 use base64::engine::general_purpose::STANDARD_NO_PAD;
-use rapira_grpc::php::call::{MetadataField, context_metadata};
+use rapira_grpc::call::{MetadataField, context_metadata};
 
 /// The transport-reserved names of `Context::$metadata`: https://github.com/rapira-rs/contract/blob/master/src/Grpc/Call/Context.php
 const RESERVED_PREFIXES: [&str; 4] = ["grpc-", "connect-", "content-", "trailer-"];

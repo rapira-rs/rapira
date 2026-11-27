@@ -21,7 +21,7 @@ use tokio_util::io::InspectWriter;
 use tower::Service as _;
 
 use crate::Server;
-use crate::dispatch::PhpDispatcher;
+use crate::dispatch::{InFlight, PhpDispatcher};
 
 /// Everything the accept loop hands to a connection, and the drain that follows it.
 struct Serving {
@@ -31,22 +31,6 @@ struct Serving {
     connections: Connections,
     /// The calls whose response is not complete: a unary call until its response is ready, and a stream of PHP until its body ends.
     inflight: Arc<AtomicUsize>,
-}
-
-/// Counts one call in flight until it drops, also when the client leaves first.
-pub(crate) struct InFlight(Arc<AtomicUsize>);
-
-impl InFlight {
-    pub(crate) fn start(count: &Arc<AtomicUsize>) -> Self {
-        count.fetch_add(1, Relaxed);
-        Self(Arc::clone(count))
-    }
-}
-
-impl Drop for InFlight {
-    fn drop(&mut self) {
-        self.0.fetch_sub(1, Relaxed);
-    }
 }
 
 impl Serving {

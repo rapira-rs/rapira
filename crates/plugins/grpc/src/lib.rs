@@ -11,15 +11,14 @@ use rapira_sapi::rapira_plugin;
 use rapira_sapi::work::Intake;
 use tokio::sync::watch;
 
-mod call;
+pub mod call;
 pub mod config;
 mod dispatch;
 mod health;
-pub mod php;
+mod php;
 pub mod schema;
 mod serve;
 
-use call::{Call, Head, Part, UnaryReply};
 pub use php::rapira_grpc_register_classes;
 use schema::Schema;
 

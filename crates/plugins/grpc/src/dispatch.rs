@@ -1,7 +1,7 @@
 //! The `PhpDispatcher`: one call through the intake to PHP, the JSON transcoding, and the PHP reply, stream or status as a connectrpc response or error.
 
 use std::sync::Arc;
-use std::sync::atomic::AtomicUsize;
+use std::sync::atomic::{AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
 use bytes::Bytes;
@@ -16,12 +16,25 @@ use rapira_sapi::work::{Intake, Unit, now_unix_f64};
 use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout_at;
 
-use crate::call::{Deadline, expired};
-use crate::php::GrpcState;
-use crate::php::call::{Reply, StreamReply};
+use crate::call::{Call, CallState, Deadline, Part, Reply, StreamReply, expired};
+use crate::php::GrpcUnit;
 use crate::schema::{Method, Schema};
-use crate::serve::InFlight;
-use crate::{Call, Part};
+
+/// Counts one call in flight until it drops, also when the client leaves first.
+pub(crate) struct InFlight(Arc<AtomicUsize>);
+
+impl InFlight {
+    pub(crate) fn start(count: &Arc<AtomicUsize>) -> Self {
+        count.fetch_add(1, Relaxed);
+        Self(Arc::clone(count))
+    }
+}
+
+impl Drop for InFlight {
+    fn drop(&mut self) {
+        self.0.fetch_sub(1, Relaxed);
+    }
+}
 
 /// Routes the unary and server-streaming methods of the configured services to PHP.
 pub(crate) struct PhpDispatcher {
@@ -196,7 +209,7 @@ async fn unary(
     let bytes = call.message.len();
     let until = call.until();
     let (tx, reply) = oneshot::channel();
-    let call = GrpcState::new(call, Reply::Unary(tx));
+    let call = GrpcUnit::new(CallState::new(call, Reply::Unary(tx)));
     // The intake refuses the call before dispatch, so PHP never sees it.
     if let Err(e) = intake.submit(Unit::Dispatcher(Box::new(call)), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));
@@ -255,7 +268,7 @@ async fn server_streaming(
     // The channel holds one message. When the buffers of the connection are full, hyper stops the poll of the body, so the generator waits at its yield.
     let (parts_tx, parts) = mpsc::channel(1);
     let reply = StreamReply::new(head_tx, parts_tx);
-    let call = GrpcState::new(call, Reply::Stream(reply));
+    let call = GrpcUnit::new(CallState::new(call, Reply::Stream(reply)));
     // The intake refuses the call before dispatch, so PHP never sees it.
     if let Err(e) = intake.submit(Unit::Dispatcher(Box::new(call)), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));
@@ -368,7 +381,7 @@ mod tests {
                 received_at: 0.0,
             };
             let (tx, _receiver) = oneshot::channel();
-            let state = GrpcState::new(req, Reply::Unary(tx));
+            let state = GrpcUnit::new(CallState::new(req, Reply::Unary(tx)));
             assert_eq!(state.cancelled(), case.cancelled, "{}", case.name);
             assert_eq!(state.is_finalized(), case.cancelled, "{}", case.name);
         }

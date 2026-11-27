@@ -44,13 +44,13 @@ unsafe fn metadata_valid(ht: *mut HashTable) -> bool {
                 not_a_list(key);
                 return false;
             }
-            let binary = super::call::is_binary(key);
+            let binary = crate::call::is_binary(key);
             for zend::Entry { val: item, .. } in zend::entries((*list).value.arr) {
                 if zend::zval_type(item) != IS_STRING {
                     not_a_list(key);
                     return false;
                 }
-                if !binary && !super::call::printable(zend::zstr_bytes((*item).value.str_)) {
+                if !binary && !crate::call::printable(zend::zstr_bytes((*item).value.str_)) {
                     zend_value_error(
                         c"a value of metadata key %.*s is not printable ASCII".as_ptr(),
                         key.len() as c_int,
