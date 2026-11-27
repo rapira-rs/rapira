@@ -1,8 +1,7 @@
-//! PHP-to-IO-shard response handoff: single-Arc lock-free oneshot slot, recycled large buffers, `HttpResponder`, and `RequestGuard`.
+//! PHP-to-IO-shard response handoff: single-Arc lock-free oneshot slot, recycled large buffers, and `HttpResponder`.
 
 use std::cell::UnsafeCell;
 use std::fs::File;
-use std::rc::Rc;
 use std::sync::atomic::{AtomicBool, AtomicU8, Ordering};
 use std::sync::{Arc, Mutex};
 use std::task::{Context, Poll, Waker};
@@ -12,9 +11,6 @@ use http::header::CONTENT_LENGTH;
 use rapira_http_middleware::ResponseHead;
 use rapira_sapi::CgiResponder;
 use tokio::sync::mpsc;
-
-use crate::io::ConnPhase;
-use crate::serve::LocalInflight;
 
 const STREAM_CHANNEL_CAP: usize = 16;
 const POOL_MIN_BYTES: usize = 32 << 10;
@@ -459,7 +455,7 @@ impl CgiResponder for HttpResponder {
         let content_length = if bodiless {
             head.headers
                 .get(CONTENT_LENGTH)
-                .and_then(|v| crate::check::parse_content_length(v.as_bytes().trim_ascii()))
+                .and_then(|v| crate::intake::parse_content_length(v.as_bytes().trim_ascii()))
         } else if truncated {
             None
         } else {
@@ -477,73 +473,5 @@ impl CgiResponder for HttpResponder {
             bodiless,
             truncated,
         });
-    }
-}
-
-/// `!Send` guard tied to one request on an IO shard; owns the single IO-side `Arc<ResponseSlot>`,
-/// resets `ConnPhase`, decrements shard inflight, and closes/cancels incomplete PHP units on drop.
-pub(crate) struct RequestGuard {
-    phase: Rc<ConnPhase>,
-    inflight: Rc<LocalInflight>,
-    slot: Option<Arc<ResponseSlot>>,
-    received: bool,
-}
-
-impl RequestGuard {
-    pub(crate) fn new(phase: Rc<ConnPhase>, inflight: Rc<LocalInflight>) -> Self {
-        phase.enter_request();
-        inflight.inc();
-        Self {
-            phase,
-            inflight,
-            slot: None,
-            received: false,
-        }
-    }
-
-    pub(crate) fn attach_slot(&mut self, slot: Arc<ResponseSlot>) {
-        self.slot = Some(slot);
-        self.received = false;
-    }
-
-    /// Awaits the initial `Start` message directly on the attached `ResponseSlot` without cloning `Arc`.
-    pub(crate) async fn wait_start(&mut self) -> Result<Start, ()> {
-        std::future::poll_fn(|cx| {
-            let slot = self.slot.as_ref().expect("slot attached before wait_start");
-            match slot.poll_recv(cx) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(out) => {
-                    self.received = true;
-                    Poll::Ready(out)
-                }
-            }
-        })
-        .await
-    }
-
-    pub(crate) fn mark_done(&self) {
-        if let Some(slot) = &self.slot {
-            slot.mark_done();
-        }
-    }
-
-    /// Hands completion ownership to `ConnPhase` so `ShardIo::poll_flush` marks PHP done only after the final bytes flush to the socket.
-    pub(crate) fn arm_complete(&mut self) {
-        if let Some(slot) = self.slot.take() {
-            self.phase.arm_complete(slot);
-        }
-    }
-}
-
-impl Drop for RequestGuard {
-    fn drop(&mut self) {
-        if let Some(slot) = &self.slot {
-            if !self.received {
-                slot.close_receiver();
-            }
-            slot.cancel_if_incomplete();
-        }
-        self.phase.leave_request();
-        self.inflight.dec();
     }
 }

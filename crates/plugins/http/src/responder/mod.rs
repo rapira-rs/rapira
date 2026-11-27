@@ -15,10 +15,9 @@ use rapira_http_middleware::{BodyStream, MiddlewareChain, ResponseHead, ShortRes
 use tokio::sync::mpsc;
 
 use body::{StreamBody, run_encoders};
-use slot::Chunk;
 
 pub(crate) use body::ResponseBody;
-pub(crate) use slot::{HttpResponder, RequestGuard, ResponseSlot, Start};
+pub(crate) use slot::{Chunk, HttpResponder, ResponseSlot, Start};
 
 /// True for HTTP statuses that carry no message body (RFC 9112 §6.3: 1xx, 204, 304).
 /// https://www.rfc-editor.org/rfc/rfc9112#section-6.3
@@ -75,9 +74,8 @@ fn strip_hop_by_hop(headers: &mut HeaderMap) {
 }
 
 /// Builds a standardized host refusal response (`Cache-Control: private, no-store`, `Connection: close`).
-pub(crate) fn refusal(status: StatusCode, guard: RequestGuard) -> Response<ResponseBody> {
-    guard.mark_done();
-    let mut res = Response::new(ResponseBody::Empty { _guard: guard });
+pub(crate) fn refusal(status: StatusCode) -> Response<ResponseBody> {
+    let mut res = Response::new(ResponseBody::Empty);
     *res.status_mut() = status;
     let hdrs = res.headers_mut();
     hdrs.insert(CACHE_CONTROL, HeaderValue::from_static("private, no-store"));
@@ -115,8 +113,7 @@ fn build_response(
     closing: bool,
     extensions: &Extensions,
     spec: ResponseSpec,
-    mut guard: RequestGuard,
-) -> Response<ResponseBody> {
+) -> Result<Response<ResponseBody>, StatusCode> {
     let ResponseSpec {
         mut head,
         declared_len,
@@ -134,14 +131,13 @@ fn build_response(
     );
 
     if head.status < 200 {
-        guard.arm_complete();
-        let mut res = Response::new(ResponseBody::Empty { _guard: guard });
+        let mut res = Response::new(ResponseBody::Empty);
         *res.status_mut() = StatusCode::BAD_GATEWAY;
         if closing || truncated_complete {
             res.headers_mut()
                 .insert(CONNECTION, HeaderValue::from_static("close"));
         }
-        return res;
+        return Ok(res);
     }
 
     let bodiless = bodiless || is_head || is_bodiless_status(head.status);
@@ -176,8 +172,7 @@ fn build_response(
         {
             headers.insert(CONTENT_LENGTH, HeaderValue::from(cl));
         }
-        guard.arm_complete();
-        ResponseBody::Empty { _guard: guard }
+        ResponseBody::Empty
     } else {
         match source {
             ResponseSource::Complete { body, truncated } => {
@@ -187,10 +182,8 @@ fn build_response(
                     let wire = if encoders.is_empty() {
                         body
                     } else {
-                        match run_encoders(&mut encoders, &body, false) {
-                            Ok(b) => b,
-                            Err(_) => return refusal(StatusCode::INTERNAL_SERVER_ERROR, guard),
-                        }
+                        run_encoders(&mut encoders, &body, false)
+                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                     };
                     let hint_len = (under_run && encoders.is_empty())
                         .then_some(declared_len)
@@ -198,43 +191,30 @@ fn build_response(
                     ResponseBody::Stream(Box::new(StreamBody::truncated(
                         (!wire.is_empty()).then_some(wire),
                         hint_len,
-                        guard,
                     )))
                 } else {
                     let wire = if encoders.is_empty() {
                         body
                     } else {
-                        match run_encoders(&mut encoders, &body, true) {
-                            Ok(b) => b,
-                            Err(_) => return refusal(StatusCode::INTERNAL_SERVER_ERROR, guard),
-                        }
+                        run_encoders(&mut encoders, &body, true)
+                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
                     };
-                    guard.arm_complete();
                     if wire.is_empty() {
-                        ResponseBody::Empty { _guard: guard }
+                        ResponseBody::Empty
                     } else {
-                        ResponseBody::Once {
-                            data: Some(wire),
-                            _guard: guard,
-                        }
+                        ResponseBody::Once(Some(wire))
                     }
                 }
             }
             ResponseSource::PhpStream { rx } => {
                 if encoders.is_empty() && head.known_len == Some(0) {
-                    guard.arm_complete();
-                    ResponseBody::Empty { _guard: guard }
+                    ResponseBody::Empty
                 } else {
-                    ResponseBody::Stream(Box::new(StreamBody::php(
-                        rx,
-                        encoders,
-                        declared_len,
-                        guard,
-                    )))
+                    ResponseBody::Stream(Box::new(StreamBody::php(rx, encoders, declared_len)))
                 }
             }
             ResponseSource::MiddlewareStream { first, rest } => ResponseBody::Stream(Box::new(
-                StreamBody::middleware(first, rest, encoders, declared_len, guard),
+                StreamBody::middleware(first, rest, encoders, declared_len),
             )),
         }
     };
@@ -242,7 +222,7 @@ fn build_response(
     let mut res = Response::new(resp_body);
     *res.status_mut() = status;
     *res.headers_mut() = headers;
-    res
+    Ok(res)
 }
 
 /// Converts a Phase-1 middleware `ShortResponse` into a `hyper` response, running outer Phase-2 hooks.
@@ -253,8 +233,7 @@ pub(crate) fn build_short_response(
     closing: bool,
     extensions: &Extensions,
     short: ShortResponse,
-    guard: RequestGuard,
-) -> Response<ResponseBody> {
+) -> Result<Response<ResponseBody>, StatusCode> {
     let declared_len = short.head.known_len;
     let source = match short.rest {
         Some(rest) => ResponseSource::MiddlewareStream {
@@ -278,23 +257,20 @@ pub(crate) fn build_short_response(
             outer_depth: Some(outer_depth),
             source,
         },
-        guard,
     )
 }
 
-/// Converts a PHP `Start` message into a `hyper` `Response<ResponseBody>`.
+/// Converts a PHP `Start` message into a `hyper` `Response<ResponseBody>`, or a refusal `StatusCode`.
 pub(crate) fn build_php_response(
     chain: &MiddlewareChain,
     is_head: bool,
     closing: bool,
     extensions: &Extensions,
     start: Start,
-    guard: RequestGuard,
-) -> Response<ResponseBody> {
+) -> Result<Response<ResponseBody>, StatusCode> {
     let spec = match start {
         Start::Error(code) => {
-            let status = StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR);
-            return refusal(status, guard);
+            return Err(StatusCode::from_u16(code).unwrap_or(StatusCode::INTERNAL_SERVER_ERROR));
         }
         Start::Complete {
             head,
@@ -321,5 +297,5 @@ pub(crate) fn build_php_response(
             source: ResponseSource::PhpStream { rx },
         },
     };
-    build_response(chain, is_head, closing, extensions, spec, guard)
+    build_response(chain, is_head, closing, extensions, spec)
 }

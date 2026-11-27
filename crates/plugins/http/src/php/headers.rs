@@ -65,7 +65,7 @@ pub(super) fn split_framing(mut headers: ResponseHeaders) -> Result<SplitHead, &
         if lines.next().is_some() {
             return Err(c"content-length may not repeat");
         }
-        first.and_then(|v| crate::check::parse_content_length(v.as_bytes().trim_ascii()))
+        first.and_then(|v| crate::intake::parse_content_length(v.as_bytes().trim_ascii()))
     };
     headers.remove(&http::header::CONTENT_LENGTH);
     Ok(SplitHead {

@@ -14,7 +14,7 @@ use rapira_http_middleware::{BodyEncoder, BodyStream};
 use tokio::sync::mpsc;
 use tokio::task::JoinHandle;
 
-use super::slot::{Chunk, PooledBuf, RequestGuard, take_pooled_buf};
+use super::slot::{Chunk, PooledBuf, take_pooled_buf};
 
 const SENDFILE_SLICE: usize = 256 << 10;
 
@@ -254,7 +254,6 @@ pub(crate) struct StreamBody {
     sent_raw: u64,
     pending_error: bool,
     finished: bool,
-    guard: RequestGuard,
 }
 
 impl StreamBody {
@@ -262,7 +261,6 @@ impl StreamBody {
         rx: mpsc::Receiver<Chunk>,
         encoders: Vec<Box<dyn BodyEncoder>>,
         declared_len: Option<u64>,
-        guard: RequestGuard,
     ) -> Self {
         Self::new(
             StreamSource::Php {
@@ -271,7 +269,6 @@ impl StreamBody {
             },
             encoders,
             declared_len,
-            guard,
         )
     }
 
@@ -280,7 +277,6 @@ impl StreamBody {
         rest: Box<dyn BodyStream>,
         encoders: Vec<Box<dyn BodyEncoder>>,
         declared_len: Option<u64>,
-        guard: RequestGuard,
     ) -> Self {
         Self::new(
             StreamSource::Middleware {
@@ -289,28 +285,17 @@ impl StreamBody {
             },
             encoders,
             declared_len,
-            guard,
         )
     }
 
-    pub(super) fn truncated(
-        data: Option<Bytes>,
-        declared_len: Option<u64>,
-        guard: RequestGuard,
-    ) -> Self {
-        Self::new(
-            StreamSource::Truncated { data },
-            Vec::new(),
-            declared_len,
-            guard,
-        )
+    pub(super) fn truncated(data: Option<Bytes>, declared_len: Option<u64>) -> Self {
+        Self::new(StreamSource::Truncated { data }, Vec::new(), declared_len)
     }
 
     fn new(
         source: StreamSource,
         encoders: Vec<Box<dyn BodyEncoder>>,
         declared_len: Option<u64>,
-        guard: RequestGuard,
     ) -> Self {
         Self {
             source,
@@ -319,7 +304,6 @@ impl StreamBody {
             sent_raw: 0,
             pending_error: false,
             finished: false,
-            guard,
         }
     }
 
@@ -377,7 +361,6 @@ impl Body for StreamBody {
                     if this.encoders.is_empty() {
                         if reached {
                             this.source.stop();
-                            this.guard.arm_complete();
                             this.finished = true;
                         }
                         return Poll::Ready(Some(Ok(Frame::data(chunk))));
@@ -388,7 +371,6 @@ impl Body for StreamBody {
                             Err(_) => return this.trigger_abort(cx),
                         };
                         this.source.stop();
-                        this.guard.arm_complete();
                         this.finished = true;
                         return Poll::Ready(
                             (!encoded.is_empty()).then(|| Ok(Frame::data(encoded))),
@@ -414,7 +396,6 @@ impl Body for StreamBody {
                             Err(_) => return this.trigger_abort(cx),
                         }
                     };
-                    this.guard.arm_complete();
                     this.finished = true;
                     return Poll::Ready((!tail.is_empty()).then(|| Ok(Frame::data(tail))));
                 }
@@ -426,14 +407,17 @@ impl Body for StreamBody {
 
 /// Concrete unboxed `http_body::Body` returned to `hyper`.
 pub(crate) enum ResponseBody {
-    Empty {
-        _guard: RequestGuard,
-    },
-    Once {
-        data: Option<Bytes>,
-        _guard: RequestGuard,
-    },
+    Empty,
+    Once(Option<Bytes>),
     Stream(Box<StreamBody>),
+}
+
+impl ResponseBody {
+    /// True when the entire body is already materialized in memory and cannot abort mid-stream.
+    #[inline]
+    pub(crate) fn is_complete(&self) -> bool {
+        !matches!(self, Self::Stream(_))
+    }
 }
 
 impl Body for ResponseBody {
@@ -443,8 +427,8 @@ impl Body for ResponseBody {
     #[inline]
     fn is_end_stream(&self) -> bool {
         match self {
-            Self::Empty { .. } => true,
-            Self::Once { data, .. } => data.is_none(),
+            Self::Empty => true,
+            Self::Once(data) => data.is_none(),
             Self::Stream(s) => s.is_end_stream(),
         }
     }
@@ -452,10 +436,8 @@ impl Body for ResponseBody {
     #[inline]
     fn size_hint(&self) -> SizeHint {
         match self {
-            Self::Empty { .. } => SizeHint::with_exact(0),
-            Self::Once { data, .. } => {
-                SizeHint::with_exact(data.as_ref().map_or(0, |b| b.len() as u64))
-            }
+            Self::Empty => SizeHint::with_exact(0),
+            Self::Once(data) => SizeHint::with_exact(data.as_ref().map_or(0, |b| b.len() as u64)),
             Self::Stream(s) => s.size_hint(),
         }
     }
@@ -466,8 +448,8 @@ impl Body for ResponseBody {
         cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         match self.get_mut() {
-            Self::Empty { .. } => Poll::Ready(None),
-            Self::Once { data, .. } => match data.take() {
+            Self::Empty => Poll::Ready(None),
+            Self::Once(data) => match data.take() {
                 Some(b) if !b.is_empty() => Poll::Ready(Some(Ok(Frame::data(b)))),
                 _ => Poll::Ready(None),
             },

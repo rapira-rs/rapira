@@ -11,13 +11,11 @@ use rapira_sapi::rapira_plugin;
 use rapira_sapi::work::Intake;
 use tokio::sync::watch;
 
-pub mod check;
 pub mod config;
-mod handler;
+pub mod intake;
 mod io;
 pub mod multipart;
 pub mod php;
-pub mod request;
 mod responder;
 mod serve;
 

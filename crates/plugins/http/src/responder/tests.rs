@@ -1,6 +1,5 @@
 use std::io;
 use std::pin::Pin;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll, Wake, Waker};
@@ -17,8 +16,6 @@ use tokio::sync::mpsc;
 
 use super::slot::Chunk;
 use super::*;
-use crate::io::ConnPhase;
-use crate::serve::LocalInflight;
 
 struct CountWaker(AtomicUsize);
 
@@ -374,8 +371,7 @@ fn compressed_declared_under_run_aborts() {
                 truncated: false,
             }
         };
-        let guard = RequestGuard::new(ConnPhase::new(), Rc::new(LocalInflight::default()));
-        let resp = build_php_response(&chain, false, false, &ctx.extensions, start, guard);
+        let resp = build_php_response(&chain, false, false, &ctx.extensions, start).unwrap();
         let (_chunks, aborted, _pendings) = drain_body(resp.into_body());
         assert_eq!(aborted, case.want_abort, "{}", case.name);
     }
@@ -458,11 +454,11 @@ fn unified_normalizer_and_stream_invariants() {
         declared_len: Option<u64>,
         fail_write: bool,
         fail_finish: bool,
+        want_err: Option<StatusCode>,
         want_status: StatusCode,
         want_cl: Option<&'static str>,
         want_abort: bool,
         want_pending_before_abort: bool,
-        want_slot_armed_on_phase: bool,
     }
     let cases = [
         Case {
@@ -473,11 +469,11 @@ fn unified_normalizer_and_stream_invariants() {
             declared_len: Some(5),
             fail_write: false,
             fail_finish: false,
+            want_err: None,
             want_status: StatusCode::BAD_GATEWAY,
             want_cl: None,
             want_abort: false,
             want_pending_before_abort: false,
-            want_slot_armed_on_phase: true,
         },
         Case {
             name: "HEAD response keeps known Content-Length without body on 200",
@@ -487,11 +483,11 @@ fn unified_normalizer_and_stream_invariants() {
             declared_len: Some(42),
             fail_write: false,
             fail_finish: false,
+            want_err: None,
             want_status: StatusCode::OK,
             want_cl: Some("42"),
             want_abort: false,
             want_pending_before_abort: false,
-            want_slot_armed_on_phase: true,
         },
         Case {
             name: "HEAD 304 never emits Content-Length",
@@ -501,11 +497,11 @@ fn unified_normalizer_and_stream_invariants() {
             declared_len: Some(42),
             fail_write: false,
             fail_finish: false,
+            want_err: None,
             want_status: StatusCode::NOT_MODIFIED,
             want_cl: None,
             want_abort: false,
             want_pending_before_abort: false,
-            want_slot_armed_on_phase: true,
         },
         Case {
             name: "middleware stream shorter than known_len yields pending before abort",
@@ -515,53 +511,53 @@ fn unified_normalizer_and_stream_invariants() {
             declared_len: Some(10),
             fail_write: false,
             fail_finish: false,
+            want_err: None,
             want_status: StatusCode::OK,
             want_cl: None,
             want_abort: true,
             want_pending_before_abort: true,
-            want_slot_armed_on_phase: false,
         },
         Case {
-            name: "one-shot encoder failure returns 500 refusal without arming ConnPhase",
+            name: "one-shot encoder failure returns Err(500) refusal status",
             kind: SourceKind::PhpComplete,
             status: 200,
             is_head: false,
             declared_len: Some(5),
             fail_write: false,
             fail_finish: true,
+            want_err: Some(StatusCode::INTERNAL_SERVER_ERROR),
             want_status: StatusCode::INTERNAL_SERVER_ERROR,
             want_cl: None,
             want_abort: false,
             want_pending_before_abort: false,
-            want_slot_armed_on_phase: false,
         },
         Case {
-            name: "truncated pre-head encoder write failure returns 500 refusal without arming ConnPhase",
+            name: "truncated pre-head encoder write failure returns Err(500) refusal status",
             kind: SourceKind::PhpTruncated,
             status: 200,
             is_head: false,
             declared_len: None,
             fail_write: true,
             fail_finish: false,
+            want_err: Some(StatusCode::INTERNAL_SERVER_ERROR),
             want_status: StatusCode::INTERNAL_SERVER_ERROR,
             want_cl: None,
             want_abort: false,
             want_pending_before_abort: false,
-            want_slot_armed_on_phase: false,
         },
         Case {
-            name: "stream finish encoder failure aborts without arming ConnPhase",
+            name: "stream finish encoder failure yields pending before abort",
             kind: SourceKind::PhpStream,
             status: 200,
             is_head: false,
             declared_len: Some(5),
             fail_write: false,
             fail_finish: true,
+            want_err: None,
             want_status: StatusCode::OK,
             want_cl: None,
             want_abort: true,
             want_pending_before_abort: true,
-            want_slot_armed_on_phase: false,
         },
     ];
 
@@ -574,13 +570,9 @@ fn unified_normalizer_and_stream_invariants() {
         } else {
             MiddlewareChain::default()
         };
-        let phase = ConnPhase::new();
-        let slot = ResponseSlot::new();
-        let mut guard = RequestGuard::new(Rc::clone(&phase), Rc::new(LocalInflight::default()));
-        guard.attach_slot(Arc::clone(&slot));
         let ext = Extensions::new();
 
-        let resp = match case.kind {
+        let res = match case.kind {
             SourceKind::ShortFull => {
                 let mut head = ResponseHead::new(case.status);
                 head.known_len = case.declared_len;
@@ -591,7 +583,6 @@ fn unified_normalizer_and_stream_invariants() {
                     false,
                     &ext,
                     ShortResponse::full(head, Bytes::from_static(b"hello")),
-                    guard,
                 )
             }
             SourceKind::ShortStreamUnderRun => {
@@ -602,7 +593,7 @@ fn unified_normalizer_and_stream_invariants() {
                     body: Bytes::from_static(b"hel"),
                     rest: Some(Box::new(VecStream(vec![Ok(Bytes::from_static(b"lo"))]))),
                 };
-                build_short_response(&chain, 0, case.is_head, false, &ext, short, guard)
+                build_short_response(&chain, 0, case.is_head, false, &ext, short)
             }
             SourceKind::PhpComplete | SourceKind::PhpTruncated => build_php_response(
                 &chain,
@@ -616,7 +607,6 @@ fn unified_normalizer_and_stream_invariants() {
                     bodiless: false,
                     truncated: matches!(case.kind, SourceKind::PhpTruncated),
                 },
-                guard,
             ),
             SourceKind::PhpStream => {
                 let (tx, rx) = mpsc::channel(4);
@@ -633,11 +623,15 @@ fn unified_normalizer_and_stream_invariants() {
                         content_length: case.declared_len,
                         rx,
                     },
-                    guard,
                 )
             }
         };
 
+        if let Some(want_err) = case.want_err {
+            assert_eq!(res.err(), Some(want_err), "{}", case.name);
+            continue;
+        }
+        let resp = res.expect(case.name);
         assert_eq!(resp.status(), case.want_status, "{}", case.name);
         assert_eq!(
             resp.headers()
@@ -654,38 +648,6 @@ fn unified_normalizer_and_stream_invariants() {
             assert!(
                 pendings >= 1,
                 "{}: expected flush yield before abort",
-                case.name
-            );
-        }
-
-        // Verify ConnPhase arming:
-        // - Armed responses cancel if the socket fails before flush (`cancel_pending`).
-        // - Refused responses (`500` on one-shot encode error) mark the slot done immediately without arming `ConnPhase`.
-        // - Aborted streams cancel on guard drop without arming `ConnPhase`, so `on_flushed` cannot mark them done.
-        if case.want_slot_armed_on_phase {
-            assert!(
-                !slot.is_cancelled(),
-                "{}: armed slot stays uncancelled until socket result",
-                case.name
-            );
-            phase.cancel_pending();
-            assert!(
-                slot.is_cancelled(),
-                "{}: cancel_pending must cancel the slot armed on ConnPhase",
-                case.name
-            );
-        } else if case.want_abort {
-            phase.on_flushed();
-            assert!(
-                slot.is_cancelled(),
-                "{}: aborted stream must cancel slot, not arm completion",
-                case.name
-            );
-        } else {
-            phase.cancel_pending();
-            assert!(
-                !slot.is_cancelled(),
-                "{}: 500 refusal must not arm ConnPhase",
                 case.name
             );
         }

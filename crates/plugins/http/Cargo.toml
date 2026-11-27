@@ -35,5 +35,5 @@ httparse = "1"
 rapira_php_build = { workspace = true }
 
 [dev-dependencies]
-tokio = { workspace = true, features = ["test-util"] }
+tokio = { workspace = true, features = ["test-util", "io-util"] }
 toml = { workspace = true }

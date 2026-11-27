@@ -6,10 +6,9 @@
 use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, Uri, Version};
 use rapira_fuzz::safe_name;
-use rapira_http::check::check_request;
+use rapira_http::intake::{build_request, check_request};
 use rapira_http::middleware::{Peer, PeerAddr};
 use rapira_http::php::uri_abs;
-use rapira_http::request::build;
 use rapira_sapi::types::Chunks;
 
 const MAX_BODY: usize = 1024;
@@ -63,7 +62,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     let (mut parts, ()) = req.into_parts();
 
     let authority = match check_request(&mut parts, superglobals, MAX_BODY) {
-        Ok(auth) => auth,
+        Ok(admitted) => admitted.authority,
         Err(rej) => {
             assert!(matches!(rej.status.as_u16(), 400 | 413));
             return;
@@ -97,7 +96,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         https,
         received_at: 0.0,
     };
-    let built = build(
+    let built = build_request(
         parts.method,
         parts.uri,
         parts.version,

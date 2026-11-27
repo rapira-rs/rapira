@@ -1,5 +1,4 @@
 use std::borrow::Cow;
-use std::rc::Rc;
 use std::sync::Arc;
 use std::task::{Context, Poll, Waker};
 
@@ -14,9 +13,7 @@ use rapira_sapi::zend_string;
 use super::headers::*;
 use super::respond::*;
 use super::*;
-use crate::io::ConnPhase;
-use crate::responder::{RequestGuard, ResponseSlot, Start, build_php_response};
-use crate::serve::LocalInflight;
+use crate::responder::{ResponseSlot, Start, build_php_response, refusal};
 
 fn base_req() -> Request {
     Request {
@@ -98,16 +95,14 @@ impl Attached {
 
     fn build_and_collect(&mut self) -> Captured {
         let start = self.try_recv_start().expect("expected Start message");
-        let mut guard = RequestGuard::new(ConnPhase::new(), Rc::new(LocalInflight::default()));
-        guard.attach_slot(Arc::clone(&self.slot));
         let res = build_php_response(
             &MiddlewareChain::default(),
             self.is_head,
             false,
             &Extensions::new(),
             start,
-            guard,
-        );
+        )
+        .unwrap_or_else(refusal);
         let (parts, mut body) = res.into_parts();
         let exact_len = body.size_hint().exact();
         let is_end_stream = body.is_end_stream();

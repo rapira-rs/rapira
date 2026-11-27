@@ -150,7 +150,7 @@ pub fn uri_abs(req: &Request) -> String {
 
 pub struct ExchangeState {
     // The multipart field comes before responder, so the drop in declaration order unlinks the spool files before the responder signals completion.
-    multipart: Option<MultipartBody>,
+    multipart: Option<Box<MultipartBody>>,
     req: Request,
     responder: Option<HttpResponder>,
     /// The first `getRequest()` fills it. The state keeps the owned `$uri` because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
@@ -166,7 +166,7 @@ pub struct ExchangeState {
 impl ExchangeState {
     pub(crate) fn new(
         req: Request,
-        multipart: Option<MultipartBody>,
+        multipart: Option<Box<MultipartBody>>,
         responder: HttpResponder,
     ) -> Self {
         let bodiless = req.method == "HEAD";

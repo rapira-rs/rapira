@@ -1,4 +1,7 @@
-//! LocalSet-friendly `hyper::rt::{Read, Write}` transport with lazy single-timer idle and write timeouts.
+//! HTTP connection driver: `ShardIo<S>` timeouts, `ConnPhase` flush completion, `Inflight` tracking, and `TrackBody<B>`.
+
+#[cfg(test)]
+mod tests;
 
 use std::cell::Cell;
 use std::future::Future;
@@ -6,16 +9,19 @@ use std::io;
 use std::pin::Pin;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::task::{Context, Poll};
 use std::time::Duration;
 
+use http::{Response, StatusCode};
+use http_body::{Body, Frame, SizeHint};
 use hyper::rt::{Read, ReadBufCursor, Write};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio::net::{TcpStream, UnixStream};
 use tokio::time::{Instant, Sleep};
 
-use crate::responder::ResponseSlot;
+use crate::responder::{ResponseBody, ResponseSlot, Start, refusal};
 
 /// Nonblocking stream accepted by `rapira_net` and registered on one shard's Tokio reactor.
 pub(crate) enum RawIo {
@@ -94,6 +100,78 @@ impl AsyncWrite for RawIo {
     }
 }
 
+/// Cache-line-padded inflight request counter owned by one IO shard.
+/// Only the owning IO shard writes to it, so plain stores avoid atomic RMW and cross-shard false sharing.
+#[repr(align(64))]
+#[derive(Default)]
+pub(crate) struct InflightShard {
+    count: AtomicUsize,
+}
+
+impl InflightShard {
+    #[inline]
+    pub(crate) fn store(&self, n: usize) {
+        self.count.store(n, Ordering::Release);
+    }
+
+    #[inline]
+    pub(crate) fn count(&self) -> usize {
+        self.count.load(Ordering::Acquire)
+    }
+}
+
+/// Sharded inflight request tracker across all IO shards.
+pub(crate) struct Inflight {
+    shards: Vec<Arc<InflightShard>>,
+}
+
+impl Inflight {
+    pub(crate) fn with_shards(n: usize) -> Self {
+        let n = n.max(1);
+        Self {
+            shards: (0..n).map(|_| Arc::new(InflightShard::default())).collect(),
+        }
+    }
+
+    pub(crate) fn shard_at(&self, idx: usize) -> Arc<InflightShard> {
+        Arc::clone(&self.shards[idx % self.shards.len()])
+    }
+
+    pub(crate) fn count(&self) -> usize {
+        self.shards.iter().map(|s| s.count()).sum()
+    }
+}
+
+/// `!Send` per-shard inflight counter backed by a cache-padded atomic read during drain.
+#[derive(Default)]
+pub(crate) struct LocalInflight {
+    atomic: Arc<InflightShard>,
+    local: Cell<usize>,
+}
+
+impl LocalInflight {
+    pub(crate) fn new(atomic: Arc<InflightShard>) -> Self {
+        Self {
+            atomic,
+            local: Cell::new(0),
+        }
+    }
+
+    #[inline]
+    pub(crate) fn inc(&self) {
+        let next = self.local.get() + 1;
+        self.local.set(next);
+        self.atomic.store(next);
+    }
+
+    #[inline]
+    pub(crate) fn dec(&self) {
+        let next = self.local.get() - 1;
+        self.local.set(next);
+        self.atomic.store(next);
+    }
+}
+
 /// Connection lifecycle phase shared on the `!Send` shard between `ShardIo` and the request handler.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum IoPhase {
@@ -168,9 +246,199 @@ impl Drop for ConnPhase {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeaseState {
+    Active,
+    AwaitingStart,
+    Aborted,
+}
+
+/// `!Send` RAII lease held by `RequestScope` while preparing/waiting, then moved into `TrackBody<B>`.
+struct RequestLease {
+    phase: Rc<ConnPhase>,
+    inflight: Rc<LocalInflight>,
+    slot: Option<Arc<ResponseSlot>>,
+    state: LeaseState,
+}
+
+impl RequestLease {
+    #[inline]
+    fn has_slot(&self) -> bool {
+        self.slot.is_some()
+    }
+
+    #[inline]
+    fn arm_complete(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            self.phase.arm_complete(slot);
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn cancel_slot(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            if self.state == LeaseState::AwaitingStart {
+                slot.close_receiver();
+                self.state = LeaseState::Active;
+            }
+            slot.cancel_if_incomplete();
+        }
+    }
+
+    #[cold]
+    #[inline(never)]
+    fn mark_done(&mut self) {
+        if let Some(slot) = self.slot.take() {
+            if self.state == LeaseState::AwaitingStart {
+                slot.close_receiver();
+                self.state = LeaseState::Active;
+            }
+            slot.mark_done();
+        }
+    }
+}
+
+impl Drop for RequestLease {
+    #[inline]
+    fn drop(&mut self) {
+        if self.slot.is_some() {
+            self.cancel_slot();
+        }
+        self.phase.leave_request();
+        self.inflight.dec();
+    }
+}
+
+/// Per-request shard lifecycle guard owned during admission and PHP dispatch, then converted into `TrackBody<B>`.
+pub(crate) struct RequestScope {
+    lease: RequestLease,
+}
+
+impl RequestScope {
+    #[inline]
+    pub(crate) fn new(phase: Rc<ConnPhase>, inflight: Rc<LocalInflight>) -> Self {
+        phase.enter_request();
+        inflight.inc();
+        Self {
+            lease: RequestLease {
+                phase,
+                inflight,
+                slot: None,
+                state: LeaseState::Active,
+            },
+        }
+    }
+
+    #[inline]
+    pub(crate) fn attach_slot(&mut self, slot: Arc<ResponseSlot>) {
+        self.lease.slot = Some(slot);
+        self.lease.state = LeaseState::AwaitingStart;
+    }
+
+    /// Awaits the initial `Start` message directly on the attached `ResponseSlot` without cloning `Arc`.
+    pub(crate) async fn wait_start(&mut self) -> Result<Start, ()> {
+        std::future::poll_fn(|cx| {
+            let slot = self
+                .lease
+                .slot
+                .as_ref()
+                .expect("slot attached before wait_start");
+            match slot.poll_recv(cx) {
+                Poll::Pending => Poll::Pending,
+                Poll::Ready(out) => {
+                    self.lease.state = LeaseState::Active;
+                    Poll::Ready(out)
+                }
+            }
+        })
+        .await
+    }
+
+    /// Wraps a normal HTTP response so `ConnPhase` arms completion once the full body is ready and cancels on abort or drop.
+    #[inline]
+    pub(crate) fn track(
+        mut self,
+        resp: Response<ResponseBody>,
+    ) -> Response<TrackBody<ResponseBody>> {
+        if resp.body().is_complete() {
+            self.lease.arm_complete();
+        }
+        let lease = self.lease;
+        resp.map(|body| TrackBody { body, lease })
+    }
+
+    /// Returns a host refusal response, marking any attached PHP slot done immediately without arming `ConnPhase`.
+    pub(crate) fn refuse(mut self, status: StatusCode) -> Response<TrackBody<ResponseBody>> {
+        self.lease.mark_done();
+        let lease = self.lease;
+        refusal(status).map(|body| TrackBody { body, lease })
+    }
+}
+
+/// Shard-level `http_body::Body` adapter that tracks request inflight count, `ConnPhase` arming, and abort cancellation.
+pub(crate) struct TrackBody<B> {
+    body: B,
+    lease: RequestLease,
+}
+
+type FramePoll<B> = Poll<Option<Result<Frame<<B as Body>::Data>, <B as Body>::Error>>>;
+
+impl<B: Body + Unpin> TrackBody<B> {
+    #[cold]
+    #[inline(never)]
+    fn on_stream_poll(&mut self, poll: &FramePoll<B>) {
+        match poll {
+            Poll::Pending => {}
+            Poll::Ready(Some(Ok(_))) => {
+                if self.lease.state != LeaseState::Aborted && self.body.is_end_stream() {
+                    self.lease.arm_complete();
+                }
+            }
+            Poll::Ready(Some(Err(_))) => {
+                self.lease.state = LeaseState::Aborted;
+                self.lease.cancel_slot();
+            }
+            Poll::Ready(None) => {
+                if self.lease.state != LeaseState::Aborted {
+                    self.lease.arm_complete();
+                }
+            }
+        }
+    }
+}
+
+impl<B: Body + Unpin> Body for TrackBody<B> {
+    type Data = B::Data;
+    type Error = B::Error;
+
+    #[inline]
+    fn is_end_stream(&self) -> bool {
+        self.body.is_end_stream()
+    }
+
+    #[inline]
+    fn size_hint(&self) -> SizeHint {
+        self.body.size_hint()
+    }
+
+    #[inline]
+    fn poll_frame(
+        self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
+        let this = self.get_mut();
+        let poll = Pin::new(&mut this.body).poll_frame(cx);
+        if this.lease.has_slot() {
+            this.on_stream_poll(&poll);
+        }
+        poll
+    }
+}
+
 /// `hyper::rt::{Read, Write}` wrapper that allocates and arms timers lazily only on `Poll::Pending`.
-pub(crate) struct ShardIo {
-    io: TokioIo<RawIo>,
+pub(crate) struct ShardIo<S> {
+    io: TokioIo<S>,
     phase: Rc<ConnPhase>,
     keepalive_timeout: Duration,
     /// Coarsening slack that avoids per-request `Sleep::reset()` wheel churn on busy keep-alive connections.
@@ -183,9 +451,9 @@ pub(crate) struct ShardIo {
     write_armed: bool,
 }
 
-impl ShardIo {
+impl<S> ShardIo<S> {
     pub(crate) fn new(
-        raw: RawIo,
+        raw: S,
         phase: Rc<ConnPhase>,
         keepalive_timeout: Duration,
         write_timeout: Duration,
@@ -229,7 +497,7 @@ impl ShardIo {
     }
 }
 
-impl Read for ShardIo {
+impl<S: AsyncRead + Unpin> Read for ShardIo<S> {
     #[inline]
     fn poll_read(
         self: Pin<&mut Self>,
@@ -285,7 +553,7 @@ impl Read for ShardIo {
     }
 }
 
-impl Write for ShardIo {
+impl<S: AsyncWrite + Unpin> Write for ShardIo<S> {
     #[inline]
     fn poll_write(
         self: Pin<&mut Self>,
@@ -329,7 +597,7 @@ impl Write for ShardIo {
 
     #[inline]
     fn is_write_vectored(&self) -> bool {
-        true
+        self.io.is_write_vectored()
     }
 
     #[inline]

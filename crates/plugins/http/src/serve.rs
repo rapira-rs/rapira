@@ -6,65 +6,30 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
-use std::time::Duration;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use anyhow::{Context, Result, anyhow};
+use http::{Extensions, Method, Request as HttpRequest, Response, StatusCode};
+use hyper::body::Incoming;
 use hyper::server::conn::http1;
 use hyper::service::service_fn;
-use rapira_http_middleware::{MiddlewareChain, PeerAddr};
+use rapira_http_middleware::{MiddlewareChain, Peer, PeerAddr};
 use rapira_net::{ListenAddr, Serve};
-use rapira_sapi::work::Intake;
+use rapira_sapi::types::Context as SapiContext;
+use rapira_sapi::work::{Intake, Refused, Unit};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::LocalSet;
 
-use crate::handler::handle_request;
-use crate::io::{ConnPhase, RawIo, ShardIo};
+use crate::intake::{self, Admit, IntakeLimits, Prepared};
+use crate::io::{
+    ConnPhase, Inflight, InflightShard, LocalInflight, RawIo, RequestScope, ShardIo, TrackBody,
+};
+use crate::php::ExchangeState;
+use crate::responder::{HttpResponder, ResponseBody, build_php_response, build_short_response};
 use crate::{Config, Server};
 
 /// Maximum HTTP/1.x request head size in bytes (`431 Request Header Fields Too Large` above this).
 const MAX_HEADER_BYTES: usize = 64 << 10;
-
-/// Cache-line-padded inflight request counter owned by one IO shard.
-/// Only the owning IO shard writes to it, so plain stores avoid atomic RMW (`lock xadd`) and cross-shard false sharing.
-#[repr(align(64))]
-#[derive(Default)]
-pub(crate) struct InflightShard {
-    count: AtomicUsize,
-}
-
-impl InflightShard {
-    #[inline]
-    pub(crate) fn store(&self, n: usize) {
-        self.count.store(n, Ordering::Release);
-    }
-
-    #[inline]
-    pub(crate) fn count(&self) -> usize {
-        self.count.load(Ordering::Acquire)
-    }
-}
-
-/// Sharded inflight request tracker across all IO shards.
-pub(crate) struct Inflight {
-    shards: Vec<Arc<InflightShard>>,
-}
-
-impl Inflight {
-    fn with_shards(n: usize) -> Self {
-        let n = n.max(1);
-        Self {
-            shards: (0..n).map(|_| Arc::new(InflightShard::default())).collect(),
-        }
-    }
-
-    fn shard_at(&self, idx: usize) -> Arc<InflightShard> {
-        Arc::clone(&self.shards[idx % self.shards.len()])
-    }
-
-    fn count(&self) -> usize {
-        self.shards.iter().map(|s| s.count()).sum()
-    }
-}
 
 /// State shared across every HTTP IO shard.
 pub(crate) struct Shared {
@@ -74,36 +39,6 @@ pub(crate) struct Shared {
     pub inflight: Arc<Inflight>,
     /// True while the listener drains. Each response then closes its connection.
     pub closing: Arc<AtomicBool>,
-}
-
-/// `!Send` per-shard inflight counter backed by a cache-padded atomic read during drain.
-#[derive(Default)]
-pub(crate) struct LocalInflight {
-    atomic: Arc<InflightShard>,
-    local: Cell<usize>,
-}
-
-impl LocalInflight {
-    fn new(atomic: Arc<InflightShard>) -> Self {
-        Self {
-            atomic,
-            local: Cell::new(0),
-        }
-    }
-
-    #[inline]
-    pub(crate) fn inc(&self) {
-        let next = self.local.get() + 1;
-        self.local.set(next);
-        self.atomic.store(next);
-    }
-
-    #[inline]
-    pub(crate) fn dec(&self) {
-        let next = self.local.get() - 1;
-        self.local.set(next);
-        self.atomic.store(next);
-    }
 }
 
 /// `!Send` state owned by one `LocalSet` IO shard to avoid cross-core atomics and `watch` mutexes.
@@ -137,6 +72,97 @@ pub(crate) struct ConnCtx {
     pub phase: Rc<ConnPhase>,
     pub remote: PeerAddr,
     pub server: PeerAddr,
+}
+
+fn now_unix() -> f64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0.0, |d| d.as_secs_f64())
+}
+
+/// Handles one HTTP request on the connection's IO shard.
+async fn handle_request(
+    conn: Rc<ConnCtx>,
+    req: HttpRequest<Incoming>,
+) -> Result<Response<TrackBody<ResponseBody>>, std::convert::Infallible> {
+    let mut scope = RequestScope::new(Rc::clone(&conn.phase), Rc::clone(&conn.shard.inflight));
+    let shared = &conn.shard.shared;
+    let is_head = req.method() == Method::HEAD;
+
+    let peer = Peer {
+        remote: conn.remote.clone(),
+        server: conn.server.clone(),
+        https: false,
+        received_at: now_unix(),
+    };
+
+    let limits = IntakeLimits {
+        superglobals: shared.cfg.superglobals,
+        max_body_size: shared.cfg.max_body_size,
+        body_timeout: shared.cfg.keepalive_timeout,
+        uploads: shared.cfg.uploads.as_ref(),
+    };
+
+    let (request, multipart, budget_bytes, extensions) =
+        match intake::admit(req, peer, &shared.chain, &limits) {
+            Ok(Admit::Ready(request)) => (request, None, 0, Extensions::new()),
+            Ok(Admit::Pending(pending)) => match pending.finish(&shared.chain, &limits).await {
+                Ok(Prepared::Short {
+                    outer_depth,
+                    short,
+                    extensions,
+                }) => {
+                    let closing = shared.closing.load(Ordering::Acquire);
+                    return Ok(
+                        match build_short_response(
+                            &shared.chain,
+                            outer_depth,
+                            is_head,
+                            closing,
+                            &extensions,
+                            short,
+                        ) {
+                            Ok(resp) => scope.track(resp),
+                            Err(status) => scope.refuse(status),
+                        },
+                    );
+                }
+                Ok(Prepared::Dispatch {
+                    request,
+                    multipart,
+                    budget_bytes,
+                    extensions,
+                }) => (request, multipart, budget_bytes, extensions),
+                Err(rej) => return Ok(scope.refuse(rej.status)),
+            },
+            Err(rej) => return Ok(scope.refuse(rej.status)),
+        };
+
+    let (responder, slot) = HttpResponder::pair(is_head);
+    scope.attach_slot(slot);
+    let unit = if shared.cfg.superglobals {
+        Unit::Cgi(Box::new(SapiContext::new(request, Box::new(responder))))
+    } else {
+        Unit::Dispatcher(Box::new(ExchangeState::new(request, multipart, responder)))
+    };
+    if let Err(refused) = shared.intake.submit(unit, budget_bytes).await {
+        let status = match refused {
+            Refused::OverBudget | Refused::Saturated => StatusCode::SERVICE_UNAVAILABLE,
+        };
+        return Ok(scope.refuse(status));
+    }
+    let start = match scope.wait_start().await {
+        Ok(start) => start,
+        Err(()) => return Ok(scope.refuse(StatusCode::BAD_GATEWAY)),
+    };
+
+    let closing = shared.closing.load(Ordering::Acquire);
+    Ok(
+        match build_php_response(&shared.chain, is_head, closing, &extensions, start) {
+            Ok(resp) => scope.track(resp),
+            Err(status) => scope.refuse(status),
+        },
+    )
 }
 
 struct OpenConnGuard(Rc<ShardState>);
