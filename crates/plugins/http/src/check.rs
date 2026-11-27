@@ -60,30 +60,24 @@ pub fn check_request(
     let host_bytes = first_host.map(|v| v.as_bytes().trim_ascii());
     let uri_authority = parts.uri.authority().map(|a| a.as_str().as_bytes());
 
-    let authority = match (host_bytes, uri_authority) {
-        (Some(b""), _) => {
-            if parts.version == Version::HTTP_11 {
-                return Err(Rejection {
-                    status: StatusCode::BAD_REQUEST,
-                    reason: "empty Host header".into(),
-                });
-            }
-            match uri_authority {
-                Some(a) if !a.is_empty() => Authority::Explicit(Bytes::copy_from_slice(a)),
-                _ => Authority::None,
-            }
+    let authority = match host_bytes {
+        Some(b"") if parts.version == Version::HTTP_11 => {
+            return Err(Rejection {
+                status: StatusCode::BAD_REQUEST,
+                reason: "empty Host header".into(),
+            });
         }
-        (Some(_), _) => Authority::HostHeader,
-        (None, Some(a)) if !a.is_empty() => Authority::Explicit(Bytes::copy_from_slice(a)),
-        (None, _) => {
-            if parts.version == Version::HTTP_11 {
-                return Err(Rejection {
-                    status: StatusCode::BAD_REQUEST,
-                    reason: "missing Host header".into(),
-                });
-            }
-            Authority::None
+        None if parts.version == Version::HTTP_11 => {
+            return Err(Rejection {
+                status: StatusCode::BAD_REQUEST,
+                reason: "missing Host header".into(),
+            });
         }
+        Some(b) if !b.is_empty() => Authority::HostHeader,
+        _ => match uri_authority {
+            Some(a) if !a.is_empty() => Authority::Explicit(Bytes::copy_from_slice(a)),
+            _ => Authority::None,
+        },
     };
 
     if let Some(cl_val) = parts.headers.get(CONTENT_LENGTH)
@@ -160,6 +154,26 @@ mod tests {
                 max_body: 1024,
                 want_status: None,
                 want_authority: None,
+            },
+            Case {
+                name: "http11 absolute-form without host rejected",
+                version: Version::HTTP_11,
+                uri: "http://example.test/path",
+                headers: &[],
+                superglobals: false,
+                max_body: 1024,
+                want_status: Some(400),
+                want_authority: None,
+            },
+            Case {
+                name: "http10 absolute-form without host uses uri authority",
+                version: Version::HTTP_10,
+                uri: "http://example.test/path",
+                headers: &[],
+                superglobals: false,
+                max_body: 1024,
+                want_status: None,
+                want_authority: Some(b"example.test"),
             },
             Case {
                 name: "declared content-length over cap returns 413",

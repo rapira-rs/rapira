@@ -1213,6 +1213,57 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
     Ok(())
 }
 
+/// Empty multipart requests without a boundary reach PHP raw under both Content-Length: 0 and chunked framing; non-empty and repeated-header requests still answer 400.
+#[test]
+fn empty_chunked_multipart_without_boundary_reaches_php() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        raw: &'static [u8],
+        want_status: u16,
+    }
+    let cases = [
+        Case {
+            name: "empty chunked multipart without boundary reaches php",
+            raw: b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n",
+            want_status: 200,
+        },
+        Case {
+            name: "empty content-length 0 multipart without boundary reaches php",
+            raw: b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            want_status: 200,
+        },
+        Case {
+            name: "non-empty chunked multipart without boundary returns 400",
+            raw: b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nbody\r\n0\r\n\r\n",
+            want_status: 400,
+        },
+        Case {
+            name: "empty chunked repeated multipart content-type returns 400",
+            raw: b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Type: multipart/form-data\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n",
+            want_status: 400,
+        },
+    ];
+
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/echo-loop-worker.php"))
+        .http_extra("[http.uploads]\ndir = \"uploads\"")
+        .spawn();
+    let timeout = Duration::from_secs(10);
+
+    for case in cases {
+        let mut conn = crate::harness::Conn::open(srv.addr, timeout)?;
+        conn.send(case.raw)?;
+        let head = conn.read_head(timeout)?;
+        assert_eq!(
+            head.status,
+            case.want_status,
+            "{}\n{}",
+            case.name,
+            crate::harness::diagnostics(&srv)
+        );
+    }
+    Ok(())
+}
+
 /// `getInfo()` during the handling of a unit. The outstanding unit counts as active, and the pull already took it out of `pending`.
 #[test]
 fn get_info_counts_the_outstanding_unit() -> anyhow::Result<()> {

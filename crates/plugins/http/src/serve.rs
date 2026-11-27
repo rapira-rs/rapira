@@ -24,13 +24,12 @@ use crate::{Config, Server};
 /// Maximum HTTP/1.x request head size in bytes (`431 Request Header Fields Too Large` above this).
 const MAX_HEADER_BYTES: usize = 64 << 10;
 
-/// Cache-line-padded inflight request and open connection counters owned by one IO shard.
-/// Only the owning IO shard writes to them, so plain stores avoid atomic RMW (`lock xadd`) and cross-shard false sharing.
+/// Cache-line-padded inflight request counter owned by one IO shard.
+/// Only the owning IO shard writes to it, so plain stores avoid atomic RMW (`lock xadd`) and cross-shard false sharing.
 #[repr(align(64))]
 #[derive(Default)]
 pub(crate) struct InflightShard {
     count: AtomicUsize,
-    open: AtomicUsize,
 }
 
 impl InflightShard {
@@ -43,19 +42,9 @@ impl InflightShard {
     pub(crate) fn count(&self) -> usize {
         self.count.load(Ordering::Acquire)
     }
-
-    #[inline]
-    pub(crate) fn store_open(&self, n: usize) {
-        self.open.store(n, Ordering::Relaxed);
-    }
-
-    #[inline]
-    pub(crate) fn open(&self) -> usize {
-        self.open.load(Ordering::Relaxed)
-    }
 }
 
-/// Sharded inflight request and open connection tracker across all IO shards.
+/// Sharded inflight request tracker across all IO shards.
 pub(crate) struct Inflight {
     shards: Vec<Arc<InflightShard>>,
 }
@@ -74,10 +63,6 @@ impl Inflight {
 
     fn count(&self) -> usize {
         self.shards.iter().map(|s| s.count()).sum()
-    }
-
-    fn open_count(&self) -> usize {
-        self.shards.iter().map(|s| s.open()).sum()
     }
 }
 
@@ -119,11 +104,6 @@ impl LocalInflight {
         self.local.set(next);
         self.atomic.store(next);
     }
-
-    #[inline]
-    fn store_open(&self, n: usize) {
-        self.atomic.store_open(n);
-    }
 }
 
 /// `!Send` state owned by one `LocalSet` IO shard to avoid cross-core atomics and `watch` mutexes.
@@ -138,16 +118,13 @@ pub(crate) struct ShardState {
 impl ShardState {
     #[inline]
     fn inc_open(&self) {
-        let next = self.local_open.get() + 1;
-        self.local_open.set(next);
-        self.inflight.store_open(next);
+        self.local_open.set(self.local_open.get() + 1);
     }
 
     #[inline]
     fn dec_open(&self) {
         let next = self.local_open.get() - 1;
         self.local_open.set(next);
-        self.inflight.store_open(next);
         if next == 0 && self.draining.get() {
             self.drained.notify_one();
         }
@@ -187,6 +164,7 @@ fn run_shard(
     inflight_atomic: Arc<InflightShard>,
     mut rx: mpsc::UnboundedReceiver<Accepted>,
     mut cut: watch::Receiver<bool>,
+    rx_drained: oneshot::Sender<usize>,
     done: oneshot::Sender<()>,
 ) {
     let rt = match tokio::runtime::Builder::new_current_thread()
@@ -272,6 +250,7 @@ fn run_shard(
             }
         }
         shard_state.draining.set(true);
+        let _ = rx_drained.send(shard_state.local_open.get());
         if shard_state.local_open.get() > 0 {
             let drained = shard_state.drained.notified();
             tokio::select! {
@@ -320,6 +299,7 @@ struct Serving {
     senders: Vec<mpsc::UnboundedSender<Accepted>>,
     next: AtomicUsize,
     cut: watch::Sender<bool>,
+    rx_drained_rxs: Vec<oneshot::Receiver<usize>>,
     done_rxs: Vec<oneshot::Receiver<()>>,
     handles: Vec<thread::JoinHandle<()>>,
 }
@@ -352,11 +332,13 @@ impl Serving {
             senders: Vec::with_capacity(num_shards),
             next: AtomicUsize::new(0),
             cut,
+            rx_drained_rxs: Vec::with_capacity(num_shards),
             done_rxs: Vec::with_capacity(num_shards),
             handles: Vec::with_capacity(num_shards),
         };
         for i in 0..num_shards {
             let (tx, rx) = mpsc::unbounded_channel();
+            let (rx_drained_tx, rx_drained_rx) = oneshot::channel();
             let (done_tx, done_rx) = oneshot::channel();
             let shard = serving.shared.inflight.shard_at(i);
             let shared_clone = Arc::clone(&serving.shared);
@@ -364,18 +346,15 @@ impl Serving {
             let handle = thread::Builder::new()
                 .name(format!("rapira-io-{i}"))
                 .spawn(move || {
-                    run_shard(shared_clone, shard, rx, cut_rx, done_tx);
+                    run_shard(shared_clone, shard, rx, cut_rx, rx_drained_tx, done_tx);
                 })
                 .with_context(|| format!("spawning HTTP IO shard {i}"))?;
             serving.senders.push(tx);
+            serving.rx_drained_rxs.push(rx_drained_rx);
             serving.done_rxs.push(done_rx);
             serving.handles.push(handle);
         }
         Ok(serving)
-    }
-
-    fn open_connections(&self) -> usize {
-        self.shared.inflight.open_count()
     }
 
     /// Assigns accepted connections round-robin across IO shards without cross-core counter scans.
@@ -398,15 +377,22 @@ impl Serving {
 
     /// A held connection closes after its next response. An idle connection can stay open for the full grace period.
     async fn drain(mut self, grace: Duration) -> Result<()> {
+        let deadline = tokio::time::Instant::now() + grace;
         self.shared.closing.store(true, Ordering::Release);
-        tracing::info!(
-            target: "http",
-            "draining {} open connections",
-            self.open_connections()
-        );
         self.senders.clear();
+        let rx_drained_rxs = std::mem::take(&mut self.rx_drained_rxs);
+        let mut open = 0usize;
+        let _ = tokio::time::timeout_at(deadline, async {
+            for rx in rx_drained_rxs {
+                if let Ok(n) = rx.await {
+                    open += n;
+                }
+            }
+        })
+        .await;
+        tracing::info!(target: "http", "draining {open} open connections");
         let done_rxs = std::mem::take(&mut self.done_rxs);
-        let _ = tokio::time::timeout(grace, async move {
+        let _ = tokio::time::timeout_at(deadline, async move {
             for rx in done_rxs {
                 let _ = rx.await;
             }

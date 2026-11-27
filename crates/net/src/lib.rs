@@ -132,11 +132,18 @@ where
     for _ in 0..ACCEPT_BATCH_LIMIT {
         match guard.try_io(|inner| accept_one(inner.get_ref())) {
             Ok(Ok(())) => {}
+            Ok(Err(e)) if is_skipped_accept(&e) => {
+                // Readiness stays set on non-WouldBlock errors; yield so `select!` can observe `stop`.
+                drop(guard);
+                tokio::task::yield_now().await;
+                return Err(e);
+            }
             Ok(Err(e)) => return Err(e),
             Err(_would_block) => return Ok(()),
         }
     }
     // Yield after a full burst so `select!` can observe `stop`.
+    drop(guard);
     tokio::task::yield_now().await;
     Ok(())
 }
@@ -343,6 +350,71 @@ mod tests {
                 "{}",
                 case.name
             );
+        }
+    }
+
+    #[test]
+    fn skipped_accept_yields_so_stop_is_observed() {
+        struct Case {
+            name: &'static str,
+            errno: i32,
+        }
+        let cases = [
+            Case {
+                name: "ECONNABORTED yields to stop",
+                errno: libc::ECONNABORTED,
+            },
+            Case {
+                name: "ECONNRESET yields to stop",
+                errno: libc::ECONNRESET,
+            },
+            Case {
+                name: "EINTR yields to stop",
+                errno: libc::EINTR,
+            },
+        ];
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        for case in cases {
+            rt.block_on(async {
+                let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                std_listener.set_nonblocking(true).unwrap();
+                let addr = std_listener.local_addr().unwrap();
+                let _client = std::net::TcpStream::connect(addr).unwrap();
+                // SAFETY: `std_listener` owns its descriptor for the lifetime of `AsyncFd`.
+                let async_fd =
+                    unsafe { AsyncFd::register_with_interest(std_listener, Interest::READABLE) }
+                        .unwrap();
+
+                let (stop_tx, mut stop_rx) = watch::channel(false);
+                let mut calls = 0usize;
+                let accept = async {
+                    loop {
+                        let step = accept_batch(&async_fd, |_| {
+                            calls += 1;
+                            if calls == 2 {
+                                stop_tx.send_replace(true);
+                            }
+                            Err(std::io::Error::from_raw_os_error(case.errno))
+                        })
+                        .await;
+                        assert!(step.is_err_and(|e| is_skipped_accept(&e)), "{}", case.name);
+                        if calls >= 10 {
+                            return "starved";
+                        }
+                    }
+                };
+                let outcome = tokio::select! {
+                    biased;
+                    _ = stop_rx.wait_for(|&s| s) => "stopped",
+                    res = accept => res,
+                };
+                assert_eq!(outcome, "stopped", "{}", case.name);
+            });
         }
     }
 }

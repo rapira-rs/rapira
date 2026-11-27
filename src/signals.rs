@@ -27,24 +27,27 @@ pub struct Signals(libc::sigset_t);
 impl Signals {
     /// Blocks the host signals on the main thread before it creates any thread, and installs the handler for them. Each new thread inherits the mask. https://man7.org/linux/man-pages/man3/pthread_sigmask.3.html
     pub fn block() -> io::Result<Self> {
-        // SAFETY: sigemptyset initializes both sets. sigaction and pthread_sigmask copy their arguments.
+        // SAFETY: sigemptyset initializes both sets. pthread_sigmask and sigaction copy their arguments.
         unsafe {
+            let mut set = std::mem::zeroed();
+            libc::sigemptyset(&mut set);
+            for sig in HOST {
+                libc::sigaddset(&mut set, sig);
+            }
+            // Block host signals before installing `forward` so startup signals stay pending until `sigwait` starts.
+            let err = libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
+            if err != 0 {
+                return Err(io::Error::from_raw_os_error(err));
+            }
             let mut action: libc::sigaction = std::mem::zeroed();
             action.sa_sigaction = forward as *const () as libc::sighandler_t;
             // An interrupted system call of a PHP thread starts again.
             action.sa_flags = libc::SA_RESTART;
             libc::sigemptyset(&mut action.sa_mask);
-            let mut set = std::mem::zeroed();
-            libc::sigemptyset(&mut set);
             for sig in HOST {
-                libc::sigaddset(&mut set, sig);
                 if libc::sigaction(sig, &action, std::ptr::null_mut()) != 0 {
                     return Err(io::Error::last_os_error());
                 }
-            }
-            let err = libc::pthread_sigmask(libc::SIG_BLOCK, &set, std::ptr::null_mut());
-            if err != 0 {
-                return Err(io::Error::from_raw_os_error(err));
             }
             Ok(Self(set))
         }

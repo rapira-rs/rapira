@@ -408,3 +408,121 @@ fn compress_middleware_handles_head_without_uncompressed_content_length() {
 
     let _ = std::fs::remove_dir_all(&root);
 }
+
+/// Conditional 304 responses for compressed static assets keep Vary: Accept-Encoding and match the 200 ETag weakness.
+#[test]
+fn compress_preserves_vary_and_weak_etag_on_static_304() {
+    let root = scratch_dir();
+    let css = "body { color: blue; }\n".repeat(200);
+    std::fs::write(root.join("app.css"), &css).expect("write app.css");
+    let png = vec![0x89u8; 4096];
+    std::fs::write(root.join("logo.png"), &png).expect("write logo.png");
+
+    let srv = Spawn::http(Mode::Dispatcher, fixture_path("compress/worker.php"))
+        .http_extra(&format!(
+            "middleware = [\"compress\", \"static\"]\n[http.compress]\nmin_size = 64\n[http.static]\nroot = \"{}\"",
+            root.display()
+        ))
+        .spawn();
+
+    let raw_css = http_get_raw(srv.addr, "/app.css", &[("Accept-Encoding", "gzip")], T)
+        .expect("initial GET /app.css");
+    let (status, css_fields, _) = split_raw(&raw_css);
+    assert_eq!(status, 200);
+    let css_weak_etag = field(&css_fields, "etag").expect("css etag").to_owned();
+    assert!(
+        css_weak_etag.starts_with("W/\""),
+        "css 200 etag={css_weak_etag}"
+    );
+    let css_strong_etag = css_weak_etag.strip_prefix("W/").unwrap().to_owned();
+    let css_last_mod = field(&css_fields, "last-modified")
+        .expect("css last-modified")
+        .to_owned();
+
+    let raw_png = http_get_raw(srv.addr, "/logo.png", &[("Accept-Encoding", "gzip")], T)
+        .expect("initial GET /logo.png");
+    let (status, png_fields, _) = split_raw(&raw_png);
+    assert_eq!(status, 200);
+    let png_strong_etag = field(&png_fields, "etag").expect("png etag").to_owned();
+    assert!(
+        png_strong_etag.starts_with('"'),
+        "png 200 etag={png_strong_etag}"
+    );
+
+    struct Case {
+        name: &'static str,
+        target: &'static str,
+        cond_header: &'static str,
+        cond_value: String,
+        accept: Option<&'static str>,
+        want_etag: String,
+        want_vary: bool,
+    }
+    let cases = [
+        Case {
+            name: "304 css via If-None-Match with gzip weakens etag and keeps Vary",
+            target: "/app.css",
+            cond_header: "If-None-Match",
+            cond_value: css_weak_etag.clone(),
+            accept: Some("gzip"),
+            want_etag: css_weak_etag.clone(),
+            want_vary: true,
+        },
+        Case {
+            name: "304 css via If-Modified-Since with gzip weakens etag and keeps Vary",
+            target: "/app.css",
+            cond_header: "If-Modified-Since",
+            cond_value: css_last_mod,
+            accept: Some("gzip"),
+            want_etag: css_weak_etag,
+            want_vary: true,
+        },
+        Case {
+            name: "304 css without Accept-Encoding keeps strong etag and keeps Vary",
+            target: "/app.css",
+            cond_header: "If-None-Match",
+            cond_value: css_strong_etag.clone(),
+            accept: None,
+            want_etag: css_strong_etag,
+            want_vary: true,
+        },
+        Case {
+            name: "304 incompressible png with gzip keeps strong etag without Vary",
+            target: "/logo.png",
+            cond_header: "If-None-Match",
+            cond_value: png_strong_etag.clone(),
+            accept: Some("gzip"),
+            want_etag: png_strong_etag,
+            want_vary: false,
+        },
+    ];
+
+    for case in cases {
+        let mut headers = vec![(case.cond_header, case.cond_value.as_str())];
+        if let Some(ae) = case.accept {
+            headers.push(("Accept-Encoding", ae));
+        }
+        let raw = http_get_raw(srv.addr, case.target, &headers, T)
+            .unwrap_or_else(|e| panic!("{}: {e}\n{}", case.name, diagnostics(&srv)));
+        let (status, fields, body) = split_raw(&raw);
+        assert_eq!(status, 304, "{}: fields={fields:?}", case.name);
+        assert!(body.is_empty(), "{}: 304 body must be empty", case.name);
+        assert_eq!(
+            field(&fields, "content-encoding"),
+            None,
+            "{}: 304 must not set content-encoding",
+            case.name
+        );
+        assert_eq!(
+            field(&fields, "etag"),
+            Some(case.want_etag.as_str()),
+            "{}: fields={fields:?}",
+            case.name
+        );
+        let has_vary = field(&fields, "vary")
+            .is_some_and(|v| v.to_ascii_lowercase().contains("accept-encoding"));
+        assert_eq!(has_vary, case.want_vary, "{}: fields={fields:?}", case.name);
+    }
+
+    let _ = std::fs::remove_dir_all(&root);
+}

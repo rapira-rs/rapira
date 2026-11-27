@@ -61,7 +61,7 @@ enum BodyMode<'a> {
     },
     /// Opened lazily on the first non-empty body byte so an empty POST reaches PHP raw.
     Multipart {
-        boundary: Vec<u8>,
+        content_type: &'a [u8],
         limits: &'a multipart::Limits,
         size_hint: Option<usize>,
         parser: Option<Box<multipart::Parser<'a>>>,
@@ -103,9 +103,9 @@ fn has_repeated_multipart_ct(headers: &HeaderMap, uploads: Option<&multipart::Li
     uploads.is_some() && matches!(inspect_multipart_ct(headers), MultipartHeader::Repeated)
 }
 
-/// Validates multipart `Content-Type` before polling the body so `Expect: 100-continue` is skipped on `400`.
+/// Rejects repeated multipart `Content-Type` headers before polling the body; defers boundary parsing until the first non-empty frame.
 fn open_body_mode<'a>(
-    headers: &HeaderMap,
+    headers: &'a HeaderMap,
     uploads: Option<&'a multipart::Limits>,
 ) -> Result<BodyMode<'a>, Rejection> {
     let Some(limits) = uploads else {
@@ -116,7 +116,7 @@ fn open_body_mode<'a>(
         });
     };
 
-    let first_bytes = match inspect_multipart_ct(headers) {
+    let content_type = match inspect_multipart_ct(headers) {
         MultipartHeader::None => {
             return Ok(BodyMode::Raw {
                 first: None,
@@ -132,13 +132,12 @@ fn open_body_mode<'a>(
         }
         MultipartHeader::Single(bytes) => bytes,
     };
-    let boundary = multipart::boundary(first_bytes)?;
     let size_hint = headers
         .get(CONTENT_LENGTH)
         .and_then(|v| parse_content_length(v.as_bytes().trim_ascii()))
         .and_then(|n| usize::try_from(n).ok());
     Ok(BodyMode::Multipart {
-        boundary,
+        content_type,
         limits,
         size_hint,
         parser: None,
@@ -228,16 +227,20 @@ async fn read_request_body(
                 }
             }
             BodyMode::Multipart {
-                boundary,
+                content_type,
                 limits,
                 size_hint,
                 parser,
             } => {
-                let p = parser.get_or_insert_with(|| {
-                    Box::new(multipart::Parser::new_with_hint(
-                        boundary, limits, *size_hint,
-                    ))
-                });
+                let p = match parser {
+                    Some(p) => p,
+                    None => {
+                        let boundary = multipart::boundary(content_type)?;
+                        parser.insert(Box::new(multipart::Parser::new_with_hint(
+                            &boundary, limits, *size_hint,
+                        )))
+                    }
+                };
                 p.feed(&data)?;
             }
         }

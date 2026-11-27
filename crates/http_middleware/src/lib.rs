@@ -91,6 +91,13 @@ impl ResponseHead {
     }
 }
 
+/// Representation metadata for a `304 Not Modified` response whose wire headers omit `Content-Type` or `Content-Length`.
+#[derive(Clone, Debug)]
+pub struct RepresentationMeta {
+    pub content_type: http::header::HeaderValue,
+    pub known_len: Option<u64>,
+}
+
 /// Push-based body transform (for example gzip or zstd compression).
 pub trait BodyEncoder: Send {
     fn write(&mut self, chunk: &[u8], out: &mut Vec<u8>) -> io::Result<()>;

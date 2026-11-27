@@ -28,7 +28,11 @@ pub struct StaticFiles {
     forbid: Vec<String>,
 }
 
-struct ServeDirStream(ServeFileSystemResponseBody);
+struct ServeDirStream {
+    inner: ServeFileSystemResponseBody,
+    /// Remaining bytes declared by the file metadata; early EOF while positive yields `UnexpectedEof`.
+    remaining: Option<u64>,
+}
 
 impl BodyStream for ServeDirStream {
     fn poll_next_chunk(
@@ -36,13 +40,24 @@ impl BodyStream for ServeDirStream {
         cx: &mut Context<'_>,
     ) -> Poll<Option<io::Result<Bytes>>> {
         loop {
-            match Pin::new(&mut self.0).poll_frame(cx) {
+            match Pin::new(&mut self.inner).poll_frame(cx) {
                 Poll::Pending => return Poll::Pending,
-                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(None) => {
+                    if self.remaining.is_some_and(|rem| rem > 0) {
+                        self.remaining = Some(0);
+                        return Poll::Ready(Some(Err(io::Error::from(
+                            io::ErrorKind::UnexpectedEof,
+                        ))));
+                    }
+                    return Poll::Ready(None);
+                }
                 Poll::Ready(Some(Ok(frame))) => {
                     if let Ok(data) = frame.into_data()
                         && !data.is_empty()
                     {
+                        if let Some(rem) = &mut self.remaining {
+                            *rem = rem.saturating_sub(data.len() as u64);
+                        }
                         return Poll::Ready(Some(Ok(data)));
                     }
                 }
@@ -90,7 +105,7 @@ impl StaticFiles {
         })
     }
 
-    async fn serve_eligible(&self, req: &RequestCtx) -> Option<ShortResponse> {
+    async fn serve_eligible(&self, req: &mut RequestCtx) -> Option<ShortResponse> {
         let mut dir = self.dir.clone();
         let mut served = dir.try_call(probe(req, true)).await;
         // ServeDir does not check If-Range. A validator other than the current strong ETag gets
@@ -104,6 +119,27 @@ impl StaticFiles {
         }
         match served {
             Ok(res) if res.status() != StatusCode::NOT_FOUND => {
+                // ServeDir omits Content-Type and Content-Length on 304; fetch representation metadata for outer response-head middleware (e.g. Vary and weak ETag).
+                if res.status() == StatusCode::NOT_MODIFIED {
+                    let mut head_probe = http::Request::new(Empty::<Bytes>::new());
+                    *head_probe.method_mut() = Method::HEAD;
+                    *head_probe.uri_mut() = req.uri.clone();
+                    if let Ok(meta_res) = dir.try_call(head_probe).await
+                        && meta_res.status() == StatusCode::OK
+                        && let Some(content_type) =
+                            meta_res.headers().get(header::CONTENT_TYPE).cloned()
+                    {
+                        let known_len = meta_res
+                            .headers()
+                            .get(header::CONTENT_LENGTH)
+                            .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+                        req.extensions
+                            .insert(rapira_http_middleware::RepresentationMeta {
+                                content_type,
+                                known_len,
+                            });
+                    }
+                }
                 Some(into_short_response(req.method == Method::HEAD, res).await)
             }
             // A directory URL answers 404 without a filesystem error. It then reaches PHP.
@@ -156,7 +192,10 @@ async fn into_short_response(
     if is_head || matches!(status, 204 | 304) || content_length == Some(0) {
         return ShortResponse::full(head, Bytes::new());
     }
-    let mut stream = ServeDirStream(body);
+    let mut stream = ServeDirStream {
+        inner: body,
+        remaining: content_length,
+    };
     let first = match std::future::poll_fn(|cx| Pin::new(&mut stream).poll_next_chunk(cx)).await {
         None => return ShortResponse::full(head, Bytes::new()),
         Some(Ok(data)) => data,
@@ -265,5 +304,116 @@ mod tests {
     fn an_undecodable_path_is_never_eligible() {
         let st = StaticFiles::new(PathBuf::from("/"), vec![".php".into()]);
         assert!(!st.eligible("/%FF.css"));
+    }
+
+    #[test]
+    fn truncated_stream_reports_unexpected_eof() {
+        struct Case {
+            name: &'static str,
+            truncate_before_first: bool,
+            truncate_after_first: bool,
+            want_status: u16,
+            want_stream_eof_err: bool,
+        }
+        let cases = [
+            Case {
+                name: "file truncated to zero before first read returns 500",
+                truncate_before_first: true,
+                truncate_after_first: false,
+                want_status: 500,
+                want_stream_eof_err: false,
+            },
+            Case {
+                name: "file truncated mid-stream returns unexpected eof error",
+                truncate_before_first: false,
+                truncate_after_first: true,
+                want_status: 200,
+                want_stream_eof_err: true,
+            },
+            Case {
+                name: "unmodified large file streams cleanly to end",
+                truncate_before_first: false,
+                truncate_after_first: false,
+                want_status: 200,
+                want_stream_eof_err: false,
+            },
+        ];
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        let size = 300 * 1024;
+        let payload = vec![b'a'; size];
+
+        for (idx, case) in cases.iter().enumerate() {
+            let root = std::env::temp_dir()
+                .join(format!("rapira-static-trunc-{}-{idx}", std::process::id()));
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(&root).unwrap();
+            let file_path = root.join("large.txt");
+            std::fs::write(&file_path, &payload).unwrap();
+
+            rt.block_on(async {
+                let mut dir = ServeDir::with_backend(root.clone(), CachingBackend::default())
+                    .append_index_html_on_directories(false);
+                let req = http::Request::builder()
+                    .method(Method::GET)
+                    .uri("/large.txt")
+                    .body(Empty::<Bytes>::new())
+                    .unwrap();
+                let res = dir.try_call(req).await.unwrap();
+                assert_eq!(res.status(), StatusCode::OK, "{}", case.name);
+
+                if case.truncate_before_first {
+                    std::fs::File::options()
+                        .write(true)
+                        .open(&file_path)
+                        .unwrap()
+                        .set_len(0)
+                        .unwrap();
+                }
+
+                let mut short = into_short_response(false, res).await;
+                assert_eq!(short.head.status, case.want_status, "{}", case.name);
+
+                if case.truncate_after_first {
+                    std::fs::File::options()
+                        .write(true)
+                        .open(&file_path)
+                        .unwrap()
+                        .set_len(0)
+                        .unwrap();
+                }
+
+                let mut total = short.body.len();
+                let mut got_eof_err = false;
+                if let Some(mut rest) = short.rest.take() {
+                    while let Some(item) =
+                        std::future::poll_fn(|cx| Pin::new(rest.as_mut()).poll_next_chunk(cx)).await
+                    {
+                        match item {
+                            Ok(chunk) => total += chunk.len(),
+                            Err(err) => {
+                                assert_eq!(
+                                    err.kind(),
+                                    std::io::ErrorKind::UnexpectedEof,
+                                    "{}",
+                                    case.name
+                                );
+                                got_eof_err = true;
+                                break;
+                            }
+                        }
+                    }
+                }
+                assert_eq!(got_eof_err, case.want_stream_eof_err, "{}", case.name);
+                if case.want_status == 200 && !case.want_stream_eof_err {
+                    assert_eq!(total, size, "{}", case.name);
+                }
+            });
+
+            let _ = std::fs::remove_dir_all(&root);
+        }
     }
 }

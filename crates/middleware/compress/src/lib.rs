@@ -16,7 +16,7 @@ use http::header::{
     CONTENT_TYPE, ETAG, HeaderValue, VARY,
 };
 use rapira_http_middleware::{
-    BodyEncoder, Middleware, Phases, RequestCtx, RequestStep, ResponseHead,
+    BodyEncoder, Middleware, Phases, RepresentationMeta, RequestCtx, RequestStep, ResponseHead,
 };
 
 pub use config::{Section, Settings, resolve};
@@ -62,7 +62,10 @@ impl Middleware for Compress {
         extensions: &Extensions,
         head: &mut ResponseHead,
     ) -> Option<Box<dyn BodyEncoder>> {
-        if !(200..300).contains(&head.status) || matches!(head.status, 204 | 206) {
+        let is_not_modified = head.status == 304;
+        if !is_not_modified
+            && (!(200..300).contains(&head.status) || matches!(head.status, 204..=206))
+        {
             return None;
         }
         if head.headers.contains_key(&CONTENT_ENCODING) || head.headers.contains_key(&CONTENT_RANGE)
@@ -72,22 +75,32 @@ impl Middleware for Compress {
         if has_no_transform(head.headers.get_all(&CACHE_CONTROL).iter()) {
             return None;
         }
-        let ct = head.headers.get(&CONTENT_TYPE)?;
+        let rep_meta = is_not_modified
+            .then(|| extensions.get::<RepresentationMeta>())
+            .flatten();
+        let ct = head
+            .headers
+            .get(&CONTENT_TYPE)
+            .or_else(|| rep_meta.map(|m| &m.content_type))?;
         if !is_compressible_mime(ct.as_bytes()) {
             return None;
         }
-        if head
+        let known_len = head
             .known_len
-            .is_some_and(|len| len < self.settings.min_size)
-        {
+            .or_else(|| rep_meta.and_then(|m| m.known_len));
+        if known_len.is_some_and(|len| len == 0 || len < self.settings.min_size) {
             return None;
         }
 
-        // RFC 9110 §12.5.5: caches must key negotiated compressible responses on Accept-Encoding.
-        // https://www.rfc-editor.org/rfc/rfc9110#section-12.5.5
+        // RFC 9110 §12.5.5 and §15.4.5: caches key negotiated responses (including 304) on Accept-Encoding.
+        // https://www.rfc-editor.org/rfc/rfc9110#section-15.4.5
         ensure_vary_accept_encoding(head);
 
         let enc = *extensions.get::<Encoding>()?;
+        if is_not_modified {
+            weaken_etag(head);
+            return None;
+        }
         let encoder: Option<Box<dyn BodyEncoder>> = if is_head {
             None
         } else {
@@ -510,6 +523,161 @@ mod tests {
             assert_eq!(
                 resolve(case.section).is_err(),
                 case.want_err,
+                "{}",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn on_response_head_status_and_conditional_rules() {
+        struct Case {
+            name: &'static str,
+            status: u16,
+            min_size: u64,
+            known_len: Option<u64>,
+            content_type: Option<&'static str>,
+            etag: Option<&'static str>,
+            accept: Option<Encoding>,
+            want_encoder: bool,
+            want_ce: Option<&'static str>,
+            want_vary: bool,
+            want_etag: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "205 with min_size 0 does not compress",
+                status: 205,
+                min_size: 0,
+                known_len: Some(0),
+                content_type: Some("text/plain"),
+                etag: None,
+                accept: Some(Encoding::Gzip),
+                want_encoder: false,
+                want_ce: None,
+                want_vary: false,
+                want_etag: None,
+            },
+            Case {
+                name: "205 streamed without known_len does not compress",
+                status: 205,
+                min_size: 64,
+                known_len: None,
+                content_type: Some("text/plain"),
+                etag: None,
+                accept: Some(Encoding::Gzip),
+                want_encoder: false,
+                want_ce: None,
+                want_vary: false,
+                want_etag: None,
+            },
+            Case {
+                name: "200 empty body with min_size 0 does not compress",
+                status: 200,
+                min_size: 0,
+                known_len: Some(0),
+                content_type: Some("text/plain"),
+                etag: Some("\"empty\""),
+                accept: Some(Encoding::Gzip),
+                want_encoder: false,
+                want_ce: None,
+                want_vary: false,
+                want_etag: Some("\"empty\""),
+            },
+            Case {
+                name: "304 compressible with gzip adds vary and weakens etag",
+                status: 304,
+                min_size: 64,
+                known_len: Some(2000),
+                content_type: Some("text/plain"),
+                etag: Some("\"v1\""),
+                accept: Some(Encoding::Gzip),
+                want_encoder: false,
+                want_ce: None,
+                want_vary: true,
+                want_etag: Some("W/\"v1\""),
+            },
+            Case {
+                name: "304 compressible without accept-encoding adds vary and keeps strong etag",
+                status: 304,
+                min_size: 64,
+                known_len: Some(2000),
+                content_type: Some("text/plain"),
+                etag: Some("\"v1\""),
+                accept: None,
+                want_encoder: false,
+                want_ce: None,
+                want_vary: true,
+                want_etag: Some("\"v1\""),
+            },
+            Case {
+                name: "304 incompressible keeps strong etag without vary",
+                status: 304,
+                min_size: 64,
+                known_len: Some(2000),
+                content_type: Some("image/png"),
+                etag: Some("\"v1\""),
+                accept: Some(Encoding::Gzip),
+                want_encoder: false,
+                want_ce: None,
+                want_vary: false,
+                want_etag: Some("\"v1\""),
+            },
+            Case {
+                name: "304 below min_size keeps strong etag without vary",
+                status: 304,
+                min_size: 64,
+                known_len: Some(16),
+                content_type: Some("text/plain"),
+                etag: Some("\"v1\""),
+                accept: Some(Encoding::Gzip),
+                want_encoder: false,
+                want_ce: None,
+                want_vary: false,
+                want_etag: Some("\"v1\""),
+            },
+        ];
+
+        for case in cases {
+            let mw = Compress::new(
+                resolve(Section {
+                    min_size: Some(case.min_size),
+                    ..Default::default()
+                })
+                .unwrap(),
+            );
+            let mut ext = Extensions::new();
+            if let Some(enc) = case.accept {
+                ext.insert(enc);
+            }
+            let mut head = ResponseHead::new(case.status);
+            head.known_len = case.known_len;
+            if let Some(ct) = case.content_type {
+                head.headers
+                    .insert(CONTENT_TYPE, HeaderValue::from_static(ct));
+            }
+            if let Some(etag) = case.etag {
+                head.headers.insert(ETAG, HeaderValue::from_static(etag));
+            }
+            let enc = mw.on_response_head(false, &ext, &mut head);
+            assert_eq!(enc.is_some(), case.want_encoder, "{}", case.name);
+            assert_eq!(
+                head.headers
+                    .get(&CONTENT_ENCODING)
+                    .and_then(|v| v.to_str().ok()),
+                case.want_ce,
+                "{}",
+                case.name
+            );
+            let has_vary = head
+                .headers
+                .get_all(&VARY)
+                .iter()
+                .any(|v| v.as_bytes().eq_ignore_ascii_case(b"accept-encoding"));
+            assert_eq!(has_vary, case.want_vary, "{}", case.name);
+            assert_eq!(
+                head.headers.get(&ETAG).and_then(|v| v.to_str().ok()),
+                case.want_etag,
                 "{}",
                 case.name
             );

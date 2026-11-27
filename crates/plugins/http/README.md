@@ -26,7 +26,7 @@ The HTTP pool shares 1,024 intake slots and a 64 MiB budget for pending request 
 
 ## Crate layout
 
-- `Cargo.toml`: depends on `rapira_sapi`, `rapira_net`, `rapira_config` and `rapira_static_files`. `rapira_php_build` is a build dependency.
+- `Cargo.toml`: depends on `rapira_sapi`, `rapira_net`, `rapira_config`, `rapira_http_middleware`, `rapira_static_files`, and `rapira_compress`. `rapira_php_build` is a build dependency.
 - `build.rs`: compiles the C files with `rapira_php_build::compile` against the PHP headers. `rapira_http.h` includes `rapira_sapi.h` by its path in `crates/sapi`.
 - `rapira_http.stub.php`: the PHP stub of the `Rapira\Http` and `Rapira\Internal\Http` classes.
 - `rapira_http_arginfo.h`: generated from the stub by `make stubs`. Do not edit it.
@@ -36,46 +36,43 @@ The HTTP pool shares 1,024 intake slots and a 64 MiB budget for pending request 
 - `rapira_exchange.c`: the method shells of `Exchange`.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[http]` table), `Settings`, `resolve` with the boot checks, and `Server::from_settings`.
-- `src/serve.rs`: the accept loop, one hyper connection per accepted socket, and the drain.
-- `src/handler.rs`: the admission checks, the middleware chain, the body read, the submit to the intake and the response head.
-- `src/middleware.rs`: the chain types `Body`, `Request`, `Response`, `Service`, `Layer`, and `Peer`.
+- `src/serve.rs`: the accept loop, dedicated single-threaded `LocalSet` IO shards running `hyper` 1.x, and the drain.
+- `src/io.rs`: the per-connection `ShardIo` wrapper for keepalive timeouts, write timeouts, and response flush completion.
+- `src/handler.rs`: the admission checks, the middleware chain, the body read, and the submit to the intake.
 - `src/check.rs`: the admission checks: `Host`, field names, declared length.
 - `src/request.rs`: builds the SAPI `Request` from the HTTP request and the `Peer`.
-- `src/response.rs`: the response fields and the error responses.
-- `src/bridge.rs`: the reply body that streams the PHP frames and the `sendFile` slices, and the write timeout.
+- `src/responder.rs`: the PHP-to-IO response slot, large-buffer pool, `ResponseBody`, middleware body encoding, and error responses.
 - `src/multipart.rs`: the multipart parser and the spool dirs of dispatcher mode.
 - `src/php/`: the Rust behind the PHP methods: the class entries, the declarations of `rapira_http_plugin` and `rapira_http_register_classes` and the write of the server identity (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
 
 ## Middleware
 
-`[http].middleware` lists the middleware names in chain order. The plugin builds one tower layer for each name and applies the layers around its inner service, the first listed outermost. Without middleware, hyper serves the inner service directly.
+`[http].middleware` lists the middleware names in chain order, the first listed outermost. `Config.middleware` holds `Vec<Arc<dyn Middleware>>` from `rapira_http_middleware` (re-exported as `rapira_http::middleware`).
 
-A layer is `middleware::Layer`: a `tower::util::BoxCloneServiceLayer` over `http::Request<Body>` and `http::Response<Body>`, with the error type `Infallible`. `middleware::Body` is an `UnsyncBoxBody<Bytes, BoxError>`. A layer answers a request itself or calls the inner service.
-
-The request extensions hold private state of the plugin: the peer (the remote address, the server address, `https` and the receive time, which PHP gets), the request authority and the in-flight counter of the drain. A layer that rebuilds a request must keep the extensions. A layer must not keep them after the call.
+Each middleware implements `Middleware` and declares its active lifecycle stages via `phases()` (`Phases::REQUEST`, `Phases::RESPONSE_HEAD`, or both). `on_request(&self, req: &mut RequestCtx)` runs outer to inner on the IO shard and returns `RequestStep::Next`, `RequestStep::Respond(ShortResponse)`, or `RequestStep::Async(...)`. `on_response_head(&self, is_head, extensions, head: &mut ResponseHead)` runs inner to outer before wire framing (only for middlewares strictly outside a short-circuiting stage) and can return a `Box<dyn BodyEncoder>` to transform response body bytes. `RequestCtx` provides `method`, `uri`, `version`, `headers`, `peer`, and per-request `extensions`.
 
 The admission checks run before the chain. A request that fails them does not reach the middleware.
 
 To add a built-in middleware:
 
-- Put its layer in a new crate under `crates/middleware`.
+- Put its `Middleware` implementation in a new crate under `crates/middleware`, depending on `rapira_http_middleware`.
 - In the root `Cargo.toml`, add the crate to the workspace `members` and to `[workspace.dependencies]`.
 - Add the crate to the dependencies in `crates/plugins/http/Cargo.toml`.
-- In `src/config.rs`, add its table to `Section`, as `r#static` is for `[http.static]`.
+- In `src/config.rs`, add its table to `Section`, as `r#static` is for `[http.static]` and `compress` is for `[http.compress]`.
 - Resolve the table in `settings` and store the result in `Settings`.
-- In `check_middleware`, check its name and require its table. Reject a configured table that the list does not name.
-- Add its boot check to `resolve`, as `check_static_root` is for `static`.
-- Build its layer in `Server::from_settings`. Keep the configured list order when more than one middleware is available.
+- In `check_middleware`, register its name in `rapira_config::check_stages` and enforce whether its config table is required or optional. Reject a configured table that the list does not name.
+- Add any boot checks to `resolve`, as `check_static_root` is for `static`.
+- Construct `Arc<dyn Middleware>` in `Server::from_settings`. Keep the configured list order when more than one middleware is available.
 - Add cases for the new name to the tables of `middleware_list_and_tables_must_agree` and of a resolve test.
 - Add an e2e test in `crates/tests/tests/e2e/` that starts `rapira` with the new `[http.<name>]` table through `Spawn::http_extra`, and add its `mod` line to `main.rs`.
 - Add a commented example of the table to `examples/rapira.toml`, next to `[http.static]`.
 - Add its boot errors to the error list in the Config section.
 
-`rapira_http` depends on each middleware crate, so a crate under `crates/middleware` cannot use `Peer`. A middleware that needs `Peer` must be in `rapira_http`, or `Peer` must first move to a shared crate.
-
-`rapira_static_files::StaticFiles` is the `static` middleware. It serves files from `[http.static].root`. A miss goes to the next layer, and to PHP when `static` is the last layer. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
+`rapira_static_files::StaticFiles` is the `static` middleware. It serves files from `[http.static].root`. A miss goes to the next middleware, and to PHP when `static` is the last middleware. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
 
 `StaticFiles` holds served files in memory. All HTTP connections share one cache of up to 16 MiB. It stores files of at most 256 KiB. An entry stays fresh for one second. A permission change does not stop the cache from serving a file. To stop it, delete the file or replace it. A server restart empties the cache.
+
+`rapira_compress::Compress` is the `compress` middleware. It negotiates `zstd` or `gzip` from `Accept-Encoding` and encodes eligible responses inline. Place `"compress"` before `"static"` in `http.middleware` (for example `middleware = ["compress", "static"]`) to compress static file responses as well as PHP responses. `[http.compress]` is optional when `"compress"` is listed and uses default settings when omitted.
 
 ## Request handling
 
@@ -117,6 +114,7 @@ The `[http]` table. Unknown keys fail the boot.
 - `[http.uploads]`: the multipart limits of dispatcher mode: `dir` (default: the system temp dir), `max_file_size_mb` (2), `max_field_size_kb` (256), `max_files` (20), `max_parts` (1024), `max_part_headers` (32). This table under another mode fails the boot.
 - `[http.sendfile]`: `root`, the directory that must contain each `sendFile()` path. Default: the entrypoint directory.
 - `[http.static]`: the settings of the `static` middleware: `root` (required, an existing directory) and `forbid` (the file-name suffixes it never serves, default `[".php"]`).
+- `[http.compress]`: optional override settings of the `compress` middleware: `min_size` (default 1024 bytes), `gzip_level` (1..=9, default 4), and `zstd_level` (1..=19, default 3).
 - `[http.pool]`: `entrypoint` (required), `mode`, `workers`, `max_requests`, `max_boot_failures`, `request_terminate_timeout_secs`, `execution_clock` and `env`. See the [example configuration](../../../examples/rapira.toml).
 
 The connection drain lasts for `[server].stop_timeout_secs` minus five seconds, or half the stop timeout if it is below ten seconds. The remaining time is for PHP shutdown. See [Run the server](../../../README.md#run-the-server) for request timeouts and exit codes.
@@ -136,9 +134,10 @@ GD reads `GDFONTPATH` from the process environment. `setlocale()` with an empty 
 Each of these errors in the middleware list fails the boot with exit code 1:
 
 - `http.middleware lists "<name>" twice`
-- `http.middleware entry "<name>" is unknown; known middleware: "static"`
+- `http.middleware entry "<name>" is unknown; known middleware: "static", "compress"`
 - `http.middleware lists "static" but [http.static] is missing`
 - `[http.static] is configured but http.middleware does not list "static"`
+- `[http.compress] is configured but http.middleware does not list "compress"`
 
 ## Build
 

@@ -1333,7 +1333,6 @@ pub(crate) fn build_php_response(
 
             let declared_under_run = !bodiless
                 && !truncated
-                && encoders.is_empty()
                 && content_length.is_some_and(|cl| (body.len() as u64) < cl);
 
             let resp_body = if bodiless {
@@ -1353,7 +1352,9 @@ pub(crate) fn build_php_response(
                 };
                 ResponseBody::Truncated {
                     data: (!wire.is_empty()).then_some(wire),
-                    declared_len: declared_under_run.then_some(content_length).flatten(),
+                    declared_len: (declared_under_run && encoders.is_empty())
+                        .then_some(content_length)
+                        .flatten(),
                     pending_error: false,
                     finished: false,
                     _guard: guard,
@@ -1414,7 +1415,7 @@ pub(crate) fn build_php_response(
                 ResponseBody::Stream(Box::new(StreamBody {
                     rx,
                     encoders,
-                    declared_len: head.known_len,
+                    declared_len: content_length,
                     sent_raw: 0,
                     active_file: None,
                     pending_error: false,
@@ -1679,6 +1680,119 @@ mod tests {
             handle.join().unwrap();
             assert!(matches!(got, Ok(Start::Error(code)) if code == status));
             assert!(w_cnt.0.load(Ordering::Relaxed) <= 1);
+        }
+    }
+
+    #[test]
+    fn compressed_declared_under_run_aborts() {
+        use http::header::{ACCEPT_ENCODING, CONTENT_TYPE};
+        use rapira_http_middleware::{Middleware, Peer, PeerAddr, RequestCtx};
+
+        struct Case {
+            name: &'static str,
+            stream: bool,
+            declared_len: u64,
+            body_len: usize,
+            want_abort: bool,
+        }
+        let cases = [
+            Case {
+                name: "one-shot compressed body shorter than content-length aborts",
+                stream: false,
+                declared_len: 100,
+                body_len: 50,
+                want_abort: true,
+            },
+            Case {
+                name: "streamed compressed body shorter than content-length aborts",
+                stream: true,
+                declared_len: 100,
+                body_len: 50,
+                want_abort: true,
+            },
+            Case {
+                name: "one-shot compressed body matching content-length completes",
+                stream: false,
+                declared_len: 100,
+                body_len: 100,
+                want_abort: false,
+            },
+            Case {
+                name: "streamed compressed body matching content-length completes",
+                stream: true,
+                declared_len: 100,
+                body_len: 100,
+                want_abort: false,
+            },
+        ];
+
+        let compress = Arc::new(rapira_compress::Compress::new(
+            rapira_compress::resolve(rapira_compress::Section {
+                min_size: Some(16),
+                ..Default::default()
+            })
+            .unwrap(),
+        ));
+        let chain = MiddlewareChain::new(vec![compress.clone() as Arc<dyn Middleware>]);
+
+        let mut req_headers = HeaderMap::new();
+        req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+        let mut ctx = RequestCtx {
+            method: http::Method::GET,
+            uri: http::Uri::from_static("/"),
+            version: http::Version::HTTP_11,
+            headers: req_headers,
+            peer: Peer {
+                remote: PeerAddr::Inet(([127, 0, 0, 1], 40000).into()),
+                server: PeerAddr::Inet(([127, 0, 0, 1], 8000).into()),
+                https: false,
+                received_at: 0.0,
+            },
+            extensions: Extensions::new(),
+        };
+        let _ = compress.on_request(&mut ctx);
+
+        for case in cases {
+            let mut head = ResponseHead::new(200);
+            head.headers
+                .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+            let start = if case.stream {
+                let (tx, rx) = mpsc::channel(4);
+                tx.try_send(Chunk::Data(Bytes::from(vec![b'x'; case.body_len])))
+                    .unwrap();
+                tx.try_send(Chunk::End { truncated: false }).unwrap();
+                Start::Stream {
+                    head,
+                    content_length: Some(case.declared_len),
+                    rx,
+                }
+            } else {
+                Start::Complete {
+                    head,
+                    body: Bytes::from(vec![b'x'; case.body_len]),
+                    content_length: Some(case.declared_len),
+                    bodiless: false,
+                    truncated: false,
+                }
+            };
+            let guard = RequestGuard::new(ConnPhase::new(), Rc::new(LocalInflight::default()));
+            let resp = build_php_response(&chain, false, false, &ctx.extensions, start, guard);
+            let mut body = resp.into_body();
+            let (_w_cnt, waker) = count_waker();
+            let mut cx = Context::from_waker(&waker);
+            let mut aborted = false;
+            loop {
+                match Pin::new(&mut body).poll_frame(&mut cx) {
+                    Poll::Ready(Some(Ok(_))) => {}
+                    Poll::Ready(Some(Err(_))) => {
+                        aborted = true;
+                        break;
+                    }
+                    Poll::Ready(None) => break,
+                    Poll::Pending => {}
+                }
+            }
+            assert_eq!(aborted, case.want_abort, "{}", case.name);
         }
     }
 }
