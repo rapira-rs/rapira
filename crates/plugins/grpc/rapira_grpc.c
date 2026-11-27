@@ -218,11 +218,7 @@ ZEND_METHOD(Rapira_Grpc_Call_Context, __construct) {
         zend_update_property_double(ce, obj, ZEND_STRL("deadline"), deadline);
     }
     zend_update_property(ce, obj, ZEND_STRL("remote"), remote);
-    if (tls) {
-        zend_update_property(ce, obj, ZEND_STRL("tls"), tls);
-    } else {
-        zend_update_property_null(ce, obj, ZEND_STRL("tls"));
-    }
+    rapira_prop_obj_or_null(ce, obj, ZEND_STRL("tls"), tls);
     zend_update_property(ce, obj, ZEND_STRL("protocol"), protocol);
     zend_update_property_double(ce, obj, ZEND_STRL("receivedAt"), received_at);
 }

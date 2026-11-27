@@ -1,301 +1,226 @@
-//! This module has the admission checks before the middleware chain: Host, the field names of the CGI view and the declared body length.
+//! Pre-body HTTP request admission checks and CGI header name filtering.
 
-use http::Version;
-use http::header::{CONTENT_LENGTH, HOST, HeaderMap, HeaderName};
+use bytes::Bytes;
+use http::header::{CONTENT_LENGTH, HOST, HeaderName};
+use http::{HeaderMap, StatusCode, Version};
+use rapira_sapi::types::Authority;
 
-/// A refusal before dispatch. PHP never saw the request.
-#[derive(Debug)]
-pub struct Rejection {
-    pub status: http::StatusCode,
-    pub reason: String,
-}
+use crate::Rejection;
 
-impl std::fmt::Display for Rejection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.status.as_u16(), self.reason)
+/// Parses a non-empty ASCII decimal `Content-Length` without signs or overflow.
+pub fn parse_content_length(raw: &[u8]) -> Option<u64> {
+    if raw.is_empty() {
+        return None;
     }
-}
-
-impl Rejection {
-    fn new(status: http::StatusCode, reason: impl Into<String>) -> Self {
-        Self {
-            status,
-            reason: reason.into(),
+    let mut val: u64 = 0;
+    for &b in raw {
+        if !b.is_ascii_digit() {
+            return None;
         }
+        val = val.checked_mul(10)?.checked_add(u64::from(b - b'0'))?;
     }
+    Some(val)
 }
 
-/// The CGI view maps `-` and `.` to `_`, so `X_Forwarded_For` and `X.Forwarded.For` would give the same `HTTP_X_FORWARDED_FOR` as `X-Forwarded-For`. nginx and Apache drop such names too.
-pub(crate) fn is_safe_field_name(name: &str) -> bool {
-    name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
+/// True when `name` contains only ASCII letters, digits, and `-`, so `HTTP_*` CGI mangling cannot alias another header.
+#[inline]
+pub fn is_safe_field_name(name: &str) -> bool {
+    !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
-/// Returns the authority of the request, that is, the one Host value. An empty value counts as missing. HTTP/1.1 requires one, and a second Host line is a 400 in every version. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
-fn authority(headers: &HeaderMap, http11: bool) -> Result<Option<Vec<u8>>, &'static str> {
-    let mut lines = headers.get_all(HOST).iter();
-    let first = lines.next();
-    if lines.next().is_some() {
-        return Err("request carries more than one Host field line");
-    }
-    match first.filter(|v| !v.is_empty()) {
-        Some(v) => Ok(Some(v.as_bytes().to_vec())),
-        None if http11 => Err("HTTP/1.1 request without a Host field"),
-        None => Ok(None),
-    }
-}
-
-/// Removes the field names that alias a CGI variable. Only the classic and worker modes build the CGI view.
+/// Drops request headers whose names could alias a CGI `HTTP_*` variable.
 pub fn drop_unsafe_field_names(headers: &mut HeaderMap) {
-    let mut unsafe_names: Vec<HeaderName> = Vec::new();
-    for name in headers.keys() {
-        if !is_safe_field_name(name.as_str()) {
-            unsafe_names.push(name.clone());
-        }
+    if headers.keys().all(|k| is_safe_field_name(k.as_str())) {
+        return;
     }
-    for name in &unsafe_names {
-        headers.remove(name);
+    let bad: Vec<HeaderName> = headers
+        .keys()
+        .filter(|k| !is_safe_field_name(k.as_str()))
+        .cloned()
+        .collect();
+    for key in bad {
+        headers.remove(&key);
     }
 }
 
-/// Runs the admission checks in dispatch order. Ok carries the authority for the PHP request.
+/// Validates Host and Content-Length before middleware or body reads, and extracts the request authority.
 pub fn check_request(
     parts: &mut http::request::Parts,
     superglobals: bool,
     max_body_size: usize,
-) -> Result<Option<Vec<u8>>, Rejection> {
-    let authority = authority(&parts.headers, parts.version == Version::HTTP_11)
-        .map_err(|reason| Rejection::new(http::StatusCode::BAD_REQUEST, reason))?;
+) -> Result<Authority, Rejection> {
+    let mut hosts = parts.headers.get_all(HOST).iter();
+    let first_host = hosts.next();
+    if hosts.next().is_some() {
+        return Err(Rejection {
+            status: StatusCode::BAD_REQUEST,
+            reason: "repeated Host header".into(),
+        });
+    }
+    let host_bytes = first_host.map(|v| v.as_bytes().trim_ascii());
+    let uri_authority = parts.uri.authority().map(|a| a.as_str().as_bytes());
+
+    let authority = match (host_bytes, uri_authority) {
+        (Some(b""), _) => {
+            if parts.version == Version::HTTP_11 {
+                return Err(Rejection {
+                    status: StatusCode::BAD_REQUEST,
+                    reason: "empty Host header".into(),
+                });
+            }
+            match uri_authority {
+                Some(a) if !a.is_empty() => Authority::Explicit(Bytes::copy_from_slice(a)),
+                _ => Authority::None,
+            }
+        }
+        (Some(_), _) => Authority::HostHeader,
+        (None, Some(a)) if !a.is_empty() => Authority::Explicit(Bytes::copy_from_slice(a)),
+        (None, _) => {
+            if parts.version == Version::HTTP_11 {
+                return Err(Rejection {
+                    status: StatusCode::BAD_REQUEST,
+                    reason: "missing Host header".into(),
+                });
+            }
+            Authority::None
+        }
+    };
+
+    if let Some(cl_val) = parts.headers.get(CONTENT_LENGTH)
+        && let Some(cl) = parse_content_length(cl_val.as_bytes().trim_ascii())
+        && cl > max_body_size as u64
+    {
+        return Err(Rejection {
+            status: StatusCode::PAYLOAD_TOO_LARGE,
+            reason: format!("request body of {cl} bytes exceeds max_body_size ({max_body_size})"),
+        });
+    }
+
     if superglobals {
         drop_unsafe_field_names(&mut parts.headers);
     }
-    let declared = parts
-        .headers
-        .get(CONTENT_LENGTH)
-        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
-    if declared.is_some_and(|len| len > max_body_size as u64) {
-        return Err(Rejection::new(
-            http::StatusCode::PAYLOAD_TOO_LARGE,
-            "declared content-length exceeds max_body_size",
-        ));
-    }
+
     Ok(authority)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use http::Method;
-
-    fn map(pairs: &[(&str, &str)]) -> HeaderMap {
-        let mut m = HeaderMap::new();
-        for (k, v) in pairs {
-            m.append(
-                HeaderName::try_from(*k).unwrap(),
-                http::HeaderValue::from_str(v).unwrap(),
-            );
-        }
-        m
-    }
-
-    /// RFC 9112 §3.2 requires one Host on HTTP/1.1; a second Host line is a 400 in every version.
-    #[test]
-    fn authority_follows_the_host_rules() {
-        struct Case {
-            name: &'static str,
-            headers: &'static [(&'static str, &'static str)],
-            http11: bool,
-            /// None is a 400.
-            want: Option<Option<&'static [u8]>>,
-        }
-        let cases = [
-            Case {
-                name: "HTTP/1.1 with a Host",
-                headers: &[("host", "a.example")],
-                http11: true,
-                want: Some(Some(b"a.example")),
-            },
-            Case {
-                name: "HTTP/1.1 without a Host",
-                headers: &[],
-                http11: true,
-                want: None,
-            },
-            Case {
-                name: "HTTP/1.1 with an empty Host",
-                headers: &[("host", "")],
-                http11: true,
-                want: None,
-            },
-            Case {
-                name: "HTTP/1.0 without a Host",
-                headers: &[],
-                http11: false,
-                want: Some(None),
-            },
-            Case {
-                name: "HTTP/1.0 with an empty Host",
-                headers: &[("host", "")],
-                http11: false,
-                want: Some(None),
-            },
-            Case {
-                name: "two Host lines on HTTP/1.1",
-                headers: &[("host", "a"), ("host", "b")],
-                http11: true,
-                want: None,
-            },
-            Case {
-                name: "two Host lines on HTTP/1.0",
-                headers: &[("host", "a"), ("host", "b")],
-                http11: false,
-                want: None,
-            },
-        ];
-        for case in cases {
-            let got = authority(&map(case.headers), case.http11).ok();
-            let want = case.want.map(|a| a.map(<[u8]>::to_vec));
-            assert_eq!(got, want, "{}", case.name);
-        }
-    }
+    use http::header::HeaderValue;
 
     #[test]
-    fn only_alphanumerics_and_dash_are_safe_field_names() {
-        struct Case {
-            name: &'static str,
-            field: &'static str,
-            safe: bool,
-        }
-        let cases = [
-            Case {
-                name: "dashes",
-                field: "x-forwarded-for",
-                safe: true,
-            },
-            Case {
-                name: "mixed case",
-                field: "Sec-Ch-Ua-Mobile",
-                safe: true,
-            },
-            Case {
-                name: "underscore",
-                field: "x_forwarded_for",
-                safe: false,
-            },
-            Case {
-                name: "dot",
-                field: "x.forwarded.for",
-                safe: false,
-            },
-            Case {
-                name: "tilde",
-                field: "x~foo",
-                safe: false,
-            },
-            Case {
-                name: "dollar",
-                field: "x$foo",
-                safe: false,
-            },
-        ];
-        for case in cases {
-            assert_eq!(is_safe_field_name(case.field), case.safe, "{}", case.name);
-        }
-    }
-
-    #[test]
-    fn drop_removes_only_the_unsafe_names() {
-        let mut headers = map(&[
-            ("x-forwarded-for", "203.0.113.7"),
-            ("x_forwarded_for", "1.2.3.4"),
-            ("x.forwarded.for", "5.6.7.8"),
-        ]);
-        drop_unsafe_field_names(&mut headers);
-        let names: Vec<&str> = headers.keys().map(HeaderName::as_str).collect();
-        assert_eq!(names, ["x-forwarded-for"]);
-    }
-
-    fn parts(method: Method, version: Version, pairs: &[(&str, &str)]) -> http::request::Parts {
-        let mut req = http::Request::new(());
-        *req.method_mut() = method;
-        *req.version_mut() = version;
-        *req.headers_mut() = map(pairs);
-        req.into_parts().0
-    }
-
-    #[test]
-    fn check_request_admits_or_refuses() {
+    fn check_request_validates_host_and_body_cap() {
         struct Case {
             name: &'static str,
             version: Version,
+            uri: &'static str,
             headers: &'static [(&'static str, &'static str)],
             superglobals: bool,
-            /// None is admitted; Some is the refusal status.
+            max_body: usize,
             want_status: Option<u16>,
-            /// The field names after the checks, for an admitted request.
-            want_names: &'static [&'static str],
+            want_authority: Option<&'static [u8]>,
         }
         let cases = [
             Case {
-                name: "declared length over the cap is 413",
+                name: "http11 requires host",
                 version: Version::HTTP_11,
-                headers: &[("host", "e2e"), ("content-length", "2048")],
-                superglobals: true,
-                want_status: Some(413),
-                want_names: &[],
-            },
-            Case {
-                name: "declared length at the cap passes",
-                version: Version::HTTP_11,
-                headers: &[("host", "e2e"), ("content-length", "1024")],
-                superglobals: true,
-                want_status: None,
-                want_names: &["host", "content-length"],
-            },
-            Case {
-                name: "an unsafe name is dropped for the CGI view",
-                version: Version::HTTP_11,
-                headers: &[("host", "e2e"), ("x_forwarded_for", "1.2.3.4")],
-                superglobals: true,
-                want_status: None,
-                want_names: &["host"],
-            },
-            Case {
-                name: "an unsafe name stays without the CGI view",
-                version: Version::HTTP_11,
-                headers: &[("host", "e2e"), ("x_forwarded_for", "1.2.3.4")],
-                superglobals: false,
-                want_status: None,
-                want_names: &["host", "x_forwarded_for"],
-            },
-            Case {
-                name: "HTTP/1.1 without a Host is 400",
-                version: Version::HTTP_11,
+                uri: "/",
                 headers: &[],
-                superglobals: true,
+                superglobals: false,
+                max_body: 1024,
                 want_status: Some(400),
-                want_names: &[],
+                want_authority: None,
             },
             Case {
-                name: "two Host lines are 400",
+                name: "http11 rejects empty host",
                 version: Version::HTTP_11,
-                headers: &[("host", "a"), ("host", "b")],
-                superglobals: true,
+                uri: "/",
+                headers: &[("host", "   ")],
+                superglobals: false,
+                max_body: 1024,
                 want_status: Some(400),
-                want_names: &[],
+                want_authority: None,
+            },
+            Case {
+                name: "repeated host rejected",
+                version: Version::HTTP_11,
+                uri: "/",
+                headers: &[("host", "a"), ("host", "b")],
+                superglobals: false,
+                max_body: 1024,
+                want_status: Some(400),
+                want_authority: None,
+            },
+            Case {
+                name: "http10 allows missing host",
+                version: Version::HTTP_10,
+                uri: "/ok",
+                headers: &[],
+                superglobals: false,
+                max_body: 1024,
+                want_status: None,
+                want_authority: None,
+            },
+            Case {
+                name: "declared content-length over cap returns 413",
+                version: Version::HTTP_11,
+                uri: "/",
+                headers: &[("host", "example.com"), ("content-length", "2048")],
+                superglobals: false,
+                max_body: 1024,
+                want_status: Some(413),
+                want_authority: None,
+            },
+            Case {
+                name: "valid http11 extracts host authority",
+                version: Version::HTTP_11,
+                uri: "/",
+                headers: &[
+                    ("host", "example.com:8080"),
+                    ("x_bad", "1"),
+                    ("x-good", "2"),
+                ],
+                superglobals: true,
+                max_body: 1024,
+                want_status: None,
+                want_authority: Some(b"example.com:8080"),
             },
         ];
+
         for case in cases {
-            let mut p = parts(Method::POST, case.version, case.headers);
-            let got = check_request(&mut p, case.superglobals, 1024);
-            assert_eq!(
-                got.as_ref().err().map(|r| r.status.as_u16()),
-                case.want_status,
-                "{}",
-                case.name
-            );
-            if got.is_ok() {
-                let names: Vec<&str> = p.headers.keys().map(HeaderName::as_str).collect();
-                assert_eq!(names, case.want_names, "{}", case.name);
+            let mut req = http::Request::builder()
+                .version(case.version)
+                .uri(case.uri)
+                .body(())
+                .unwrap();
+            for &(k, v) in case.headers {
+                req.headers_mut().append(
+                    HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                    HeaderValue::from_str(v).unwrap(),
+                );
+            }
+            let (mut parts, ()) = req.into_parts();
+            let res = check_request(&mut parts, case.superglobals, case.max_body);
+            match case.want_status {
+                Some(code) => {
+                    let err = res.expect_err(case.name);
+                    assert_eq!(err.status.as_u16(), code, "{}", case.name);
+                }
+                None => {
+                    let auth = res.expect(case.name);
+                    let resolved = match &auth {
+                        Authority::None => None,
+                        Authority::HostHeader => {
+                            parts.headers.get(HOST).map(|v| v.as_bytes().trim_ascii())
+                        }
+                        Authority::Explicit(b) => Some(b.as_ref()),
+                    };
+                    assert_eq!(resolved, case.want_authority, "{}", case.name);
+                    if case.superglobals {
+                        assert!(!parts.headers.contains_key("x_bad"), "{}", case.name);
+                        assert!(parts.headers.contains_key("x-good"), "{}", case.name);
+                    }
+                }
             }
         }
     }

@@ -47,7 +47,7 @@ impl Dispatcher for PhpDispatcher {
     ) -> UnaryResult {
         let schema = Arc::clone(&self.schema);
         let intake = self.intake.clone();
-        let path = path.to_owned();
+        let path: Arc<str> = Arc::from(path);
         Box::pin(async move { unary(&schema, &intake, path, ctx, request, format).await })
     }
 
@@ -61,7 +61,7 @@ impl Dispatcher for PhpDispatcher {
         let schema = Arc::clone(&self.schema);
         let intake = self.intake.clone();
         let inflight = Arc::clone(&self.inflight);
-        let path = path.to_owned();
+        let path: Arc<str> = Arc::from(path);
         Box::pin(server_streaming(
             schema, intake, inflight, path, ctx, request, format,
         ))
@@ -102,8 +102,8 @@ fn plain_reply(ctx: &RequestContext) -> bool {
 /// Builds the call of one request: its message as binary protobuf, and the request facts that PHP reads. It takes the headers out of `ctx`.
 fn call(
     schema: &Schema,
-    method: &Method,
-    path: &str,
+    method: Method,
+    path: Arc<str>,
     ctx: &mut RequestContext,
     body: Bytes,
     format: CodecFormat,
@@ -111,7 +111,7 @@ fn call(
     let message = match format {
         CodecFormat::Proto => body,
         CodecFormat::Json => schema
-            .json_to_proto(method, &body)
+            .json_to_proto(&method, &body)
             .map_err(|e| ConnectError::invalid_argument(format!("{e:#}")))?
             .into(),
         _ => {
@@ -120,25 +120,28 @@ fn call(
             )));
         }
     };
+    let received_at = now_unix_f64();
     Ok(Call {
-        method: path.to_owned(),
+        method: path,
         protocol: ctx.protocol().unwrap_or(Protocol::Connect),
         metadata: std::mem::take(ctx.headers_mut()),
         deadline: ctx.deadline().map(|at| Deadline {
             at,
-            unix: now_unix_f64() + at.saturating_duration_since(Instant::now()).as_secs_f64(),
+            unix: received_at + at.saturating_duration_since(Instant::now()).as_secs_f64(),
         }),
         remote: ctx
             .extensions_mut()
             .remove::<Addr>()
             .expect("serve puts an Addr on every connection"),
         message,
+        received_at,
     })
 }
 
 /// Encodes one output message in the format of the client.
 fn encode(
     schema: &Schema,
+    method: Method,
     path: &str,
     format: CodecFormat,
     message: Bytes,
@@ -146,8 +149,7 @@ fn encode(
     if format != CodecFormat::Json {
         return Ok(message);
     }
-    let method = schema.method(path).expect("lookup found the route");
-    match schema.proto_to_json(method, &message) {
+    match schema.proto_to_json(&method, &message) {
         Ok(json) => Ok(Bytes::from(json)),
         Err(e) => {
             tracing::warn!(target: "grpc", "{path}: the reply does not decode: {e:#}");
@@ -168,12 +170,12 @@ fn missing_reply(path: &str, until: Option<Instant>) -> ConnectError {
 async fn unary(
     schema: &Schema,
     intake: &Intake,
-    path: String,
+    path: Arc<str>,
     mut ctx: RequestContext,
     request: Payload,
     format: CodecFormat,
 ) -> Result<EncodedResponse, ConnectError> {
-    let method = schema.method(&path).expect("lookup found the route");
+    let method = *schema.method(&path).expect("lookup found the route");
     // connectrpc gives a Connect unary request to this handler for a method of each kind.
     if method.kind != MethodKind::Unary {
         return Err(ConnectError::unimplemented(format!(
@@ -181,7 +183,14 @@ async fn unary(
         )));
     }
     let plain_reply = plain_reply(&ctx);
-    let call = call(schema, method, &path, &mut ctx, request.encoded()?, format)?;
+    let call = call(
+        schema,
+        method,
+        Arc::clone(&path),
+        &mut ctx,
+        request.encoded()?,
+        format,
+    )?;
     drop(request);
     let protocol = call.protocol;
     let bytes = call.message.len();
@@ -204,7 +213,7 @@ async fn unary(
                 .with_trailers(reply.trailers));
         }
     };
-    let body = encode(schema, &path, format, message)?;
+    let body = encode(schema, method, &path, format, message)?;
     let mut response = EncodedResponse::new(EncodedBody::from(body));
     response.headers = reply.headers;
     response.trailers = reply.trailers;
@@ -225,14 +234,21 @@ async fn server_streaming(
     schema: Arc<Schema>,
     intake: Intake,
     inflight: Arc<AtomicUsize>,
-    path: String,
+    path: Arc<str>,
     mut ctx: RequestContext,
     request: Bytes,
     format: CodecFormat,
 ) -> Result<Response<EncodedStream>, ConnectError> {
-    let method = schema.method(&path).expect("lookup found the route");
+    let method = *schema.method(&path).expect("lookup found the route");
     let plain_reply = plain_reply(&ctx);
-    let call = call(&schema, method, &path, &mut ctx, request, format)?;
+    let call = call(
+        &schema,
+        method,
+        Arc::clone(&path),
+        &mut ctx,
+        request,
+        format,
+    )?;
     let until = call.until();
     let bytes = call.message.len();
     let (head_tx, head) = oneshot::channel();
@@ -255,6 +271,7 @@ async fn server_streaming(
         parts,
         until,
         schema,
+        method,
         path,
         format,
         _counted: InFlight::start(&inflight),
@@ -274,7 +291,8 @@ struct Body {
     /// The deadline of the call. connectrpc bounds only the handler with it, so the body ends the stream there.
     until: Option<Instant>,
     schema: Arc<Schema>,
-    path: String,
+    method: Method,
+    path: Arc<str>,
     format: CodecFormat,
     /// The handler returns at the head, so the body keeps the call in the count of the drain until the stream ends.
     _counted: InFlight,
@@ -294,7 +312,7 @@ impl Body {
         };
         match part {
             Some(Part::Message(message)) => {
-                let message = encode(&self.schema, &self.path, self.format, message)?;
+                let message = encode(&self.schema, self.method, &self.path, self.format, message)?;
                 Ok(Some((EncodedBody::from(message), self)))
             }
             Some(Part::End) => Ok(None),
@@ -341,12 +359,13 @@ mod tests {
         ];
         for case in cases {
             let req = Call {
-                method: "rapira.test.v1.EchoService/Echo".to_owned(),
+                method: Arc::from("rapira.test.v1.EchoService/Echo"),
                 protocol: Protocol::Grpc,
                 metadata: http::HeaderMap::new(),
                 deadline: case.until.map(|at| Deadline { at, unix: 0.0 }),
                 remote: Addr::Unix(None),
                 message: Bytes::new(),
+                received_at: 0.0,
             };
             let (tx, _receiver) = oneshot::channel();
             let state = GrpcState::new(req, Reply::Unary(tx));

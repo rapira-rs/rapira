@@ -7,8 +7,7 @@ use crate::{
     zend_hash_get_current_data_ex, zend_hash_get_current_key_ex,
     zend_hash_internal_pointer_reset_ex, zend_hash_move_forward_ex, zend_object,
     zend_property_info, zend_read_property, zend_string, zend_throw_error, zend_throw_exception,
-    zend_ulong, zend_update_property, zend_update_property_double, zend_update_property_long,
-    zend_update_property_null, zend_update_property_stringl, zend_value_error, zval,
+    zend_ulong, zend_update_property, zend_value_error, zval,
 };
 
 pub fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
@@ -19,63 +18,9 @@ pub fn ptr_or_empty(bytes: &[u8]) -> *const c_char {
     }
 }
 
-/// # Safety
-/// `ce` is a registered class, `obj` is alive, and `ce` declares the property.
-pub unsafe fn prop_stringl(
-    ce: *mut zend_class_entry,
-    obj: *mut zend_object,
-    name: &CStr,
-    bytes: &[u8],
-) {
-    unsafe {
-        zend_update_property_stringl(
-            ce,
-            obj,
-            name.as_ptr(),
-            name.count_bytes(),
-            ptr_or_empty(bytes),
-            bytes.len(),
-        );
-    }
-}
-
-/// # Safety
-/// As `prop_stringl`.
-pub unsafe fn prop_str_or_null(
-    ce: *mut zend_class_entry,
-    obj: *mut zend_object,
-    name: &CStr,
-    bytes: Option<&[u8]>,
-) {
-    unsafe {
-        match bytes {
-            Some(b) => prop_stringl(ce, obj, name, b),
-            None => prop_null(ce, obj, name),
-        }
-    }
-}
-
-/// # Safety
-/// As `prop_stringl`.
-pub unsafe fn prop_null(ce: *mut zend_class_entry, obj: *mut zend_object, name: &CStr) {
-    unsafe { zend_update_property_null(ce, obj, name.as_ptr(), name.count_bytes()) }
-}
-
-/// # Safety
-/// As `prop_stringl`.
-pub unsafe fn prop_long(ce: *mut zend_class_entry, obj: *mut zend_object, name: &CStr, v: i64) {
-    unsafe { zend_update_property_long(ce, obj, name.as_ptr(), name.count_bytes(), v) }
-}
-
-/// # Safety
-/// As `prop_stringl`.
-pub unsafe fn prop_double(ce: *mut zend_class_entry, obj: *mut zend_object, name: &CStr, v: f64) {
-    unsafe { zend_update_property_double(ce, obj, name.as_ptr(), name.count_bytes(), v) }
-}
-
 /// `zend_update_property` addrefs `zv`; the caller keeps its ref and releases it.
 /// # Safety
-/// As `prop_stringl`, and `zv` is initialized.
+/// `ce` is a registered class, `obj` is alive, `ce` declares the property, and `zv` is initialized.
 pub unsafe fn prop_zval(
     ce: *mut zend_class_entry,
     obj: *mut zend_object,

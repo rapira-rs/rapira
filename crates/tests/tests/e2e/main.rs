@@ -4,6 +4,7 @@ mod async_tests;
 mod basic_tests;
 mod boot_server;
 mod classic;
+mod compress;
 mod concurrency;
 mod dispatcher;
 mod dispatcher_loop;

@@ -1,8 +1,8 @@
 use std::path::Path;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
-use rapira_net::ListenAddr;
+use anyhow::{Result, bail};
+use rapira_config::ListenAddr;
 use serde::Deserialize;
 
 /// The `[observability]` table.
@@ -32,11 +32,7 @@ pub struct Settings {
 }
 
 pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
-    let listen = section
-        .listen
-        .parse::<ListenAddr>()
-        .with_context(|| format!("invalid observability.listen `{}`", section.listen))?;
-    let listen = rapira_config::resolve_listen(dir, listen)?;
+    let listen = rapira_config::parse_required_listen(dir, "observability", &section.listen)?;
     let keepalive_timeout = rapira_config::nonzero_timeout(
         "observability",
         "keepalive_timeout_secs",

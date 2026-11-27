@@ -4,7 +4,6 @@ use rapira_config::{ExecutionClock, Mode, PoolSettings};
 use std::cell::RefCell;
 use std::ffi::{CStr, c_int};
 use std::panic::{AssertUnwindSafe, catch_unwind};
-use std::sync::atomic::Ordering;
 use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -29,6 +28,7 @@ thread_local! {
 pub(crate) struct UnitRx {
     rx: Receiver<Entry>,
     idle: Arc<Idle>,
+    pool: Arc<Pool>,
     control: Receiver<()>,
     workers: Arc<Workers>,
 }
@@ -61,6 +61,7 @@ impl UnitRx {
             Self {
                 rx: units.rx,
                 idle: units.idle,
+                pool: units.pool,
                 control,
                 workers,
             },
@@ -77,7 +78,7 @@ impl UnitRx {
         }
         match units.try_recv() {
             Ok(entry) => {
-                pool::with(|pool| pool.pending.fetch_sub(1, Ordering::Relaxed));
+                self.pool.limits.release(entry.budget_bytes);
                 Some(Pull::Unit(entry.unit))
             }
             Err(TryRecvError::Disconnected) => Some(Pull::Closed),
@@ -88,6 +89,12 @@ impl UnitRx {
     /// A wait with a timeout above zero needs the queue of the pool as `units`, because the submit wakes the workers of that queue.
     fn recv(&self, units: &Receiver<Entry>, timeout: Duration) -> Pull {
         if let Some(pull) = self.take(units) {
+            if matches!(pull, Pull::Unit(_)) && self.idle.has_waiters() {
+                let rem = units.len();
+                if rem > 0 {
+                    self.idle.wake_one(rem);
+                }
+            }
             return pull;
         }
         if timeout.is_zero() {
@@ -115,7 +122,16 @@ impl UnitRx {
                 got = self.take(units);
             }
             match got {
-                Some(pull) => return pull,
+                Some(pull) => {
+                    // Hand off to another waiting worker if more units remain queued after our leave decremented waking.
+                    if matches!(pull, Pull::Unit(_)) && self.idle.has_waiters() {
+                        let rem = units.len();
+                        if rem > 0 {
+                            self.idle.wake_one(rem);
+                        }
+                    }
+                    return pull;
+                }
                 None if expired => return Pull::NoUnit,
                 None => {}
             }
@@ -257,7 +273,7 @@ impl crate::Engine {
                             .or_else(|| cause.downcast_ref::<String>().map(String::as_str))
                             .unwrap_or("unknown panic");
                         error!(target: "rapira", "{name} pool: worker {index} panicked: {message}; exiting with code 101");
-                        unsafe { libc::_exit(101) };
+                        crate::exit::exit(101);
                     }
                 })
                 .with_context(|| format!("spawning {name} worker {index}"))?;
@@ -403,7 +419,7 @@ pub(crate) fn pull_unit_to_shed(deadline: Instant, retry: &Weak<BootRetry>) -> P
 }
 
 pub(crate) fn pending_depth() -> u64 {
-    pool::with(|pool| pool.pending.load(Ordering::Relaxed)).unwrap_or(0)
+    pool::with(Pool::pending).unwrap_or(0)
 }
 
 #[cfg(test)]
@@ -740,8 +756,6 @@ mod tests {
                 intake,
             } = worker(case.max_requests);
             let mut intake = Some(intake);
-            // The clients of the CGI units that wait.
-            let mut clients = Vec::new();
             for feed in case.feed {
                 match feed {
                     Feed::Unit | Feed::Cancelled => {
@@ -754,12 +768,10 @@ mod tests {
                             .unwrap();
                     }
                     Feed::Cgi | Feed::CgiGone => {
-                        let (tx, rx) = tokio::sync::mpsc::channel(8);
-                        if matches!(feed, Feed::Cgi) {
-                            clients.push(rx);
-                        }
+                        let cancelled = matches!(feed, Feed::CgiGone);
+                        let (responder, _log) = crate::types::tests::responder(cancelled);
                         let mut ctx = crate::types::tests::context();
-                        ctx.sender = Some(tx);
+                        ctx.responder = Some(responder);
                         intake
                             .as_ref()
                             .unwrap()

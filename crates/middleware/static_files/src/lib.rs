@@ -3,33 +3,53 @@ mod config;
 
 pub use config::{Section, Settings, resolve};
 
-use std::convert::Infallible;
+use std::io;
 use std::path::PathBuf;
-use std::sync::Arc;
+use std::pin::Pin;
+use std::task::{Context, Poll};
 
 use bytes::Bytes;
 use http::{Method, StatusCode, header};
-use http_body_util::combinators::UnsyncBoxBody;
-use http_body_util::{BodyExt, Empty};
-use tower::util::{BoxCloneService, BoxCloneServiceLayer};
-use tower::{Service as _, ServiceExt as _};
+use http_body::Body as _;
+use http_body_util::Empty;
+use rapira_http_middleware::{
+    BodyStream, Middleware, Phases, RequestCtx, RequestStep, ResponseHead, ShortResponse,
+};
 use tower_http::services::ServeDir;
-use tower_http::services::fs::DefaultServeDirFallback;
+use tower_http::services::fs::{DefaultServeDirFallback, ServeFileSystemResponseBody};
 
 use cache::CachingBackend;
 
-type BoxError = Box<dyn std::error::Error + Send + Sync>;
-/// The body of the http plugin's middleware chain.
-type Body = UnsyncBoxBody<Bytes, BoxError>;
-/// The http plugin's inner service, the one type the layer wraps.
-type Inner = BoxCloneService<http::Request<Body>, http::Response<Body>, Infallible>;
-
-/// Serves files from a directory and hands every miss to the inner service.
+/// Serves files from a directory and passes every miss to the next middleware or PHP.
 /// A permission error or a bad file name is also a miss. Any other read failure
-/// answers 500. That request does not reach the inner service.
+/// answers 500. That request does not reach PHP.
 pub struct StaticFiles {
     dir: ServeDir<DefaultServeDirFallback, CachingBackend>,
     forbid: Vec<String>,
+}
+
+struct ServeDirStream(ServeFileSystemResponseBody);
+
+impl BodyStream for ServeDirStream {
+    fn poll_next_chunk(
+        mut self: Pin<&mut Self>,
+        cx: &mut Context<'_>,
+    ) -> Poll<Option<io::Result<Bytes>>> {
+        loop {
+            match Pin::new(&mut self.0).poll_frame(cx) {
+                Poll::Pending => return Poll::Pending,
+                Poll::Ready(None) => return Poll::Ready(None),
+                Poll::Ready(Some(Ok(frame))) => {
+                    if let Ok(data) = frame.into_data()
+                        && !data.is_empty()
+                    {
+                        return Poll::Ready(Some(Ok(data)));
+                    }
+                }
+                Poll::Ready(Some(Err(err))) => return Poll::Ready(Some(Err(err))),
+            }
+        }
+    }
 }
 
 impl StaticFiles {
@@ -69,6 +89,93 @@ impl StaticFiles {
             file[start..].eq_ignore_ascii_case(ext.as_bytes())
         })
     }
+
+    async fn serve_eligible(&self, req: &RequestCtx) -> Option<ShortResponse> {
+        let mut dir = self.dir.clone();
+        let mut served = dir.try_call(probe(req, true)).await;
+        // ServeDir does not check If-Range. A validator other than the current strong ETag gets
+        // the whole file. https://www.rfc-editor.org/rfc/rfc9110#section-13.1.5
+        if let Ok(res) = &served
+            && res.headers().contains_key(header::CONTENT_RANGE)
+            && let Some(validator) = req.headers.get(header::IF_RANGE)
+            && res.headers().get(header::ETAG) != Some(validator)
+        {
+            served = dir.try_call(probe(req, false)).await;
+        }
+        match served {
+            Ok(res) if res.status() != StatusCode::NOT_FOUND => {
+                Some(into_short_response(req.method == Method::HEAD, res).await)
+            }
+            // A directory URL answers 404 without a filesystem error. It then reaches PHP.
+            Ok(_) => None,
+            Err(e) if is_miss(&e) => None,
+            // An Err outside the miss kinds is a read failure and must not reach PHP.
+            // https://docs.rs/tower-http/0.7.1/tower_http/services/struct.ServeDir.html#method.try_call
+            Err(e) => {
+                tracing::error!(target: "http", "static probe failed for {}: {e}", req.uri.path());
+                Some(ShortResponse::full(
+                    ResponseHead::new(StatusCode::INTERNAL_SERVER_ERROR.as_u16()),
+                    Bytes::new(),
+                ))
+            }
+        }
+    }
+}
+
+impl Middleware for StaticFiles {
+    fn phases(&self) -> Phases {
+        Phases::REQUEST
+    }
+
+    fn on_request<'a>(&'a self, req: &'a mut RequestCtx) -> RequestStep<'a> {
+        if req.method != Method::GET && req.method != Method::HEAD {
+            return RequestStep::Next;
+        }
+        if !self.eligible(req.path()) {
+            return RequestStep::Next;
+        }
+        RequestStep::Async(Box::pin(async move { self.serve_eligible(req).await }))
+    }
+}
+
+async fn into_short_response(
+    is_head: bool,
+    res: http::Response<ServeFileSystemResponseBody>,
+) -> ShortResponse {
+    let (parts, body) = res.into_parts();
+    let status = parts.status.as_u16();
+    let content_length = parts
+        .headers
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    let head = ResponseHead {
+        status,
+        headers: parts.headers,
+        known_len: content_length,
+    };
+    if is_head || matches!(status, 204 | 304) || content_length == Some(0) {
+        return ShortResponse::full(head, Bytes::new());
+    }
+    let mut stream = ServeDirStream(body);
+    let first = match std::future::poll_fn(|cx| Pin::new(&mut stream).poll_next_chunk(cx)).await {
+        None => return ShortResponse::full(head, Bytes::new()),
+        Some(Ok(data)) => data,
+        Some(Err(err)) => {
+            tracing::error!(target: "http", "static file read failed: {err}");
+            return ShortResponse::full(
+                ResponseHead::new(StatusCode::INTERNAL_SERVER_ERROR.as_u16()),
+                Bytes::new(),
+            );
+        }
+    };
+    if content_length == Some(first.len() as u64) {
+        return ShortResponse::full(head, first);
+    }
+    ShortResponse {
+        head,
+        body: first,
+        rest: Some(Box::new(stream)),
+    }
 }
 
 /// The error kinds that mean there is no file to serve. `try_call` reports a missing path and
@@ -89,78 +196,29 @@ fn is_miss(e: &std::io::Error) -> bool {
     )
 }
 
-impl StaticFiles {
-    /// Returns the middleware as a tower layer over the http plugin's inner service.
-    pub fn layer(
-        self,
-    ) -> BoxCloneServiceLayer<Inner, http::Request<Body>, http::Response<Body>, Infallible> {
-        let files = Arc::new(self);
-        BoxCloneServiceLayer::new(tower::layer::layer_fn(move |inner: Inner| {
-            let files = Arc::clone(&files);
-            tower::service_fn(move |req| {
-                let files = Arc::clone(&files);
-                let inner = inner.clone();
-                async move { Ok(files.handle(req, inner).await) }
-            })
-        }))
-    }
-
-    async fn handle(&self, req: http::Request<Body>, inner: Inner) -> http::Response<Body> {
-        if req.method() != Method::GET && req.method() != Method::HEAD {
-            return forward(inner, req).await;
-        }
-        if !self.eligible(req.uri().path()) {
-            return forward(inner, req).await;
-        }
-
-        let mut dir = self.dir.clone();
-        let mut served = dir.try_call(probe(&req)).await;
-        // ServeDir does not check If-Range. A validator other than the current strong ETag gets
-        // the whole file. https://www.rfc-editor.org/rfc/rfc9110#section-13.1.5
-        if let Ok(res) = &served
-            && res.headers().contains_key(header::CONTENT_RANGE)
-            && let Some(validator) = req.headers().get(header::IF_RANGE)
-            && res.headers().get(header::ETAG) != Some(validator)
-        {
-            let mut whole = probe(&req);
-            whole.headers_mut().remove(header::RANGE);
-            served = dir.try_call(whole).await;
-        }
-        match served {
-            Ok(res) if res.status() != StatusCode::NOT_FOUND => {
-                res.map(|b| b.map_err(|e| -> BoxError { Box::new(e) }).boxed_unsync())
-            }
-            // A directory URL answers 404 without a filesystem error. It then reaches PHP.
-            Ok(_) => forward(inner, req).await,
-            Err(e) if is_miss(&e) => forward(inner, req).await,
-            // An Err outside the miss kinds is a read failure and must not reach PHP.
-            // https://docs.rs/tower-http/0.7.1/tower_http/services/struct.ServeDir.html#method.try_call
-            Err(e) => {
-                tracing::error!(target: "http", "static probe failed for {}: {e}", req.uri().path());
-                http::Response::builder()
-                    .status(StatusCode::INTERNAL_SERVER_ERROR)
-                    .body(Empty::<Bytes>::new().map_err(BoxError::from).boxed_unsync())
-                    .unwrap()
-            }
-        }
-    }
-}
-
-/// The probe carries only the head. The original request stays unchanged for the miss path,
-/// so its extensions reach the inner service.
-fn probe(req: &http::Request<Body>) -> http::Request<Empty<Bytes>> {
+/// Builds a head-only probe request for `ServeDir` carrying only the range and precondition headers it reads.
+fn probe(req: &RequestCtx, include_range: bool) -> http::Request<Empty<Bytes>> {
+    const PRECONDITIONS: [header::HeaderName; 4] = [
+        header::IF_MATCH,
+        header::IF_UNMODIFIED_SINCE,
+        header::IF_NONE_MATCH,
+        header::IF_MODIFIED_SINCE,
+    ];
     let mut probe = http::Request::new(Empty::<Bytes>::new());
-    *probe.method_mut() = req.method().clone();
-    *probe.uri_mut() = req.uri().clone();
-    *probe.headers_mut() = req.headers().clone();
+    *probe.method_mut() = req.method.clone();
+    *probe.uri_mut() = req.uri.clone();
+    let dst = probe.headers_mut();
+    if include_range {
+        for val in req.headers.get_all(header::RANGE) {
+            dst.append(header::RANGE, val.clone());
+        }
+    }
+    for name in PRECONDITIONS {
+        for val in req.headers.get_all(&name) {
+            dst.append(name.clone(), val.clone());
+        }
+    }
     probe
-}
-
-/// Hands a miss to the inner service.
-async fn forward(mut inner: Inner, req: http::Request<Body>) -> http::Response<Body> {
-    let Ok(ready) = inner.ready().await;
-    let Ok(res) = ready.call(req).await;
-    res
 }
 
 #[cfg(test)]

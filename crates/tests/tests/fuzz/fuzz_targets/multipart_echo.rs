@@ -6,7 +6,7 @@ use std::sync::LazyLock;
 
 use arbitrary::{Arbitrary, Unstructured};
 use rapira_fuzz::MAX_LEN;
-use rapira_http::check::Rejection;
+use rapira_http::Rejection;
 use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart};
 
 #[derive(Arbitrary)]
@@ -242,9 +242,11 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
                 let f = fields
                     .next()
                     .unwrap_or_else(|| panic!("missing field: {ctx}"));
-                assert_eq!(f.name, s.name, "field name: {ctx}");
-                assert_eq!(f.value, s.data, "field value: {ctx}");
-                assert_eq!(f.headers, grouped(&s.headers), "field headers: {ctx}");
+                let headers: Vec<HeaderValues> =
+                    got.field_headers(f).map(|h| h.to_owned_values()).collect();
+                assert_eq!(got.field_name(f), s.name, "field name: {ctx}");
+                assert_eq!(got.field_value(f), s.data, "field value: {ctx}");
+                assert_eq!(headers, grouped(&s.headers), "field headers: {ctx}");
             }
             Some(filename) => {
                 let f = files
@@ -256,10 +258,20 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
                     .find(|(n, _)| n.eq_ignore_ascii_case("content-type"))
                     .map(|(_, v)| v.clone())
                     .filter(|v| !v.is_empty());
-                assert_eq!(f.name, s.name, "file name: {ctx}");
-                assert_eq!(&f.client_filename, filename, "client filename: {ctx}");
-                assert_eq!(f.client_media_type, media, "client media type: {ctx}");
-                assert_eq!(f.headers, grouped(&s.headers), "file headers: {ctx}");
+                let headers: Vec<HeaderValues> =
+                    got.file_headers(f).map(|h| h.to_owned_values()).collect();
+                assert_eq!(got.file_name(f), s.name, "file name: {ctx}");
+                assert_eq!(
+                    got.file_client_filename(f),
+                    filename.as_slice(),
+                    "client filename: {ctx}"
+                );
+                assert_eq!(
+                    got.file_client_media_type(f),
+                    media.as_deref(),
+                    "client media type: {ctx}"
+                );
+                assert_eq!(headers, grouped(&s.headers), "file headers: {ctx}");
                 assert_eq!(f.size, s.data.len() as u64, "file size: {ctx}");
                 let spooled = std::fs::read(&f.file.path).expect("spooled file");
                 assert_eq!(spooled, s.data, "spooled bytes: {ctx}");

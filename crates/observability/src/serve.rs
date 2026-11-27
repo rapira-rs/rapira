@@ -1,4 +1,5 @@
 use std::convert::Infallible;
+use std::fmt::Write as _;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -15,8 +16,8 @@ use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 
 use crate::config::Settings;
+use crate::stats;
 use crate::text::{self, Build};
-use crate::{probes, stats};
 
 /// The bound listener and its endpoint settings.
 pub struct Server {
@@ -67,7 +68,11 @@ impl Server {
             };
             tracing::info!(target: "observability", "listening on {}", self.prepared.addr());
             let result = self.prepared.run(stop, &serving).await;
-            if tokio::time::timeout(drain_grace, serving.graceful.shutdown()).await.is_err() {
+            if result.is_ok()
+                && tokio::time::timeout(drain_grace, serving.graceful.shutdown())
+                    .await
+                    .is_err()
+            {
                 tracing::warn!(target: "observability", "requests still in flight after {drain_grace:?}");
             }
             result
@@ -109,12 +114,22 @@ impl Serving {
 }
 
 impl Serve for Serving {
-    fn spawn_tcp(&self, stream: tokio::net::TcpStream, _peer: std::net::SocketAddr) {
-        self.spawn_conn(stream);
+    fn spawn_tcp(&self, stream: std::net::TcpStream, _peer: std::net::SocketAddr) {
+        match tokio::net::TcpStream::from_std(stream) {
+            Ok(stream) => self.spawn_conn(stream),
+            Err(e) => tracing::debug!(target: "observability", "registering tcp connection: {e}"),
+        }
     }
 
-    fn spawn_unix(&self, stream: tokio::net::UnixStream, _peer: Option<&std::path::Path>) {
-        self.spawn_conn(stream);
+    fn spawn_unix(
+        &self,
+        stream: std::os::unix::net::UnixStream,
+        _peer: Option<std::path::PathBuf>,
+    ) {
+        match tokio::net::UnixStream::from_std(stream) {
+            Ok(stream) => self.spawn_conn(stream),
+            Err(e) => tracing::debug!(target: "observability", "registering unix connection: {e}"),
+        }
     }
 }
 
@@ -140,13 +155,13 @@ fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<String> {
             reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
         }
         (&Method::GET, "/readyz") if routes.probes => {
-            let mut unready = Vec::new();
-            for pool in routes.pools.iter() {
-                if !pool.ready() {
-                    unready.push(pool.name);
-                }
-            }
-            let (status, body) = probes::readyz(&unready);
+            let (status, body) = readyz(
+                routes
+                    .pools
+                    .iter()
+                    .filter(|pool| !pool.ready())
+                    .map(|pool| pool.name),
+            );
             reply(status, PROBE_CONTENT_TYPE, body)
         }
         _ => {
@@ -154,6 +169,18 @@ fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<String> {
             *not_found.status_mut() = StatusCode::NOT_FOUND;
             not_found
         }
+    }
+}
+
+fn readyz<'a>(unready: impl IntoIterator<Item = &'a str>) -> (StatusCode, String) {
+    let mut body = String::new();
+    for pool in unready {
+        let _ = writeln!(body, "pool {pool}: no ready worker");
+    }
+    if body.is_empty() {
+        (StatusCode::OK, "ok\n".to_owned())
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, body)
     }
 }
 
@@ -167,4 +194,45 @@ fn reply(
     res.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readyz_names_each_pool_without_a_ready_worker() {
+        struct Case {
+            name: &'static str,
+            unready: &'static [&'static str],
+            want: (StatusCode, &'static str),
+        }
+        let cases = [
+            Case {
+                name: "each pool has a ready worker",
+                unready: &[],
+                want: (StatusCode::OK, "ok\n"),
+            },
+            Case {
+                name: "one pool has no ready worker",
+                unready: &["grpc"],
+                want: (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "pool grpc: no ready worker\n",
+                ),
+            },
+            Case {
+                name: "neither pool has a ready worker",
+                unready: &["http", "grpc"],
+                want: (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "pool http: no ready worker\npool grpc: no ready worker\n",
+                ),
+            },
+        ];
+        for case in cases {
+            let (status, body) = readyz(case.unready.iter().copied());
+            assert_eq!((status, body.as_str()), case.want, "{}", case.name);
+        }
+    }
 }

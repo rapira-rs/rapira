@@ -32,9 +32,8 @@
     "smart_str", "PHP_JSON_PARTIAL_OUTPUT_ON_ERROR",
     // add_assoc_str, add_index_zval and smart_str_free are inline, so the Rust side calls these exported functions and this shim
     "add_assoc_stringl_ex", "zend_hash_index_update", "rapira_smart_str_free",
-    // the EG(fake_scope) swap inside zend_update_property* initializes readonly props
-    "object_init_ex", "zend_update_property", "zend_update_property_stringl",
-    "zend_update_property_long", "zend_update_property_double", "zend_update_property_null",
+    // the EG(fake_scope) swap inside zend_update_property initializes readonly props
+    "object_init_ex", "zend_update_property",
     // SG, EG, PG and CG are macros that read a thread-local struct on ZTS, so wrapper.c has accessors
     "rapira_sg", "rapira_eg", "rapira_pg", "rapira_cg",
     // A park pauses the execution timer through these functions (module.c). rapira_timer is the native timer type of the build.
@@ -43,8 +42,6 @@
     "rapira_array_init",
     // zend_array_is_list is inline, so wrapper.c has the rapira_array_is_list shim
     "rapira_array_is_list",
-    // zend_string_addref and zend_string_release are inline, so wrapper.c has shims for them
-    "rapira_zstr_addref", "rapira_zstr_release",
     // ZVAL_OBJ_COPY is a macro, so wrapper.c has the rapira_zval_enum_case shim
     "rapira_zval_enum_case",
     // zend_hash_str_find_ptr is inline; prop_offset (zend.rs) calls its exported half

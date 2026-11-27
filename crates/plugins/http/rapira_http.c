@@ -96,10 +96,6 @@ ZEND_METHOD(Rapira_Http_Request, __construct) {
     zend_update_property(ce, obj, ZEND_STRL("body"), &body);
     zend_update_property(ce, obj, ZEND_STRL("remote"), remote);
     zend_update_property(ce, obj, ZEND_STRL("server"), server);
-    if (tls) {
-        zend_update_property(ce, obj, ZEND_STRL("tls"), tls);
-    } else {
-        zend_update_property_null(ce, obj, ZEND_STRL("tls"));
-    }
+    rapira_prop_obj_or_null(ce, obj, ZEND_STRL("tls"), tls);
     zend_update_property_double(ce, obj, ZEND_STRL("receivedAt"), received_at);
 }

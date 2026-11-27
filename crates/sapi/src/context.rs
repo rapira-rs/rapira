@@ -77,6 +77,102 @@ server_strings! {
     on: b"on",
     http_1_0: b"HTTP/1.0",
     http_1_1: b"HTTP/1.1",
+    empty: b"",
+    slash: b"/",
+    zero: b"0",
+    method_get: b"GET",
+    method_post: b"POST",
+    method_put: b"PUT",
+    method_delete: b"DELETE",
+    method_head: b"HEAD",
+    method_options: b"OPTIONS",
+    method_patch: b"PATCH",
+    // Common HTTP_* meta-variable names.
+    http_host: b"HTTP_HOST",
+    http_user_agent: b"HTTP_USER_AGENT",
+    http_accept: b"HTTP_ACCEPT",
+    http_accept_language: b"HTTP_ACCEPT_LANGUAGE",
+    http_accept_encoding: b"HTTP_ACCEPT_ENCODING",
+    http_connection: b"HTTP_CONNECTION",
+    http_content_type: b"HTTP_CONTENT_TYPE",
+    http_content_length: b"HTTP_CONTENT_LENGTH",
+    http_cookie: b"HTTP_COOKIE",
+    http_authorization: b"HTTP_AUTHORIZATION",
+    http_referer: b"HTTP_REFERER",
+    http_origin: b"HTTP_ORIGIN",
+    http_cache_control: b"HTTP_CACHE_CONTROL",
+    http_pragma: b"HTTP_PRAGMA",
+    http_x_forwarded_for: b"HTTP_X_FORWARDED_FOR",
+    http_x_forwarded_proto: b"HTTP_X_FORWARDED_PROTO",
+    http_x_forwarded_host: b"HTTP_X_FORWARDED_HOST",
+    http_x_real_ip: b"HTTP_X_REAL_IP",
+    http_x_requested_with: b"HTTP_X_REQUESTED_WITH",
+    http_if_none_match: b"HTTP_IF_NONE_MATCH",
+    http_if_modified_since: b"HTTP_IF_MODIFIED_SINCE",
+    http_upgrade_insecure_requests: b"HTTP_UPGRADE_INSECURE_REQUESTS",
+    http_sec_fetch_dest: b"HTTP_SEC_FETCH_DEST",
+    http_sec_fetch_mode: b"HTTP_SEC_FETCH_MODE",
+    http_sec_fetch_site: b"HTTP_SEC_FETCH_SITE",
+    http_sec_fetch_user: b"HTTP_SEC_FETCH_USER",
+    http_dnt: b"HTTP_DNT",
+    http_sec_gpc: b"HTTP_SEC_GPC",
+}
+
+impl ServerStrings {
+    /// Returns the pre-interned `HTTP_*` meta-variable name for an ASCII header name (case-insensitive).
+    pub(crate) fn http_header_ci(&self, field: &[u8]) -> Option<Permanent> {
+        let mut lower = [0u8; 32];
+        if field.len() > lower.len() {
+            return None;
+        }
+        for (dst, &b) in lower[..field.len()].iter_mut().zip(field) {
+            *dst = b.to_ascii_lowercase();
+        }
+        match &lower[..field.len()] {
+            b"host" => Some(self.http_host),
+            b"user-agent" => Some(self.http_user_agent),
+            b"accept" => Some(self.http_accept),
+            b"accept-language" => Some(self.http_accept_language),
+            b"accept-encoding" => Some(self.http_accept_encoding),
+            b"connection" => Some(self.http_connection),
+            b"content-type" => Some(self.http_content_type),
+            b"content-length" => Some(self.http_content_length),
+            b"cookie" => Some(self.http_cookie),
+            b"authorization" => Some(self.http_authorization),
+            b"referer" => Some(self.http_referer),
+            b"origin" => Some(self.http_origin),
+            b"cache-control" => Some(self.http_cache_control),
+            b"pragma" => Some(self.http_pragma),
+            b"x-forwarded-for" => Some(self.http_x_forwarded_for),
+            b"x-forwarded-proto" => Some(self.http_x_forwarded_proto),
+            b"x-forwarded-host" => Some(self.http_x_forwarded_host),
+            b"x-real-ip" => Some(self.http_x_real_ip),
+            b"x-requested-with" => Some(self.http_x_requested_with),
+            b"if-none-match" => Some(self.http_if_none_match),
+            b"if-modified-since" => Some(self.http_if_modified_since),
+            b"upgrade-insecure-requests" => Some(self.http_upgrade_insecure_requests),
+            b"sec-fetch-dest" => Some(self.http_sec_fetch_dest),
+            b"sec-fetch-mode" => Some(self.http_sec_fetch_mode),
+            b"sec-fetch-site" => Some(self.http_sec_fetch_site),
+            b"sec-fetch-user" => Some(self.http_sec_fetch_user),
+            b"dnt" => Some(self.http_dnt),
+            b"sec-gpc" => Some(self.http_sec_gpc),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn method(&self, method: &[u8]) -> Option<Permanent> {
+        match method {
+            b"GET" => Some(self.method_get),
+            b"POST" => Some(self.method_post),
+            b"PUT" => Some(self.method_put),
+            b"DELETE" => Some(self.method_delete),
+            b"HEAD" => Some(self.method_head),
+            b"OPTIONS" => Some(self.method_options),
+            b"PATCH" => Some(self.method_patch),
+            _ => None,
+        }
+    }
 }
 
 /// The HTTP pool identity shared by the dispatcher and CGI.

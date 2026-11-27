@@ -1,7 +1,7 @@
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::collections::VecDeque;
+use std::sync::{Arc, Condvar, Mutex};
 use std::thread;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 use anyhow::{Context, Result, ensure};
 use rapira_config::PoolSettings;
@@ -14,6 +14,16 @@ use tracing::{error, info, warn};
 use crate::pidfile::PidFile;
 use crate::settings::Settings;
 use crate::signals::Signals;
+
+struct WakeState {
+    signals: VecDeque<libc::c_int>,
+    failed: bool,
+    plugins_done: bool,
+    obs_done: bool,
+    workers_done: bool,
+}
+
+type Wake = Arc<(Mutex<WakeState>, Condvar)>;
 
 pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
@@ -43,35 +53,64 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
             pool.workers = 1;
         }
     }
+    let wake: Wake = Arc::new((
+        Mutex::new(WakeState {
+            signals: VecDeque::new(),
+            failed: false,
+            plugins_done: false,
+            obs_done: obs.is_none(),
+            workers_done: false,
+        }),
+        Condvar::new(),
+    ));
+    {
+        let wake = Arc::clone(&wake);
+        signals
+            .start(move |sig| {
+                let mut state = wake.0.lock().unwrap();
+                state.signals.push_back(sig);
+                wake.1.notify_one();
+            })
+            .context("starting signal thread")?;
+    }
     let mut engine = rapira_sapi::Engine::start(
         &crate::PLUGIN_REGISTERS,
         plugins.iter().map(|(_, pool)| pool),
     )?;
-    let mut pidfile = settings
+    let _pidfile = settings
         .server
         .pidfile
         .as_deref()
         .map(PidFile::write)
         .transpose()
         .context("writing pidfile")?;
-    let rt = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .thread_name("rapira-io")
-        .build()
-        .context("starting the IO runtime")?;
+    let has_grpc = plugins.iter().any(|(plugin, _)| plugin.name() == "grpc");
+    let mut rt_builder = tokio::runtime::Builder::new_multi_thread();
+    rt_builder.enable_all();
+    if has_grpc {
+        rt_builder.thread_name("rapira-io");
+    } else {
+        // HTTP runs its own sharded single-threaded IO runtimes, so the control runtime only needs one thread for accept and timer support.
+        rt_builder.worker_threads(1).thread_name("rapira-ctrl");
+    }
+    let rt = rt_builder.build().context("starting the IO runtime")?;
     let (stop, _) = watch::channel(false);
     let grace = settings.server.drain_grace();
     let mut services = Vec::new();
     for (plugin, cfg) in plugins {
         // SAFETY: both plugins supply static dispatcher records.
-        let intake = or_exit(
-            unsafe { engine.start_pool(cfg, &*plugin, rt.handle()) },
-            &mut pidfile,
-        );
+        let intake = or_exit(unsafe { engine.start_pool(cfg, &*plugin, rt.handle()) });
         services.push((plugin, intake));
     }
+    {
+        let wake = Arc::clone(&wake);
+        engine.set_workers_done_notify(Arc::new(move || {
+            let mut state = wake.0.lock().unwrap();
+            state.workers_done = true;
+            wake.1.notify_one();
+        }));
+    }
     let pools: Arc<[Arc<Pool>]> = engine.pools().into();
-    let failed = Arc::new(AtomicBool::new(false));
     let mut tasks = JoinSet::new();
     for (plugin, intake) in services {
         let name = plugin.name();
@@ -82,12 +121,15 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
         );
     }
     let stopped = stop.subscribe();
-    let error_flag = Arc::clone(&failed);
-    let plugins = rt.spawn(async move {
+    let plugins_wake = Arc::clone(&wake);
+    rt.spawn(async move {
         while let Some(result) = tasks.join_next().await {
             let (name, result) = result.unwrap_or_else(|e| ("task", Err(e.into())));
-            service_end(name, result, &stopped, &error_flag);
+            service_end(name, result, &stopped, &plugins_wake);
         }
+        let mut state = plugins_wake.0.lock().unwrap();
+        state.plugins_done = true;
+        plugins_wake.1.notify_one();
     });
     let obs = obs.map(|server| {
         let build = rapira_observability::Build {
@@ -95,7 +137,7 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
             php_version: rapira_sapi::linked_php_version(),
         };
         let stopped = stop.subscribe();
-        let flag = Arc::clone(&failed);
+        let obs_wake = Arc::clone(&wake);
         let pools = Arc::clone(&pools);
         or_exit(
             thread::Builder::new()
@@ -105,21 +147,26 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
                         server.serve(pools, build, stopped.clone(), grace)
                     }))
                     .unwrap_or_else(|_| Err(anyhow::anyhow!("observability thread panicked")));
-                    service_end("observability", result, &stopped, &flag);
+                    service_end("observability", result, &stopped, &obs_wake);
+                    let mut state = obs_wake.0.lock().unwrap();
+                    state.obs_done = true;
+                    obs_wake.1.notify_one();
                 })
                 .context("starting observability"),
-            &mut pidfile,
         )
     });
 
     loop {
-        let sig = or_exit(
-            signals.wait().context("waiting for a host signal"),
-            &mut pidfile,
-        );
-        if failed.load(Ordering::Acquire) {
-            break;
-        }
+        let sig = {
+            let mut state = wake.0.lock().unwrap();
+            while !state.failed && state.signals.is_empty() {
+                state = wake.1.wait(state).unwrap();
+            }
+            if state.failed {
+                break;
+            }
+            state.signals.pop_front().unwrap()
+        };
         match sig {
             libc::SIGTERM | libc::SIGINT | libc::SIGQUIT => break,
             libc::SIGUSR1 => status(&pools),
@@ -132,51 +179,56 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
     }
 
     let deadline = Instant::now() + settings.server.stop_timeout;
+    stop.send_replace(true);
     info!(target: "rapira", "stopping server");
     engine.begin_drain();
-    stop.send_replace(true);
-    loop {
-        match or_exit(
-            signals.pending().context("checking signals during stop"),
-            &mut pidfile,
-        ) {
-            Some(libc::SIGTERM | libc::SIGINT) => exit(130, &mut pidfile),
-            Some(libc::SIGUSR1) => status(&pools),
-            _ => {}
+    let failed = loop {
+        let mut state = wake.0.lock().unwrap();
+        while let Some(sig) = state.signals.pop_front() {
+            match sig {
+                libc::SIGTERM | libc::SIGINT => {
+                    drop(state);
+                    rapira_sapi::exit::exit(130);
+                }
+                libc::SIGUSR1 if !state.failed => {
+                    drop(state);
+                    status(&pools);
+                    state = wake.0.lock().unwrap();
+                }
+                _ => {}
+            }
         }
-        if plugins.is_finished()
-            && obs.as_ref().is_none_or(thread::JoinHandle::is_finished)
-            && engine.workers_finished()
-        {
-            break;
+        if state.plugins_done && state.obs_done && state.workers_done {
+            break state.failed;
         }
         let left = deadline.saturating_duration_since(Instant::now());
         if left.is_zero() {
+            let failed = state.failed;
+            drop(state);
             error!(target: "rapira", "stop deadline reached; exiting without PHP module shutdown");
-            exit(i32::from(failed.load(Ordering::Acquire)), &mut pidfile);
+            rapira_sapi::exit::exit(i32::from(failed));
         }
-        thread::sleep(left.min(Duration::from_millis(10)));
-    }
+        let (guard, _) = wake.1.wait_timeout(state, left).unwrap();
+        drop(guard);
+    };
     if let Some(thread) = obs {
         thread.join().expect("observability caught its panic");
     }
     drop(engine);
     rt.shutdown_background();
-    ensure!(!failed.load(Ordering::Acquire), "a server listener stopped");
+    ensure!(!failed, "a server listener stopped");
     Ok(())
 }
 
-/// A listener failure wakes the signal loop. During an operator stop, a cut drain still exits successfully.
-fn service_end(name: &str, result: Result<()>, stop: &watch::Receiver<bool>, failed: &AtomicBool) {
+/// A listener failure wakes the main loop directly. During an operator stop, a cut drain still exits successfully.
+fn service_end(name: &str, result: Result<()>, stop: &watch::Receiver<bool>, wake: &Wake) {
     if let Err(e) = result {
         error!(target: "rapira", "plugin {name}: {e:#}");
     }
     if !*stop.borrow() {
-        failed.store(true, Ordering::Release);
-        // SAFETY: kill takes two integers. The main thread accepts SIGUSR1 and checks the failure flag.
-        unsafe {
-            libc::kill(libc::getpid(), libc::SIGUSR1);
-        }
+        let mut state = wake.0.lock().unwrap();
+        state.failed = true;
+        wake.1.notify_one();
     }
 }
 
@@ -190,15 +242,9 @@ fn status(pools: &[Arc<Pool>]) {
     }
 }
 
-fn or_exit<T>(result: Result<T>, pidfile: &mut Option<PidFile>) -> T {
+fn or_exit<T>(result: Result<T>) -> T {
     result.unwrap_or_else(|e| {
         error!(target: "rapira", "{e:#}");
-        exit(1, pidfile);
+        rapira_sapi::exit::exit(1);
     })
-}
-
-fn exit(code: i32, pidfile: &mut Option<PidFile>) -> ! {
-    drop(pidfile.take());
-    // SAFETY: threads can still be inside PHP. Skip process destructors.
-    unsafe { libc::_exit(code) }
 }

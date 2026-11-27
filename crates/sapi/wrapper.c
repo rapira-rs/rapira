@@ -68,10 +68,6 @@ void rapira_hash_update_stringl(HashTable *ht, zend_string *key,
     zend_hash_update(ht, key, &value);
 }
 
-void rapira_zstr_addref(zend_string *s) { zend_string_addref(s); }
-
-void rapira_zstr_release(zend_string *s) { zend_string_release(s); }
-
 // This immutable string stays valid until process exit. PHP can keep it in extension caches until module shutdown. https://github.com/php/php-src/blob/php-8.6.0/ext/pcre/php_pcre.c#L847-L863
 zend_string *rapira_permanent_string(const char *s, size_t len) {
     zend_string *str = zend_string_init(s, len, true);

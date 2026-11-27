@@ -1,10 +1,12 @@
 //! The call that the plugin hands to PHP, and what PHP sends back.
 
+use std::sync::Arc;
+use std::time::Instant;
+
 use bytes::Bytes;
 use connectrpc::ConnectError;
 use connectrpc::http::HeaderMap;
 use rapira_sapi::types::Addr;
-use std::time::Instant;
 
 #[derive(Clone, Copy)]
 pub(crate) struct Deadline {
@@ -19,13 +21,14 @@ pub(crate) fn expired(until: Option<Instant>) -> bool {
 /// One call with one request message. `message` is the binary protobuf encoding of the method's input message.
 pub(crate) struct Call {
     /// `package.Service/Method`, without a leading slash.
-    pub method: String,
+    pub method: Arc<str>,
     pub protocol: connectrpc::Protocol,
     /// The request headers as received. `getContext()` drops the transport names and decodes `-bin` values when it builds `Context::$metadata`.
     pub metadata: HeaderMap,
     pub deadline: Option<Deadline>,
     pub remote: Addr,
     pub message: Bytes,
+    pub received_at: f64,
 }
 
 impl Call {

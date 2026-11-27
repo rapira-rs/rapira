@@ -28,7 +28,7 @@ struct PoolFamily {
 
 /// Writes the text format. Each family is one group, with the HELP and TYPE lines first. All label values are fixed ASCII strings, so nothing needs escaping. https://prometheus.io/docs/instrumenting/exposition_formats/#prometheus-text-format
 pub(crate) fn render(pools: &[PoolStats], build: &Build) -> String {
-    let mut out = String::new();
+    let mut out = String::with_capacity(768 + pools.len() * 512);
 
     family(&mut out, "rapira_workers", "gauge", "Workers per state.");
     for p in pools {

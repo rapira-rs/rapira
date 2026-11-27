@@ -11,13 +11,14 @@ workspace = true
 
 [dependencies]
 rapira_config = { workspace = true }
+rapira_http_middleware = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 bytes = { workspace = true }
 http = { workspace = true }
+http-body = { workspace = true }
 http-body-util = { workspace = true }
 tracing = { workspace = true }
 percent-encoding = "2"
 tokio = { workspace = true, features = ["fs", "rt"] }
-tower = { workspace = true }
 tower-http = { version = "0.7.1", default-features = false, features = ["fs"] }

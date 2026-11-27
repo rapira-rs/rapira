@@ -50,23 +50,61 @@ fn check_linked_php() -> anyhow::Result<()> {
 }
 
 #[derive(Default)]
-pub(crate) struct Workers(Mutex<Vec<(Sender<()>, JoinHandle<()>)>>);
+struct WorkersInner {
+    threads: Vec<(Sender<()>, JoinHandle<()>)>,
+    active: usize,
+    on_all_done: Option<Arc<dyn Fn() + Send + Sync>>,
+}
+
+#[derive(Default)]
+pub(crate) struct Workers(Mutex<WorkersInner>);
+
+struct ActiveGuard(Arc<Workers>);
+
+impl Drop for ActiveGuard {
+    fn drop(&mut self) {
+        let notify = {
+            let mut inner = self.0.0.lock().unwrap();
+            inner.active -= 1;
+            if inner.active == 0 {
+                inner.on_all_done.clone()
+            } else {
+                None
+            }
+        };
+        if let Some(notify) = notify {
+            notify();
+        }
+    }
+}
 
 impl Workers {
     pub(crate) fn spawn(
-        &self,
+        self: &Arc<Self>,
         builder: Builder,
         control: Sender<()>,
         run: impl FnOnce() + Send + 'static,
     ) -> std::io::Result<()> {
-        let mut workers = self.0.lock().unwrap();
-        let thread = builder.spawn(run)?;
-        workers.push((control, thread));
-        Ok(())
+        let mut inner = self.0.lock().unwrap();
+        inner.active += 1;
+        let workers = Arc::clone(self);
+        match builder.spawn(move || {
+            let _active = ActiveGuard(workers);
+            run();
+        }) {
+            Ok(thread) => {
+                inner.threads.push((control, thread));
+                Ok(())
+            }
+            Err(e) => {
+                inner.active -= 1;
+                Err(e)
+            }
+        }
     }
 
     pub(crate) fn wake(&self) {
-        for (control, worker) in self.0.lock().unwrap().iter() {
+        for (control, worker) in self.0.lock().unwrap().threads.iter() {
             // A full channel already holds a reload for this worker.
             let _ = control.try_send(());
             worker.thread().unpark();
@@ -153,13 +191,16 @@ impl Engine {
         Ok(engine)
     }
 
-    pub fn workers_finished(&self) -> bool {
-        self.workers
-            .0
-            .lock()
-            .unwrap()
-            .iter()
-            .all(|(_, t)| t.is_finished())
+    /// Registers a callback invoked once all spawned PHP worker threads finish (or immediately if none are active).
+    pub fn set_workers_done_notify(&self, notify: Arc<dyn Fn() + Send + Sync>) {
+        let already_done = {
+            let mut inner = self.workers.0.lock().unwrap();
+            inner.on_all_done = Some(Arc::clone(&notify));
+            inner.active == 0
+        };
+        if already_done {
+            notify();
+        }
     }
 
     pub fn reload(&self) {
@@ -183,7 +224,7 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        let workers = std::mem::take(&mut *self.workers.0.lock().unwrap());
+        let workers = std::mem::take(&mut self.workers.0.lock().unwrap().threads);
         for (control, worker) in workers {
             drop(control);
             worker.thread().unpark();

@@ -1,10 +1,6 @@
-//! This module implements writeHead(), writeBody(), writeTrailers() and flush(). It also has the frames that these methods send and the strings that the IO thread reads in place.
+//! This module implements writeHead(), writeBody(), writeTrailers() and flush() over the HTTP responder.
 
-use std::cell::{Cell, RefCell};
-use std::sync::Arc;
-use std::time::Duration;
-
-use rapira_sapi::{rapira_zstr_addref, rapira_zstr_release, stream, zend_string};
+use rapira_sapi::zend_string;
 
 use super::headers::{forbidden_trailer, split_framing, walk_head_table};
 use super::*;
@@ -60,34 +56,10 @@ pub(super) unsafe fn throw_verb(v: Verb) -> bool {
 
 pub(super) struct Closed;
 
-/// A full channel waits for space or an interrupt with the PHP execution timer paused.
-/// # Safety
-/// The engine is active on this thread.
-pub(super) unsafe fn send_frame(st: &mut ExchangeState, frame: Frame) -> Result<(), Closed> {
-    let Some(tx) = st.sender.as_ref() else {
-        return Err(Closed);
-    };
-    let sent = unsafe { stream::send(tx, frame, None) };
-    // A frame pushed while the receiver drops stays in the channel until the last Sender drops, because tokio Rx::drop drains the channel only once. The drop of the Sender here frees the frame, so a lent string cannot delay the cycle end.
-    if sent && tx.is_closed() {
-        st.sender = None;
-        return Err(Closed);
-    }
-    sent.then_some(()).ok_or(Closed)
-}
-
-/// `finalizing_len` is the body length of a one-shot response. It applies only when nothing streamed before. A declared content-length takes precedence, and a bodiless response ignores `finalizing_len`.
-/// # Safety
-/// The rules of `send_frame` apply.
-pub(super) unsafe fn emit_head(
-    st: &mut ExchangeState,
-    finalizing_len: Option<u64>,
-) -> Result<(), Closed> {
+/// Emits the committed or implicit 200 response head onto the wire.
+pub(super) fn emit_head(st: &mut ExchangeState, finalizing_len: Option<u64>) -> Result<(), Closed> {
     let head = match std::mem::replace(&mut st.phase, Phase::Sent) {
-        Phase::Open => ResponseHead {
-            status: 200,
-            headers: HeaderMap::new(),
-        },
+        Phase::Open => ResponseHead::new(200),
         Phase::Committed(head) => head,
         phase => {
             st.phase = phase;
@@ -99,29 +71,25 @@ pub(super) unsafe fn emit_head(
     } else {
         st.declared_cl.or(finalizing_len)
     };
-    unsafe {
-        send_frame(
-            st,
-            Frame::Head {
-                head,
-                content_length,
-                bodiless: st.bodiless,
-            },
-        )
-    }
+    let Some(responder) = st.responder.as_mut() else {
+        return Err(Closed);
+    };
+    responder
+        .write_head(head, content_length, st.bodiless)
+        .map_err(|_| Closed)
 }
 
-/// The function sets `Phase::Discarded`, so `release()` does not count the unit a second time. The discard also releases the strings that the IO thread no longer reads.
+/// Sets `Phase::Discarded` so `release()` does not count the unit a second time.
 pub(super) fn discard_unit(st: &mut ExchangeState) {
-    // SAFETY: every caller runs on the PHP thread with the engine active.
-    unsafe { release_done() };
     if st.settled() {
         return;
     }
     st.phase = Phase::Discarded;
     st.unlink_spools();
     record(Event::Handled { errored: true });
-    st.sender = None;
+    if let Some(mut responder) = st.responder.take() {
+        responder.discard();
+    }
 }
 
 /// The check before a write. It discards a cancelled unit. A settled unit takes no more writes.
@@ -134,7 +102,7 @@ pub(super) fn closed(st: &mut ExchangeState) -> Option<Verb> {
 }
 
 /// # Safety
-/// The rules of `send_frame` apply.
+/// The engine is active on this thread.
 pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState) -> Verb {
     if let Some(verb) = closed(st) {
         return verb;
@@ -142,7 +110,10 @@ pub(super) unsafe fn write_trailers_core(st: &mut ExchangeState) -> Verb {
     if matches!(st.phase, Phase::Open) {
         return Verb::HeadNotWritten;
     }
-    if unsafe { emit_head(st, Some(st.sent_body)) }.is_err() {
+    if matches!(st.phase, Phase::Committed(_)) && st.sent_body == 0 {
+        return send_complete(st, &[], 0);
+    }
+    if emit_head(st, Some(st.sent_body)).is_err() {
         discard_unit(st);
         return Verb::Discarded;
     }
@@ -158,16 +129,18 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
     trailers: *mut HashTable,
 ) -> bool {
     guard(false, || unsafe {
-        let map = match walk_head_table(trailers) {
-            Ok(map) => map,
+        let headers = match walk_head_table(trailers) {
+            Ok(headers) => headers,
             Err(msg) => {
                 zend::throw_value_error(msg);
                 return false;
             }
         };
-        let forbidden = map.keys().any(|n| forbidden_trailer(n.as_str()));
-        // The plugin serves HTTP/1.1 and sends no trailer section, so only the checks read the map.
-        drop(map);
+        let forbidden = headers
+            .iter()
+            .any(|(name, _)| forbidden_trailer(name.as_str()));
+        // The plugin serves HTTP/1.1 and sends no trailer section, so only the checks read the headers.
+        drop(headers);
         if forbidden {
             zend::throw_value_error(
                 c"the field may not travel in a trailer section: framing, routing, authentication, request modifiers, response controls and content format stay in the head",
@@ -179,12 +152,10 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
     })
 }
 
-/// # Safety
-/// The rules of `send_frame` apply.
-pub(super) unsafe fn write_head_core(
+pub(super) fn write_head_core(
     st: &mut ExchangeState,
     status: u16,
-    headers: HeaderMap,
+    headers: ResponseHeaders,
 ) -> Verb {
     if st.cancelled() {
         discard_unit(st);
@@ -205,6 +176,7 @@ pub(super) unsafe fn write_head_core(
     st.phase = Phase::Committed(ResponseHead {
         status,
         headers: split.headers,
+        known_len: split.declared_cl,
     });
     // A 1xx response carries no body (RFC 9112 §6.3), the same as 204 and 304. A committed 101 therefore drops its chunks. https://www.rfc-editor.org/rfc/rfc9112#section-6.3
     if matches!(status, 204 | 304 | 101) {
@@ -230,22 +202,51 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_head(
             );
             return false;
         }
-        let map = match walk_head_table(headers) {
-            Ok(map) => map,
+        let headers = match walk_head_table(headers) {
+            Ok(headers) => headers,
             Err(msg) => {
                 zend::throw_value_error(msg);
                 return false;
             }
         };
-        throw_verb(write_head_core(st, status as u16, map))
+        throw_verb(write_head_core(st, status as u16, headers))
     })
 }
 
-/// The smallest writeBody piece that the IO thread reads in place. The host copies a smaller piece. The value comes from a measurement.
-const ZERO_COPY_MIN: usize = 16 << 10;
-
-/// The maximum number of PHP string bytes that the IO thread holds in place at one time. Above it, the host copies a piece. It limits what memory_limit sees for borrowed strings. It also limits the wait of the cycle end for a slow client to the time that the client needs to read the cap.
-const BORROW_CAP: usize = 8 << 20;
+/// Sends a one-shot response (head + optional body) without allocating a stream channel and seals the exchange.
+fn send_complete(st: &mut ExchangeState, body: &[u8], accepted_len: u64) -> Verb {
+    st.unlink_spools();
+    let head = match std::mem::replace(&mut st.phase, Phase::Open) {
+        Phase::Open => ResponseHead::new(200),
+        Phase::Committed(head) => head,
+        other => {
+            st.phase = other;
+            unreachable!("send_complete requires Open or Committed phase");
+        }
+    };
+    let content_length = if st.bodiless {
+        st.declared_cl
+    } else {
+        st.declared_cl.or(Some(accepted_len))
+    };
+    let Some(mut responder) = st.responder.take() else {
+        discard_unit(st);
+        return Verb::Discarded;
+    };
+    let wire_body = if st.bodiless { &[] } else { body };
+    if responder
+        .write_complete(head, wire_body, content_length, st.bodiless, false)
+        .is_err()
+    {
+        st.phase = Phase::Discarded;
+        record(Event::Handled { errored: true });
+        return Verb::Discarded;
+    }
+    st.sent_body = accepted_len;
+    st.phase = Phase::Sealed;
+    record(Event::Handled { errored: false });
+    Verb::Ok
+}
 
 /// # Safety
 /// `st` is valid. `s` is a live string. The engine is active.
@@ -254,56 +255,57 @@ pub(super) unsafe fn write_body_core(
     s: *mut zend_string,
     eos: bool,
 ) -> Verb {
-    unsafe { release_done() };
     if let Some(verb) = closed(st) {
         return verb;
     }
-    let len = unsafe { (*s).len };
+    let bytes = unsafe { zend::zstr_bytes(s) };
+    let len = bytes.len();
     if len == 0 && !eos {
         return Verb::Ok;
     }
-    unsafe {
-        send_body(st, len as u64, eos, |n| {
-            let n = n as usize;
-            // A cut piece lends the whole string, because the slice keeps all of it alive.
-            if len >= ZERO_COPY_MIN && lending() && lent_bytes() + len <= BORROW_CAP {
-                Frame::Chunk(borrow(s, len).slice(..n))
-            } else {
-                Frame::Chunk(Bytes::copy_from_slice(&zend::zstr_bytes(s)[..n]))
-            }
-        })
-    }
-}
-
-/// Sends `len` body bytes and seals on `eos`. `frame(n)` builds the frame of the first `n` bytes; a write past the declared content-length sends the part that fits and seals.
-/// # Safety
-/// The rules of `send_frame` apply.
-pub(super) unsafe fn send_body(
-    st: &mut ExchangeState,
-    len: u64,
-    eos: bool,
-    frame: impl FnOnce(u64) -> Frame,
-) -> Verb {
-    if let Some(cl) = st.declared_cl
-        && st.sent_body + len > cl
+    // One-shot fast path: hand head + body over the single oneshot without allocating a stream channel.
+    if eos
+        && st.sent_body == 0
+        && matches!(st.phase, Phase::Open | Phase::Committed(_))
+        && st.declared_cl.is_none_or(|cl| (len as u64) <= cl)
     {
-        let fit = cl - st.sent_body;
-        if unsafe { emit_head(st, Some(cl)) }.is_ok() && fit > 0 && !st.bodiless {
-            let _ = unsafe { send_frame(st, frame(fit)) };
+        return send_complete(st, bytes, len as u64);
+    }
+
+    if let Some(cl) = st.declared_cl
+        && st.sent_body + (len as u64) > cl
+    {
+        let fit = (cl - st.sent_body) as usize;
+        if st.sent_body == 0 && matches!(st.phase, Phase::Open | Phase::Committed(_)) {
+            let _ = send_complete(st, &bytes[..fit], cl);
+            return Verb::ContentLengthExceeded;
+        }
+        if emit_head(st, Some(cl)).is_ok()
+            && fit > 0
+            && !st.bodiless
+            && let Some(responder) = st.responder.as_mut()
+        {
+            let _ = unsafe { responder.write_chunk(&bytes[..fit]) };
         }
         st.sent_body = cl;
         unsafe { seal(st) };
         return Verb::ContentLengthExceeded;
     }
-    let finalizing = (eos && st.sent_body == 0).then_some(len);
-    if unsafe { emit_head(st, finalizing) }.is_err() {
+
+    if emit_head(st, None).is_err() {
         discard_unit(st);
         return Verb::Discarded;
     }
-    st.sent_body += len;
-    if len > 0 && !st.bodiless && unsafe { send_frame(st, frame(len)) }.is_err() {
-        discard_unit(st);
-        return Verb::Discarded;
+    st.sent_body += len as u64;
+    if len > 0 && !st.bodiless {
+        let Some(responder) = st.responder.as_mut() else {
+            discard_unit(st);
+            return Verb::Discarded;
+        };
+        if unsafe { responder.write_chunk(bytes) }.is_err() {
+            discard_unit(st);
+            return Verb::Discarded;
+        }
     }
     if eos {
         unsafe { seal(st) };
@@ -326,23 +328,21 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_body(
 }
 
 /// # Safety
-/// The rules of `send_frame` apply.
+/// The engine is active on this thread.
 pub(super) unsafe fn seal(st: &mut ExchangeState) {
-    unsafe { release_done() };
     st.unlink_spools();
     st.phase = Phase::Sealed;
     record(Event::Handled { errored: false });
-    let _ = unsafe { send_frame(st, Frame::End { truncated: false }) };
-    st.sender = None;
+    if let Some(mut responder) = st.responder.take() {
+        unsafe { responder.finish(false) };
+    }
 }
 
-/// # Safety
-/// The rules of `send_frame` apply.
-pub(super) unsafe fn flush_core(st: &mut ExchangeState) -> Verb {
+pub(super) fn flush_core(st: &mut ExchangeState) -> Verb {
     if let Some(verb) = closed(st) {
         return verb;
     }
-    match unsafe { emit_head(st, None) } {
+    match emit_head(st, None) {
         Ok(()) => Verb::Ok,
         Err(Closed) => {
             discard_unit(st);
@@ -361,87 +361,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_flush(held: *const HeldPtr) -> bool 
     })
 }
 
-/// A string that the IO thread reads in place: the Bytes owner, and the LENT entry of the PHP thread. A drop on any thread only lowers the count of `alive`.
-#[derive(Clone)]
-struct Borrowed {
-    s: *mut zend_string,
-    len: usize,
-    alive: Arc<()>,
-}
-
-// SAFETY: the IO thread only reads the bytes; the PHP thread changes the reference count.
-unsafe impl Send for Borrowed {}
-
-impl AsRef<[u8]> for Borrowed {
-    fn as_ref(&self) -> &[u8] {
-        // SAFETY: borrow() took a reference, and release_done() releases it only after the last Bytes owner dropped.
-        unsafe { zend::zstr_bytes(self.s) }
-    }
-}
-
-thread_local! {
-    /// The strings of this PHP thread that the IO thread can still read.
-    static LENT: RefCell<Vec<Borrowed>> = const { RefCell::new(Vec::new()) };
-    /// The cycle whose quiesce ran. App code that a later RSHUTDOWN runs, for example a session save handler, copies its pieces, because the memory manager frees the request strings before the next quiesce.
-    static QUIESCED_CYCLE: Cell<u64> = const { Cell::new(0) };
-}
-
-/// A unit with a watchdog must be able to recycle while the IO thread still holds response bytes.
-fn lending() -> bool {
-    !rapira_sapi::watchdog::enabled() && rapira_sapi::exchange::cycle() != QUIESCED_CYCLE.get()
-}
-
-fn lent_bytes() -> usize {
-    LENT.with_borrow(|lent| lent.iter().map(|b| b.len).sum())
-}
-
-/// Returns a frame body that reads `s` in place. The new reference keeps `s` alive until release_done().
-/// # Safety
-/// `s` is a live string of `len` bytes. The engine is active on this thread.
-unsafe fn borrow(s: *mut zend_string, len: usize) -> Bytes {
-    unsafe { rapira_zstr_addref(s) };
-    let alive = Arc::new(());
-    let b = Borrowed { s, len, alive };
-    LENT.with_borrow_mut(|lent| lent.push(b.clone()));
-    Bytes::from_owner(b)
-}
-
-/// Releases the strings that the IO thread no longer reads. write_body_core, seal and discard_unit call it first, so a long response releases its strings while it runs. Arc::get_mut loads the count with Acquire, so the reads of the IO thread come before the release.
-/// # Safety
-/// The engine is active on this thread.
-unsafe fn release_done() {
-    LENT.with_borrow_mut(|lent| {
-        for b in lent.extract_if(.., |b| Arc::get_mut(&mut b.alive).is_some()) {
-            unsafe { rapira_zstr_release(b.s) };
-        }
-    });
-}
-
-/// The quiesce hook of the http plugin record in rapira_http_classes.c. It waits until the IO thread reads no lent string, then releases the strings. A warn record about every 5 s names what the IO thread still holds.
-/// # Safety
-/// The engine is active on this thread.
+/// The quiesce hook of the http plugin record in rapira_http_classes.c.
+/// Response bytes are copied or pooled before handoff, so quiesce is an immediate no-op.
 #[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_http_quiesce() {
-    guard((), || unsafe {
-        for polls in 0u64.. {
-            release_done();
-            let held = LENT.with_borrow(Vec::len);
-            if held == 0 {
-                QUIESCED_CYCLE.set(rapira_sapi::exchange::cycle());
-                return;
-            }
-            if polls == 0 {
-                // The request watchdog does not count the wait as a stuck request.
-                record(Event::Idle);
-            }
-            if polls % 5000 == 4999 {
-                tracing::warn!(
-                    target: "http",
-                    "the cycle end waits for {held} response piece(s) of {} bytes that the IO thread still holds",
-                    lent_bytes()
-                );
-            }
-            std::thread::sleep(Duration::from_millis(1));
-        }
-    });
-}
+pub unsafe extern "C" fn rapira_rs_http_quiesce() {}

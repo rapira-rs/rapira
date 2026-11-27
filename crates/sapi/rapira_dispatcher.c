@@ -28,7 +28,9 @@ void rapira_set_dispatcher(int mode, const rapira_plugin *plugin,
 
 int rapira_current_mode(void) { return rapira_mode; }
 
-const rapira_plugin *rapira_current_plugin(void) { return rapira_plugin_current; }
+const rapira_plugin *rapira_current_plugin(void) {
+    return rapira_plugin_current;
+}
 
 // the memoized plugin Dispatcher of this cycle; RSHUTDOWN releases it
 ZEND_TLS zval rapira_dispatcher_memo;
@@ -47,7 +49,8 @@ ZEND_FUNCTION(Rapira_get_mode) {
         [RAPIRA_MODE_DISPATCHER] = "Dispatcher",
     };
 
-    // the case object belongs to the per-request class constant; the copy takes a reference
+    // the case object belongs to the per-request class constant; the copy takes
+    // a reference
     RETURN_OBJ_COPY(
         zend_enum_get_case_cstr(rapira_ce_mode, names[rapira_mode]));
 }
@@ -88,9 +91,8 @@ ZEND_FUNCTION(Rapira_handle_request) {
     ZEND_PARSE_PARAMETERS_END();
 
     if (rapira_mode != RAPIRA_MODE_WORKER) {
-        zend_throw_exception(
-            rapira_ce_not_in_worker_mode_error,
-            "Requests are only handed out in Mode::Worker", 0);
+        zend_throw_exception(rapira_ce_not_in_worker_mode_error,
+                             "Requests are only handed out in Mode::Worker", 0);
         RETURN_THROWS();
     }
     if (rapira_in_handle_request) {
@@ -290,8 +292,10 @@ ZEND_FUNCTION(rapira_sapi_is_cancelled) {
 ZEND_FUNCTION(rapira_sapi_dispatcher_construct) {
     zend_throw_error(NULL,
                      "host-created; obtain it from \\Rapira\\get_dispatcher()");
+    RETURN_THROWS();
 }
 
 ZEND_FUNCTION(rapira_sapi_host_created) {
     zend_throw_error(NULL, "host-created");
+    RETURN_THROWS();
 }

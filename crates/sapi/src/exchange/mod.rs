@@ -1,6 +1,7 @@
 pub(crate) use std::{cell::Cell, ffi::c_char, ptr::NonNull, time::Duration};
 use std::{fmt::NumBuffer, io::Write, net::IpAddr, os::unix::ffi::OsStrExt, sync::OnceLock};
 
+use crate::context::{Permanent, permanent};
 pub(crate) use crate::work::{Held, HeldPtr, release};
 pub(crate) use crate::{
     add_assoc_zval_ex,
@@ -10,7 +11,7 @@ pub(crate) use crate::{
     rapira_receive_untimed, rapira_unit_object,
     start::{Pull, Wait, pending_depth, pull_with},
     types::Addr,
-    zend, zval,
+    zend, zend_hash_update, zval,
 };
 
 mod receive;
@@ -74,13 +75,85 @@ pub fn ip_text(ip: IpAddr, buf: &mut [u8; 39]) -> &str {
     std::str::from_utf8(&buf[..len]).expect("an IP text is ASCII")
 }
 
-/// add_assoc_zval_ex takes over the list ref, because the hash-update functions never addref.
+macro_rules! header_keys {
+    ($($field:ident: $text:literal,)*) => {
+        /// Pre-interned permanent Zend string keys for common HTTP and multipart header names.
+        pub struct HeaderKeys {
+            $($field: Permanent,)*
+        }
+
+        impl HeaderKeys {
+            fn intern() -> Self {
+                Self {
+                    $($field: permanent($text),)*
+                }
+            }
+
+            #[inline]
+            fn find(&self, name: &str) -> Option<Permanent> {
+                match name.as_bytes() {
+                    $($text => Some(self.$field),)*
+                    _ => None,
+                }
+            }
+        }
+    };
+}
+
+header_keys! {
+    // Multipart part headers in common wire spellings.
+    content_disposition_title: b"Content-Disposition",
+    content_disposition: b"content-disposition",
+    content_type_title: b"Content-Type",
+    content_type: b"content-type",
+    content_transfer_encoding_title: b"Content-Transfer-Encoding",
+    content_transfer_encoding: b"content-transfer-encoding",
+    // Common HTTP request headers (lowercase in http::HeaderMap).
+    host: b"host",
+    user_agent: b"user-agent",
+    accept: b"accept",
+    accept_language: b"accept-language",
+    accept_encoding: b"accept-encoding",
+    referer: b"referer",
+    cookie: b"cookie",
+    connection: b"connection",
+    content_length: b"content-length",
+    authorization: b"authorization",
+    origin: b"origin",
+    cache_control: b"cache-control",
+    pragma: b"pragma",
+    dnt: b"dnt",
+    sec_gpc: b"sec-gpc",
+    sec_fetch_dest: b"sec-fetch-dest",
+    sec_fetch_mode: b"sec-fetch-mode",
+    sec_fetch_site: b"sec-fetch-site",
+    sec_fetch_user: b"sec-fetch-user",
+    upgrade_insecure_requests: b"upgrade-insecure-requests",
+    x_forwarded_for: b"x-forwarded-for",
+    x_forwarded_proto: b"x-forwarded-proto",
+    x_forwarded_host: b"x-forwarded-host",
+    x_real_ip: b"x-real-ip",
+    x_requested_with: b"x-requested-with",
+    if_none_match: b"if-none-match",
+    if_modified_since: b"if-modified-since",
+}
+
+static HEADER_KEYS: OnceLock<HeaderKeys> = OnceLock::new();
+
+/// Returns the process-wide pre-interned header key table, initializing it once on first use.
+#[inline]
+pub fn header_keys() -> &'static HeaderKeys {
+    HEADER_KEYS.get_or_init(HeaderKeys::intern)
+}
+
+/// Inserts a list of header values under `name` using a pre-loaded `HeaderKeys` table.
 /// # Safety
 /// `dst` is a live array, and the engine is active on this thread.
-pub unsafe fn add_list<'v>(
+#[inline]
+pub unsafe fn add_list_with_keys<'v>(
+    keys: &HeaderKeys,
     dst: *mut zval,
-    key: *const c_char,
-    key_len: usize,
+    name: &str,
     values: impl Iterator<Item = &'v [u8]>,
 ) {
     unsafe {
@@ -89,8 +162,19 @@ pub unsafe fn add_list<'v>(
         for v in values {
             crate::add_next_index_stringl(&mut list, zend::ptr_or_empty(v), v.len());
         }
-        add_assoc_zval_ex(dst, key, key_len, &mut list);
+        if let Some(perm) = keys.find(name) {
+            zend_hash_update((*dst).value.arr, perm.as_ptr(), &mut list);
+        } else {
+            add_assoc_zval_ex(dst, header_key(name), name.len(), &mut list);
+        }
     }
+}
+
+/// Inserts a list of header values under `name`. Common names use pre-interned permanent keys to avoid hashing and allocation.
+/// # Safety
+/// `dst` is a live array, and the engine is active on this thread.
+pub unsafe fn add_list<'v>(dst: *mut zval, name: &str, values: impl Iterator<Item = &'v [u8]>) {
+    unsafe { add_list_with_keys(header_keys(), dst, name, values) }
 }
 
 /// The key pointer of a header name for add_assoc_zval_ex.

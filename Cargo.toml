@@ -22,9 +22,11 @@ workspace = true
 [workspace]
 members = [
     "crates/config",
+    "crates/http_middleware",
     "crates/tests",
     "crates/observability",
     "crates/php_build",
+    "crates/middleware/compress",
     "crates/middleware/static_files",
     "crates/interceptors/auth",
     "crates/sapi",
@@ -41,6 +43,8 @@ tracing = { version = "0.1", default-features = false, features = ["std"] }
 rapira_sapi = { path = "crates/sapi" }
 rapira_php_build = { path = "crates/php_build" }
 rapira_config = { path = "crates/config" }
+rapira_http_middleware = { path = "crates/http_middleware" }
+rapira_compress = { path = "crates/middleware/compress" }
 rapira_static_files = { path = "crates/middleware/static_files" }
 rapira_grpc_auth = { path = "crates/interceptors/auth" }
 rapira_http = { path = "crates/plugins/http" }
@@ -53,10 +57,13 @@ tokio = { version = "1", features = ["sync", "io-uring"] }
 bytes = "1"
 futures-util = { version = "0.3", default-features = false }
 http = "1"
+http-body = "1"
 http-body-util = "0.1"
 hyper = "1"
 hyper-util = "0.1"
 tower = { version = "0.5", features = ["util"] }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+zstd = { version = "0.13", default-features = false }
 libc = "0.2"
 buffa = { version = "0.9.2", default-features = false, features = ["std"] }
 buffa-descriptor = { version = "0.9.2", features = ["reflect", "json"] }

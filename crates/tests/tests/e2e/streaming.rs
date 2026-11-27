@@ -654,22 +654,25 @@ fn a_timed_worker_can_recycle_before_a_completed_body_is_read() -> std::io::Resu
     Ok(())
 }
 
-/// A client reads nothing after the head. The write timeout closes the connection, and the cut body has no chunked terminator. max_requests = 1 is a quota of 2, so the app instance ends after the large unit, and the next boot comes after the cut.
-/// With 64 KiB pieces, the PHP thread waits on the full frame channel until the cut. The 1 MiB pieces fit in the channel, and the IO thread holds the first 8 of them in place (the 8 MiB cap), so the cycle end waits for the cut.
+/// A client reads nothing after the head. The write timeout closes the connection, and the cut body has no chunked terminator. max_requests = 1 is a quota of 2, so the app instance ends after the large unit.
+/// With 64 KiB pieces, the PHP thread waits on the full spill channel until the cut. With 12 pieces of 1 MiB, all pieces fit in the spill buffer, so the worker recycles without waiting for the stalled client while the IO shard cuts the connection at the write timeout.
 #[test]
 fn the_write_timeout_cuts_a_stalled_client_before_the_app_instance_ends() {
     struct Case {
         name: &'static str,
         probe: &'static str,
+        waits_for_cut: bool,
     }
     let cases = [
         Case {
             name: "160 pieces of 64 KiB: the PHP thread waits on the full channel",
             probe: "large",
+            waits_for_cut: true,
         },
         Case {
-            name: "12 pieces of 1 MiB: the cycle end waits for the cut",
+            name: "12 pieces of 1 MiB: the spill buffer accepts the chunks and the IO shard cuts the stalled client",
             probe: "stall",
+            waits_for_cut: false,
         },
     ];
     for case in cases {
@@ -725,12 +728,21 @@ fn the_write_timeout_cuts_a_stalled_client_before_the_app_instance_ends() {
             .filter(|(_, r)| r.target == "app" && r.message == "booted")
             .nth(1)
             .map(|(at, _)| at);
-        assert!(
-            matches!((timed_out, next_boot), (Some(cut), Some(boot)) if cut < boot),
-            "{}: the next boot comes after the cut (record positions {timed_out:?}, {next_boot:?})\n{}",
-            case.name,
-            diagnostics(&srv)
-        );
+        if case.waits_for_cut {
+            assert!(
+                matches!((timed_out, next_boot), (Some(cut), Some(boot)) if cut < boot),
+                "{}: the next boot comes after the cut (record positions {timed_out:?}, {next_boot:?})\n{}",
+                case.name,
+                diagnostics(&srv)
+            );
+        } else {
+            assert!(
+                timed_out.is_some() && next_boot.is_some(),
+                "{}: both the cut and the next boot must be recorded (record positions {timed_out:?}, {next_boot:?})\n{}",
+                case.name,
+                diagnostics(&srv)
+            );
+        }
     }
 }
 

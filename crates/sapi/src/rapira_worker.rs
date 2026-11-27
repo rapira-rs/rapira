@@ -5,7 +5,7 @@ use crate::{
     diagnostics::{Severity, error_type_to_level},
     pool::{Event, Pool, record},
     quota::End,
-    start::{BootRetry, Pull, Wait, pull, pull_unit_to_shed, run_script},
+    start::{BootRetry, Pull, Wait, pull_unit_to_shed, pull_with, run_script},
 };
 use std::{
     cell::Cell,
@@ -258,7 +258,7 @@ pub(crate) fn rapira_worker(
         failures = failures.saturating_add(1);
         if give_up_boot(failures, max_boot_failures, pool.served()) && !pool.draining() {
             error!(target: "rapira", "{} pool: worker {index} failed to boot {failures} times; the pool never served; exiting with code 70", pool.name);
-            unsafe { libc::_exit(70) };
+            crate::exit::exit(70);
         }
         // Units that arrive during the wait do not change the next boot time.
         let retry_at = Instant::now() + retry_delay;
@@ -343,10 +343,26 @@ fn next_unit() -> Result<Box<Context>, u32> {
         unsafe { rapira_stash_boot_shutdown_functions() };
     }
     log_and_clear_last_error();
-    match pull(Wait::Forever) {
+    // Keep the execution timer armed across immediately queued units; disarm it only before parking or stopping.
+    let mut disarmed = false;
+    let got = pull_with(|units| {
+        let got = units.next(Wait::Never);
+        if !matches!(got, Pull::NoUnit) {
+            return got;
+        }
+        unsafe { rapira_receive_untimed() };
+        disarmed = true;
+        units.next(Wait::Forever)
+    });
+    match got {
         Pull::Unit(unit) => Ok(unit.into_cgi()),
         // The app instance takes no more units. handle_request() returns false, and the worker stays.
-        Pull::Closed | Pull::Reload | Pull::NoUnit => Err(RAPIRA_HANDLE_STOP),
+        Pull::Closed | Pull::Reload | Pull::NoUnit => {
+            if !disarmed {
+                unsafe { rapira_receive_untimed() };
+            }
+            Err(RAPIRA_HANDLE_STOP)
+        }
     }
 }
 

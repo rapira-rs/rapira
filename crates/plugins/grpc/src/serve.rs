@@ -56,12 +56,13 @@ impl Serving {
     {
         let mut stop = self.health.subscribe();
         let draining = stop.clone();
-        // The server's first write starts with 'H' for HTTP/1 or the length of its initial SETTINGS frame for HTTP/2. https://www.rfc-editor.org/rfc/rfc9113#section-3.4
+        // Trigger hyper's graceful_shutdown only for HTTP/2 (whose first server write starts with the 0 byte of the initial SETTINGS frame length: https://www.rfc-editor.org/rfc/rfc9113#section-3.4).
+        // HTTP/1.1 keep-alive connections stay open to serve one final request with `Connection: close` (lines 78-83).
         let h2 = Arc::new(Notify::new());
         let mut first = Some(Arc::clone(&h2));
         let io = InspectWriter::new(io, move |bytes| {
             if let Some(h2) = first.take()
-                && bytes[0] == 0
+                && bytes.first() == Some(&0)
             {
                 h2.notify_one();
             }
@@ -100,7 +101,7 @@ impl Serving {
         self.health.send_replace(Status::NotServing);
         drop(self.health);
         tracing::info!(target: "grpc", "draining open connections");
-        let drained = self.connections.drain(grace, std::future::ready(())).await;
+        let drained = self.connections.drain(grace).await;
         // An HTTP/1.1 connection that stays idle until the deadline holds no call, so only a call in flight fails the drain.
         let cut = self.inflight.load(Relaxed);
         if !drained && cut > 0 {
@@ -114,17 +115,28 @@ impl Serving {
 }
 
 impl Serve for Serving {
-    fn spawn_tcp(&self, stream: tokio::net::TcpStream, peer: std::net::SocketAddr) {
-        let mut info = ConnectionInfo::new().with_peer_addr(peer);
-        info.extensions_mut().insert(Addr::Inet(peer));
-        self.spawn(stream, info);
+    fn spawn_tcp(&self, stream: std::net::TcpStream, peer: std::net::SocketAddr) {
+        match tokio::net::TcpStream::from_std(stream) {
+            Ok(stream) => {
+                let mut info = ConnectionInfo::new().with_peer_addr(peer);
+                info.extensions_mut().insert(Addr::Inet(peer));
+                self.spawn(stream, info);
+            }
+            Err(e) => {
+                tracing::debug!(target: "grpc", "registering tcp connection from {peer}: {e}");
+            }
+        }
     }
 
-    fn spawn_unix(&self, stream: tokio::net::UnixStream, peer: Option<&std::path::Path>) {
-        let mut info = ConnectionInfo::new();
-        info.extensions_mut()
-            .insert(Addr::Unix(peer.map(Into::into)));
-        self.spawn(stream, info);
+    fn spawn_unix(&self, stream: std::os::unix::net::UnixStream, peer: Option<std::path::PathBuf>) {
+        match tokio::net::UnixStream::from_std(stream) {
+            Ok(stream) => {
+                let mut info = ConnectionInfo::new();
+                info.extensions_mut().insert(Addr::Unix(peer));
+                self.spawn(stream, info);
+            }
+            Err(e) => tracing::debug!(target: "grpc", "registering unix connection: {e}"),
+        }
     }
 }
 

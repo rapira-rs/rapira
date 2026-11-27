@@ -1,4 +1,5 @@
 use rapira_config::{LogFormat, LogSettings};
+use std::fmt::Write as _;
 use std::io::{self, IsTerminal};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::registry::LookupSpan;
@@ -20,7 +21,7 @@ fn build_filter(rust_log: Option<&str>, log: &LogSettings) -> EnvFilter {
         _ => {
             let mut spec = log.level.as_str().to_owned();
             for (target, level) in &log.targets {
-                spec += &format!(",{target}={}", level.as_str());
+                let _ = write!(spec, ",{target}={}", level.as_str());
             }
             EnvFilter::builder()
                 .parse(&spec)

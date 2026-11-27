@@ -1,5 +1,6 @@
 use std::io;
-use std::sync::OnceLock;
+use std::sync::{OnceLock, mpsc};
+use std::thread;
 
 const HOST: [libc::c_int; 6] = [
     libc::SIGTERM,
@@ -10,14 +11,14 @@ const HOST: [libc::c_int; 6] = [
     libc::SIGUSR2,
 ];
 
-/// The main thread accepts the host signals.
-static MAIN: OnceLock<libc::pthread_t> = OnceLock::new();
+/// The dedicated signal thread accepts the host signals through POSIX `sigwait`.
+static SIGNAL_THREAD: OnceLock<libc::pthread_t> = OnceLock::new();
 
-/// A PHP thread blocks no signal, so a host signal can arrive there. The handler passes the signal to the main thread. `pthread_kill` is async-signal-safe. https://man7.org/linux/man-pages/man7/signal-safety.7.html
+/// A PHP thread blocks no signal, so a host signal can arrive there. The handler passes the signal to the signal thread. `pthread_kill` is async-signal-safe. https://man7.org/linux/man-pages/man7/signal-safety.7.html
 extern "C" fn forward(sig: libc::c_int) {
-    if let Some(main) = MAIN.get() {
-        // SAFETY: the main thread lives until the process exits.
-        unsafe { libc::pthread_kill(*main, sig) };
+    if let Some(target) = SIGNAL_THREAD.get() {
+        // SAFETY: the signal thread lives until the process exits.
+        unsafe { libc::pthread_kill(*target, sig) };
     }
 }
 
@@ -28,7 +29,6 @@ impl Signals {
     pub fn block() -> io::Result<Self> {
         // SAFETY: sigemptyset initializes both sets. sigaction and pthread_sigmask copy their arguments.
         unsafe {
-            MAIN.get_or_init(|| libc::pthread_self());
             let mut action: libc::sigaction = std::mem::zeroed();
             action.sa_sigaction = forward as *const () as libc::sighandler_t;
             // An interrupted system call of a PHP thread starts again.
@@ -50,31 +50,35 @@ impl Signals {
         }
     }
 
-    pub fn wait(&self) -> io::Result<libc::c_int> {
-        loop {
-            let mut sig = 0;
-            // SAFETY: the set contains the blocked host signals. The main thread is their only consumer.
-            let err = unsafe { libc::sigwait(&self.0, &mut sig) };
-            match err {
-                0 => return Ok(sig),
-                libc::EINTR => continue,
-                err => return Err(io::Error::from_raw_os_error(err)),
-            }
-        }
-    }
-
-    /// Accept a pending host signal during the drain without waiting past the stop deadline.
-    pub fn pending(&self) -> io::Result<Option<libc::c_int>> {
-        // SAFETY: sigpending writes a sigset_t. Only the main thread accepts these signals.
-        unsafe {
-            let mut pending = std::mem::zeroed();
-            if libc::sigpending(&mut pending) != 0 {
-                return Err(io::Error::last_os_error());
-            }
-            if HOST.iter().any(|s| libc::sigismember(&pending, *s) == 1) {
-                return self.wait().map(Some);
-            }
-        }
-        Ok(None)
+    /// Starts the dedicated `sigwait` consumer thread before any PHP worker spawns.
+    pub fn start(self, on_signal: impl Fn(libc::c_int) + Send + 'static) -> io::Result<()> {
+        let set = self.0;
+        let (ready_tx, ready_rx) = mpsc::sync_channel::<()>(0);
+        thread::Builder::new()
+            .name("rapira-sig".into())
+            .spawn(move || {
+                // SAFETY: `pthread_self` returns the thread ID of this long-lived signal thread.
+                let _ = SIGNAL_THREAD.set(unsafe { libc::pthread_self() });
+                let _ = ready_tx.send(());
+                loop {
+                    let mut sig = 0;
+                    // SAFETY: `set` contains only blocked host signals, and this thread is their sole `sigwait` consumer.
+                    let err = unsafe { libc::sigwait(&set, &mut sig) };
+                    match err {
+                        0 => on_signal(sig),
+                        libc::EINTR => continue,
+                        err => {
+                            tracing::error!(
+                                target: "rapira",
+                                "waiting for a host signal failed: {}",
+                                io::Error::from_raw_os_error(err)
+                            );
+                            break;
+                        }
+                    }
+                }
+            })?;
+        let _ = ready_rx.recv();
+        Ok(())
     }
 }

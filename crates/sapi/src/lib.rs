@@ -7,6 +7,7 @@ mod diagnostics;
 mod engine;
 mod env;
 pub mod exchange;
+pub mod exit;
 mod log;
 mod module;
 pub mod plugin;
@@ -26,7 +27,7 @@ use std::ffi::c_int;
 pub use bindings::*;
 pub use context::HttpIdentity;
 pub use engine::{Engine, has_execution_timers, linked_php_version, zts};
-pub use types::{Addr, Frame, Request};
+pub use types::{Addr, CgiResponder, Request};
 
 // bindgen names the Zend SUCCESS and FAILURE constants differently across php-src versions, so the values are hardcoded.
 pub const SUCCESS: c_int = 0;

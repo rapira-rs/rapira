@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
+use crate::work::IntakeLimits;
+
 /// The state of a worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum State {
@@ -38,22 +40,34 @@ impl State {
     }
 }
 
+#[repr(align(64))]
+#[derive(Default)]
+pub(crate) struct CachePadded<T>(pub(crate) T);
+
+impl<T> std::ops::Deref for CachePadded<T> {
+    type Target = T;
+    fn deref(&self) -> &T {
+        &self.0
+    }
+}
+
 pub struct Pool {
     pub name: &'static str,
     pub(crate) workers: Box<[Worker]>,
-    /// Units that wait for a worker.
-    pub(crate) pending: AtomicU64,
-    pub(crate) failed_on_full_queue: AtomicU64,
-    /// Units refused before a worker could take them.
-    pub(crate) refused: AtomicU64,
     /// A worker of the pool reached a pull.
     served: AtomicBool,
     /// The server stop started.
     draining: AtomicBool,
     /// Active workers whose interrupted unit is still running after the watchdog grace period.
     pub(crate) blocked: AtomicUsize,
+    /// Lock-free body-byte budget and queue-slot accounting, also backing `pending()`.
+    pub(crate) limits: IntakeLimits,
+    pub(crate) failed_on_full_queue: AtomicU64,
+    /// Units refused before a worker could take them.
+    pub(crate) refused: AtomicU64,
 }
 
+#[repr(align(64))]
 #[derive(Default)]
 pub(crate) struct Worker {
     /// A `State` discriminant.
@@ -87,13 +101,17 @@ impl Pool {
         Self {
             name,
             workers: (0..workers).map(|_| Worker::default()).collect(),
-            pending: AtomicU64::new(0),
-            failed_on_full_queue: AtomicU64::new(0),
-            refused: AtomicU64::new(0),
             served: AtomicBool::new(false),
             draining: AtomicBool::new(false),
             blocked: AtomicUsize::new(0),
+            limits: IntakeLimits::new(),
+            failed_on_full_queue: AtomicU64::new(0),
+            refused: AtomicU64::new(0),
         }
+    }
+
+    pub(crate) fn pending(&self) -> u64 {
+        self.limits.pending()
     }
 
     /// Binds the calling thread as worker `index` of this pool.
@@ -147,7 +165,7 @@ impl Pool {
         }
         PoolSnapshot {
             name: self.name,
-            pending: self.pending.load(Relaxed),
+            pending: self.pending(),
             failed_on_full_queue: self.failed_on_full_queue.load(Relaxed),
             refused: self.refused.load(Relaxed),
             workers,

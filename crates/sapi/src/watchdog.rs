@@ -187,7 +187,7 @@ impl Worker {
                 error!(target: "rapira", "{pool} worker {index} is blocked {GRACE:?} after its interrupt; the unit will end when its native call returns");
                 if self.pool.blocked.fetch_add(1, Relaxed) + 1 == self.pool.workers.len() {
                     error!(target: "rapira", "every worker of pool {pool} is blocked; exiting with code 124");
-                    unsafe { libc::_exit(124) };
+                    crate::exit::exit(124);
                 }
             }
             _ => {}

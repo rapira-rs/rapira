@@ -1,15 +1,15 @@
 use std::mem::MaybeUninit;
 use std::ptr::NonNull;
-use std::sync::atomic::Ordering;
+use std::sync::atomic::{AtomicIsize, AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex};
 use std::thread::Thread;
 use std::time::Duration;
 
-use crossbeam_channel::{Receiver, Sender, unbounded};
-use tokio::sync::{OwnedSemaphorePermit, Semaphore};
+use crossbeam_channel::{Receiver, Sender, bounded};
+use tokio::sync::Notify;
 
 use crate::callbacks::guard;
-use crate::pool::{Event, Pool, record};
+use crate::pool::{CachePadded, Event, Pool, record};
 use crate::types::Context;
 use crate::zend_class_entry;
 
@@ -124,7 +124,7 @@ impl Unit {
     /// The client left while the unit was queued, so the pull skips it.
     pub(crate) fn cancelled(&self) -> bool {
         match self {
-            Self::Cgi(ctx) => ctx.sender.as_ref().is_none_or(|tx| tx.is_closed()),
+            Self::Cgi(ctx) => ctx.is_cancelled(),
             Self::Dispatcher(held) => held.cancelled(),
         }
     }
@@ -154,11 +154,121 @@ impl Unit {
     }
 }
 
-/// The pull releases both permits when it takes the unit.
+/// The pull releases the slot and `budget_bytes` through `IntakeLimits` when it takes the unit.
 pub(crate) struct Entry {
     pub(crate) unit: Unit,
-    _bytes: OwnedSemaphorePermit,
-    _slot: OwnedSemaphorePermit,
+    pub(crate) budget_bytes: u32,
+}
+
+/// Lock-free body-byte budget and queue-slot accounting owned by `Pool`.
+pub(crate) struct IntakeLimits {
+    budget_avail: CachePadded<AtomicIsize>,
+    slots_avail: CachePadded<AtomicIsize>,
+    slot_waiters: CachePadded<AtomicUsize>,
+    slot_notify: Notify,
+}
+
+impl IntakeLimits {
+    pub(crate) fn new() -> Self {
+        Self {
+            budget_avail: CachePadded(AtomicIsize::new(BODY_BUDGET as isize)),
+            slots_avail: CachePadded(AtomicIsize::new(INTAKE_SLOTS as isize)),
+            slot_waiters: CachePadded(AtomicUsize::new(0)),
+            slot_notify: Notify::new(),
+        }
+    }
+
+    pub(crate) fn pending(&self) -> u64 {
+        let used = (INTAKE_SLOTS as isize - self.slots_avail.0.load(Ordering::Relaxed))
+            .clamp(0, INTAKE_SLOTS as isize) as u64;
+        used + self.slot_waiters.0.load(Ordering::Relaxed) as u64
+    }
+
+    fn try_acquire_budget(&self, want: u32) -> bool {
+        if want == 0 {
+            return true;
+        }
+        let want = want as isize;
+        if self.budget_avail.0.fetch_sub(want, Ordering::Relaxed) >= want {
+            return true;
+        }
+        self.budget_avail.0.fetch_add(want, Ordering::Relaxed);
+        false
+    }
+
+    fn release_budget(&self, bytes: u32) {
+        if bytes > 0 {
+            self.budget_avail
+                .0
+                .fetch_add(bytes as isize, Ordering::Relaxed);
+        }
+    }
+
+    fn try_acquire_slot(&self) -> bool {
+        if self.slots_avail.0.fetch_sub(1, Ordering::SeqCst) > 0 {
+            return true;
+        }
+        // Restore speculative decrement; wake a waiter if a worker released concurrently.
+        if self.slots_avail.0.fetch_add(1, Ordering::SeqCst) >= 0
+            && self.slot_waiters.0.load(Ordering::SeqCst) > 0
+        {
+            self.slot_notify.notify_one();
+        }
+        false
+    }
+
+    async fn acquire_slot_slow(&self) {
+        struct WaiterGuard<'a>(&'a IntakeLimits);
+        impl Drop for WaiterGuard<'_> {
+            fn drop(&mut self) {
+                self.0.slot_waiters.0.fetch_sub(1, Ordering::Relaxed);
+            }
+        }
+        self.slot_waiters.0.fetch_add(1, Ordering::SeqCst);
+        let _waiter = WaiterGuard(self);
+        loop {
+            let notified = self.slot_notify.notified();
+            tokio::pin!(notified);
+            notified.as_mut().enable();
+            if self.try_acquire_slot() {
+                return;
+            }
+            notified.await;
+        }
+    }
+
+    /// Releases one slot and `budget_bytes` after a worker removes an entry from the channel.
+    pub(crate) fn release(&self, budget_bytes: u32) {
+        self.release_budget(budget_bytes);
+        self.slots_avail.0.fetch_add(1, Ordering::SeqCst);
+        if self.slot_waiters.0.load(Ordering::SeqCst) > 0 {
+            self.slot_notify.notify_one();
+        }
+    }
+}
+
+/// Restores reserved body bytes if `submit` times out or is cancelled while waiting for a slot.
+struct BudgetGuard<'a> {
+    limits: &'a IntakeLimits,
+    bytes: u32,
+}
+
+impl<'a> BudgetGuard<'a> {
+    fn arm(limits: &'a IntakeLimits, bytes: u32) -> Self {
+        Self { limits, bytes }
+    }
+
+    fn disarm(mut self) -> u32 {
+        let bytes = self.bytes;
+        self.bytes = 0;
+        bytes
+    }
+}
+
+impl Drop for BudgetGuard<'_> {
+    fn drop(&mut self) {
+        self.limits.release_budget(self.bytes);
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -191,7 +301,11 @@ pub fn now_unix_f64() -> f64 {
 
 /// The workers of one pool that wait for a unit.
 #[derive(Default)]
-pub(crate) struct Idle(Mutex<Waiting>);
+pub(crate) struct Idle {
+    /// Count of workers currently parked in `waiting.workers`. Checked lock-free after a SeqCst fence on submit so saturated pools never lock the mutex.
+    idle_count: CachePadded<AtomicUsize>,
+    waiting: Mutex<Waiting>,
+}
 
 #[derive(Default)]
 struct Waiting {
@@ -202,17 +316,31 @@ struct Waiting {
 }
 
 impl Idle {
+    pub(crate) fn has_waiters(&self) -> bool {
+        self.idle_count.0.load(Ordering::Relaxed) > 0
+    }
+
     pub(crate) fn enter(&self, worker: &Thread) {
-        self.0.lock().unwrap().workers.push(worker.clone());
+        let mut waiting = self.waiting.lock().unwrap();
+        waiting.workers.push(worker.clone());
+        self.idle_count
+            .0
+            .store(waiting.workers.len(), Ordering::Relaxed);
+        drop(waiting);
+        // Pairs with the SeqCst fence in Intake::submit so a submit never misses a waiter while the waiter misses the unit.
+        std::sync::atomic::fence(Ordering::SeqCst);
     }
 
     /// Ends the wait of `worker`.
     pub(crate) fn leave(&self, worker: &Thread) {
-        let mut waiting = self.0.lock().unwrap();
+        let mut waiting = self.waiting.lock().unwrap();
         let at = waiting.workers.iter().rposition(|w| w.id() == worker.id());
         match at {
             Some(at) => {
                 waiting.workers.remove(at);
+                self.idle_count
+                    .0
+                    .store(waiting.workers.len(), Ordering::Relaxed);
             }
             // A wake took the worker from the list. The wake on close is not in the count.
             None => waiting.waking = waiting.waking.saturating_sub(1),
@@ -221,13 +349,16 @@ impl Idle {
 
     /// Wakes the worker that started its wait last, unless a wake is in progress for each of the `queued` units. The caches of this worker are warm, and under a partial load the other workers stay asleep.
     pub(crate) fn wake_one(&self, queued: usize) {
-        let mut waiting = self.0.lock().unwrap();
+        let mut waiting = self.waiting.lock().unwrap();
         if waiting.waking >= queued {
             return;
         }
         let Some(worker) = waiting.workers.pop() else {
             return;
         };
+        self.idle_count
+            .0
+            .store(waiting.workers.len(), Ordering::Relaxed);
         waiting.waking += 1;
         drop(waiting);
         worker.unpark();
@@ -239,7 +370,10 @@ struct WakeOnClose(Arc<Idle>);
 
 impl Drop for WakeOnClose {
     fn drop(&mut self) {
-        let workers = std::mem::take(&mut self.0.0.lock().unwrap().workers);
+        let mut waiting = self.0.waiting.lock().unwrap();
+        let workers = std::mem::take(&mut waiting.workers);
+        self.0.idle_count.0.store(0, Ordering::Relaxed);
+        drop(waiting);
         for worker in workers {
             worker.unpark();
         }
@@ -251,6 +385,7 @@ impl Drop for WakeOnClose {
 pub(crate) struct Units {
     pub(crate) rx: Receiver<Entry>,
     pub(crate) idle: Arc<Idle>,
+    pub(crate) pool: Arc<Pool>,
 }
 
 /// The submit end of the pool queue. Each plugin task can hold a clone.
@@ -261,96 +396,80 @@ pub struct Intake {
     idle: Arc<WakeOnClose>,
     pub(crate) boot_retry: Arc<crate::start::BootRetry>,
     pool: Arc<Pool>,
-    /// The bytes of the pending units.
-    budget: Arc<Semaphore>,
-    /// The semaphore wakes the waiting submitters in arrival order.
-    slots: Arc<Semaphore>,
 }
 
-/// Counts a pending unit until the send succeeds or the submitter leaves.
-struct PendingGuard<'a> {
-    pool: Option<&'a Pool>,
-    found_full: bool,
-}
+/// Counts a failed slow-path wait if the submitter times out or is cancelled before acquiring a slot.
+struct FullQueueGuard<'a>(Option<&'a Pool>);
 
-impl<'a> PendingGuard<'a> {
+impl<'a> FullQueueGuard<'a> {
     fn arm(pool: &'a Pool) -> Self {
-        pool.pending.fetch_add(1, Ordering::Relaxed);
-        Self {
-            pool: Some(pool),
-            found_full: false,
-        }
+        Self(Some(pool))
     }
+
     fn disarm(mut self) {
-        self.pool = None;
+        self.0 = None;
     }
 }
 
-impl Drop for PendingGuard<'_> {
+impl Drop for FullQueueGuard<'_> {
     fn drop(&mut self) {
-        if let Some(pool) = self.pool {
-            pool.pending.fetch_sub(1, Ordering::Relaxed);
-            if self.found_full {
-                pool.failed_on_full_queue.fetch_add(1, Ordering::Relaxed);
-            }
+        if let Some(pool) = self.0 {
+            pool.failed_on_full_queue.fetch_add(1, Ordering::Relaxed);
         }
     }
 }
 
 impl Intake {
     pub(crate) fn new(pool: Arc<Pool>) -> (Self, Units) {
-        let (tx, rx) = unbounded();
+        let (tx, rx) = bounded(INTAKE_SLOTS);
         let idle = Arc::<Idle>::default();
         (
             Self {
                 tx,
                 idle: Arc::new(WakeOnClose(Arc::clone(&idle))),
                 boot_retry: Arc::default(),
-                pool,
-                budget: Arc::new(Semaphore::new(BODY_BUDGET)),
-                slots: Arc::new(Semaphore::new(INTAKE_SLOTS)),
+                pool: Arc::clone(&pool),
             },
-            Units { rx, idle },
+            Units { rx, idle, pool },
         )
     }
 
     /// Reserve the body bytes and a queue slot. A body larger than the pool budget needs the full budget.
     pub async fn submit(&self, unit: Unit, bytes: usize) -> Result<(), Refused> {
-        let Ok(held) =
-            Arc::clone(&self.budget).try_acquire_many_owned(bytes.min(BODY_BUDGET) as u32)
-        else {
+        let budget_bytes = bytes.min(BODY_BUDGET) as u32;
+        if !self.pool.limits.try_acquire_budget(budget_bytes) {
             self.pool.refused.fetch_add(1, Ordering::Relaxed);
             return Err(Refused::OverBudget);
-        };
-        // Count the unit before a worker can take it.
-        let mut pending = PendingGuard::arm(&self.pool);
-        let slot = match Arc::clone(&self.slots).try_acquire_owned() {
-            Ok(slot) => slot,
-            Err(_) => {
-                pending.found_full = true;
-                let wait = Arc::clone(&self.slots).acquire_owned();
-                let Ok(slot) = tokio::time::timeout(INTAKE_WAIT, wait).await else {
-                    tracing::warn!(
-                        target: "rapira",
-                        "intake full for {INTAKE_WAIT:?} ({} pending); shedding the request",
-                        self.pool.pending.load(Ordering::Relaxed)
-                    );
-                    self.pool.refused.fetch_add(1, Ordering::Relaxed);
-                    return Err(Refused::Saturated);
-                };
-                slot.expect("the intake never closes its slot semaphore")
+        }
+        let budget = BudgetGuard::arm(&self.pool.limits, budget_bytes);
+        if !self.pool.limits.try_acquire_slot() {
+            let full = FullQueueGuard::arm(&self.pool);
+            if tokio::time::timeout(INTAKE_WAIT, self.pool.limits.acquire_slot_slow())
+                .await
+                .is_err()
+            {
+                tracing::warn!(
+                    target: "rapira",
+                    "intake full for {INTAKE_WAIT:?} ({} pending); shedding the request",
+                    self.pool.pending()
+                );
+                self.pool.refused.fetch_add(1, Ordering::Relaxed);
+                return Err(Refused::Saturated);
             }
-        };
+            full.disarm();
+        }
         let entry = Entry {
             unit,
-            _bytes: held,
-            _slot: slot,
+            budget_bytes: budget.disarm(),
         };
         self.tx
             .send(entry)
             .expect("workers keep the receiver until the last intake drops");
-        self.idle.0.wake_one(self.tx.len());
-        pending.disarm();
+        // Pairs with the SeqCst fence in Idle::enter so saturated pools skip the Idle mutex without risking a missed wake.
+        std::sync::atomic::fence(Ordering::SeqCst);
+        if self.idle.0.has_waiters() {
+            self.idle.0.wake_one(self.tx.len());
+        }
         Ok(())
     }
 }
@@ -382,17 +501,13 @@ mod tests {
     /// The shed of a CGI unit is the 503 seal.
     #[test]
     fn a_cgi_shed_refuses_with_503() {
-        let (tx, mut rx) = tokio::sync::mpsc::channel(8);
+        let (responder, log) = crate::types::tests::responder(false);
         let mut ctx = crate::types::tests::context();
-        ctx.sender = Some(tx);
+        ctx.responder = Some(responder);
         Unit::Cgi(Box::new(ctx)).shed();
-        let mut got = Vec::new();
-        while let Ok(frame) = rx.try_recv() {
-            got.push(crate::types::tests::describe(frame));
-        }
         assert_eq!(
-            got,
-            ["head 503 cl=Some(0) bodiless=false", "end truncated=false"]
+            log.lock().unwrap().as_slice(),
+            ["respond 503 truncated=false body="]
         );
     }
 
@@ -496,11 +611,11 @@ mod tests {
                 name: "room frees during the wait",
                 during: During::RoomFrees,
                 result: Some(Ok(())),
-                // The unit is in the queue. Only the pull of the PHP thread subtracts it from pending.
+                // One unit left the queue and the waiting submit took its slot.
                 want: Counts {
                     refused: 0,
                     failed_on_full_queue: 0,
-                    pending: 1,
+                    pending: 0,
                 },
             },
         ];
@@ -517,8 +632,9 @@ mod tests {
                 During::RoomFrees => {
                     let (result, ()) = tokio::join!(submit, async {
                         tokio::time::sleep(ACTION_DELAY).await;
-                        // The pull drops the entry, and its slot goes to the waiting submit.
-                        drop(rx.rx.try_recv().unwrap());
+                        // The pull releases the slot and budget to the waiting submit.
+                        let entry = rx.rx.try_recv().unwrap();
+                        rx.pool.limits.release(entry.budget_bytes);
                     });
                     Some(result)
                 }
@@ -537,6 +653,57 @@ mod tests {
                     case.want.pending + INTAKE_SLOTS as u64,
                 ),
                 "{}: refused, failed on full queue, pending",
+                case.name
+            );
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread", start_paused = true)]
+    async fn saturated_or_cancelled_submit_returns_body_budget() {
+        enum Outcome {
+            Timeout,
+            Cancel,
+        }
+        struct Case {
+            name: &'static str,
+            outcome: Outcome,
+        }
+        let cases = [
+            Case {
+                name: "timed out submit restores full body budget",
+                outcome: Outcome::Timeout,
+            },
+            Case {
+                name: "cancelled submit restores full body budget",
+                outcome: Outcome::Cancel,
+            },
+        ];
+        for case in cases {
+            let (intake, rx) = intake();
+            for _ in 0..INTAKE_SLOTS {
+                intake.submit(probe(), 0).await.unwrap();
+            }
+            let submit = intake.submit(probe(), BODY_BUDGET);
+            match case.outcome {
+                Outcome::Timeout => {
+                    assert_eq!(submit.await, Err(Refused::Saturated), "{}", case.name);
+                }
+                Outcome::Cancel => {
+                    assert!(
+                        tokio::time::timeout(Duration::from_secs(1), submit)
+                            .await
+                            .is_err(),
+                        "{}",
+                        case.name
+                    );
+                }
+            }
+            let entry = rx.rx.try_recv().unwrap();
+            rx.pool.limits.release(entry.budget_bytes);
+            assert_eq!(
+                intake.submit(probe(), BODY_BUDGET).await,
+                Ok(()),
+                "{}",
                 case.name
             );
         }

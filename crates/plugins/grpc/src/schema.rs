@@ -85,6 +85,7 @@ pub(crate) fn with<T>(f: impl FnOnce(&Schema) -> T) -> T {
 }
 
 /// A method that rapira routes to PHP: unary or server-streaming.
+#[derive(Clone, Copy)]
 pub struct Method {
     pub input: MessageIndex,
     pub(crate) output: MessageIndex,

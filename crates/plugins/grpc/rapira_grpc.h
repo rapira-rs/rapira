@@ -6,8 +6,9 @@
 // C data is before zend_object std, as in rapira_sapi.h
 typedef struct {
     rapira_held held; // the GrpcState, owned by Rust
-    zval message; // memoized request message; IS_UNDEF until getMessage()
-    zval context; // memoized Rapira\Grpc\Call\Context; IS_UNDEF until getContext()
+    zval message;     // memoized request message; IS_UNDEF until getMessage()
+    zval context;     // memoized Rapira\Grpc\Call\Context; IS_UNDEF until
+                      // getContext()
     zend_object std;
 } rapira_grpc_call_obj;
 // rapira_held_of (rapira_sapi.h) subtracts handlers.offset from the object
@@ -24,7 +25,6 @@ extern zend_class_entry *rapira_ce_grpc_protocol;
 extern zend_class_entry *rapira_ce_grpc_status;
 extern zend_class_entry *rapira_ce_grpc_metadata;
 extern zend_class_entry *rapira_ce_grpc_exception;
-extern zend_class_entry *rapira_ce_grpc_headers_already_committed_error;
 
 void rapira_grpc_register_classes(void);
 

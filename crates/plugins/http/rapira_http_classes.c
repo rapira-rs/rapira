@@ -78,11 +78,8 @@ void rapira_http_register_classes(void) {
         register_class_Rapira_Internal_Http_Exchange(http_exchange);
     rapira_plugin_wire(&rapira_http_plugin);
 
-    rapira_exchange_handlers = std_object_handlers;
-    rapira_exchange_handlers.clone_obj = NULL;
-    rapira_exchange_handlers.offset = offsetof(rapira_exchange_obj, std);
-    rapira_exchange_handlers.free_obj = rapira_exchange_free;
-    rapira_ce_http_exchange->create_object = rapira_object_create;
-    rapira_ce_http_exchange->default_object_handlers =
-        &rapira_exchange_handlers;
+    rapira_unit_handlers_init(&rapira_exchange_handlers,
+                              offsetof(rapira_exchange_obj, std),
+                              rapira_exchange_free);
+    rapira_unit_class_wire(rapira_ce_http_exchange, &rapira_exchange_handlers);
 }

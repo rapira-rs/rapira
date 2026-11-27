@@ -29,6 +29,8 @@ rapira_php_build = { workspace = true }
 [dev-dependencies]
 # The E2E tests (tests/e2e) use it for process control of the spawned rapira binary.
 libc = { workspace = true }
+flate2 = { workspace = true }
+zstd = { workspace = true }
 
 # Build the rapira binary first. The e2e suite starts it and sends concurrent requests.
 # cargo test -p tests --test e2e --features e2e -- --test-threads=1

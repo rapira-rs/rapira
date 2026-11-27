@@ -9,8 +9,8 @@ use anyhow::{Context, Result, anyhow, bail};
 use connectrpc::{ConnectionConfig, DeadlinePolicy};
 use connectrpc_reflection::Reflector;
 use rapira_config::{
-    ListenAddr, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, opt_path,
-    parse_listen, resolve_pool,
+    ListenAddr, Mode, PoolSection, PoolSettings, Stage, check_entrypoint, check_stages,
+    nonzero_timeout, opt_path, parse_listen, resolve_pool,
 };
 use serde::Deserialize;
 
@@ -151,27 +151,26 @@ fn resolve_interceptors(
     list: Vec<String>,
     mut auth: Option<rapira_grpc_auth::Settings>,
 ) -> Result<Vec<Interceptor>> {
-    for (i, name) in list.iter().enumerate() {
-        if list[..i].contains(name) {
-            bail!("grpc.interceptors lists \"{name}\" twice");
-        }
-    }
+    check_stages(
+        "grpc",
+        "interceptors",
+        "interceptors",
+        &list,
+        &[Stage {
+            name: "auth",
+            configured: auth.is_some(),
+            requires_table: true,
+        }],
+    )?;
     let mut interceptors = Vec::with_capacity(list.len());
     for name in list {
         match name.as_str() {
-            "auth" => match auth.take() {
-                Some(settings) => interceptors.push(Interceptor::Auth(settings)),
-                None => bail!("grpc.interceptors lists \"auth\" but [grpc.auth] is missing"),
-            },
-            other => {
-                bail!(
-                    "grpc.interceptors entry \"{other}\" is unknown; known interceptors: \"auth\""
-                )
-            }
+            "auth" => interceptors.push(Interceptor::Auth(
+                auth.take()
+                    .expect("check_stages guarantees [grpc.auth] is configured"),
+            )),
+            other => unreachable!("unknown interceptor `{other}` passed check_stages"),
         }
-    }
-    if auth.is_some() {
-        bail!("[grpc.auth] is configured but grpc.interceptors does not list \"auth\"");
     }
     Ok(interceptors)
 }
@@ -201,16 +200,13 @@ impl Server {
         }
 
         let listener = rapira_net::bind(&settings.listen).context("plugin grpc: prepare failed")?;
-        let names: Vec<String> = schema
-            .services()
-            .map(|s| s.full_name().to_owned())
-            .collect();
-        let (mut router, health) = crate::health::install(names.iter().cloned());
+        let (mut router, health) =
+            crate::health::install(schema.services().map(|s| s.full_name().to_owned()));
         if settings.reflection {
             let reflector = Reflector::from_descriptor_pool(Arc::clone(schema.pool()))
                 .map_err(|e| anyhow!("building grpc reflection: {e}"))
                 .context("plugin grpc: prepare failed")?
-                .with_services(names);
+                .with_services(schema.services().map(|s| s.full_name()));
             router = connectrpc_reflection::install(router, reflector);
         }
         tracing::info!(target: "grpc", "listening on {}", listener.addr());

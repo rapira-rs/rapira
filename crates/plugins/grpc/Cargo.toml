@@ -22,7 +22,7 @@ buffa-descriptor = { workspace = true }
 connectrpc = { workspace = true }
 connectrpc-health = { workspace = true }
 connectrpc-reflection = { workspace = true }
-tokio = { workspace = true, features = ["rt", "net", "time", "macros"] }
+tokio = { workspace = true, features = ["net", "time"] }
 tokio-util = { version = "0.7", features = ["io"] }
 bytes = { workspace = true }
 futures-util = { workspace = true }

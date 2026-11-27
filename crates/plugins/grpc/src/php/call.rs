@@ -1,6 +1,7 @@
 //! The `GrpcState` unit, the request Metadata and Context, the services list, and the Rust behind the methods of UnaryCall, ServerStreamingCall and ResponseMetadata.
 
 use std::ffi::{CStr, c_char};
+use std::sync::OnceLock;
 
 use base64::Engine as _;
 use base64::alphabet;
@@ -11,15 +12,15 @@ use bytes::Bytes;
 use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
 use connectrpc::{ConnectError, ErrorCode, ErrorDetail, Protocol};
 use rapira_sapi::callbacks::guard;
-use rapira_sapi::exchange::{add_list, build_address, header_key};
+use rapira_sapi::exchange::{add_list, build_address};
 use rapira_sapi::pool::{Event, record};
 use rapira_sapi::stream;
-use rapira_sapi::work::{Held, HeldPtr, now_unix_f64};
+use rapira_sapi::work::{Held, HeldPtr};
 use rapira_sapi::{
     HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_zval_enum_case,
     zend, zend_argument_type_error, zend_class_entry, zend_long, zend_object, zend_string,
-    zend_zval_value_name, zval, zval_ptr_dtor,
+    zend_zval_value_name, zval,
 };
 use tokio::sync::{mpsc, oneshot};
 
@@ -31,18 +32,27 @@ use super::{
 };
 use crate::{Call, Head, Part, UnaryReply};
 
+static METHOD_INFO_SLOTS: OnceLock<[u32; 4]> = OnceLock::new();
+static SERVICE_INFO_SLOTS: OnceLock<[u32; 2]> = OnceLock::new();
+static METADATA_SLOTS: OnceLock<[u32; 1]> = OnceLock::new();
+static CONTEXT_SLOTS: OnceLock<[u32; 7]> = OnceLock::new();
+
 /// # Safety
 /// `dst` is writable. The engine is active on this thread.
 unsafe fn method_info(dst: *mut zval, pool: &DescriptorPool, m: &MethodDescriptor) {
     unsafe {
         let ce = rapira_ce_grpc_method_info;
+        let [name_slot, input_slot, output_slot, kind_slot] =
+            *METHOD_INFO_SLOTS.get_or_init(|| {
+                [c"name", c"inputType", c"outputType", c"kind"].map(|n| zend::prop_offset(ce, n))
+            });
         let _ = object_init_ex(dst, ce);
         let obj = (*dst).value.obj;
-        zend::prop_stringl(ce, obj, c"name", m.name().as_bytes());
+        zend::slot_stringl(obj, name_slot, m.name().as_bytes());
         let input = pool.message(m.input()).full_name();
-        zend::prop_stringl(ce, obj, c"inputType", input.as_bytes());
+        zend::slot_stringl(obj, input_slot, input.as_bytes());
         let output = pool.message(m.output()).full_name();
-        zend::prop_stringl(ce, obj, c"outputType", output.as_bytes());
+        zend::slot_stringl(obj, output_slot, output.as_bytes());
         let case = match (m.is_client_streaming(), m.is_server_streaming()) {
             (false, false) => c"Unary",
             (false, true) => c"ServerStreaming",
@@ -51,8 +61,7 @@ unsafe fn method_info(dst: *mut zval, pool: &DescriptorPool, m: &MethodDescripto
         };
         let mut kind: zval = std::mem::zeroed();
         rapira_zval_enum_case(&mut kind, rapira_ce_grpc_method_kind, case.as_ptr());
-        zend::prop_zval(ce, obj, c"kind", &mut kind);
-        zval_ptr_dtor(&mut kind);
+        zend::slot_init(obj, kind_slot, &kind);
     }
 }
 
@@ -63,6 +72,9 @@ unsafe fn method_info(dst: *mut zval, pool: &DescriptorPool, m: &MethodDescripto
 pub unsafe extern "C" fn rapira_rs_grpc_services(rv: *mut zval) -> bool {
     guard(false, || {
         crate::schema::with(|schema| unsafe {
+            let ce = rapira_ce_grpc_service_info;
+            let [name_slot, methods_slot] = *SERVICE_INFO_SLOTS
+                .get_or_init(|| [c"name", c"methods"].map(|n| zend::prop_offset(ce, n)));
             let services = schema.services();
             rapira_array_init(rv, services.len() as u32);
             for s in services {
@@ -73,13 +85,12 @@ pub unsafe extern "C" fn rapira_rs_grpc_services(rv: *mut zval) -> bool {
                     method_info(&mut info, schema.pool(), m);
                     let _ = add_next_index_object(&mut methods, info.value.obj);
                 }
-                let ce = rapira_ce_grpc_service_info;
                 let mut service: zval = std::mem::zeroed();
                 let _ = object_init_ex(&mut service, ce);
-                zend::prop_stringl(ce, service.value.obj, c"name", s.full_name().as_bytes());
-                zend::prop_zval(ce, service.value.obj, c"methods", &mut methods);
-                zval_ptr_dtor(&mut methods);
-                let _ = add_next_index_object(rv, service.value.obj);
+                let obj = service.value.obj;
+                zend::slot_stringl(obj, name_slot, s.full_name().as_bytes());
+                zend::slot_init(obj, methods_slot, &methods);
+                let _ = add_next_index_object(rv, obj);
             }
             true
         })
@@ -217,7 +228,6 @@ impl StreamReply {
 
 pub(crate) struct GrpcState {
     req: Call,
-    received_at: f64,
     /// None after the outcome went out or the call was discarded. The call is then finalized.
     reply: Option<Reply>,
     discarded: bool,
@@ -232,7 +242,6 @@ impl GrpcState {
     pub(crate) fn new(req: Call, reply: Reply) -> Self {
         Self {
             req,
-            received_at: now_unix_f64(),
             reply: Some(reply),
             discarded: false,
             headers: Vec::new(),
@@ -528,18 +537,16 @@ unsafe fn build_metadata(dst: *mut zval, fields: &[MetadataField]) {
         let mut entries: zval = std::mem::zeroed();
         rapira_array_init(&mut entries, fields.len() as u32);
         for MetadataField { name, values } in fields {
-            let key = name.as_str();
             add_list(
                 &mut entries,
-                header_key(key),
-                key.len(),
+                name.as_str(),
                 values.iter().map(Vec::as_slice),
             );
         }
         let ce = rapira_ce_grpc_metadata;
+        let [entries_slot] = *METADATA_SLOTS.get_or_init(|| [zend::prop_offset(ce, c"entries")]);
         let _ = object_init_ex(dst, ce);
-        zend::prop_zval(ce, (*dst).value.obj, c"entries", &mut entries);
-        zval_ptr_dtor(&mut entries);
+        zend::slot_init((*dst).value.obj, entries_slot, &entries);
     }
 }
 
@@ -572,21 +579,42 @@ unsafe fn build_context(dst: *mut zval, st: &mut GrpcState) {
         );
 
         let ce = rapira_ce_grpc_context;
+        let [
+            method_slot,
+            metadata_slot,
+            deadline_slot,
+            remote_slot,
+            tls_slot,
+            protocol_slot,
+            received_at_slot,
+        ] = *CONTEXT_SLOTS.get_or_init(|| {
+            [
+                c"method",
+                c"metadata",
+                c"deadline",
+                c"remote",
+                c"tls",
+                c"protocol",
+                c"receivedAt",
+            ]
+            .map(|n| zend::prop_offset(ce, n))
+        });
         let _ = object_init_ex(dst, ce);
         let o = (*dst).value.obj;
-        zend::prop_stringl(ce, o, c"method", req.method.as_bytes());
-        zend::prop_zval(ce, o, c"metadata", &mut metadata);
-        zval_ptr_dtor(&mut metadata);
+        zend::slot_stringl(o, method_slot, req.method.as_bytes());
+        zend::slot_init(o, metadata_slot, &metadata);
         match req.deadline {
-            Some(d) => zend::prop_double(ce, o, c"deadline", d.unix),
-            None => zend::prop_null(ce, o, c"deadline"),
+            Some(d) => zend::slot_double(o, deadline_slot, d.unix),
+            None => zend::slot_null(o, deadline_slot),
         }
-        zend::prop_zval(ce, o, c"remote", &mut remote);
-        zval_ptr_dtor(&mut remote);
-        zend::prop_null(ce, o, c"tls");
-        zend::prop_zval(ce, o, c"protocol", &mut protocol);
-        zval_ptr_dtor(&mut protocol);
-        zend::prop_double(ce, o, c"receivedAt", st.received_at);
+        zend::slot_init(o, remote_slot, &remote);
+        zend::slot_null(o, tls_slot);
+        zend::slot_init(o, protocol_slot, &protocol);
+        zend::slot_double(o, received_at_slot, req.received_at);
+
+        // The C shell memoizes Context once per call, so release the Rust copies now.
+        st.context_metadata = None;
+        st.req.metadata.clear();
     }
 }
 
@@ -792,12 +820,13 @@ mod tests {
 
     fn state(reply: oneshot::Sender<UnaryReply>) -> GrpcState {
         let req = Call {
-            method: "rapira.test.v1.EchoService/Echo".into(),
+            method: std::sync::Arc::from("rapira.test.v1.EchoService/Echo"),
             protocol: Protocol::Grpc,
             metadata: HeaderMap::new(),
             deadline: None,
             remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
             message: Bytes::new(),
+            received_at: 0.0,
         };
         GrpcState::new(req, Reply::Unary(reply))
     }

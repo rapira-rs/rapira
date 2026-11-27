@@ -14,8 +14,8 @@
 #ifdef HAVE_PHP_SESSION
 #include <ext/session/php_session.h>
 #endif
-#include <ext/json/php_json.h>
 #include <Zend/zend_observer.h>
+#include <ext/json/php_json.h>
 #include <ext/spl/spl_exceptions.h>
 #include <ext/standard/head.h>
 
@@ -24,38 +24,43 @@
 #define RAPIRA_VERSION "0.0.0-dev"
 #endif
 
-// array_init_size, smart_str_free and zend_array_is_list need C wrappers for Rust.
+// array_init_size, smart_str_free and zend_array_is_list need C wrappers for
+// Rust.
 void rapira_array_init(zval *zv, uint32_t size);
 void rapira_smart_str_free(smart_str *s);
 bool rapira_array_is_list(HashTable *ht);
-// ZVAL_OBJ_COPY is a macro; the shim looks up the case called name in the enum class ce and writes it into dst with a new reference
+// ZVAL_OBJ_COPY is a macro; the shim looks up the case called name in the enum
+// class ce and writes it into dst with a new reference
 void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name);
 // ZVAL_STRINGL is a macro; the shim writes a new non-interned string into zv
 void rapira_zval_stringl(zval *zv, const char *s, size_t len);
-// ZVAL_NEW_STR and ZVAL_EMPTY_STRING are macros; the shim writes a new string of
-// len bytes into zv and returns its buffer for the caller to fill. For len 0 it
-// writes the empty string and returns NULL.
+// ZVAL_NEW_STR and ZVAL_EMPTY_STRING are macros; the shim writes a new string
+// of len bytes into zv and returns its buffer for the caller to fill. For len 0
+// it writes the empty string and returns NULL.
 char *rapira_zval_string_alloc(zval *zv, size_t len);
-// zend_string_addref and zend_string_release are inline; the shims add and
-// release one reference, and an interned string gets neither
-void rapira_zstr_addref(zend_string *s);
-void rapira_zstr_release(zend_string *s);
-// ZVAL_STRINGL_FAST is a macro; the shim registers the variable called name with the string value val through php_register_known_variable.
-// The name must be non-empty and non-numeric, have no NUL, ' ', '.' or '[', and not be "this" or "GLOBALS".
+// ZVAL_STRINGL_FAST is a macro; the shim registers the variable called name
+// with the string value val through php_register_known_variable. The name must
+// be non-empty and non-numeric, have no NUL, ' ', '.' or '[', and not be "this"
+// or "GLOBALS".
 void rapira_register_known_stringl(const char *name, size_t name_len,
                                    const char *val, size_t val_len,
                                    zval *track_vars_array);
-// ZVAL_STRINGL_FAST is a macro; the shim stores the string value val in the hash table ht under key through zend_hash_update.
+// ZVAL_STRINGL_FAST is a macro; the shim stores the string value val in the
+// hash table ht under key through zend_hash_update.
 void rapira_hash_update_stringl(HashTable *ht, zend_string *key,
                                 const char *val, size_t val_len);
+// Returns a permanent interned string, which PHP never refcounts or frees.
+zend_string *rapira_permanent_string(const char *s, size_t len);
 
-// The PHP globals struct of the calling thread. The code reads each global through these accessors, so one body fits NTS and ZTS.
+// The PHP globals struct of the calling thread. The code reads each global
+// through these accessors, so one body fits NTS and ZTS.
 sapi_globals_struct *rapira_sg(void);
 zend_executor_globals *rapira_eg(void);
 php_core_globals *rapira_pg(void);
 zend_compiler_globals *rapira_cg(void);
 
-// The signal and the interval timer of zend_set_timeout. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1656-L1697
+// The signal and the interval timer of zend_set_timeout.
+// https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1656-L1697
 #ifdef ZEND_MAX_EXECUTION_TIMERS
 #define RAPIRA_TIMER_SIGNAL SIGRTMIN
 #elif defined(HAVE_SETITIMER)
@@ -69,17 +74,20 @@ zend_compiler_globals *rapira_cg(void);
 #endif
 #endif
 
-// The saved execution timer of this thread: a POSIX timer with ZEND_MAX_EXECUTION_TIMERS, else the setitimer timer of zend_set_timeout.
+// The saved execution timer of this thread: a POSIX timer with
+// ZEND_MAX_EXECUTION_TIMERS, else the setitimer timer of zend_set_timeout.
 #if defined(ZEND_MAX_EXECUTION_TIMERS)
 typedef struct itimerspec rapira_timer;
 #else
 typedef struct itimerval rapira_timer;
 #endif
-// Stops the timer and writes its old value to saved. Returns true only for a timer with time left. Call it on a PHP thread.
+// Stops the timer and writes its old value to saved. Returns true only for a
+// timer with time left. Call it on a PHP thread.
 bool rapira_timer_pause(rapira_timer *saved);
 // Arms the timer again with the value that rapira_timer_pause saved.
 void rapira_timer_resume(const rapira_timer *saved);
-// Moves the execution timer of this thread to the CPU clock of the thread, if the pool of the thread uses the cpu clock. RINIT calls it.
+// Moves the execution timer of this thread to the CPU clock of the thread, if
+// the pool of the thread uses the cpu clock. RINIT calls it.
 void rapira_timer_use_cpu_clock(void);
 
 // The worker maps rapira_config::Mode to these values.
@@ -106,9 +114,10 @@ typedef struct {
 bool rapira_zts(void);
 bool rapira_has_execution_timers(void);
 void rapira_lock_timeouts(void);
-// Each PHP thread calls start before its first request and end after its last request.
-// The plugin and the name must live until the thread ends. The name has name_len bytes.
-// cpu_clock is true when the pool of the thread sets execution_clock to cpu.
+// Each PHP thread calls start before its first request and end after its last
+// request. The plugin and the name must live until the thread ends. The name
+// has name_len bytes. cpu_clock is true when the pool of the thread sets
+// execution_clock to cpu.
 void rapira_thread_start(int mode, const rapira_plugin *plugin,
                          const char *name, size_t name_len, bool cpu_clock);
 void rapira_thread_end(void);
@@ -189,8 +198,10 @@ typedef struct {
     zend_object std;
 } rapira_dispatcher_info_obj;
 
-// Class entries of the base stubs; rapira_register_classes assigns them in MINIT, before the plugin classes register and before any object of these classes can exist.
-// Rust binds the entries it reads as static muts (allowed_bindings.rs); the others are C-only.
+// Class entries of the base stubs; rapira_register_classes assigns them in
+// MINIT, before the plugin classes register and before any object of these
+// classes can exist. Rust binds the entries it reads as static muts
+// (allowed_bindings.rs); the others are C-only.
 extern zend_class_entry *rapira_ce_throwable;
 extern zend_class_entry *rapira_ce_work;
 extern zend_class_entry *rapira_ce_dispatcher;
@@ -227,7 +238,35 @@ rapira_prop_str_or_null(zend_class_entry *ce, zend_object *obj,
         zend_update_property_null(ce, obj, name, name_len);
     }
 }
-// Call after php_module_startup to register the POST reader and the activation hook for buffered request bodies.
+// writes the zval property name, or null when value is NULL
+static zend_always_inline void
+rapira_prop_obj_or_null(zend_class_entry *ce, zend_object *obj,
+                        const char *name, size_t name_len, zval *value) {
+    if (value) {
+        zend_update_property(ce, obj, name, name_len, value);
+    } else {
+        zend_update_property_null(ce, obj, name, name_len);
+    }
+}
+// Initializes a private copy of std_object_handlers for a non-cloneable unit
+// class with a C prefix.
+static zend_always_inline void
+rapira_unit_handlers_init(zend_object_handlers *handlers, size_t offset,
+                          zend_object_free_obj_t free_obj) {
+    *handlers = std_object_handlers;
+    handlers->clone_obj = NULL;
+    handlers->offset = offset;
+    handlers->free_obj = free_obj;
+}
+// Binds create_object and default_object_handlers for a unit class.
+static zend_always_inline void
+rapira_unit_class_wire(zend_class_entry *ce,
+                       const zend_object_handlers *handlers) {
+    ce->create_object = rapira_object_create;
+    ce->default_object_handlers = handlers;
+}
+// Call after php_module_startup to register the POST reader and the activation
+// hook for buffered request bodies.
 void rapira_register_post_reader(void);
 
 // The Dispatcher, DispatcherInfo and Work methods that every plugin shares, and

@@ -13,17 +13,20 @@ workspace = true
 rapira_sapi = { workspace = true }
 rapira_net = { workspace = true }
 rapira_config = { workspace = true }
+rapira_http_middleware = { workspace = true }
+rapira_compress = { workspace = true }
 rapira_static_files = { workspace = true }
 anyhow = { workspace = true }
+bytes = { workspace = true }
 libc = { workspace = true }
 serde = { workspace = true }
 tracing = { workspace = true }
 http = { workspace = true }
+http-body = { workspace = true }
 http-body-util = { workspace = true }
-tokio = { workspace = true, features = ["rt", "net", "time", "macros"] }
 hyper = { workspace = true, features = ["http1", "server"] }
 hyper-util = { workspace = true, features = ["tokio"] }
-tower = { workspace = true }
+tokio = { workspace = true, features = ["rt", "net", "time", "macros"] }
 # The multipart parser uses these crates.
 memchr = "2"
 httparse = "1"

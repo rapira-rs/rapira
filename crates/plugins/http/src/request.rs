@@ -1,60 +1,86 @@
-//! Builds the SAPI Request from the HTTP request and the Peer.
+//! Builds the SAPI Request from the parsed HTTP head and Peer.
 
-use rapira_sapi::Request;
-use rapira_sapi::types::Chunks;
+use std::borrow::Cow;
 
-use crate::middleware::Peer;
+use http::{Method, Uri, Version};
+use rapira_http_middleware::{Peer, PeerAddr, RequestHeaders};
+use rapira_sapi::types::{Authority, Chunks, RequestUri};
+use rapira_sapi::{Addr, Request};
+
+fn peer_addr(addr: PeerAddr) -> Addr {
+    match addr {
+        PeerAddr::Inet(sa) => Addr::Inet(sa),
+        PeerAddr::Unix(p) => Addr::Unix(p),
+    }
+}
+
+fn method_cow(m: &Method) -> Cow<'static, str> {
+    match *m {
+        Method::GET => Cow::Borrowed("GET"),
+        Method::POST => Cow::Borrowed("POST"),
+        Method::PUT => Cow::Borrowed("PUT"),
+        Method::DELETE => Cow::Borrowed("DELETE"),
+        Method::HEAD => Cow::Borrowed("HEAD"),
+        Method::OPTIONS => Cow::Borrowed("OPTIONS"),
+        Method::PATCH => Cow::Borrowed("PATCH"),
+        Method::CONNECT => Cow::Borrowed("CONNECT"),
+        Method::TRACE => Cow::Borrowed("TRACE"),
+        _ => Cow::Owned(m.as_str().to_owned()),
+    }
+}
 
 /// The body stays raw, because the handler parses multipart.
 pub fn build(
-    parts: http::request::Parts,
-    authority: Option<Vec<u8>>,
+    method: Method,
+    uri: Uri,
+    version: Version,
+    headers: RequestHeaders,
+    authority: Authority,
     body: Chunks,
     peer: Peer,
 ) -> Request {
-    // hyper's HTTP/1 server parses only HTTP/1.0 and HTTP/1.1; HTTP/2 is planned.
-    let protocol = match parts.version {
-        http::Version::HTTP_10 => "HTTP/1.0",
-        http::Version::HTTP_2 => "HTTP/2.0",
+    let protocol = match version {
+        Version::HTTP_10 => "HTTP/1.0",
+        Version::HTTP_2 => "HTTP/2.0",
         _ => "HTTP/1.1",
     };
+    let target = uri.authority().map(|_| uri.to_string().into_bytes());
+    let req_uri = match uri.path_and_query() {
+        None => RequestUri::Static("/"),
+        Some(pq) => match pq.as_str() {
+            "/" => RequestUri::Static("/"),
+            s if s.starts_with('/') || s == "*" => RequestUri::Parsed(uri),
+            // Display restores the leading slash that an authority-only absolute-form omits, so "http://h?q" gives "/?q".
+            // https://github.com/hyperium/http/blob/v1.5.0/src/uri/path.rs#L277-L291
+            _ => RequestUri::Owned(pq.to_string()),
+        },
+    };
     Request {
-        method: parts.method.as_str().to_owned(),
-        // The origin-form view for every target form. Display restores the leading
-        // slash that an authority-only absolute-form omits, so "http://h?q" gives
-        // "/?q". It keeps "*" unchanged.
-        // https://github.com/hyperium/http/blob/v1.5.0/src/uri/path.rs#L277-L291
-        uri: parts
-            .uri
-            .path_and_query()
-            .map(|pq| pq.to_string())
-            .unwrap_or_else(|| "/".to_owned()),
-        // The request-target, rebuilt for the absolute and authority forms. hyper gives only the parsed Uri, not the raw bytes.
+        method: method_cow(&method),
+        uri: req_uri,
         // For the origin and asterisk forms the target equals uri, which PHP uses when this is None.
-        target: parts
-            .uri
-            .authority()
-            .map(|_| parts.uri.to_string().into_bytes()),
+        target,
         authority,
         https: peer.https,
         protocol,
-        remote: peer.remote,
-        server: peer.server,
+        remote: peer_addr(peer.remote),
+        server: peer_addr(peer.server),
         received_at: peer.received_at,
         body,
-        headers: parts.headers,
+        headers,
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use rapira_sapi::Addr;
+    use http::header::{HeaderName, HeaderValue};
+    use rapira_http_middleware::PeerAddr;
 
     fn peer() -> Peer {
         Peer {
-            remote: Addr::Inet(([127, 0, 0, 1], 40000).into()),
-            server: Addr::Inet(([127, 0, 0, 1], 8000).into()),
+            remote: PeerAddr::Inet(([127, 0, 0, 1], 40000).into()),
+            server: PeerAddr::Inet(([127, 0, 0, 1], 8000).into()),
             https: false,
             received_at: 1.5,
         }
@@ -62,20 +88,37 @@ mod tests {
 
     #[test]
     fn headers_keep_the_per_name_wire_order() {
-        let req = http::Request::builder()
-            .method("GET")
-            .uri("/a/b?x=1")
-            .header("X-Probe", "one")
-            .header("Accept", "text/*")
-            .header("x-probe", "two")
-            .body(())
-            .unwrap();
-        let (parts, ()) = req.into_parts();
-        let built = build(parts, Some(b"e2e".to_vec()), Chunks::default(), peer());
-        let probes: Vec<_> = built.headers.get_all("x-probe").iter().collect();
-        assert_eq!(probes, ["one", "two"]);
+        let mut hdrs = RequestHeaders::new();
+        hdrs.append(
+            HeaderName::from_static("x-probe"),
+            HeaderValue::from_static("one"),
+        );
+        hdrs.append(
+            HeaderName::from_static("accept"),
+            HeaderValue::from_static("text/*"),
+        );
+        hdrs.append(
+            HeaderName::from_static("x-probe"),
+            HeaderValue::from_static("two"),
+        );
+        let built = build(
+            Method::GET,
+            Uri::from_static("/a/b?x=1"),
+            Version::HTTP_11,
+            hdrs,
+            Authority::Explicit(bytes::Bytes::from_static(b"e2e")),
+            Chunks::default(),
+            peer(),
+        );
+        let probes: Vec<&[u8]> = built
+            .headers
+            .get_all("x-probe")
+            .iter()
+            .map(HeaderValue::as_bytes)
+            .collect();
+        assert_eq!(probes, [&b"one"[..], &b"two"[..]]);
         assert_eq!(built.protocol, "HTTP/1.1");
-        assert_eq!(built.authority.as_deref(), Some(&b"e2e"[..]));
+        assert_eq!(built.authority_bytes(), Some(&b"e2e"[..]));
         assert_eq!(built.received_at, 1.5);
     }
 
@@ -120,14 +163,16 @@ mod tests {
             },
         ];
         for case in cases {
-            let req = http::Request::builder()
-                .method(case.method)
-                .uri(case.uri)
-                .body(())
-                .unwrap();
-            let (parts, ()) = req.into_parts();
-            let built = build(parts, None, Chunks::default(), peer());
-            assert_eq!(built.uri, case.want_uri, "{}", case.name);
+            let built = build(
+                Method::from_bytes(case.method.as_bytes()).unwrap(),
+                Uri::try_from(case.uri).unwrap(),
+                Version::HTTP_11,
+                RequestHeaders::new(),
+                Authority::None,
+                Chunks::default(),
+                peer(),
+            );
+            assert_eq!(built.uri.as_str(), case.want_uri, "{}", case.name);
             assert_eq!(built.target.as_deref(), case.want_target, "{}", case.name);
         }
     }

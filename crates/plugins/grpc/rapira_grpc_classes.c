@@ -101,14 +101,11 @@ void rapira_grpc_register_classes(void) {
     rapira_plugin_wire(&rapira_grpc_plugin);
 
     // the call classes share one object layout
-    rapira_grpc_call_handlers = std_object_handlers;
-    rapira_grpc_call_handlers.clone_obj = NULL;
-    rapira_grpc_call_handlers.offset = offsetof(rapira_grpc_call_obj, std);
-    rapira_grpc_call_handlers.free_obj = rapira_grpc_call_free;
-    rapira_ce_grpc_unary_call->create_object = rapira_object_create;
-    rapira_ce_grpc_unary_call->default_object_handlers =
-        &rapira_grpc_call_handlers;
-    rapira_ce_grpc_server_streaming_call->create_object = rapira_object_create;
-    rapira_ce_grpc_server_streaming_call->default_object_handlers =
-        &rapira_grpc_call_handlers;
+    rapira_unit_handlers_init(&rapira_grpc_call_handlers,
+                              offsetof(rapira_grpc_call_obj, std),
+                              rapira_grpc_call_free);
+    rapira_unit_class_wire(rapira_ce_grpc_unary_call,
+                           &rapira_grpc_call_handlers);
+    rapira_unit_class_wire(rapira_ce_grpc_server_streaming_call,
+                           &rapira_grpc_call_handlers);
 }

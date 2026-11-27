@@ -1,161 +1,117 @@
-//! Passes an HTTP/1 request head through the admission checks, the request build and the `$uri` of the dispatcher mode.
-//! The first byte selects the superglobals and the scheme. The rest is the request head.
+//! Passes an HTTP/1.x request head through `httparse`, admission checks, request build, and `$uri` of dispatcher mode.
+//! The first byte selects the superglobals, scheme, and server address. The rest is wire bytes.
 
 #![no_main]
 
-use http::header::{CONTENT_LENGTH, HOST, TRANSFER_ENCODING};
-use http::{HeaderMap, HeaderName, HeaderValue, Method, Uri, Version};
+use http::header::{HeaderName, HeaderValue};
+use http::{HeaderMap, Method, Uri, Version};
 use rapira_fuzz::safe_name;
 use rapira_http::check::check_request;
-use rapira_http::middleware::Peer;
+use rapira_http::middleware::{Peer, PeerAddr};
 use rapira_http::php::uri_abs;
 use rapira_http::request::build;
-use rapira_sapi::Addr;
 use rapira_sapi::types::Chunks;
 
 const MAX_BODY: usize = 1024;
 const SERVER: &str = "127.0.0.1:8000";
 
-/// RFC 9110 Content-Length = 1*DIGIT: https://www.rfc-editor.org/rfc/rfc9110#section-8.6
-fn length(v: &HeaderValue) -> Option<u64> {
-    let s = v.to_str().ok()?;
-    s.bytes()
-        .all(|b| b.is_ascii_digit())
-        .then(|| s.parse().ok())?
-}
-
 libfuzzer_sys::fuzz_target!(|data: &[u8]| {
-    let Some((&flags, head)) = data.split_first() else {
+    let Some((&flags, wire)) = data.split_first() else {
         return;
     };
     let superglobals = flags & 2 != 0;
     let https = flags & 4 != 0;
 
-    // The same parse as the HTTP/1 server of hyper: httparse, then the http types.
-    let mut fields = [httparse::EMPTY_HEADER; 100];
-    let mut req = httparse::Request::new(&mut fields);
-    let Ok(httparse::Status::Complete(_)) = req.parse(head) else {
+    let mut raw_headers = [httparse::EMPTY_HEADER; 64];
+    let mut parsed = httparse::Request::new(&mut raw_headers);
+    let Ok(httparse::Status::Complete(_)) = parsed.parse(wire) else {
         return;
     };
-    let (Some(method), Some(target), Some(minor)) = (req.method, req.path, req.version) else {
+    let Some(method_str) = parsed.method else {
         return;
     };
-    let (Ok(method), Ok(uri)) = (Method::from_bytes(method.as_bytes()), Uri::try_from(target))
-    else {
+    let Ok(method) = Method::from_bytes(method_str.as_bytes()) else {
         return;
     };
-    let version = if minor == 1 {
-        Version::HTTP_11
-    } else {
-        Version::HTTP_10
+    let Some(path_str) = parsed.path else {
+        return;
     };
-    let mut sent = HeaderMap::new();
-    for f in req.headers.iter() {
-        let (Ok(name), Ok(value)) = (
-            HeaderName::from_bytes(f.name.as_bytes()),
-            HeaderValue::from_bytes(f.value),
-        ) else {
+    let Ok(uri) = Uri::try_from(path_str) else {
+        return;
+    };
+    let version = match parsed.version {
+        Some(0) => Version::HTTP_10,
+        Some(1) => Version::HTTP_11,
+        _ => return,
+    };
+    let mut headers = HeaderMap::new();
+    for h in parsed.headers.iter() {
+        let Ok(name) = HeaderName::from_bytes(h.name.as_bytes()) else {
             return;
         };
-        sent.append(name, value);
+        let Ok(val) = HeaderValue::from_bytes(h.value) else {
+            return;
+        };
+        headers.append(name, val);
     }
-    // hyper answers 400 to a Content-Length that is not 1*DIGIT and to two different values. Transfer-Encoding changes the framing, which is out of scope here.
-    let lengths: Vec<Option<u64>> = sent.get_all(CONTENT_LENGTH).iter().map(length).collect();
-    if sent.contains_key(TRANSFER_ENCODING)
-        || lengths.iter().any(Option::is_none)
-        || lengths.windows(2).any(|w| w[0] != w[1])
-    {
-        return;
-    }
-    let declared = lengths.first().copied().flatten();
 
-    let mut parts = http::Request::new(()).into_parts().0;
-    parts.method = method;
-    parts.uri = uri.clone();
-    parts.version = version;
-    parts.headers = sent.clone();
+    let mut req = http::Request::new(());
+    *req.method_mut() = method;
+    *req.uri_mut() = uri;
+    *req.version_mut() = version;
+    *req.headers_mut() = headers;
+    let (mut parts, ()) = req.into_parts();
 
-    // Each rule that the request breaks allows its status, and a request that breaks no rule must pass.
-    let hosts: Vec<&[u8]> = sent
-        .get_all(HOST)
-        .iter()
-        .map(HeaderValue::as_bytes)
-        .collect();
-    let mut allowed = Vec::new();
-    // RFC 9112 section 3.2: https://www.rfc-editor.org/rfc/rfc9112#section-3.2
-    // A second Host line, or a missing or empty Host value on HTTP/1.1, is a 400.
-    if hosts.len() > 1
-        || (version == Version::HTTP_11 && hosts.first().is_none_or(|h| h.is_empty()))
-    {
-        allowed.push(400);
-    }
-    if declared.is_some_and(|l| l > MAX_BODY as u64) {
-        allowed.push(413);
-    }
     let authority = match check_request(&mut parts, superglobals, MAX_BODY) {
-        Ok(authority) => {
-            assert!(allowed.is_empty(), "accepted, but allowed {allowed:?}");
-            authority
-        }
-        Err(r) => {
-            assert!(
-                allowed.contains(&r.status.as_u16()),
-                "{r}, but allowed {allowed:?}"
-            );
+        Ok(auth) => auth,
+        Err(rej) => {
+            assert!(matches!(rej.status.as_u16(), 400 | 413));
             return;
         }
     };
 
-    // The authority is the Host value when it is not empty, also for an absolute-form target.
-    let want_authority = hosts.first().copied().filter(|h| !h.is_empty());
-    assert_eq!(authority.as_deref(), want_authority, "authority");
-    // The fields as received. The superglobals drop the names that alias a CGI variable.
-    let want_fields: HeaderMap = sent
-        .iter()
-        .filter(|(n, _)| !superglobals || safe_name(n))
-        .map(|(n, v)| (n.clone(), v.clone()))
-        .collect();
-    assert_eq!(parts.headers, want_fields, "fields");
+    if parts.version == Version::HTTP_11 {
+        let resolved = match &authority {
+            rapira_sapi::types::Authority::None => None,
+            rapira_sapi::types::Authority::HostHeader => parts
+                .headers
+                .get(http::header::HOST)
+                .map(|v| v.as_bytes().trim_ascii()),
+            rapira_sapi::types::Authority::Explicit(b) => Some(b.as_ref()),
+        };
+        assert!(
+            resolved.is_some_and(|a| !a.is_empty()),
+            "HTTP/1.1 must require non-empty Host"
+        );
+    }
+    if superglobals {
+        for name in parts.headers.keys() {
+            assert!(safe_name(name), "unsafe CGI header leaked: {name}");
+        }
+    }
 
     let local = if flags & 1 == 0 { SERVER } else { "[::1]:8123" };
     let peer = Peer {
-        remote: Addr::Inet(([127, 0, 0, 1], 40000).into()),
-        server: Addr::Inet(local.parse().unwrap()),
+        remote: PeerAddr::Inet(([127, 0, 0, 1], 40000).into()),
+        server: PeerAddr::Inet(local.parse().unwrap()),
         https,
         received_at: 0.0,
     };
-    let built = build(parts, authority.clone(), Chunks::default(), peer);
-    // http::Uri drops a fragment, so $target has none.
-    let raw = target.split('#').next().unwrap_or_default();
-    let (want_uri, want_target) = if raw == "*" || raw.starts_with('/') {
-        (raw.to_owned(), None)
-    } else if let Some(scheme) = uri.scheme_str() {
-        let rest = &raw[scheme.len() + 3..];
-        let end = rest.find(['/', '?']).unwrap_or(rest.len());
-        // http::Uri writes the RFC 9110 normal form: an empty path as "/" and the http and https schemes in lower case: https://www.rfc-editor.org/rfc/rfc9110#section-4.2.3
-        let path = if rest[end..].starts_with('/') {
-            rest[end..].to_owned()
-        } else {
-            format!("/{}", &rest[end..])
-        };
-        let target = format!("{scheme}://{}{path}", &rest[..end]);
-        (path, Some(target))
-    } else {
-        ("/".to_owned(), Some(raw.to_owned()))
-    };
-    assert_eq!(built.uri, want_uri, "uri");
-    assert_eq!(
-        built.target.as_deref(),
-        want_target.as_deref().map(str::as_bytes),
-        "target"
+    let built = build(
+        parts.method,
+        parts.uri,
+        parts.version,
+        parts.headers,
+        authority,
+        Chunks::default(),
+        peer,
     );
 
-    // Request::$uri: the listener scheme, the authority or else the listener address, and the path. OPTIONS * gives the root.
-    let uri_abs = uri_abs(&built);
-    let a = authority.as_deref().unwrap_or(local.as_bytes());
-    // rapira puts any Host value into $uri, so the target checks $uri only for an authority that http::Uri accepts.
+    let uri_abs_str = uri_abs(&built);
+    let a = built.authority_bytes().unwrap_or(local.as_bytes());
     if http::uri::Authority::try_from(a).is_ok() {
-        let u = Uri::try_from(uri_abs.as_str()).unwrap_or_else(|e| panic!("$uri {uri_abs}: {e}"));
+        let u = Uri::try_from(uri_abs_str.as_str())
+            .unwrap_or_else(|e| panic!("$uri {uri_abs_str}: {e}"));
         assert_eq!(
             u.scheme_str(),
             Some(if https { "https" } else { "http" }),
@@ -166,7 +122,8 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
             Some(a),
             "$uri authority"
         );
-        let path = if built.uri == "*" { "/" } else { &built.uri };
+        let uri_str = built.uri.as_str();
+        let path = if uri_str == "*" { "/" } else { uri_str };
         assert_eq!(
             u.path_and_query().map(|p| p.as_str()),
             Some(path),

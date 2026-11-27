@@ -4,7 +4,7 @@
 
 use std::sync::LazyLock;
 
-use rapira_http::check::Rejection;
+use rapira_http::Rejection;
 use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart};
 
 /// Small limits, so that a 4 KiB input can go over each count and size limit.
@@ -75,14 +75,20 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     assert!(form.fields.len() + form.files.len() <= l.max_parts);
     assert!(form.files.len() <= l.max_files);
     for f in &form.fields {
-        assert!(!f.name.is_empty());
-        assert!(f.value.len() <= l.max_field_size);
-        assert_grouped(&f.headers, l);
+        assert!(!form.field_name(f).is_empty());
+        assert!(form.field_value(f).len() <= l.max_field_size);
+        let headers: Vec<HeaderValues> = form
+            .field_headers(f)
+            .map(|h| h.to_owned_values())
+            .collect();
+        assert_grouped(&headers, l);
     }
     for f in &form.files {
-        assert!(!f.name.is_empty());
+        assert!(!form.file_name(f).is_empty());
         assert!(f.size <= l.max_file_size);
-        assert_grouped(&f.headers, l);
+        let headers: Vec<HeaderValues> =
+            form.file_headers(f).map(|h| h.to_owned_values()).collect();
+        assert_grouped(&headers, l);
         let len = std::fs::metadata(&f.file.path).expect("spooled file").len();
         assert_eq!(len, f.size, "spooled file size");
     }

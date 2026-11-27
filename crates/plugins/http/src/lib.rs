@@ -1,26 +1,41 @@
 //! The http plugin. It serves HTTP/1.1 on the configured listener, and PHP answers every request.
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
+use rapira_http_middleware::Middleware;
 use rapira_net::{ListenAddr, PreparedListener};
 use rapira_sapi::plugin::{Plugin, ServeFuture};
 use rapira_sapi::rapira_plugin;
 use rapira_sapi::work::Intake;
 use tokio::sync::watch;
 
-mod bridge;
 pub mod check;
 pub mod config;
 mod handler;
-pub mod middleware;
+mod io;
 pub mod multipart;
 pub mod php;
 pub mod request;
-mod response;
+mod responder;
 mod serve;
 
 pub use php::rapira_http_register_classes;
+pub use rapira_http_middleware as middleware;
+
+/// A refusal before dispatch. PHP never saw the request.
+#[derive(Debug)]
+pub struct Rejection {
+    pub status: http::StatusCode,
+    pub reason: String,
+}
+
+impl std::fmt::Display for Rejection {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.status.as_u16(), self.reason)
+    }
+}
 
 pub struct Config {
     pub listen: ListenAddr,
@@ -32,9 +47,11 @@ pub struct Config {
     pub write_timeout: Duration,
     pub keepalive_timeout: Duration,
     /// `[http].middleware` in config order. The first entry is outermost.
-    pub middleware: Vec<middleware::Layer>,
+    pub middleware: Vec<Arc<dyn Middleware>>,
     /// The multipart limits and the process spool directory for dispatcher mode.
     pub uploads: Option<multipart::Limits>,
+    /// The containment root of sendFile().
+    pub sendfile_root: PathBuf,
 }
 
 pub struct Server {
@@ -55,7 +72,11 @@ impl Plugin for Server {
     fn worker_init(&self) -> Arc<dyn Fn() + Send + Sync> {
         let identity =
             rapira_sapi::HttpIdentity::new(&self.config.server_name, self.config.server_port);
-        Arc::new(move || identity.enter())
+        let sendfile_root = self.config.sendfile_root.clone();
+        Arc::new(move || {
+            identity.enter();
+            php::set_sendfile_root(sendfile_root.clone());
+        })
     }
 
     fn serve(

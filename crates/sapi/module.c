@@ -1,6 +1,7 @@
 #include "rapira_sapi.h"
 
 #include <main/php_content_types.h>
+#include <time.h>
 #ifdef __linux__
 #include <sys/syscall.h>
 #endif
@@ -119,6 +120,24 @@ static void rapira_observer_end_to(zend_execute_data *base) {
 // The per-unit time budget, or -1 when it is not captured. set_time_limit()
 // rewrites the live field.
 ZEND_TLS zend_long rapira_unit_timeout = -1;
+// True when the kernel execution timer is currently armed for
+// rapira_unit_timeout.
+ZEND_TLS bool rapira_timer_armed = false;
+// Coarse monotonic timestamp (ms) when the kernel timer was last armed.
+ZEND_TLS int64_t rapira_timer_armed_ms = 0;
+
+static int64_t rapira_coarse_ms(void) {
+    struct timespec ts;
+#ifdef CLOCK_MONOTONIC_COARSE
+    if (clock_gettime(CLOCK_MONOTONIC_COARSE, &ts) == 0) {
+        return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    }
+#endif
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    }
+    return 0;
+}
 
 // zend_unset_timeout does not stop the timer when EG(timeout_seconds) is 0, so
 // stop the timer before this function sets the field to 0.
@@ -126,13 +145,15 @@ void rapira_receive_untimed(void) {
     if (rapira_unit_timeout < 0) {
         rapira_unit_timeout = EG(timeout_seconds);
     }
-    zend_unset_timeout();
-    EG(timeout_seconds) = 0;
+    if (rapira_timer_armed || EG(timeout_seconds) != 0) {
+        zend_unset_timeout();
+        EG(timeout_seconds) = 0;
+        rapira_timer_armed = false;
+    }
 }
 
 // zend_set_timeout sets EG(timeout_seconds) itself (zend_execute_API.c).
 // receive() calls this without rapira_receive_untimed() when a unit is queued.
-// Then the capture is still due, and zend_set_timeout(0) keeps a running timer.
 // Callers: receive() for each pulled unit, and rapira_request_init for each
 // worker-mode unit.
 void rapira_receive_timed(void) {
@@ -140,9 +161,29 @@ void rapira_receive_timed(void) {
         rapira_unit_timeout = EG(timeout_seconds);
     }
     if (rapira_unit_timeout == 0) {
-        zend_unset_timeout();
+        if (rapira_timer_armed || EG(timeout_seconds) != 0) {
+            zend_unset_timeout();
+            EG(timeout_seconds) = 0;
+            rapira_timer_armed = false;
+        }
+        return;
+    }
+    // Re-arm on the first unit, after an idle wait, after set_time_limit(), or
+    // once at least 1% of the budget (capped at 100 ms) has elapsed. Skipping
+    // redundant timer_settime() calls avoids kernel sighand->siglock contention
+    // across worker threads on fast requests.
+    int64_t now_ms = rapira_coarse_ms();
+    int64_t rearm_ms = rapira_unit_timeout * 10;
+    if (rearm_ms > 100) {
+        rearm_ms = 100;
+    }
+    if (rapira_timer_armed && EG(timeout_seconds) == rapira_unit_timeout &&
+        (now_ms - rapira_timer_armed_ms) < rearm_ms) {
+        return;
     }
     zend_set_timeout(rapira_unit_timeout, false);
+    rapira_timer_armed = true;
+    rapira_timer_armed_ms = now_ms;
 }
 
 static bool rapira_timeouts_disabled;
@@ -153,7 +194,9 @@ bool rapira_timer_pause(rapira_timer *saved) {
     if (!EG(pid)) {
         return false;
     }
-    // Leave an expired timer unchanged. Linux can discard its pending signal if the timer changes. https://github.com/torvalds/linux/blob/v7.3/kernel/time/posix-timers.c#L305-L311
+    // Leave an expired timer unchanged. Linux can discard its pending signal if
+    // the timer changes.
+    // https://github.com/torvalds/linux/blob/v7.3/kernel/time/posix-timers.c#L305-L311
     struct itimerspec now = {0};
     if (timer_gettime(EG(max_execution_timer_timer), &now) != 0 ||
         (now.it_value.tv_sec == 0 && now.it_value.tv_nsec == 0)) {
@@ -168,7 +211,8 @@ bool rapira_timer_pause(rapira_timer *saved) {
     if (rapira_timeouts_disabled) {
         return false;
     }
-    // One call reads and stops the timer. https://man7.org/linux/man-pages/man2/setitimer.2.html
+    // One call reads and stops the timer.
+    // https://man7.org/linux/man-pages/man2/setitimer.2.html
     struct itimerval off = {0};
     if (setitimer(RAPIRA_ZEND_ITIMER, &off, saved) != 0) {
         return false;
@@ -181,6 +225,8 @@ bool rapira_timer_pause(rapira_timer *saved) {
 }
 
 void rapira_timer_resume(const rapira_timer *saved) {
+    // Force the next unit to re-arm its full budget after a paused write.
+    rapira_timer_armed = false;
 #if defined(ZEND_MAX_EXECUTION_TIMERS)
     timer_settime(EG(max_execution_timer_timer), 0, saved, NULL);
 #elif defined(HAVE_SETITIMER)
@@ -191,7 +237,8 @@ void rapira_timer_resume(const rapira_timer *saved) {
 }
 
 #if defined(ZEND_MAX_EXECUTION_TIMERS) && defined(__linux__)
-// glibc has no name for this field. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_max_execution_timer.c#L36-L40
+// glibc has no name for this field.
+// https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_max_execution_timer.c#L36-L40
 #ifndef sigev_notify_thread_id
 #define sigev_notify_thread_id _sigev_un._tid
 #endif
@@ -200,8 +247,11 @@ void rapira_timer_resume(const rapira_timer *saved) {
 // True when the pool of this thread sets execution_clock to cpu.
 ZEND_TLS bool rapira_cpu_clock = false;
 
-// Zend creates the execution timer of this thread on a wall clock in each request startup. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_max_execution_timer.c#L49-L85
-// For a pool with the cpu clock, this function moves the timer to the CPU clock of the thread. https://man7.org/linux/man-pages/man2/timer_create.2.html
+// Zend creates the execution timer of this thread on a wall clock in each
+// request startup.
+// https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_max_execution_timer.c#L49-L85
+// For a pool with the cpu clock, this function moves the timer to the CPU clock
+// of the thread. https://man7.org/linux/man-pages/man2/timer_create.2.html
 void rapira_timer_use_cpu_clock(void) {
     if (!rapira_cpu_clock) {
         return;
@@ -210,14 +260,17 @@ void rapira_timer_use_cpu_clock(void) {
     struct sigevent sev = {0};
     sev.sigev_notify = SIGEV_THREAD_ID;
     sev.sigev_signo = RAPIRA_TIMER_SIGNAL;
-    // zend_timeout_handler accepts only a signal with this value. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1535
+    // zend_timeout_handler accepts only a signal with this value.
+    // https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1535
     sev.sigev_value.sival_ptr = &EG(max_execution_timer_timer);
     sev.sigev_notify_thread_id = (pid_t)syscall(SYS_gettid);
     timer_t cpu;
     if (timer_create(CLOCK_THREAD_CPUTIME_ID, &sev, &cpu) == 0) {
         timer_delete(EG(max_execution_timer_timer));
         EG(max_execution_timer_timer) = cpu;
-        // Arms the full budget of php_request_startup on the new timer, and clears a timeout that the wall clock recorded before RINIT. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1724-L1730
+        // Arms the full budget of php_request_startup on the new timer, and
+        // clears a timeout that the wall clock recorded before RINIT.
+        // https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1724-L1730
         zend_set_timeout(EG(timeout_seconds), false);
     }
 #endif
@@ -235,7 +288,8 @@ static void rapira_request_init(void) {
     // init_compiler clears this per cycle (zend_compile.c:461), not per unit
     CG(unclean_shutdown) = false;
 
-    // Reuse the timer signal handler that php_request_startup installed for this cycle.
+    // Reuse the timer signal handler that php_request_startup installed for
+    // this cycle.
     rapira_receive_timed();
 
     if (PG(expose_php)) {
@@ -490,8 +544,8 @@ int rapira_request_teardown(void) {
     RAPIRA_GUARD(rapira_release_header_callback(), outcome, observed_base);
     RAPIRA_GUARD(sapi_deactivate(), outcome, observed_base);
 
-    zend_try { zend_unset_timeout(); }
-    zend_end_try();
+    // The next unit re-arms the timer in rapira_request_init(), and next_unit()
+    // disarms it before parking or stopping.
 
     // the teardown can run __destruct, and a pending throw would reach the next
     // unit. The release can run a __destruct that bails out.
@@ -548,21 +602,29 @@ bool rapira_has_execution_timers(void) {
 #endif
 }
 
-// MINIT still owns the ini table that each worker copies. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_ini.c#L144-L171
+// MINIT still owns the ini table that each worker copies.
+// https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_ini.c#L144-L171
 void rapira_lock_timeouts(void) {
     if (rapira_timeouts_disabled) {
-        // set_time_limit() uses PHP_INI_USER to change max_execution_time. https://github.com/php/php-src/blob/php-8.6.0/main/main.c#L1603-L1616
-        // ini_set() also uses PHP_INI_USER. https://github.com/php/php-src/blob/php-8.6.0/ext/standard/basic_functions.c#L2008-L2054
+        // set_time_limit() uses PHP_INI_USER to change max_execution_time.
+        // https://github.com/php/php-src/blob/php-8.6.0/main/main.c#L1603-L1616
+        // ini_set() also uses PHP_INI_USER.
+        // https://github.com/php/php-src/blob/php-8.6.0/ext/standard/basic_functions.c#L2008-L2054
         zend_ini_entry *execution = zend_hash_str_find_ptr(
             EG(ini_directives), ZEND_STRL("max_execution_time"));
         zend_ini_entry *input = zend_hash_str_find_ptr(
             EG(ini_directives), ZEND_STRL("max_input_time"));
-        execution->modifiable = PHP_INI_SYSTEM;
-        input->modifiable = PHP_INI_SYSTEM;
+        if (execution) {
+            execution->modifiable = PHP_INI_SYSTEM;
+        }
+        if (input) {
+            input->modifiable = PHP_INI_SYSTEM;
+        }
     }
 }
 
-// Start TSRM before Zend signal handling and SAPI startup. https://github.com/php/php-src/blob/php-8.6.0/sapi/embed/php_embed.c#L167-L186
+// Start TSRM before Zend signal handling and SAPI startup.
+// https://github.com/php/php-src/blob/php-8.6.0/sapi/embed/php_embed.c#L167-L186
 bool rapira_process_init(int expected_threads, bool disable_timeouts) {
     rapira_timeouts_disabled = disable_timeouts;
 #ifdef ZTS
@@ -576,7 +638,8 @@ bool rapira_process_init(int expected_threads, bool disable_timeouts) {
     return true;
 }
 
-// Only the thread that started TSRM can shut it down. https://github.com/php/php-src/blob/php-8.6.0/TSRM/TSRM.c#L194-L206
+// Only the thread that started TSRM can shut it down.
+// https://github.com/php/php-src/blob/php-8.6.0/TSRM/TSRM.c#L194-L206
 void rapira_process_shutdown(void) {
 #if !defined(ZTS) && defined(ZEND_CHECK_STACK_LIMIT)
     // The one NTS interpreter returns to the main stack for module shutdown.
@@ -680,19 +743,179 @@ void rapira_opcache_reset(void) {
         return;
     }
     zval retval;
+    ZVAL_UNDEF(&retval);
     zend_fcall_info fci = {
         .size = sizeof(fci),
         .retval = &retval,
     };
     ZVAL_UNDEF(&fci.function_name);
     zend_fcall_info_cache fcc = {.function_handler = fn};
-    zend_try { zend_call_function(&fci, &fcc); }
+    zend_try {
+        zend_call_function(&fci, &fcc);
+        zval_ptr_dtor(&retval);
+    }
     zend_end_try();
 }
 
+// Zero-copy read-only body stream backed by Rust Bytes chunks (callbacks.rs).
+extern void *rapira_rs_body_open(void);
+extern void *rapira_rs_body_clone(const void *cursor);
+extern size_t rapira_rs_body_read(void *cursor, char *buf, size_t count,
+                                  bool *eof);
+extern int rapira_rs_body_seek(void *cursor, int64_t offset, int whence,
+                               int64_t *newoffs);
+extern size_t rapira_rs_body_len(const void *cursor);
+extern void rapira_rs_body_drop(void *cursor);
+// The Authorization field of the bound request (callbacks.rs); NULL when none.
+extern const char *rapira_rs_authorization(void);
+
+static ssize_t rapira_body_stream_write(php_stream *stream, const char *buf,
+                                        size_t count) {
+    (void)stream;
+    (void)buf;
+    (void)count;
+    return -1;
+}
+
+static ssize_t rapira_body_stream_read(php_stream *stream, char *buf,
+                                       size_t count) {
+    bool eof = false;
+    size_t n = rapira_rs_body_read(stream->abstract, buf, count, &eof);
+    if (eof) {
+        stream->eof = 1;
+    }
+    return (ssize_t)n;
+}
+
+static int rapira_body_stream_close(php_stream *stream, int close_handle) {
+    (void)close_handle;
+    if (stream->abstract != NULL) {
+        rapira_rs_body_drop(stream->abstract);
+        stream->abstract = NULL;
+    }
+    return 0;
+}
+
+static int rapira_body_stream_flush(php_stream *stream) {
+    (void)stream;
+    return 0;
+}
+
+static int rapira_body_stream_seek(php_stream *stream, zend_off_t offset,
+                                   int whence, zend_off_t *newoffs) {
+    int64_t pos = -1;
+    if (rapira_rs_body_seek(stream->abstract, (int64_t)offset, whence, &pos) !=
+        0) {
+        *newoffs = -1;
+        return -1;
+    }
+    *newoffs = (zend_off_t)pos;
+    stream->eof = 0;
+    stream->fatal_error = 0;
+    return 0;
+}
+
+static int rapira_body_stream_stat(php_stream *stream,
+                                   php_stream_statbuf *ssb) {
+    memset(ssb, 0, sizeof(php_stream_statbuf));
+    ssb->sb.st_mode = 0444 | S_IFREG;
+    ssb->sb.st_size = (zend_off_t)rapira_rs_body_len(stream->abstract);
+    ssb->sb.st_nlink = 1;
+    ssb->sb.st_rdev = -1;
+    ssb->sb.st_dev = 0xC;
+    ssb->sb.st_ino = 0;
+#ifndef PHP_WIN32
+    ssb->sb.st_blksize = -1;
+    ssb->sb.st_blocks = -1;
+#endif
+    return 0;
+}
+
+static const php_stream_ops rapira_body_stream_ops = {
+    rapira_body_stream_write,
+    rapira_body_stream_read,
+    rapira_body_stream_close,
+    rapira_body_stream_flush,
+    "MEMORY",
+    rapira_body_stream_seek,
+    NULL, /* cast */
+    rapira_body_stream_stat,
+    NULL, /* set_option */
+};
+
+static const php_stream_ops rapira_input_stream_ops = {
+    rapira_body_stream_write,
+    rapira_body_stream_read,
+    rapira_body_stream_close,
+    rapira_body_stream_flush,
+    "Input",
+    rapira_body_stream_seek,
+    NULL, /* cast */
+    rapira_body_stream_stat,
+    NULL, /* set_option */
+};
+
+static const php_stream_wrapper *rapira_orig_php_wrapper = NULL;
+
+// Serves php://input directly over the zero-copy body chunks with stat()
+// support so file_get_contents('php://input') allocates the full buffer once
+// and avoids repeated 8 KiB reallocations on multi-megabyte bodies. Every other
+// php:// path delegates to stock PHP.
+static php_stream *
+rapira_php_stream_opener(php_stream_wrapper *wrapper, const char *path,
+                         const char *mode, int options,
+                         zend_string **opened_path,
+                         php_stream_context *context STREAMS_DC) {
+    const char *sub = path;
+    if (!strncasecmp(sub, "php://", 6)) {
+        sub += 6;
+    }
+    if (!strcasecmp(sub, "input") && SG(request_info).request_body != NULL &&
+        SG(request_info).request_body->ops == &rapira_body_stream_ops) {
+        if ((options & STREAM_OPEN_FOR_INCLUDE) && !PG(allow_url_include)) {
+            if (options & REPORT_ERRORS) {
+                php_error_docref(
+                    NULL, E_WARNING,
+                    "URL file-access is disabled in the server configuration");
+            }
+            return NULL;
+        }
+        void *cursor =
+            rapira_rs_body_clone(SG(request_info).request_body->abstract);
+        if (cursor != NULL) {
+            php_stream *stream =
+                php_stream_alloc(&rapira_input_stream_ops, cursor, 0, "rb");
+            stream->flags |= PHP_STREAM_FLAG_NO_BUFFER;
+            return stream;
+        }
+    }
+    return rapira_orig_php_wrapper->wops->stream_opener(
+        wrapper, path, mode, options, opened_path, context STREAMS_REL_CC);
+}
+
+static const php_stream_wrapper_ops rapira_php_wops = {
+    rapira_php_stream_opener,
+    NULL, /* close */
+    NULL, /* fstat */
+    NULL, /* stat */
+    NULL, /* opendir */
+    "PHP",
+    NULL, /* unlink */
+    NULL, /* rename */
+    NULL, /* mkdir */
+    NULL, /* rmdir */
+    NULL,
+};
+
+static const php_stream_wrapper rapira_php_wrapper = {
+    &rapira_php_wops,
+    NULL,
+    0, /* is_url */
+};
+
 // sapi_deactivate_module only sets the request body stream to NULL, and no code
-// frees the resource. The body is a memory stream, and
-// sapi_read_standard_form_data makes a temp stream.
+// frees the resource. The body is a rapira zero-copy stream (or memory/temp
+// stream from fallback paths).
 void rapira_release_temporary_streams(void) {
     zend_resource *val = NULL;
     int stream_type = php_file_le_stream();
@@ -700,7 +923,8 @@ void rapira_release_temporary_streams(void) {
         if (val->type == stream_type) {
             php_stream *stream = val->ptr;
             if (stream != NULL &&
-                (stream->ops == &php_stream_memory_ops ||
+                (stream->ops == &rapira_body_stream_ops ||
+                 stream->ops == &php_stream_memory_ops ||
                  stream->ops == &php_stream_temp_ops) &&
                 !(stream->flags & PHP_STREAM_FLAG_NO_FCLOSE) &&
                 stream->__exposed == 0 && GC_REFCOUNT(val) == 1) {
@@ -711,32 +935,17 @@ void rapira_release_temporary_streams(void) {
     ZEND_HASH_FOREACH_END();
 }
 
-// The raw body of the bound request (callbacks.rs): the length, then one part
-// at a time in order. A part length is 0 past the last part.
-extern size_t rapira_rs_raw_body_len(void);
-extern size_t rapira_rs_raw_body_part(size_t index, const char **part);
-// The Authorization field of the bound request (callbacks.rs); NULL when none.
-extern const char *rapira_rs_authorization(void);
-
-// Hands the body to PHP as a read-only memory stream over one string that the
-// parts fill in one pass; rapira_release_temporary_streams frees the stream
-// between units. With post_read set, php://input does not call read_post.
+// Hands the body to PHP as a zero-copy read-only stream over the request
+// chunks; rapira_release_temporary_streams frees the stream between units. With
+// post_read set, php://input does not call read_post.
 static void rapira_install_body(void) {
-    size_t len = rapira_rs_raw_body_len();
-    if (len == 0) {
+    void *cursor = rapira_rs_body_open();
+    if (cursor == NULL) {
         return;
     }
-    zend_string *body = zend_string_alloc(len, false);
-    char *dst = ZSTR_VAL(body);
-    const char *part = NULL;
-    for (size_t i = 0, n; (n = rapira_rs_raw_body_part(i, &part)) != 0; i++) {
-        memcpy(dst, part, n);
-        dst += n;
-    }
-    ZSTR_VAL(body)[len] = '\0';
-    php_stream *stream = php_stream_memory_open(TEMP_STREAM_READONLY, body);
-    // the stream holds its own reference (main/streams/memory.c)
-    zend_string_release(body);
+    php_stream *stream =
+        php_stream_alloc(&rapira_body_stream_ops, cursor, 0, "rb");
+    stream->flags |= PHP_STREAM_FLAG_NO_BUFFER;
     SG(request_info).request_body = stream;
     SG(post_read) = 1;
 }
@@ -778,13 +987,24 @@ static int rapira_activate(void) {
     return SUCCESS;
 }
 
-// Register after PHP installs its default POST reader at startup. https://github.com/php/php-src/blob/php-8.6.0/main/php_content_types.c#L39-L46
+// Register after PHP installs its default POST reader at startup.
+// https://github.com/php/php-src/blob/php-8.6.0/main/php_content_types.c#L39-L46
 void rapira_register_post_reader(void) {
     sapi_register_default_post_reader(rapira_default_post_reader);
     sapi_module.activate = rapira_activate;
+    php_stream_wrapper *orig = zend_hash_str_find_ptr(
+        php_stream_get_url_stream_wrappers_hash_global(), "php", 3);
+    if (orig != NULL && orig->wops != NULL &&
+        orig->wops->stream_opener != NULL) {
+        rapira_orig_php_wrapper = orig;
+        php_unregister_url_stream_wrapper("php");
+        php_register_url_stream_wrapper("php", &rapira_php_wrapper);
+    }
 }
 
-// The ZTS thread constructor copies the ini entries and initializes the stack limit and the timer. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend.c#L883-L891
+// The ZTS thread constructor copies the ini entries and initializes the stack
+// limit and the timer.
+// https://github.com/php/php-src/blob/php-8.6.0/Zend/zend.c#L883-L891
 void rapira_thread_start(int mode, const rapira_plugin *plugin,
                          const char *name, size_t name_len, bool cpu_clock) {
 #ifdef ZTS
@@ -795,7 +1015,9 @@ void rapira_thread_start(int mode, const rapira_plugin *plugin,
 #endif
     rapira_set_dispatcher(mode, plugin, name, name_len);
     rapira_cpu_clock = cpu_clock;
-    // Each thread has its own content type table. Keep the POST handler that mbstring selected. https://github.com/php/php-src/blob/php-8.6.0/main/SAPI.c#L50-L55
+    // Each thread has its own content type table. Keep the POST handler that
+    // mbstring selected.
+    // https://github.com/php/php-src/blob/php-8.6.0/main/SAPI.c#L50-L55
     sapi_post_entry *entry = zend_hash_str_find_ptr(
         &SG(known_post_content_types), DEFAULT_POST_CONTENT_TYPE,
         sizeof(DEFAULT_POST_CONTENT_TYPE) - 1);
@@ -807,7 +1029,9 @@ void rapira_thread_start(int mode, const rapira_plugin *plugin,
 void rapira_thread_end(void) {
 #ifdef ZTS
 #if PHP_VERSION_ID < 80700
-    // PHP 8.4 to 8.6 destroy only the lists still in TSRM at module shutdown. PHP 8.7 destroys the list in ts_free_thread(). https://github.com/php/php-src/commit/0a98b97933070124575e12c0bbdfd18371e5def9
+    // PHP 8.4 to 8.6 destroy only the lists still in TSRM at module shutdown.
+    // PHP 8.7 destroys the list in ts_free_thread().
+    // https://github.com/php/php-src/commit/0a98b97933070124575e12c0bbdfd18371e5def9
     dtor_func_t destructor = EG(persistent_list).pDestructor;
     volatile bool completed = false;
     do {
@@ -870,6 +1094,8 @@ int rapira_request_shutdown(void) {
         zend_set_timeout(rapira_unit_timeout, false);
     }
     rapira_unit_timeout = -1; // the next cycle captures its budget again
+    rapira_timer_armed = false;
+    rapira_timer_armed_ms = 0;
 #ifdef HAVE_PHP_SESSION
     // left set, it makes RSHUTDOWN skip the handler's close() (mod_user.c:29)
     PS(in_save_handler) = false;

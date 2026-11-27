@@ -1,13 +1,10 @@
 use crate::context::{Permanent, ctx, with_ctx};
 use crate::diagnostics::syslog_to_level;
-use crate::types::StreamState;
+use crate::types::{BodyCursor, RequestHeaders, ResponseHeaders, StreamState};
 use crate::*;
-use ::http::header::{
-    AUTHORIZATION, CONTENT_LENGTH, CONTENT_TYPE, COOKIE, FROM, HeaderMap, HeaderName, HeaderValue,
-    PROXY_AUTHORIZATION, REFERER,
-};
+use ::http::header::{AUTHORIZATION, COOKIE, HeaderName, HeaderValue};
 use core::slice;
-use std::ffi::{CStr, CString};
+use std::ffi::{CStr, CString, c_void};
 use std::fmt::NumBuffer;
 use std::io::Read;
 use std::os::raw::{c_char, c_int};
@@ -76,18 +73,18 @@ fn split_header_line(line: &[u8]) -> Option<(HeaderName, HeaderValue)> {
 /// The separator that joins the repeats of `name`. `None` marks a singleton field, which keeps the first line and drops the rest.
 /// A join is legal only for comma-list fields. https://www.rfc-editor.org/rfc/rfc9110#section-5.3
 /// `Cookie` lines join on `"; "`. https://www.rfc-editor.org/rfc/rfc6265#section-4.2.1
-fn field_line_separator(name: &HeaderName) -> Option<&'static [u8]> {
-    static SINGLETON: [HeaderName; 6] = [
-        AUTHORIZATION,
-        PROXY_AUTHORIZATION,
-        CONTENT_TYPE,
-        CONTENT_LENGTH,
-        REFERER,
-        FROM,
+fn field_line_separator(name: &[u8]) -> Option<&'static [u8]> {
+    const SINGLETON: [&[u8]; 6] = [
+        b"authorization",
+        b"proxy-authorization",
+        b"content-type",
+        b"content-length",
+        b"referer",
+        b"from",
     ];
-    if SINGLETON.contains(name) {
+    if SINGLETON.iter().any(|s| name.eq_ignore_ascii_case(s)) {
         None
-    } else if name == COOKIE {
+    } else if name.eq_ignore_ascii_case(b"cookie") {
         Some(b"; ")
     } else {
         Some(b", ")
@@ -96,13 +93,16 @@ fn field_line_separator(name: &HeaderName) -> Option<&'static [u8]> {
 
 /// Returns the one CGI value of `name`. Repeated lines join into `buf` on the field separator; a single line or a singleton field returns the first line and leaves `buf` unchanged.
 pub(crate) fn joined_field<'a>(
-    headers: &'a HeaderMap,
+    headers: &'a RequestHeaders,
     name: &HeaderName,
     buf: &'a mut Vec<u8>,
 ) -> Option<&'a [u8]> {
     let mut values = headers.get_all(name).iter().map(HeaderValue::as_bytes);
     let first = values.next()?;
-    let (Some(sep), Some(second)) = (field_line_separator(name), values.next()) else {
+    let (Some(sep), Some(second)) = (
+        field_line_separator(name.as_str().as_bytes()),
+        values.next(),
+    ) else {
         return Some(first);
     };
     buf.clear();
@@ -114,59 +114,120 @@ pub(crate) fn joined_field<'a>(
     Some(buf)
 }
 
-/// Writes the NUL-terminated `HTTP_` meta-variable name of `field` into `buf`.
-/// A field name is an RFC 9110 token, so it has no NUL, ' ' or '['. '.' maps to '_' as php_register_variable_ex mangles it, so the name is valid for php_register_known_variable.
+/// Formats `HTTP_<FIELD>` on the stack when it fits, or on the heap for long names.
+/// A field name is an RFC 9110 token, so it has no NUL, ' ' or '['. '.' maps to '_' as php_register_variable_ex mangles it.
 /// https://www.rfc-editor.org/rfc/rfc3875#section-4.1.18
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.1
-fn cgi_header_name<'a>(buf: &'a mut Vec<u8>, field: &str) -> &'a CStr {
-    buf.clear();
-    buf.extend_from_slice(b"HTTP_");
-    for &b in field.as_bytes() {
-        buf.push(if b == b'-' || b == b'.' {
+fn with_cgi_header_name(field: &[u8], put: &mut impl FnMut(&CStr)) {
+    let encode = |b: u8| {
+        if b == b'-' || b == b'.' {
             b'_'
         } else {
             b.to_ascii_uppercase()
-        });
+        }
+    };
+    let total = 5 + field.len() + 1;
+    if total <= 128 {
+        let mut stack = [0u8; 128];
+        stack[..5].copy_from_slice(b"HTTP_");
+        for (dst, &b) in stack[5..5 + field.len()].iter_mut().zip(field) {
+            *dst = encode(b);
+        }
+        stack[total - 1] = 0;
+        let name = CStr::from_bytes_until_nul(&stack[..total]).unwrap_or_default();
+        put(name);
+    } else {
+        let mut heap = Vec::with_capacity(total);
+        heap.extend_from_slice(b"HTTP_");
+        heap.extend(field.iter().map(|&b| encode(b)));
+        heap.push(0);
+        let name = CStr::from_bytes_until_nul(&heap).unwrap_or_default();
+        put(name);
     }
-    buf.push(0);
-    CStr::from_bytes_until_nul(buf).unwrap_or_default()
 }
 
 /// Owns header storage across calls into Zend, including a PHP bailout.
 pub struct CgiHeaders {
-    raw: HeaderMap,
-    cookie: Option<CString>,
-    name: Vec<u8>,
+    pub(crate) raw: RequestHeaders,
+    pub(crate) cookie: Option<CString>,
     joined: Vec<u8>,
 }
 
 impl CgiHeaders {
-    pub fn new(raw: HeaderMap) -> Self {
+    pub fn new(raw: RequestHeaders) -> Self {
         let mut joined = Vec::new();
         let cookie = joined_field(&raw, &COOKIE, &mut joined)
             .map(|v| crate::types::cgi_cstring("Cookie", v));
         Self {
             raw,
             cookie,
-            name: Vec::new(),
             joined,
+        }
+    }
+
+    fn visit_unique(&mut self, mut visit: impl FnMut(&[u8], &[u8])) {
+        let joined = &mut self.joined;
+        let cookie = self.cookie.as_ref();
+        // http 1.5.0 groups values by identical HeaderName reference in first-insertion order.
+        // https://docs.rs/http/1.5.0/src/http/header/map.rs.html#2323-2356
+        let mut fields = self.raw.iter().peekable();
+        while let Some((name, first)) = fields.next() {
+            let name_bytes = name.as_str().as_bytes();
+            let mut rest = std::iter::from_fn(|| {
+                fields
+                    .next_if(|&(n, _)| std::ptr::eq(n, name))
+                    .map(|(_, v)| v.as_bytes())
+            });
+            if name == COOKIE
+                && let Some(c) = cookie
+                && !c.as_bytes().is_empty()
+            {
+                for _ in rest {}
+                visit(name_bytes, c.as_bytes());
+                continue;
+            }
+            let Some(second) = rest.next() else {
+                visit(name_bytes, first.as_bytes());
+                continue;
+            };
+            if let Some(sep) = field_line_separator(name_bytes) {
+                joined.clear();
+                joined.extend_from_slice(first.as_bytes());
+                joined.extend_from_slice(sep);
+                joined.extend_from_slice(second);
+                for val in rest {
+                    joined.extend_from_slice(sep);
+                    joined.extend_from_slice(val);
+                }
+                visit(name_bytes, joined.as_slice());
+            } else {
+                for _ in rest {}
+                visit(name_bytes, first.as_bytes());
+            }
         }
     }
 
     /// Registers one variable at the first occurrence of each field name.
     pub fn register(&mut self, mut put: impl FnMut(&CStr, &[u8])) {
-        for field in self.raw.keys() {
-            let value = if field == COOKIE
-                && let Some(cookie) = &self.cookie
-                && !cookie.as_bytes().is_empty()
-            {
-                cookie.as_bytes()
+        self.visit_unique(|field, value| {
+            with_cgi_header_name(field, &mut |name| put(name, value));
+        });
+    }
+
+    /// Registers `HTTP_*` entries using pre-interned keys for common headers and stack formatting for custom headers.
+    pub(crate) fn register_server(
+        &mut self,
+        s: &crate::context::ServerStrings,
+        mut put_interned: impl FnMut(Permanent, &[u8]),
+        mut put_raw: impl FnMut(&CStr, &[u8]),
+    ) {
+        self.visit_unique(|field, value| {
+            if let Some(perm) = s.http_header_ci(field) {
+                put_interned(perm, value);
             } else {
-                // HTTP_* retains the raw field bytes even if a C string was empty.
-                joined_field(&self.raw, field, &mut self.joined).expect("the field is present")
-            };
-            put(cgi_header_name(&mut self.name, field.as_str()), value);
-        }
+                with_cgi_header_name(field, &mut |name| put_raw(name, value));
+            }
+        });
     }
 }
 
@@ -193,11 +254,11 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
                 let headers = &raw const (*rapira_sg()).sapi_headers;
                 head_status(&*headers)
             };
-            ctx.commit_head(status, HeaderMap::new());
+            ctx.commit_head(status, ResponseHeaders::new());
         }
 
-        if let Some(tx) = &ctx.sender {
-            if tx.is_closed() {
+        if let Some(responder) = &ctx.responder {
+            if responder.is_cancelled() {
                 ctx.finish(false);
                 unsafe { *aborted = true };
                 return Some(0);
@@ -211,6 +272,9 @@ pub unsafe extern "C" fn rapira_rs_ub_write(
                 ctx.finish(true);
                 unsafe { *aborted = true };
                 return Some(0);
+            }
+            if ctx.body.is_empty() && len > 0 {
+                ctx.body.reserve(len.max(4096));
             }
             let buf = unsafe { slice::from_raw_parts(buf.cast::<u8>(), len) };
             ctx.body.extend_from_slice(buf);
@@ -245,7 +309,10 @@ pub unsafe extern "C" fn send_headers(h: *mut sapi_headers_struct) -> c_int {
         };
 
         let h = unsafe { &*h };
-        let headers: HeaderMap = head_lines(h).filter_map(header_field).collect();
+        let mut headers = ResponseHeaders::new();
+        for (name, value) in head_lines(h).filter_map(header_field) {
+            headers.append(name, value);
+        }
         ctx.commit_head(head_status(h), headers);
         SAPI_HEADER_SENT_SUCCESSFULLY as c_int
     })
@@ -257,24 +324,98 @@ pub(crate) unsafe extern "C" fn read_post(buf: *mut c_char, count: usize) -> usi
         ctx.req.body.read(dst).unwrap_or(0)
     })
 }
-/// The raw body length of the bound request, for the post readers in module.c.
+/// Opens a zero-copy seekable body cursor backed by the bound request's raw byte chunks. Returns NULL when the body is empty.
 #[unsafe(no_mangle)]
-pub extern "C" fn rapira_rs_raw_body_len() -> usize {
-    with_ctx(0, |ctx| ctx.req.body.len())
-}
-/// Gives part `index` of the raw body of the bound request to the post readers in module.c. It writes the address of the part into `part` and returns its length. It returns 0 past the last part. No part is empty, so 0 marks the end.
-/// # Safety
-/// `part` must point at a writable `*const c_char`
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn rapira_rs_raw_body_part(index: usize, part: *mut *const c_char) -> usize {
-    with_ctx(0, |ctx| {
-        let Some(bytes) = ctx.req.body.parts().get(index) else {
-            return 0;
-        };
-        unsafe { *part = bytes.as_ptr().cast() };
-        bytes.len()
+pub extern "C" fn rapira_rs_body_open() -> *mut c_void {
+    with_ctx(null_mut(), |ctx| match ctx.req.body.body_data() {
+        Some(data) => Box::into_raw(Box::new(BodyCursor::new(data))).cast(),
+        None => null_mut(),
     })
 }
+
+/// Opens a fresh cursor at byte 0 sharing the chunks of an existing `BodyCursor`.
+/// # Safety
+/// `cursor` must be a live pointer returned by `rapira_rs_body_open` or `rapira_rs_body_clone`.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_body_clone(cursor: *const c_void) -> *mut c_void {
+    guard(null_mut(), || {
+        if cursor.is_null() {
+            return null_mut();
+        }
+        let src = unsafe { &*cursor.cast::<BodyCursor>() };
+        Box::into_raw(Box::new(src.clone_at_start())).cast()
+    })
+}
+
+/// Reads up to `count` bytes from `cursor` into `buf` and writes EOF state to `eof`.
+/// # Safety
+/// `cursor` must be live, `buf` writable for `count` bytes, and `eof` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_body_read(
+    cursor: *mut c_void,
+    buf: *mut c_char,
+    count: usize,
+    eof: *mut bool,
+) -> usize {
+    guard(0, || {
+        let cur = unsafe { &mut *cursor.cast::<BodyCursor>() };
+        let dst = unsafe { slice::from_raw_parts_mut(buf.cast::<u8>(), count) };
+        let (n, is_eof) = cur.read(dst);
+        unsafe { *eof = is_eof };
+        n
+    })
+}
+
+/// Seeks `cursor`, matching `php_stream_memory_seek`. Returns 0 on success, -1 on failure.
+/// # Safety
+/// `cursor` must be live and `newoffs` writable.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_body_seek(
+    cursor: *mut c_void,
+    offset: i64,
+    whence: c_int,
+    newoffs: *mut i64,
+) -> c_int {
+    guard(-1, || {
+        let cur = unsafe { &mut *cursor.cast::<BodyCursor>() };
+        match cur.seek(offset, whence) {
+            Some(pos) => {
+                unsafe { *newoffs = pos };
+                0
+            }
+            None => {
+                unsafe { *newoffs = -1 };
+                -1
+            }
+        }
+    })
+}
+
+/// Returns the total byte length of the body behind `cursor`.
+/// # Safety
+/// `cursor` must be live.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_body_len(cursor: *const c_void) -> usize {
+    guard(0, || {
+        if cursor.is_null() {
+            return 0;
+        }
+        unsafe { (*cursor.cast::<BodyCursor>()).len() }
+    })
+}
+
+/// Drops a `BodyCursor` created by `rapira_rs_body_open` or `rapira_rs_body_clone`.
+/// # Safety
+/// `cursor` must be live and dropped at most once.
+#[unsafe(no_mangle)]
+pub unsafe extern "C" fn rapira_rs_body_drop(cursor: *mut c_void) {
+    guard((), || {
+        if !cursor.is_null() {
+            drop(unsafe { Box::from_raw(cursor.cast::<BodyCursor>()) });
+        }
+    });
+}
+
 /// Returns the Authorization field of the bound request for php_handle_auth_data in rapira_activate (module.c). Returns NULL when no request is bound or the field is absent.
 #[unsafe(no_mangle)]
 pub extern "C" fn rapira_rs_authorization() -> *const c_char {
@@ -330,7 +471,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         // The env pairs of the pool go in first, so the request variables below override a pair with the same name.
         // Each name goes in as written. The environment import of PHP skips a name with a space, '.' or '[', and it stores an all-digit name as an integer key. Such a name is therefore different in the boot $_SERVER.
         crate::env::with_pool_pairs(|env| {
-            let size = SERVER_VARS_MAX + reqc.headers.raw.keys_len() as u32 + env.len() as u32;
+            let size = SERVER_VARS_MAX + reqc.headers.raw.len() as u32 + env.len() as u32;
             unsafe { zend_hash_extend(ht, size, false) };
             for &(name, value) in env {
                 put_interned(name, value);
@@ -340,7 +481,13 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         let script = crate::context::script();
         let identity = crate::HttpIdentity::current();
         put_interned(s.php_self, script.server_script_name);
-        put(s.document_uri, &reqc.uri.as_bytes()[..reqc.path_len]);
+        let uri_bytes = reqc.uri.to_bytes();
+        let doc_uri = &uri_bytes[..reqc.path_len];
+        if doc_uri == b"/" {
+            put_interned(s.document_uri, s.slash);
+        } else {
+            put(s.document_uri, doc_uri);
+        }
         put_interned(s.document_root, script.server_document_root);
         let scheme = if reqc.https {
             s.scheme_https
@@ -348,15 +495,38 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
             s.scheme_http
         };
         put_interned(s.request_scheme, scheme);
-        put(s.remote_host, reqc.remote_addr.as_bytes());
-        put(s.remote_port, reqc.remote_port.as_bytes());
+        // REMOTE_ADDR must hold a hostnumber (RFC 3875 §4.1.8), so a unix peer gets the loopback address.
+        let mut ip_buf = [0u8; 39];
+        let mut port_buf = NumBuffer::new();
+        let (remote_addr, remote_port): (&[u8], &[u8]) = match &reqc.remote {
+            Addr::Inet(sa) => (
+                crate::exchange::ip_text(sa.ip(), &mut ip_buf).as_bytes(),
+                sa.port().format_into(&mut port_buf).as_bytes(),
+            ),
+            Addr::Unix(_) => (b"127.0.0.1", b"0"),
+        };
+        put(s.remote_host, remote_addr);
+        put(s.remote_port, remote_port);
         // REMOTE_IDENT is optional per CGI/1.1; rapira runs no RFC 1413 ident lookup, so it is empty.
         // https://www.rfc-editor.org/rfc/rfc3875#section-4.1.10
         // https://www.rfc-editor.org/rfc/rfc1413
-        put(s.remote_ident, b"");
-        put(s.request_method, reqc.method.as_bytes());
-        put(s.request_uri, reqc.uri.as_bytes());
-        put(s.query_string, reqc.query.as_bytes());
+        put_interned(s.remote_ident, s.empty);
+        let method_bytes = reqc.method.to_bytes();
+        match s.method(method_bytes) {
+            Some(m) => put_interned(s.request_method, m),
+            None => put(s.request_method, method_bytes),
+        }
+        if uri_bytes == b"/" {
+            put_interned(s.request_uri, s.slash);
+        } else {
+            put(s.request_uri, uri_bytes);
+        }
+        let query_bytes = reqc.query.to_bytes();
+        if query_bytes.is_empty() {
+            put_interned(s.query_string, s.empty);
+        } else {
+            put(s.query_string, query_bytes);
+        }
         put_interned(s.script_filename, script.server_filename);
         put_interned(s.script_name, script.server_script_name);
         match reqc.protocol {
@@ -367,12 +537,12 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         put_interned(s.server_software, s.rapira);
         put_interned(s.server_name, identity.server_name);
         put_interned(s.server_port, identity.server_port);
-        put(s.remote_addr, reqc.remote_addr.as_bytes());
+        put(s.remote_addr, remote_addr);
         put_interned(s.gateway_interface, s.cgi_1_1);
         if reqc.https {
             put_interned(s.https, s.on);
         } else {
-            put(s.https, b"");
+            put_interned(s.https, s.empty);
         }
 
         let auth_type: &[u8] = reqc
@@ -385,7 +555,11 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
                     .find(|s| !s.is_empty())
             })
             .unwrap_or(b"");
-        put(s.auth_type, auth_type);
+        if auth_type.is_empty() {
+            put_interned(s.auth_type, s.empty);
+        } else {
+            put(s.auth_type, auth_type);
+        }
 
         let auth_user = unsafe { (*rapira_sg()).request_info.auth_user };
         if !auth_user.is_null() {
@@ -398,11 +572,15 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         }
 
         let content_length = reqc.body.len();
-        put(
-            s.content_length,
-            content_length.format_into(&mut NumBuffer::new()).as_bytes(),
-        );
-        reqc.headers.register(put_bytes);
+        if content_length == 0 {
+            put_interned(s.content_length, s.zero);
+        } else {
+            put(
+                s.content_length,
+                content_length.format_into(&mut NumBuffer::new()).as_bytes(),
+            );
+        }
+        reqc.headers.register_server(s, put, put_bytes);
     })
 }
 
@@ -478,16 +656,15 @@ mod tests {
         assert_eq!(split_header_line(b"X_Custom: 1").unwrap().0, "x_custom");
     }
 
-    fn map(lines: &[(&str, &str)]) -> HeaderMap {
-        lines
-            .iter()
-            .map(|(k, v)| {
-                (
-                    HeaderName::from_bytes(k.as_bytes()).unwrap(),
-                    HeaderValue::from_str(v).unwrap(),
-                )
-            })
-            .collect()
+    fn hdrs(lines: &[(&str, &str)]) -> RequestHeaders {
+        let mut h = RequestHeaders::new();
+        for (k, v) in lines {
+            h.append(
+                HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                http::HeaderValue::from_str(v).unwrap(),
+            );
+        }
+        h
     }
 
     /// List fields join on ", ", Cookie on "; ", and a singleton field keeps its first line.
@@ -496,7 +673,7 @@ mod tests {
         struct Case {
             name: &'static str,
             lines: &'static [(&'static str, &'static str)],
-            field: &'static str,
+            field: &'static [u8],
             want: Option<&'static str>,
         }
         let cases = [
@@ -507,7 +684,7 @@ mod tests {
                     ("x-forwarded-for", "1.2.3.4"),
                     ("Cookie", "b=2"),
                 ],
-                field: "cookie",
+                field: b"cookie",
                 want: Some("a=1; b=2"),
             },
             Case {
@@ -517,13 +694,13 @@ mod tests {
                     ("accept", "text/*"),
                     ("X-Forwarded-For", "5.6.7.8"),
                 ],
-                field: "x-forwarded-for",
+                field: b"x-forwarded-for",
                 want: Some("1.2.3.4, 5.6.7.8"),
             },
             Case {
                 name: "single line passes through",
                 lines: &[("accept", "text/*")],
-                field: "accept",
+                field: b"accept",
                 want: Some("text/*"),
             },
             Case {
@@ -532,7 +709,7 @@ mod tests {
                     ("authorization", "Bearer one"),
                     ("Authorization", "Bearer two"),
                 ],
-                field: "authorization",
+                field: b"authorization",
                 want: Some("Bearer one"),
             },
             Case {
@@ -541,20 +718,21 @@ mod tests {
                     ("content-type", "text/plain"),
                     ("content-type", "text/html"),
                 ],
-                field: "content-type",
+                field: b"content-type",
                 want: Some("text/plain"),
             },
             Case {
                 name: "absent field has no value",
                 lines: &[("accept", "text/*")],
-                field: "referer",
+                field: b"referer",
                 want: None,
             },
         ];
         for case in cases {
-            let headers = map(case.lines);
+            let headers = hdrs(case.lines);
             let mut buf = Vec::new();
-            let got = joined_field(&headers, &HeaderName::from_static(case.field), &mut buf);
+            let field = HeaderName::from_bytes(case.field).unwrap();
+            let got = joined_field(&headers, &field, &mut buf);
             assert_eq!(got, case.want.map(str::as_bytes), "{}", case.name);
         }
     }
@@ -562,7 +740,7 @@ mod tests {
     /// The `HTTP_*` registration is last-write-wins. Each name registers once, in the order of its first line.
     #[test]
     fn cgi_header_vars_register_each_name_once() {
-        let headers = map(&[
+        let headers = hdrs(&[
             ("x-forwarded-for", "1.2.3.4"),
             ("cookie", "a=1"),
             ("x-forwarded-for", "5.6.7.8"),
@@ -584,21 +762,49 @@ mod tests {
     }
 
     /// The http plugin screens field names against `[A-Za-z0-9-]`; that screen is complete only while this mapper rewrites no byte of that set but `-`.
-    /// One buffer serves every name of a request, so a shorter name after a longer one must not keep the old tail.
     #[test]
     fn cgi_header_name_rewrites_only_dash_and_dot() {
-        let mut buf = Vec::new();
-        assert_eq!(cgi_header_name(&mut buf, "x-foo").to_bytes(), b"HTTP_X_FOO");
-        assert_eq!(cgi_header_name(&mut buf, "x_foo").to_bytes(), b"HTTP_X_FOO");
-        assert_eq!(cgi_header_name(&mut buf, "x.foo").to_bytes(), b"HTTP_X_FOO");
-        assert_eq!(cgi_header_name(&mut buf, "x~foo").to_bytes(), b"HTTP_X~FOO");
-        assert_eq!(
-            cgi_header_name(&mut buf, "accept-language").to_bytes(),
-            b"HTTP_ACCEPT_LANGUAGE"
-        );
-        assert_eq!(
-            cgi_header_name(&mut buf, "accept").to_bytes(),
-            b"HTTP_ACCEPT"
-        );
+        struct Case {
+            name: &'static str,
+            raw: &'static [u8],
+            want: &'static [u8],
+        }
+        let cases = [
+            Case {
+                name: "dash becomes underscore",
+                raw: b"x-foo",
+                want: b"HTTP_X_FOO",
+            },
+            Case {
+                name: "underscore stays underscore",
+                raw: b"x_foo",
+                want: b"HTTP_X_FOO",
+            },
+            Case {
+                name: "dot becomes underscore",
+                raw: b"x.foo",
+                want: b"HTTP_X_FOO",
+            },
+            Case {
+                name: "tilde stays unchanged",
+                raw: b"x~foo",
+                want: b"HTTP_X~FOO",
+            },
+            Case {
+                name: "longer name writes full string",
+                raw: b"accept-language",
+                want: b"HTTP_ACCEPT_LANGUAGE",
+            },
+            Case {
+                name: "shorter name after longer leaves no tail",
+                raw: b"accept",
+                want: b"HTTP_ACCEPT",
+            },
+        ];
+        for case in cases {
+            with_cgi_header_name(case.raw, &mut |name: &CStr| {
+                assert_eq!(name.to_bytes(), case.want, "{}", case.name);
+            });
+        }
     }
 }
