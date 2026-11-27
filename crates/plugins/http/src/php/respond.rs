@@ -179,7 +179,7 @@ pub(super) fn write_head_core(
         known_len: split.declared_cl,
     });
     // A 1xx response carries no body (RFC 9112 §6.3), the same as 204 and 304. A committed 101 therefore drops its chunks. https://www.rfc-editor.org/rfc/rfc9112#section-6.3
-    if matches!(status, 204 | 304 | 101) {
+    if crate::responder::is_bodiless_status(status) {
         st.bodiless = true;
     }
     Verb::Ok
