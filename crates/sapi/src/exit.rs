@@ -17,7 +17,7 @@ impl Drop for CleanupGuard {
     fn drop(&mut self) {
         let mut list = CLEANUPS.lock().unwrap_or_else(|e| e.into_inner());
         if let Some(pos) = list.iter().position(|(id, _)| *id == self.id) {
-            let _ = list.swap_remove(pos);
+            let _ = list.remove(pos);
         }
     }
 }
@@ -70,6 +70,7 @@ mod tests {
 
     #[test]
     fn guard_drop_removes_only_its_own_registration() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
         let g1 = register(|| {});
         let g2 = register(|| {});
         let id1 = g1.id;
@@ -83,5 +84,54 @@ mod tests {
         drop(g2);
         let list = CLEANUPS.lock().unwrap();
         assert!(!list.iter().any(|(id, _)| *id == id2));
+    }
+
+    static TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn guard_drop_preserves_lifo_order_for_remaining_hooks() {
+        let _guard = TEST_LOCK.lock().unwrap_or_else(|e| e.into_inner());
+        struct Case {
+            name: &'static str,
+            drop_index: usize,
+            want_order: &'static [&'static str],
+        }
+        let cases = [
+            Case {
+                name: "dropping first of three preserves C before B",
+                drop_index: 0,
+                want_order: &["C", "B"],
+            },
+            Case {
+                name: "dropping middle of three preserves C before A",
+                drop_index: 1,
+                want_order: &["C", "A"],
+            },
+            Case {
+                name: "dropping last of three preserves B before A",
+                drop_index: 2,
+                want_order: &["B", "A"],
+            },
+        ];
+
+        for case in cases {
+            let log = Arc::new(Mutex::new(Vec::new()));
+            let mut guards: Vec<Option<CleanupGuard>> = ["A", "B", "C"]
+                .into_iter()
+                .map(|label| {
+                    let l = Arc::clone(&log);
+                    Some(register(move || l.lock().unwrap().push(label)))
+                })
+                .collect();
+            drop(guards[case.drop_index].take());
+            {
+                let mut list = CLEANUPS.lock().unwrap_or_else(|e| e.into_inner());
+                run_cleanups(&mut list);
+            }
+            for g in guards.into_iter().flatten() {
+                std::mem::forget(g);
+            }
+            assert_eq!(*log.lock().unwrap(), case.want_order, "{}", case.name);
+        }
     }
 }

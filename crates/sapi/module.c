@@ -200,13 +200,23 @@ bool rapira_timer_pause(rapira_timer *saved) {
     struct itimerspec now = {0};
     if (timer_gettime(EG(max_execution_timer_timer), &now) != 0 ||
         (now.it_value.tv_sec == 0 && now.it_value.tv_nsec == 0)) {
+        rapira_timer_armed = false;
         return false;
     }
     struct itimerspec off = {0};
     if (timer_settime(EG(max_execution_timer_timer), 0, &off, saved) != 0) {
+        rapira_timer_armed = false;
         return false;
     }
-    return saved->it_value.tv_sec != 0 || saved->it_value.tv_nsec != 0;
+    if (saved->it_value.tv_sec == 0 && saved->it_value.tv_nsec == 0) {
+        // The timer expired between timer_gettime and timer_settime; re-arm
+        // 1 ns so the timeout signal still arrives if Linux discarded it.
+        rapira_timer_armed = false;
+        struct itimerspec fire = {.it_value = {.tv_sec = 0, .tv_nsec = 1}};
+        timer_settime(EG(max_execution_timer_timer), 0, &fire, NULL);
+        return false;
+    }
+    return true;
 #elif defined(HAVE_SETITIMER)
     if (rapira_timeouts_disabled) {
         return false;
@@ -215,9 +225,14 @@ bool rapira_timer_pause(rapira_timer *saved) {
     // https://man7.org/linux/man-pages/man2/setitimer.2.html
     struct itimerval off = {0};
     if (setitimer(RAPIRA_ZEND_ITIMER, &off, saved) != 0) {
+        rapira_timer_armed = false;
         return false;
     }
-    return saved->it_value.tv_sec != 0 || saved->it_value.tv_usec != 0;
+    if (saved->it_value.tv_sec == 0 && saved->it_value.tv_usec == 0) {
+        rapira_timer_armed = false;
+        return false;
+    }
+    return true;
 #else
     (void)saved;
     return false;

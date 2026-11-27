@@ -189,11 +189,12 @@ impl IntakeLimits {
             return true;
         }
         let want = want as isize;
-        if self.budget_avail.0.fetch_sub(want, Ordering::Relaxed) >= want {
-            return true;
-        }
-        self.budget_avail.0.fetch_add(want, Ordering::Relaxed);
-        false
+        self.budget_avail
+            .0
+            .try_update(Ordering::Relaxed, Ordering::Relaxed, |avail| {
+                (avail >= want).then_some(avail - want)
+            })
+            .is_ok()
     }
 
     fn release_budget(&self, bytes: u32) {
@@ -706,6 +707,59 @@ mod tests {
                 "{}",
                 case.name
             );
+        }
+    }
+
+    #[test]
+    fn failing_budget_reservation_does_not_block_fitting_request() {
+        use std::sync::Arc;
+        use std::sync::atomic::AtomicBool;
+
+        struct Case {
+            name: &'static str,
+            avail: u32,
+            too_big: u32,
+            fits: u32,
+        }
+        let cases = [
+            Case {
+                name: "2-byte over-budget attempt never blocks 1-byte reservation",
+                avail: 1,
+                too_big: 2,
+                fits: 1,
+            },
+            Case {
+                name: "1 MiB over-budget attempt never blocks 4 KiB reservation",
+                avail: 4096,
+                too_big: 1 << 20,
+                fits: 4096,
+            },
+        ];
+
+        for case in cases {
+            let limits = Arc::new(IntakeLimits::new());
+            assert!(limits.try_acquire_budget((BODY_BUDGET as u32) - case.avail));
+            let stop = Arc::new(AtomicBool::new(false));
+            let l_bg = Arc::clone(&limits);
+            let s_bg = Arc::clone(&stop);
+            let too_big = case.too_big;
+            let contender = std::thread::spawn(move || {
+                while !s_bg.load(Ordering::Relaxed) {
+                    assert!(!l_bg.try_acquire_budget(too_big));
+                }
+            });
+
+            let mut false_refusals = 0usize;
+            for _ in 0..100_000 {
+                if limits.try_acquire_budget(case.fits) {
+                    limits.release_budget(case.fits);
+                } else {
+                    false_refusals += 1;
+                }
+            }
+            stop.store(true, Ordering::Relaxed);
+            contender.join().unwrap();
+            assert_eq!(false_refusals, 0, "{}", case.name);
         }
     }
 }

@@ -324,11 +324,18 @@ pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
     Err(bad("multipart/form-data without a boundary parameter"))
 }
 
+/// Maximum transport padding bytes (spaces or tabs) accepted on one delimiter line.
+/// Excess padding releases the held bytes as content so a delimiter look-alike cannot buffer megabytes in memory.
+const MAX_TAIL_PADDING: u16 = 256;
+
+/// Maximum byte size of one multipart part's header section (including the terminating blank line).
+const MAX_PART_HEADER_BYTES: usize = 64 << 10;
+
 /// The tail of a delimiter line after the delimiter bytes: the two dashes of a close-delimiter, transport padding and the line ending (RFC 2046 §5.1.1).
 #[derive(Clone, Copy, Default)]
 struct Tail {
     dashes: u8,
-    padded: bool,
+    padding: u16,
     cr: bool,
 }
 
@@ -351,10 +358,15 @@ impl Tail {
             };
         }
         match byte {
-            b'-' if !self.padded && self.dashes < 2 => self.dashes += 1,
+            b'-' if self.padding == 0 && self.dashes < 2 => self.dashes += 1,
             // One dash is not a close-delimiter.
             _ if self.dashes == 1 => return Step::Content,
-            b' ' | b'\t' => self.padded = true,
+            b' ' | b'\t' => {
+                if self.padding == MAX_TAIL_PADDING {
+                    return Step::Content;
+                }
+                self.padding += 1;
+            }
             b'\r' => self.cr = true,
             b'\n' => return Step::Delimiter,
             _ => return Step::Content,
@@ -495,6 +507,9 @@ impl<'a> Parser<'a> {
             let mut from = 0;
             while let Some(lf) = memchr::memchr(b'\n', &bytes[from..]) {
                 let end = from + lf + 1;
+                if end > MAX_PART_HEADER_BYTES {
+                    return Err(over("part header section too large"));
+                }
                 let line = &bytes[from..end];
                 if matches!(line, b"\n" | b"\r\n") {
                     open_part(
@@ -514,6 +529,9 @@ impl<'a> Parser<'a> {
                 }
                 from = end;
             }
+            if bytes.len() > MAX_PART_HEADER_BYTES {
+                return Err(over("part header section too large"));
+            }
             self.head.extend_from_slice(bytes);
             self.line = from;
             return Ok(&[]);
@@ -521,6 +539,9 @@ impl<'a> Parser<'a> {
         let mut from = 0;
         while let Some(lf) = memchr::memchr(b'\n', &bytes[from..]) {
             let end = from + lf + 1;
+            if self.head.len() + (end - from) > MAX_PART_HEADER_BYTES {
+                return Err(over("part header section too large"));
+            }
             self.head.extend_from_slice(&bytes[from..end]);
             from = end;
             let line = &self.head[self.line..];
@@ -542,7 +563,11 @@ impl<'a> Parser<'a> {
             }
             self.line = self.head.len();
         }
-        self.head.extend_from_slice(&bytes[from..]);
+        let rem = &bytes[from..];
+        if self.head.len() + rem.len() > MAX_PART_HEADER_BYTES {
+            return Err(over("part header section too large"));
+        }
+        self.head.extend_from_slice(rem);
         Ok(&[])
     }
 
@@ -1601,6 +1626,122 @@ mod tests {
             let single: Vec<&[u8]> = case.body.chunks(1).collect();
             let name = format!("{} in single bytes", case.name);
             assert_same(&name, &whole, &parse(&single, b"B", &l));
+        }
+    }
+
+    #[test]
+    fn bounded_tail_padding_and_part_header_section() {
+        struct Case {
+            name: &'static str,
+            body: Vec<u8>,
+            chunk_size: usize,
+            max_file_size: u64,
+            want_status: Option<u16>,
+            want_field: Option<Vec<u8>>,
+        }
+        let pad_256 = [
+            b"--B".as_slice(),
+            &vec![b' '; 256],
+            b"\r\ncontent-disposition: form-data; name=a\r\n\r\nok\r\n--B--",
+        ]
+        .concat();
+        let pad_257_in_field = [
+            b"--B\r\ncontent-disposition: form-data; name=a\r\n\r\nstart\r\n--B".as_slice(),
+            &vec![b' '; 257],
+            b"\r\n--B--",
+        ]
+        .concat();
+        let mut want_pad_257 = b"start\r\n--B".to_vec();
+        want_pad_257.extend(std::iter::repeat_n(b' ', 257));
+        let pad_over_file_limit = [
+            b"--B\r\ncontent-disposition: form-data; name=f; filename=a.bin\r\n\r\n--B".as_slice(),
+            &vec![b' '; 4096],
+            b"\r\n--B--",
+        ]
+        .concat();
+        let huge_header = [
+            b"--B\r\ncontent-disposition: form-data; name=a\r\nx-pad: ".as_slice(),
+            &vec![b'h'; 65 << 10],
+            b"\r\n\r\nval\r\n--B--",
+        ]
+        .concat();
+        let unterminated_huge_header =
+            [b"--B\r\nx-pad: ".as_slice(), &vec![b'h'; 65 << 10]].concat();
+
+        let cases = [
+            Case {
+                name: "256-byte tail padding still matches delimiter",
+                body: pad_256,
+                chunk_size: 1024,
+                max_file_size: 1024,
+                want_status: None,
+                want_field: Some(b"ok".to_vec()),
+            },
+            Case {
+                name: "257-byte tail padding releases held bytes as content",
+                body: pad_257_in_field,
+                chunk_size: 64,
+                max_file_size: 1024,
+                want_status: None,
+                want_field: Some(want_pad_257),
+            },
+            Case {
+                name: "excess tail padding in file part triggers max_file_size instead of buffering in held",
+                body: pad_over_file_limit,
+                chunk_size: 128,
+                max_file_size: 512,
+                want_status: Some(413),
+                want_field: None,
+            },
+            Case {
+                name: "single-chunk part header section over 64 KiB rejected with 413",
+                body: huge_header.clone(),
+                chunk_size: 128 << 10,
+                max_file_size: 1024,
+                want_status: Some(413),
+                want_field: None,
+            },
+            Case {
+                name: "split part header section over 64 KiB rejected with 413",
+                body: huge_header,
+                chunk_size: 4096,
+                max_file_size: 1024,
+                want_status: Some(413),
+                want_field: None,
+            },
+            Case {
+                name: "unterminated part header section over 64 KiB rejected during feed",
+                body: unterminated_huge_header,
+                chunk_size: 4096,
+                max_file_size: 1024,
+                want_status: Some(413),
+                want_field: None,
+            },
+        ];
+
+        for case in cases {
+            let mut l = limits();
+            l.max_file_size = case.max_file_size;
+            let pieces: Vec<&[u8]> = case.body.chunks(case.chunk_size).collect();
+            let res = parse(&pieces, b"B", &l);
+            match case.want_status {
+                Some(code) => {
+                    let Err(err) = res else {
+                        panic!("{}: expected rejection {code}", case.name);
+                    };
+                    assert_eq!(err.status.as_u16(), code, "{}: {}", case.name, err.reason);
+                }
+                None => {
+                    let mp = res.expect(case.name);
+                    assert_eq!(mp.fields.len(), 1, "{}", case.name);
+                    assert_eq!(
+                        mp.field_value(&mp.fields[0]),
+                        case.want_field.as_deref().unwrap(),
+                        "{}",
+                        case.name
+                    );
+                }
+            }
         }
     }
 }

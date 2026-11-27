@@ -89,7 +89,7 @@ impl UnitRx {
     /// A wait with a timeout above zero needs the queue of the pool as `units`, because the submit wakes the workers of that queue.
     fn recv(&self, units: &Receiver<Entry>, timeout: Duration) -> Pull {
         if let Some(pull) = self.take(units) {
-            if matches!(pull, Pull::Unit(_)) && self.idle.has_waiters() {
+            if self.idle.has_waiters() {
                 let rem = units.len();
                 if rem > 0 {
                     self.idle.wake_one(rem);
@@ -124,7 +124,7 @@ impl UnitRx {
             match got {
                 Some(pull) => {
                     // Hand off to another waiting worker if more units remain queued after our leave decremented waking.
-                    if matches!(pull, Pull::Unit(_)) && self.idle.has_waiters() {
+                    if self.idle.has_waiters() {
                         let rem = units.len();
                         if rem > 0 {
                             self.idle.wake_one(rem);
@@ -815,6 +815,90 @@ mod tests {
                 "{}: handled, errors, pending",
                 case.name
             );
+        }
+    }
+
+    #[test]
+    fn reload_pull_hands_off_queued_unit_to_parked_worker() {
+        struct Case {
+            name: &'static str,
+            park_before_reload: bool,
+        }
+        let cases = [
+            Case {
+                name: "immediate take returning reload wakes parked worker for queued unit",
+                park_before_reload: false,
+            },
+            Case {
+                name: "parked worker woken into reload hands off queued unit to other parked worker",
+                park_before_reload: true,
+            },
+        ];
+
+        for case in cases {
+            let pool = Arc::new(Pool::new("test", 2));
+            let (intake, units) = Intake::new(Arc::clone(&pool));
+            let idle = Arc::clone(&units.idle);
+            let (w1, tx1) = UnitRx::new(units.clone(), Arc::default());
+            let (w2, _tx2) = UnitRx::new(units, Arc::default());
+            let (tx_u, rx_u) = bounded(4);
+            let rx_u_w2 = rx_u.clone();
+            let (got_tx, got_rx) = bounded(1);
+
+            let t2 = thread::spawn(move || {
+                let pull = w2.recv(&rx_u_w2, Duration::from_secs(2));
+                let _ = got_tx.send(matches!(pull, Pull::Unit(_)));
+            });
+
+            // Wait until worker 2 is parked in `idle`.
+            let spin_deadline = Instant::now() + Duration::from_secs(2);
+            while !idle.has_waiters() {
+                assert!(
+                    Instant::now() < spin_deadline,
+                    "{}: w2 did not park",
+                    case.name
+                );
+                thread::yield_now();
+            }
+
+            let entry = Entry {
+                unit: Unit::Dispatcher(Box::new(Probe { cancelled: false })),
+                budget_bytes: 0,
+            };
+
+            if case.park_before_reload {
+                let rx_u_w1 = rx_u.clone();
+                let (w1_done_tx, w1_done_rx) = bounded(1);
+                let t1 = thread::spawn(move || {
+                    let pull = w1.recv(&rx_u_w1, Duration::from_secs(2));
+                    let _ = w1_done_tx.send(matches!(pull, Pull::Reload));
+                });
+                // Give w1 time to park at the tail of the LIFO waiter stack behind w2.
+                thread::sleep(Duration::from_millis(20));
+                tx1.try_send(()).unwrap();
+                tx_u.send(entry).unwrap();
+                idle.wake_one(1);
+                assert!(
+                    w1_done_rx.recv_timeout(Duration::from_millis(500)).unwrap(),
+                    "{}: w1 should pull Reload",
+                    case.name
+                );
+                t1.join().unwrap();
+            } else {
+                tx1.try_send(()).unwrap();
+                tx_u.send(entry).unwrap();
+                assert!(
+                    matches!(w1.recv(&rx_u, Duration::ZERO), Pull::Reload),
+                    "{}: w1 should pull Reload",
+                    case.name
+                );
+            }
+
+            let w2_got_unit = got_rx.recv_timeout(Duration::from_millis(500));
+            drop(tx_u);
+            drop(intake);
+            t2.join().unwrap();
+            assert_eq!(w2_got_unit.ok(), Some(true), "{}", case.name);
         }
     }
 }
