@@ -11,6 +11,7 @@ mod log;
 mod module;
 pub mod plugin;
 pub mod pool;
+mod queue;
 mod reload;
 mod start;
 pub mod stream;

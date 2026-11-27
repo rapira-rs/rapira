@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering::Relaxed};
 use std::time::Instant;
 
-use crate::work::IntakeLimits;
+use crate::queue::PoolQueue;
 
 /// The state of a worker.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -40,17 +40,6 @@ impl State {
     }
 }
 
-#[repr(align(64))]
-#[derive(Default)]
-pub(crate) struct CachePadded<T>(pub(crate) T);
-
-impl<T> std::ops::Deref for CachePadded<T> {
-    type Target = T;
-    fn deref(&self) -> &T {
-        &self.0
-    }
-}
-
 pub struct Pool {
     pub name: &'static str,
     pub(crate) workers: Box<[Worker]>,
@@ -60,11 +49,7 @@ pub struct Pool {
     draining: AtomicBool,
     /// Active workers whose interrupted unit is still running after the watchdog grace period.
     pub(crate) blocked: AtomicUsize,
-    /// Lock-free body-byte budget and queue-slot accounting, also backing `pending()`.
-    pub(crate) limits: IntakeLimits,
-    pub(crate) failed_on_full_queue: AtomicU64,
-    /// Units refused before a worker could take them.
-    pub(crate) refused: AtomicU64,
+    queue: Arc<PoolQueue>,
 }
 
 #[repr(align(64))]
@@ -97,21 +82,19 @@ pub struct WorkerSnapshot {
 }
 
 impl Pool {
-    pub(crate) fn new(name: &'static str, workers: usize) -> Self {
+    pub(crate) fn new(name: &'static str, workers: usize, queue: Arc<PoolQueue>) -> Self {
         Self {
             name,
             workers: (0..workers).map(|_| Worker::default()).collect(),
             served: AtomicBool::new(false),
             draining: AtomicBool::new(false),
             blocked: AtomicUsize::new(0),
-            limits: IntakeLimits::new(),
-            failed_on_full_queue: AtomicU64::new(0),
-            refused: AtomicU64::new(0),
+            queue,
         }
     }
 
     pub(crate) fn pending(&self) -> u64 {
-        self.limits.pending()
+        self.queue.pending()
     }
 
     /// Binds the calling thread as worker `index` of this pool.
@@ -148,9 +131,11 @@ impl Pool {
     /// A worker with a unit in progress stays active until its next pull.
     pub(crate) fn begin_drain(&self) {
         self.draining.store(true, Relaxed);
+        self.queue.sync_ready(|| self.ready());
     }
 
     /// Records an event for worker `index` directly without reading thread-local state.
+    #[inline]
     pub(crate) fn record_worker(&self, index: usize, event: Event) {
         let worker = &self.workers[index];
         if matches!(
@@ -164,18 +149,50 @@ impl Pool {
             Event::Handled { errored } => worker.count(errored),
             Event::Shed => worker.count(true),
             Event::Recycled => {
+                let was_serving = self.state(index).serving();
                 worker.recycles.fetch_add(1, Relaxed);
                 worker.inactive(State::Starting);
+                if was_serving {
+                    self.queue.sync_ready(|| self.ready());
+                }
             }
-            Event::Idle => worker.inactive(State::Idle),
+            Event::Idle => {
+                let prev = worker.state.load(Relaxed);
+                worker.inactive(State::Idle);
+                if prev == State::Starting as u8
+                    || prev == State::Draining as u8
+                    || (prev == State::Active as u8 && self.draining())
+                {
+                    self.queue.sync_ready(|| self.ready());
+                }
+            }
             Event::Active => {
+                let prev = worker.state.load(Relaxed);
                 let since = now_millis();
                 crate::watchdog::arm(since);
                 worker.last_activity_ms.store(since, Relaxed);
                 worker.state.store(State::Active as u8, Relaxed);
+                if prev == State::Starting as u8
+                    || prev == State::Draining as u8
+                    || (prev == State::Idle as u8 && self.draining())
+                {
+                    self.queue.sync_ready(|| self.ready());
+                }
             }
-            Event::Starting => worker.inactive(State::Starting),
-            Event::Stopped => worker.state.store(State::Draining as u8, Relaxed),
+            Event::Starting => {
+                let was_serving = self.state(index).serving();
+                worker.inactive(State::Starting);
+                if was_serving {
+                    self.queue.sync_ready(|| self.ready());
+                }
+            }
+            Event::Stopped => {
+                let was_serving = self.state(index).serving();
+                worker.state.store(State::Draining as u8, Relaxed);
+                if was_serving {
+                    self.queue.sync_ready(|| self.ready());
+                }
+            }
         }
     }
 
@@ -192,11 +209,12 @@ impl Pool {
                 last_activity_ms: worker.last_activity_ms.load(Relaxed),
             });
         }
+        let queue = self.queue.stats();
         PoolSnapshot {
             name: self.name,
-            pending: self.pending(),
-            failed_on_full_queue: self.failed_on_full_queue.load(Relaxed),
-            refused: self.refused.load(Relaxed),
+            pending: queue.pending,
+            failed_on_full_queue: queue.failed_on_full_queue,
+            refused: queue.refused,
             workers,
         }
     }
@@ -288,7 +306,7 @@ mod tests {
             },
         ];
         for case in cases {
-            let pool = Pool::new("http", 2);
+            let pool = Pool::new("http", 2, PoolQueue::new().0);
             for (worker, state) in pool.workers.iter().zip(case.states) {
                 worker.state.store(state as u8, Relaxed);
             }
@@ -300,7 +318,7 @@ mod tests {
     #[test]
     fn a_live_shed_sample_counts_each_outcome_once() {
         const SHED: u64 = 65_536;
-        let pool = Arc::new(Pool::new("http", 1));
+        let pool = Arc::new(Pool::new("http", 1, PoolQueue::new().0));
         let writer = Arc::clone(&pool);
         let go = std::sync::Barrier::new(2);
         std::thread::scope(|scope| {
@@ -386,7 +404,7 @@ mod tests {
             },
         ];
         for case in cases {
-            let pool = Arc::new(Pool::new("http", 1));
+            let pool = Arc::new(Pool::new("http", 1, PoolQueue::new().0));
             pool.bind(0);
             pool.workers[0].state.store(case.state as u8, Relaxed);
             if case.draining {

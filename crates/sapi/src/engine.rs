@@ -6,9 +6,9 @@ use std::sync::{Arc, Mutex};
 use std::thread::{Builder, JoinHandle};
 
 use anyhow::{Context, ensure};
-use crossbeam_channel::Sender;
 use rapira_config::PoolSettings;
 
+use crate::queue::PoolQueue;
 use crate::*;
 
 unsafe extern "C" {
@@ -51,7 +51,8 @@ fn check_linked_php() -> anyhow::Result<()> {
 
 #[derive(Default)]
 struct WorkersInner {
-    threads: Vec<(Sender<()>, JoinHandle<()>)>,
+    threads: Vec<JoinHandle<()>>,
+    queues: Vec<Arc<PoolQueue>>,
     active: usize,
     on_all_done: Option<Arc<dyn Fn() + Send + Sync>>,
 }
@@ -79,10 +80,13 @@ impl Drop for ActiveGuard {
 }
 
 impl Workers {
+    pub(crate) fn register_queue(&self, queue: Arc<PoolQueue>) {
+        self.0.lock().unwrap().queues.push(queue);
+    }
+
     pub(crate) fn spawn(
         self: &Arc<Self>,
         builder: Builder,
-        control: Sender<()>,
         run: impl FnOnce() + Send + 'static,
     ) -> std::io::Result<()> {
         let mut inner = self.0.lock().unwrap();
@@ -93,7 +97,7 @@ impl Workers {
             run();
         }) {
             Ok(thread) => {
-                inner.threads.push((control, thread));
+                inner.threads.push(thread);
                 Ok(())
             }
             Err(e) => {
@@ -104,10 +108,9 @@ impl Workers {
     }
 
     pub(crate) fn wake(&self) {
-        for (control, worker) in self.0.lock().unwrap().threads.iter() {
-            // A full channel already holds a reload for this worker.
-            let _ = control.try_send(());
-            worker.thread().unpark();
+        let queues = self.0.lock().unwrap().queues.clone();
+        for queue in queues {
+            queue.reload();
         }
     }
 }
@@ -225,10 +228,17 @@ impl Engine {
 
 impl Drop for Engine {
     fn drop(&mut self) {
-        let workers = std::mem::take(&mut self.workers.0.lock().unwrap().threads);
-        for (control, worker) in workers {
-            drop(control);
-            worker.thread().unpark();
+        let (queues, threads) = {
+            let mut inner = self.workers.0.lock().unwrap();
+            (
+                std::mem::take(&mut inner.queues),
+                std::mem::take(&mut inner.threads),
+            )
+        };
+        for queue in queues {
+            queue.close();
+        }
+        for worker in threads {
             worker.join().expect("the worker catches its panics");
         }
         // SAFETY: this is the thread that started TSRM. Every PHP worker has joined.
