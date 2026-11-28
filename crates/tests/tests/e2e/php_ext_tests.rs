@@ -1,10 +1,10 @@
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use tests::wire::submit;
 use tests::{Resp, drain_resp, fixture, req};
 
 use crate::harness::Spawn;
 
-/// One worker process serves every uri in order.
+/// One worker serves every URI in order.
 fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<Resp>> {
     let srv = Spawn::http(Mode::Worker, fixture(name)).spawn();
     uris.iter()
@@ -12,179 +12,224 @@ fn run(name: &str, uris: &[&str]) -> anyhow::Result<Vec<Resp>> {
         .collect()
 }
 
-fn success(name: &str, token: &str) -> anyhow::Result<()> {
-    let out = run(name, &["/"])?;
-    if out[0].body_string() == "skip" {
-        return Ok(());
+/// A request that throws must answer 500, and the next plain request must answer 200 with the expected tokens, so this also covers the success path of the extension.
+#[test]
+fn extension_exceptions_recover_and_keep_serving() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        fixture: &'static str,
+        tokens: &'static [&'static str],
     }
-    assert_eq!(
-        out[0].status(),
-        200,
-        "{name} must serve 200 (got: {:?})",
-        out[0]
-    );
-    assert!(
-        out[0].body_string().contains(token),
-        "{name} must echo {token:?} (got: {:?})",
-        out[0].body_string()
-    );
+    let cases = [
+        Case {
+            name: "zlib",
+            fixture: "php_ext/zlib-worker.php",
+            tokens: &["zlib:rapira zlib"],
+        },
+        Case {
+            name: "curl",
+            fixture: "php_ext/curl-worker.php",
+            tokens: &["curl:"],
+        },
+        Case {
+            name: "ctype",
+            fixture: "php_ext/ctype-worker.php",
+            tokens: &["ctype:1"],
+        },
+        Case {
+            name: "mbstring",
+            fixture: "php_ext/mbstring-worker.php",
+            tokens: &["mb:HÉLLO"],
+        },
+        Case {
+            name: "iconv",
+            fixture: "php_ext/iconv-worker.php",
+            tokens: &["iconv:iconv ok"],
+        },
+        Case {
+            name: "openssl",
+            fixture: "php_ext/openssl-worker.php",
+            tokens: &["openssl:64"],
+        },
+        Case {
+            name: "fileinfo",
+            fixture: "php_ext/fileinfo-worker.php",
+            tokens: &["finfo:text/plain"],
+        },
+        Case {
+            name: "tokenizer",
+            fixture: "php_ext/tokenizer-worker.php",
+            tokens: &["tok:"],
+        },
+        Case {
+            name: "phar",
+            fixture: "php_ext/phar-worker.php",
+            tokens: &["phar:"],
+        },
+        Case {
+            name: "dom",
+            fixture: "php_ext/dom-worker.php",
+            tokens: &["dom:ok"],
+        },
+        Case {
+            name: "simplexml",
+            fixture: "php_ext/simplexml-worker.php",
+            tokens: &["sxml:ok"],
+        },
+        Case {
+            name: "xml",
+            fixture: "php_ext/xml-worker.php",
+            tokens: &["xml:1"],
+        },
+        Case {
+            name: "xmlreader",
+            fixture: "php_ext/xmlreader-worker.php",
+            tokens: &["xr:a"],
+        },
+        Case {
+            name: "xmlwriter",
+            fixture: "php_ext/xmlwriter-worker.php",
+            tokens: &["xw:<v>ok</v>"],
+        },
+        Case {
+            name: "pdo_sqlite",
+            fixture: "php_ext/pdo_sqlite-worker.php",
+            tokens: &["pdo:ok"],
+        },
+        Case {
+            name: "sqlite3",
+            fixture: "php_ext/sqlite3-worker.php",
+            tokens: &["sqlite:42"],
+        },
+        Case {
+            name: "filter",
+            fixture: "php_ext/filter-worker.php",
+            tokens: &["filter:a@b.com"],
+        },
+        // The token is the unkeyed 32-byte BLAKE2b of "rapira" (RFC 7693), which is what crypto_generichash computes.
+        Case {
+            name: "sodium",
+            fixture: "php_ext/sodium-worker.php",
+            tokens: &["sodium:94dc0c93428ad3519ec5ec157a5c3c53b7b6056ba3fff7ad773a19e0b4f3fd5a"],
+        },
+        Case {
+            name: "browscap",
+            fixture: "php_ext/browscap-worker.php",
+            tokens: &["browscap:false"],
+        },
+        Case {
+            name: "imap",
+            fixture: "php_ext/imap-worker.php",
+            tokens: &["imap:ok"],
+        },
+    ];
+    for case in cases {
+        let out = run(case.fixture, &["/?boom=1", "/"])?;
+        if out[0].body_string() == "skip" {
+            continue;
+        }
+        assert_eq!(
+            out[0].status(),
+            500,
+            "{}: uncaught throw must be 500 (got: {:?})",
+            case.name,
+            out[0]
+        );
+        assert_eq!(
+            out[1].status(),
+            200,
+            "{}: must keep serving after throw (got: {:?})",
+            case.name,
+            out[1]
+        );
+        let body = out[1].body_string();
+        for token in case.tokens {
+            assert!(
+                body.contains(token),
+                "{}: follow-up must echo {token:?} (got: {body:?})",
+                case.name
+            );
+        }
+    }
     Ok(())
 }
 
-/// A request that throws must answer 500, and the next plain request must answer 200 with the token, so this also covers the success path of the extension.
-fn exception(name: &str, token: &str) -> anyhow::Result<()> {
-    let out = run(name, &["/?boom=1", "/"])?;
-    if out[0].body_string() == "skip" {
-        return Ok(());
+#[test]
+fn extension_success_cases() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        fixture: &'static str,
+        tokens: &'static [&'static str],
     }
-    assert_eq!(
-        out[0].status(),
-        500,
-        "{name} uncaught throw must be a 500 (got: {:?})",
-        out[0]
-    );
-    assert_eq!(
-        out[1].status(),
-        200,
-        "{name} must keep serving after the throw (got: {:?})",
-        out[1]
-    );
-    assert!(
-        out[1].body_string().contains(token),
-        "{name} follow-up must echo {token:?} (got: {:?})",
-        out[1].body_string()
-    );
+    let cases = [
+        Case {
+            name: "bcmath",
+            fixture: "php_ext/bcmath-worker.php",
+            tokens: &["bcmath:0.30"],
+        },
+        Case {
+            name: "intl",
+            fixture: "php_ext/intl-worker.php",
+            tokens: &["intl:café"],
+        },
+        Case {
+            name: "pdo_pgsql",
+            fixture: "php_ext/pdo_pgsql-worker.php",
+            tokens: &["pdo_pgsql:ok"],
+        },
+        Case {
+            name: "pgsql",
+            fixture: "php_ext/pgsql-worker.php",
+            tokens: &["pgsql:0001ff"],
+        },
+        Case {
+            name: "igbinary",
+            fixture: "php_ext/igbinary-worker.php",
+            tokens: &["igbinary:ok"],
+        },
+        Case {
+            name: "redis",
+            fixture: "php_ext/redis-worker.php",
+            tokens: &["redis:ok"],
+        },
+        // Checks that OPcache started under the rapira SAPI name. OPcache <= 8.4 starts only for the SAPI names on an allowlist. See build_sapi_module.
+        Case {
+            name: "opcache",
+            fixture: "php_ext/opcache-worker.php",
+            tokens: &["opcache:enabled"],
+        },
+        // The `browscap` ini is PHP_INI_SYSTEM and unset here, so get_browser() must warn and return false (browscap.c).
+        Case {
+            name: "browscap unset warns",
+            fixture: "php_ext/browscap-worker.php",
+            tokens: &[
+                "browscap:false",
+                "get_browser(): browscap ini directive not set",
+            ],
+        },
+    ];
+    for case in cases {
+        let out = run(case.fixture, &["/"])?;
+        if out[0].body_string() == "skip" {
+            continue;
+        }
+        assert_eq!(
+            out[0].status(),
+            200,
+            "{}: must serve 200 (got: {:?})",
+            case.name,
+            out[0]
+        );
+        let body = out[0].body_string();
+        for token in case.tokens {
+            assert!(
+                body.contains(token),
+                "{}: must echo {token:?} (got: {body:?})",
+                case.name
+            );
+        }
+    }
     Ok(())
-}
-
-#[test]
-fn zlib_exception() -> anyhow::Result<()> {
-    exception("php_ext/zlib-worker.php", "zlib:rapira zlib")
-}
-
-#[test]
-fn curl_exception() -> anyhow::Result<()> {
-    exception("php_ext/curl-worker.php", "curl:")
-}
-
-#[test]
-fn ctype_exception() -> anyhow::Result<()> {
-    exception("php_ext/ctype-worker.php", "ctype:1")
-}
-
-#[test]
-fn mbstring_exception() -> anyhow::Result<()> {
-    exception("php_ext/mbstring-worker.php", "mb:HÉLLO")
-}
-
-#[test]
-fn iconv_exception() -> anyhow::Result<()> {
-    exception("php_ext/iconv-worker.php", "iconv:iconv ok")
-}
-
-#[test]
-fn openssl_exception() -> anyhow::Result<()> {
-    exception("php_ext/openssl-worker.php", "openssl:64")
-}
-
-#[test]
-fn fileinfo_exception() -> anyhow::Result<()> {
-    exception("php_ext/fileinfo-worker.php", "finfo:text/plain")
-}
-
-#[test]
-fn tokenizer_exception() -> anyhow::Result<()> {
-    exception("php_ext/tokenizer-worker.php", "tok:")
-}
-
-#[test]
-fn phar_exception() -> anyhow::Result<()> {
-    exception("php_ext/phar-worker.php", "phar:")
-}
-
-#[test]
-fn dom_exception() -> anyhow::Result<()> {
-    exception("php_ext/dom-worker.php", "dom:ok")
-}
-
-#[test]
-fn simplexml_exception() -> anyhow::Result<()> {
-    exception("php_ext/simplexml-worker.php", "sxml:ok")
-}
-
-#[test]
-fn xml_exception() -> anyhow::Result<()> {
-    exception("php_ext/xml-worker.php", "xml:1")
-}
-
-#[test]
-fn xmlreader_exception() -> anyhow::Result<()> {
-    exception("php_ext/xmlreader-worker.php", "xr:a")
-}
-
-#[test]
-fn xmlwriter_exception() -> anyhow::Result<()> {
-    exception("php_ext/xmlwriter-worker.php", "xw:<v>ok</v>")
-}
-
-#[test]
-fn pdo_sqlite_exception() -> anyhow::Result<()> {
-    exception("php_ext/pdo_sqlite-worker.php", "pdo:ok")
-}
-
-#[test]
-fn sqlite3_exception() -> anyhow::Result<()> {
-    exception("php_ext/sqlite3-worker.php", "sqlite:42")
-}
-
-#[test]
-fn filter_exception() -> anyhow::Result<()> {
-    exception("php_ext/filter-worker.php", "filter:a@b.com")
-}
-
-/// The token is the unkeyed 32-byte BLAKE2b of "rapira" (RFC 7693), which is what crypto_generichash computes.
-#[test]
-fn sodium_exception() -> anyhow::Result<()> {
-    exception(
-        "php_ext/sodium-worker.php",
-        "sodium:94dc0c93428ad3519ec5ec157a5c3c53b7b6056ba3fff7ad773a19e0b4f3fd5a",
-    )
-}
-
-#[test]
-fn bcmath_success() -> anyhow::Result<()> {
-    success("php_ext/bcmath-worker.php", "bcmath:0.30")
-}
-
-#[test]
-fn intl_success() -> anyhow::Result<()> {
-    success("php_ext/intl-worker.php", "intl:café")
-}
-
-#[test]
-fn pdo_pgsql_success() -> anyhow::Result<()> {
-    success("php_ext/pdo_pgsql-worker.php", "pdo_pgsql:ok")
-}
-
-#[test]
-fn pgsql_success() -> anyhow::Result<()> {
-    success("php_ext/pgsql-worker.php", "pgsql:0001ff")
-}
-
-#[test]
-fn igbinary_success() -> anyhow::Result<()> {
-    success("php_ext/igbinary-worker.php", "igbinary:ok")
-}
-
-#[test]
-fn redis_success() -> anyhow::Result<()> {
-    success("php_ext/redis-worker.php", "redis:ok")
-}
-
-/// Checks that OPcache started under the rapira SAPI name. OPcache <= 8.4 starts only for the SAPI names on an allowlist. See build_sapi_module.
-#[test]
-fn opcache_success() -> anyhow::Result<()> {
-    success("php_ext/opcache-worker.php", "opcache:enabled")
 }
 
 /// ext/openssl has no RINIT or RSHUTDOWN (openssl.c), in php-fpm and in rapira alike, so an undrained error in the persistent ring stays after its request.
@@ -252,36 +297,4 @@ fn openssl_error_ring_overwrites_the_oldest() -> anyhow::Result<()> {
         out[2].body_string()
     );
     Ok(())
-}
-
-#[test]
-fn browscap_unset_exception() -> anyhow::Result<()> {
-    exception("php_ext/browscap-worker.php", "browscap:false")
-}
-/// The `browscap` ini is PHP_INI_SYSTEM and unset here, so get_browser() must warn and return false (browscap.c).
-#[test]
-fn browscap_unset_warns() -> anyhow::Result<()> {
-    let out = run("php_ext/browscap-worker.php", &["/"])?;
-    if out[0].body_string() == "skip" {
-        return Ok(());
-    }
-    assert_eq!(out[0].status(), 200, "must serve 200 (got: {:?})", out[0]);
-    assert!(
-        out[0]
-            .body_string()
-            .contains("get_browser(): browscap ini directive not set"),
-        "the E_WARNING must be visible in the body (got: {:?})",
-        out[0].body_string()
-    );
-    assert!(
-        out[0].body_string().contains("browscap:false"),
-        "get_browser() must return false (got: {:?})",
-        out[0].body_string()
-    );
-    Ok(())
-}
-
-#[test]
-fn imap_exception() -> anyhow::Result<()> {
-    exception("php_ext/imap-worker.php", "imap:ok")
 }

@@ -1,5 +1,5 @@
 <?php
-// Classic mode runs this file once per request; /chdir moves the worker out of the entrypoint directory.
+// Classic mode runs this file once per request and prints getcwd(). /chdir moves the request to the temp directory first.
 header('Content-Type: text/plain');
 
 if (($_SERVER['REQUEST_URI'] ?? '') === '/chdir') {

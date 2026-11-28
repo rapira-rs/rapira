@@ -1,4 +1,4 @@
-//! A file cache for one worker process.
+//! The file cache of the HTTP plugin.
 //!
 //! `ServeDir` sends every filesystem operation through the `Backend` trait. This module
 //! implements that trait. `ServeDir` builds the ETag, evaluates the preconditions, applies
@@ -10,8 +10,7 @@
 //! above the size cap. `ServeDir` reads the validators of a `HEAD` and of a `GET` from the
 //! same entry, so the two methods always agree.
 //!
-//! An entry is fresh for one second. Each forked worker has its own cache. Only a change to a
-//! cached file can give stale data.
+//! All HTTP connections share the cache. An entry stays fresh for one second.
 //!
 //! The cache treats a file as changed when the device, the inode, the mtime or the length is
 //! different. The ETag encodes only the mtime and the length.
@@ -40,7 +39,7 @@ use tower_http::services::fs::{Backend, File, Metadata};
 
 /// The cache does not store a larger file. `ServeDir` streams it from disk.
 const MAX_FILE: u64 = 256 * 1024;
-/// The memory limit for one worker process. Forked workers do not share the cache.
+/// The memory limit of the shared cache.
 const MAX_TOTAL: usize = 16 * 1024 * 1024;
 /// An entry stays fresh for this time. A stat then revalidates it, so a change to a cached
 /// file reaches the client after one second.

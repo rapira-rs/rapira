@@ -1,11 +1,19 @@
 <?php
+require __DIR__ . '/env.php';
+
+$bootServer = $_SERVER;
 $boot = [
     'boot_getenv' => getenv('POOL_PROBE'),
     'boot_server' => $_SERVER['POOL_PROBE'] ?? null,
     'boot_env' => $_ENV['POOL_PROBE'] ?? null,
 ];
-$handler = static function () use ($boot): void {
+$handler = static function () use ($boot, $bootServer): void {
     header('Content-Type: application/json');
+    $path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+    if ($path !== '/') {
+        echo json_encode(env_route($path, $bootServer));
+        return;
+    }
     echo json_encode($boot + [
         'getenv' => getenv('POOL_PROBE'),
         'getenv_empty' => getenv('POOL_EMPTY'),

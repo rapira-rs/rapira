@@ -1,153 +1,218 @@
+use std::net::SocketAddr;
+use std::os::fd::AsRawFd;
+use std::path::PathBuf;
 use std::time::Duration;
 
-use anyhow::anyhow;
-#[cfg(not(target_os = "linux"))]
-use tokio::net::{TcpListener, UnixListener};
-use tokio::runtime::Handle;
+use anyhow::{Context, Result};
+use tokio::io::Interest;
+use tokio::io::unix::AsyncFd;
 use tokio::sync::watch;
 
-#[cfg(target_os = "linux")]
-mod accept_linux;
-
-pub mod listen;
+mod listen;
 pub use listen::{ListenAddr, PreparedListener, bind};
 
-#[cfg(target_os = "linux")]
-use accept_linux::{Accepted, TcpListener, UnixListener};
+/// The accepted connections of one listener. Dropping the owner cuts open connections.
+#[derive(Default)]
+pub struct Connections(watch::Sender<()>);
 
-/// Takes the accepted connections. [`Acceptor::run`] calls it inside its runtime.
-pub trait Serve {
-    fn spawn_tcp(&self, stream: tokio::net::TcpStream, peer: std::net::SocketAddr);
-    fn spawn_unix(&self, stream: tokio::net::UnixStream, peer: Option<&std::path::Path>);
-}
-
-/// The listening socket of one worker.
-pub struct Acceptor {
-    socket: Socket,
-    addr: ListenAddr,
-    #[cfg(not(target_os = "linux"))]
-    stop: watch::Receiver<bool>,
-}
-
-enum Socket {
-    Tcp(TcpListener),
-    Unix(UnixListener),
-}
-
-impl Acceptor {
-    /// `stop` set to true ends [`Acceptor::run`].
-    pub fn adopt(
-        prepared: PreparedListener,
-        stop: watch::Receiver<bool>,
-        rt: &Handle,
-    ) -> std::io::Result<Self> {
-        // The blocked acceptor waits on an eventfd, so a task on rt passes the flag on to it.
-        #[cfg(target_os = "linux")]
-        let stop = {
-            let wake = accept_linux::Wake::new()?;
-            let (bridge, mut flag) = (wake.clone(), stop);
-            rt.spawn(async move {
-                let _ = flag.wait_for(|stop| *stop).await;
-                bridge.stop();
-            });
-            wake
-        };
-        let PreparedListener { fd, addr } = prepared;
-        let tcp: bool = matches!(addr, ListenAddr::Tcp(_));
-        // On other OSes from_std registers the tokio listener with the reactor of rt.
-        let _guard = rt.enter();
-        // bind set O_NONBLOCK, because both acceptors need an accept that does not block.
-        let socket = if tcp {
-            let std = std::net::TcpListener::from(fd);
-            #[cfg(target_os = "linux")]
-            let listener = TcpListener::from_std(std, stop)?;
-            #[cfg(not(target_os = "linux"))]
-            let listener = TcpListener::from_std(std)?;
-            Socket::Tcp(listener)
-        } else {
-            let std = std::os::unix::net::UnixListener::from(fd);
-            #[cfg(target_os = "linux")]
-            let listener = UnixListener::from_std(std, stop)?;
-            #[cfg(not(target_os = "linux"))]
-            let listener = UnixListener::from_std(std)?;
-            Socket::Unix(listener)
-        };
-        Ok(Self {
-            socket,
-            addr,
-            #[cfg(not(target_os = "linux"))]
-            stop,
-        })
+impl Connections {
+    pub fn spawn(&self, connection: impl Future<Output = ()> + Send + 'static) {
+        let mut cut = self.0.subscribe();
+        tokio::spawn(async move {
+            tokio::select! {
+                biased;
+                _ = cut.changed() => {}
+                () = connection => {}
+            }
+        });
     }
 
-    /// Runs the accept loop on the calling thread until the stop flag is set. A blocked
-    /// accept lets the kernel give each connection to one worker. Returns the listener
-    /// failure, if any. The listener is closed when this returns.
-    #[cfg(target_os = "linux")]
-    pub fn run(self, rt: &Handle, serve: &impl Serve) -> Option<anyhow::Error> {
-        // tokio::spawn and from_std reach the runtime the connections run on.
-        let _guard = rt.enter();
-        loop {
-            match accept_blocking(&self.socket, serve) {
-                Ok(true) => {}
-                Ok(false) => break None,
-                Err(e) if is_fatal_accept(&e) => {
-                    break Some(anyhow!("listener failed: {e}"));
+    /// Waits for open connections to close within `grace`.
+    pub async fn drain(&self, grace: Duration) -> bool {
+        tokio::time::timeout(grace, self.0.closed()).await.is_ok()
+    }
+}
+
+/// Starts a connection for each raw nonblocking socket that [`PreparedListener::run`] accepts.
+/// Accepted sockets are not registered on the accept reactor, so callers can register them on the
+/// current Tokio runtime or move them to a dedicated IO shard runtime.
+pub trait Serve {
+    fn spawn_tcp(&self, stream: std::net::TcpStream, peer: SocketAddr);
+    fn spawn_unix(&self, stream: std::os::unix::net::UnixStream, peer: Option<PathBuf>);
+}
+
+enum RawSocket {
+    Tcp(AsyncFd<std::net::TcpListener>),
+    Unix(AsyncFd<std::os::unix::net::UnixListener>),
+}
+
+/// Caps one raw accept burst so the accept loop yields to check `stop` under continuous connection churn.
+const ACCEPT_BATCH_LIMIT: usize = 64;
+
+impl PreparedListener {
+    /// Accepts nonblocking connections until `stop` is true or its sender closes.
+    pub async fn run(self, mut stop: watch::Receiver<bool>, serve: &impl Serve) -> Result<()> {
+        let Self { fd, addr } = self;
+        let accept = async {
+            let socket = match addr {
+                ListenAddr::Tcp(_) => {
+                    // SAFETY: `std::net::TcpListener` owns its descriptor for the lifetime of `AsyncFd`.
+                    unsafe {
+                        AsyncFd::register_with_interest(
+                            std::net::TcpListener::from(fd),
+                            Interest::READABLE,
+                        )
+                    }
+                    .map(RawSocket::Tcp)
+                    .map_err(std::io::Error::from)
                 }
-                Err(e) if is_skipped_accept(&e) => {
-                    tracing::debug!(target: "net", "accept skipped on {}: {e}", self.addr);
-                }
-                Err(e) => {
-                    tracing::warn!(target: "net", "accept failed on {}: {e}", self.addr);
-                    std::thread::sleep(Duration::from_millis(100));
+                ListenAddr::Unix(_) => {
+                    // SAFETY: `std::os::unix::net::UnixListener` owns its descriptor for the lifetime of `AsyncFd`.
+                    unsafe {
+                        AsyncFd::register_with_interest(
+                            std::os::unix::net::UnixListener::from(fd),
+                            Interest::READABLE,
+                        )
+                    }
+                    .map(RawSocket::Unix)
+                    .map_err(std::io::Error::from)
                 }
             }
-        }
-    }
+            .with_context(|| format!("registering listener on {addr}"))?;
 
-    /// Runs the accept loop on rt until the stop flag is set. Returns the listener
-    /// failure, if any. The listener is closed when this returns.
-    #[cfg(not(target_os = "linux"))]
-    pub fn run(self, rt: &Handle, serve: &impl Serve) -> Option<anyhow::Error> {
-        let Self {
-            socket,
-            addr,
-            mut stop,
-        } = self;
-        rt.block_on(async {
             loop {
-                tokio::select! {
-                    biased;
-                    _ = stop.wait_for(|stop| *stop) => break None,
-                    res = accept_connection(&socket, serve) => match res {
-                        Ok(()) => {}
-                        Err(e) if is_fatal_accept(&e) => {
-                            break Some(anyhow!("listener failed: {e}"));
-                        }
-                        Err(e) if is_skipped_accept(&e) => {
-                            tracing::debug!(target: "net", "accept skipped on {addr}: {e}");
-                        }
-                        Err(e) => {
-                            tracing::warn!(target: "net", "accept failed on {addr}: {e}");
-                            tokio::time::sleep(Duration::from_millis(100)).await;
-                        }
+                let step = match &socket {
+                    RawSocket::Tcp(l) => {
+                        accept_batch(l, |raw| {
+                            let (stream, peer) = accept_tcp(raw)?;
+                            let _ = stream.set_nodelay(true);
+                            serve.spawn_tcp(stream, peer);
+                            Ok(())
+                        })
+                        .await
+                    }
+                    RawSocket::Unix(l) => {
+                        accept_batch(l, |raw| {
+                            let (stream, peer) = accept_unix(raw)?;
+                            serve.spawn_unix(stream, peer);
+                            Ok(())
+                        })
+                        .await
+                    }
+                };
+                match step {
+                    Ok(()) => {}
+                    Err(e) if is_fatal_accept(&e) => {
+                        return Err(e).with_context(|| format!("listener failed on {addr}"));
+                    }
+                    Err(e) if is_skipped_accept(&e) => {
+                        tracing::debug!(target: "net", "accept skipped on {addr}: {e}");
+                    }
+                    Err(e) => {
+                        tracing::warn!(target: "net", "accept failed on {addr}: {e}");
+                        tokio::time::sleep(Duration::from_millis(100)).await;
                     }
                 }
             }
+        };
+        tokio::select! {
+            biased;
+            _ = stop.wait_for(|stop| *stop) => Ok(()),
+            result = accept => result,
+        }
+    }
+}
+
+async fn accept_batch<L, F>(l: &AsyncFd<L>, mut accept_one: F) -> std::io::Result<()>
+where
+    L: AsRawFd,
+    F: FnMut(&L) -> std::io::Result<()>,
+{
+    let mut guard = l.readable().await?;
+    for _ in 0..ACCEPT_BATCH_LIMIT {
+        match guard.try_io(|inner| accept_one(inner.get_ref())) {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) if is_skipped_accept(&e) => {
+                // Readiness stays set on non-WouldBlock errors; yield so `select!` can observe `stop`.
+                drop(guard);
+                tokio::task::yield_now().await;
+                return Err(e);
+            }
+            Ok(Err(e)) => return Err(e),
+            Err(_would_block) => return Ok(()),
+        }
+    }
+    // Yield after a full burst so `select!` can observe `stop`.
+    drop(guard);
+    tokio::task::yield_now().await;
+    Ok(())
+}
+
+/// Accepts one socket with `SOCK_NONBLOCK | SOCK_CLOEXEC` in one syscall on Linux.
+/// https://man7.org/linux/man-pages/man2/accept4.2.html
+#[cfg(target_os = "linux")]
+fn accept4(listener: &impl AsRawFd) -> std::io::Result<(std::os::fd::OwnedFd, socket2::SockAddr)> {
+    use std::os::fd::{FromRawFd, OwnedFd};
+
+    // SAFETY: `accept4` initializes `addr` and writes its length into `len` on success.
+    unsafe {
+        socket2::SockAddr::try_init(|addr, len| {
+            let fd = libc::accept4(
+                listener.as_raw_fd(),
+                addr.cast::<libc::sockaddr>(),
+                len,
+                libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            );
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: `accept4` returned a fresh owned socket descriptor.
+            Ok(OwnedFd::from_raw_fd(fd))
         })
     }
 }
 
-// Linux accept() forwards pending network errors of the new connection, so only errnos
-// that prove listener state are fatal. https://man7.org/linux/man-pages/man2/accept.2.html
-// ErrorKind::Other never carries an errno. It is the wrapped rotation failure, after
-// which the listener is unregistered.
+#[cfg(target_os = "linux")]
+fn accept_tcp(l: &std::net::TcpListener) -> std::io::Result<(std::net::TcpStream, SocketAddr)> {
+    let (fd, peer) = accept4(l)?;
+    let peer = peer
+        .as_socket()
+        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EAFNOSUPPORT))?;
+    Ok((std::net::TcpStream::from(fd), peer))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn accept_tcp(l: &std::net::TcpListener) -> std::io::Result<(std::net::TcpStream, SocketAddr)> {
+    let (stream, peer) = l.accept()?;
+    stream.set_nonblocking(true)?;
+    Ok((stream, peer))
+}
+
+#[cfg(target_os = "linux")]
+fn accept_unix(
+    l: &std::os::unix::net::UnixListener,
+) -> std::io::Result<(std::os::unix::net::UnixStream, Option<PathBuf>)> {
+    let (fd, peer) = accept4(l)?;
+    let path = peer.as_pathname().map(std::path::Path::to_path_buf);
+    Ok((std::os::unix::net::UnixStream::from(fd), path))
+}
+
+#[cfg(not(target_os = "linux"))]
+fn accept_unix(
+    l: &std::os::unix::net::UnixListener,
+) -> std::io::Result<(std::os::unix::net::UnixStream, Option<PathBuf>)> {
+    let (stream, peer) = l.accept()?;
+    stream.set_nonblocking(true)?;
+    let path = peer.as_pathname().map(std::path::Path::to_path_buf);
+    Ok((stream, path))
+}
+
+// Linux accept() also reports network errors from individual connections. https://man7.org/linux/man-pages/man2/accept.2.html
 fn is_fatal_accept(e: &std::io::Error) -> bool {
-    e.kind() == std::io::ErrorKind::Other
-        || matches!(
-            e.raw_os_error(),
-            Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK)
-        )
+    matches!(
+        e.raw_os_error(),
+        Some(libc::EBADF | libc::EINVAL | libc::ENOTSOCK)
+    )
 }
 
 fn is_skipped_accept(e: &std::io::Error) -> bool {
@@ -157,49 +222,6 @@ fn is_skipped_accept(e: &std::io::Error) -> bool {
             | std::io::ErrorKind::ConnectionReset
             | std::io::ErrorKind::Interrupted
     )
-}
-
-/// Takes one connection. False means the wake descriptor stopped the loop.
-#[cfg(target_os = "linux")]
-fn accept_blocking(socket: &Socket, serve: &impl Serve) -> std::io::Result<bool> {
-    match socket {
-        Socket::Tcp(l) => match l.accept_blocking(std::net::TcpListener::accept)? {
-            None => return Ok(false),
-            Some(Accepted { stream, peer }) => {
-                stream.set_nonblocking(true)?;
-                let stream = tokio::net::TcpStream::from_std(stream)?;
-                let _ = stream.set_nodelay(true);
-                serve.spawn_tcp(stream, peer);
-            }
-        },
-        Socket::Unix(l) => match l.accept_blocking(std::os::unix::net::UnixListener::accept)? {
-            None => return Ok(false),
-            Some(Accepted { stream, peer }) => {
-                stream.set_nonblocking(true)?;
-                serve.spawn_unix(
-                    tokio::net::UnixStream::from_std(stream)?,
-                    peer.as_pathname(),
-                );
-            }
-        },
-    }
-    Ok(true)
-}
-
-#[cfg(not(target_os = "linux"))]
-async fn accept_connection(socket: &Socket, serve: &impl Serve) -> std::io::Result<()> {
-    match socket {
-        Socket::Tcp(l) => {
-            let (stream, peer) = l.accept().await?;
-            let _ = stream.set_nodelay(true);
-            serve.spawn_tcp(stream, peer);
-        }
-        Socket::Unix(l) => {
-            let (stream, peer) = l.accept().await?;
-            serve.spawn_unix(stream, peer.as_pathname());
-        }
-    }
-    Ok(())
 }
 
 #[cfg(test)]
@@ -218,19 +240,25 @@ mod tests {
     fn accept_errors_end_the_loop_only_when_the_listener_is_gone() {
         let cases = [
             Case {
-                name: "a rotation failure leaves the listener unregistered",
-                error: std::io::Error::other("listener rotation failed"),
-                fatal: true,
-                skipped: false,
-            },
-            Case {
                 name: "EBADF proves the listener descriptor is gone",
                 error: std::io::Error::from_raw_os_error(libc::EBADF),
                 fatal: true,
                 skipped: false,
             },
             Case {
-                name: "EMFILE is a limit of this worker, not of the listener",
+                name: "EINVAL means the socket is not listening",
+                error: std::io::Error::from_raw_os_error(libc::EINVAL),
+                fatal: true,
+                skipped: false,
+            },
+            Case {
+                name: "ENOTSOCK means the descriptor is not a socket",
+                error: std::io::Error::from_raw_os_error(libc::ENOTSOCK),
+                fatal: true,
+                skipped: false,
+            },
+            Case {
+                name: "EMFILE is the file descriptor limit of the process",
                 error: std::io::Error::from_raw_os_error(libc::EMFILE),
                 fatal: false,
                 skipped: false,
@@ -250,6 +278,71 @@ mod tests {
                 "{}",
                 case.name
             );
+        }
+    }
+
+    #[test]
+    fn skipped_accept_yields_so_stop_is_observed() {
+        struct Case {
+            name: &'static str,
+            errno: i32,
+        }
+        let cases = [
+            Case {
+                name: "ECONNABORTED yields to stop",
+                errno: libc::ECONNABORTED,
+            },
+            Case {
+                name: "ECONNRESET yields to stop",
+                errno: libc::ECONNRESET,
+            },
+            Case {
+                name: "EINTR yields to stop",
+                errno: libc::EINTR,
+            },
+        ];
+
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+
+        for case in cases {
+            rt.block_on(async {
+                let std_listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+                std_listener.set_nonblocking(true).unwrap();
+                let addr = std_listener.local_addr().unwrap();
+                let _client = std::net::TcpStream::connect(addr).unwrap();
+                // SAFETY: `std_listener` owns its descriptor for the lifetime of `AsyncFd`.
+                let async_fd =
+                    unsafe { AsyncFd::register_with_interest(std_listener, Interest::READABLE) }
+                        .unwrap();
+
+                let (stop_tx, mut stop_rx) = watch::channel(false);
+                let mut calls = 0usize;
+                let accept = async {
+                    loop {
+                        let step = accept_batch(&async_fd, |_| {
+                            calls += 1;
+                            if calls == 2 {
+                                stop_tx.send_replace(true);
+                            }
+                            Err(std::io::Error::from_raw_os_error(case.errno))
+                        })
+                        .await;
+                        assert!(step.is_err_and(|e| is_skipped_accept(&e)), "{}", case.name);
+                        if calls >= 10 {
+                            return "starved";
+                        }
+                    }
+                };
+                let outcome = tokio::select! {
+                    biased;
+                    _ = stop_rx.wait_for(|&s| s) => "stopped",
+                    res = accept => res,
+                };
+                assert_eq!(outcome, "stopped", "{}", case.name);
+            });
         }
     }
 }

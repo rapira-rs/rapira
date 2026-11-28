@@ -2,7 +2,7 @@ use std::{ops::Deref, path::Path, time::Duration};
 
 use http::Method;
 use http::header::{AUTHORIZATION, CONTENT_TYPE, COOKIE, HeaderValue, SET_COOKIE};
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use tests::wire::submit;
 use tests::{Resp, StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
@@ -635,6 +635,12 @@ fn uncaught_exception_after_output_worker() -> anyhow::Result<()> {
             req(&format!("/output-then-throw-worker.php?i={i}")),
         )?);
         assert_eq!(resp.status(), 200, "headers were committed by the echo");
+        assert!(resp.truncated, "uncaught throw after output must truncate");
+        assert_eq!(
+            resp.content_length, None,
+            "truncated response must omit synthesized Content-Length (got: {:?})",
+            resp.content_length
+        );
         let body = resp.body_string();
         let hello = body.find("hello");
         let uncaught = body.find(&format!("Uncaught Exception: request {i}"));
@@ -858,17 +864,6 @@ fn boot_global_object_survives_requests() -> anyhow::Result<()> {
         1,
         "the boot object must destruct exactly once, at worker exit"
     );
-    Ok(())
-}
-
-/// A truncated response must not carry a synthesized Content-Length, because its absence lets clients detect the cut.
-#[test]
-fn truncated_response_has_no_content_length_worker() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Worker, fixture("shared/output-then-throw-worker.php")).spawn();
-    let resp = drain_resp(submit(srv.addr, req("/output-then-throw-worker.php?i=1"))?);
-
-    assert!(resp.truncated, "uncaught throw after output must truncate");
-    assert_eq!(resp.content_length, None, "got: {:?}", resp.content_length);
     Ok(())
 }
 

@@ -22,6 +22,7 @@ use tests::{fixture, server_log};
 
 use crate::harness::{
     Spawn, calls, exited, http_raw, listen, logged_remote, plugin_error, scratch_dir, signal, stop,
+    wait_log_contains,
 };
 
 /// Logs a `call` record for each call and answers as the request metadata asks.
@@ -328,7 +329,7 @@ async fn each_protocol_reaches_php_over_the_wire() {
             .map(|call| call["remote"].clone())
             .collect();
         let want: Vec<Value> = if case.php {
-            vec![json!(logged_remote(&conn.peer))]
+            vec![json!(logged_remote(conn.peer))]
         } else {
             Vec::new()
         };
@@ -918,7 +919,7 @@ async fn request_facts_reach_php() {
             "{}: deadline {deadline:?} for a 60 s timeout at {wall}",
             case.name
         );
-        assert_eq!(call["remote"], logged_remote(&conn.peer), "{}", case.name);
+        assert_eq!(call["remote"], logged_remote(conn.peer), "{}", case.name);
     }
     stop(srv).await;
 }
@@ -1154,14 +1155,14 @@ async fn shutdown_joins_the_server_and_drops_every_intake_clone() {
     );
 }
 
-/// The drain grace is `[supervisor] process_control_timeout_secs` less the smaller of 5 s and half of it: 4 s gives 2 s, and 1 s gives 500 ms.
+/// The drain grace is `[server] stop_timeout_secs` less the smaller of 5 s and half of it: 4 s gives 2 s, and 1 s gives 500 ms.
 #[tokio::test]
 async fn drain_waits_for_calls_within_the_grace() {
     struct Case {
         name: &'static str,
         /// PHP answers the call this long after the stop. With None, PHP holds the call past the grace.
         answer_after: Option<Duration>,
-        process_control_timeout_secs: u64,
+        stop_timeout_secs: u64,
         grpc_status: Option<&'static str>,
         /// A text of the plugin error. None when the plugin stops clean.
         shutdown: Option<&'static str>,
@@ -1170,14 +1171,14 @@ async fn drain_waits_for_calls_within_the_grace() {
         Case {
             name: "a call that ends inside the grace completes",
             answer_after: Some(Duration::from_millis(100)),
-            process_control_timeout_secs: 4,
+            stop_timeout_secs: 4,
             grpc_status: Some("0"),
             shutdown: None,
         },
         Case {
             name: "a call past the grace is cut",
             answer_after: None,
-            process_control_timeout_secs: 1,
+            stop_timeout_secs: 1,
             grpc_status: None,
             shutdown: Some("grpc drain timed out"),
         },
@@ -1185,8 +1186,8 @@ async fn drain_waits_for_calls_within_the_grace() {
     for case in cases {
         let srv = Spawn::grpc(fixture("grpc/unary-worker.php"))
             .toml(&format!(
-                "[supervisor]\nprocess_control_timeout_secs = {}",
-                case.process_control_timeout_secs
+                "[server]\nstop_timeout_secs = {}",
+                case.stop_timeout_secs
             ))
             .json_log()
             .spawn();
@@ -1231,15 +1232,18 @@ async fn drain_waits_for_calls_within_the_grace() {
     }
 }
 
-/// Source: the `StaticChecker` docs. `shutdown` only sets NOT_SERVING, and a `Watch` stream ends when its service is removed.
+/// Both an open Watch and a final Watch report NOT_SERVING and end within the grace period.
 #[tokio::test]
 async fn drain_ends_health_watch_streams() {
-    // process_control_timeout_secs = 4 gives a drain grace of 2 s.
+    // A stop timeout of 4 s gives a drain grace of 2 s.
     let grace = Duration::from_secs(2);
     let srv = Spawn::grpc(wire_worker())
-        .toml("[supervisor]\nprocess_control_timeout_secs = 4")
+        .toml("[server]\nstop_timeout_secs = 4")
         .json_log()
         .spawn();
+    let mut last = Conn::open(&listen(&srv), Wire::Http1)
+        .await
+        .expect("connect");
     let mut conn = Conn::open(&listen(&srv), Wire::H2).await.expect("connect");
     let watch = conn
         .request(
@@ -1256,19 +1260,39 @@ async fn drain_ends_health_watch_streams() {
 
     let started = Instant::now();
     signal(srv.pid(), libc::SIGQUIT);
-    let (srv, rest) = tokio::join!(exited(srv), body.collect());
+    assert!(wait_log_contains(&srv, "draining open connections", grace));
+    let last = last.send(
+        Method::POST,
+        "/grpc.health.v1.Health/Watch",
+        &[("content-type", "application/connect+proto")],
+        b"\0\0\0\0\0",
+    );
+    let (srv, rest, last) = tokio::join!(exited(srv), body.collect(), last);
     assert_eq!(plugin_error(&srv), None);
     assert!(
         started.elapsed() < grace / 2,
         "took {:?}",
         started.elapsed()
     );
-    let trailers = rest.unwrap().trailers().cloned().unwrap_or_default();
+    let rest = rest.unwrap();
+    let trailers = rest.trailers().cloned().unwrap_or_default();
     assert_eq!(
         trailers.get("grpc-status").map(|v| v.as_bytes()),
         Some(&b"0"[..]),
         "{trailers:?}"
     );
+    assert_eq!(&rest.to_bytes()[..], b"\0\0\0\0\x02\x08\x02", "NOT_SERVING");
+    let last = last.expect("the final Watch ends");
+    assert_eq!(last.status, 200);
+    assert_eq!(last.field("connection"), Some("close"));
+    let frames = tests::grpc::envelopes(&last.body);
+    let [status, end] = &frames[..] else {
+        panic!("{frames:?}")
+    };
+    assert_eq!((status.flags, &status.message[..]), (0, &b"\x08\x02"[..]));
+    assert_eq!(end.flags, 2);
+    let end: Value = serde_json::from_slice(&end.message).unwrap();
+    assert!(end.is_object() && end.get("error").is_none(), "{end}");
 }
 
 enum Next {
@@ -1294,19 +1318,8 @@ fn next_frame(stream: &mut TcpStream) -> Next {
     }
 }
 
-/// A silent peer gets a PING after `keepalive_interval_secs` without a read, and the listener closes the connection when the PING has no ACK within `keepalive_timeout_secs`. With 1 s each, both events come within the 4 s read timeout; the 10 s defaults miss it. https://www.rfc-editor.org/rfc/rfc9113#section-6.7
-#[test]
-fn keepalive_pings_a_silent_peer_and_closes_it() {
-    const SETTINGS: u8 = 0x4;
-    const PING: u8 = 0x6;
-    const ACK: u8 = 0x1;
-    let srv = Spawn::grpc(wire_worker())
-        .grpc_extra("keepalive_interval_secs = 1\nkeepalive_timeout_secs = 1")
-        .spawn();
-    let ListenAddr::Tcp(addr) = listen(&srv) else {
-        panic!("the grpc listener of Spawn::grpc is tcp");
-    };
-    let mut stream = TcpStream::connect(addr).expect("connect");
+fn idle_h2(srv: &crate::harness::Server) -> TcpStream {
+    let mut stream = TcpStream::connect(srv.addr).expect("connect");
     stream
         .set_read_timeout(Some(Duration::from_secs(4)))
         .expect("read timeout");
@@ -1317,12 +1330,48 @@ fn keepalive_pings_a_silent_peer_and_closes_it() {
     loop {
         match next_frame(&mut stream) {
             Next::Frame {
-                kind: SETTINGS,
-                flags,
-            } if flags & ACK == 0 => stream
+                kind: 0x4,
+                flags: 0,
+            } => stream
                 .write_all(b"\0\0\0\x04\x01\0\0\0\0")
                 .expect("acknowledge the server SETTINGS"),
-            Next::Frame { kind: PING, flags } if flags & ACK == 0 => break,
+            Next::Frame {
+                kind: 0x4,
+                flags: 1,
+            } => return stream,
+            Next::Frame { .. } => {}
+            Next::Closed => panic!("the listener closed the connection before the SETTINGS ACK"),
+        }
+    }
+}
+
+#[test]
+fn drain_sends_goaway_to_an_idle_h2_connection_without_a_request() {
+    let srv = Spawn::grpc(wire_worker()).spawn();
+    let mut stream = idle_h2(&srv);
+    signal(srv.pid(), libc::SIGQUIT);
+    loop {
+        match next_frame(&mut stream) {
+            Next::Frame { kind: 0x7, .. } => break,
+            Next::Frame { .. } => {}
+            Next::Closed => panic!("the listener closed the connection before GOAWAY"),
+        }
+    }
+}
+
+/// A silent peer gets a PING after `keepalive_interval_secs` without a read, and the listener closes the connection when the PING has no ACK within `keepalive_timeout_secs`. With 1 s each, both events come within the 4 s read timeout; the 10 s defaults miss it. https://www.rfc-editor.org/rfc/rfc9113#section-6.7
+#[test]
+fn keepalive_pings_a_silent_peer_and_closes_it() {
+    let srv = Spawn::grpc(wire_worker())
+        .grpc_extra("keepalive_interval_secs = 1\nkeepalive_timeout_secs = 1")
+        .spawn();
+    let mut stream = idle_h2(&srv);
+    loop {
+        match next_frame(&mut stream) {
+            Next::Frame {
+                kind: 0x6,
+                flags: 0,
+            } => break,
             Next::Frame { .. } => {}
             Next::Closed => panic!("the listener closed the connection before a PING"),
         }

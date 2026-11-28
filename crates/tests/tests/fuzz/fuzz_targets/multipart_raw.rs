@@ -1,12 +1,11 @@
-//! Passes raw bytes through the multipart parser of the dispatcher mode. The bytes before the first LF are the Content-Type value and the rest is the body. The calls follow parse_multipart in crates/plugins/http/src/handler.rs. The target parses the body once as one part and once split into parts, and the two results must agree.
+//! Passes raw bytes through the multipart parser of the dispatcher mode. The bytes before the first LF are the Content-Type value and the rest is the body. The calls follow `read_request_body` in `crates/plugins/http/src/intake/mod.rs`. The target parses the body once as one part, once split into parts and once byte by byte, and the results must agree.
 
 #![no_main]
 
 use std::sync::LazyLock;
 
-use bytes::Bytes;
-use rapira_http::check::Rejection;
-use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart, parse};
+use http::StatusCode;
+use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart};
 
 /// Small limits, so that a 4 KiB input can go over each count and size limit.
 static LIMITS: LazyLock<Limits> = LazyLock::new(|| Limits {
@@ -19,11 +18,8 @@ static LIMITS: LazyLock<Limits> = LazyLock::new(|| Limits {
 });
 
 /// A malformed body gives 400 and a body over a limit gives 413. An I/O error gives 500, which the allowed list refuses.
-fn rejected(Rejection { status, reason }: Rejection, allowed: &[u16]) {
-    assert!(
-        allowed.contains(&status.as_u16()),
-        "status {status}: {reason}"
-    );
+fn rejected(status: StatusCode, allowed: &[u16]) {
+    assert!(allowed.contains(&status.as_u16()), "status {status}");
 }
 
 /// Asserts one entry per name, with names compared byte for byte, a value in each entry, and at most max_part_headers field lines in all.
@@ -59,14 +55,16 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
         return;
     }
     let l = &*LIMITS;
-    let whole = parse(&[Bytes::copy_from_slice(body)], &b, l);
+    let whole = rapira_fuzz::parse(&[body], &b, l);
     let parts = rapira_fuzz::split(body);
-    let lens: Vec<usize> = parts.iter().map(Bytes::len).collect();
+    let lens: Vec<usize> = parts.iter().map(|p| p.len()).collect();
     rapira_fuzz::assert_same_parse(
         format_args!("parts {lens:?}"),
         &whole,
-        &parse(&parts, &b, l),
+        &rapira_fuzz::parse(&parts, &b, l),
     );
+    let single: Vec<&[u8]> = body.chunks(1).collect();
+    rapira_fuzz::assert_same_parse("single bytes", &whole, &rapira_fuzz::parse(&single, &b, l));
     let form = match whole {
         Ok(form) => form,
         Err(e) => return rejected(e, &[400, 413]),
@@ -74,14 +72,18 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     assert!(form.fields.len() + form.files.len() <= l.max_parts);
     assert!(form.files.len() <= l.max_files);
     for f in &form.fields {
-        assert!(!f.name.is_empty());
-        assert!(f.value.len() <= l.max_field_size);
-        assert_grouped(&f.headers, l);
+        assert!(!form.field_name(f).is_empty());
+        assert!(form.field_value(f).len() <= l.max_field_size);
+        let headers: Vec<HeaderValues> =
+            form.field_headers(f).map(|h| h.to_owned_values()).collect();
+        assert_grouped(&headers, l);
     }
     for f in &form.files {
-        assert!(!f.name.is_empty());
+        assert!(!form.file_name(f).is_empty());
         assert!(f.size <= l.max_file_size);
-        assert_grouped(&f.headers, l);
+        let headers: Vec<HeaderValues> =
+            form.file_headers(f).map(|h| h.to_owned_values()).collect();
+        assert_grouped(&headers, l);
         let len = std::fs::metadata(&f.file.path).expect("spooled file").len();
         assert_eq!(len, f.size, "spooled file size");
     }

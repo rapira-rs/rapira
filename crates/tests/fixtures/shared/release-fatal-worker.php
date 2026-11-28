@@ -31,7 +31,7 @@ $handler = static function (): void {
         echo 'buffered';
         return;
     }
-    echo 'ok counter=' . Counter::$n . ' pid=' . getmypid();
+    echo 'ok counter=' . Counter::$n;
 };
 
 while (\Rapira\handle_request($handler)) {

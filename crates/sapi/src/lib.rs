@@ -1,27 +1,33 @@
 pub mod bindings;
 
 pub mod callbacks;
-mod classic_worker;
 mod context;
 mod diagnostics;
+mod engine;
+mod env;
 pub mod exchange;
+pub mod exit;
 mod log;
 mod module;
 pub mod plugin;
-pub mod quota;
-mod rapira_worker;
-pub mod scoreboard;
+pub mod pool;
+pub mod queue;
+mod reload;
 mod start;
 pub mod stream;
 pub mod types;
+mod watchdog;
 pub mod work;
+mod worker;
 pub mod zend;
 
 use std::ffi::c_int;
 
 pub use bindings::*;
-pub use start::{PhpModule, Rapira, StartedWorker, boot_master, linked_php_version};
-pub use types::{Addr, Frame, Request};
+pub use context::HttpIdentity;
+pub use engine::{Engine, linked_php_version, zts};
+pub use types::{Addr, CgiExchange, CgiResponder, Request};
+pub use watchdog::block_timer_signal;
 
 // bindgen names the Zend SUCCESS and FAILURE constants differently across php-src versions, so the values are hardcoded.
 pub const SUCCESS: c_int = 0;
@@ -29,36 +35,42 @@ pub const FAILURE: c_int = -1;
 
 // The request shims return RAPIRA_OK, RAPIRA_BAILOUT or RAPIRA_THROW (rapira_sapi.h).
 unsafe extern "C" {
-    pub fn rapira_finish_output() -> c_int;
-    pub fn rapira_init_call_stack();
-    pub fn rapira_clear_last_error();
-    pub fn rapira_request_teardown() -> c_int;
-    pub fn rapira_process_init();
-    pub fn rapira_child_init();
-    pub fn rapira_release_temporary_streams();
+    pub(crate) fn rapira_clear_last_error();
+    pub(crate) fn rapira_request_teardown() -> c_int;
+    pub(crate) fn rapira_release_temporary_streams();
     // Holds the shutdown functions of the boot until the cycle ends (module.c).
-    pub fn rapira_stash_boot_shutdown_functions();
-    pub fn rapira_request_activate() -> c_int;
-    // Registers the post readers that give PHP the buffered body. It runs after every MINIT (module.c).
-    pub fn rapira_register_post_reader();
-    pub fn rapira_request_shutdown() -> c_int;
+    pub(crate) fn rapira_stash_boot_shutdown_functions();
+    pub(crate) fn rapira_request_activate() -> c_int;
+    // Registers the default post reader and the activate hook that give PHP the buffered body. It runs after MINIT (module.c).
+    pub(crate) fn rapira_register_post_reader();
+    pub(crate) fn rapira_request_shutdown() -> c_int;
     // rapira_receive_untimed disarms the execution timer while the app waits in receive(). rapira_receive_timed arms it again with the captured per-cycle budget when the host hands out a unit (module.c).
-    pub fn rapira_receive_untimed();
-    pub fn rapira_receive_timed();
+    pub(crate) fn rapira_receive_untimed();
+    pub(crate) fn rapira_receive_timed();
     // Creates the object of a unit in rv and returns the address of its held word, a rapira_held (rapira_dispatcher.c).
-    pub fn rapira_unit_object(rv: *mut zval, ce: *mut zend_class_entry) -> *mut std::ffi::c_void;
+    pub(crate) fn rapira_unit_object(
+        rv: *mut zval,
+        ce: *mut zend_class_entry,
+    ) -> *mut std::ffi::c_void;
     // A C shim (module.c) over rapira_rs_ub_write. It raises the client-abort bailout from C, so the longjmp does not cross the Rust catch_unwind frame.
-    pub fn rapira_ub_write(str_: *const std::os::raw::c_char, len: usize) -> usize;
+    pub(crate) fn rapira_ub_write(str_: *const std::os::raw::c_char, len: usize) -> usize;
 
-    pub fn rapira_run_handler(fci: *mut zend_fcall_info, fcc: *mut zend_fcall_info_cache) -> c_int;
+    pub(crate) fn rapira_run_handler(
+        fci: *mut zend_fcall_info,
+        fcc: *mut zend_fcall_info_cache,
+    ) -> c_int;
     // Returns -1 with no OPcache. Otherwise it returns a set of flags: 1 when OPcache serves this app instance, 2 when a restart is pending, 4 when a restart runs now. Writes last_restart_time (module.c).
-    pub fn rapira_opcache_state(last_restart: *mut zend_long) -> c_int;
+    pub(crate) fn rapira_opcache_state(last_restart: *mut zend_long) -> c_int;
     // Calls opcache_reset() (module.c).
-    pub fn rapira_opcache_reset();
+    pub(crate) fn rapira_opcache_reset();
     // Returns a permanent interned string, which PHP never refcounts or frees (wrapper.c).
-    pub fn rapira_permanent_string(s: *const std::os::raw::c_char, len: usize) -> *mut zend_string;
+    pub(crate) fn rapira_permanent_string(
+        s: *const std::os::raw::c_char,
+        len: usize,
+    ) -> *mut zend_string;
 
-    pub static mut rapira_module_entry: zend_module_entry;
+    pub(crate) static mut rapira_module_entry: zend_module_entry;
     // OPcache calls it in the process that schedules a restart (Zend/zend.h).
-    pub static mut zend_accel_schedule_restart_hook: Option<unsafe extern "C" fn(reason: c_int)>;
+    pub(crate) static mut zend_accel_schedule_restart_hook:
+        Option<unsafe extern "C" fn(reason: c_int)>;
 }

@@ -13,7 +13,7 @@ try {
         ++$sequence;
         $path = $ex->getRequest()->target;
         if ($path === '/state') {
-            $ex->writeBody(getmypid() . ":{$sequence}:{$result}");
+            $ex->writeBody("{$sequence}:{$result}");
             continue;
         }
         $length = match ($path) {

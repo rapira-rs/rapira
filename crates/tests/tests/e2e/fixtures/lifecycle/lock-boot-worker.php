@@ -5,12 +5,23 @@ use Rapira\Exception\ClosedException;
 
 $lock = fopen(__DIR__ . '/boot.lock', 'c');
 if (!flock($lock, LOCK_EX | LOCK_NB)) {
-    throw new RuntimeException('boot lock held');
+    \Rapira\log('boot lock held');
+    return;
+}
+if (getenv('HOLD_BOOT') === '1') {
+    \Rapira\log('waiting at boot');
+    sleep(30);
 }
 $d = \Rapira\get_dispatcher();
 try {
     while (true) {
         $ex = $d->receive();
+        if ($ex->getRequest()->target === '/hold') {
+            \Rapira\log('held');
+            while (!file_exists(__DIR__ . '/release')) {
+                usleep(10000);
+            }
+        }
         $ex->writeHead(200, ['content-type' => ['text/plain']]);
         $ex->writeBody('ok');
     }

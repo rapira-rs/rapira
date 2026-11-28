@@ -9,7 +9,7 @@ unsafe extern "C" fn ini_defaults(configuration_hash: *mut HashTable) {
     for (name, value) in [
         (c"display_errors", c"0"),
         (c"log_errors", c"1"),
-        // The execution timer also counts the CPU time of the IO threads, so the hard timeout can end the worker process while PHP waits.
+        // An NTS hard timeout can end the worker while PHP waits in a native call.
         (c"hard_timeout", c"0"),
         // An app instance holds the OPcache usage lock for its whole life, so after this timeout OPcache kills the workers that hold it (kill_all_lockers in ext/opcache/ZendAccelerator.c).
         (c"opcache.force_restart_timeout", c"0"),
@@ -45,7 +45,7 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         ub_write: Some(rapira_ub_write),
         flush: None,
         get_stat: None,
-        getenv: None,
+        getenv: Some(crate::env::getenv),
         header_handler: None,
         send_headers: Some(callbacks::send_headers),
         send_header: None,
@@ -77,7 +77,7 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         additional_functions: null(),
         input_filter_init: None,
         sapi_error: Some(zend_error),
-        #[cfg(php85)]
+        #[cfg(not(php84))]
         pre_request_init: None,
     }
 }

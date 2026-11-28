@@ -1,4 +1,5 @@
 use std::env;
+use std::path::Path;
 use std::process::Command;
 
 use anyhow::Context;
@@ -23,6 +24,13 @@ pub fn discover() -> anyhow::Result<Php> {
         .split_whitespace()
         .map(|s| s.trim_start_matches("-I").to_string())
         .collect();
+    if let Some(config) = includes
+        .iter()
+        .map(|dir| Path::new(dir).join("main/php_config.h"))
+        .find(|path| path.is_file())
+    {
+        println!("cargo:rerun-if-changed={}", config.display());
+    }
     let prefix: String = php_config("--prefix")?;
     let version: PhpVersion = parse_version(&php_config("--version")?)?;
     Ok(Php {

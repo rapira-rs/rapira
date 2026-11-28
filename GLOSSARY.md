@@ -1,37 +1,29 @@
 # Rapira
 
-Rapira is a PHP application server. A Rust host embeds the PHP interpreter in forked worker processes and hands them HTTP and gRPC work. This glossary names the concepts that the host, the PHP contract and the docs share.
+Rapira is a PHP application server. One server process runs the PHP workers that serve HTTP exchanges and gRPC calls.
 
-## Processes
-
-**Master**:
-The single parent process. It binds the listeners, forks the workers of every pool and supervises them.
-_Avoid_: parent process, daemon, main process
+## Workers and pools
 
 **Worker**:
-One forked process with one PHP interpreter. It serves the units of one pool.
-_Avoid_: child, PHP process; never the app code or a thread
+One thread with one PHP interpreter. It serves units from one pool.
+_Avoid_: child, worker process, app
 
 **Pool**:
-The worker set of one plugin, with its entrypoint, mode and process count.
+The workers of one plugin, with a common entrypoint, mode and intake.
 _Avoid_: worker group, cluster, farm
 
 **Recycle**:
-The replacement of the app instance inside a worker by a fresh one, after max requests or a reload. The worker process stays.
+The replacement of an app instance on the same worker thread.
 _Avoid_: restart, respawn, reboot
 
 **Drain**:
-The end of a worker. It pulls no new units, finishes the units it holds within a grace period, then exits.
+The part of a server stop when listeners close and open connections have time to finish.
 _Avoid_: graceful shutdown, graceful stop, wind down
-
-**Scoreboard**:
-The shared record of every worker's state and counters, one slot per worker.
-_Avoid_: status table, stats, registry
 
 ## Sides of the boundary
 
 **Host**:
-The Rust side of the boundary: the master, and in a worker everything that is not the app.
+The part of the server that runs the workers and delivers units to the app.
 _Avoid_: runtime, engine, native side, SAPI (for the side as a whole)
 
 **App**:
@@ -78,11 +70,11 @@ The grpc unit: one invocation of one method, unary or streaming.
 _Avoid_: request, RPC (as a noun for the unit), exchange
 
 **Dispatcher**:
-The per-plugin object from which the app receives units in dispatcher mode. One per process.
+The object from which an app receives units in dispatcher mode. Each worker has its own dispatcher.
 _Avoid_: queue, receiver, handler, server
 
 **Intake**:
-The bounded queue of a worker between the plugin and the app. Units wait here until the app pulls them.
+The bounded queue of a pool. A unit waits here until a worker pulls it.
 _Avoid_: worker queue, job queue, mailbox, backlog (that is the kernel listen queue)
 
 **Pull**:
@@ -101,7 +93,7 @@ One run of the entrypoint in a worker, from startup to shutdown. In classic mode
 _Avoid_: request (the PHP SAPI sense), run, iteration, session, the garbage collector's cycle
 
 **Boot**:
-The phase before serving. For the server: the master binds listeners and loads schemas before the fork. For a cycle: the run of the entrypoint before the app's first pull. A fatal error in the boot is a boot failure, not an app failure.
+For the server, preparation of the listeners, schemas and workers before serving. For an app, the run of its entrypoint before the first pull.
 _Avoid_: startup, bootstrap, warm-up, init
 
 **Shed**:

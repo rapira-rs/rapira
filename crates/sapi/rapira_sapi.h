@@ -11,20 +11,11 @@
 #include <main/php_variables.h>
 // clang-format on
 
-// ZTS comes from the main/php_config.h of the headers this build compiles against.
-#ifdef ZTS
-#error "rapira is NTS-only, but these PHP headers are from a thread-safe (ZTS) build. Rebuild PHP without --enable-zts, or point PHP_CONFIG at an NTS php-config."
-#endif
-// A park of the PHP thread pauses the setitimer() execution timer (stream.rs). This option replaces that timer with a POSIX timer: https://github.com/php/php-src/blob/php-8.5.12/Zend/Zend.m4#L446-L455
-#ifdef ZEND_MAX_EXECUTION_TIMERS
-#error "rapira needs the setitimer() execution timer, but these PHP headers enable ZEND_MAX_EXECUTION_TIMERS. Rebuild PHP without --enable-zend-max-execution-timers."
-#endif
-
 #ifdef HAVE_PHP_SESSION
 #include <ext/session/php_session.h>
 #endif
-#include <ext/json/php_json.h>
 #include <Zend/zend_observer.h>
+#include <ext/json/php_json.h>
 #include <ext/spl/spl_exceptions.h>
 #include <ext/standard/head.h>
 
@@ -33,38 +24,78 @@
 #define RAPIRA_VERSION "0.0.0-dev"
 #endif
 
-// array_init_size, smart_str_free and zend_array_is_list need C wrappers for Rust.
+// array_init_size, smart_str_free and zend_array_is_list need C wrappers for
+// Rust.
 void rapira_array_init(zval *zv, uint32_t size);
 void rapira_smart_str_free(smart_str *s);
 bool rapira_array_is_list(HashTable *ht);
-// ZVAL_OBJ_COPY is a macro; the shim looks up the case called name in the enum class ce and writes it into dst with a new reference
+// ZVAL_OBJ_COPY is a macro; the shim looks up the case called name in the enum
+// class ce and writes it into dst with a new reference
 void rapira_zval_enum_case(zval *dst, zend_class_entry *ce, const char *name);
 // ZVAL_STRINGL is a macro; the shim writes a new non-interned string into zv
 void rapira_zval_stringl(zval *zv, const char *s, size_t len);
-// ZVAL_NEW_STR and ZVAL_EMPTY_STRING are macros; the shim writes a new string of
-// len bytes into zv and returns its buffer for the caller to fill. For len 0 it
-// writes the empty string and returns NULL.
+// ZVAL_NEW_STR and ZVAL_EMPTY_STRING are macros; the shim writes a new string
+// of len bytes into zv and returns its buffer for the caller to fill. For len 0
+// it writes the empty string and returns NULL.
 char *rapira_zval_string_alloc(zval *zv, size_t len);
-// zend_string_addref and zend_string_release are inline; the shims add and
-// release one reference, and an interned string gets neither
-void rapira_zstr_addref(zend_string *s);
-void rapira_zstr_release(zend_string *s);
-// ZVAL_STRINGL_FAST is a macro; the shim registers the variable called name with the string value val through php_register_known_variable.
-// The name must be non-empty and non-numeric, have no NUL, ' ', '.' or '[', and not be "this" or "GLOBALS".
+// ZVAL_STRINGL_FAST is a macro; the shim registers the variable called name
+// with the string value val through php_register_known_variable. The name must
+// be non-empty and non-numeric, have no NUL, ' ', '.' or '[', and not be "this"
+// or "GLOBALS".
 void rapira_register_known_stringl(const char *name, size_t name_len,
                                    const char *val, size_t val_len,
                                    zval *track_vars_array);
-// ZVAL_STRINGL_FAST is a macro; the shim stores the string value val in the hash table ht under key through zend_hash_update.
+// ZVAL_STRINGL_FAST is a macro; the shim stores the string value val in the
+// hash table ht under key through zend_hash_update.
 void rapira_hash_update_stringl(HashTable *ht, zend_string *key,
                                 const char *val, size_t val_len);
+// Returns a permanent interned string, which PHP never refcounts or frees.
+zend_string *rapira_permanent_string(const char *s, size_t len);
 
-// The Mode enum of rapira_config (crates/config/src/pool.rs). start_worker (start.rs) maps it to these values. Keep both in sync.
+// The PHP globals struct of the calling thread. The code reads each global
+// through these accessors, so one body fits NTS and ZTS.
+sapi_globals_struct *rapira_sg(void);
+zend_executor_globals *rapira_eg(void);
+php_core_globals *rapira_pg(void);
+zend_compiler_globals *rapira_cg(void);
+
+// The signal and the interval timer of zend_set_timeout.
+// https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_execute_API.c#L1656-L1697
+#ifdef ZEND_MAX_EXECUTION_TIMERS
+#define RAPIRA_TIMER_SIGNAL SIGRTMIN
+#elif defined(HAVE_SETITIMER)
+#if defined(__CYGWIN__) || defined(__PASE__) ||                                \
+    (defined(__aarch64__) && defined(__APPLE__))
+#define RAPIRA_TIMER_SIGNAL SIGALRM
+#define RAPIRA_ZEND_ITIMER ITIMER_REAL
+#else
+#define RAPIRA_TIMER_SIGNAL SIGPROF
+#define RAPIRA_ZEND_ITIMER ITIMER_PROF
+#endif
+#endif
+
+// The saved execution timer of this thread: a POSIX timer with
+// ZEND_MAX_EXECUTION_TIMERS, else the setitimer timer of zend_set_timeout.
+#if defined(ZEND_MAX_EXECUTION_TIMERS)
+typedef struct itimerspec rapira_timer;
+#else
+typedef struct itimerval rapira_timer;
+#endif
+// Stops the timer and writes its old value to saved. Returns true only for a
+// timer with time left. Call it on a PHP thread.
+bool rapira_timer_pause(rapira_timer *saved);
+// Arms the timer again with the value that rapira_timer_pause saved.
+void rapira_timer_resume(const rapira_timer *saved);
+// Moves the execution timer of this thread to the CPU clock of the thread, if
+// the pool of the thread uses the cpu clock. RINIT calls it.
+void rapira_timer_use_cpu_clock(void);
+
+// The worker maps rapira_config::Mode to these values.
 enum {
     RAPIRA_MODE_CLASSIC = 0,
     RAPIRA_MODE_WORKER = 1,
     RAPIRA_MODE_DISPATCHER = 2,
 };
-extern int rapira_mode;
 
 // The plugin record. Each plugin defines one; its register function assigns the
 // classes in MINIT.
@@ -73,29 +104,32 @@ typedef struct {
     zend_class_entry *info;
     // the error of receive() and tryReceive() while a unit is unfinalized
     const char *busy;
-    // RSHUTDOWN calls it on the PHP thread before the memory manager frees the
-    // request strings. The plugin waits until its IO thread holds no request
-    // string, then releases the strings. It is NULL when the plugin lends
-    // nothing.
-    void (*quiesce)(void);
 } rapira_plugin;
-// The plugin of this worker's pool. In dispatcher mode, start_worker
-// (start.rs) writes these globals once before the PHP thread starts.
-// NULL outside dispatcher mode.
-extern const rapira_plugin *rapira_plugin_current;
-// Plugin::name() of this worker's pool, without a NUL terminator.
-extern const char *rapira_plugin_name;
-extern size_t rapira_plugin_name_len;
+
+bool rapira_zts(void);
+bool rapira_has_execution_timers(void);
+void rapira_lock_timeouts(void);
+// Each PHP thread calls start before its first request and end after its last
+// request. The plugin and the name must live until the thread ends. The name
+// has name_len bytes. cpu_clock is true when the pool of the thread sets
+// execution_clock to cpu.
+void rapira_thread_start(int mode, const rapira_plugin *plugin,
+                         const char *name, size_t name_len, bool cpu_clock);
+void rapira_thread_end(void);
+void rapira_set_dispatcher(int mode, const rapira_plugin *plugin,
+                           const char *name, size_t name_len);
+int rapira_current_mode(void);
+// The record is NULL outside dispatcher mode.
+const rapira_plugin *rapira_current_plugin(void);
 // A plugin register function calls it after it assigns the classes of the
 // record. It gives the shared handlers to the Dispatcher and DispatcherInfo
 // classes.
 void rapira_plugin_wire(const rapira_plugin *plugin);
-// The plugin register functions that MINIT calls after the base classes, in
-// array order; boot_master (start.rs) writes them once in the master.
+// The engine sets these functions before MINIT registers the plugin classes.
 extern void (*const *rapira_plugin_registers)(void);
 extern size_t rapira_plugin_register_count;
 
-// Return values of rapira_rs_handle_request (rapira_worker.rs);
+// Return values of rapira_rs_handle_request (worker.rs);
 // rapira_dispatcher.c reads them.
 enum {
     RAPIRA_HANDLE_STOP = 0,
@@ -113,8 +147,10 @@ void rapira_dispatcher_release(void);
 void rapira_dispatcher_forget(void);
 
 // rust glue
-// the seal of the current CGI reply (rapira_worker.rs)
+// the seal of the current CGI reply (worker.rs)
 extern void rapira_rs_finish_response(void);
+// Drops the putenv() writes of the PHP request (env.rs).
+extern void rapira_rs_env_clear(void);
 
 // The unit behind a Work object. It is the first field of the C prefix of every
 // class that receive() hands out. Rust owns the two words (HeldPtr in work.rs);
@@ -135,19 +171,21 @@ static zend_always_inline rapira_held *rapira_held_of(zend_object *obj) {
 // reclaims the unit (work.rs)
 extern void rapira_rs_held_drop(rapira_held *held);
 
-// The plugin takes one value that the generator of the unit yielded. It returns
-// false with an exception pending when the plugin refused the value. It returns
-// false with no exception when the host closed the unit, so the value has no
-// destination.
-typedef bool (*rapira_stream_send_t)(const rapira_held *held, zval *value);
+// Shared C prefix for every dispatcher unit class (HTTP Exchange, gRPC
+// UnaryCall, gRPC ServerStreamingCall). zend_object_alloc zeroes the prefix,
+// so held is None and memos start as IS_UNDEF.
+typedef struct {
+    rapira_held held;
+    zval memos[2];
+    zend_object std;
+} rapira_unit_obj;
+static_assert(offsetof(rapira_unit_obj, held) == 0,
+              "the held word must be the first field of rapira_unit_obj");
 
-// Runs a generator to its end and gives each yielded value to send
-// (rapira_stream.c). Returns true when the generator ended and the unit is
-// open. Returns false when an exception is pending or the host closed the unit.
-// An exit() is a pending exception too.
-bool rapira_stream_run_generator(zend_object *generator,
-                                 const rapira_held *held,
-                                 rapira_stream_send_t send);
+static zend_always_inline rapira_unit_obj *
+rapira_unit_from(zend_object *obj) {
+    return (rapira_unit_obj *)((char *)obj - offsetof(rapira_unit_obj, std));
+}
 
 // The counts of a DispatcherInfo object are before zend_object std:
 // https://www.zend.com/resources/php-extensions/embedding-c-data-into-php-objects
@@ -157,8 +195,10 @@ typedef struct {
     zend_object std;
 } rapira_dispatcher_info_obj;
 
-// Class entries of the base stubs; rapira_register_classes assigns them in MINIT, before the plugin classes register and before any object of these classes can exist.
-// Rust binds the entries it reads as static muts (allowed_bindings.rs); the others are C-only.
+// Class entries of the base stubs; rapira_register_classes assigns them in
+// MINIT, before the plugin classes register and before any object of these
+// classes can exist. Rust binds the entries it reads as static muts
+// (allowed_bindings.rs); the others are C-only.
 extern zend_class_entry *rapira_ce_throwable;
 extern zend_class_entry *rapira_ce_work;
 extern zend_class_entry *rapira_ce_dispatcher;
@@ -195,8 +235,20 @@ rapira_prop_str_or_null(zend_class_entry *ce, zend_object *obj,
         zend_update_property_null(ce, obj, name, name_len);
     }
 }
-// called from start.rs after php_module_startup. It registers the post readers
-// that hand the buffered body to PHP (module.c)
+// writes the zval property name, or null when value is NULL
+static zend_always_inline void
+rapira_prop_obj_or_null(zend_class_entry *ce, zend_object *obj,
+                        const char *name, size_t name_len, zval *value) {
+    if (value) {
+        zend_update_property(ce, obj, name, name_len, value);
+    } else {
+        zend_update_property_null(ce, obj, name, name_len);
+    }
+}
+// Binds create_object and the shared rapira_unit_obj handlers for a unit class.
+void rapira_unit_wire(zend_class_entry *ce);
+// Call after php_module_startup to register the POST reader and the activation
+// hook for buffered request bodies.
 void rapira_register_post_reader(void);
 
 // The Dispatcher, DispatcherInfo and Work methods that every plugin shares, and

@@ -57,27 +57,21 @@ pub(super) struct SplitHead {
     pub(super) declared_cl: Option<u64>,
 }
 
-/// Takes content-length out as the declared length; the plugin drops the hop-by-hop fields.
+/// Takes content-length out as the declared length; the HTTP writer drops the hop-by-hop fields.
 pub(super) fn split_framing(mut headers: HeaderMap) -> Result<SplitHead, &'static CStr> {
-    let mut lines = headers.get_all(http::header::CONTENT_LENGTH).iter();
-    let first = lines.next();
-    if lines.next().is_some() {
-        return Err(c"content-length may not repeat");
-    }
-    let declared_cl = first.and_then(|v| parse_content_length(v.as_bytes()));
-    headers.remove(http::header::CONTENT_LENGTH);
+    let declared_cl = {
+        let mut lines = headers.get_all(&http::header::CONTENT_LENGTH).iter();
+        let first = lines.next();
+        if lines.next().is_some() {
+            return Err(c"content-length may not repeat");
+        }
+        first.and_then(|v| crate::intake::parse_content_length(v.as_bytes().trim_ascii()))
+    };
+    headers.remove(&http::header::CONTENT_LENGTH);
     Ok(SplitHead {
         headers,
         declared_cl,
     })
-}
-
-pub(super) fn parse_content_length(v: &[u8]) -> Option<u64> {
-    let s = std::str::from_utf8(v).ok()?.trim();
-    if !s.bytes().all(|b| b.is_ascii_digit()) {
-        return None;
-    }
-    s.parse().ok()
 }
 
 /// A name outside the RFC 9110 `tchar` set or a value byte outside the field-value set is an error. `HeaderName::from_bytes` and `HeaderValue::from_bytes` apply these sets, as on the classic path.
@@ -86,9 +80,9 @@ pub(super) fn parse_content_length(v: &[u8]) -> Option<u64> {
 /// # Safety
 /// `ht` is NULL or a live array. ZPP owns the entries.
 pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<HeaderMap, &'static CStr> {
-    let mut map = HeaderMap::new();
+    let mut headers = HeaderMap::new();
     if ht.is_null() {
-        return Ok(map);
+        return Ok(headers);
     }
     unsafe {
         for zend::Entry { key, val: list } in zend::entries(ht) {
@@ -109,9 +103,9 @@ pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<HeaderMap, &'
                 else {
                     return Err(c"header value is not representable on the wire");
                 };
-                map.append(&name, value);
+                headers.append(name.clone(), value);
             }
         }
     }
-    Ok(map)
+    Ok(headers)
 }

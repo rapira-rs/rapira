@@ -22,7 +22,8 @@ buffa-descriptor = { workspace = true }
 connectrpc = { workspace = true }
 connectrpc-health = { workspace = true }
 connectrpc-reflection = { workspace = true }
-tokio = { workspace = true, features = ["rt-multi-thread", "net", "time"] }
+tokio = { workspace = true, features = ["net", "time"] }
+tokio-util = { version = "0.7", features = ["io"] }
 bytes = { workspace = true }
 futures-util = { workspace = true }
 base64 = { workspace = true }
@@ -33,4 +34,5 @@ ureq = { workspace = true }
 rapira_php_build = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
 toml = { workspace = true }

@@ -1,14 +1,14 @@
 use std::collections::BTreeSet;
 use std::time::{Duration, Instant};
 
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use tests::grpc::{Conn, ECHO_PATH, HI_FRAME, Wire, status_details};
 use tests::wire::submit;
 use tests::{drain_resp_deadline, fixture, poll, req};
 
 use crate::harness::{
-    Exited, MASTER_EXIT_FAILBOOT, MASTER_EXIT_OK, Spawn, assert_exit_code, diagnostics, listen,
-    signal, wait_log_contains,
+    EXIT_FAILBOOT, EXIT_OK, Exited, Spawn, assert_exit_code, diagnostics, fixture_path, http_get,
+    listen, signal, wait_log_contains, wait_serving,
 };
 
 // A worker with a fatal error before its receive loop must answer the queued unit with 503, and the SIGQUIT stop must not wait for a boot that retries forever.
@@ -34,7 +34,7 @@ fn failboot_worker_serves_503_and_drops_cleanly() -> anyhow::Result<()> {
 
     signal(srv.pid(), libc::SIGQUIT);
     let status = srv.wait_exit(deadline.saturating_duration_since(Instant::now()));
-    assert_exit_code(status, MASTER_EXIT_OK, &srv);
+    assert_exit_code(status, EXIT_OK, &srv);
     Ok(())
 }
 
@@ -85,7 +85,7 @@ fn failboot_grpc_worker_sheds_with_unavailable() -> anyhow::Result<()> {
     Ok(())
 }
 
-// A request during the wait after a failed boot gets 503 and starts no boot. The next boot starts when the wait ends. The 5 failed boots of the default max_boot_failures have 4 waits between them (0.5, 1, 2 and 4 s), so the 4 requests do not shorten the time to the unhealthy flag. The flag stops the worker, and the master stops with exit code 70 because the pool never served.
+// The default limit gives four retry waits: 0.5, 1, 2 and 4 seconds. Requests get 503 without shortening those waits.
 #[test]
 fn requests_during_the_boot_wait_get_503_and_start_no_boot() -> anyhow::Result<()> {
     let started = Instant::now();
@@ -99,35 +99,31 @@ fn requests_during_the_boot_wait_get_503_and_start_no_boot() -> anyhow::Result<(
     let mut statuses = Vec::new();
     for _ in 0..4 {
         let mut rx = submit(srv.addr, req("/"))?;
-        let resp = drain_resp_deadline(&mut rx, deadline)
-            .expect("boot-failing worker hung (unhealthy regression)");
+        let resp =
+            drain_resp_deadline(&mut rx, deadline).expect("no response during the boot retry wait");
         statuses.push(resp.status());
     }
     assert_eq!(statuses, [503; 4], "each request during the wait gets 503");
 
     let status = srv.wait_exit(deadline.saturating_duration_since(Instant::now()));
-    assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
+    assert_exit_code(status, EXIT_FAILBOOT, &srv);
     let took = started.elapsed();
-    let log = std::fs::read_to_string(srv.log_file())?;
-    assert!(
-        log.contains("worker keeps failing to boot; flagged unhealthy"),
-        "5 failed boots in sequence must flag the worker unhealthy\n{log}"
-    );
     assert!(
         took >= Duration::from_millis(7500),
-        "the requests started boots: the master stopped after {took:?}\n{log}"
+        "the requests started boots: the server stopped after {took:?}\n{}",
+        diagnostics(&srv)
     );
     Ok(())
 }
 
-// A pool whose boot always fails stops the master with exit code 70 after max_boot_failures failed boots in sequence, 5 by default. The worker waits between the boots: 500 ms after the first failed boot, and each further failed boot doubles the wait.
+// A pool that never serves exits 70 after the specified number of consecutive boot failures.
 #[test]
 fn a_pool_that_never_boots_gives_up_after_max_boot_failures() {
     struct Case {
         name: &'static str,
         /// Keys inside `[http.pool]`.
         pool: &'static str,
-        /// The boots that the log holds before the unhealthy record.
+        /// Number of boots before exit.
         boots: usize,
         /// The sum of the waits between these boots.
         waits: Duration,
@@ -155,31 +151,22 @@ fn a_pool_that_never_boots_gives_up_after_max_boot_failures() {
         .http_pool(case.pool)
         .boot_failure();
         let took = started.elapsed();
+        assert_eq!(status.code(), Some(EXIT_FAILBOOT), "{}\n{log}", case.name);
         assert_eq!(
-            status.code(),
-            Some(MASTER_EXIT_FAILBOOT),
-            "{}\n{log}",
-            case.name
-        );
-        let Some((before, _)) = log.split_once("worker keeps failing to boot; flagged unhealthy")
-        else {
-            panic!("{}: the worker stays healthy\n{log}", case.name);
-        };
-        assert_eq!(
-            before.matches("boot attempt").count(),
+            log.matches("boot attempt").count(),
             case.boots,
             "{}\n{log}",
             case.name
         );
         assert!(
             took >= case.waits,
-            "{}: the master stopped after {took:?}\n{log}",
+            "{}: the server stopped after {took:?}\n{log}",
             case.name
         );
     }
 }
 
-// max_boot_failures = 0 is no limit. After 6 failed boots, one more than the default limit, the worker is not flagged, a request still gets 503, and the master runs.
+// With no boot failure limit, the server continues to shed requests after the sixth failed boot.
 #[test]
 fn max_boot_failures_zero_keeps_a_worker_that_never_boots() -> anyhow::Result<()> {
     let mut srv = Spawn::http(
@@ -189,12 +176,11 @@ fn max_boot_failures_zero_keeps_a_worker_that_never_boots() -> anyhow::Result<()
     .http_pool("max_boot_failures = 0")
     .spawn();
     let log = srv.log_file();
-    let text = poll(Duration::from_secs(30), || {
+    poll(Duration::from_secs(30), || {
         let text = std::fs::read_to_string(&log).ok()?;
-        (text.matches("boot attempt").count() >= 6).then_some(text)
+        (text.matches("boot attempt").count() >= 6).then_some(())
     })
     .unwrap_or_else(|| panic!("fewer than 6 boots\n{}", diagnostics(&srv)));
-    assert!(!text.contains("flagged unhealthy"), "\n{text}");
 
     let mut rx = submit(srv.addr, req("/"))?;
     let resp = drain_resp_deadline(&mut rx, Instant::now() + Duration::from_secs(10))
@@ -203,24 +189,23 @@ fn max_boot_failures_zero_keeps_a_worker_that_never_boots() -> anyhow::Result<()
     assert_eq!(
         srv.try_status(),
         None,
-        "the master keeps running\n{}",
+        "the server keeps running\n{}",
         diagnostics(&srv)
     );
     Ok(())
 }
 
-// An idle keep-alive connection holds the drain of an unhealthy worker open for the whole drain grace. The worker does not boot again after the unhealthy flag. It sheds the units that arrive and exits when the drain ends. process_control_timeout_secs = 4 gives a drain grace of 2 s, which is longer than the 1 s boot wait after the second failed boot.
+// The boot failure exit does not wait for an idle keep-alive connection to close.
 #[test]
-fn an_unhealthy_worker_boots_no_more_while_a_connection_holds_its_drain() -> anyhow::Result<()> {
+fn a_pool_that_never_served_exits_even_with_an_open_connection() -> anyhow::Result<()> {
     let mut srv = Spawn::http(
         Mode::Worker,
         fixture("failboot_worker_tests/logged-failboot-worker.php"),
     )
-    .http_pool("max_boot_failures = 2")
-    .toml("[supervisor]\nprocess_control_timeout_secs = 4")
+    .http_pool("max_boot_failures = 3")
+    .toml("[server]\nstop_timeout_secs = 30")
     .spawn();
     let read = Duration::from_secs(10);
-    // The first boot record starts the 500 ms wait, so the GET arrives before the second failed boot flags the worker.
     assert!(
         wait_log_contains(&srv, "boot attempt", read),
         "no boot\n{}",
@@ -240,16 +225,45 @@ fn an_unhealthy_worker_boots_no_more_while_a_connection_holds_its_drain() -> any
         diagnostics(&srv)
     );
 
-    let status = srv.wait_exit(Duration::from_secs(20));
-    assert_exit_code(status, MASTER_EXIT_FAILBOOT, &srv);
+    let status = srv.wait_exit(Duration::from_secs(5));
+    assert_exit_code(status, EXIT_FAILBOOT, &srv);
     let log = std::fs::read_to_string(srv.log_file())?;
-    let Some((_, after)) = log.split_once("worker keeps failing to boot; flagged unhealthy") else {
-        panic!("the worker stays healthy\n{log}");
-    };
+    assert_eq!(log.matches("boot attempt").count(), 3, "{log}");
+    Ok(())
+}
+
+#[test]
+fn a_pool_that_served_retries_past_the_limit_and_recovers() -> anyhow::Result<()> {
+    let srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/reboot-fails-worker.php"),
+    )
+    .http_pool("max_boot_failures = 1")
+    .json_log()
+    .spawn();
+    let read = Duration::from_secs(10);
+    wait_serving(&srv, "http", 1);
+    let served = http_get(srv.addr, "/", read)?;
     assert_eq!(
-        after.matches("boot attempt").count(),
-        0,
-        "boots after the unhealthy flag\n{log}"
+        (served.status, served.body.as_slice()),
+        (200, b"ok".as_slice())
+    );
+    poll(read, || {
+        (tests::server_log::app_contexts(&srv.log_file(), "reboot failed").len() >= 2).then_some(())
+    })
+    .unwrap_or_else(|| {
+        panic!(
+            "the app did not retry past the limit\n{}",
+            diagnostics(&srv)
+        )
+    });
+    assert_eq!(http_get(srv.addr, "/", read)?.status, 503);
+    std::fs::remove_file(srv.dir.join("http/served.flag"))?;
+    wait_serving(&srv, "http", 1);
+    let recovered = http_get(srv.addr, "/", read)?;
+    assert_eq!(
+        (recovered.status, recovered.body.as_slice()),
+        (200, b"ok".as_slice())
     );
     Ok(())
 }

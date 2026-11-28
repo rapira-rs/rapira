@@ -1,6 +1,6 @@
 <?php
 // A session store without a lock whose write() takes 200 ms. ?set=V stores V;
-// other requests read the session without a write. The body is "<pid> <value>".
+// The reader waits for the client to receive the writer's response before it opens the session.
 // REGISTER_SHUTDOWN=1 passes register_shutdown = true to session_set_save_handler().
 final class UnlockedStore implements SessionHandlerInterface
 {
@@ -50,6 +50,16 @@ final class UnlockedStore implements SessionHandlerInterface
 }
 
 $serve = static function (): void {
+	if (isset($_GET['wait'])) {
+		\Rapira\log('reader waiting');
+		$until = microtime(true) + 10;
+		while (!is_file(__DIR__ . '/read-session')) {
+			if (microtime(true) >= $until) {
+				throw new RuntimeException('reader timed out');
+			}
+			usleep(1_000);
+		}
+	}
 	session_id('shared');
 	if (isset($_GET['set'])) {
 		session_start();
@@ -57,7 +67,7 @@ $serve = static function (): void {
 	} else {
 		session_start(['read_and_close' => true]);
 	}
-	echo getmypid(), ' ', $_SESSION['v'] ?? 'none';
+	echo $_SESSION['v'] ?? 'none';
 };
 
 session_set_save_handler(new UnlockedStore(), getenv('REGISTER_SHUTDOWN') === '1');

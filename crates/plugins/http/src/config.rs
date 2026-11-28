@@ -1,4 +1,4 @@
-//! This module has the settings of the [http] table, the boot checks and the Server that the master forks with.
+//! The `[http]` settings, boot checks and listener preparation.
 
 use std::fs::{OpenOptions, remove_file};
 use std::net::{Ipv4Addr, SocketAddr};
@@ -8,13 +8,13 @@ use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow, bail, ensure};
 use rapira_config::{
-    ListenAddr, Mode, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, opt_path,
-    parse_listen, resolve_pool,
+    ListenAddr, Mode, PoolSection, PoolSettings, Stage, check_entrypoint, check_stages,
+    nonzero_timeout, opt_path, parse_listen, resolve_pool,
 };
 use serde::Deserialize;
 
 use crate::multipart::Limits;
-use crate::{Config, Server, prepare};
+use crate::{Config, Server};
 
 /// The `[http]` table.
 #[derive(Debug, Deserialize)]
@@ -32,6 +32,7 @@ pub struct Section {
     #[serde(default)]
     pub middleware: Vec<String>,
     pub r#static: Option<rapira_static_files::Section>,
+    pub compress: Option<rapira_compress::Section>,
     #[serde(default)]
     pub pool: PoolSection,
 }
@@ -68,7 +69,9 @@ pub struct Settings {
     pub uploads: Option<Limits>,
     /// The containment root of sendFile(). The default is the entrypoint directory.
     pub sendfile_root: PathBuf,
+    pub middleware: Vec<String>,
     pub static_files: Option<rapira_static_files::Settings>,
+    pub compress: Option<rapira_compress::Settings>,
     pub pool: PoolSettings,
 }
 
@@ -88,6 +91,7 @@ pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
 /// Returns the settings of `section`. It reads no file.
 fn settings(section: Section, dir: &Path) -> Result<Settings> {
     let listen = parse_listen(
+        dir,
         "http",
         section.listen.as_deref(),
         ListenAddr::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 8000))),
@@ -134,7 +138,30 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         .r#static
         .map(|s| rapira_static_files::resolve(s, dir))
         .transpose()?;
-    check_middleware(&section.middleware, static_files.is_some())?;
+    let compress_table = section.compress.map(rapira_compress::resolve).transpose()?;
+    check_stages(
+        "http",
+        "middleware",
+        "middleware",
+        &section.middleware,
+        &[
+            Stage {
+                name: "static",
+                configured: static_files.is_some(),
+                requires_table: true,
+            },
+            Stage {
+                name: "compress",
+                configured: compress_table.is_some(),
+                requires_table: false,
+            },
+        ],
+    )?;
+    let compress = if section.middleware.iter().any(|n| n == "compress") {
+        Some(compress_table.unwrap_or_default())
+    } else {
+        None
+    };
 
     Ok(Settings {
         listen,
@@ -147,39 +174,19 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         keepalive_timeout,
         uploads,
         sendfile_root,
+        middleware: section.middleware,
         static_files,
+        compress,
         pool,
     })
 }
 
-fn check_middleware(list: &[String], static_configured: bool) -> Result<()> {
-    for (i, name) in list.iter().enumerate() {
-        if list[..i].contains(name) {
-            bail!("http.middleware lists \"{name}\" twice")
-        }
-    }
-
-    for name in list {
-        match name.as_str() {
-            "static" if !static_configured => {
-                bail!("http.middleware lists \"static\" but [http.static] is missing")
-            }
-            "static" => {}
-            other => {
-                bail!("http.middleware entry \"{other}\" is unknown; known middleware: \"static\"")
-            }
-        }
-    }
-
-    if list.is_empty() && static_configured {
-        bail!("[http.static] is configured but http.middleware does not list \"static\"");
-    }
-
-    Ok(())
-}
-
 fn resolve_uploads(section: UploadsSection, config_dir: &Path) -> Result<Limits> {
-    let dir = opt_path(config_dir, section.dir.as_deref())?.unwrap_or_else(std::env::temp_dir);
+    // TMPDIR can be relative, and the cwd of the process changes when PHP enters the entrypoint directory on NTS.
+    let dir = match opt_path(config_dir, section.dir.as_deref())? {
+        Some(dir) => dir,
+        None => std::path::absolute(std::env::temp_dir())?,
+    };
     let max_file_size_mb = section.max_file_size_mb.map_or(2, NonZero::get);
     let max_file_size = max_file_size_mb
         .checked_mul(1024 * 1024)
@@ -232,21 +239,57 @@ fn check_uploads_dir(dir: &Path) -> Result<()> {
 }
 
 impl Server {
-    /// Runs in the master after the logger starts. It binds the listener before the fork.
+    /// Prepares the HTTP listener and its settings before the workers start.
     pub fn from_settings(settings: Settings) -> Result<Self> {
-        let mut middleware: Vec<crate::middleware::Layer> = Vec::new();
-        if let Some(st) = settings.static_files {
-            tracing::info!(target: "rapira", "static files from {}, forbid {:?}", st.root.display(), st.forbid);
-            middleware.push(rapira_static_files::StaticFiles::new(st.root, st.forbid).layer());
+        let mut static_files = settings.static_files;
+        let mut compress = settings.compress;
+        let mut middleware: Vec<std::sync::Arc<dyn rapira_http_middleware::Middleware>> =
+            Vec::with_capacity(settings.middleware.len());
+        for name in &settings.middleware {
+            match name.as_str() {
+                "static" => {
+                    let st = static_files
+                        .take()
+                        .context("http.middleware lists \"static\" but [http.static] is missing")?;
+                    tracing::info!(
+                        target: "rapira",
+                        "static files from {}, forbid {:?}",
+                        st.root.display(),
+                        st.forbid
+                    );
+                    middleware.push(std::sync::Arc::new(rapira_static_files::StaticFiles::new(
+                        st.root, st.forbid,
+                    )));
+                }
+                "compress" => {
+                    let c = compress.take().context(
+                        "http.middleware lists \"compress\" but compress settings are missing",
+                    )?;
+                    tracing::info!(
+                        target: "rapira",
+                        "response compression enabled (min_size={}, gzip_level={}, zstd_level={})",
+                        c.min_size,
+                        c.gzip_level,
+                        c.zstd_level
+                    );
+                    middleware.push(std::sync::Arc::new(rapira_compress::Compress::new(c)));
+                }
+                other => bail!("unknown http middleware `{other}`"),
+            }
         }
 
+        let mut uploads = settings.uploads;
+        // The spool sweep ends before the listener opens.
+        let spool = uploads
+            .as_mut()
+            .map(crate::multipart::SpoolDir::prepare)
+            .transpose()
+            .context("plugin http: prepare failed")?;
         let prepared = rapira_net::bind(&settings.listen).context("plugin http: prepare failed")?;
-        tracing::info!(target: "http", "prepared listener on {}", prepared.addr());
         let config = Config {
             // The bound address, because the kernel picks the port for a listen port 0.
             listen: prepared.addr().clone(),
-            // The plugin leaks it once at boot, because every request borrows it until the process exits.
-            server_name: Box::leak(settings.server_name.into_boxed_str()),
+            server_name: settings.server_name,
             server_port: settings.server_port.unwrap_or(match prepared.addr() {
                 ListenAddr::Tcp(addr) => addr.port(),
                 ListenAddr::Unix(_) => 80,
@@ -256,11 +299,15 @@ impl Server {
             superglobals: settings.pool.mode != Mode::Dispatcher,
             keepalive_timeout: settings.keepalive_timeout,
             middleware,
-            uploads: settings.uploads,
+            uploads,
             sendfile_root: settings.sendfile_root,
         };
-        prepare(&config);
-        Ok(Self { config, prepared })
+        tracing::info!(target: "http", "listening on {}", prepared.addr());
+        Ok(Self {
+            config,
+            prepared,
+            spool,
+        })
     }
 }
 
@@ -286,7 +333,7 @@ mod tests {
             Case {
                 name: "unknown name",
                 toml: "middleware = [\"staticc\"]\n[pool]\nentrypoint = \"w.php\"",
-                error: "http.middleware entry \"staticc\" is unknown; known middleware: \"static\"",
+                error: "http.middleware entry \"staticc\" is unknown; known middleware: \"static\", \"compress\"",
             },
             Case {
                 name: "listed without table",
@@ -321,7 +368,12 @@ mod tests {
             Case {
                 name: "unknown name precedes later missing table",
                 toml: "middleware = [\"unknown\", \"static\"]\n[pool]\nentrypoint = \"w.php\"",
-                error: "http.middleware entry \"unknown\" is unknown; known middleware: \"static\"",
+                error: "http.middleware entry \"unknown\" is unknown; known middleware: \"static\", \"compress\"",
+            },
+            Case {
+                name: "compress table without listing",
+                toml: "[compress]\nmin_size = 512\n[pool]\nentrypoint = \"w.php\"",
+                error: "[http.compress] is configured but http.middleware does not list \"compress\"",
             },
         ];
         for case in cases {
@@ -640,5 +692,42 @@ mod tests {
         );
         assert_eq!(http.pool.mode, Mode::Dispatcher);
         assert_eq!(http.sendfile_root, Path::new("/srv/app"));
+    }
+
+    #[test]
+    fn from_settings_rejects_unvalidated_middleware() {
+        struct Case {
+            name: &'static str,
+            middleware: Vec<String>,
+            want_err: &'static str,
+        }
+        let cases = [
+            Case {
+                name: "static listed without static_files settings",
+                middleware: vec!["static".into()],
+                want_err: "http.middleware lists \"static\" but [http.static] is missing",
+            },
+            Case {
+                name: "compress listed without compress settings",
+                middleware: vec!["compress".into()],
+                want_err: "http.middleware lists \"compress\" but compress settings are missing",
+            },
+            Case {
+                name: "unknown middleware name",
+                middleware: vec!["bogus".into()],
+                want_err: "unknown http middleware `bogus`",
+            },
+        ];
+        for case in cases {
+            let mut cfg = settings_of("[pool]\nentrypoint = \"a.php\"\n").unwrap();
+            cfg.middleware = case.middleware;
+            cfg.static_files = None;
+            cfg.compress = None;
+            let err = match Server::from_settings(cfg) {
+                Ok(_) => panic!("{}: expected Err", case.name),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(err.contains(case.want_err), "{}: {err}", case.name);
+        }
     }
 }

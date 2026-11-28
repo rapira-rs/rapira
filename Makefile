@@ -1,15 +1,16 @@
-PHP_CONFIG ?= php-config
-# php-embedded puts libphp.so on the default linker path; a custom prefix (make php) needs LD_LIBRARY_PATH.
-LOCATE_PHP = PREFIX=$$($(PHP_CONFIG) --prefix 2>/dev/null); test -n "$$PREFIX" || { echo "$(PHP_CONFIG) not found; set PHP_CONFIG=/path/to/php-config"; exit 1; }; LIBPHP=$$(find "$$PREFIX/lib64" "$$PREFIX/lib" -maxdepth 1 -name libphp.so 2>/dev/null | head -1); test -n "$$LIBPHP" || { echo "no libphp.so under $$PREFIX; install php-embedded or build PHP with --enable-embed=shared"; exit 1; }; LIBDIR=$$(dirname "$$LIBPHP")
-PHP_ENV = PHP_CONFIG=$(PHP_CONFIG) LD_LIBRARY_PATH="$$LIBDIR"
+PHP_PREFIX ?= $(HOME)/.local/share/php-zts
+PHP_CONFIG ?= $(if $(wildcard $(PHP_PREFIX)/bin/php-config),$(PHP_PREFIX)/bin/php-config,php-config)
+CARGO_TARGET_DIR ?= target/zts
+LOCATE_PHP = PREFIX=$$("$(PHP_CONFIG)" --prefix) || exit 1; LIBPHP=$$(find "$$PREFIX/lib64" "$$PREFIX/lib" -maxdepth 1 \( -name libphp.so -o -name libphp.dylib \) 2>/dev/null | head -1); test -n "$$LIBPHP" || { echo "no embed library under $$PREFIX; build PHP with --enable-embed=shared"; exit 1; }; LIBDIR=$$(dirname "$$LIBPHP")
+PHP_ENV = PHP_CONFIG="$(PHP_CONFIG)" LD_LIBRARY_PATH="$$LIBDIR$${LD_LIBRARY_PATH:+:$$LD_LIBRARY_PATH}" DYLD_LIBRARY_PATH="$$LIBDIR$${DYLD_LIBRARY_PATH:+:$$DYLD_LIBRARY_PATH}"
 
-GEN_STUB ?= $(shell $(PHP_CONFIG) --prefix)/lib64/php/build/gen_stub.php
+GEN_STUB ?= $(firstword $(wildcard $(shell $(PHP_CONFIG) --prefix)/lib*/php/build/gen_stub.php))
 PHP_BIN ?= $(shell $(PHP_CONFIG) --prefix)/bin/php
 
 BUF_VERSION ?= v1.73.0
 BUF ?= go run github.com/bufbuild/buf/cmd/buf@$(BUF_VERSION)
 
-.PHONY: test test_nts test_e2e coverage stubs grpc_fixtures php
+.PHONY: test test_unit test_e2e coverage stubs grpc_fixtures php
 
 stubs:
 	@test -f "$(GEN_STUB)" || { echo "gen_stub.php not found at $(GEN_STUB); set GEN_STUB=/path/to/gen_stub.php"; exit 1; }
@@ -27,34 +28,45 @@ grpc_fixtures:
 	$(BUF) build fixtures/grpc_options --as-file-descriptor-set --path fixtures/grpc_options/ping.proto --exclude-imports -o fixtures/grpc_options/ping-no-imports.binpb
 
 test:
-	@$(MAKE) test_nts
+	@$(MAKE) test_unit
 	@$(MAKE) test_e2e
 
-test_nts:
+test_unit:
 	@$(LOCATE_PHP); \
-	RUSTFLAGS="$$RUSTFLAGS --cfg tokio_unstable" CARGO_TARGET_DIR=target/nts $(PHP_ENV) cargo test --workspace
+	RUSTFLAGS="$$RUSTFLAGS --cfg tokio_unstable" CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(PHP_ENV) cargo test --workspace
 
 test_e2e:
 	@$(LOCATE_PHP); \
 	export RUSTFLAGS="$$RUSTFLAGS --cfg tokio_unstable" && \
-	CARGO_TARGET_DIR=target/nts $(PHP_ENV) cargo build -p rapira_core --bin rapira && \
-	CARGO_TARGET_DIR=target/nts $(PHP_ENV) cargo test -p tests --test e2e --features e2e -- --test-threads=1
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(PHP_ENV) cargo build -p rapira_core --bin rapira && \
+	CARGO_TARGET_DIR="$(CARGO_TARGET_DIR)" $(PHP_ENV) cargo test -p tests --test e2e --features e2e -- --test-threads=1
 
 PHP_SRC ?= ../../third-party/php-src
-PHP_PREFIX ?= $(HOME)/.local/share/php-nts
+
+# Compiler flags from the official PHP CLI image. https://github.com/docker-library/php/blob/3b25f4162a9bd144d3f447d03cb8fe16c0d2c9cc/8.6/trixie/cli/Dockerfile#L53-L59
+php: CFLAGS ?= -fstack-protector-strong -fpic -fpie -O2 -D_LARGEFILE_SOURCE -D_FILE_OFFSET_BITS=64
+php: CPPFLAGS ?= $(CFLAGS)
+ifeq ($(shell uname -s),Linux)
+php: LDFLAGS ?= -Wl,-O1 -pie
+endif
 
 php:
 	@test -d "$(PHP_SRC)" || { echo "php-src not found at $(PHP_SRC); set PHP_SRC=/path/to/php-src"; exit 1; }
 	-@$(MAKE) -C "$(PHP_SRC)" distclean >/dev/null 2>&1
-	@FLAGS="$$(tr '\n' ' ' < .github/php-configure-flags.txt)"; \
-	cd "$(PHP_SRC)" && \
-	./buildconf --force && \
-	./configure --prefix="$(PHP_PREFIX)" $$FLAGS
+	@cd "$(PHP_SRC)" && \
+		./buildconf --force && \
+		CFLAGS="$(CFLAGS)" CPPFLAGS="$(CPPFLAGS)" LDFLAGS="$(LDFLAGS)" \
+		./configure --prefix="$(PHP_PREFIX)" \
+			--with-config-file-path="$(PHP_PREFIX)/etc/php" --with-config-file-scan-dir="$(PHP_PREFIX)/etc/php/conf.d" \
+			--enable-option-checking=fatal --enable-embed=shared --enable-zts --disable-zend-signals \
+			--enable-mysqlnd --with-password-argon2 --with-sodium=shared --with-pdo-sqlite --with-sqlite3 \
+			--with-curl --with-iconv --with-openssl --with-readline --with-zlib --enable-phpdbg --enable-phpdbg-readline
 	@$(MAKE) -C "$(PHP_SRC)" -j"$$(getconf _NPROCESSORS_ONLN)"
 	@$(MAKE) -C "$(PHP_SRC)" install
+	@mkdir -p "$(PHP_PREFIX)/etc/php/conf.d"
+	@echo 'extension=sodium' > "$(PHP_PREFIX)/etc/php/conf.d/sodium.ini"
 
-# Workers exit through _exit, which skips the profile write at exit. Continuous mode (%c) keeps the
-# counters in a mapped file that forked workers share. On Linux it needs counter relocation.
+# A forced exit skips the profile write. Continuous mode (%c) keeps the counters in a mapped file.
 # https://clang.llvm.org/docs/SourceBasedCodeCoverage.html#running-the-instrumented-program
 coverage:
 	@$(LOCATE_PHP); \

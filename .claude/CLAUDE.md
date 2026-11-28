@@ -1,8 +1,8 @@
 ## Settled, do not reopen
 
-- NTS only, `rapira_sapi.h` rejects ZTS headers at compile time. Unix only.
-- One interpreter per forked worker. Master is single-threaded, no tokio; workers inherit listener fds.
-- MINIT runs once in the master pre-fork so opcache SHM is inherited. Workers exit rather than tear the module down.
+- Unix only. One server process runs all pools. A ZTS pool has one PHP interpreter per worker thread. NTS supports one pool with one worker.
+- Each pool has one intake. Plugins share the IO runtime. Observability runs on a separate thread.
+- Run MINIT once on the main thread. Join every PHP worker before module shutdown. A recycle starts a new app instance on the same worker.
 - Foreground only, no daemonize. Pidfile stays.
 - Allocator is mimalloc v3, without THP.
 - Choose the side of each piece of host logic, C or Rust, case by case. Neither side is the default. First compare the options with care: the owner of the data, the pointers and layouts that cross the boundary, the point where a bailout (longjmp) can start, and the number of calls across the boundary. Then take the smallest implementation that is safe. Typical fits, not fixed rules: Rust for Rust state, a Rust crate, a rule that Rust code also uses, and work that is hard in C (parsing, protocol state, passing a request to PHP and returning data from C to the host); C for ZPP shells, argument checks, longjmp isolation, macro shims and glue that needs no Rust (the zval memo check and copy in a getter, the property writes of a value constructor).
@@ -21,7 +21,7 @@
 
 ## Tests
 
-- Test behavior through simple results a client or operator sees: responses, log records, exit statuses or scoreboard lines. Assert on these results, not internal counters, queues or join handles.
+- Test behavior through simple results a client or operator sees: responses, log records, exit statuses or status lines. Assert on these results, not internal counters, queues or join handles.
 - Do not add public or private production API or branches only for tests. This includes functions, methods, constructors, accessors, `Default` implementations and feature flags. Do not add generics or traits with one production type and one test type. `#[cfg(test)]` and `pub(crate)` are not exceptions. Helpers inside `#[cfg(test)] mod tests` are test code.
 - If no external path reaches a behavior, test its pure logic in a unit test or leave it untested. Do not add test hooks. Delete tests of sequences that production never runs.
 - Unit tests belong in their crate's `#[cfg(test)] mod tests`. Test one small piece of code in its own scope. Private items are allowed. No fixtures: files, directories, sockets, child processes, signals, environment variables or PHP. Do not copy other rapira components as test doubles. In-memory inputs (futures, writers, wakers or paused tokio clocks) are not fixtures. An AF_UNIX socketpair counts as an in-memory input.
@@ -30,10 +30,10 @@
 - Do not assert that a port refuses connections after a stop: another process can bind the free port.
 - New tests use worker or dispatcher mode, rarely classic.
 - Check PHP behavior with php-src or a short script.
-- Use Docker to test PHP minors other than the system PHP. Build the test image from the `php` stage of `Dockerfile` on a PHP image from [rapira-rs/docker](https://github.com/rapira-rs/docker): `docker build --target php --build-arg PHP_IMAGE=ghcr.io/rapira-rs/php:<minor>-nts .`. It includes NTS PHP with `libphp.so`, the PHP headers and the PHP extensions of the Rapira image. Add Rust from the `rust` image that `Dockerfile` names. Install `clang`, `libclang-dev` and `procps` (`worker_pids` in `harness.rs` needs `ps`). Set `RUSTFLAGS="--cfg tokio_unstable -L native=/usr/local/lib"` and `LD_LIBRARY_PATH=/usr/local/lib`. Use a target directory outside the checkout.
+- Use the PHP build in `.github/actions/php-embed` for the CI extension set. For image tests, build the `php` stage of `Dockerfile`. Set `PHP_IMAGE` to the [official tag for the PHP minor](../README.md#docker). Run the test container with `--init`. Use the Rust toolchain from the `rust` stage, `clang`, `libclang-dev` and `procps`. Set `RUSTFLAGS="--cfg tokio_unstable -L native=/usr/local/lib"` and `LD_LIBRARY_PATH=/usr/local/lib`.
 - The container runs PHP as root and lacks some CI tools. These differences can cause failures. Run a failing test on `main` in the same container before you report it.
 
-`make test` (test_nts then test_e2e), `make test_nts`, `make test_e2e`, `make coverage`, `make stubs`. All derived from `php-config`, no hardcoded distro paths.
+Run `make test` for the workspace and end-to-end suites. Use `PHP_CONFIG` to select the interpreter build.
 
 ## Fuzz targets
 
@@ -45,6 +45,7 @@
 
 ## Dependencies
 
+- Build CI's PHP directly from `php-src`. Ask the owner before adding a third-party project, including a setup action or build tool.
 - Prefer `libc` directly over wrappers.
 - Update dependencies and toolchains, including PHP in GitHub Actions and Rust, even with breaking changes. Update old versions instead of adding compatibility wrappers.
 
@@ -55,8 +56,8 @@
 ## Known false positives, do not "fix"
 
 - rust-analyzer `E0277: Arguments<'_>: Sync` on `Box::pin` over a `tokio::select!`, while `cargo check` is clean. Cargo is authoritative.
-- PHP 8.5 warns that `--enable-opcache` is unrecognized. The flag stays for the 8.4 CI leg.
-- Extension visibility differs per CI leg; that is what the `extension_loaded` skip guards are for. Do not edit the test `php.ini`.
+- PHP 8.4 needs `--enable-opcache`. PHP 8.5 and later include OPcache in the engine.
+- PHP builds differ in their optional extensions. Keep the `extension_loaded` skip guards and the shared test `php.ini`.
 - `.clang-tidy` runs in survey mode, so Zend macro signatures trip `bugprone-*`. No CI job runs it.
 
 ## Design patterns

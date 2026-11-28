@@ -1,29 +1,29 @@
 //! The http plugin. It serves HTTP/1.1 on the configured listener, and PHP answers every request.
 
 use std::path::PathBuf;
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::Result;
+use rapira_http_middleware::Middleware;
 use rapira_net::{ListenAddr, PreparedListener};
-use rapira_sapi::plugin::{Mode, Plugin, Worker};
+use rapira_sapi::plugin::{Plugin, ServeFuture};
 use rapira_sapi::rapira_plugin;
+use rapira_sapi::work::Intake;
+use tokio::sync::watch;
 
-mod bridge;
-pub mod check;
 pub mod config;
-mod handler;
-pub mod middleware;
+pub mod intake;
+mod io;
 pub mod multipart;
 pub mod php;
-pub mod request;
-mod response;
+mod responder;
 mod serve;
 
 pub use php::rapira_http_register_classes;
 
 pub struct Config {
     pub listen: ListenAddr,
-    pub server_name: &'static str,
+    pub server_name: String,
     pub server_port: u16,
     pub max_body_size: usize,
     /// The classic and worker modes build the CGI view, so they drop the field names that alias a CGI variable.
@@ -31,8 +31,8 @@ pub struct Config {
     pub write_timeout: Duration,
     pub keepalive_timeout: Duration,
     /// `[http].middleware` in config order. The first entry is outermost.
-    pub middleware: Vec<middleware::Layer>,
-    /// The multipart limits of a dispatcher pool. It is None in the other modes, which give the body to the rfc1867 parser of php-src through read_post. `serve` replaces `dir` with the worker's own spool dir under it.
+    pub middleware: Vec<Arc<dyn Middleware>>,
+    /// The multipart limits and the process spool directory for dispatcher mode.
     pub uploads: Option<multipart::Limits>,
     /// The containment root of sendFile().
     pub sendfile_root: PathBuf,
@@ -41,16 +41,7 @@ pub struct Config {
 pub struct Server {
     config: Config,
     prepared: PreparedListener,
-}
-
-/// Runs in the master before the fork, with no runtime.
-fn prepare(config: &Config) {
-    // This runs before the fork, because the PHP thread of a worker can read the identity at boot, before serve() runs.
-    php::set_server_identity(config.server_name, config.server_port);
-    php::set_sendfile_root(config.sendfile_root.clone());
-    if let Some(uploads) = &config.uploads {
-        multipart::sweep_spool_dirs(&uploads.dir);
-    }
+    spool: Option<multipart::SpoolDir>,
 }
 
 impl Plugin for Server {
@@ -58,16 +49,26 @@ impl Plugin for Server {
         "http"
     }
 
-    fn modes(&self) -> &'static [Mode] {
-        &[Mode::Classic, Mode::Worker, Mode::Dispatcher]
-    }
-
     fn dispatcher(&self) -> *const rapira_plugin {
         &raw const php::rapira_http_plugin
     }
 
-    fn serve(self: Box<Self>, worker: Worker) -> Result<()> {
-        let Self { config, prepared } = *self;
-        serve::serve(config, prepared, worker)
+    fn worker_init(&self) -> Arc<dyn Fn() + Send + Sync> {
+        let identity =
+            rapira_sapi::HttpIdentity::new(&self.config.server_name, self.config.server_port);
+        let sendfile_root = self.config.sendfile_root.clone();
+        Arc::new(move || {
+            identity.enter();
+            php::set_sendfile_root(sendfile_root.clone());
+        })
+    }
+
+    fn serve(
+        self: Box<Self>,
+        intake: Intake,
+        stop: watch::Receiver<bool>,
+        drain_grace: Duration,
+    ) -> ServeFuture {
+        Box::pin(serve::serve(*self, intake, stop, drain_grace))
     }
 }

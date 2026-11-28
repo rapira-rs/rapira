@@ -8,5 +8,6 @@ $objects = [];
 for ($i = 0; $i < 50; $i++) {
     $objects[] = new ArrayObject([$i]);
 }
+$boot = bin2hex(random_bytes(8));
 $ex = \Rapira\get_dispatcher()->receive();
-$ex->writeBody((string) getmypid());
+$ex->writeBody($boot);

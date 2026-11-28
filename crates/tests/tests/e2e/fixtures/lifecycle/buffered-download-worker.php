@@ -28,7 +28,7 @@ try {
             }
             continue;
         }
-        $ex->writeBody(getmypid() . ":{$sequence}:{$result}");
+        $ex->writeBody("{$sequence}:{$result}");
     }
 } catch (ClosedException) {
 }

@@ -1,16 +1,14 @@
 use std::net::SocketAddr;
-use std::path::Path;
 
 use http::Method;
 use rapira_net::ListenAddr;
-use rapira_sapi::plugin::Mode;
 use serde_json::Value;
 use tests::grpc::{Conn, ECHO_PATH as ECHO, Fields, Wire, envelope, fields};
 use tests::{StatusBody, server_log};
 
 use crate::harness::{
-    BOOT, ECHO_SERVICE, Exited, MASTER_EXIT_OK, STOP_BUDGET, Spawn, assert_exit_code, diagnostics,
-    fixture_path, http_get, listen, signal, wait_log_contains, wait_workers,
+    BOOT, EXIT_OK, STOP_BUDGET, Spawn, assert_exit_code, diagnostics, fixture_path, signal,
+    wait_log_contains, wait_serving,
 };
 
 /// Encodes `EchoRequest { text }` as field 1, length-delimited, for a text shorter than 128 bytes.
@@ -162,7 +160,7 @@ fn grpc_pool_serves_from_rapira_toml() {
             reply: r#"{"status":"SERVING"}"#,
         },
         Case {
-            name: "a forked worker reads the services that prepare set",
+            name: "the dispatcher reads the configured services",
             path: ECHO,
             body: r#"{"text":"services"}"#,
             reply: r#"{"text":"rapira.test.v1.EchoService:5,rapira.test.v1.OtherService:1"}"#,
@@ -171,7 +169,7 @@ fn grpc_pool_serves_from_rapira_toml() {
     let srv = Spawn::grpc(fixture_path("grpc/echo-worker.php"))
         .services(None)
         .spawn();
-    wait_workers(&srv, BOOT, "1 grpc worker", |p| p.len() == 1);
+    wait_serving(&srv, "grpc", 1);
     for case in cases {
         let got = connect_json(srv.addr, case.path, case.body);
         assert!(
@@ -183,72 +181,7 @@ fn grpc_pool_serves_from_rapira_toml() {
     }
 }
 
-/// Each worker gets the dispatcher of its own pool: `shared/echo-worker.php` answers HTTP, `grpc/echo-worker.php` answers gRPC.
-#[test]
-fn http_and_grpc_pools_run_side_by_side() {
-    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php"))
-        .with_grpc(fixture_path("grpc/echo-worker.php"))
-        .spawn();
-    let ListenAddr::Tcp(grpc) = listen(&srv) else {
-        panic!("a TCP grpc listener")
-    };
-    wait_workers(&srv, BOOT, "1 http and 1 grpc worker", |p| p.len() == 2);
-
-    let StatusBody { status: code, body } = http_get(srv.addr, "/", BOOT)
-        .unwrap_or_else(|e| panic!("GET /: {e}\n{}", diagnostics(&srv)));
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    assert!(
-        body.starts_with(b"ok:"),
-        "{:?}\n{}",
-        String::from_utf8_lossy(&body),
-        diagnostics(&srv)
-    );
-
-    let got = connect_json(grpc, ECHO, r#"{"text":"hi"}"#);
-    assert!(
-        matches!(&got, Ok(StatusBody { status: 200, body }) if body == r#"{"text":"hi"}"#),
-        "{got:?}\n{}",
-        diagnostics(&srv)
-    );
-}
-
-/// The master loads the schema before the fork. `main` returns the error, so the process exits 1.
-#[test]
-fn grpc_boot_fails_before_the_fork() {
-    struct Case {
-        name: &'static str,
-        /// The [grpc] descriptor_set. None means the staged echo.binpb.
-        descriptor_set: Option<&'static str>,
-        service: &'static str,
-        log: &'static str,
-    }
-    let cases = [
-        Case {
-            name: "unknown service",
-            descriptor_set: None,
-            service: "rapira.test.v1.Missing",
-            log: "grpc.services entry `rapira.test.v1.Missing` is not in",
-        },
-        Case {
-            name: "unreadable descriptor set",
-            descriptor_set: Some("missing.binpb"),
-            service: ECHO_SERVICE,
-            log: "reading grpc.descriptor_set",
-        },
-    ];
-    for case in cases {
-        let mut spawn =
-            Spawn::grpc(fixture_path("grpc/echo-worker.php")).services(Some(&[case.service]));
-        if let Some(path) = case.descriptor_set {
-            spawn = spawn.descriptor_set(Path::new(path));
-        }
-        let Exited { status, log } = spawn.boot_failure();
-        assert_eq!(status.code(), Some(1), "{}: {log}", case.name);
-        assert!(log.contains(case.log), "{}: {log}", case.name);
-    }
-}
-
-/// SIGQUIT starts a drain. The worker finishes the call it holds, then the master exits clean.
+/// SIGQUIT starts a drain. The worker finishes the call before the server exits.
 #[test]
 fn sigquit_drains_an_in_flight_grpc_call() {
     let mut srv = Spawn::grpc(fixture_path("grpc/echo-worker.php")).spawn();
@@ -268,5 +201,5 @@ fn sigquit_drains_an_in_flight_grpc_call() {
         diagnostics(&srv)
     );
     let status = srv.wait_exit(STOP_BUDGET);
-    assert_exit_code(status, MASTER_EXIT_OK, &srv);
+    assert_exit_code(status, EXIT_OK, &srv);
 }

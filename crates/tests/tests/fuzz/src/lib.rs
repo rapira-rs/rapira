@@ -4,9 +4,8 @@ use std::fmt::Display;
 use std::path::PathBuf;
 
 use bytes::Bytes;
-use http::{HeaderMap, HeaderName, HeaderValue};
-use rapira_http::check::Rejection;
-use rapira_http::multipart::{MultipartBody, UploadedFile};
+use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
+use rapira_http::multipart::{HeaderValues, Limits, MultipartBody, Parser, UploadedFile};
 
 /// The largest input of connect_json and multipart_echo. The CI runs use the same -max_len.
 pub const MAX_LEN: usize = 4096;
@@ -18,7 +17,7 @@ pub fn spool_dir() -> PathBuf {
     dir
 }
 
-/// Splits the body into up to 8 parts. Each split position is the little-endian u16 of the two bytes at index 0, 97, 194 and so on, modulo len + 1; a position of 0 or len gives an empty part, which the view accepts and the transport never delivers.
+/// Splits the body into up to 8 parts. Each split position is the little-endian u16 of the two bytes at index 0, 97, 194 and so on, modulo len + 1; a position of 0 or len gives an empty part, which the parser accepts and the transport never delivers.
 pub fn split(body: &[u8]) -> Vec<Bytes> {
     let mut at = Vec::new();
     for i in (0..body.len().saturating_sub(1)).step_by(97).take(7) {
@@ -36,43 +35,64 @@ pub fn split(body: &[u8]) -> Vec<Bytes> {
     parts
 }
 
-/// Asserts that two parses of one body agree: the status and the reason of a rejection, or each field and each file with the bytes of its spooled file.
+/// Feeds the pieces to the parser in order and ends the body, as `read_request_body` in `crates/plugins/http/src/intake/mod.rs` does with the frames of a body.
+pub fn parse<P: AsRef<[u8]>>(
+    pieces: &[P],
+    boundary: &[u8],
+    limits: &Limits,
+) -> Result<MultipartBody, StatusCode> {
+    let mut parser = Parser::new(boundary, limits, None);
+    for piece in pieces {
+        parser.feed(piece.as_ref())?;
+    }
+    parser.finish()
+}
+
+/// Asserts that two parses of one body agree: the rejection status, or each field and each file with the bytes of its spooled file.
 pub fn assert_same_parse(
     ctx: impl Display,
-    want: &Result<MultipartBody, Rejection>,
-    got: &Result<MultipartBody, Rejection>,
+    want: &Result<MultipartBody, StatusCode>,
+    got: &Result<MultipartBody, StatusCode>,
 ) {
     match (want, got) {
         (Ok(want), Ok(got)) => {
             assert_eq!(want.fields.len(), got.fields.len(), "field count: {ctx}");
             for (w, g) in want.fields.iter().zip(&got.fields) {
+                let wh: Vec<HeaderValues> =
+                    want.field_headers(w).map(|h| h.to_owned_values()).collect();
+                let gh: Vec<HeaderValues> =
+                    got.field_headers(g).map(|h| h.to_owned_values()).collect();
                 assert_eq!(
-                    (&w.name, &w.value, &w.headers),
-                    (&g.name, &g.value, &g.headers),
+                    (want.field_name(w), want.field_value(w), wh),
+                    (got.field_name(g), got.field_value(g), gh),
                     "field: {ctx}"
                 );
             }
             assert_eq!(want.files.len(), got.files.len(), "file count: {ctx}");
             for (w, g) in want.files.iter().zip(&got.files) {
                 assert_eq!(
-                    (&w.name, &w.client_filename, &w.client_media_type),
-                    (&g.name, &g.client_filename, &g.client_media_type),
+                    (
+                        want.file_name(w),
+                        want.file_client_filename(w),
+                        want.file_client_media_type(w)
+                    ),
+                    (
+                        got.file_name(g),
+                        got.file_client_filename(g),
+                        got.file_client_media_type(g)
+                    ),
                     "file: {ctx}"
                 );
-                assert_eq!(
-                    (&w.headers, w.size),
-                    (&g.headers, g.size),
-                    "file headers and size: {ctx}"
-                );
+                let wh: Vec<HeaderValues> =
+                    want.file_headers(w).map(|h| h.to_owned_values()).collect();
+                let gh: Vec<HeaderValues> =
+                    got.file_headers(g).map(|h| h.to_owned_values()).collect();
+                assert_eq!((wh, w.size), (gh, g.size), "file headers and size: {ctx}");
                 let spooled = |f: &UploadedFile| std::fs::read(&f.file.path).expect("spooled file");
                 assert_eq!(spooled(w), spooled(g), "spooled bytes: {ctx}");
             }
         }
-        (Err(w), Err(g)) => assert_eq!(
-            (w.status, &w.reason),
-            (g.status, &g.reason),
-            "rejection: {ctx}"
-        ),
+        (Err(w), Err(g)) => assert_eq!(w, g, "rejection: {ctx}"),
         (Ok(_), Err(g)) => panic!("only the split parse rejects with {g}: {ctx}"),
         (Err(w), Ok(_)) => panic!("only the one-part parse rejects with {w}: {ctx}"),
     }

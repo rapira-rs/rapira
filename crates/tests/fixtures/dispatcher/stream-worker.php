@@ -117,6 +117,14 @@ try {
             }
             continue;
         }
+        if ($probe === 'sendfile-cwd') {
+            // A relative path resolves against the cwd of PHP.
+            if (isset($q['nested'])) {
+                chdir(__DIR__ . '/nested');
+            }
+            $ex->sendFile('same');
+            continue;
+        }
         if ($probe === 'trailers') {
             $ex->writeBody('chunk,', eos: false);
             $ex->writeTrailers(['x-checksum' => ['abc123']]);

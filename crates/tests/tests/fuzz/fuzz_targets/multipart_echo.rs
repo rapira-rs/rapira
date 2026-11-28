@@ -1,14 +1,12 @@
-//! Encodes generated parts the way a browser does, parses the body, and compares the result with the parts byte for byte. The target parses the body once as one part and once split into parts, and the two results must agree.
+//! Encodes generated parts the way a browser does, parses the body, and compares the result with the parts byte for byte. The target parses the body once as one part, once split into parts and once byte by byte, and the results must agree.
 
 #![no_main]
 
 use std::sync::LazyLock;
 
 use arbitrary::{Arbitrary, Unstructured};
-use bytes::Bytes;
 use rapira_fuzz::MAX_LEN;
-use rapira_http::check::Rejection;
-use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart, parse};
+use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart};
 
 #[derive(Arbitrary)]
 struct EchoPart<'a> {
@@ -217,17 +215,23 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     body.extend_from_slice(b"--\r\n");
 
     let ctx = body.escape_ascii();
-    let whole = parse(&[Bytes::copy_from_slice(&body)], &bnd, &LIMITS);
+    let whole = rapira_fuzz::parse(&[&body[..]], &bnd, &LIMITS);
     let parts = rapira_fuzz::split(&body);
-    let lens: Vec<usize> = parts.iter().map(Bytes::len).collect();
+    let lens: Vec<usize> = parts.iter().map(|p| p.len()).collect();
     rapira_fuzz::assert_same_parse(
         format_args!("parts {lens:?} of {ctx}"),
         &whole,
-        &parse(&parts, &bnd, &LIMITS),
+        &rapira_fuzz::parse(&parts, &bnd, &LIMITS),
+    );
+    let single: Vec<&[u8]> = body.chunks(1).collect();
+    rapira_fuzz::assert_same_parse(
+        format_args!("single bytes of {ctx}"),
+        &whole,
+        &rapira_fuzz::parse(&single, &bnd, &LIMITS),
     );
     let got = match whole {
         Ok(got) => got,
-        Err(Rejection { status, reason }) => panic!("{status} {reason}: {ctx}"),
+        Err(status) => panic!("{status}: {ctx}"),
     };
     let mut fields = got.fields.iter();
     let mut files = got.files.iter();
@@ -237,9 +241,11 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
                 let f = fields
                     .next()
                     .unwrap_or_else(|| panic!("missing field: {ctx}"));
-                assert_eq!(f.name, s.name, "field name: {ctx}");
-                assert_eq!(f.value, s.data, "field value: {ctx}");
-                assert_eq!(f.headers, grouped(&s.headers), "field headers: {ctx}");
+                let headers: Vec<HeaderValues> =
+                    got.field_headers(f).map(|h| h.to_owned_values()).collect();
+                assert_eq!(got.field_name(f), s.name, "field name: {ctx}");
+                assert_eq!(got.field_value(f), s.data, "field value: {ctx}");
+                assert_eq!(headers, grouped(&s.headers), "field headers: {ctx}");
             }
             Some(filename) => {
                 let f = files
@@ -251,10 +257,20 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
                     .find(|(n, _)| n.eq_ignore_ascii_case("content-type"))
                     .map(|(_, v)| v.clone())
                     .filter(|v| !v.is_empty());
-                assert_eq!(f.name, s.name, "file name: {ctx}");
-                assert_eq!(&f.client_filename, filename, "client filename: {ctx}");
-                assert_eq!(f.client_media_type, media, "client media type: {ctx}");
-                assert_eq!(f.headers, grouped(&s.headers), "file headers: {ctx}");
+                let headers: Vec<HeaderValues> =
+                    got.file_headers(f).map(|h| h.to_owned_values()).collect();
+                assert_eq!(got.file_name(f), s.name, "file name: {ctx}");
+                assert_eq!(
+                    got.file_client_filename(f),
+                    filename.as_slice(),
+                    "client filename: {ctx}"
+                );
+                assert_eq!(
+                    got.file_client_media_type(f),
+                    media.as_deref(),
+                    "client media type: {ctx}"
+                );
+                assert_eq!(headers, grouped(&s.headers), "file headers: {ctx}");
                 assert_eq!(f.size, s.data.len() as u64, "file size: {ctx}");
                 let spooled = std::fs::read(&f.file.path).expect("spooled file");
                 assert_eq!(spooled, s.data, "spooled bytes: {ctx}");

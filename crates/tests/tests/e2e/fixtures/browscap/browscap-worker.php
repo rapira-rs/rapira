@@ -1,8 +1,8 @@
 <?php
 // get_browser() with a null name reads $_SERVER['HTTP_USER_AGENT'], so this fixture needs worker mode.
-$handler = static function (): void {
-	// ?probe=pid uses an explicit user agent and appends the pid, for the shared-table test
-	$probe = ($_GET['probe'] ?? '') === 'pid';
+$app = bin2hex(random_bytes(8));
+$handler = static function () use ($app): void {
+	$probe = ($_GET['probe'] ?? '') === 'app';
 	$b = get_browser($probe ? 'Rapira/1.0 (Darwin)' : null, true);
 	if (!is_array($b)) {
 		echo 'browscap:false';
@@ -15,7 +15,9 @@ $handler = static function (): void {
 	}
 	echo implode("\n", $out);
 	if ($probe) {
-		echo "\npid=" . getmypid();
+		echo "\napp=" . $app;
+		// A probe holds its worker for 50 ms, so the other probes reach the other workers.
+		usleep(50_000);
 	}
 };
 while (\Rapira\handle_request($handler)) {

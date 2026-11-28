@@ -8,7 +8,7 @@ listen = "127.0.0.1:8000"    # host:port, ":port" for all interfaces, or "unix:/
 # max_body_size_mb = 8       # larger request bodies answer 413
 # write_timeout_secs = 30    # closes the connection when a response write stalls this long
 # keepalive_timeout_secs = 60 # closes a keepalive connection idle past the limit; also caps one head or body-frame read
-# middleware = ["static"]    # applied in list order; each configured middleware must be listed
+# middleware = ["compress", "static"] # applied in list order; each configured middleware must be listed
 
 # Multipart limits of the http plugin, for dispatcher mode only. Classic and worker modes parse
 # in PHP, where php.ini sets the limits. With an explicit table under another mode, the boot fails.
@@ -22,23 +22,30 @@ listen = "127.0.0.1:8000"    # host:port, ":port" for all interfaces, or "unix:/
 
 # Serve files from a directory before PHP. A miss falls through to PHP. Dotfiles always fall through to PHP.
 # Requires "static" in http.middleware.
-# The server holds served files in memory. Each worker keeps up to 16MiB and stores no file
-# above 256KiB. The cost is therefore 16MiB for each process in http.pool.processes. An entry stays
-# fresh for one second, so a rewritten file reaches the client after that time.
+# The HTTP plugin caches up to 16 MiB of files. Each file must be at most 256 KiB. Entries stay fresh for one second.
 # [http.static]
 # root = "public"            # required; the directory must exist; relative paths resolve against this file's directory
 # forbid = [".php"]          # file-name suffixes the server never serves; an explicit list replaces this default
+
+# Compress eligible HTTP responses with zstd or gzip based on Accept-Encoding.
+# Requires "compress" in http.middleware; this table is optional when defaults are used.
+# [http.compress]
+# min_size = 1024            # minimum known response body size in bytes to compress
+# gzip_level = 4             # 1..=9
+# zstd_level = 3             # 1..=19
 
 # The worker pool behind the http listener. Each plugin owns its pool under [<plugin>.pool].
 [http.pool]
 entrypoint = "dispatcher-sync.php" # relative paths resolve against this file's directory
 mode = "dispatcher"           # "classic" | "worker" | "dispatcher" (the default)
-processes = 16                # a fixed worker count; defaults to the CPU count
+workers = 16                  # PHP interpreter threads; defaults to the CPU count
 # max_requests = 0            # recycle the app of a worker after about N requests, with jitter; 0 means no limit
-# max_memory_mb = 0           # drain and replace a worker whose RSS goes above this; the master checks it every second; 0 means no limit
-# max_boot_failures = 5       # stop a worker as unhealthy after N failed boots in sequence; 0 means no limit; for worker and dispatcher modes
-# request_terminate_timeout_secs = 0  # kill and replace a worker whose request runs longer; 0 turns it off
-# Environment variables of each worker of the pool. The $_SERVER of each request also gets them.
+# max_boot_failures = 5       # exit 70 if one worker fails to boot N times in a row before its pool serves; 0 means no limit
+# request_terminate_timeout_secs = 0  # wall-clock limit per unit; 0 disables it for this pool
+# A positive limit in any pool reserves SIGRTMAX on systems that have it.
+# After an interrupt, a native call can keep waiting. Exit 124 requires every worker of one pool to be blocked after 5 more seconds.
+# execution_clock = "wall"    # the clock of PHP's max_execution_time: "wall" (the default) | "cpu" (the CPU time of the worker thread); has an effect only on Linux with per-thread PHP timers
+# PHP reads these values through getenv(), $_ENV and $_SERVER. Child processes inherit the server environment.
 # [http.pool.env]
 # APP_ENV = "prod"
 
@@ -46,7 +53,7 @@ processes = 16                # a fixed worker count; defaults to the CPU count
 # With a [grpc] table, grpc.descriptor_set and grpc.pool.entrypoint are required.
 # [grpc]
 # listen = "127.0.0.1:50051"   # host:port, ":port" for all interfaces, or "unix:/path"
-# descriptor_set = "api.binpb" # relative to this file's directory, or an http:// or https:// URL that the master downloads at boot; build it with its imports: buf build --as-file-descriptor-set -o api.binpb
+# descriptor_set = "api.binpb" # relative to this file's directory, or an HTTP or HTTPS URL to load at boot
 # services = ["billing.v1.InvoiceService"] # serve only these fully qualified names, each in descriptor_set; unset means the services of the files that no other file imports
 # reflection = false           # serve grpc.reflection.v1 and v1alpha
 # default_timeout_secs = 30    # deadline of a call without a client timeout; unset by default, which means no deadline
@@ -59,22 +66,23 @@ processes = 16                # a fixed worker count; defaults to the CPU count
 # [grpc.pool]
 # entrypoint = "grpc.php"      # relative paths resolve against this file's directory
 # mode = "dispatcher"          # the only mode for a grpc pool
-# processes = 16               # defaults to the CPU count
+# workers = 16                 # defaults to the CPU count
 
 # The bearer-token check. Requires "auth" in grpc.interceptors. grpc.health.v1.Health needs no token.
 # [grpc.auth]
 # tokens_file = "grpc-tokens"  # relative to this file's directory; one token per line
 
-# The observability process runs no PHP. It serves GET /metrics and the livez and readyz probes from the worker scoreboard.
+# The observability thread serves GET /metrics, /livez and /readyz.
 # [observability]
 # listen = "127.0.0.1:9180"    # required; host:port, ":port" for all interfaces, or "unix:/path"
 # keepalive_timeout_secs = 60 # optional; closes a keep-alive connection idle past the limit
 # [observability.metrics]    # GET /metrics
 # [observability.probes]     # GET /livez, GET /readyz
 
-# [supervisor]
+# [server]
 # pidfile = "rapira.pid"      # relative to this file's directory
-# process_control_timeout_secs = 30   # stop time from QUIT to TERM; KILL follows one second after TERM
+# Exits 70, 101 and 124 can leave the pidfile. The next start overwrites it.
+# stop_timeout_secs = 30      # time for plugins and PHP threads to stop
 
 [log]
 # level = "error"             # error | warn | info | debug | trace

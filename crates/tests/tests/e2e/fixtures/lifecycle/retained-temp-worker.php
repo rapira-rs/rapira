@@ -7,11 +7,11 @@ $handler = static function () use (&$export, &$requests): void {
     if ($_SERVER['REQUEST_METHOD'] === 'POST') {
         $export = new SplTempFileObject();
         $export->fwrite(file_get_contents('php://input'));
-        echo getmypid(), ':', $requests, ':stored';
+        echo $requests, ':stored';
         return;
     }
     $export->rewind();
-    echo getmypid(), ':', $requests, ':', $export->fgets();
+    echo $requests, ':', $export->fgets();
 };
 while (\Rapira\handle_request($handler)) {
 }

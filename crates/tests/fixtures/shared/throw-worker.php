@@ -1,7 +1,7 @@
 <?php
 $handler = static function (): void {
 	if (($_GET['boom'] ?? '') === '1') {
-		throw new \RuntimeException("scoreboard error");
+		throw new \RuntimeException("handler error");
 	}
 	echo "ok";
 };

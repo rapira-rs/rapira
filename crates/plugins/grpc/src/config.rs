@@ -1,19 +1,21 @@
-//! The `[grpc]` table: its settings, the boot checks, the interceptor list and the `Server` that the master forks with.
+//! The `[grpc]` settings, boot checks, interceptors and listener preparation.
 
 use std::net::{Ipv4Addr, SocketAddr};
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Context, Result, bail};
+use anyhow::{Context, Result, anyhow, bail};
+use connectrpc::{ConnectionConfig, DeadlinePolicy};
+use connectrpc_reflection::Reflector;
 use rapira_config::{
-    ListenAddr, PoolSection, PoolSettings, check_entrypoint, nonzero_timeout, opt_path,
-    parse_listen, resolve_pool,
+    ListenAddr, Mode, PoolSection, PoolSettings, Stage, check_entrypoint, check_stages,
+    nonzero_timeout, opt_path, parse_listen, resolve_pool,
 };
 use serde::Deserialize;
 
 use crate::schema::Source;
-use crate::{Config, Schema, Server, prepare};
+use crate::{Schema, Server};
 
 /// The `[grpc]` table.
 #[derive(Debug, Deserialize)]
@@ -50,14 +52,9 @@ pub struct Settings {
     /// The wait for the PING ACK before the listener closes the connection.
     pub keepalive_timeout: Duration,
     /// The configured order. The first interceptor runs first.
-    pub interceptors: Vec<Interceptor>,
+    pub interceptors: Vec<String>,
+    pub auth: Option<rapira_grpc_auth::Settings>,
     pub pool: PoolSettings,
-}
-
-/// A built-in interceptor and its settings.
-#[derive(Debug)]
-pub enum Interceptor {
-    Auth(rapira_grpc_auth::Settings),
 }
 
 /// Resolves `section` and runs the boot check of the entrypoint file.
@@ -70,6 +67,7 @@ pub fn resolve(section: Section, dir: &Path) -> Result<Settings> {
 /// The settings of `section`. Reads no file.
 fn settings(section: Section, dir: &Path) -> Result<Settings> {
     let listen = parse_listen(
+        dir,
         "grpc",
         section.listen.as_deref(),
         ListenAddr::Tcp(SocketAddr::from((Ipv4Addr::LOCALHOST, 50051))),
@@ -114,9 +112,25 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         .auth
         .map(|s| rapira_grpc_auth::resolve(s, dir))
         .transpose()?;
-    let interceptors = resolve_interceptors(section.interceptors, auth)?;
+    check_stages(
+        "grpc",
+        "interceptors",
+        "interceptors",
+        &section.interceptors,
+        &[Stage {
+            name: "auth",
+            configured: auth.is_some(),
+            requires_table: true,
+        }],
+    )?;
 
     let pool = resolve_pool(section.pool, "grpc.pool", dir)?;
+    if pool.mode != Mode::Dispatcher {
+        bail!(
+            "grpc.pool.mode = {}: this plugin serves dispatcher",
+            pool.mode
+        );
+    }
 
     Ok(Settings {
         listen,
@@ -127,7 +141,8 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         max_timeout,
         keepalive_interval,
         keepalive_timeout,
-        interceptors,
+        interceptors: section.interceptors,
+        auth,
         pool,
     })
 }
@@ -137,38 +152,8 @@ fn optional_timeout(key: &str, secs: Option<u64>) -> Result<Option<Duration>> {
         .transpose()
 }
 
-/// Each listed name needs its table, and each table needs its name.
-fn resolve_interceptors(
-    list: Vec<String>,
-    mut auth: Option<rapira_grpc_auth::Settings>,
-) -> Result<Vec<Interceptor>> {
-    for (i, name) in list.iter().enumerate() {
-        if list[..i].contains(name) {
-            bail!("grpc.interceptors lists \"{name}\" twice");
-        }
-    }
-    let mut interceptors = Vec::with_capacity(list.len());
-    for name in list {
-        match name.as_str() {
-            "auth" => match auth.take() {
-                Some(settings) => interceptors.push(Interceptor::Auth(settings)),
-                None => bail!("grpc.interceptors lists \"auth\" but [grpc.auth] is missing"),
-            },
-            other => {
-                bail!(
-                    "grpc.interceptors entry \"{other}\" is unknown; known interceptors: \"auth\""
-                )
-            }
-        }
-    }
-    if auth.is_some() {
-        bail!("[grpc.auth] is configured but grpc.interceptors does not list \"auth\"");
-    }
-    Ok(interceptors)
-}
-
 impl Server {
-    /// The master loads the schema and interceptors and binds the listener before the fork. An error stops the boot.
+    /// Loads the schema and the interceptors, binds the listener and prepares the routes before PHP starts.
     pub fn from_settings(settings: Settings) -> Result<Self> {
         let schema = Arc::new(Schema::load(
             &settings.descriptor_set,
@@ -176,25 +161,48 @@ impl Server {
         )?);
         let mut interceptors: Vec<Arc<dyn connectrpc::Interceptor>> =
             Vec::with_capacity(settings.interceptors.len());
-        for interceptor in &settings.interceptors {
-            match interceptor {
-                Interceptor::Auth(auth) => {
-                    interceptors.push(Arc::new(rapira_grpc_auth::Auth::load(auth)?));
+        let mut auth = settings.auth;
+        for name in &settings.interceptors {
+            match name.as_str() {
+                "auth" => {
+                    let cfg = auth
+                        .take()
+                        .context("grpc.interceptors lists \"auth\" but [grpc.auth] is missing")?;
+                    interceptors.push(Arc::new(rapira_grpc_auth::Auth::load(&cfg)?));
                 }
+                other => bail!("unknown grpc interceptor `{other}`"),
             }
         }
-        let config = Config {
-            listen: settings.listen,
+        let mut deadlines = DeadlinePolicy::new();
+        if let Some(timeout) = settings.default_timeout {
+            deadlines = deadlines.with_default_timeout(timeout);
+        }
+        if let Some(max) = settings.max_timeout {
+            deadlines = deadlines.with_max(max);
+        }
+
+        let listener = rapira_net::bind(&settings.listen).context("plugin grpc: prepare failed")?;
+        let (mut router, health) =
+            crate::health::install(schema.services().map(|s| s.full_name().to_owned()));
+        if settings.reflection {
+            let reflector = Reflector::from_descriptor_pool(Arc::clone(schema.pool()))
+                .map_err(|e| anyhow!("building grpc reflection: {e}"))
+                .context("plugin grpc: prepare failed")?
+                .with_services(schema.services().map(|s| s.full_name()));
+            router = connectrpc_reflection::install(router, reflector);
+        }
+        tracing::info!(target: "grpc", "listening on {}", listener.addr());
+        Ok(Self {
+            listener,
             schema,
-            reflection: settings.reflection,
-            default_timeout: settings.default_timeout,
-            max_timeout: settings.max_timeout,
-            keepalive_interval: settings.keepalive_interval,
-            keepalive_timeout: settings.keepalive_timeout,
+            router,
+            health,
+            deadlines,
+            connection: ConnectionConfig::new()
+                .with_http2_keepalive_interval(settings.keepalive_interval)
+                .with_http2_keepalive_timeout(settings.keepalive_timeout),
             interceptors,
-        };
-        let prepared = prepare(&config).context("plugin grpc: prepare failed")?;
-        Ok(Self { config, prepared })
+        })
     }
 }
 
@@ -367,6 +375,11 @@ mod tests {
                 toml: toml("foo = 1\n"),
                 expected: Err("unknown field `foo`"),
             },
+            Case {
+                name: "worker mode",
+                toml: "descriptor_set = \"a.binpb\"\n[pool]\nentrypoint = \"g.php\"\nmode = \"worker\"\n".into(),
+                expected: Err("grpc.pool.mode = worker: this plugin serves dispatcher"),
+            },
         ];
         for case in cases {
             let got = toml::from_str::<Section>(&case.toml)
@@ -483,9 +496,15 @@ mod tests {
                 (Ok(g), Ok(want)) => {
                     let files: Vec<PathBuf> = g
                         .interceptors
-                        .into_iter()
-                        .map(|interceptor| match interceptor {
-                            Interceptor::Auth(auth) => auth.tokens_file,
+                        .iter()
+                        .map(|name| match name.as_str() {
+                            "auth" => g
+                                .auth
+                                .as_ref()
+                                .expect("auth configured")
+                                .tokens_file
+                                .clone(),
+                            other => panic!("unexpected interceptor {other}"),
                         })
                         .collect();
                     let want: Vec<PathBuf> = want.iter().map(PathBuf::from).collect();
@@ -496,6 +515,44 @@ mod tests {
                 }
                 (got, want) => panic!("{}: got {got:?}, want {want:?}", case.name),
             }
+        }
+    }
+
+    #[test]
+    fn from_settings_rejects_unvalidated_interceptors() {
+        struct Case {
+            name: &'static str,
+            interceptors: Vec<String>,
+            want_err: &'static str,
+        }
+        let cases = [
+            Case {
+                name: "auth listed without auth settings",
+                interceptors: vec!["auth".into()],
+                want_err: "grpc.interceptors lists \"auth\" but [grpc.auth] is missing",
+            },
+            Case {
+                name: "unknown interceptor name",
+                interceptors: vec!["bogus".into()],
+                want_err: "unknown grpc interceptor `bogus`",
+            },
+        ];
+        let descriptor =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/grpc/echo.binpb");
+        for case in cases {
+            let section: Section = toml::from_str(&format!(
+                "descriptor_set = \"{}\"\n[pool]\nentrypoint = \"a.php\"\n",
+                descriptor.display()
+            ))
+            .unwrap();
+            let mut cfg = settings(section, Path::new("/")).unwrap();
+            cfg.interceptors = case.interceptors;
+            cfg.auth = None;
+            let err = match Server::from_settings(cfg) {
+                Ok(_) => panic!("{}: expected Err", case.name),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(err.contains(case.want_err), "{}: {err}", case.name);
         }
     }
 }

@@ -1,5 +1,12 @@
 <?php
+require __DIR__ . '/env.php';
+
 header('Content-Type: application/json');
+$path = parse_url($_SERVER['REQUEST_URI'], PHP_URL_PATH);
+if ($path !== '/') {
+    echo json_encode(env_route($path));
+    return;
+}
 echo json_encode([
     'getenv' => getenv('POOL_PROBE'),
     'getenv_empty' => getenv('POOL_EMPTY'),

@@ -2,7 +2,7 @@ use crate::harness::{
     Conn, Exited, Head, Server, Spawn, diagnostics, fixture_path, http_get, http_get_raw,
     http_post, http_raw_bytes, parse_status_and_body, scratch_dir,
 };
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use std::path::Path;
 use std::time::{Duration, SystemTime};
 use tests::{StatusBody, fixture};
@@ -541,7 +541,7 @@ fn static_files_check_if_range() {
     let _ = std::fs::remove_dir_all(&root);
 }
 
-/// `http.static.forbid` decides which sources stay with PHP. Each case boots its own master.
+/// `http.static.forbid` decides which sources stay with PHP. Each case starts its own server.
 #[test]
 fn the_forbid_list_decides_which_sources_reach_php() {
     struct Case {
@@ -589,9 +589,7 @@ fn the_forbid_list_decides_which_sources_reach_php() {
     }
 }
 
-/// Each check deletes or rewrites the file after the first request, so only the cache can
-/// give the old answer. The cache belongs to the one worker process. The entries go stale
-/// after one second, so one wait covers every check that needs a stale entry.
+/// Each check deletes or rewrites the file after the first request, so only the HTTP cache can give the old answer. The entries expire after one second.
 #[test]
 fn cached_entries_answer_until_they_go_stale() {
     let big = "x".repeat(262_145);

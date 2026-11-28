@@ -735,6 +735,69 @@ async fn a_passed_deadline_ends_the_stream() {
     stop(srv).await;
 }
 
+/// A stream without a client deadline uses the pool's request limit. A PHP timeout after the head ends the call with INTERNAL.
+#[tokio::test]
+async fn the_pool_timeout_recycles_a_stream_without_a_client_deadline() -> anyhow::Result<()> {
+    let srv = Spawn::grpc(fixture("grpc/stream-worker.php"))
+        .grpc_pool("request_terminate_timeout_secs = 1")
+        .json_log()
+        .spawn();
+    let mut conn = Conn::open(&listen(&srv), Wire::H2).await?;
+    let slow = envelope(&echo("slow"));
+    let response =
+        tokio::time::timeout(Duration::from_secs(5), conn.grpc(WATCH_PATH, &[], &slow)).await??;
+    assert_eq!(response.grpc_status(), Some("13"), "{response:?}");
+    assert_eq!(envelopes(&response.body)[0].message.as_ref(), echo("1"));
+    crate::harness::slot_line(&srv, "recycles=1 ");
+    let next = conn
+        .grpc(WATCH_PATH, &[], &envelope(&echo("count")))
+        .await?;
+    assert_eq!(next.grpc_status(), Some("0"), "{next:?}");
+    assert_eq!(envelopes(&next.body).len(), 3);
+    stop(srv).await;
+    Ok(())
+}
+
+/// A pool timeout releases the worker while its first client still holds the unread response.
+#[tokio::test]
+async fn the_pool_timeout_releases_an_unread_stream_for_the_next_call() -> anyhow::Result<()> {
+    let srv = Spawn::grpc(fixture("grpc/stream-worker.php"))
+        .grpc_pool("request_terminate_timeout_secs = 1")
+        .json_log()
+        .spawn();
+    let addr = listen(&srv);
+    let mut first = Conn::open(&addr, Wire::H2).await?;
+    let held = first
+        .request(Method::POST, WATCH_PATH, GRPC, &envelope(&echo("flood")))
+        .await?;
+    let mut second = Conn::open(&addr, Wire::H2).await?;
+    let next = tokio::time::timeout(
+        Duration::from_secs(5),
+        second.grpc(WATCH_PATH, &[], &envelope(&echo("count"))),
+    )
+    .await??;
+    assert_eq!(next.grpc_status(), Some("0"), "{next:?}");
+    assert_eq!(
+        next.body.as_ref(),
+        [
+            envelope(&echo("1")),
+            envelope(&echo("2")),
+            envelope(&echo("3"))
+        ]
+        .concat()
+    );
+    crate::harness::slot_line(&srv, "recycles=1 ");
+    let body = held.into_body().collect().await?;
+    assert_eq!(
+        body.trailers()
+            .and_then(|t| t.get("grpc-status"))
+            .map(|v| v.as_bytes()),
+        Some(&b"13"[..])
+    );
+    stop(srv).await;
+    Ok(())
+}
+
 /// A wait of the generator at a yield ends at the deadline of the call, so a client that does not read cannot hold the worker. Sources: PROTOCOL-HTTP2 (`grpc-timeout: 300m` is 300 ms, status 4 is DEADLINE_EXCEEDED), `StreamingResponder::respond` (the generator gets WorkDiscardedException at its yield, and `respond()` throws it when the generator does not catch it) and `Work` (a call that the host closed is finalized and cancelled).
 #[tokio::test]
 async fn a_passed_deadline_ends_the_wait_for_a_client_that_does_not_read() {
@@ -843,11 +906,11 @@ async fn respond_on_a_closed_call_does_not_start_the_generator() {
     stop(srv).await;
 }
 
-/// A stream that runs past the drain grace fails the drain. Sources: the case "a call past the grace is cut" of `drain_waits_for_calls_within_the_grace` in grpc_server.rs (`process_control_timeout_secs = 1` gives a drain grace of 500 ms, and a call that the drain cuts gives a plugin error with `grpc drain timed out`).
+/// A stop timeout of 1 s gives a drain grace of 500 ms. A stream that stays open past the grace causes a `grpc drain timed out` error.
 #[tokio::test]
 async fn a_stream_past_the_drain_grace_fails_the_drain() {
     let srv = Spawn::grpc(fixture("grpc/stream-worker.php"))
-        .toml("[supervisor]\nprocess_control_timeout_secs = 1")
+        .toml("[server]\nstop_timeout_secs = 1")
         .json_log()
         .spawn();
     let mut conn = Conn::open(&listen(&srv), Wire::H2).await.expect("connect");

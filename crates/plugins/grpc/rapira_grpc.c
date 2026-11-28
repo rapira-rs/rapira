@@ -218,11 +218,7 @@ ZEND_METHOD(Rapira_Grpc_Call_Context, __construct) {
         zend_update_property_double(ce, obj, ZEND_STRL("deadline"), deadline);
     }
     zend_update_property(ce, obj, ZEND_STRL("remote"), remote);
-    if (tls) {
-        zend_update_property(ce, obj, ZEND_STRL("tls"), tls);
-    } else {
-        zend_update_property_null(ce, obj, ZEND_STRL("tls"));
-    }
+    rapira_prop_obj_or_null(ce, obj, ZEND_STRL("tls"), tls);
     zend_update_property(ce, obj, ZEND_STRL("protocol"), protocol);
     zend_update_property_double(ce, obj, ZEND_STRL("receivedAt"), received_at);
 }
@@ -237,27 +233,27 @@ ZEND_METHOD(Rapira_Internal_Grpc_Dispatcher, getServices) {
                                 "getServices");
 }
 
-// getMessage() copies the message into one zend_string on its first call.
+// getMessage() copies the message into memo slot 0 on its first call.
 // Later calls return the same zend_string.
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getMessage) {
     ZEND_PARSE_PARAMETERS_NONE();
-    rapira_grpc_call_obj *call = rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS));
-    if (Z_ISUNDEF(call->message)) {
+    rapira_unit_obj *call = rapira_unit_from(Z_OBJ_P(ZEND_THIS));
+    if (Z_ISUNDEF(call->memos[0])) {
         size_t len = 0;
         const char *message = rapira_rs_grpc_message(&call->held, &len);
-        ZVAL_STRINGL(&call->message, message, len);
+        ZVAL_STRINGL(&call->memos[0], message, len);
     }
-    RETURN_COPY(&call->message);
+    RETURN_COPY(&call->memos[0]);
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getContext) {
     ZEND_PARSE_PARAMETERS_NONE();
-    rapira_grpc_call_obj *call = rapira_grpc_call_from(Z_OBJ_P(ZEND_THIS));
-    if (Z_ISUNDEF(call->context)) {
+    rapira_unit_obj *call = rapira_unit_from(Z_OBJ_P(ZEND_THIS));
+    if (Z_ISUNDEF(call->memos[1])) {
         RAPIRA_RETURN_THROWS_UNLESS(
-            rapira_rs_grpc_context(&call->held, &call->context), "getContext");
+            rapira_rs_grpc_context(&call->held, &call->memos[1]), "getContext");
     }
-    RETURN_COPY(&call->context);
+    RETURN_COPY(&call->memos[1]);
 }
 
 ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, getResponseMetadata) {
@@ -277,20 +273,62 @@ ZEND_METHOD(Rapira_Internal_Grpc_UnaryCall, respond) {
         "respond");
 }
 
-// Sends one value that the generator of respond() yielded
-// (rapira_stream_run_generator). The generator is argument 1 of respond().
+// Sends one value that the generator of respond() yielded (argument 1).
 static bool grpc_stream_send(const rapira_held *held, zval *value) {
     if (Z_TYPE_P(value) != IS_STRING) {
         zend_argument_type_error(1, "must yield strings, %s yielded",
                                  zend_zval_value_name(value));
         return false;
     }
-    return rapira_rs_grpc_stream_send(held, Z_STRVAL_P(value),
-                                      Z_STRLEN_P(value));
+    return rapira_rs_grpc_stream_send(held, ZSTR_VAL(Z_STR_P(value)),
+                                      ZSTR_LEN(Z_STR_P(value)));
 }
 
-// Sends each yielded string as one message. The generator runs below this C
-// frame (rapira_stream.c).
+// Runs a generator to completion below this C frame so a PHP bailout crosses no
+// Rust frame. Returns true when the generator ended with the call open.
+static bool grpc_run_generator(zend_object *generator,
+                               const rapira_held *held) {
+    zend_generator *gen = (zend_generator *)generator;
+    bool open = true;
+
+    // A generator that has not run advances to its first yield, as
+    // zend_generator_ensure_initialized does:
+    // https://github.com/php/php-src/blob/php-8.5.12/Zend/zend_generators.c#L908-L914
+    if (Z_TYPE(gen->value) == IS_UNDEF && gen->execute_data &&
+        gen->node.parent == NULL) {
+        zend_generator_resume(gen);
+        gen->flags |= ZEND_GENERATOR_AT_FIRST_YIELD;
+    }
+    while (!EG(exception) && gen->execute_data) {
+        if (open) {
+            // During a yield from, the current generator holds the value.
+            zval *value = &zend_generator_get_current(gen)->value;
+            ZVAL_DEREF(value);
+            if (grpc_stream_send(held, value)) {
+                zend_generator_resume(gen);
+                continue;
+            }
+            if (EG(exception)) {
+                return false;
+            }
+            open = false;
+        }
+        zval discarded;
+        object_init_ex(&discarded, rapira_ce_work_discarded_exception);
+        zend_update_property_string(rapira_ce_work_discarded_exception,
+                                    Z_OBJ(discarded), ZEND_STRL("message"),
+                                    "the host closed the work first");
+        zend_call_method_with_1_params(generator, zend_ce_generator, NULL,
+                                       "throw", NULL, &discarded);
+        zval_ptr_dtor(&discarded);
+    }
+    if (EG(exception)) {
+        return false;
+    }
+    return open;
+}
+
+// Sends each yielded string as one message.
 ZEND_METHOD(Rapira_Internal_Grpc_ServerStreamingCall, respond) {
     zend_object *messages;
     ZEND_PARSE_PARAMETERS_START(1, 1)
@@ -303,7 +341,7 @@ ZEND_METHOD(Rapira_Internal_Grpc_ServerStreamingCall, respond) {
     // False needs no action. With an exception pending, a call that the host
     // did not close stays unfinalized, and fail() can end it. With none, the
     // host closed the call, so no outcome goes out.
-    if (rapira_stream_run_generator(messages, held, grpc_stream_send)) {
+    if (grpc_run_generator(messages, held)) {
         rapira_rs_grpc_stream_end(held);
     }
 }

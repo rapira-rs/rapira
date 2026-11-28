@@ -7,26 +7,26 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 `Server` implements `rapira_sapi::plugin::Plugin`:
 
 - `name()` returns `http`: the TOML table and the dispatcher name that PHP sees.
-- `modes()` accepts the classic, worker and dispatcher modes.
-- `dispatcher()` returns the address of `rapira_http_plugin`, the C record of the dispatcher surface: the dispatcher classes, the busy error of `receive()` and the quiesce hook of dispatcher mode.
+- `dispatcher()` returns the address of `rapira_http_plugin`, the C record of the dispatcher surface: the dispatcher classes and the busy error of `receive()`.
+- `worker_init()` returns the function that binds the server name and port on each PHP thread before its first entrypoint.
 - The crate exports `rapira_http_register_classes`. MINIT calls it after the base classes to register the `Rapira\Http` classes.
-- `Server::from_settings` runs in the master before the fork, with no runtime. It sets the server identity and the `sendFile()` root that the workers inherit, removes the spool dirs of dead workers and binds the listener with `rapira_net::bind`.
-- `serve()` runs in the worker on the plugin thread `rapira-http`. It gets a `Worker` from the SAPI: the handle of a tokio runtime with two worker threads, the `Intake` to the PHP thread, the stop flag and the drain bound `drain_grace`. After the stop, the plugin drains within `worker.drain_grace` and returns.
+- `Server::from_settings` sets the server identity and `sendFile()` root, removes spool directories of dead server processes and binds the listener before PHP starts.
+- `serve()` runs the accept loop on the control runtime and dispatches sockets round-robin to dedicated single-threaded `LocalSet` IO shards (`rapira-io-{i}`). It receives the HTTP pool's `Intake`, the stop flag and the connection drain timeout.
 
-`serve()` takes the worker's `Intake`. It adopts the inherited listener with `rapira_net::Acceptor` and runs the accept loop on the plugin thread. hyper's http1 builder serves each connection on the runtime. Each request goes through the admission checks, the middleware chain and the inner service. The inner service reads the body and submits the unit to the intake: a `Context` with the CGI view in the classic and worker modes, an `ExchangeState` in dispatcher mode. PHP writes the reply as frames (`Head`, `Chunk`, `File`, `End`), and the plugin writes them to the socket as they arrive.
+`PreparedListener::run` accepts connections and distributes them across the IO shards. Each request goes through head admission and the middleware chain in `intake`. `PendingIntake` reads the body (offloading multipart spooling to the blocking pool) and submits the unit to the pool: a `CgiExchange` in classic and worker modes, or an `ExchangeState` in dispatcher mode. Any available worker can serve it, including a later request on the same connection. PHP writes response handoffs (`Start::{Complete, Stream, Error}` and `Chunk::{Data, File, End}`), which the shard writes to the socket as they arrive.
 
 `ExchangeState` in `src/php/mod.rs` is the dispatcher-mode unit. It implements `rapira_sapi::work::Held`:
 
 - `cancelled()` returns true when the client is gone. `receive()` skips such a unit.
 - The SAPI keeps the state in the `Rapira\Http\Exchange` object from `receive()`, answers `isFinalized()` and `isCancelled()` from it, and reclaims it when the object is freed.
 - `lost()` sends a 500 head, or a truncated End after a sent head, when the object is freed before the unit is settled.
-- `shed()` answers 503 when the PHP boot of the worker failed.
+- `shed()` answers 503 during a boot retry if the pool has no ready worker.
 
-The client gets 503 when the intake of the worker stays full for 30 seconds or when the waiting request bodies use the 64 MiB body budget of the worker, and 500 when the PHP thread of the worker has stopped. PHP does not see these requests.
+The HTTP pool shares 1,024 intake slots and a 64 MiB budget for pending request bodies. If the pool cannot reserve the body bytes, the client gets 503 immediately. If no slot becomes free within 30 seconds, the client also gets 503. PHP does not see these requests.
 
 ## Crate layout
 
-- `Cargo.toml`: depends on `rapira_sapi`, `rapira_net`, `rapira_config` and `rapira_static_files`. `rapira_php_build` is a build dependency.
+- `Cargo.toml`: depends on `rapira_sapi`, `rapira_net`, `rapira_config`, `rapira_http_middleware`, `rapira_static_files`, and `rapira_compress`. `rapira_php_build` is a build dependency.
 - `build.rs`: compiles the C files with `rapira_php_build::compile` against the PHP headers. `rapira_http.h` includes `rapira_sapi.h` by its path in `crates/sapi`.
 - `rapira_http.stub.php`: the PHP stub of the `Rapira\Http` and `Rapira\Internal\Http` classes.
 - `rapira_http_arginfo.h`: generated from the stub by `make stubs`. Do not edit it.
@@ -36,50 +36,47 @@ The client gets 503 when the intake of the worker stays full for 30 seconds or w
 - `rapira_exchange.c`: the method shells of `Exchange`.
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[http]` table), `Settings`, `resolve` with the boot checks, and `Server::from_settings`.
-- `src/serve.rs`: the accept loop, one hyper connection per accepted socket, and the drain.
-- `src/handler.rs`: the admission checks, the middleware chain, the body read, the submit to the intake and the response head.
-- `src/middleware.rs`: the chain types `Body`, `Request`, `Response`, `Service`, `Layer`, and `Peer`.
-- `src/check.rs`: the admission checks: `Host`, field names, declared length.
-- `src/request.rs`: builds the SAPI `Request` from the HTTP request and the `Peer`.
-- `src/response.rs`: the response fields and the error responses.
-- `src/bridge.rs`: the reply body that streams the PHP frames and the `sendFile` slices, and the write timeout.
-- `src/multipart.rs`: the multipart parser and the spool dirs of dispatcher mode.
+- `src/serve.rs`: the accept loop, dedicated single-threaded `LocalSet` IO shards running `hyper` 1.x, and the drain.
+- `src/io/`: the per-connection `ShardIo`, `ConnPhase`, `RequestScope`, `TrackBody`, keepalive/write timeouts, and flush completion (`mod.rs`, `tests.rs`).
+- `src/intake/`: head admission checks (`Host`, field names, declared length), Phase-1 middleware execution, request body reading, SAPI `Request` construction, and multipart offload (`mod.rs`, `tests.rs`).
+- `src/responder/`: the response normalizer (`mod.rs`), lock-free `ResponseSlot`, large-buffer pool, and `HttpResponder` (`slot.rs`), unified `ResponseBody`/`StreamBody`, `sendFile` reads, and `BodyEncoder` framing (`body.rs`), plus unit tests (`tests.rs`).
+- `src/multipart.rs`: the streaming multipart parser and the spool dirs of dispatcher mode.
 - `src/php/`: the Rust behind the PHP methods: the class entries, the declarations of `rapira_http_plugin` and `rapira_http_register_classes` and the write of the server identity (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
 
 ## Middleware
 
-`[http].middleware` lists the middleware names in chain order. The plugin builds one tower layer for each name and applies the layers around its inner service, the first listed outermost. Without middleware, hyper serves the inner service directly.
+`[http].middleware` lists the middleware names in chain order, the first listed outermost. `Config.middleware` holds `Vec<Arc<dyn Middleware>>` from `rapira_http_middleware` (re-exported as `rapira_http::middleware`).
 
-A layer is `middleware::Layer`: a `tower::util::BoxCloneServiceLayer` over `http::Request<Body>` and `http::Response<Body>`, with the error type `Infallible`. `middleware::Body` is an `UnsyncBoxBody<Bytes, BoxError>`. A layer answers a request itself or calls the inner service.
-
-The request extensions hold private state of the plugin: the peer (the remote address, the server address, `https` and the receive time, which PHP gets), the request authority and the in-flight counter of the drain. A layer that rebuilds a request must keep the extensions. A layer must not keep them after the call.
+Each middleware implements `Middleware` and declares its active lifecycle stages via `phases()` (`Phases::REQUEST`, `Phases::RESPONSE_HEAD`, or both). `on_request(&self, req: &mut RequestCtx)` runs outer to inner on the IO shard and returns `RequestStep::Next`, `RequestStep::Respond(ShortResponse)`, or `RequestStep::Async(...)`. `on_response_head(&self, is_head, extensions, head: &mut ResponseHead)` runs inner to outer before wire framing (only for middlewares strictly outside a short-circuiting stage) and can return a `Box<dyn BodyEncoder>` to transform response body bytes. `RequestCtx` provides `method`, `uri`, `version`, `headers`, `peer`, and per-request `extensions`.
 
 The admission checks run before the chain. A request that fails them does not reach the middleware.
 
 To add a built-in middleware:
 
-- Put its layer in a new crate under `crates/middleware`.
+- Put its `Middleware` implementation in a new crate under `crates/middleware`, depending on `rapira_http_middleware`.
 - In the root `Cargo.toml`, add the crate to the workspace `members` and to `[workspace.dependencies]`.
 - Add the crate to the dependencies in `crates/plugins/http/Cargo.toml`.
-- In `src/config.rs`, add its table to `Section`, as `r#static` is for `[http.static]`.
+- In `src/config.rs`, add its table to `Section`, as `r#static` is for `[http.static]` and `compress` is for `[http.compress]`.
 - Resolve the table in `settings` and store the result in `Settings`.
-- In `check_middleware`, check its name and require its table. Reject a configured table that the list does not name.
-- Add its boot check to `resolve`, as `check_static_root` is for `static`.
-- Build its layer in `Server::from_settings`. Keep the configured list order when more than one middleware is available.
+- In `settings` in `src/config.rs`, register its name in `rapira_config::check_stages` and enforce whether its config table is required or optional. Reject a configured table that the list does not name.
+- Add any boot checks to `resolve`, as `check_static_root` is for `static`.
+- Construct `Arc<dyn Middleware>` in `Server::from_settings`. Keep the configured list order when more than one middleware is available.
 - Add cases for the new name to the tables of `middleware_list_and_tables_must_agree` and of a resolve test.
 - Add an e2e test in `crates/tests/tests/e2e/` that starts `rapira` with the new `[http.<name>]` table through `Spawn::http_extra`, and add its `mod` line to `main.rs`.
 - Add a commented example of the table to `examples/rapira.toml`, next to `[http.static]`.
 - Add its boot errors to the error list in the Config section.
 
-`rapira_http` depends on each middleware crate, so a crate under `crates/middleware` cannot use `Peer`. A middleware that needs `Peer` must be in `rapira_http`, or `Peer` must first move to a shared crate.
+`rapira_static_files::StaticFiles` is the `static` middleware. It serves files from `[http.static].root`. A miss goes to the next middleware, and to PHP when `static` is the last middleware. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
 
-`rapira_static_files::StaticFiles` is the `static` middleware. It serves files from `[http.static].root`. A miss goes to the next layer, and to PHP when `static` is the last layer. A permission error or a bad file name is also a miss. Any other read failure answers 500. That request does not reach PHP.
+`StaticFiles` holds served files in memory. All HTTP connections share one cache of up to 16 MiB. It stores files of at most 256 KiB. An entry stays fresh for one second. A permission change does not stop the cache from serving a file. To stop it, delete the file or replace it. A server restart empties the cache.
 
-`StaticFiles` holds served files in memory. An entry stays fresh for one second. A rewritten file therefore reaches the client after that time. Each worker keeps its own cache of up to 16 MiB, and the cache stores no file above 256 KiB. The memory cost is 16 MiB for each process in `http.pool.processes`. A permission change does not stop the cache from serving a file. To stop it, delete the file or replace it. A restart empties the cache.
+`rapira_compress::Compress` is the `compress` middleware. It negotiates `zstd` or `gzip` from `Accept-Encoding` and encodes eligible responses inline. Place `"compress"` before `"static"` in `http.middleware` (for example `middleware = ["compress", "static"]`) to compress static file responses as well as PHP responses. `[http.compress]` is optional when `"compress"` is listed and uses default settings when omitted.
 
 ## Request handling
 
 - The request body is buffered before dispatch and capped by `max_body_size_mb`: a declared `Content-Length` over the cap answers 413 before the body is read, an over-long streamed body answers 413 when the cap is crossed.
+- In dispatcher mode the plugin parses a `multipart/form-data` body while it arrives. It writes each file part to the spool directory and holds only the field parts in memory.
+- The plugin reads a connection in pieces of at most 64 KiB. A request head that does not fit into this read buffer answers 431.
 - `Expect: 100-continue` is honored by hyper: the interim 100 goes out when the body is first read and is skipped entirely when the request is refused first.
 - A missing or empty `Host` on HTTP/1.1, and more than one `Host` line in any version, answer 400 (RFC 9112 §3.2); the `Host` value is the authority. https://www.rfc-editor.org/rfc/rfc9112#section-3.2
 - In dispatcher mode, a multipart request with more than one `Content-Type` line answers 400: the plugin and a PHP consumer could split the body on different boundaries (RFC 9110 §8.3). https://www.rfc-editor.org/rfc/rfc9110#section-8.3
@@ -99,7 +96,7 @@ To add a built-in middleware:
 
 ## Shutdown
 
-On the stop signal the accept loop ends immediately, idle keepalive connections close, and in-flight requests drain within the drain window (see Config); requests still running past the deadline are cut short and reported.
+On stop, the listener closes. A connection accepted before the stop can finish a request during the drain, including its first request. The response carries `Connection: close`. Idle connections can stay open until the drain deadline. At the deadline the plugin closes remaining connections and reports any incomplete requests.
 
 ## Config
 
@@ -115,24 +112,38 @@ The `[http]` table. Unknown keys fail the boot.
 - `[http.uploads]`: the multipart limits of dispatcher mode: `dir` (default: the system temp dir), `max_file_size_mb` (2), `max_field_size_kb` (256), `max_files` (20), `max_parts` (1024), `max_part_headers` (32). This table under another mode fails the boot.
 - `[http.sendfile]`: `root`, the directory that must contain each `sendFile()` path. Default: the entrypoint directory.
 - `[http.static]`: the settings of the `static` middleware: `root` (required, an existing directory) and `forbid` (the file-name suffixes it never serves, default `[".php"]`).
-- `[http.pool]`: the worker pool: `entrypoint` (required), `mode`, `processes`, `max_requests`, `max_memory_mb`, `max_boot_failures`, `request_terminate_timeout_secs`, `env`. `examples/rapira.toml` shows each key.
+- `[http.compress]`: optional override settings of the `compress` middleware: `min_size` (default 1024 bytes), `gzip_level` (1..=9, default 4), and `zstd_level` (1..=19, default 3).
+- `[http.pool]`: `entrypoint` (required), `mode`, `workers`, `max_requests`, `max_boot_failures`, `request_terminate_timeout_secs`, `execution_clock` and `env`. See the [example configuration](../../../examples/rapira.toml).
 
-The drain window is not a key of this table. It is `[supervisor].process_control_timeout_secs` minus 5 seconds, or minus half of it when it is below 10 seconds. The drain therefore ends before the master sends SIGTERM.
+The connection drain lasts for `[server].stop_timeout_secs` minus five seconds, or half the stop timeout if it is below ten seconds. The remaining time is for PHP shutdown. See [Run the server](../../../README.md#run-the-server) for request timeouts and exit codes.
 
-`[http.pool.env]` sets environment variables for the workers of the pool. Each worker sets them after the fork, before its PHP thread starts, so `getenv()`, the boot `$_SERVER` and `$_ENV` (when `variables_order` contains `E`) show them. Each request `$_SERVER` also gets them, and a request variable with the same name wins. The master runs MINIT and parses `php.ini` before it forks the workers, so an extension that reads a variable at MINIT, and `${VAR}` in `php.ini`, do not see them. A name that is empty or contains `=` or NUL, or a value that contains NUL, fails the boot.
+`[http.pool.env]` supplies environment variables to PHP. `getenv()` first reads changes from `putenv()`, then the pool table, then the environment at server startup. `putenv('NAME')` hides a name. `putenv('NAME=')` sets an empty value. Changes last for one request in classic mode and for one app instance in worker and dispatcher modes. `${NAME}` in the text of `parse_ini_file()` and `parse_ini_string()` reads the same values. After `putenv('NAME')`, `${NAME}` reads the environment at server startup.
+
+The boot `$_SERVER` and `$_ENV` (when `variables_order` contains `E`) import the PHP environment. [PHP checks `HTTP_PROXY` against the process environment](https://github.com/php/php-src/blob/php-8.6.0/main/php_variables.c#L885-L897) in both arrays. The `$_SERVER` of an HTTP request gets the pool entries and the request variables. A request variable with the same name wins.
+
+Native libraries and child processes read the process environment, and `putenv()` does not change it. `exec()`, `shell_exec()`, `system()`, `passthru()`, `popen()` and `proc_open()` with no environment argument give the child the process environment. To give a child the pool values and the `putenv()` changes, pass `getenv()` as the environment argument of `proc_open()`. [PHP leaves a variable with an empty value out of that environment](https://github.com/php/php-src/blob/php-8.6.0/ext/standard/proc_open.c#L186-L192). A name that is empty or contains `=` or NUL, or a value that contains NUL, fails the boot.
+
+Symfony Process can give a child only the variables whose names are also keys of `$_SERVER` or `$_ENV`. The `$_SERVER` of a request has no process variables, so such a child can have no `PATH` and no `HOME`. Add these names to `[http.pool.env]`, or put `E` into `variables_order`.
+
+A pool `TMPDIR` or a `putenv()` call can change the value of `getenv('TMPDIR')`. To select the PHP temporary directory that `sys_get_temp_dir()` returns, set [`sys_temp_dir`](https://www.php.net/manual/en/filesystem.configuration.php#ini.sys-temp-dir) in `php.ini` or set `TMPDIR` before starting Rapira. The INI setting takes precedence. For dispatcher uploads, set `dir` in `[http.uploads]`.
+
+GD reads `GDFONTPATH` from the process environment. `setlocale()` with an empty locale name reads `LC_ALL`, the `LC_*` variables and `LANG` from it. Set these variables before starting Rapira, or pass a full font path and a locale name.
 
 Each of these errors in the middleware list fails the boot with exit code 1:
 
 - `http.middleware lists "<name>" twice`
-- `http.middleware entry "<name>" is unknown; known middleware: "static"`
+- `http.middleware entry "<name>" is unknown; known middleware: "static", "compress"`
 - `http.middleware lists "static" but [http.static] is missing`
 - `[http.static] is configured but http.middleware does not list "static"`
+- `[http.compress] is configured but http.middleware does not list "compress"`
+- `http.compress.gzip_level must be in 1..=9`
+- `http.compress.zstd_level must be in 1..=19`
 
 ## Build
 
 ```sh
 cargo build -p rapira_http
-cargo clippy -p rapira_http --all-targets
+cargo clippy -p rapira_http --all-targets -- -D warnings
 ```
 
 ## License

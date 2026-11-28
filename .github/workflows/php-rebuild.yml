@@ -1,5 +1,4 @@
-# Builds the Rapira images of the newest release again on each new NTS PHP image.
-# https://github.com/rapira-rs/docker builds the PHP images ghcr.io/<owner>/php.
+# Rebuilds the newest release when its PHP base image changes.
 # The images hold the state, in the base annotations of the rapira tag php<minor>.
 name: PHP rebuild
 on:
@@ -17,7 +16,6 @@ concurrency:
 
 env:
     IMAGE: ghcr.io/${{ github.repository }}
-    PHP_IMAGE: ghcr.io/${{ github.repository_owner }}/php
     PHP_MINORS: "8.4 8.5 8.6"
 
 jobs:
@@ -51,12 +49,13 @@ jobs:
                       # A release moves php<minor> last. A php<minor> tag without a base annotation comes from a root Dockerfile without the PHP_IMAGE argument.
                       INDEX=$(docker buildx imagetools inspect --raw "$IMAGE:php$MINOR" || true)
                       HAVE=$(jq -r '.annotations["org.opencontainers.image.base.digest"] // empty' <<< "$INDEX")
-                      if [ -z "$HAVE" ]; then
+                      BASE=$(jq -r '.annotations["org.opencontainers.image.base.name"] // empty' <<< "$INDEX")
+                      if [ -z "$HAVE" ] || [ -z "$BASE" ]; then
                           echo "PHP $MINOR: php$MINOR has no base annotation, skip"
                           continue
                       fi
-                      CURRENT=$(docker buildx imagetools inspect "$PHP_IMAGE:$MINOR-nts" --format '{{json .Manifest}}' | jq -er .digest)
-                      echo "PHP $MINOR: php$MINOR is built on $HAVE; $PHP_IMAGE:$MINOR-nts is $CURRENT"
+                      CURRENT=$(docker buildx imagetools inspect "$BASE" --format '{{json .Manifest}}' | jq -er .digest)
+                      echo "PHP $MINOR: php$MINOR is built on $HAVE; $BASE is $CURRENT"
                       [ "$HAVE" = "$CURRENT" ] || SELECTED="$SELECTED $MINOR"
                   done
                   {

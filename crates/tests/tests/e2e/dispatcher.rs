@@ -1,9 +1,9 @@
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use serde_json::json;
 use tests::wire::submit;
 use tests::{StatusBody, drain, fixture, req, server_log};
 
-use crate::harness::Spawn;
+use crate::harness::{Spawn, slot_line};
 
 /// Outside dispatcher mode the call throws `NoDispatcherError`, catchable by its own name and by its stock parent.
 #[test]
@@ -64,15 +64,17 @@ fn header_callback_fatal_keeps_the_worker() -> anyhow::Result<()> {
     .spawn();
     let StatusBody {
         status: s1,
-        body: pid1,
+        body: first,
     } = drain(submit(srv.addr, req("/"))?);
     let StatusBody {
         status: s2,
-        body: pid2,
+        body: next,
     } = drain(submit(srv.addr, req("/"))?);
 
-    assert_eq!((s1, s2), (200, 200), "bodies: {pid1:?} {pid2:?}");
-    assert_eq!(pid1, pid2, "the worker must not crash between cycles");
+    assert_eq!((s1, s2), (200, 200), "bodies: {first:?} {next:?}");
+    assert_eq!((first.len(), next.len()), (16, 16));
+    assert_ne!(first, next, "each app handles one request");
+    slot_line(&srv, "handled=2 ");
     Ok(())
 }
 

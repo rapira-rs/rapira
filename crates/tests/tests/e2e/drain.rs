@@ -1,19 +1,21 @@
 use crate::harness::*;
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use std::time::Duration;
 
 const READ: Duration = Duration::from_secs(10);
 const REQUEST: &[u8] = b"GET / HTTP/1.1\r\nHost: e2e\r\n\r\n";
 
-/// Runs one keep-alive exchange on `conn` and returns the response head. The body is read by content-length.
-fn exchange(conn: &mut Conn) -> std::io::Result<Head> {
-    conn.send(REQUEST)?;
+/// Send the request bytes and check the status, Connection header and body.
+fn exchange(conn: &mut Conn, bytes: &[u8], connection: Option<&str>) -> std::io::Result<()> {
+    conn.send(bytes)?;
     let head = conn.read_head(READ)?;
+    assert_eq!(head.status, 200);
+    assert_eq!(field(&head, "connection"), connection);
     let length = field(&head, "content-length")
         .and_then(|v| v.parse().ok())
-        .unwrap_or(0);
-    conn.read_n(length, READ)?;
-    Ok(head)
+        .expect("the response declares its length");
+    assert_eq!(conn.read_n(length, READ)?, b"ok");
+    Ok(())
 }
 
 fn field<'a>(head: &'a Head, name: &str) -> Option<&'a str> {
@@ -23,51 +25,41 @@ fn field<'a>(head: &'a Head, name: &str) -> Option<&'a str> {
         .map(|(_, v)| v.as_str())
 }
 
-/// A stopping worker keeps the connections it holds. A request on each gets a complete response with `connection: close`, and the worker exits after they close.
+/// During a stop, each accepted HTTP connection gets its last response with `connection: close`.
 #[test]
-fn a_stopping_worker_answers_requests_on_the_connections_it_holds() {
-    let srv = Spawn::http(Mode::Dispatcher, fixture_path("shared/echo-worker.php")).spawn();
-    let pid = wait_workers(&srv, READ, "1 worker", |p| p.len() == 1)[0];
+fn a_stopping_server_answers_requests_on_its_http_connections() {
+    let mut srv = Spawn::http(
+        Mode::Dispatcher,
+        fixture_path("lifecycle/boot-log-worker.php"),
+    )
+    .spawn();
+    wait_serving(&srv, "http", 1);
     let mut used: Vec<Conn> = (0..4)
         .map(|_| {
             let mut conn = Conn::open(srv.addr, READ).expect("connect");
-            let head = exchange(&mut conn).expect("the first exchange");
-            assert_eq!(head.status, 200, "\n{}", diagnostics(&srv));
-            assert_eq!(field(&head, "connection"), None, "a kept-alive response");
+            exchange(&mut conn, REQUEST, None).expect("the first exchange");
             conn
         })
         .collect();
-    let mut fresh: Vec<Conn> = (0..4)
-        .map(|_| Conn::open(srv.addr, READ).expect("connect"))
-        .collect();
-
-    signal(pid, libc::SIGQUIT);
+    let mut fresh = Conn::open(srv.addr, READ).expect("connect before the stop");
+    // The 100 response on the next connection confirms that the listener accepted both. The POST keeps the drain open until the test sends its body.
+    let mut held = Conn::open(srv.addr, READ).expect("connect for the held POST");
+    held.send(b"POST / HTTP/1.1\r\nHost: e2e\r\nExpect: 100-continue\r\nContent-Length: 1\r\n\r\n")
+        .expect("send the POST headers");
+    assert_eq!(held.read_head(READ).expect("interim response").status, 100);
+    signal(srv.pid(), libc::SIGQUIT);
     assert!(
-        wait_log_contains(&srv, "open connections", READ),
+        wait_log_contains(&srv, "draining 6 open connections", READ),
         "no drain record\n{}",
         diagnostics(&srv)
     );
-
     for (i, conn) in used.iter_mut().enumerate() {
-        let head = exchange(conn)
+        exchange(conn, REQUEST, Some("close"))
             .unwrap_or_else(|e| panic!("held connection {i}: {e}\n{}", diagnostics(&srv)));
-        assert_eq!(head.status, 200, "held connection {i}");
-        assert_eq!(
-            field(&head, "connection"),
-            Some("close"),
-            "held connection {i}"
-        );
     }
-    // The old worker or its replacement answers, depending on which one accepted the connection.
-    for (i, conn) in fresh.iter_mut().enumerate() {
-        let head = exchange(conn)
-            .unwrap_or_else(|e| panic!("new connection {i}: {e}\n{}", diagnostics(&srv)));
-        assert_eq!(head.status, 200, "new connection {i}");
-    }
-    // The 10 s wait is well under the 25 s drain grace period. It is enough because the drain ends when the last connection closes.
-    wait_workers(&srv, READ, "a new worker after the drain", |p| {
-        p.len() == 1 && p[0] != pid
-    });
+    exchange(&mut fresh, REQUEST, Some("close")).expect("the first request during the drain");
+    exchange(&mut held, b"x", Some("close")).expect("complete the held POST");
+    assert_exit_code(srv.wait_exit(READ), EXIT_OK, &srv);
 }
 
 /// Sends one Connect unary call to EchoService/Echo on `conn`.
@@ -87,14 +79,19 @@ async fn connect_call(conn: &mut tests::grpc::Conn) -> tests::grpc::Response {
         .expect("the call")
 }
 
-/// A stopping gRPC worker answers the next Connect call on each HTTP/1.1 connection it holds, and that response closes the connection.
+/// During a stop, each accepted gRPC HTTP/1.1 connection gets its last Connect response.
 #[tokio::test]
-async fn a_stopping_grpc_worker_answers_on_its_http1_connections() {
+async fn a_stopping_server_answers_on_its_grpc_http1_connections() {
     let srv = Spawn::grpc(fixture_path("grpc/echo-worker.php"))
         .json_log()
         .spawn();
-    let pid = wait_workers(&srv, READ, "1 worker", |p| p.len() == 1)[0];
-    let mut conns = Vec::new();
+    wait_serving(&srv, "grpc", 1);
+    // The first reply on a later connection confirms that the listener accepted this one.
+    let mut conns = vec![
+        tests::grpc::Conn::open(&listen(&srv), tests::grpc::Wire::Http1)
+            .await
+            .expect("connect before the stop"),
+    ];
     for _ in 0..4 {
         let mut conn = tests::grpc::Conn::open(&listen(&srv), tests::grpc::Wire::Http1)
             .await
@@ -104,13 +101,12 @@ async fn a_stopping_grpc_worker_answers_on_its_http1_connections() {
         conns.push(conn);
     }
 
-    signal(pid, libc::SIGQUIT);
+    signal(srv.pid(), libc::SIGQUIT);
     assert!(
         wait_log_contains(&srv, "draining open connections", READ),
         "no drain record\n{}",
         diagnostics(&srv)
     );
-
     for (i, conn) in conns.iter_mut().enumerate() {
         let response = connect_call(conn).await;
         assert_eq!(
@@ -119,6 +115,7 @@ async fn a_stopping_grpc_worker_answers_on_its_http1_connections() {
             "connection {i}\n{}",
             diagnostics(&srv)
         );
+        assert_eq!(response.body.as_ref(), tests::grpc::HI, "connection {i}");
         assert_eq!(
             response
                 .headers
@@ -128,4 +125,70 @@ async fn a_stopping_grpc_worker_answers_on_its_http1_connections() {
             "connection {i}"
         );
     }
+    tokio::time::timeout(READ, exited(srv))
+        .await
+        .expect("the server exits after the last response");
+}
+
+#[tokio::test]
+async fn drain_keeps_the_health_names_for_the_last_connect_check() {
+    const CHECK: &str = "/grpc.health.v1.Health/Check";
+    const PROTO: tests::grpc::Fields = &[("content-type", "application/proto")];
+    struct Case {
+        name: &'static str,
+        message: &'static [u8],
+        status: u16,
+    }
+    let cases = [
+        Case {
+            name: "whole server",
+            message: b"",
+            status: 200,
+        },
+        Case {
+            name: "configured service",
+            message: b"\x0a\x1arapira.test.v1.EchoService",
+            status: 200,
+        },
+        Case {
+            name: "unknown service",
+            message: b"\x0a\x01x",
+            status: 404,
+        },
+    ];
+    let srv = Spawn::grpc(fixture_path("grpc/echo-worker.php"))
+        .json_log()
+        .spawn();
+    let mut conns = Vec::new();
+    for case in cases {
+        let mut conn = tests::grpc::Conn::open(&listen(&srv), tests::grpc::Wire::Http1)
+            .await
+            .unwrap();
+        let before = conn
+            .send(http::Method::POST, CHECK, PROTO, case.message)
+            .await
+            .unwrap();
+        assert_eq!(before.status, case.status, "{}", case.name);
+        if case.status == 200 {
+            assert_eq!(&before.body[..], b"\x08\x01", "{}: SERVING", case.name);
+        }
+        conns.push((case, conn));
+    }
+    signal(srv.pid(), libc::SIGQUIT);
+    assert!(wait_log_contains(&srv, "draining open connections", READ));
+    for (case, mut conn) in conns {
+        let after = conn
+            .send(http::Method::POST, CHECK, PROTO, case.message)
+            .await
+            .unwrap();
+        assert_eq!(after.status, case.status, "{}", case.name);
+        assert_eq!(after.field("connection"), Some("close"), "{}", case.name);
+        if case.status == 200 {
+            assert_eq!(&after.body[..], b"\x08\x02", "{}: NOT_SERVING", case.name);
+        } else {
+            let error: serde_json::Value = serde_json::from_slice(&after.body).unwrap();
+            assert_eq!(error["code"], "not_found", "{}", case.name);
+        }
+    }
+    assert_eq!(plugin_error(&exited(srv).await), None);
 }

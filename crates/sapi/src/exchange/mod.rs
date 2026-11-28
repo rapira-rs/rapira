@@ -1,52 +1,16 @@
-pub(crate) use std::{cell::Cell, ffi::c_char, ptr::NonNull, time::Duration};
-use std::{fmt::NumBuffer, io::Write, net::IpAddr, os::unix::ffi::OsStrExt, sync::OnceLock};
-
-pub(crate) use crate::work::{Held, HeldPtr, release};
-pub(crate) use crate::{
-    add_assoc_zval_ex,
-    callbacks::guard,
-    object_init_ex, rapira_array_init, rapira_ce_closed_exception, rapira_ce_inet_address,
-    rapira_ce_timeout_exception, rapira_ce_unix_address, rapira_receive_timed,
-    rapira_receive_untimed, rapira_unit_object,
-    start::{Pull, Wait, pending_depth, pull},
-    types::Addr,
-    zend, zval,
+use std::{
+    ffi::c_char, fmt::NumBuffer, io::Write, net::IpAddr, os::unix::ffi::OsStrExt, sync::OnceLock,
 };
 
-mod receive;
-
-thread_local! {
-    /// The Box pointer of the unit handed out last, so a path where free_obj never runs, such as a bailout, can still reclaim it.
-    pub(crate) static UNIT: Cell<Option<*mut dyn Held>> = const { Cell::new(None) };
-    /// The count of the cycles this PHP thread ran, 1 in the first cycle.
-    static CYCLE: Cell<u64> = const { Cell::new(0) };
-}
+pub use crate::context::Permanent;
+use crate::{
+    add_assoc_zval_ex, object_init_ex, rapira_array_init, rapira_ce_inet_address,
+    rapira_ce_unix_address, types::Addr, zend, zend_hash_update, zval,
+};
 
 /// The number of the current cycle of this PHP thread. A plugin that closes something at the cycle end reopens it when the number changes.
 pub fn cycle() -> u64 {
-    CYCLE.get()
-}
-
-/// Clears the cycle slot if it still points at `ptr`.
-pub(crate) fn forget_held(ptr: *const ()) {
-    if UNIT.get().is_some_and(|u| std::ptr::addr_eq(u, ptr)) {
-        UNIT.set(None);
-    }
-}
-
-pub(crate) fn cycle_reset() {
-    reclaim_current();
-    CYCLE.set(CYCLE.get() + 1);
-    crate::start::CLOSED_SEEN.set(false);
-    crate::start::RECEIVED.set(false);
-}
-
-/// Reclaims a unit that free_obj never saw, after a shutdown bailout or an allocation bailout.
-pub(crate) fn reclaim_current() {
-    if let Some(ptr) = UNIT.get() {
-        // SAFETY: the pointer came from Box::leak in receive, and rapira_rs_held_drop clears the cycle slot before it reclaims.
-        drop(unsafe { release(ptr) });
-    }
+    crate::worker::current_cycle()
 }
 
 /// Writes the text of `ip` into `buf` and returns it, the same bytes as its `Display`.
@@ -77,13 +41,14 @@ pub fn ip_text(ip: IpAddr, buf: &mut [u8; 39]) -> &str {
     std::str::from_utf8(&buf[..len]).expect("an IP text is ASCII")
 }
 
-/// add_assoc_zval_ex takes over the list ref, because the hash-update functions never addref.
+/// Inserts a list of header values under `name`, using `perm` when pre-interned to avoid hashing and allocation.
 /// # Safety
 /// `dst` is a live array, and the engine is active on this thread.
-pub unsafe fn add_list<'v>(
+#[inline]
+pub unsafe fn add_list_with<'v>(
     dst: *mut zval,
-    key: *const c_char,
-    key_len: usize,
+    name: &str,
+    perm: Option<Permanent>,
     values: impl Iterator<Item = &'v [u8]>,
 ) {
     unsafe {
@@ -92,13 +57,24 @@ pub unsafe fn add_list<'v>(
         for v in values {
             crate::add_next_index_stringl(&mut list, zend::ptr_or_empty(v), v.len());
         }
-        add_assoc_zval_ex(dst, key, key_len, &mut list);
+        if let Some(perm) = perm {
+            zend_hash_update((*dst).value.arr, perm.as_ptr(), &mut list);
+        } else {
+            add_assoc_zval_ex(dst, header_key(name), name.len(), &mut list);
+        }
     }
+}
+
+/// Inserts a list of header values under `name`.
+/// # Safety
+/// `dst` is a live array, and the engine is active on this thread.
+pub unsafe fn add_list<'v>(dst: *mut zval, name: &str, values: impl Iterator<Item = &'v [u8]>) {
+    unsafe { add_list_with(dst, name, None, values) }
 }
 
 /// The key pointer of a header name for add_assoc_zval_ex.
 /// The symtable prefilter in add_assoc_zval_ex reads the byte after a leading `-`. For the name "-" that byte is past the name, so a NUL-terminated copy replaces it.
-pub fn header_key(name: &str) -> *const c_char {
+fn header_key(name: &str) -> *const c_char {
     if name == "-" {
         c"-".as_ptr()
     } else {

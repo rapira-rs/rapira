@@ -1,0 +1,80 @@
+name: Build PHP for tests
+description: Install the embed SAPI from a PHP release branch or debug master
+inputs:
+    version:
+        description: PHP minor or master
+        required: true
+    model:
+        description: PHP thread model
+        default: zts
+        required: false
+runs:
+    using: composite
+    steps:
+        - if: runner.os == 'Linux'
+          shell: bash
+          run: |
+              sudo apt-get update
+              sudo apt-get install -y --no-install-recommends build-essential autoconf bison re2c pkg-config libclang-dev libssl-dev libcurl4-openssl-dev libxml2-dev libonig-dev libsqlite3-dev zlib1g-dev libffi-dev libicu-dev libpq-dev libsodium-dev
+              echo "LIBCLANG_PATH=$(dirname "$(dirname "$(clang -print-resource-dir)")")" >> "$GITHUB_ENV"
+        - if: runner.os == 'macOS'
+          id: brew
+          shell: bash
+          run: |
+              libs=(openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq libsodium)
+              brew install autoconf bison re2c pkg-config "${libs[@]}"
+              echo "libs=$(brew list --versions "${libs[@]}" | shasum -a 256 | cut -c1-16)" >> "$GITHUB_OUTPUT"
+        - id: source
+          shell: bash
+          env:
+              VERSION: ${{ inputs.version }}
+          run: |
+              ref=PHP-$VERSION
+              if [ "$VERSION" = master ]; then ref=master; fi
+              sha=$(git ls-remote --exit-code https://github.com/php/php-src.git "refs/heads/$ref" | cut -f1)
+              echo "sha=$sha" >> "$GITHUB_OUTPUT"
+        - id: cache
+          uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+          with:
+              path: ${{ github.workspace }}/.php-embed
+              key: php-${{ inputs.model }}-${{ runner.os }}-${{ runner.arch }}-${{ steps.source.outputs.sha }}-${{ steps.brew.outputs.libs }}-${{ hashFiles('.github/actions/php-embed/action.yml', '.github/build-php.sh', '.github/php-configure-flags.txt') }}
+        - if: steps.cache.outputs.cache-hit != 'true'
+          shell: bash
+          env:
+              VERSION: ${{ inputs.version }}
+              SHA: ${{ steps.source.outputs.sha }}
+              MODEL: ${{ inputs.model }}
+              PHP_PREFIX: ${{ github.workspace }}/.php-embed
+          run: |
+              dir=$(mktemp -d)
+              cd "$dir"
+              curl -fsSL --retry 3 "https://codeload.github.com/php/php-src/tar.gz/$SHA" | tar xz --strip-components=1
+              sh "$GITHUB_WORKSPACE/.github/build-php.sh" "$VERSION" "$MODEL"
+        - if: steps.cache.outputs.cache-hit != 'true'
+          uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+          with:
+              path: ${{ github.workspace }}/.php-embed
+              key: ${{ steps.cache.outputs.cache-primary-key }}
+        - shell: bash
+          env:
+              VERSION: ${{ inputs.version }}
+              MODEL: ${{ inputs.model }}
+              PHP_PREFIX: ${{ github.workspace }}/.php-embed
+          run: |
+              if [ "$VERSION" = 8.4 ]; then
+                  export PHP_INI_SCAN_DIR="$PHP_PREFIX/conf.d"
+                  mkdir -p "$PHP_INI_SCAN_DIR"
+                  echo "zend_extension=$("$PHP_PREFIX/bin/php-config" --extension-dir)/opcache.so" > "$PHP_INI_SCAN_DIR/opcache.ini"
+                  echo "PHP_INI_SCAN_DIR=$PHP_INI_SCAN_DIR" >> "$GITHUB_ENV"
+              fi
+              "$PHP_PREFIX/bin/php" -r 'exit((bool) PHP_ZTS === (getenv("MODEL") === "zts") && (bool) PHP_DEBUG === (getenv("VERSION") === "master") && extension_loaded("Zend OPcache") ? 0 : 1);'
+              echo "$PHP_PREFIX/bin" >> "$GITHUB_PATH"
+              {
+                  echo "PHP_CONFIG=$PHP_PREFIX/bin/php-config"
+                  echo "RUSTFLAGS=--cfg tokio_unstable -L native=$PHP_PREFIX/lib"
+                  if [ "$RUNNER_OS" = macOS ]; then
+                      echo "DYLD_LIBRARY_PATH=$PHP_PREFIX/lib"
+                  else
+                      echo "LD_LIBRARY_PATH=$PHP_PREFIX/lib"
+                  fi
+              } >> "$GITHUB_ENV"

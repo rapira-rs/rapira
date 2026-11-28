@@ -1,12 +1,10 @@
 &[
     "sapi_module_struct", "sapi_headers_struct", "sapi_header_struct", "sapi_request_info",
-    "sapi_globals_struct", "zend_executor_globals", "php_core_globals", "zend_compiler_globals",
-    "sapi_globals", "executor_globals", "compiler_globals", "core_globals",
     "zend_file_handle", "zend_module_entry", "zend_string", "zval", "HashTable", "zend_long",
     "zend_fcall_info", "zend_fcall_info_cache",
-    "sapi_startup", "sapi_shutdown", "php_module_startup", "php_module_shutdown", "php_request_startup",
+    "sapi_startup", "php_module_startup", "php_request_startup",
     "php_execute_script", "zend_error", "zend_stream_init_filename", "zend_destroy_file_handle",
-    "rapira_mode", "RAPIRA_MODE_CLASSIC", "RAPIRA_MODE_WORKER",
+    "RAPIRA_MODE_CLASSIC", "RAPIRA_MODE_WORKER",
     "RAPIRA_MODE_DISPATCHER", "RAPIRA_OK", "RAPIRA_BAILOUT", "RAPIRA_THROW",
     "RAPIRA_HANDLE_STOP", "RAPIRA_HANDLE_CONTINUE", "RAPIRA_HANDLE_RECYCLE",
     // the two halves of the linked-libphp version check, and the linked version string
@@ -17,8 +15,9 @@
     "rapira_ce_timeout_exception", "rapira_ce_closed_exception",
     "zend_argument_type_error",
     "rapira_ce_work_discarded_exception",
-    // the plugin globals the Rust boot and worker start write (static mut), and the type of the plugin record that describes the dispatcher
-    "rapira_plugin", "rapira_plugin_current", "rapira_plugin_name", "rapira_plugin_name_len",
+    "rapira_zts", "rapira_has_execution_timers", "rapira_thread_start", "rapira_thread_end",
+    // Each worker reads its dispatcher record. The engine writes the register functions before MINIT.
+    "rapira_plugin", "rapira_current_plugin",
     "rapira_plugin_registers", "rapira_plugin_register_count",
     // the FOREACH macros are header-only, so the array walk uses the exported position API
     "zend_hash_internal_pointer_reset_ex", "zend_hash_get_current_key_ex",
@@ -32,15 +31,16 @@
     "smart_str", "PHP_JSON_PARTIAL_OUTPUT_ON_ERROR",
     // add_assoc_str, add_index_zval and smart_str_free are inline, so the Rust side calls these exported functions and this shim
     "add_assoc_stringl_ex", "zend_hash_index_update", "rapira_smart_str_free",
-    // the EG(fake_scope) swap inside zend_update_property* initializes readonly props
-    "object_init_ex", "zend_update_property", "zend_update_property_stringl",
-    "zend_update_property_long", "zend_update_property_double", "zend_update_property_null",
+    // the EG(fake_scope) swap inside zend_update_property initializes readonly props
+    "object_init_ex", "zend_update_property",
+    // SG, EG, PG and CG are macros that read a thread-local struct on ZTS, so wrapper.c has accessors
+    "rapira_sg", "rapira_eg", "rapira_pg", "rapira_cg",
+    // A park pauses the execution timer through these functions (module.c). rapira_timer is the native timer type of the build.
+    "rapira_timer", "rapira_timer_pause", "rapira_timer_resume",
     // array_init_size is a macro, so wrapper.c has the rapira_array_init shim
     "rapira_array_init",
     // zend_array_is_list is inline, so wrapper.c has the rapira_array_is_list shim
     "rapira_array_is_list",
-    // zend_string_addref and zend_string_release are inline, so wrapper.c has shims for them
-    "rapira_zstr_addref", "rapira_zstr_release",
     // ZVAL_OBJ_COPY is a macro, so wrapper.c has the rapira_zval_enum_case shim
     "rapira_zval_enum_case",
     // zend_hash_str_find_ptr is inline; prop_offset (zend.rs) calls its exported half
@@ -48,6 +48,8 @@
     // for the $_SERVER registration, ZVAL_STRINGL_FAST is a macro, so wrapper.c has the rapira_register_known_stringl and rapira_hash_update_stringl shims
     "rapira_register_known_stringl", "rapira_hash_update_stringl", "zend_hash_extend", "php_import_environment_variables",
     "zend_is_auto_global_str", "zend_hash_update",
+    // zend_symtable_str_del is inline; the environment import (env.rs) calls the two exported functions behind it
+    "zend_hash_str_del", "zend_hash_index_del",
     // for the slot writes of declared properties (zend.rs), ZVAL_STRINGL and ZVAL_NEW_STR are macros, so wrapper.c has the rapira_zval_stringl and rapira_zval_string_alloc shims
     "zend_property_info", "rapira_zval_stringl", "rapira_zval_string_alloc", "IS_LONG", "IS_DOUBLE", "IS_PROP_UNINIT", "IS_PROP_REINITABLE",
     // zend_symtable_str_update is inline; add_assoc_zval_ex is its exported caller (zend_API.c)
@@ -56,7 +58,7 @@
     "zend_object", "zend_class_entry", "zval_ptr_dtor", // zval_ptr_dtor_nogc is inline-only, so the Rust side uses zval_ptr_dtor
     // zend_string_init is inline-only; the exported interner function pointer covers startup-time strings
     "zend_hash_str_update", "zend_string_init_interned",
-    // the realpath cache of the process (Zend/zend_virtual_cwd.c); each app start empties it
+    // Each app start empties the realpath cache of PHP. The cache is per thread on ZTS (Zend/zend_virtual_cwd.c).
     "realpath_cache_clean",
     "php_default_post_reader", "php_default_treat_data", "php_default_input_filter",
     "SAPI_HEADER_SENT_SUCCESSFULLY", "SAPI_HEADER_SEND_FAILED", "IS_STRING",

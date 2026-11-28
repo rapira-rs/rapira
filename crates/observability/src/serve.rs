@@ -1,25 +1,26 @@
 use std::convert::Infallible;
+use std::fmt::Write as _;
+use std::sync::Arc;
 use std::time::Duration;
 
-use anyhow::{Result, anyhow};
+use anyhow::{Context, Result};
 use hyper::body::Incoming;
 use hyper::header::{CONTENT_TYPE, HeaderValue};
 use hyper::server::conn::http1;
 use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::{TokioIo, TokioTimer};
 use hyper_util::server::graceful::GracefulShutdown;
-use rapira_net::{Acceptor, PreparedListener, Serve};
-use rapira_scoreboard::{PoolRegion, SharedSlot};
+use rapira_net::{PreparedListener, Serve};
+use rapira_sapi::pool::Pool;
 use tokio::io::{AsyncRead, AsyncWrite};
 use tokio::sync::watch;
 
 use crate::config::Settings;
+use crate::stats;
 use crate::text::{self, Build};
-use crate::{memory, probes, stats};
 
-/// The observability endpoint. The master prepares it before the fork, and the observability process serves it.
+/// The bound listener and its endpoint settings.
 pub struct Server {
-    build: Build,
     prepared: PreparedListener,
     keepalive_timeout: Duration,
     metrics: bool,
@@ -27,12 +28,10 @@ pub struct Server {
 }
 
 impl Server {
-    /// Binds the listener. The master calls this before the fork.
-    pub fn new(settings: Settings, build: Build) -> Result<Server> {
+    /// Binds the listener before the PHP engine starts.
+    pub fn from_settings(settings: Settings) -> Result<Self> {
         let prepared = rapira_net::bind(&settings.listen)?;
-        tracing::info!(target: "observability", "prepared listener on {}", prepared.addr());
         Ok(Self {
-            build,
             prepared,
             keepalive_timeout: settings.keepalive_timeout,
             metrics: settings.metrics,
@@ -40,72 +39,56 @@ impl Server {
         })
     }
 
-    /// Runs in the observability process. Serves the routes of the configured sub-tables until `stop` turns true, then waits for the requests in flight within `drain_grace`. `pools` are the pools that the metrics and `/readyz` report.
+    /// Runs on the observability thread. When `stop` is true, waits up to `drain_grace` for open connections to close.
     pub fn serve(
         self,
-        board: &'static [SharedSlot],
-        pools: &'static [PoolRegion],
+        pools: Arc<[Arc<Pool>]>,
+        build: Build,
         stop: watch::Receiver<bool>,
         drain_grace: Duration,
     ) -> Result<()> {
-        let rt = tokio::runtime::Builder::new_multi_thread()
-            .worker_threads(1)
+        let rt = tokio::runtime::Builder::new_current_thread()
             .enable_all()
-            .thread_name("rapira-obs-io")
             .build()
-            .map_err(|e| anyhow!("building the observability runtime: {e}"))?;
-        tracing::info!(target: "observability", "serving on {}", self.prepared.addr());
-        let acceptor = Acceptor::adopt(self.prepared, stop, rt.handle())?;
-        let mut builder = http1::Builder::new();
-        builder
-            .timer(TokioTimer::new())
-            .header_read_timeout(self.keepalive_timeout);
-        let serving = Serving {
-            routes: Box::leak(Box::new(Routes {
-                board,
-                pools,
-                build: self.build,
-                metrics: self.metrics,
-                probes: self.probes,
-            })),
-            graceful: GracefulShutdown::new(),
-            builder,
-        };
-        let fatal = acceptor.run(rt.handle(), &serving);
-        let Serving { graceful, .. } = serving;
-        // tokio::time::timeout panics outside a runtime context, so the call runs inside block_on.
-        let drained =
-            rt.block_on(async { tokio::time::timeout(drain_grace, graceful.shutdown()).await });
-        if drained.is_err() {
-            tracing::warn!(target: "observability", "requests still in flight after {drain_grace:?}");
-        }
-        fatal.map_or(Ok(()), Err)
+            .context("building the observability runtime")?;
+        rt.block_on(async {
+            let mut builder = http1::Builder::new();
+            builder
+                .timer(TokioTimer::new())
+                .header_read_timeout(self.keepalive_timeout);
+            let serving = Serving {
+                routes: Arc::new(Routes {
+                    pools,
+                    build,
+                    metrics: self.metrics,
+                    probes: self.probes,
+                }),
+                graceful: GracefulShutdown::new(),
+                builder,
+            };
+            tracing::info!(target: "observability", "listening on {}", self.prepared.addr());
+            let result = self.prepared.run(stop, &serving).await;
+            if result.is_ok()
+                && tokio::time::timeout(drain_grace, serving.graceful.shutdown())
+                    .await
+                    .is_err()
+            {
+                tracing::warn!(target: "observability", "requests still in flight after {drain_grace:?}");
+            }
+            result
+        })
     }
 }
 
-/// What a request reads: the board, the pools it reports, the build and the routes that the config turns on.
 struct Routes {
-    board: &'static [SharedSlot],
-    /// Every pool except the pool of the observability process.
-    pools: &'static [PoolRegion],
+    pools: Arc<[Arc<Pool>]>,
     build: Build,
     metrics: bool,
     probes: bool,
 }
 
-impl Routes {
-    /// Reads the board in one pass, then reads `/proc` once for each live worker.
-    fn metrics_text(&self) -> String {
-        let mut pools = stats::board_stats(self.board, self.pools);
-        for worker in pools.iter_mut().flat_map(|p| p.workers.iter_mut()) {
-            worker.memory = memory::read(worker.pid);
-        }
-        text::render(&pools, &self.build)
-    }
-}
-
 struct Serving {
-    routes: &'static Routes,
+    routes: Arc<Routes>,
     graceful: GracefulShutdown,
     builder: http1::Builder,
 }
@@ -115,9 +98,9 @@ impl Serving {
     where
         S: AsyncRead + AsyncWrite + Unpin + Send + 'static,
     {
-        let routes = self.routes;
+        let routes = Arc::clone(&self.routes);
         let service = hyper::service::service_fn(move |req| {
-            std::future::ready(Ok::<_, Infallible>(respond(routes, &req)))
+            std::future::ready(Ok::<_, Infallible>(respond(&routes, &req)))
         });
         let conn = self
             .graceful
@@ -131,12 +114,22 @@ impl Serving {
 }
 
 impl Serve for Serving {
-    fn spawn_tcp(&self, stream: tokio::net::TcpStream, _peer: std::net::SocketAddr) {
-        self.spawn_conn(stream);
+    fn spawn_tcp(&self, stream: std::net::TcpStream, _peer: std::net::SocketAddr) {
+        match tokio::net::TcpStream::from_std(stream) {
+            Ok(stream) => self.spawn_conn(stream),
+            Err(e) => tracing::debug!(target: "observability", "registering tcp connection: {e}"),
+        }
     }
 
-    fn spawn_unix(&self, stream: tokio::net::UnixStream, _peer: Option<&std::path::Path>) {
-        self.spawn_conn(stream);
+    fn spawn_unix(
+        &self,
+        stream: std::os::unix::net::UnixStream,
+        _peer: Option<std::path::PathBuf>,
+    ) {
+        match tokio::net::UnixStream::from_std(stream) {
+            Ok(stream) => self.spawn_conn(stream),
+            Err(e) => tracing::debug!(target: "observability", "registering unix connection: {e}"),
+        }
     }
 }
 
@@ -147,29 +140,47 @@ const PROBE_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
 fn respond(routes: &Routes, req: &Request<Incoming>) -> Response<String> {
     match (req.method(), req.uri().path()) {
         (&Method::GET, "/metrics") if routes.metrics => {
-            reply(StatusCode::OK, text::CONTENT_TYPE, routes.metrics_text())
+            let pools: Vec<_> = routes
+                .pools
+                .iter()
+                .map(|pool| stats::pool_stats(&pool.snapshot()))
+                .collect();
+            reply(
+                StatusCode::OK,
+                text::CONTENT_TYPE,
+                text::render(&pools, &routes.build),
+            )
         }
-        // The lifeline stops this process when the master dies, so an answer shows that the master lives.
         (&Method::GET, "/livez") if routes.probes => {
             reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
         }
         (&Method::GET, "/readyz") if routes.probes => {
-            let unready = probes::unready(routes.board, routes.pools);
-            if unready.is_empty() {
-                reply(StatusCode::OK, PROBE_CONTENT_TYPE, "ok\n")
-            } else {
-                let body: String = unready
+            let (status, body) = readyz(
+                routes
+                    .pools
                     .iter()
-                    .map(|name| format!("pool {name}: no ready worker\n"))
-                    .collect();
-                reply(StatusCode::SERVICE_UNAVAILABLE, PROBE_CONTENT_TYPE, body)
-            }
+                    .filter(|pool| !pool.ready())
+                    .map(|pool| pool.name),
+            );
+            reply(status, PROBE_CONTENT_TYPE, body)
         }
         _ => {
             let mut not_found = Response::new(String::new());
             *not_found.status_mut() = StatusCode::NOT_FOUND;
             not_found
         }
+    }
+}
+
+fn readyz<'a>(unready: impl IntoIterator<Item = &'a str>) -> (StatusCode, String) {
+    let mut body = String::new();
+    for pool in unready {
+        let _ = writeln!(body, "pool {pool}: no ready worker");
+    }
+    if body.is_empty() {
+        (StatusCode::OK, "ok\n".to_owned())
+    } else {
+        (StatusCode::SERVICE_UNAVAILABLE, body)
     }
 }
 
@@ -183,4 +194,45 @@ fn reply(
     res.headers_mut()
         .insert(CONTENT_TYPE, HeaderValue::from_static(content_type));
     res
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn readyz_names_each_pool_without_a_ready_worker() {
+        struct Case {
+            name: &'static str,
+            unready: &'static [&'static str],
+            want: (StatusCode, &'static str),
+        }
+        let cases = [
+            Case {
+                name: "each pool has a ready worker",
+                unready: &[],
+                want: (StatusCode::OK, "ok\n"),
+            },
+            Case {
+                name: "one pool has no ready worker",
+                unready: &["grpc"],
+                want: (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "pool grpc: no ready worker\n",
+                ),
+            },
+            Case {
+                name: "neither pool has a ready worker",
+                unready: &["http", "grpc"],
+                want: (
+                    StatusCode::SERVICE_UNAVAILABLE,
+                    "pool http: no ready worker\npool grpc: no ready worker\n",
+                ),
+            },
+        ];
+        for case in cases {
+            let (status, body) = readyz(case.unready.iter().copied());
+            assert_eq!((status, body.as_str()), case.want, "{}", case.name);
+        }
+    }
 }

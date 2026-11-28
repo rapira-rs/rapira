@@ -1,11 +1,10 @@
 use http::Method;
 use http::header::{CONTENT_TYPE, HeaderValue};
-use rapira_sapi::plugin::Mode;
-use std::time::Duration;
+use rapira_config::Mode;
 use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp, fixture, req, server_log};
 
-use crate::harness::{Conn, Head, Server, Spawn, slot_line};
+use crate::harness::{Server, Spawn, slot_line, wait_serving};
 
 fn post(body: Vec<u8>) -> http::Request<Vec<u8>> {
     let mut r = req("/");
@@ -90,7 +89,7 @@ fn post_temp_streams_do_not_accumulate() -> anyhow::Result<()> {
     Ok(())
 }
 
-// The worker path must run the handler of set_exception_handler as zend_execute_scripts does, and a handled exception must not raise a 500 or a scoreboard error.
+// The worker path must run the handler of set_exception_handler as zend_execute_scripts does, and a handled exception must not raise a 500 or count as an error.
 #[test]
 fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
     let srv = Spawn::http(
@@ -106,8 +105,6 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
         status: s2,
         body: b2,
     } = drain(submit(srv.addr, req("/"))?);
-    // The slot counts a unit before its response goes out, so both units are counted here.
-    let slot = slot_line(&srv, "handled 2 errors");
 
     assert_eq!(s1, 200);
     assert!(
@@ -119,10 +116,7 @@ fn uncaught_throwable_reaches_exception_handler() -> anyhow::Result<()> {
         b2.contains("handled:boom"),
         "the handler persists on the worker (got: {b2:?})"
     );
-    assert!(
-        slot.contains("errors 0 "),
-        "a handled exception is not an engine error (got: {slot:?})"
-    );
+    slot_line(&srv, "handled=2 errors=0 ");
     Ok(())
 }
 
@@ -169,32 +163,14 @@ fn session_reset_survives_bailing_save_handler() -> anyhow::Result<()> {
     Ok(())
 }
 
-const READ: Duration = Duration::from_secs(10);
-
-/// Sends one keep-alive GET on `conn` and returns the body, read by content-length.
-fn keep_alive_get(conn: &mut Conn, path: &str) -> String {
-    conn.send(format!("GET {path} HTTP/1.1\r\nHost: e2e\r\n\r\n").as_bytes())
-        .expect("send");
-    let Head { fields, .. } = conn.read_head(READ).expect("head");
-    let length = fields
-        .iter()
-        .find(|(k, _)| k == "content-length")
-        .and_then(|(_, v)| v.parse().ok())
-        .expect("content-length");
-    String::from_utf8(conn.read_n(length, READ).expect("body")).expect("utf-8 body")
-}
-
-/// With a store that has no lock, a request that starts when the previous response arrives reads the session that the previous request wrote. Request 2 goes to the other worker, so only the order of the write and the response decides.
+/// A second worker reads the unlocked session store as soon as the client gets the writer's response.
 #[test]
-fn the_next_request_reads_the_session_of_the_previous_response() {
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
+fn the_next_request_reads_the_session_of_the_previous_response() -> anyhow::Result<()> {
     struct Case {
         name: &'static str,
         mode: Mode,
         register_shutdown: &'static str,
-    }
-    struct Pinned {
-        pid: String,
-        conn: Conn,
     }
     let cases = [
         Case {
@@ -215,30 +191,31 @@ fn the_next_request_reads_the_session_of_the_previous_response() {
     ];
     for case in cases {
         let srv = Spawn::http(case.mode, fixture("shared/session-unlocked.php"))
-            .processes(2)
+            .workers(2)
             .env("REGISTER_SHUTDOWN", case.register_shutdown)
+            .json_log()
             .spawn();
-        let mut pinned: Vec<Pinned> = Vec::new();
-        for _ in 0..64 {
-            let mut conn = Conn::open(srv.addr, READ).expect("connect");
-            let body = keep_alive_get(&mut conn, "/");
-            let pid = body.split(' ').next().unwrap_or_default().to_owned();
-            if pinned.iter().all(|p| p.pid != pid) {
-                pinned.push(Pinned { pid, conn });
-            }
-            if pinned.len() == 2 {
-                break;
-            }
-        }
-        let [mut a, mut b]: [Pinned; 2] = pinned
-            .try_into()
-            .unwrap_or_else(|_| panic!("{}: two workers must answer", case.name));
+        wait_serving(&srv, "http", 2);
+        let reader = submit(srv.addr, req("/?wait=1"))?;
+        server_log::wait_app_record(&srv.log_file(), "reader waiting");
 
-        keep_alive_get(&mut a.conn, "/?set=new");
-        let body = keep_alive_get(&mut b.conn, "/");
-
-        assert_eq!(body, format!("{} new", b.pid), "{}", case.name);
+        let written = drain(submit(srv.addr, req("/?set=new"))?);
+        std::fs::write(srv.dir.join("http/read-session"), "")?;
+        let read = drain(reader);
+        assert_eq!(
+            (written.status, written.body.as_str()),
+            (200, "new"),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            (read.status, read.body.as_str()),
+            (200, "new"),
+            "{}",
+            case.name
+        );
     }
+    Ok(())
 }
 
 #[test]
@@ -302,6 +279,11 @@ fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
     assert!(
         b2.contains("ok counter=1"),
         "fatal in shutdown fn must recycle, resetting statics (got: {b2:?})"
+    );
+    let line = slot_line(&srv, "handled=2 ");
+    assert!(
+        line.contains("recycles=1 "),
+        "the shutdown fatal recycles the app: {line}"
     );
     Ok(())
 }

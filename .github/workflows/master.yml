@@ -1,4 +1,4 @@
-name: CI (php-src master, debug)
+name: CI (php-src master, ZTS debug)
 on:
     push: { branches: [main] }
     pull_request:
@@ -10,111 +10,29 @@ permissions:
 jobs:
     test:
         runs-on: ${{ matrix.os }}
-        timeout-minutes: 45
+        timeout-minutes: 60
         strategy:
             fail-fast: false
             matrix:
                 os: [ubuntu-26.04, ubuntu-26.04-arm, macos-latest]
         env:
-            PHP_PREFIX: ${{ github.workspace }}/.php-master-debug
             RUST_BACKTRACE: "1"
-            RUSTFLAGS: "--cfg tokio_unstable"
         steps:
             - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-              with:
-                  persist-credentials: false
-
-            - name: Install build deps (Linux)
-              if: runner.os == 'Linux'
-              run: |
-                  sudo apt-get update
-                  sudo apt-get install -y --no-install-recommends \
-                    build-essential pkg-config curl git autoconf bison re2c \
-                    libclang-dev llvm-dev \
-                    libssl-dev libcurl4-openssl-dev libxml2-dev libonig-dev \
-                    libsqlite3-dev zlib1g-dev libffi-dev libicu-dev libpq-dev libsodium-dev
-                  # bindgen reads the include paths of the default clang and must load the libclang of the same version. The image has several, and clang-sys takes the newest one
-                  echo "LIBCLANG_PATH=$(dirname "$(dirname "$(clang -print-resource-dir)")")" >> "$GITHUB_ENV"
-
-            - name: Install build deps (macOS)
-              if: runner.os == 'macOS'
-              run: |
-                  brew install autoconf bison re2c pkg-config openssl@3 curl oniguruma libxml2 sqlite libffi gettext icu4c libpq libsodium
-                  echo "$(brew --prefix bison)/bin" >> "$GITHUB_PATH"
-
-            - name: Resolve php-src master commit
-              id: phpsrc
-              shell: bash
-              run: echo "sha=$(git ls-remote https://github.com/php/php-src.git master | cut -f1)" >> "$GITHUB_OUTPUT"
-
-            - name: Restore NTS+debug PHP (embed SAPI)
-              id: php
-              uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-              with:
-                  path: ${{ env.PHP_PREFIX }}
-                  key: php-master-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/master.yml') }}
-
-            - name: Build NTS+debug PHP (embed SAPI) from php-src master
-              if: steps.php.outputs.cache-hit != 'true'
-              run: |
-                  set -euo pipefail
-                  git clone --depth 1 --branch master https://github.com/php/php-src.git
-                  cd php-src
-                  EXTRA=""
-                  SHA256=(sha256sum)
-                  if [ "$RUNNER_OS" = "macOS" ]; then
-                    export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig:$(brew --prefix curl)/lib/pkgconfig:$(brew --prefix oniguruma)/lib/pkgconfig:$(brew --prefix libxml2)/lib/pkgconfig:$(brew --prefix sqlite)/lib/pkgconfig:$(brew --prefix libffi)/lib/pkgconfig:$(brew --prefix icu4c)/lib/pkgconfig:$(brew --prefix libpq)/lib/pkgconfig:$(brew --prefix libsodium)/lib/pkgconfig${PKG_CONFIG_PATH:+:$PKG_CONFIG_PATH}"
-                    EXTRA="--with-iconv=$(xcrun --show-sdk-path)/usr --with-gettext=$(brew --prefix gettext)"
-                    SHA256=(shasum -a 256)
-                  fi
-                  curl -fsSL --retry 3 https://codeload.github.com/igbinary/igbinary/tar.gz/2b1f5d62e3037b07c2a46499ac32091cdb41fb40 -o igbinary.tgz
-                  curl -fsSL --retry 3 https://codeload.github.com/phpredis/phpredis/tar.gz/753a2d6d6752edf741ad97e885e23320c1be0e96 -o redis.tgz
-                  echo '1664c973d836ae7f0dfa92dbbc04504d506f8caf7c14db27e245646aaaceeab8  igbinary.tgz' | "${SHA256[@]}" -c -
-                  echo '258d7b5cfda4e74a24a45d3505a7bc0d15b629fbe66a1e21224b3cc93f768d12  redis.tgz' | "${SHA256[@]}" -c -
-                  mkdir -p ext/igbinary ext/redis
-                  tar -xzf igbinary.tgz -C ext/igbinary --strip-components=1
-                  tar -xzf redis.tgz -C ext/redis --strip-components=1
-                  ./buildconf --force
-                  ./configure \
-                    --prefix="${PHP_PREFIX}" \
-                    --enable-debug-assertions \
-                    --enable-zend-test \
-                    --enable-debug \
-                    --enable-igbinary --enable-redis --enable-redis-igbinary \
-                    $(tr '\n' ' ' < "$GITHUB_WORKSPACE/.github/php-configure-flags.txt") $EXTRA
-                  make -j"$(getconf _NPROCESSORS_ONLN)"
-                  make install
-
-            - name: Save NTS+debug PHP cache
-              if: steps.php.outputs.cache-hit != 'true'
-              uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-              with:
-                  path: ${{ env.PHP_PREFIX }}
-                  key: php-master-debug-${{ runner.os }}-${{ runner.arch }}-${{ steps.phpsrc.outputs.sha }}-${{ hashFiles('.github/php-configure-flags.txt', '.github/workflows/master.yml') }}
-
-            - name: Expose PHP to build + tests
-              run: |
-                  echo "${PHP_PREFIX}/bin" >> "$GITHUB_PATH"
-                  if [ "$RUNNER_OS" = "macOS" ]; then
-                    echo "DYLD_LIBRARY_PATH=${PHP_PREFIX}/lib" >> "$GITHUB_ENV"
-                  else
-                    echo "LD_LIBRARY_PATH=${PHP_PREFIX}/lib" >> "$GITHUB_ENV"
-                  fi
-
+              with: { persist-credentials: false }
+            - uses: ./.github/actions/php-embed
+              with: { version: master }
             - name: Verify built extension set
               run: |
-                  mods=$("${PHP_PREFIX}/bin/php" -m); echo "$mods"
+                  mods=$(php -m)
                   for ext in bcmath calendar ctype curl dom exif ffi fileinfo filter ftp gettext iconv \
-                             igbinary intl mbstring openssl pdo_pgsql pdo_sqlite pgsql phar redis session \
+                             igbinary intl mbstring openssl pdo_pgsql pdo_sqlite pgsql phar session \
                              shmop simplexml sockets sodium sqlite3 sysvmsg sysvsem sysvshm tokenizer xml \
                              xmlreader xmlwriter zend_test zlib; do
-                    grep -qix "$ext" <<<"$mods" || { echo "missing extension: $ext"; exit 1; }
+                      grep -qix "$ext" <<<"$mods" || { echo "missing extension: $ext"; exit 1; }
                   done
-
             - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
             - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-              with:
-                  cache-on-failure: true
-
+              with: { cache-on-failure: true }
             - run: cargo test --workspace
             - run: cargo build -p rapira_core --bin rapira && cargo test -p tests --test e2e --features e2e -- --test-threads=1

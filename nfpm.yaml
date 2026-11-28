@@ -9,7 +9,7 @@ homepage: "https://github.com/rapira-rs/rapira"
 license: "MIT"
 description: |
   Rapira - PHP application server.
-  Bundles an NTS PHP ${PHP_MINOR} embed runtime (libphp.so,
+  Bundles a ZTS PHP ${PHP_MINOR} embed runtime (libphp.so,
   common web extension set) under /usr/lib/rapira.
 provides:
   - "rapira"

@@ -2,6 +2,26 @@
 
 #include <Zend/zend_smart_str.h>
 
+sapi_globals_struct *rapira_sg(void) {
+    return (sapi_globals_struct *)((char *)&SG(server_context) -
+                                   offsetof(sapi_globals_struct, server_context));
+}
+
+zend_executor_globals *rapira_eg(void) {
+    return (zend_executor_globals *)((char *)&EG(exception) -
+                                     offsetof(zend_executor_globals, exception));
+}
+
+php_core_globals *rapira_pg(void) {
+    return (php_core_globals *)((char *)&PG(last_error_message) -
+                                offsetof(php_core_globals, last_error_message));
+}
+
+zend_compiler_globals *rapira_cg(void) {
+    return (zend_compiler_globals *)((char *)&CG(unclean_shutdown) -
+                                     offsetof(zend_compiler_globals, unclean_shutdown));
+}
+
 void rapira_array_init(zval *zv, uint32_t size) {
     array_init_size(zv, size);
 }
@@ -48,18 +68,7 @@ void rapira_hash_update_stringl(HashTable *ht, zend_string *key,
     zend_hash_update(ht, key, &value);
 }
 
-void rapira_zstr_addref(zend_string *s) { zend_string_addref(s); }
-
-void rapira_zstr_release(zend_string *s) { zend_string_release(s); }
-
-void rapira_init_call_stack(void) {
-#ifdef ZEND_CHECK_STACK_LIMIT
-    zend_call_stack_init();
-#endif
-}
-
-// Returns a string that lives until the process exits, because PHP never refcounts or frees an interned string.
-// The flags match zend_add_interned_string (Zend/zend_string.c). This function sets the hash once, as zend_new_interned_string_permanent does, so no request computes it.
+// This immutable string stays valid until process exit. PHP can keep it in extension caches until module shutdown. https://github.com/php/php-src/blob/php-8.6.0/ext/pcre/php_pcre.c#L847-L863
 zend_string *rapira_permanent_string(const char *s, size_t len) {
     zend_string *str = zend_string_init(s, len, true);
     zend_string_hash_val(str);

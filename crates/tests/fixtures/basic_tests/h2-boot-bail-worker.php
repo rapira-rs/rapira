@@ -1,8 +1,8 @@
 <?php
 // the boot opens a session whose save handler causes a fatal error on the first write, so the first rapira_request_teardown() of the worker bails out when it flushes the session. The persistent counter in sys_get_temp_dir() lets the served request report its cycle. It reads "2" after the bailout causes a recycle and the boot runs again
 $dir = sys_get_temp_dir();
-$sentinel = $dir . '/rapira_h2_sentinel_' . getmypid();
-$boot = $dir . '/rapira_h2_boot_' . getmypid();
+$sentinel = $dir . '/sentinel';
+$boot = $dir . '/boot';
 
 $n = (file_exists($boot) ? (int) file_get_contents($boot) : 0) + 1;
 file_put_contents($boot, (string) $n);

@@ -1,6 +1,6 @@
 use http::header::{AUTHORIZATION, CONTENT_TYPE, HeaderValue};
 use http::{Method, Version};
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use std::net::SocketAddr;
 use std::time::Duration;
 use tests::wire::submit;
@@ -68,7 +68,7 @@ fn worker_survives_a_fatal_in_a_released_exception() -> anyhow::Result<()> {
         query: &'static str,
         status: u16,
         /// The start of the body. display_errors appends the fatal text when the output is still open.
-        body: fn(u32) -> String,
+        body: &'static str,
     }
     let cases = [
         Case {
@@ -76,32 +76,30 @@ fn worker_survives_a_fatal_in_a_released_exception() -> anyhow::Result<()> {
             query: "/?boom=shutdown",
             // With display_errors on, php_error_cb keeps the 200 (main/main.c), and the flush commits that head.
             status: 200,
-            body: |pid| format!("ok counter=2 pid={pid}"),
+            body: "ok counter=2",
         },
         Case {
             name: "an output callback throws it at teardown, after the reply is sealed",
             query: "/?boom=teardown",
             status: 200,
-            body: |_| "buffered".to_owned(),
+            body: "buffered",
         },
     ];
     let srv = Spawn::http(Mode::Worker, fixture("shared/release-fatal-worker.php")).spawn();
     let baseline = drain(submit(srv.addr, req("/"))?);
-    assert_eq!(baseline.status, 200, "baseline: {baseline:?}");
-    let pid: u32 = baseline
-        .body
-        .rsplit_once("pid=")
-        .and_then(|(_, pid)| pid.parse().ok())
-        .unwrap_or_else(|| panic!("no pid in {:?}", baseline.body));
+    assert_eq!(
+        (baseline.status, baseline.body.as_str()),
+        (200, "ok counter=1")
+    );
 
-    for case in cases {
+    for (i, case) in cases.iter().enumerate() {
         let StatusBody { status, body } = drain(submit(srv.addr, req(case.query))?);
         assert_eq!(status, case.status, "{}: status (body {body:?})", case.name);
         assert!(
-            body.starts_with(&(case.body)(pid)),
+            body.starts_with(case.body),
             "{}: want {:?} first, got {body:?}",
             case.name,
-            (case.body)(pid)
+            case.body
         );
 
         let next = drain(submit(srv.addr, req("/"))?);
@@ -111,6 +109,7 @@ fn worker_survives_a_fatal_in_a_released_exception() -> anyhow::Result<()> {
             "{}: the same worker serves a new app instance",
             case.name
         );
+        slot_line(&srv, &format!("recycles={} ", i + 1));
     }
     Ok(())
 }
@@ -185,19 +184,16 @@ fn worker_survives_a_memory_limit_fatal_error() -> anyhow::Result<()> {
     assert_eq!(before.status, 200, "before: {before:?}");
     drain(submit(srv.addr, req("/?leak=1"))?);
     let after = drain(submit(srv.addr, req("/"))?);
-    let pid = |body: &str| body.split_once(" boot=").map(|(pid, _)| pid.to_owned());
-    assert_eq!(
-        (after.status, pid(&after.body)),
-        (200, pid(&before.body)),
-        "the same worker serves the next request: {after:?}\n{}",
-        diagnostics(&srv)
-    );
+    assert_eq!(after.status, 200, "after the fatal error: {after:?}");
+    assert_eq!(before.body.len(), 16, "boot token: {before:?}");
+    assert_eq!(after.body.len(), 16, "boot token: {after:?}");
     assert_ne!(
         after.body,
         before.body,
         "the app booted again with a new boot id\n{}",
         diagnostics(&srv)
     );
+    slot_line(&srv, "recycles=1 ");
     Ok(())
 }
 
@@ -424,28 +420,6 @@ fn worker_finish_request() -> anyhow::Result<()> {
 }
 
 #[test]
-fn getenv_classic() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Classic, fixture("basic_tests/env.php"))
-        .env("FOO", "BAR")
-        .spawn();
-    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
-    assert_eq!(status, 200);
-    assert!(body.contains("BAR"), "expected FOO=BAR (got: {body:?})");
-    Ok(())
-}
-
-#[test]
-fn getenv_worker() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Worker, fixture("shared/env-worker.php"))
-        .env("FOO", "BAR")
-        .spawn();
-    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
-    assert_eq!(status, 200);
-    assert!(body.contains("BAR"), "expected FOO=BAR (got: {body:?})");
-    Ok(())
-}
-
-#[test]
 fn failboot_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("basic_tests/failboot.php")).spawn();
     let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
@@ -457,81 +431,50 @@ fn failboot_classic() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The counters of the one worker slot.
-#[derive(Debug)]
-struct Slot {
-    handled: u64,
-    errors: u64,
-    recycles: u64,
-}
-
-/// On SIGUSR1 the master logs one `slot {id} pid {pid} state {state} handled {n} errors {n} recycles {n}` line per slot; the server logs in the plain format, so the line ends with the counters.
-fn slot(srv: &Server) -> Slot {
-    let line = slot_line(srv, "");
-    let count = |name: &str| -> u64 {
-        let mut words = line.split_whitespace();
-        words.find(|w| *w == name);
-        words
-            .next()
-            .and_then(|w| w.parse().ok())
-            .unwrap_or_else(|| panic!("no {name} count in {line:?}"))
-    };
-    Slot {
-        handled: count("handled"),
-        errors: count("errors"),
-        recycles: count("recycles"),
-    }
-}
-
 #[test]
-fn scoreboard_counts_worker() -> anyhow::Result<()> {
+fn status_counts_worker() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("shared/throw-worker.php")).spawn();
     let _ = drain(submit(srv.addr, req("/?boom=0"))?);
     let _ = drain(submit(srv.addr, req("/?boom=0"))?);
     let _ = drain(submit(srv.addr, req("/?boom=1"))?);
-    let snap = slot(&srv);
-
-    assert_eq!(snap.handled, 3, "3 requests handled");
-    assert_eq!(snap.errors, 1, "one engine error (uncaught throw)");
+    slot_line(&srv, "handled=3 errors=1 ");
     Ok(())
 }
 
 #[test]
-fn scoreboard_counts_recycles_worker() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Worker, fixture("shared/shutdown-fatal-worker.php")).spawn();
-    let _ = drain(submit(srv.addr, req("/?boom=1"))?);
-    let s2 = drain(submit(srv.addr, req("/"))?).status;
-    let snap = slot(&srv);
-
-    assert_eq!(s2, 200, "worker recovers after the recycle");
-    assert_eq!(snap.handled, 2, "both units handled");
-    assert!(
-        snap.recycles >= 1,
-        "the shutdown-fn fatal must recycle the worker (recycles={})",
-        snap.recycles
-    );
-    Ok(())
-}
-
-#[test]
-fn scoreboard_counts_classic() -> anyhow::Result<()> {
-    // A classic worker runs one entrypoint, so each entrypoint gets its own worker.
-    let counts = |script: &str, requests: usize| -> anyhow::Result<Slot> {
-        let srv = Spawn::http(Mode::Classic, fixture(script)).spawn();
-        for _ in 0..requests {
+fn status_counts_classic() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        script: &'static str,
+        requests: usize,
+        errors: usize,
+    }
+    let cases = [
+        Case {
+            name: "two clean requests",
+            script: "shared/hello.php",
+            requests: 2,
+            errors: 0,
+        },
+        Case {
+            name: "one compile error",
+            script: "basic_tests/failboot.php",
+            requests: 1,
+            errors: 1,
+        },
+    ];
+    for case in cases {
+        let srv = Spawn::http(Mode::Classic, fixture(case.script)).spawn();
+        for _ in 0..case.requests {
             let _ = drain(submit(srv.addr, req("/"))?);
         }
-        Ok(slot(&srv))
-    };
-
-    let snap = counts("shared/hello.php", 2)?;
-    assert_eq!((snap.handled, snap.errors), (2, 0), "two clean requests");
-    let snap = counts("basic_tests/failboot.php", 1)?;
-    assert_eq!(
-        (snap.handled, snap.errors),
-        (1, 1),
-        "one PHP error (failboot.php fails to compile)"
-    );
+        let line = slot_line(&srv, &format!("handled={} ", case.requests));
+        assert!(
+            line.contains(&format!("errors={} ", case.errors)),
+            "{}: {line}",
+            case.name
+        );
+    }
     Ok(())
 }
 
@@ -913,6 +856,7 @@ fn first_call_teardown_bailout_recycles_instead_of_serving_on_corrupt_state() ->
         body, "2",
         "first-call teardown bailout must recycle + re-bootstrap, not serve in cycle 1 (got {body:?})"
     );
+    slot_line(&srv, "state=idle handled=1 errors=0 recycles=1 ");
     std::fs::remove_dir_all(&tmp)?;
     Ok(())
 }

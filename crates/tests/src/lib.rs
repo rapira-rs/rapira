@@ -1,5 +1,5 @@
+use crate::wire::{Frame, ResponseHead};
 use http::{HeaderMap, HeaderName, HeaderValue};
-use rapira_sapi::Frame;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc;
@@ -57,7 +57,7 @@ pub fn echo_descriptor_set() -> PathBuf {
 /// A response stream collected until its `End`, or until the producer stops.
 #[derive(Debug, Default)]
 pub struct Resp {
-    pub head: Option<rapira_sapi::types::ResponseHead>,
+    pub head: Option<ResponseHead>,
     pub content_length: Option<u64>,
     pub body: Vec<u8>,
     pub truncated: bool,
@@ -86,7 +86,6 @@ impl Resp {
             Frame::Head {
                 head,
                 content_length,
-                ..
             } => {
                 self.head = Some(head);
                 self.content_length = content_length;
@@ -97,33 +96,25 @@ impl Resp {
                 self.ended = true;
                 return true;
             }
-            Frame::File { .. } => {
-                unreachable!("the wire client sends only Head, Chunk and End")
-            }
         }
         false
     }
 }
 
-/// Polls for a first frame until `deadline`. Returns None when nothing arrives in time, and `Resp::default()` when the producer stops with no frames.
+/// Reads one response until its `End`, until the producer stops, or until `deadline`. Returns None at the deadline, and `Resp::default()` when the producer stops with no frames.
 pub fn drain_resp_deadline(
     rx: &mut mpsc::Receiver<Frame>,
     deadline: std::time::Instant,
 ) -> Option<Resp> {
+    let mut resp = Resp::default();
     loop {
         match rx.try_recv() {
             Ok(frame) => {
-                let mut resp = Resp::default();
-                if !resp.fold(frame) {
-                    while let Some(f) = rx.blocking_recv() {
-                        if resp.fold(f) {
-                            break;
-                        }
-                    }
+                if resp.fold(frame) {
+                    return Some(resp);
                 }
-                return Some(resp);
             }
-            Err(mpsc::error::TryRecvError::Disconnected) => return Some(Resp::default()),
+            Err(mpsc::error::TryRecvError::Disconnected) => return Some(resp),
             Err(mpsc::error::TryRecvError::Empty) => {
                 if std::time::Instant::now() >= deadline {
                     return None;
@@ -175,5 +166,117 @@ pub async fn drain_async(rx: mpsc::Receiver<Frame>) -> StatusBody<String> {
     StatusBody {
         status: r.status(),
         body: r.body_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use hyper::body::Bytes;
+
+    use super::*;
+
+    #[derive(Debug, PartialEq)]
+    struct Got {
+        status: u16,
+        body: String,
+        ended: bool,
+    }
+
+    fn head() -> Frame {
+        Frame::Head {
+            head: ResponseHead {
+                status: 200,
+                headers: HeaderMap::new(),
+            },
+            content_length: None,
+        }
+    }
+
+    #[test]
+    fn drain_resp_deadline_bounds_the_whole_response() {
+        const WITHIN: Duration = Duration::from_millis(100);
+        const OPEN: Duration = Duration::from_secs(1);
+        struct Case {
+            name: &'static str,
+            /// The frames in the channel when the read starts.
+            sent: Vec<Frame>,
+            /// The producer is open when the read starts. If false, it stopped before the read.
+            open: bool,
+            want: Option<Got>,
+        }
+        let cases = [
+            Case {
+                name: "the response ends before the deadline",
+                sent: vec![
+                    head(),
+                    Frame::Chunk(Bytes::from_static(b"ok")),
+                    Frame::End { truncated: false },
+                ],
+                open: false,
+                want: Some(Got {
+                    status: 200,
+                    body: "ok".to_owned(),
+                    ended: true,
+                }),
+            },
+            Case {
+                name: "the body does not end before the deadline",
+                sent: vec![head(), Frame::Chunk(Bytes::from_static(b"pa"))],
+                open: true,
+                want: None,
+            },
+            Case {
+                name: "no frame arrives before the deadline",
+                sent: vec![],
+                open: true,
+                want: None,
+            },
+            Case {
+                name: "the producer stops with no frame",
+                sent: vec![],
+                open: false,
+                want: Some(Got {
+                    status: 0,
+                    body: String::new(),
+                    ended: false,
+                }),
+            },
+            Case {
+                name: "the producer stops in the body",
+                sent: vec![head(), Frame::Chunk(Bytes::from_static(b"pa"))],
+                open: false,
+                want: Some(Got {
+                    status: 200,
+                    body: "pa".to_owned(),
+                    ended: false,
+                }),
+            },
+        ];
+        for case in cases {
+            let (tx, mut rx) = mpsc::channel(4);
+            for frame in case.sent {
+                assert!(tx.try_send(frame).is_ok(), "{}", case.name);
+            }
+            // An open producer stops 1 s after the read starts, later than the deadline.
+            let producer = if case.open {
+                Some(std::thread::spawn(move || {
+                    std::thread::sleep(OPEN);
+                    drop(tx);
+                }))
+            } else {
+                drop(tx);
+                None
+            };
+            let resp = drain_resp_deadline(&mut rx, Instant::now() + WITHIN);
+            if let Some(producer) = producer {
+                producer.join().expect("the producer thread ends");
+            }
+            let got = resp.map(|r| Got {
+                status: r.status(),
+                body: r.body_string(),
+                ended: r.ended,
+            });
+            assert_eq!(got, case.want, "{}", case.name);
+        }
     }
 }

@@ -7,14 +7,14 @@ use std::time::Duration;
 use anyhow::Context;
 use http::header::{CONTENT_TYPE, HOST};
 use http::{HeaderValue, Method, Version};
+use rapira_config::Mode;
 use rapira_net::ListenAddr;
-use rapira_sapi::{Frame, plugin::Mode};
-use tests::wire::submit;
+use tests::wire::{Frame, submit};
 use tests::{StatusBody, drain, drain_resp, fixture, poll, req, server_log};
 
 use crate::harness::{
-    Server, Spawn, diagnostics, fixture_path, parse_status_and_body, patterned, scratch_dir,
-    signal, slot_line, wait_log_contains, worker_pids,
+    Server, Spawn, fixture_path, is_zts, parse_status_and_body, patterned, pool_line, scratch_dir,
+    signal, slot_line, wait_log_contains,
 };
 
 /// The read timeout of a raw socket exchange.
@@ -99,6 +99,39 @@ fn recv_probes_on_an_empty_channel() -> anyhow::Result<()> {
             contexts[0]
         );
     }
+    Ok(())
+}
+
+#[test]
+fn blocking_receive_preserves_last_activity_until_php_resumes() -> anyhow::Result<()> {
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/held-worker.php"))
+        .json_log()
+        .spawn();
+    let stamp = |fragment| {
+        let row = slot_line(&srv, fragment);
+        row.split_once("last_activity_ms=")
+            .unwrap()
+            .1
+            .split(|c: char| !c.is_ascii_digit())
+            .next()
+            .unwrap()
+            .parse::<u64>()
+            .unwrap()
+    };
+    let release = srv.dir.join("release");
+    let held = submit(srv.addr, req(&format!("/?release={}", release.display())))?;
+    server_log::wait_app_record(&srv.log_file(), "held");
+    let active = stamp("state=active handled=0 ");
+    // The activity clock has millisecond resolution.
+    std::thread::sleep(Duration::from_millis(2));
+    std::fs::write(release, "")?;
+    assert_eq!(drain(held).body, "done");
+    assert_eq!(stamp("state=idle handled=1 "), active);
+    assert_eq!(
+        drain(submit(srv.addr, req("/?probe=count"))?).body,
+        "runs=1"
+    );
+    assert!(stamp("state=idle handled=2 ") > active);
     Ok(())
 }
 
@@ -339,6 +372,7 @@ fn bailout_with_unit_out_dies_unsent() -> anyhow::Result<()> {
         (200, "state=false"),
         "the recycled worker must keep serving"
     );
+    slot_line(&srv, "state=idle handled=2 errors=1 recycles=1 ");
     Ok(())
 }
 
@@ -389,21 +423,25 @@ fn uploads_server(fixture_name: &str) -> Server {
         .spawn()
 }
 
-/// The files in the worker spool dirs of `srv`, read again until they are gone, for at most 5 s. The plugin creates one spool dir per worker at start.
+/// The files in the subdirectories of the server's spool directory, read again until they are gone, for at most 5 s.
 /// The client can get the last byte of the response before seal() unlinks the spool files.
 fn spooled_files(srv: &Server) -> Vec<PathBuf> {
-    let uploads = srv.dir.join("uploads");
-    let read = || -> Vec<PathBuf> {
-        let dirs: Vec<PathBuf> = std::fs::read_dir(&uploads)
-            .unwrap_or_else(|e| panic!("read {}: {e}", uploads.display()))
-            .map(|e| e.expect("uploads dir entry").path())
-            .filter(|p| p.is_dir())
-            .collect();
-        assert!(!dirs.is_empty(), "no spool dir in {}", uploads.display());
-        dirs.iter()
-            .flat_map(|d| std::fs::read_dir(d).expect("read the spool dir"))
+    let spool = srv
+        .dir
+        .join("uploads")
+        .join(format!("rapira-spool-{}", srv.pid()));
+    let entries = |dir: &Path| -> Vec<PathBuf> {
+        std::fs::read_dir(dir)
+            .unwrap_or_else(|e| panic!("read {}: {e}", dir.display()))
             .map(|e| e.expect("spool dir entry").path())
             .collect()
+    };
+    let read = || -> Vec<PathBuf> {
+        let mut files = Vec::new();
+        for subdir in entries(&spool) {
+            files.extend(entries(&subdir));
+        }
+        files
     };
     poll(Duration::from_secs(5), || {
         Some(read()).filter(Vec::is_empty)
@@ -543,10 +581,38 @@ fn request_fields_reach_php() -> anyhow::Result<()> {
     Ok(())
 }
 
+#[test]
+fn first_request_access_after_finalization_keeps_the_body() -> anyhow::Result<()> {
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/late-request.php")).spawn();
+    let mut post = req("/late?x=%2F");
+    *post.method_mut() = Method::POST;
+    *post.body_mut() = (0..=u8::MAX).cycle().take(262_144).collect();
+    post.body_mut().extend_from_slice(b"\xff\0!");
+    let sealed = drain_resp(submit(srv.addr, post)?);
+    assert_eq!(
+        (sealed.status(), sealed.body.as_slice()),
+        (200, &b"sealed\n"[..])
+    );
+    let late = drain_resp(submit(srv.addr, req("/next"))?);
+    assert_eq!(late.status(), 200);
+    let saved: serde_json::Value = serde_json::from_slice(&late.body)?;
+    assert_eq!(
+        saved,
+        serde_json::json!({
+            "final": true, "same": true, "method": "POST", "target": "/late?x=%2F",
+            "uri": "http://localhost/late?x=%2F", "length": 262147,
+            "sha256": "a6236f3d7af8393a1dcfb51f3c913cecc839339c641c580f80dd43723141b7f9"
+        })
+    );
+    Ok(())
+}
+
 /// The protocol spelling that the plugin stamps, and the no-authority `$uri` fallback to the server socket. Only an HTTP/1.0 request may omit Host.
 #[test]
 fn plugin_stamped_fields_pass_through() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php")).spawn();
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php"))
+        .http_extra("server_name = \"public.example\"\nserver_port = 8443")
+        .spawn();
 
     let mut rq = req("/p");
     *rq.version_mut() = Version::HTTP_10;
@@ -566,7 +632,7 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
     let sock = std::env::temp_dir().join(format!("rapira-e2e-{}.sock", std::process::id()));
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/request-worker.php"))
         .http_listen(ListenAddr::Unix(sock.clone()))
-        .http_extra("server_port = 8080")
+        .http_extra("server_name = \"unix.example\"\nserver_port = 8080")
         .spawn();
 
     // An unbound client socket, so the server gets no peer path. HTTP/1.0 with no Host takes the $uri fallback.
@@ -583,7 +649,7 @@ fn unix_address_arms_reach_php() -> anyhow::Result<()> {
         "remote-detail=NULL",
         "server=Rapira\\UnixAddress",
         &server_detail,
-        "uri=http://localhost:8080/",
+        "uri=http://unix.example:8080/",
         "readonly-remote=Cannot modify readonly property Rapira\\UnixAddress::$path",
     ] {
         assert!(body.contains(line), "missing {line:?} in {body:?}");
@@ -738,7 +804,43 @@ fn multipart_file_part_across_frames_keeps_its_bytes() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, a file part in a body over 256 KiB reaches PHP after the parse on the blocking pool, an empty name is a 400, and a field over the limit after a file part is a 413.
+/// The file parts of a multipart body are in the spool directory. A queued upload must reserve only the rest of its body in the 64 MiB body budget of the pool, so three queued uploads with a file part of 22 MiB each get their responses.
+#[test]
+fn queued_uploads_leave_the_body_budget_free() -> anyhow::Result<()> {
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/held-worker.php"))
+        .json_log()
+        .http_extra(
+            "max_body_size_mb = 32\n[http.uploads]\ndir = \"uploads\"\nmax_file_size_mb = 32",
+        )
+        .spawn();
+    let release = srv.dir.join("release");
+    let uri = format!("/?release={}", release.display());
+    // The first unit holds the only worker, so each upload waits in the queue.
+    let held = submit(srv.addr, req(&uri))?;
+    server_log::wait_app_record(&srv.log_file(), "held");
+    let content = "x".repeat(22 << 20);
+    let mut uploads = Vec::new();
+    for _ in 0..3 {
+        let part = Part {
+            headers: "content-disposition: form-data; name=\"f\"; filename=\"a.bin\"",
+            content: &content,
+        };
+        uploads.push(submit(srv.addr, multipart(&uri, &[part]))?);
+    }
+    pool_line(&srv, "http", "pending=3 ");
+    std::fs::write(release, "")?;
+    assert_eq!(drain(held).body, "done");
+    for upload in uploads {
+        let done = StatusBody {
+            status: 200,
+            body: "done".to_owned(),
+        };
+        assert_eq!(drain(upload), done);
+    }
+    Ok(())
+}
+
+/// The parse outcomes that the client sees: a file part between two fields keeps document order, an empty filename makes a file part, a file part of 300 KiB reaches PHP complete, an empty name is a 400, and a field over the limit after a file part is a 413.
 /// Part header names keep the case that the client sent, and the values of one name keep their line order (contract FormField and UploadedFile `$headers`).
 /// No spool file outlives its request, also when a later part rejects the body after a file part was spooled.
 #[test]
@@ -799,7 +901,7 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
             lines: &[],
         },
         Case {
-            name: "file part in a body over 256 KiB",
+            name: "file part of 300 KiB",
             parts: vec![Part {
                 headers: "content-disposition: form-data; name=\"f\"; filename=\"big.bin\"",
                 content: &big,
@@ -909,19 +1011,39 @@ fn multipart_parse_outcomes_leave_no_spool_file() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// At boot the master removes each spool dir under `http.uploads.dir` whose pid is gone. It keeps the dir of a live pid and every name that is not `rapira-spool-<positive pid>`.
+/// At boot the server removes the spool directory of a process that died with an upload in progress. It keeps directories for live processes and unrelated names.
 #[test]
 fn spool_sweep_removes_only_dead_pid_dirs() -> anyhow::Result<()> {
     struct Case {
         name: String,
         kept: bool,
     }
-    let mut child = std::process::Command::new("true").spawn()?;
-    let dead = child.id();
-    child.wait()?;
+    let uploads = scratch_dir();
+    let config = format!("[http.uploads]\ndir = \"{}\"", uploads.display());
+    let mut first = Spawn::http(Mode::Dispatcher, fixture("dispatcher/held-worker.php"))
+        .http_extra(&config)
+        .json_log()
+        .spawn();
+    let release = first.dir.join("release");
+    let upload = submit(
+        first.addr,
+        multipart(
+            &format!("/?release={}", release.display()),
+            &[Part {
+                headers: "content-disposition: form-data; name=\"f\"; filename=\"a.bin\"",
+                content: "PAYLOAD",
+            }],
+        ),
+    )?;
+    server_log::wait_app_record(&first.log_file(), "held");
+    let stale = format!("rapira-spool-{}", first.pid());
+    assert_eq!(std::fs::read_dir(uploads.join(&stale))?.count(), 1);
+    signal(first.pid(), libc::SIGKILL);
+    first.wait_exit(READ).context("server did not exit")?;
+    drop(upload);
     let cases = [
         Case {
-            name: format!("rapira-spool-{dead}"),
+            name: stale,
             kept: false,
         },
         Case {
@@ -949,14 +1071,14 @@ fn spool_sweep_removes_only_dead_pid_dirs() -> anyhow::Result<()> {
             kept: true,
         },
     ];
-    let uploads = scratch_dir();
     for case in &cases {
-        std::fs::create_dir(uploads.join(&case.name))?;
+        if case.kept {
+            std::fs::create_dir(uploads.join(&case.name))?;
+        }
     }
 
-    // The master sweeps before it binds the listener, so the sweep is done when the spawn returns.
-    let _srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/multipart-worker.php"))
-        .http_extra(&format!("[http.uploads]\ndir = \"{}\"", uploads.display()))
+    let next = Spawn::http(Mode::Dispatcher, fixture("dispatcher/multipart-worker.php"))
+        .http_extra(&config)
         .spawn();
     for case in &cases {
         assert_eq!(
@@ -966,43 +1088,8 @@ fn spool_sweep_removes_only_dead_pid_dirs() -> anyhow::Result<()> {
             case.name
         );
     }
-    Ok(())
-}
-
-/// A worker killed while it holds a spooled file part skips its own cleanup. The worker that replaces it removes the dead spool dir when it starts.
-#[test]
-fn killed_worker_spool_dir_goes_when_its_replacement_starts() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/held-worker.php"))
-        .http_extra("[http.uploads]\ndir = \"uploads\"")
-        .json_log()
-        .spawn();
-    let release = srv.log_file().with_file_name("release");
-    let rq = multipart(
-        &format!("/?release={}", release.display()),
-        &[Part {
-            headers: "content-disposition: form-data; name=\"f\"; filename=\"a.bin\"",
-            content: "PAYLOAD",
-        }],
-    );
-    let rx = submit(srv.addr, rq)?;
-    server_log::wait_app_record(&srv.log_file(), "held");
-    let pid = worker_pids(srv.pid())[0];
-    let dir = srv.dir.join("uploads").join(format!("rapira-spool-{pid}"));
-    assert_eq!(
-        std::fs::read_dir(&dir)?.count(),
-        1,
-        "the held unit spools its file part"
-    );
-
-    signal(pid, libc::SIGKILL);
-    drop(rx);
-    let gone = poll(Duration::from_secs(20), || (!dir.exists()).then_some(()));
-    assert!(
-        gone.is_some(),
-        "{} outlived its worker\n{}",
-        dir.display(),
-        diagnostics(&srv)
-    );
+    drop(next);
+    std::fs::remove_dir_all(uploads)?;
     Ok(())
 }
 
@@ -1122,12 +1209,58 @@ fn rejected_bodies_never_reach_php() -> anyhow::Result<()> {
             accepted += 1;
         }
     }
-    // The slot counts a unit before its response goes out, so the count is final here.
-    let slot = slot_line(&srv, "");
-    assert!(
-        slot.contains(&format!(" handled {accepted} ")),
-        "only the accepted bodies reach PHP: {slot}"
-    );
+    slot_line(&srv, &format!("handled={accepted} "));
+    Ok(())
+}
+
+/// Empty multipart requests without a boundary reach PHP raw under both Content-Length: 0 and chunked framing; non-empty and repeated-header requests still answer 400.
+#[test]
+fn empty_chunked_multipart_without_boundary_reaches_php() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        raw: &'static [u8],
+        want_status: u16,
+    }
+    let cases = [
+        Case {
+            name: "empty chunked multipart without boundary reaches php",
+            raw: b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n",
+            want_status: 200,
+        },
+        Case {
+            name: "empty content-length 0 multipart without boundary reaches php",
+            raw: b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+            want_status: 200,
+        },
+        Case {
+            name: "non-empty chunked multipart without boundary returns 400",
+            raw: b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: multipart/form-data\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n4\r\nbody\r\n0\r\n\r\n",
+            want_status: 400,
+        },
+        Case {
+            name: "empty chunked repeated multipart content-type returns 400",
+            raw: b"POST / HTTP/1.1\r\nHost: localhost\r\nContent-Type: text/plain\r\nContent-Type: multipart/form-data\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0\r\n\r\n",
+            want_status: 400,
+        },
+    ];
+
+    let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/echo-loop-worker.php"))
+        .http_extra("[http.uploads]\ndir = \"uploads\"")
+        .spawn();
+    let timeout = Duration::from_secs(10);
+
+    for case in cases {
+        let mut conn = crate::harness::Conn::open(srv.addr, timeout)?;
+        conn.send(case.raw)?;
+        let head = conn.read_head(timeout)?;
+        assert_eq!(
+            head.status,
+            case.want_status,
+            "{}\n{}",
+            case.name,
+            crate::harness::diagnostics(&srv)
+        );
+    }
     Ok(())
 }
 
@@ -1183,19 +1316,19 @@ fn get_info_reports_the_server_identity() -> anyhow::Result<()> {
 /// Every worker reads the server identity at boot, before its first `receive()`. The first boot of each worker sees the configured values, and no boot fails on them.
 #[test]
 fn get_info_reports_the_server_identity_at_boot() -> anyhow::Result<()> {
-    const WORKERS: usize = 16;
+    let workers = if is_zts() { 16 } else { 1 };
     let mut srv = Spawn::http(
         Mode::Dispatcher,
         fixture_path("lifecycle/boot-identity-worker.php"),
     )
-    .processes(WORKERS)
+    .workers(workers)
     .json_log()
     .spawn();
     let want = format!("name=localhost port={}", srv.addr.port());
     // A failed boot runs again after a short wait, so a worker whose first boot failed still logs a record in this window.
     let booted = poll(Duration::from_secs(15), || {
         let results = server_log::app_results(&srv.log_file(), "boot-identity");
-        (results.len() >= WORKERS).then_some(results)
+        (results.len() >= workers).then_some(results)
     });
     srv.stop();
     let failed: Vec<String> = server_log::app_records(&srv.log_file())
@@ -1487,6 +1620,41 @@ fn sendfile_outside_the_root_is_denied() -> anyhow::Result<()> {
 
     assert_eq!(resp.status(), 403);
     assert_eq!(resp.body_string(), "denied");
+    Ok(())
+}
+
+/// A relative sendFile() path resolves against the cwd of PHP: the entrypoint directory at the app start, and the target of a chdir() after it.
+/// Both directories hold a file with the same name, so the body tells which directory the path resolved against.
+#[test]
+fn sendfile_relative_path_follows_the_php_cwd() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        target: &'static str,
+        body: &'static str,
+    }
+    let srv = sendfile_server();
+    let entrypoint_dir = srv.dir.join("http");
+    std::fs::create_dir(entrypoint_dir.join("nested"))?;
+    std::fs::write(entrypoint_dir.join("same"), "entrypoint")?;
+    std::fs::write(entrypoint_dir.join("nested/same"), "nested")?;
+    // The app keeps its cwd across units, so the cases run in this order.
+    let cases = [
+        Case {
+            name: "before chdir",
+            target: "/?probe=sendfile-cwd",
+            body: "entrypoint",
+        },
+        Case {
+            name: "after chdir",
+            target: "/?probe=sendfile-cwd&nested=1",
+            body: "nested",
+        },
+    ];
+    for case in cases {
+        let resp = drain_resp(submit(srv.addr, req(case.target))?);
+        assert_eq!(resp.status(), 200, "{}", case.name);
+        assert_eq!(resp.body_string(), case.body, "{}", case.name);
+    }
     Ok(())
 }
 

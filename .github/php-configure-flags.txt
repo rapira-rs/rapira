@@ -1,4 +1,6 @@
 --enable-embed=shared
+--enable-zts
+--disable-zend-signals
 --disable-all
 --disable-cgi
 --disable-phpdbg

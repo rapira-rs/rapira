@@ -10,8 +10,9 @@ extern bool rapira_rs_exchange_write_body(const rapira_held *held,
 extern bool rapira_rs_exchange_flush(const rapira_held *held);
 extern bool rapira_rs_exchange_send_file(const rapira_held *held,
                                          const char *path, size_t path_len,
-                                         int64_t offset, int64_t length,
-                                         bool length_is_null, bool eos);
+                                         const char *cwd, int64_t offset,
+                                         int64_t length, bool length_is_null,
+                                         bool eos);
 extern bool rapira_rs_exchange_write_trailers(const rapira_held *held,
                                               HashTable *trailers);
 
@@ -67,12 +68,28 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, sendFile) {
         RETURN_THROWS();
     }
 
+    // On ZTS a relative path starts in the PHP thread's working directory. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_virtual_cwd.c#L248-L285
+    size_t path_len = ZSTR_LEN(path);
+    char *cwd = NULL;
+#ifdef VIRTUAL_DIR
+    if (path_len > 0 && !IS_ABSOLUTE_PATH(ZSTR_VAL(path), path_len)) {
+        size_t cwd_len;
+        cwd = virtual_getcwd_ex(&cwd_len);
+        if (!cwd) {
+            // A thread without a cwd resolves no relative path.
+            path_len = 0;
+        }
+    }
+#endif
+
     const rapira_held *held = rapira_held_of(Z_OBJ_P(ZEND_THIS));
-    RAPIRA_RETURN_THROWS_UNLESS(
-        rapira_rs_exchange_send_file(held, ZSTR_VAL(path), ZSTR_LEN(path),
-                                     (int64_t)offset, (int64_t)length,
-                                     length_is_null, eos),
-        "sendFile");
+    bool sent = rapira_rs_exchange_send_file(
+        held, ZSTR_VAL(path), path_len, cwd, (int64_t)offset, (int64_t)length,
+        length_is_null, eos);
+    if (cwd) {
+        efree(cwd);
+    }
+    RAPIRA_RETURN_THROWS_UNLESS(sent, "sendFile");
 }
 
 ZEND_METHOD(Rapira_Internal_Http_Exchange, writeTrailers) {
@@ -92,14 +109,14 @@ ZEND_METHOD(Rapira_Internal_Http_Exchange, flush) {
     RAPIRA_RETURN_THROWS_UNLESS(rapira_rs_exchange_flush(held), "flush");
 }
 
-// Rust builds the request graph (src/php/). This shell owns the memo.
+// Rust builds the request graph (src/php/). This shell owns memo slot 0 (Request).
 ZEND_METHOD(Rapira_Internal_Http_Exchange, getRequest) {
     ZEND_PARSE_PARAMETERS_NONE();
-    rapira_exchange_obj *ex = rapira_exchange_from(Z_OBJ_P(ZEND_THIS));
-    if (Z_ISUNDEF(ex->request)) {
+    rapira_unit_obj *ex = rapira_unit_from(Z_OBJ_P(ZEND_THIS));
+    if (Z_ISUNDEF(ex->memos[0])) {
         RAPIRA_RETURN_THROWS_UNLESS(
-            rapira_rs_exchange_build_request(&ex->held, &ex->request),
+            rapira_rs_exchange_build_request(&ex->held, &ex->memos[0]),
             "getRequest");
     }
-    RETURN_COPY(&ex->request);
+    RETURN_COPY(&ex->memos[0]);
 }

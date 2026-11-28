@@ -1,223 +1,110 @@
-use std::sync::atomic::Ordering::Relaxed;
-
-use rapira_scoreboard::{
-    PoolRegion, SLOT_ACTIVE, SLOT_DRAINING, SLOT_FREE, SLOT_IDLE, SLOT_STARTING, SharedSlot,
-};
-
-use crate::memory::Memory;
-
-/// A slot state and its `state` label value.
-pub(crate) struct StateLabel {
-    pub state: u32,
-    pub label: &'static str,
-}
-
-/// Slot states in output order, with their label values.
-pub(crate) const STATES: [StateLabel; 4] = [
-    StateLabel {
-        state: SLOT_STARTING,
-        label: "starting",
-    },
-    StateLabel {
-        state: SLOT_IDLE,
-        label: "idle",
-    },
-    StateLabel {
-        state: SLOT_ACTIVE,
-        label: "active",
-    },
-    StateLabel {
-        state: SLOT_DRAINING,
-        label: "draining",
-    },
-];
-
-/// Exit reasons in output order. `PoolStats::exits` holds the counts in this order.
-pub(crate) const EXIT_REASONS: [&str; 4] = ["drained", "unhealthy", "timeout", "crashed"];
-
-/// A live worker. Its slot has a pid other than 0 and a state other than FREE.
-#[derive(Debug, PartialEq)]
-pub(crate) struct Worker {
-    /// The slot index in the pool.
-    pub index: usize,
-    pub pid: u32,
-    /// The `/proc` read after the board read sets it. Both values are None until that read, or when that read fails.
-    pub memory: Memory,
-}
+use rapira_sapi::pool::PoolSnapshot;
 
 /// The values of one pool at one scrape.
 #[derive(Debug, Default, PartialEq)]
 pub(crate) struct PoolStats {
     pub name: &'static str,
     pub configured: usize,
-    /// Worker counts in `STATES` order.
+    /// Worker counts in `State::ALL` order.
     pub states: [u64; 4],
     pub requests: u64,
     pub failed: u64,
     pub failed_on_full_queue: u64,
     pub queued: u64,
     pub script_restarts: u64,
-    /// Exit counts in `EXIT_REASONS` order.
-    pub exits: [u64; 4],
-    pub workers: Vec<Worker>,
 }
 
-/// The stats of each pool in `pools`.
-pub(crate) fn board_stats(board: &[SharedSlot], pools: &[PoolRegion]) -> Vec<PoolStats> {
-    pools.iter().map(|pool| pool_stats(board, pool)).collect()
-}
-
-/// Sums the counters and the queue over all slots of the pool. A slot keeps the counts of every worker that it held, and `clear` empties the queue of a dead worker.
-fn pool_stats(board: &[SharedSlot], region: &PoolRegion) -> PoolStats {
+pub(crate) fn pool_stats(pool: &PoolSnapshot) -> PoolStats {
     let mut stats = PoolStats {
-        name: region.name,
-        configured: region.slots.len(),
+        name: pool.name,
+        configured: pool.workers.len(),
+        requests: pool.refused,
+        failed: pool.refused,
+        queued: pool.pending,
+        failed_on_full_queue: pool.failed_on_full_queue,
         ..Default::default()
     };
-    for (index, s) in board[region.slots.clone()].iter().enumerate() {
-        let state = s.state.load(Relaxed);
-        if let Some(i) = STATES.iter().position(|known| known.state == state) {
-            stats.states[i] += 1;
-        }
-        let pid = s.pid.load(Relaxed);
-        if pid != 0 && state != SLOT_FREE {
-            stats.workers.push(Worker {
-                index,
-                pid,
-                memory: Memory::default(),
-            });
-        }
-        stats.requests += s.handled.load(Relaxed);
-        stats.failed += s.errors.load(Relaxed);
-        stats.failed_on_full_queue += s.failed_on_full_queue.load(Relaxed);
-        stats.queued += s.pending.load(Relaxed);
-        stats.script_restarts += s.recycles.load(Relaxed);
-        let exits = [
-            &s.exits_drained,
-            &s.exits_unhealthy,
-            &s.exits_timeout,
-            &s.exits_crashed,
-        ];
-        for (total, counter) in stats.exits.iter_mut().zip(exits) {
-            *total += counter.load(Relaxed);
-        }
+    for worker in &pool.workers {
+        stats.states[worker.state as usize] += 1;
+        stats.requests += worker.handled;
+        stats.failed += worker.errors;
+        stats.script_restarts += worker.recycles;
     }
     stats
 }
 
 #[cfg(test)]
 mod tests {
+    use rapira_sapi::pool::{State, WorkerSnapshot};
+
     use super::*;
 
-    /// Slots 0 to 3 belong to an http pool of 4 workers, and slots 4 to 7 to a grpc pool of 4 workers. Each pair of states has different counts in at least one pool. Each grpc exit reason has its own count. So a swap of two states or two exit reasons fails the test.
+    fn worker(state: State, handled: u64, errors: u64, recycles: u64) -> WorkerSnapshot {
+        WorkerSnapshot {
+            state,
+            handled,
+            errors,
+            recycles,
+            last_activity_ms: 0,
+        }
+    }
+
     #[test]
-    fn board_stats_sums_each_pool() {
-        let board = rapira_scoreboard::create(8).unwrap();
-        let slot = |i: usize| &board[i];
-        let place = |i: usize, state: u32, pid: u32| {
-            slot(i).state.store(state, Relaxed);
-            slot(i).pid.store(pid, Relaxed);
-        };
-        // http slot 0 has an active worker.
-        place(0, SLOT_ACTIVE, 201);
-        slot(0).handled.store(10, Relaxed);
-        slot(0).errors.store(1, Relaxed);
-        slot(0).pending.store(2, Relaxed);
-        slot(0).recycles.store(1, Relaxed);
-        slot(0).exits_crashed.store(1, Relaxed);
-        slot(0).failed_on_full_queue.store(4, Relaxed);
-        // http slot 1 has an idle worker.
-        place(1, SLOT_IDLE, 202);
-        slot(1).handled.store(5, Relaxed);
-        // http slot 2 is free. Its counts stay in the totals.
-        place(2, SLOT_FREE, 0);
-        slot(2).handled.store(7, Relaxed);
-        slot(2).errors.store(2, Relaxed);
-        slot(2).exits_drained.store(1, Relaxed);
-        slot(2).failed_on_full_queue.store(5, Relaxed);
-        // grpc slots 0 to 3: one starting, two draining and one active worker.
-        place(4, SLOT_STARTING, 301);
-        slot(4).exits_drained.store(1, Relaxed);
-        place(5, SLOT_DRAINING, 302);
-        slot(5).exits_unhealthy.store(3, Relaxed);
-        place(6, SLOT_DRAINING, 303);
-        slot(6).exits_timeout.store(4, Relaxed);
-        place(7, SLOT_ACTIVE, 304);
-        slot(7).exits_crashed.store(5, Relaxed);
-        slot(7).failed_on_full_queue.store(6, Relaxed);
-        let pools = [
-            PoolRegion {
-                name: "http",
-                slots: 0..4,
-            },
-            PoolRegion {
-                name: "grpc",
-                slots: 4..8,
-            },
-        ];
-
-        let got = board_stats(board, &pools);
-
-        assert_eq!(
-            got,
-            vec![
-                PoolStats {
+    fn pool_stats_sums_the_workers_of_a_pool() {
+        struct Case {
+            name: &'static str,
+            pool: PoolSnapshot,
+            want: PoolStats,
+        }
+        let cases = [
+            Case {
+                name: "host refusals count once in both totals",
+                pool: PoolSnapshot {
                     name: "http",
-                    configured: 4,
+                    pending: 6,
+                    failed_on_full_queue: 3,
+                    refused: 5,
+                    workers: vec![worker(State::Active, 7, 2, 1), worker(State::Idle, 4, 1, 2)],
+                },
+                want: PoolStats {
+                    name: "http",
+                    configured: 2,
                     states: [0, 1, 1, 0],
-                    requests: 22,
-                    failed: 3,
-                    failed_on_full_queue: 9,
-                    queued: 2,
-                    script_restarts: 1,
-                    exits: [1, 0, 0, 1],
+                    requests: 16,
+                    failed: 8,
+                    failed_on_full_queue: 3,
+                    queued: 6,
+                    script_restarts: 3,
+                },
+            },
+            Case {
+                name: "a second pool has its own queue and worker counts",
+                pool: PoolSnapshot {
+                    name: "grpc",
+                    pending: 1,
+                    failed_on_full_queue: 0,
+                    refused: 2,
                     workers: vec![
-                        Worker {
-                            index: 0,
-                            pid: 201,
-                            memory: Memory::default()
-                        },
-                        Worker {
-                            index: 1,
-                            pid: 202,
-                            memory: Memory::default()
-                        },
+                        worker(State::Starting, 0, 0, 0),
+                        worker(State::Draining, 3, 1, 4),
+                        worker(State::Draining, 0, 0, 0),
+                        worker(State::Active, 9, 0, 2),
                     ],
                 },
-                PoolStats {
+                want: PoolStats {
                     name: "grpc",
                     configured: 4,
                     states: [1, 0, 1, 2],
-                    requests: 0,
-                    failed: 0,
-                    failed_on_full_queue: 6,
-                    queued: 0,
-                    script_restarts: 0,
-                    exits: [1, 3, 4, 5],
-                    workers: vec![
-                        Worker {
-                            index: 0,
-                            pid: 301,
-                            memory: Memory::default()
-                        },
-                        Worker {
-                            index: 1,
-                            pid: 302,
-                            memory: Memory::default()
-                        },
-                        Worker {
-                            index: 2,
-                            pid: 303,
-                            memory: Memory::default()
-                        },
-                        Worker {
-                            index: 3,
-                            pid: 304,
-                            memory: Memory::default()
-                        },
-                    ],
+                    requests: 14,
+                    failed: 3,
+                    failed_on_full_queue: 0,
+                    queued: 1,
+                    script_restarts: 6,
                 },
-            ]
-        );
+            },
+        ];
+        for case in cases {
+            assert_eq!(pool_stats(&case.pool), case.want, "{}", case.name);
+        }
     }
 }

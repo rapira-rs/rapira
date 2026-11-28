@@ -10,7 +10,7 @@ workspace = true
 [dependencies]
 anyhow = { workspace = true }
 http = { workspace = true }
-rapira_sapi = { workspace = true }
+rapira_config = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "time", "net"] }
 tracing = { workspace = true }
 # The server.log readers (src/server_log.rs) use it.
@@ -22,14 +22,18 @@ http-body-util = { workspace = true }
 hyper = { workspace = true, features = ["client", "http1", "http2"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 
+[build-dependencies]
+cc = "1.2"
+rapira_php_build = { workspace = true }
+
 [dev-dependencies]
 # The E2E tests (tests/e2e) use it for process control of the spawned rapira binary.
 libc = { workspace = true }
+flate2 = { workspace = true }
+zstd = { workspace = true }
 
-# The E2E suite spawns the rapira binary, which forks worker processes, and sends
-# many concurrent requests. The e2e feature gates it, so `cargo test --workspace`
-# skips it. Build the rapira binary first. Then run the suite alone, for example:
-# cargo test -p tests --test e2e --features e2e
+# Build the rapira binary first. The e2e suite starts it and sends concurrent requests.
+# cargo test -p tests --test e2e --features e2e -- --test-threads=1
 [features]
 e2e = []
 

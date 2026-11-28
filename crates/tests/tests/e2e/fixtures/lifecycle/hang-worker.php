@@ -1,5 +1,5 @@
 <?php
-// ?hang=1 blocks the request forever in native sleep, so the request_terminate_timeout watchdog of the master must kill the worker.
+// A held request keeps the worker active while other requests enter the pool queue.
 
 use Rapira\Exception\ClosedException;
 
@@ -14,7 +14,7 @@ try {
             }
         }
         $ex->writeHead(200, ['content-type' => ['text/plain']]);
-        $ex->writeBody('ok:' . getmypid());
+        $ex->writeBody('ok');
     }
 } catch (ClosedException) {
 }

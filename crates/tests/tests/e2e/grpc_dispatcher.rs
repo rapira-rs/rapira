@@ -1,8 +1,8 @@
 use std::time::{Duration, UNIX_EPOCH};
 
 use http::{HeaderMap, Method};
+use rapira_config::Mode;
 use rapira_net::ListenAddr;
-use rapira_sapi::plugin::Mode;
 use serde_json::{Value, json};
 use tests::grpc::{
     Conn, ECHO_PATH, ERROR_INFO, Fields, Response, Wire, envelope, fields, status_bytes,
@@ -104,9 +104,10 @@ fn dispatcher_identity_and_services() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// The gRPC service list stays with its own worker. The master sets it for the `[grpc]` pool before the fork, and the worker of the `[http]` pool still gets the HTTP dispatcher.
+/// The two pools run together. Each worker gets the dispatcher of its own pool.
 #[test]
-fn an_http_worker_after_a_grpc_worker_keeps_the_http_dispatcher() {
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
+fn an_http_worker_next_to_a_grpc_worker_keeps_the_http_dispatcher() {
     let srv = Spawn::http(Mode::Dispatcher, fixture("dispatcher/worker-singleton.php"))
         .with_grpc(fixture("grpc/identity.php"))
         .json_log()
@@ -519,7 +520,7 @@ async fn call_context_reports_the_request_facts() -> anyhow::Result<()> {
         }
         assert_eq!(
             fields.remove("remote"),
-            Some(json!(logged_remote(&conn.peer))),
+            Some(json!(logged_remote(conn.peer))),
             "{}",
             c.name
         );

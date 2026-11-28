@@ -26,6 +26,16 @@ zend_class_entry *rapira_ce_tls;
 // its DispatcherInfo class gets the rapira_dispatcher_info_obj layout.
 static zend_object_handlers rapira_dispatcher_handlers;
 static zend_object_handlers rapira_info_handlers;
+static zend_object_handlers rapira_unit_handlers;
+
+static void rapira_unit_free(zend_object *std) {
+    rapira_unit_obj *unit = rapira_unit_from(std);
+    rapira_rs_held_drop(&unit->held);
+    // No-op on IS_UNDEF for unused or unpopulated memo slots.
+    zval_ptr_dtor(&unit->memos[0]);
+    zval_ptr_dtor(&unit->memos[1]);
+    zend_object_std_dtor(std);
+}
 
 void (*const *rapira_plugin_registers)(void);
 size_t rapira_plugin_register_count;
@@ -146,6 +156,11 @@ void rapira_register_classes(void) {
     rapira_info_handlers = std_object_handlers;
     rapira_info_handlers.clone_obj = NULL;
     rapira_info_handlers.offset = offsetof(rapira_dispatcher_info_obj, std);
+
+    rapira_unit_handlers = std_object_handlers;
+    rapira_unit_handlers.clone_obj = NULL;
+    rapira_unit_handlers.offset = offsetof(rapira_unit_obj, std);
+    rapira_unit_handlers.free_obj = rapira_unit_free;
 }
 
 // Reflection does not skip the constructor of a final class with
@@ -157,9 +172,15 @@ void rapira_plugin_wire(const rapira_plugin *plugin) {
     plugin->info->default_object_handlers = &rapira_info_handlers;
 }
 
+void rapira_unit_wire(zend_class_entry *ce) {
+    ce->create_object = rapira_object_create;
+    ce->default_object_handlers = &rapira_unit_handlers;
+}
+
 // the plugin classes extend the base classes, so the base classes register
 // first
 PHP_MINIT_FUNCTION(rapira) {
+    rapira_lock_timeouts();
     rapira_register_classes();
     for (size_t i = 0; i < rapira_plugin_register_count; i++) {
         rapira_plugin_registers[i]();
@@ -167,16 +188,13 @@ PHP_MINIT_FUNCTION(rapira) {
     return SUCCESS;
 }
 
-// The quiesce hook runs after the shutdown functions, the destructors, the
-// output flush and the timer stop, and before the memory manager shutdown:
-// https://github.com/php/php-src/blob/php-8.5.11/main/main.c#L1974-L2050
-// A write to a held unit from a later RSHUTDOWN would lend a string that the
-// memory manager then frees, so app code there must not write.
+// RINIT runs one time in each php_request_startup, after that function arms the execution timer. https://github.com/php/php-src/blob/php-8.6.0/main/main.c#L1886-L1917
+PHP_RINIT_FUNCTION(rapira) {
+    rapira_timer_use_cpu_clock();
+    return SUCCESS;
+}
+
 PHP_RSHUTDOWN_FUNCTION(rapira) {
-    if (rapira_plugin_current != NULL &&
-        rapira_plugin_current->quiesce != NULL) {
-        rapira_plugin_current->quiesce();
-    }
 #ifdef HAVE_PHP_SESSION
     // the session RSHUTDOWN runs after this one (zend_collect_module_handlers),
     // so write the session before the response leaves
@@ -207,7 +225,7 @@ zend_module_entry rapira_module_entry = {
     ext_functions,
     PHP_MINIT(rapira),
     NULL,
-    NULL,
+    PHP_RINIT(rapira),
     PHP_RSHUTDOWN(rapira),
     NULL,
     RAPIRA_VERSION,

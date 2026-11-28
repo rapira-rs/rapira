@@ -6,11 +6,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
-use rapira_sapi::plugin::Mode;
+use rapira_config::Mode;
 use tests::wire::submit;
 use tests::{StatusBody, drain, drain_resp_deadline, fixture, req, server_log};
 
-use crate::harness::{Spawn, http_get, scratch_dir, slot_line, worker_pids};
+use crate::harness::{Spawn, http_get, scratch_dir, slot_line, wait_serving};
 
 fn timeout_ini() -> String {
     std::fs::read_to_string(fixture("ini/timeout_tests/timeout.php.ini"))
@@ -37,31 +37,33 @@ fn parked_receive_outlives_the_execution_budget() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks the budget around a write that parks on a full frame channel. The budget counts CPU time, so a sleep before the park uses none of it, and the park keeps the time that the timer had left.
-/// The budget is 3 s. The client reads nothing for 1.5 s after the sleep, so the stream parks.
+/// Checks the budget around a write that parks on a full frame channel. The park does not use the budget, and after the park the timer has the time that it had left before the park.
+/// The budget is 3 s. The unit works before and after the write. The client reads the first byte of the response, then reads nothing for 3.5 s, so the write parks for more than the budget.
 #[test]
 fn parked_write_keeps_the_unused_budget() -> anyhow::Result<()> {
     struct Case {
         name: &'static str,
         target: &'static str,
-        wait: Duration,
         killed: bool,
     }
     let cases = [
         Case {
-            name: "a 3.5 s sleep before the park leaves the budget for 1.8 s of CPU",
-            target: "/?wait=3500&burn=1800",
-            wait: Duration::from_millis(3500),
+            name: "0.9 s of work before and after a park longer than the budget completes",
+            target: "/?before=900&after=900",
             killed: false,
         },
         Case {
-            name: "the timer runs again after the park and kills a 4 s burn",
-            target: "/?wait=0&burn=4000",
-            wait: Duration::ZERO,
+            name: "2 s of work before and after the park time out, because the park does not reset the budget",
+            target: "/?before=2000&after=2000",
             killed: true,
         },
     ];
 
+    let clock = if cfg!(php_execution_timers) {
+        "wall"
+    } else {
+        "cpu"
+    };
     let ini = format!("{}\nmax_execution_time = 3\n", timeout_ini());
     for c in cases {
         let srv = Spawn::http(
@@ -76,11 +78,13 @@ fn parked_write_keeps_the_unused_budget() -> anyhow::Result<()> {
         client.set_read_timeout(Some(Duration::from_secs(20)))?;
         write!(
             client,
-            "GET {} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
+            "GET {}&clock={clock} HTTP/1.1\r\nHost: e2e\r\nConnection: close\r\n\r\n",
             c.target
         )?;
-        std::thread::sleep(c.wait + Duration::from_millis(1500));
-        let mut resp = Vec::new();
+        // The first byte arrives when the work before the write ends.
+        let mut resp = vec![0];
+        std::io::Read::read_exact(&mut client, &mut resp)?;
+        std::thread::sleep(Duration::from_millis(3500));
         // A killed unit ends the stream early, and the read can end with a reset. The bytes read before it stay in resp.
         let _ = std::io::Read::read_to_end(&mut client, &mut resp);
 
@@ -127,7 +131,7 @@ fn rearmed_budget_kills_a_spinning_unit() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks that the per-unit re-arm with reset_signals=0 still delivers SIGPROF. A spin on a later unit in the same cycle is killed and does not keep running.
+/// Checks that the per-unit re-arm with reset_signals=0 still delivers the timer signal. The timer ends a spin on a later unit in the same cycle.
 #[test]
 fn max_execution_time_fires_on_rearmed_units() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Worker, fixture("timeout_tests/timeout-worker.php"))
@@ -158,7 +162,7 @@ fn max_execution_time_fires_on_rearmed_units() -> anyhow::Result<()> {
     Ok(())
 }
 
-/// Checks that a unit that waits on a socket keeps its worker under static-file load. The execution timer counts the CPU time of all threads of the process, so the IO threads use up the budget during the wait. The hard timeout must not end the worker process.
+/// A socket wait times out under static-file load. NTS counts the CPU time of the IO threads. ZTS counts wall-clock time. After the fatal error the worker recycles the app and returns to the idle state.
 #[test]
 fn socket_wait_under_static_load_keeps_the_worker() -> anyhow::Result<()> {
     let backend = TcpListener::bind("127.0.0.1:0")?;
@@ -175,7 +179,7 @@ fn socket_wait_under_static_load_keeps_the_worker() -> anyhow::Result<()> {
         root.display()
     ))
     .spawn();
-    let workers = worker_pids(srv.pid());
+    wait_serving(&srv, "http", 1);
 
     // The backend answers after the 1 s budget plus the 2 s hard timeout of PHP.
     let answer = std::thread::spawn(move || -> std::io::Result<()> {
@@ -216,11 +220,7 @@ fn socket_wait_under_static_load_keeps_the_worker() -> anyhow::Result<()> {
     );
     // accept() returns only after the unit connects, so a run where the unit never connects fails at the checks above and does not hang here.
     answer.join().expect("backend thread")?;
-    assert_eq!(
-        worker_pids(srv.pid()),
-        workers,
-        "the timeout must not end the worker process"
-    );
+    slot_line(&srv, "state=idle handled=1 errors=1 recycles=1 ");
     Ok(())
 }
 
@@ -266,8 +266,8 @@ fn queued_unit_gets_a_fresh_budget() -> anyhow::Result<()> {
             .spawn();
 
         let first = submit(srv.addr, req(c.first))?;
-        // Two connections reach the worker in any order, so the second request goes out once the first unit runs. Slot state 3 is SLOT_ACTIVE.
-        slot_line(&srv, "state 3 ");
+        // Wait for the first unit to start before submitting the second.
+        slot_line(&srv, "state=active ");
         let mut queued = submit(srv.addr, req(c.queued))?;
         assert_eq!(
             drain(first),
@@ -311,5 +311,166 @@ fn queued_unit_gets_a_fresh_budget() -> anyhow::Result<()> {
             c.name
         );
     }
+    Ok(())
+}
+
+/// Checks the clock that max_execution_time uses in a pool. The budget is 1 s. A sleep uses wall-clock time and no CPU time. A spin uses both.
+#[test]
+#[cfg_attr(
+    not(php_execution_timers),
+    ignore = "needs PHP with per-thread execution timers"
+)]
+fn execution_clock_selects_the_time_that_uses_the_budget() -> anyhow::Result<()> {
+    struct Case {
+        name: &'static str,
+        mode: Mode,
+        fixture: &'static str,
+        pool: &'static str,
+        target: &'static str,
+        done: &'static str,
+        killed: bool,
+    }
+    let cases = [
+        Case {
+            name: "the default clock counts a sleep",
+            mode: Mode::Dispatcher,
+            fixture: "timeout_tests/timeout-dispatcher.php",
+            pool: "",
+            target: "/?sleep=2000",
+            done: "pending=0",
+            killed: true,
+        },
+        Case {
+            name: "the wall clock counts a sleep",
+            mode: Mode::Dispatcher,
+            fixture: "timeout_tests/timeout-dispatcher.php",
+            pool: "execution_clock = \"wall\"",
+            target: "/?sleep=2000",
+            done: "pending=0",
+            killed: true,
+        },
+        Case {
+            name: "the cpu clock does not count a sleep",
+            mode: Mode::Dispatcher,
+            fixture: "timeout_tests/timeout-dispatcher.php",
+            pool: "execution_clock = \"cpu\"",
+            target: "/?sleep=2000",
+            done: "pending=0",
+            killed: false,
+        },
+        Case {
+            name: "the cpu clock counts a spin",
+            mode: Mode::Dispatcher,
+            fixture: "timeout_tests/timeout-dispatcher.php",
+            pool: "execution_clock = \"cpu\"",
+            target: "/?spin",
+            done: "pending=0",
+            killed: true,
+        },
+        Case {
+            name: "the cpu clock in classic mode does not count a sleep",
+            mode: Mode::Classic,
+            fixture: "timeout_tests/clock-classic.php",
+            pool: "execution_clock = \"cpu\"",
+            target: "/?sleep=2000",
+            done: "done",
+            killed: false,
+        },
+        Case {
+            name: "the cpu clock in classic mode counts a spin",
+            mode: Mode::Classic,
+            fixture: "timeout_tests/clock-classic.php",
+            pool: "execution_clock = \"cpu\"",
+            target: "/?spin",
+            done: "done",
+            killed: true,
+        },
+    ];
+
+    let ini = timeout_ini();
+    for c in cases {
+        let srv = Spawn::http(c.mode, fixture(c.fixture))
+            .http_pool(c.pool)
+            .php_ini(&ini)
+            .json_log()
+            .spawn();
+
+        let mut rx = submit(srv.addr, req(c.target))?;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        let resp = drain_resp_deadline(&mut rx, deadline)
+            .unwrap_or_else(|| panic!("{}: the unit never ended", c.name));
+        let completed = resp.status() == 200 && resp.body_string() == c.done;
+        let fatal = server_log::records(&srv.log_file())
+            .iter()
+            .any(|e| e.target == "php" && e.message.contains("Maximum execution time"));
+        assert_eq!(
+            (completed, fatal),
+            (!c.killed, c.killed),
+            "{}: (unit completed, timeout fatal logged)",
+            c.name
+        );
+    }
+    Ok(())
+}
+
+/// Checks that a cpu pool gives a classic request its full budget when the request waits before its script starts. With session.auto_start, the RINIT of the session extension opens the session, and the second request waits there for the session lock of the first request. The budget is 1 s, and the wait is longer.
+#[test]
+#[cfg_attr(
+    not(all(php_zts, php_execution_timers)),
+    ignore = "needs ZTS PHP with per-thread execution timers"
+)]
+fn a_wait_before_the_script_does_not_use_the_cpu_budget() -> anyhow::Result<()> {
+    let sessions = scratch_dir();
+    // PHP 8.6 and later refuse a session ID from a cookie that has no session, unless strict mode is off. https://github.com/php/php-src/blob/php-8.6.0/ext/session/session.c#L1000
+    let ini = format!(
+        "{}\nsession.auto_start = 1\nsession.use_strict_mode = 0\nsession.save_path = \"{}\"\n",
+        timeout_ini(),
+        sessions.display()
+    );
+    let srv = Spawn::http(Mode::Classic, fixture("timeout_tests/clock-classic.php"))
+        .workers(2)
+        .http_pool("execution_clock = \"cpu\"")
+        .php_ini(&ini)
+        .json_log()
+        .spawn();
+    wait_serving(&srv, "http", 2);
+
+    let with_session = |target: &str| {
+        let mut request = req(target);
+        request.headers_mut().insert(
+            http::header::COOKIE,
+            http::HeaderValue::from_static("PHPSESSID=clock"),
+        );
+        request
+    };
+    // The first request keeps the session lock while it sleeps for 2 s.
+    let holder = submit(srv.addr, with_session("/?sleep=2000"))?;
+    let session_file = sessions.join("sess_clock");
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while !session_file.exists() {
+        assert!(
+            Instant::now() < deadline,
+            "the first request never opened its session"
+        );
+        std::thread::sleep(Duration::from_millis(10));
+    }
+
+    let waiter = drain(submit(srv.addr, with_session("/"))?);
+    let fatal = server_log::records(&srv.log_file())
+        .iter()
+        .any(|e| e.target == "php" && e.message.contains("Maximum execution time"));
+    assert_eq!(
+        (waiter.status, waiter.body.as_str(), fatal),
+        (200, "done", false),
+        "(status, body, timeout fatal logged) of the request that waited for the session lock"
+    );
+    assert_eq!(
+        drain(holder),
+        StatusBody {
+            status: 200,
+            body: "done".to_owned()
+        },
+        "the request that kept the session lock"
+    );
     Ok(())
 }

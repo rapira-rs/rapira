@@ -13,21 +13,33 @@ extern bool rapira_rs_held_is_cancelled(const rapira_held *held);
 extern int rapira_rs_handle_request(zend_fcall_info *fci,
                                     zend_fcall_info_cache *fcc);
 
-int rapira_mode = RAPIRA_MODE_CLASSIC;
+ZEND_TLS int rapira_mode = RAPIRA_MODE_CLASSIC;
+ZEND_TLS const rapira_plugin *rapira_plugin_current;
+ZEND_TLS const char *rapira_plugin_name;
+ZEND_TLS size_t rapira_plugin_name_len;
 
-const rapira_plugin *rapira_plugin_current;
-const char *rapira_plugin_name;
-size_t rapira_plugin_name_len;
+void rapira_set_dispatcher(int mode, const rapira_plugin *plugin,
+                           const char *name, size_t name_len) {
+    rapira_mode = mode;
+    rapira_plugin_current = mode == RAPIRA_MODE_DISPATCHER ? plugin : NULL;
+    rapira_plugin_name = name;
+    rapira_plugin_name_len = name_len;
+}
+
+int rapira_current_mode(void) { return rapira_mode; }
+
+const rapira_plugin *rapira_current_plugin(void) {
+    return rapira_plugin_current;
+}
 
 // the memoized plugin Dispatcher of this cycle; RSHUTDOWN releases it
-static zval rapira_dispatcher_memo;
+ZEND_TLS zval rapira_dispatcher_memo;
 
 ZEND_FUNCTION(Rapira_get_version) {
     ZEND_PARSE_PARAMETERS_NONE();
     RETURN_STRINGL(RAPIRA_VERSION, sizeof(RAPIRA_VERSION) - 1);
 }
 
-// start.rs sets rapira_mode once before the PHP thread starts, so the case is stable for the process
 ZEND_FUNCTION(Rapira_get_mode) {
     ZEND_PARSE_PARAMETERS_NONE();
 
@@ -37,7 +49,8 @@ ZEND_FUNCTION(Rapira_get_mode) {
         [RAPIRA_MODE_DISPATCHER] = "Dispatcher",
     };
 
-    // the case object belongs to the per-request class constant; the copy takes a reference
+    // the case object belongs to the per-request class constant; the copy takes
+    // a reference
     RETURN_OBJ_COPY(
         zend_enum_get_case_cstr(rapira_ce_mode, names[rapira_mode]));
 }
@@ -68,7 +81,7 @@ void rapira_dispatcher_release(void) {
 void rapira_dispatcher_forget(void) { ZVAL_UNDEF(&rapira_dispatcher_memo); }
 
 // a nested handle_request() would rebind SG(server_context) over the live unit
-static bool rapira_in_handle_request = false;
+ZEND_TLS bool rapira_in_handle_request = false;
 
 ZEND_FUNCTION(Rapira_handle_request) {
     zend_fcall_info fci;
@@ -78,9 +91,8 @@ ZEND_FUNCTION(Rapira_handle_request) {
     ZEND_PARSE_PARAMETERS_END();
 
     if (rapira_mode != RAPIRA_MODE_WORKER) {
-        zend_throw_exception(
-            rapira_ce_not_in_worker_mode_error,
-            "Requests are only handed out in Mode::Worker", 0);
+        zend_throw_exception(rapira_ce_not_in_worker_mode_error,
+                             "Requests are only handed out in Mode::Worker", 0);
         RETURN_THROWS();
     }
     if (rapira_in_handle_request) {
@@ -280,8 +292,10 @@ ZEND_FUNCTION(rapira_sapi_is_cancelled) {
 ZEND_FUNCTION(rapira_sapi_dispatcher_construct) {
     zend_throw_error(NULL,
                      "host-created; obtain it from \\Rapira\\get_dispatcher()");
+    RETURN_THROWS();
 }
 
 ZEND_FUNCTION(rapira_sapi_host_created) {
     zend_throw_error(NULL, "host-created");
+    RETURN_THROWS();
 }

@@ -7,6 +7,9 @@
 !Cargo.lock
 !src
 !crates
+!.github
+.github/*
+!.github/test-runtime.sh
 
 # Excluded again after the whitelist, because build output is inside the trees above.
 **/target

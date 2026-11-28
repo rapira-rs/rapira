@@ -1,28 +1,20 @@
-//! The `GrpcState` unit, the request Metadata and Context, the services list, and the Rust behind the methods of UnaryCall, ServerStreamingCall and ResponseMetadata.
+//! Private PHP/Zend FFI adapter over `crate::call::CallState`, plus `ServiceInfo` and `Context`/`Metadata` Zval builders.
 
 use std::ffi::{CStr, c_char};
-use std::time::Instant;
+use std::sync::OnceLock;
 
-use base64::Engine as _;
-use base64::alphabet;
-use base64::engine::DecodePaddingMode;
-use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STANDARD_NO_PAD};
-use bytes::Bytes;
-use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
-use connectrpc::{ConnectError, ErrorCode, ErrorDetail, MethodKind, Protocol};
+use buffa_descriptor::{DescriptorPool, MethodDescriptor};
+use connectrpc::{ConnectError, ErrorCode, ErrorDetail, Protocol};
 use rapira_sapi::callbacks::guard;
-use rapira_sapi::exchange::{add_list, build_address, header_key};
-use rapira_sapi::scoreboard::{Event, sb_update};
-use rapira_sapi::stream::{self, Step, Wait};
-use rapira_sapi::work::{Held, HeldPtr, now_unix_f64};
+use rapira_sapi::exchange::{add_list, build_address};
+use rapira_sapi::stream;
+use rapira_sapi::work::{Held, HeldPtr};
 use rapira_sapi::{
     HashTable, IS_OBJECT, IS_STRING, add_next_index_object, object_init_ex, rapira_array_init,
     rapira_ce_already_finalized_error, rapira_ce_work_discarded_exception, rapira_zval_enum_case,
     zend, zend_argument_type_error, zend_class_entry, zend_long, zend_object, zend_string,
-    zend_zval_value_name, zval, zval_ptr_dtor,
+    zend_zval_value_name, zval,
 };
-use tokio::sync::mpsc::error::TrySendError;
-use tokio::sync::{mpsc, oneshot};
 
 use super::{
     rapira_ce_grpc_context, rapira_ce_grpc_error_detail,
@@ -30,19 +22,62 @@ use super::{
     rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind, rapira_ce_grpc_protocol,
     rapira_ce_grpc_server_streaming_call, rapira_ce_grpc_service_info, rapira_ce_grpc_unary_call,
 };
-use crate::{Call, Head, MethodInfo, Part, UnaryReply};
+use crate::call::{CallState, MetadataField, Verb, normalize_error_detail};
+
+static METHOD_INFO_SLOTS: OnceLock<[u32; 4]> = OnceLock::new();
+static SERVICE_INFO_SLOTS: OnceLock<[u32; 2]> = OnceLock::new();
+static METADATA_SLOTS: OnceLock<[u32; 1]> = OnceLock::new();
+static CONTEXT_SLOTS: OnceLock<[u32; 7]> = OnceLock::new();
+
+impl Held for CallState {
+    fn settled(&self) -> bool {
+        CallState::settled(self)
+    }
+
+    fn cancelled(&self) -> bool {
+        CallState::cancelled(self)
+    }
+
+    fn discard(&mut self) {
+        CallState::discard(self);
+    }
+
+    /// The drop of `CallState`'s reply reports the lost call as INTERNAL.
+    fn lost(&mut self) {}
+
+    fn shed(self: Box<Self>) {
+        (*self).shed();
+    }
+
+    fn class(&self) -> *mut zend_class_entry {
+        // SAFETY: MINIT sets the class entries before any worker starts.
+        unsafe {
+            if self.is_stream() {
+                rapira_ce_grpc_server_streaming_call
+            } else {
+                rapira_ce_grpc_unary_call
+            }
+        }
+    }
+}
 
 /// # Safety
 /// `dst` is writable. The engine is active on this thread.
-unsafe fn method_info(dst: *mut zval, m: &MethodInfo) {
+unsafe fn method_info(dst: *mut zval, pool: &DescriptorPool, m: &MethodDescriptor) {
     unsafe {
         let ce = rapira_ce_grpc_method_info;
+        let [name_slot, input_slot, output_slot, kind_slot] =
+            *METHOD_INFO_SLOTS.get_or_init(|| {
+                [c"name", c"inputType", c"outputType", c"kind"].map(|n| zend::prop_offset(ce, n))
+            });
         let _ = object_init_ex(dst, ce);
         let obj = (*dst).value.obj;
-        zend::prop_stringl(ce, obj, c"name", m.name.as_bytes());
-        zend::prop_stringl(ce, obj, c"inputType", m.input_type.as_bytes());
-        zend::prop_stringl(ce, obj, c"outputType", m.output_type.as_bytes());
-        let case = match (m.client_streaming, m.server_streaming) {
+        zend::slot_stringl(obj, name_slot, m.name().as_bytes());
+        let input = pool.message(m.input()).full_name();
+        zend::slot_stringl(obj, input_slot, input.as_bytes());
+        let output = pool.message(m.output()).full_name();
+        zend::slot_stringl(obj, output_slot, output.as_bytes());
+        let case = match (m.is_client_streaming(), m.is_server_streaming()) {
             (false, false) => c"Unary",
             (false, true) => c"ServerStreaming",
             (true, false) => c"ClientStreaming",
@@ -50,8 +85,7 @@ unsafe fn method_info(dst: *mut zval, m: &MethodInfo) {
         };
         let mut kind: zval = std::mem::zeroed();
         rapira_zval_enum_case(&mut kind, rapira_ce_grpc_method_kind, case.as_ptr());
-        zend::prop_zval(ce, obj, c"kind", &mut kind);
-        zval_ptr_dtor(&mut kind);
+        zend::slot_init(obj, kind_slot, &kind);
     }
 }
 
@@ -60,441 +94,34 @@ unsafe fn method_info(dst: *mut zval, m: &MethodInfo) {
 /// `rv` is writable. The engine is active on this thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_services(rv: *mut zval) -> bool {
-    guard(false, || unsafe {
-        let services = crate::schema::services();
-        rapira_array_init(rv, services.len() as u32);
-        for s in services {
-            let mut methods: zval = std::mem::zeroed();
-            rapira_array_init(&mut methods, s.methods.len() as u32);
-            for m in &s.methods {
-                let mut info: zval = std::mem::zeroed();
-                method_info(&mut info, m);
-                let _ = add_next_index_object(&mut methods, info.value.obj);
-            }
+    guard(false, || {
+        crate::schema::with(|schema| unsafe {
             let ce = rapira_ce_grpc_service_info;
-            let mut service: zval = std::mem::zeroed();
-            let _ = object_init_ex(&mut service, ce);
-            zend::prop_stringl(ce, service.value.obj, c"name", s.name.as_bytes());
-            zend::prop_zval(ce, service.value.obj, c"methods", &mut methods);
-            zval_ptr_dtor(&mut methods);
-            let _ = add_next_index_object(rv, service.value.obj);
-        }
-        true
+            let [name_slot, methods_slot] = *SERVICE_INFO_SLOTS
+                .get_or_init(|| [c"name", c"methods"].map(|n| zend::prop_offset(ce, n)));
+            let services = schema.services();
+            rapira_array_init(rv, services.len() as u32);
+            for s in services {
+                let mut methods: zval = std::mem::zeroed();
+                rapira_array_init(&mut methods, s.methods().len() as u32);
+                for m in s.methods() {
+                    let mut info: zval = std::mem::zeroed();
+                    method_info(&mut info, schema.pool(), m);
+                    let _ = add_next_index_object(&mut methods, info.value.obj);
+                }
+                let mut service: zval = std::mem::zeroed();
+                let _ = object_init_ex(&mut service, ce);
+                let obj = service.value.obj;
+                zend::slot_stringl(obj, name_slot, s.full_name().as_bytes());
+                zend::slot_init(obj, methods_slot, &methods);
+                let _ = add_next_index_object(rv, obj);
+            }
+            true
+        })
     })
 }
 
-/// One metadata name with values in arrival or add order. `-bin` values are raw bytes.
-#[derive(Debug, PartialEq)]
-pub struct MetadataField {
-    pub name: HeaderName,
-    pub values: Vec<Vec<u8>>,
-}
-
-/// Request `-bin` values use the standard alphabet with or without padding. Implementations "MUST accept padded and un-padded values". See https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
-const BIN_DECODE: GeneralPurpose = GeneralPurpose::new(
-    &alphabet::STANDARD,
-    GeneralPurposeConfig::new().with_decode_padding_mode(DecodePaddingMode::Indifferent),
-);
-
-/// Names that the transport owns: gRPC and Connect control fields, content framing, Connect trailers in the head, and the HTTP connection-specific fields. `name` is lower-case.
-fn reserved(name: &str) -> bool {
-    const PREFIXES: [&str; 4] = ["grpc-", "connect-", "content-", "trailer-"];
-    const NAMES: [&str; 9] = [
-        "te",
-        "trailer",
-        "connection",
-        "keep-alive",
-        "proxy-connection",
-        "transfer-encoding",
-        "upgrade",
-        "host",
-        "accept-encoding",
-    ];
-    PREFIXES.iter().any(|p| name.starts_with(p)) || NAMES.contains(&name)
-}
-
-/// The Metadata rule for a text value: printable ASCII, 0x20 to 0x7E.
-pub(crate) fn printable(value: &[u8]) -> bool {
-    value.iter().all(|b| (0x20..=0x7e).contains(b))
-}
-
-/// A metadata name that carries binary values.
-pub(crate) fn is_binary(name: &[u8]) -> bool {
-    name.ends_with(b"-bin")
-}
-
-/// Builds `Context::$metadata` from the keys that the transport does not own, with `-bin` values decoded. It drops a text value that is not printable and an undecodable `-bin` value. A key with no values left is absent.
-/// A `-bin` value is split on "," first: "Implementations must split Binary-Headers on "," before decoding the Base64-encoded values." https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
-/// The optional whitespace around "," follows the HTTP list rule. https://www.rfc-editor.org/rfc/rfc9110#section-5.6.1
-pub fn context_metadata(headers: &HeaderMap) -> Vec<MetadataField> {
-    let mut out = Vec::new();
-    for name in headers.keys() {
-        if reserved(name.as_str()) {
-            continue;
-        }
-        let binary = is_binary(name.as_str().as_bytes());
-        let mut values: Vec<Vec<u8>> = Vec::new();
-        for v in headers.get_all(name) {
-            let v = v.as_bytes();
-            if !binary {
-                if printable(v) {
-                    values.push(v.to_vec());
-                } else {
-                    tracing::debug!(target: "rapira", "dropped a non-printable {name} value");
-                }
-                continue;
-            }
-            for piece in v.split(|&b| b == b',').map(<[u8]>::trim_ascii) {
-                match BIN_DECODE.decode(piece) {
-                    Ok(decoded) => values.push(decoded),
-                    Err(e) => {
-                        tracing::debug!(target: "rapira", "dropped an undecodable {name} value: {e}");
-                    }
-                }
-            }
-        }
-        if !values.is_empty() {
-            out.push(MetadataField {
-                name: name.clone(),
-                values,
-            });
-        }
-    }
-    out
-}
-
-/// Response metadata in wire form. `-bin` values are base64 without padding, because implementations "should emit un-padded values" (PROTOCOL-HTTP2 Requests).
-/// A text value loses its edge spaces. An HTTP/2 field value "MUST NOT start or end with an ASCII whitespace character" (https://www.rfc-editor.org/rfc/rfc9113#section-8.2.1), and for gRPC "it may be stripped" (PROTOCOL-HTTP2 Requests).
-fn wire(fields: &[MetadataField]) -> HeaderMap {
-    let mut map = HeaderMap::new();
-    for MetadataField { name, values } in fields {
-        let binary = is_binary(name.as_str().as_bytes());
-        for v in values {
-            let value = if binary {
-                HeaderValue::try_from(STANDARD_NO_PAD.encode(v))
-            } else {
-                HeaderValue::from_bytes(v.trim_ascii())
-            };
-            map.append(
-                name.clone(),
-                value.expect("add_core accepts only printable ASCII text, and base64 is ASCII"),
-            );
-        }
-    }
-    map
-}
-
-/// Where the outcome of a call goes.
-pub(crate) enum Reply {
-    Unary(oneshot::Sender<UnaryReply>),
-    Stream(StreamReply),
-}
-
-/// The two senders of a streaming response. The handler holds both receivers until the head arrives, then the response stream holds the receiver of `parts`. So a closed `parts` means in each phase that the plugin closed the call.
-pub(crate) struct StreamReply {
-    /// None after the head went out.
-    head: Option<oneshot::Sender<Result<Head, ConnectError>>>,
-    parts: mpsc::Sender<Part>,
-    /// The deadline of the call. No park waits past it. From that time on, the call is cancelled.
-    until: Option<Instant>,
-    /// A trailer was added after the head went out. A stream that ends with success does not send it.
-    late_trailer: bool,
-}
-
-impl StreamReply {
-    pub(crate) fn new(
-        head: oneshot::Sender<Result<Head, ConnectError>>,
-        parts: mpsc::Sender<Part>,
-        until: Option<Instant>,
-    ) -> Self {
-        Self {
-            head: Some(head),
-            parts,
-            until,
-            late_trailer: false,
-        }
-    }
-}
-
-pub(crate) struct GrpcState {
-    req: Call,
-    received_at: f64,
-    /// None after the outcome went out or the call was discarded. The call is then finalized.
-    reply: Option<Reply>,
-    discarded: bool,
-    headers: Vec<MetadataField>,
-    trailers: Vec<MetadataField>,
-    /// The metadata of the Context object, filled by the first `getContext()`. The state keeps it because a Zend OOM bailout longjmps through the builder frame, so that frame holds no values with Drop glue.
-    context_metadata: Option<Vec<MetadataField>>,
-}
-
-impl GrpcState {
-    /// One call on the intake. A dropped `reply` means that PHP lost the call. The drop of its receivers closes the call for PHP.
-    pub(crate) fn new(req: Call, reply: Reply) -> Self {
-        Self {
-            req,
-            received_at: now_unix_f64(),
-            reply: Some(reply),
-            discarded: false,
-            headers: Vec::new(),
-            trailers: Vec::new(),
-            context_metadata: None,
-        }
-    }
-}
-
-impl Held for GrpcState {
-    fn settled(&self) -> bool {
-        self.reply.is_none()
-    }
-
-    /// The plugin dropped the receiver because the deadline passed or the client left. connectrpc bounds only the handler with the deadline. The handler of a stream returns at the head, so a stream also checks its deadline here.
-    fn cancelled(&self) -> bool {
-        self.discarded
-            || match &self.reply {
-                Some(Reply::Unary(reply)) => reply.is_closed(),
-                Some(Reply::Stream(out)) => {
-                    out.parts.is_closed() || out.until.is_some_and(|until| Instant::now() >= until)
-                }
-                None => false,
-            }
-    }
-
-    /// The drop of `reply` finalizes the call, so `release()` does not count it a second time.
-    fn discard(&mut self) {
-        if self.settled() {
-            return;
-        }
-        self.discarded = true;
-        self.reply = None;
-        sb_update(Event::Handled { errored: true });
-    }
-
-    /// The drop of `reply` reports the lost call as INTERNAL.
-    fn lost(&mut self) {}
-
-    fn shed(self: Box<Self>) {
-        let err = ConnectError::unavailable("the worker failed to boot");
-        match self.reply {
-            Some(Reply::Unary(reply)) => {
-                let _ = reply.send(UnaryReply {
-                    headers: HeaderMap::new(),
-                    trailers: HeaderMap::new(),
-                    outcome: Err(err),
-                });
-            }
-            Some(Reply::Stream(StreamReply {
-                head: Some(head), ..
-            })) => {
-                let _ = head.send(Err(err));
-            }
-            _ => {}
-        }
-    }
-
-    fn class(&self) -> *mut zend_class_entry {
-        // SAFETY: MINIT assigns the class entries in the master before the fork, and nothing writes them after.
-        unsafe {
-            match self.req.kind {
-                MethodKind::ServerStreaming => rapira_ce_grpc_server_streaming_call,
-                _ => rapira_ce_grpc_unary_call,
-            }
-        }
-    }
-}
-
-/// A core returns a Verb and throws nothing. `thrown` throws after the core dropped its owned state, because `zend_throw_*` can bail out.
-#[derive(Debug, PartialEq)]
-enum Verb {
-    Ok,
-    Finalized,
-    Discarded,
-    HeadersCommitted,
-    BadField(&'static CStr),
-}
-
-/// Validates one response metadata entry, then adds it to its half. It checks the entry before the state, so a bad entry gives a ValueError on a finalized call too.
-fn add_core(st: &mut GrpcState, trailer: bool, binary: bool, name: &[u8], value: &[u8]) -> Verb {
-    // from_bytes lower-cases the name
-    let Ok(name) = HeaderName::from_bytes(name) else {
-        return Verb::BadField(c"the metadata name is not a valid header name");
-    };
-    // The Header-Name rule. See https://github.com/grpc/grpc/blob/master/doc/PROTOCOL-HTTP2.md#requests
-    if !name
-        .as_str()
-        .bytes()
-        .all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'z' | b'_' | b'-' | b'.'))
-    {
-        return Verb::BadField(c"a metadata name must use only 0-9 a-z _ - .");
-    }
-    if reserved(name.as_str()) {
-        return Verb::BadField(c"the metadata name is reserved for the transport");
-    }
-    match (binary, is_binary(name.as_str().as_bytes())) {
-        (false, true) => {
-            return Verb::BadField(
-                c"a metadata name with the -bin suffix takes binary values: use addBinaryHeader() or addBinaryTrailer()",
-            );
-        }
-        (true, false) => {
-            return Verb::BadField(c"a binary metadata name must have the -bin suffix");
-        }
-        _ => {}
-    }
-    if !binary && !printable(value) {
-        return Verb::BadField(c"a text metadata value must be printable ASCII");
-    }
-    // a call that the plugin closed keeps the entry, and finish() gives WorkDiscardedException
-    if st.settled() {
-        return Verb::Finalized;
-    }
-    // The first yield of a streaming response sent the headers. It also fixed the trailers of a stream that ends with success; fail() sends a later trailer.
-    if let Some(Reply::Stream(out)) = st.reply.as_mut()
-        && out.head.is_none()
-    {
-        if !trailer {
-            return Verb::HeadersCommitted;
-        }
-        out.late_trailer = true;
-    }
-    let half = if trailer {
-        &mut st.trailers
-    } else {
-        &mut st.headers
-    };
-    match half.iter_mut().find(|field| field.name == name) {
-        Some(field) => field.values.push(value.to_vec()),
-        None => half.push(MetadataField {
-            name,
-            values: vec![value.to_vec()],
-        }),
-    }
-    Verb::Ok
-}
-
-/// Sends the one outcome of the call, with both metadata halves in wire form. On a streaming response the outcome is a status. Before the head, it goes out with both halves. After the head, it ends the stream with every trailer.
-fn finish(st: &mut GrpcState, result: Result<Bytes, ConnectError>) -> Verb {
-    if st.cancelled() {
-        st.discard();
-        return Verb::Discarded;
-    }
-    let Some(reply) = st.reply.take() else {
-        return Verb::Finalized;
-    };
-    let trailers = wire(&st.trailers);
-    // the receiver can drop after the cancelled() check
-    let sent = match (reply, result) {
-        (Reply::Unary(reply), outcome) => reply
-            .send(UnaryReply {
-                headers: wire(&st.headers),
-                trailers,
-                outcome,
-            })
-            .is_ok(),
-        (Reply::Stream(mut out), Err(err)) => match out.head.take() {
-            Some(head) => head
-                .send(Err(err
-                    .with_headers(wire(&st.headers))
-                    .with_trailers(trailers)))
-                .is_ok(),
-            None => push(&out, Part::Fail(err.with_trailers(trailers))),
-        },
-        (Reply::Stream(_), Ok(_)) => unreachable!("only UnaryCall has respond(string)"),
-    };
-    settle(st, sent)
-}
-
-/// Counts the call as handled. A `sent` of false means that the plugin closed the call before the outcome went out.
-fn settle(st: &mut GrpcState, sent: bool) -> Verb {
-    sb_update(Event::Handled { errored: !sent });
-    if sent {
-        Verb::Ok
-    } else {
-        st.discarded = true;
-        Verb::Discarded
-    }
-}
-
-/// The checks of respond(\Generator) before the generator starts.
-fn begin(st: &mut GrpcState) -> Verb {
-    if st.cancelled() {
-        st.discard();
-        return Verb::Discarded;
-    }
-    if st.settled() {
-        return Verb::Finalized;
-    }
-    Verb::Ok
-}
-
-/// Sends the head when it is not out yet, with both metadata halves as they are now. Returns false when the plugin closed the call.
-fn commit(out: &mut StreamReply, headers: &[MetadataField], trailers: &[MetadataField]) -> bool {
-    let Some(head) = out.head.take() else {
-        return true;
-    };
-    head.send(Ok(Head {
-        headers: wire(headers),
-        trailers: wire(trailers),
-    }))
-    .is_ok()
-}
-
-/// Puts one part on the channel of the response stream. On a full channel the PHP thread parks until the plugin takes the part before it, the plugin closes the call, or the deadline of the call passes. Returns false when the part has no destination.
-fn push(out: &StreamReply, part: Part) -> bool {
-    let part = match out.parts.try_send(part) {
-        Ok(()) => return true,
-        Err(TrySendError::Closed(_)) => return false,
-        Err(TrySendError::Full(part)) => part,
-    };
-    let wait = match out.until {
-        Some(until) => Wait::For(until.saturating_duration_since(Instant::now())),
-        None => Wait::Forever,
-    };
-    let room = async { out.parts.reserve().await.ok() };
-    match stream::wait(room, out.parts.closed(), wait) {
-        Step::Item(permit) => {
-            permit.send(part);
-            true
-        }
-        _ => false,
-    }
-}
-
-/// Sends one message of a streaming response. The first message sends the head before it. Returns false when the message has no destination. The call is then discarded.
-fn send_core(st: &mut GrpcState, message: Bytes) -> bool {
-    if st.cancelled() {
-        st.discard();
-        return false;
-    }
-    // respond() or fail() inside the running generator finalized the call, so the generator gets the discard exception at its yield.
-    let Some(Reply::Stream(out)) = st.reply.as_mut() else {
-        return false;
-    };
-    let sent = commit(out, &st.headers, &st.trailers) && push(out, Part::Message(message));
-    if !sent {
-        st.discard();
-    }
-    sent
-}
-
-/// After the generator ends, sends the head of a stream with no message, then the end of the stream.
-fn end(st: &mut GrpcState) {
-    if st.cancelled() {
-        st.discard();
-        return;
-    }
-    // fail() inside the running generator finalized the call
-    let Some(Reply::Stream(mut out)) = st.reply.take() else {
-        return;
-    };
-    let sent = commit(&mut out, &st.headers, &st.trailers) && push(&out, Part::End);
-    if out.late_trailer {
-        tracing::debug!(target: "grpc", "{}: a trailer added after the first yield is not sent", st.req.method);
-    }
-    settle(st, sent);
-}
-
-/// The messages of the two finalize errors name the call, as the Responder.php `@throws` lines do.
+/// Throws the PHP exception for `Verb` after owned Rust state has dropped.
 /// # Safety
 /// The engine is active. This function can bail out on OOM.
 unsafe fn thrown(v: Verb) -> bool {
@@ -519,7 +146,7 @@ unsafe fn thrown(v: Verb) -> bool {
     false
 }
 
-/// A `Rapira\Grpc\Metadata` object over `fields`.
+/// Builds a `Rapira\Grpc\Metadata` object over `fields`.
 /// # Safety
 /// `dst` is writable. The engine is active on this thread.
 unsafe fn build_metadata(dst: *mut zval, fields: &[MetadataField]) {
@@ -527,18 +154,16 @@ unsafe fn build_metadata(dst: *mut zval, fields: &[MetadataField]) {
         let mut entries: zval = std::mem::zeroed();
         rapira_array_init(&mut entries, fields.len() as u32);
         for MetadataField { name, values } in fields {
-            let key = name.as_str();
             add_list(
                 &mut entries,
-                header_key(key),
-                key.len(),
+                name.as_str(),
                 values.iter().map(Vec::as_slice),
             );
         }
         let ce = rapira_ce_grpc_metadata;
+        let [entries_slot] = *METADATA_SLOTS.get_or_init(|| [zend::prop_offset(ce, c"entries")]);
         let _ = object_init_ex(dst, ce);
-        zend::prop_zval(ce, (*dst).value.obj, c"entries", &mut entries);
-        zval_ptr_dtor(&mut entries);
+        zend::slot_init((*dst).value.obj, entries_slot, &entries);
     }
 }
 
@@ -553,14 +178,11 @@ fn protocol_case(protocol: Protocol) -> &'static CStr {
 /// The listener does not terminate TLS, so `$tls` is null.
 /// # Safety
 /// `dst` is writable. The engine is active on this thread.
-unsafe fn build_context(dst: *mut zval, st: &mut GrpcState) {
+unsafe fn build_context(dst: *mut zval, st: &mut CallState) {
     unsafe {
-        let req = &st.req;
-        let fields = st
-            .context_metadata
-            .get_or_insert_with(|| context_metadata(&req.metadata));
         let mut metadata: zval = std::mem::zeroed();
-        build_metadata(&mut metadata, fields);
+        build_metadata(&mut metadata, st.context_metadata());
+        let req = st.request();
         let mut remote: zval = std::mem::zeroed();
         build_address(&mut remote, &req.remote);
         let mut protocol: zval = std::mem::zeroed();
@@ -571,27 +193,47 @@ unsafe fn build_context(dst: *mut zval, st: &mut GrpcState) {
         );
 
         let ce = rapira_ce_grpc_context;
+        let [
+            method_slot,
+            metadata_slot,
+            deadline_slot,
+            remote_slot,
+            tls_slot,
+            protocol_slot,
+            received_at_slot,
+        ] = *CONTEXT_SLOTS.get_or_init(|| {
+            [
+                c"method",
+                c"metadata",
+                c"deadline",
+                c"remote",
+                c"tls",
+                c"protocol",
+                c"receivedAt",
+            ]
+            .map(|n| zend::prop_offset(ce, n))
+        });
         let _ = object_init_ex(dst, ce);
         let o = (*dst).value.obj;
-        zend::prop_stringl(ce, o, c"method", req.method.as_bytes());
-        zend::prop_zval(ce, o, c"metadata", &mut metadata);
-        zval_ptr_dtor(&mut metadata);
+        zend::slot_stringl(o, method_slot, req.method.as_bytes());
+        zend::slot_init(o, metadata_slot, &metadata);
         match req.deadline {
-            Some(d) => zend::prop_double(ce, o, c"deadline", d),
-            None => zend::prop_null(ce, o, c"deadline"),
+            Some(d) => zend::slot_double(o, deadline_slot, d.unix),
+            None => zend::slot_null(o, deadline_slot),
         }
-        zend::prop_zval(ce, o, c"remote", &mut remote);
-        zval_ptr_dtor(&mut remote);
-        zend::prop_null(ce, o, c"tls");
-        zend::prop_zval(ce, o, c"protocol", &mut protocol);
-        zval_ptr_dtor(&mut protocol);
-        zend::prop_double(ce, o, c"receivedAt", st.received_at);
+        zend::slot_init(o, remote_slot, &remote);
+        zend::slot_null(o, tls_slot);
+        zend::slot_init(o, protocol_slot, &protocol);
+        zend::slot_double(o, received_at_slot, req.received_at);
+
+        // The C shell memoizes Context once per call, so release the Rust copies now.
+        st.release_context();
     }
 }
 
-/// A string property of an ErrorDetail. It is None when the property is not an initialized string.
+/// Reads a string property of an `ErrorDetail`, returning `None` when not an initialized string.
 /// # Safety
-/// `obj` is a live ErrorDetail. The borrow must not outlive it.
+/// `obj` is a live `ErrorDetail`. The borrow must not outlive it.
 unsafe fn detail_prop<'a>(obj: *mut zend_object, name: &CStr) -> Option<&'a [u8]> {
     unsafe {
         let mut rv: zval = std::mem::zeroed();
@@ -600,8 +242,7 @@ unsafe fn detail_prop<'a>(obj: *mut zend_object, name: &CStr) -> Option<&'a [u8]
     }
 }
 
-/// Converts `Status::$details` to connectrpc details, or returns the first item that is not an ErrorDetail. The value is unpadded base64.
-/// A Connect detail carries the bare type name. gRPC and gRPC-Web keep the `google.protobuf.Any` type URL whole, because connectrpc adds `type.googleapis.com/` only to a name without a `/`.
+/// Converts `Status::$details` to `connectrpc` details, or returns the first item that is not an `ErrorDetail`.
 /// # Safety
 /// `details` is a live array.
 unsafe fn read_details(
@@ -609,7 +250,6 @@ unsafe fn read_details(
     protocol: Protocol,
 ) -> Result<Vec<ErrorDetail>, *mut zval> {
     unsafe {
-        let whole_url = matches!(protocol, Protocol::Grpc | Protocol::GrpcWeb);
         let mut out = Vec::new();
         for zend::Entry { val: item, .. } in zend::entries(details) {
             let pair = if zend::zval_type(item) == IS_OBJECT
@@ -623,15 +263,7 @@ unsafe fn read_details(
             let Some((url, value)) = pair else {
                 return Err(item);
             };
-            let url = String::from_utf8_lossy(url);
-            out.push(ErrorDetail {
-                type_url: match url.rsplit_once('/') {
-                    Some((_, name)) if !whole_url => name.to_owned(),
-                    _ => url.into_owned(),
-                },
-                value: Some(STANDARD_NO_PAD.encode(value)),
-                debug: None,
-            });
+            out.push(normalize_error_detail(protocol, url, value));
         }
         Ok(out)
     }
@@ -646,7 +278,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_message(
     len: *mut usize,
 ) -> *const c_char {
     guard(c"".as_ptr(), || unsafe {
-        let message = &(*(*held).state::<GrpcState>()).req.message;
+        let message = &(*(*held).state::<CallState>()).request().message;
         *len = message.len();
         zend::ptr_or_empty(message)
     })
@@ -659,7 +291,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_message(
 pub unsafe extern "C" fn rapira_rs_grpc_context(held: *const HeldPtr, memo: *mut zval) -> bool {
     guard(false, || unsafe {
         let mut context: zval = std::mem::zeroed();
-        build_context(&mut context, &mut *(*held).state::<GrpcState>());
+        build_context(&mut context, &mut *(*held).state::<CallState>());
         *memo = context;
         true
     })
@@ -674,24 +306,28 @@ pub unsafe extern "C" fn rapira_rs_grpc_respond(
     len: usize,
 ) -> bool {
     guard(false, || unsafe {
-        let message = Bytes::copy_from_slice(std::slice::from_raw_parts(message.cast::<u8>(), len));
-        thrown(finish(&mut *(*held).state::<GrpcState>(), Ok(message)))
+        let message = std::slice::from_raw_parts(message.cast::<u8>(), len);
+        let verb = (*(*held).state::<CallState>()).finish(Ok(message), |_, _, _| {
+            unreachable!("unary calls never send stream parts")
+        });
+        thrown(verb)
     })
 }
 
-/// Starts respond(\Generator). Returns false with an exception pending when the call takes no stream.
+/// Starts `respond(\Generator)`. Returns false with an exception pending when the call takes no stream.
 /// # Safety
 /// `held` is the slot of a live call. The engine is active.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_stream_begin(held: *const HeldPtr) -> bool {
     guard(false, || unsafe {
-        thrown(begin(&mut *(*held).state::<GrpcState>()))
+        let verb = (*(*held).state::<CallState>()).begin();
+        thrown(verb)
     })
 }
 
-/// Sends one message that the generator of respond(\Generator) yielded. Throws nothing. Returns false when the host closed the call.
+/// Sends one message that the generator of `respond(\Generator)` yielded. Throws nothing. Returns false when the host closed the call.
 /// # Safety
-/// `held` is the slot of a live call. `message` points at `len` readable bytes.
+/// `held` is the slot of a live call. `message` points at `len` readable bytes. The caller runs on a PHP thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_stream_send(
     held: *const HeldPtr,
@@ -699,17 +335,20 @@ pub unsafe extern "C" fn rapira_rs_grpc_stream_send(
     len: usize,
 ) -> bool {
     guard(false, || unsafe {
-        let message = Bytes::copy_from_slice(std::slice::from_raw_parts(message.cast::<u8>(), len));
-        send_core(&mut *(*held).state::<GrpcState>(), message)
+        let message = std::slice::from_raw_parts(message.cast::<u8>(), len);
+        (*(*held).state::<CallState>())
+            .send(message, |tx, part, until| stream::send(tx, part, until))
     })
 }
 
-/// Runs when the generator of respond(\Generator) ends with the call open. Throws nothing.
+/// Runs when the generator of `respond(\Generator)` ends with the call open. Throws nothing.
 /// # Safety
-/// `held` is the slot of a live call.
+/// `held` is the slot of a live call. The caller runs on a PHP thread.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_stream_end(held: *const HeldPtr) {
-    guard((), || unsafe { end(&mut *(*held).state::<GrpcState>()) });
+    guard((), || unsafe {
+        (*(*held).state::<CallState>()).end(|tx, part, until| stream::send(tx, part, until));
+    });
 }
 
 /// Takes the three properties of a `Rapira\Grpc\Status`. `code` is the value of its StatusCode case. A detail that is not an ErrorDetail gives a TypeError before any state change.
@@ -723,8 +362,8 @@ pub unsafe extern "C" fn rapira_rs_grpc_fail(
     details: *mut HashTable,
 ) -> bool {
     guard(false, || unsafe {
-        let st = &mut *(*held).state::<GrpcState>();
-        let details = match read_details(details, st.req.protocol) {
+        let st = &mut *(*held).state::<CallState>();
+        let details = match read_details(details, st.request().protocol) {
             Ok(details) => details,
             Err(item) => {
                 zend_argument_type_error(
@@ -738,7 +377,8 @@ pub unsafe extern "C" fn rapira_rs_grpc_fail(
         let code = ErrorCode::from_grpc_code(code as u32).unwrap_or(ErrorCode::Unknown);
         let mut err = ConnectError::new(code, String::from_utf8_lossy(zend::zstr_bytes(message)));
         err.details = details;
-        thrown(finish(st, Err(err)))
+        let verb = st.finish(Err(err), |tx, part, until| stream::send(tx, part, until));
+        thrown(verb)
     })
 }
 
@@ -757,13 +397,8 @@ pub unsafe extern "C" fn rapira_rs_grpc_add(
     guard(false, || unsafe {
         let name = std::slice::from_raw_parts(name.cast::<u8>(), name_len);
         let value = std::slice::from_raw_parts(value.cast::<u8>(), value_len);
-        thrown(add_core(
-            &mut *(*held).state::<GrpcState>(),
-            trailer,
-            binary,
-            name,
-            value,
-        ))
+        let verb = (*(*held).state::<CallState>()).add(trailer, binary, name, value);
+        thrown(verb)
     })
 }
 
@@ -777,709 +412,8 @@ pub unsafe extern "C" fn rapira_rs_grpc_snapshot(
     rv: *mut zval,
 ) -> bool {
     guard(false, || unsafe {
-        let st = &*(*held).state::<GrpcState>();
-        build_metadata(rv, if trailer { &st.trailers } else { &st.headers });
+        let st = &*(*held).state::<CallState>();
+        build_metadata(rv, if trailer { st.trailers() } else { st.headers() });
         true
     })
-}
-
-#[cfg(test)]
-mod tests {
-    use rapira_sapi::types::Addr;
-
-    use super::*;
-
-    fn state(reply: oneshot::Sender<UnaryReply>) -> GrpcState {
-        let req = Call {
-            method: "rapira.test.v1.EchoService/Echo".into(),
-            kind: MethodKind::Unary,
-            protocol: Protocol::Grpc,
-            metadata: HeaderMap::new(),
-            deadline: None,
-            remote: Addr::Inet(([127, 0, 0, 1], 50051).into()),
-            message: Bytes::new(),
-        };
-        GrpcState::new(req, Reply::Unary(reply))
-    }
-
-    /// `from_bytes` takes the obs-text bytes that a client can send.
-    fn map(lines: &[(&'static str, &'static str)]) -> HeaderMap {
-        lines
-            .iter()
-            .map(|&(k, v)| {
-                let value = HeaderValue::from_bytes(v.as_bytes()).expect("a valid field value");
-                (HeaderName::from_static(k), value)
-            })
-            .collect()
-    }
-
-    fn owned(fields: &[(&str, &[&[u8]])]) -> Vec<MetadataField> {
-        let mut out = Vec::new();
-        for (name, values) in fields {
-            out.push(MetadataField {
-                name: HeaderName::from_bytes(name.as_bytes()).unwrap(),
-                values: values.iter().map(|value| value.to_vec()).collect(),
-            });
-        }
-        out
-    }
-
-    #[test]
-    fn reserved_names_cover_the_transport() {
-        struct Case {
-            name: &'static str,
-            header: &'static str,
-            reserved: bool,
-        }
-        const CASES: &[Case] = &[
-            Case {
-                name: "grpc- prefix",
-                header: "grpc-timeout",
-                reserved: true,
-            },
-            Case {
-                name: "grpc- prefix with -bin",
-                header: "grpc-status-details-bin",
-                reserved: true,
-            },
-            Case {
-                name: "content- prefix",
-                header: "content-type",
-                reserved: true,
-            },
-            Case {
-                name: "connect- prefix",
-                header: "connect-timeout-ms",
-                reserved: true,
-            },
-            Case {
-                name: "trailer- prefix",
-                header: "trailer-x",
-                reserved: true,
-            },
-            Case {
-                name: "te",
-                header: "te",
-                reserved: true,
-            },
-            Case {
-                name: "trailer",
-                header: "trailer",
-                reserved: true,
-            },
-            Case {
-                name: "host",
-                header: "host",
-                reserved: true,
-            },
-            Case {
-                name: "connection",
-                header: "connection",
-                reserved: true,
-            },
-            Case {
-                name: "keep-alive",
-                header: "keep-alive",
-                reserved: true,
-            },
-            Case {
-                name: "proxy-connection",
-                header: "proxy-connection",
-                reserved: true,
-            },
-            Case {
-                name: "transfer-encoding",
-                header: "transfer-encoding",
-                reserved: true,
-            },
-            Case {
-                name: "upgrade",
-                header: "upgrade",
-                reserved: true,
-            },
-            Case {
-                name: "accept-encoding",
-                header: "accept-encoding",
-                reserved: true,
-            },
-            Case {
-                name: "application name",
-                header: "user-agent",
-                reserved: false,
-            },
-            Case {
-                name: "x- name",
-                header: "x-user",
-                reserved: false,
-            },
-            Case {
-                name: "authorization",
-                header: "authorization",
-                reserved: false,
-            },
-            Case {
-                name: "grpc without the dash",
-                header: "grpcx",
-                reserved: false,
-            },
-            Case {
-                name: "x-grpc-web",
-                header: "x-grpc-web",
-                reserved: false,
-            },
-        ];
-        for c in CASES {
-            assert_eq!(reserved(c.header), c.reserved, "{}", c.name);
-        }
-    }
-
-    #[test]
-    fn context_metadata_filters_and_decodes() {
-        struct Case {
-            name: &'static str,
-            headers: &'static [(&'static str, &'static str)],
-            expected: &'static [(&'static str, &'static [&'static [u8]])],
-        }
-        // Sources: PROTOCOL-HTTP2 Requests (padded and unpadded -bin values, split on ",", duplicates joined with ","), grpc-go decodeMetadataHeader (an empty -bin value is an empty value), RFC 9110 5.6.1 (whitespace around the ","), RFC 4648 ("AP8" is 00 ff, "AQI" is 01 02).
-        const CASES: &[Case] = &[
-            Case {
-                name: "application key kept",
-                headers: &[("user-agent", "t/1")],
-                expected: &[("user-agent", &[b"t/1"])],
-            },
-            Case {
-                name: "repeats keep order",
-                headers: &[("x-user", "a"), ("x-user", "b")],
-                expected: &[("x-user", &[b"a", b"b"])],
-            },
-            Case {
-                name: "unpadded -bin",
-                headers: &[("x-trace-bin", "AP8")],
-                expected: &[("x-trace-bin", &[b"\x00\xff"])],
-            },
-            Case {
-                name: "padded -bin",
-                headers: &[("x-pad-bin", "AP8=")],
-                expected: &[("x-pad-bin", &[b"\x00\xff"])],
-            },
-            Case {
-                name: "undecodable -bin dropped",
-                headers: &[("x-bad-bin", "!!")],
-                expected: &[],
-            },
-            Case {
-                name: "comma-separated -bin values split",
-                headers: &[("x-trace-bin", "AP8,AQI")],
-                expected: &[("x-trace-bin", &[b"\x00\xff", b"\x01\x02"])],
-            },
-            Case {
-                name: "comma-separated -bin values with a space split",
-                headers: &[("x-trace-bin", "AP8, AQI")],
-                expected: &[("x-trace-bin", &[b"\x00\xff", b"\x01\x02"])],
-            },
-            Case {
-                name: "empty -bin value kept",
-                headers: &[("x-token-bin", "")],
-                expected: &[("x-token-bin", &[b""])],
-            },
-            Case {
-                name: "empty -bin value between commas kept",
-                headers: &[("x-trace-bin", "AP8,,AQI")],
-                expected: &[("x-trace-bin", &[b"\x00\xff", b"", b"\x01\x02"])],
-            },
-            Case {
-                name: "non-ASCII text value dropped",
-                headers: &[("x-user", "a"), ("x-user", "\u{e9}")],
-                expected: &[("x-user", &[b"a"])],
-            },
-            Case {
-                name: "text value with a tab dropped",
-                headers: &[("x-user", "a\tb"), ("x-user", "c")],
-                expected: &[("x-user", &[b"c"])],
-            },
-            Case {
-                name: "key with only a non-printable value absent",
-                headers: &[("x-user", "\u{e9}")],
-                expected: &[],
-            },
-            Case {
-                name: "reserved names dropped",
-                headers: &[("grpc-timeout", "1S"), ("te", "trailers")],
-                expected: &[],
-            },
-        ];
-        for c in CASES {
-            assert_eq!(
-                context_metadata(&map(c.headers)),
-                owned(c.expected),
-                "{}",
-                c.name
-            );
-        }
-    }
-
-    #[test]
-    fn wire_trims_text_values() {
-        struct Case {
-            name: &'static str,
-            field: (&'static str, &'static [u8]),
-            expected: &'static str,
-        }
-        // Sources: PROTOCOL-HTTP2 Requests ("ASCII-Value should not have leading or trailing whitespace. If it contains leading or trailing whitespace, it may be stripped."), RFC 9113 8.2.1 (a field value must not start or end with whitespace), RFC 4648 ("IA" is one space).
-        const CASES: &[Case] = &[
-            Case {
-                name: "leading space stripped",
-                field: ("x-cost", b"  12.30"),
-                expected: "12.30",
-            },
-            Case {
-                name: "trailing space stripped",
-                field: ("x-note", b"done "),
-                expected: "done",
-            },
-            Case {
-                name: "inner space kept",
-                field: ("x-note", b"a b"),
-                expected: "a b",
-            },
-            Case {
-                name: "only spaces become empty",
-                field: ("x-note", b"   "),
-                expected: "",
-            },
-            Case {
-                name: "-bin value is encoded, not trimmed",
-                field: ("x-b-bin", b" "),
-                expected: "IA",
-            },
-        ];
-        for c in CASES {
-            let (name, value) = c.field;
-            let fields = [MetadataField {
-                name: HeaderName::from_static(name),
-                values: vec![value.to_vec()],
-            }];
-            let map = wire(&fields);
-            assert_eq!(
-                map.get(name).map(HeaderValue::as_bytes),
-                Some(c.expected.as_bytes()),
-                "{}",
-                c.name
-            );
-        }
-    }
-
-    enum Setup {
-        Open,
-        Responded,
-        HostClosed,
-    }
-
-    enum Want {
-        Stored {
-            name: &'static str,
-            value: &'static [u8],
-        },
-        BadField(&'static CStr),
-        Finalized,
-    }
-
-    #[test]
-    fn add_validates_per_contract() {
-        struct Case {
-            name: &'static str,
-            setup: Setup,
-            trailer: bool,
-            binary: bool,
-            key: &'static [u8],
-            value: &'static [u8],
-            want: Want,
-        }
-        // Sources: ResponseMetadata.php, PROTOCOL-HTTP2 Header-Name (0-9 a-z _ - .). A bad field is a ValueError before any state check.
-        const CASES: &[Case] = &[
-            Case {
-                name: "text header lower-cases",
-                setup: Setup::Open,
-                trailer: false,
-                binary: false,
-                key: b"X-Cost",
-                value: b"2.7",
-                want: Want::Stored {
-                    name: "x-cost",
-                    value: b"2.7",
-                },
-            },
-            Case {
-                name: "binary header keeps raw bytes",
-                setup: Setup::Open,
-                trailer: false,
-                binary: true,
-                key: b"x-tok-bin",
-                value: b"\x00\xff",
-                want: Want::Stored {
-                    name: "x-tok-bin",
-                    value: b"\x00\xff",
-                },
-            },
-            Case {
-                name: "text trailer goes to the trailer half",
-                setup: Setup::Open,
-                trailer: true,
-                binary: false,
-                key: b"x-t",
-                value: b"w",
-                want: Want::Stored {
-                    name: "x-t",
-                    value: b"w",
-                },
-            },
-            Case {
-                name: "reserved name refused",
-                setup: Setup::Open,
-                trailer: false,
-                binary: false,
-                key: b"grpc-status",
-                value: b"0",
-                want: Want::BadField(c"the metadata name is reserved for the transport"),
-            },
-            Case {
-                name: "text method refuses -bin",
-                setup: Setup::Open,
-                trailer: false,
-                binary: false,
-                key: b"x-tok-bin",
-                value: b"a",
-                want: Want::BadField(c"a metadata name with the -bin suffix takes binary values: use addBinaryHeader() or addBinaryTrailer()"),
-            },
-            Case {
-                name: "binary method needs -bin",
-                setup: Setup::Open,
-                trailer: true,
-                binary: true,
-                key: b"x-tok",
-                value: b"a",
-                want: Want::BadField(c"a binary metadata name must have the -bin suffix"),
-            },
-            Case {
-                name: "non-ASCII text value",
-                setup: Setup::Open,
-                trailer: true,
-                binary: false,
-                key: b"x-a",
-                value: "é".as_bytes(),
-                want: Want::BadField(c"a text metadata value must be printable ASCII"),
-            },
-            Case {
-                name: "control byte in text value",
-                setup: Setup::Open,
-                trailer: true,
-                binary: false,
-                key: b"x-a",
-                value: b"a\nb",
-                want: Want::BadField(c"a text metadata value must be printable ASCII"),
-            },
-            Case {
-                name: "empty text value",
-                setup: Setup::Open,
-                trailer: false,
-                binary: false,
-                key: b"x-a",
-                value: b"",
-                want: Want::Stored {
-                    name: "x-a",
-                    value: b"",
-                },
-            },
-            Case {
-                name: "plus in the name",
-                setup: Setup::Open,
-                trailer: false,
-                binary: false,
-                key: b"x+debug",
-                value: b"a",
-                want: Want::BadField(c"a metadata name must use only 0-9 a-z _ - ."),
-            },
-            Case {
-                name: "exclamation mark in the name",
-                setup: Setup::Open,
-                trailer: true,
-                binary: false,
-                key: b"x!a",
-                value: b"a",
-                want: Want::BadField(c"a metadata name must use only 0-9 a-z _ - ."),
-            },
-            Case {
-                name: "empty name",
-                setup: Setup::Open,
-                trailer: false,
-                binary: false,
-                key: b"",
-                value: b"a",
-                want: Want::BadField(c"the metadata name is not a valid header name"),
-            },
-            Case {
-                name: "bad name wins over finalized",
-                setup: Setup::Responded,
-                trailer: false,
-                binary: false,
-                key: b"grpc-x",
-                value: b"a",
-                want: Want::BadField(c"the metadata name is reserved for the transport"),
-            },
-            Case {
-                name: "after finalize",
-                setup: Setup::Responded,
-                trailer: false,
-                binary: false,
-                key: b"x-a",
-                value: b"a",
-                want: Want::Finalized,
-            },
-            Case {
-                name: "after host close",
-                setup: Setup::HostClosed,
-                trailer: true,
-                binary: false,
-                key: b"x-a",
-                value: b"a",
-                want: Want::Stored {
-                    name: "x-a",
-                    value: b"a",
-                },
-            },
-        ];
-        for c in CASES {
-            let (tx, rx) = oneshot::channel();
-            let mut st = state(tx);
-            let _rx = match c.setup {
-                Setup::Responded => {
-                    assert_eq!(finish(&mut st, Ok(Bytes::new())), Verb::Ok, "{}", c.name);
-                    Some(rx)
-                }
-                Setup::HostClosed => {
-                    drop(rx);
-                    None
-                }
-                Setup::Open => Some(rx),
-            };
-            let v = add_core(&mut st, c.trailer, c.binary, c.key, c.value);
-            match c.want {
-                Want::Stored { name, value } => {
-                    assert_eq!(v, Verb::Ok, "{}", c.name);
-                    let half = if c.trailer { &st.trailers } else { &st.headers };
-                    assert_eq!(*half, owned(&[(name, &[value])]), "{}", c.name);
-                }
-                Want::BadField(msg) => assert_eq!(v, Verb::BadField(msg), "{}", c.name),
-                Want::Finalized => assert_eq!(v, Verb::Finalized, "{}", c.name),
-            }
-        }
-    }
-
-    struct Status {
-        code: ErrorCode,
-        message: &'static str,
-        details: &'static [Detail],
-    }
-
-    struct Detail {
-        type_url: &'static str,
-        /// Unpadded base64, as connectrpc carries it.
-        value: &'static str,
-    }
-
-    enum Finish {
-        Respond(&'static [u8]),
-        Fail(Status),
-    }
-
-    enum Sent {
-        /// The receiver gets this outcome: headers, trailers (wire form) and the result.
-        Outcome {
-            headers: &'static [(&'static str, &'static str)],
-            trailers: &'static [(&'static str, &'static str)],
-            result: Result<&'static [u8], Status>,
-        },
-        /// The test dropped the receiver.
-        Nothing,
-    }
-
-    fn error(s: &Status) -> ConnectError {
-        let mut err = ConnectError::new(s.code, s.message);
-        for d in s.details {
-            err.details.push(ErrorDetail {
-                type_url: d.type_url.to_owned(),
-                value: Some(d.value.to_owned()),
-                debug: None,
-            });
-        }
-        err
-    }
-
-    #[test]
-    fn finish_sends_one_outcome_in_wire_form() {
-        struct Entry {
-            trailer: bool,
-            binary: bool,
-            name: &'static [u8],
-            value: &'static [u8],
-        }
-        struct Case {
-            name: &'static str,
-            adds: &'static [Entry],
-            drop_receiver: bool,
-            finishes: &'static [Finish],
-            verbs: &'static [Verb],
-            finalized: bool,
-            cancelled: bool,
-            sent: Sent,
-        }
-        // Sources: Responder.php and Work.php, PROTOCOL-HTTP2 Requests (unpadded -bin values), RFC 4648 (01 02 is "AQI", 0a 01 78 is "CgF4").
-        const CASES: &[Case] = &[
-            Case {
-                name: "respond carries both halves",
-                adds: &[
-                    Entry {
-                        trailer: false,
-                        binary: false,
-                        name: b"x-a",
-                        value: b"1",
-                    },
-                    Entry {
-                        trailer: false,
-                        binary: false,
-                        name: b"x-a",
-                        value: b"2",
-                    },
-                    Entry {
-                        trailer: false,
-                        binary: true,
-                        name: b"x-b-bin",
-                        value: b"\x01\x02",
-                    },
-                    Entry {
-                        trailer: true,
-                        binary: false,
-                        name: b"x-t",
-                        value: b"w",
-                    },
-                ],
-                drop_receiver: false,
-                finishes: &[Finish::Respond(b"\x0a\x02hi")],
-                verbs: &[Verb::Ok],
-                finalized: true,
-                cancelled: false,
-                sent: Sent::Outcome {
-                    headers: &[("x-a", "1"), ("x-a", "2"), ("x-b-bin", "AQI")],
-                    trailers: &[("x-t", "w")],
-                    result: Ok(b"\x0a\x02hi"),
-                },
-            },
-            Case {
-                name: "fail carries the status",
-                adds: &[],
-                drop_receiver: false,
-                finishes: &[Finish::Fail(Status {
-                    code: ErrorCode::NotFound,
-                    message: "no invoice",
-                    details: &[Detail {
-                        type_url: "type.googleapis.com/google.rpc.ErrorInfo",
-                        value: "CgF4",
-                    }],
-                })],
-                verbs: &[Verb::Ok],
-                finalized: true,
-                cancelled: false,
-                sent: Sent::Outcome {
-                    headers: &[],
-                    trailers: &[],
-                    result: Err(Status {
-                        code: ErrorCode::NotFound,
-                        message: "no invoice",
-                        details: &[Detail {
-                            type_url: "type.googleapis.com/google.rpc.ErrorInfo",
-                            value: "CgF4",
-                        }],
-                    }),
-                },
-            },
-            Case {
-                name: "second finalize",
-                adds: &[],
-                drop_receiver: false,
-                finishes: &[Finish::Respond(b"a"), Finish::Respond(b"b")],
-                verbs: &[Verb::Ok, Verb::Finalized],
-                finalized: true,
-                cancelled: false,
-                sent: Sent::Outcome {
-                    headers: &[],
-                    trailers: &[],
-                    result: Ok(b"a"),
-                },
-            },
-            Case {
-                name: "receiver dropped before respond",
-                adds: &[],
-                drop_receiver: true,
-                finishes: &[Finish::Respond(b"a")],
-                verbs: &[Verb::Discarded],
-                finalized: true,
-                cancelled: true,
-                sent: Sent::Nothing,
-            },
-        ];
-        for c in CASES {
-            let (tx, rx) = oneshot::channel();
-            let mut st = state(tx);
-            let mut rx = (!c.drop_receiver).then_some(rx);
-            for e in c.adds {
-                assert_eq!(
-                    add_core(&mut st, e.trailer, e.binary, e.name, e.value),
-                    Verb::Ok,
-                    "{}",
-                    c.name
-                );
-            }
-            let verbs: Vec<Verb> = c
-                .finishes
-                .iter()
-                .map(|f| match f {
-                    Finish::Respond(message) => finish(&mut st, Ok(Bytes::from_static(message))),
-                    Finish::Fail(s) => finish(&mut st, Err(error(s))),
-                })
-                .collect();
-            assert_eq!(verbs, c.verbs, "{}", c.name);
-            assert_eq!(st.is_finalized(), c.finalized, "{}: finalized", c.name);
-            assert_eq!(st.cancelled(), c.cancelled, "{}: cancelled", c.name);
-            drop(st);
-
-            match &c.sent {
-                Sent::Outcome {
-                    headers,
-                    trailers,
-                    result,
-                } => {
-                    let Some(got) = rx.as_mut().and_then(|rx| rx.try_recv().ok()) else {
-                        panic!("{}: no outcome", c.name);
-                    };
-                    assert_eq!(got.headers, map(headers), "{}", c.name);
-                    assert_eq!(got.trailers, map(trailers), "{}", c.name);
-                    // ConnectError has no PartialEq, so the test compares its code, message and details.
-                    match (got.outcome, result) {
-                        (Ok(message), Ok(want)) => assert_eq!(message, *want, "{}", c.name),
-                        (Err(err), Err(want)) => {
-                            assert_eq!(err.code, want.code, "{}", c.name);
-                            assert_eq!(err.message.as_deref(), Some(want.message), "{}", c.name);
-                            assert_eq!(err.details.len(), want.details.len(), "{}", c.name);
-                            for (detail, want) in err.details.iter().zip(want.details) {
-                                assert_eq!(detail.type_url, want.type_url, "{}", c.name);
-                                assert_eq!(detail.value.as_deref(), Some(want.value), "{}", c.name);
-                            }
-                        }
-                        (got, _) => panic!("{}: the other outcome kind: {got:?}", c.name),
-                    }
-                }
-                Sent::Nothing => {}
-            }
-        }
-    }
 }

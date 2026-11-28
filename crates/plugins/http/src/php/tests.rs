@@ -1,101 +1,127 @@
+use std::borrow::Cow;
+use std::sync::Arc;
+use std::task::{Context, Poll, Waker};
+
+use bytes::Bytes;
+use http::{Extensions, StatusCode, header};
+use http_body::Body as _;
+use http_body_util::BodyExt;
+use rapira_http_middleware::MiddlewareChain;
+use rapira_sapi::types::{Authority, Chunks, Request, RequestUri};
+
 use super::headers::*;
 use super::respond::*;
 use super::*;
-use rapira_sapi::types::{Chunks, Request};
-use rapira_sapi::zend_string;
+use crate::responder::{ResponseSlot, Start, build_php_response, refusal};
 
 fn base_req() -> Request {
     Request {
-        method: String::new(),
-        uri: "/".into(),
+        method: Cow::Borrowed("GET"),
+        uri: RequestUri::Static("/"),
         target: None,
-        authority: None,
+        authority: Authority::None,
         https: false,
         protocol: "HTTP/1.1",
         remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-        server_name: "",
-        server_port: 8080,
         headers: HeaderMap::new(),
         body: Chunks::default(),
         received_at: 0.0,
     }
 }
 
-fn map(lines: &[(&'static str, &'static str)]) -> HeaderMap {
-    lines
-        .iter()
-        .map(|&(k, v)| (HeaderName::from_static(k), HeaderValue::from_static(v)))
-        .collect()
+fn hdrs(lines: &[(&'static str, &'static str)]) -> HeaderMap {
+    let mut h = HeaderMap::new();
+    for &(k, v) in lines {
+        h.append(HeaderName::from_static(k), HeaderValue::from_static(v));
+    }
+    h
 }
 
-enum Sealed {
-    Complete { status: u16, body: Vec<u8> },
-    Truncated,
-    Nothing,
+struct Captured {
+    status: StatusCode,
+    headers: http::HeaderMap,
+    exact_len: Option<u64>,
+    is_end_stream: bool,
+    body: Vec<u8>,
+    aborted: bool,
 }
 
-fn recv_sealed(rx: &mut tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>) -> Sealed {
-    let (mut status, mut body, mut saw_frames) = (None, Vec::new(), false);
-    while let Ok(frame) = rx.try_recv() {
-        saw_frames = true;
-        match frame {
-            rapira_sapi::types::Frame::File { .. } => {}
-            rapira_sapi::types::Frame::Head { head, .. } => status = Some(head.status),
-            rapira_sapi::types::Frame::Chunk(b) => body.extend_from_slice(&b),
-            rapira_sapi::types::Frame::End { truncated } => {
-                return match (truncated, status) {
-                    (true, _) => Sealed::Truncated,
-                    (false, Some(status)) => Sealed::Complete { status, body },
-                    (false, None) => Sealed::Nothing,
-                };
-            }
-        }
-    }
-    if saw_frames {
-        panic!("stream carried frames but no End");
-    }
-    Sealed::Nothing
-}
-
-/// A zend_string in test memory. write_body_core copies a piece below ZERO_COPY_MIN, so no ZendMM call reaches it.
-struct Piece(Vec<u64>);
-
-impl Piece {
-    fn new(bytes: &[u8]) -> Self {
-        let head = std::mem::offset_of!(zend_string, val);
-        let mut words = vec![0u64; (head + bytes.len() + 1).div_ceil(8)];
-        let s = words.as_mut_ptr().cast::<zend_string>();
-        // SAFETY: words holds the header and bytes.len() + 1 bytes from val on.
-        unsafe {
-            (*s).len = bytes.len();
-            std::ptr::copy_nonoverlapping(
-                bytes.as_ptr(),
-                (&raw mut (*s).val).cast::<u8>(),
-                bytes.len(),
-            );
-        }
-        Self(words)
-    }
-
-    fn ptr(&mut self) -> *mut zend_string {
-        self.0.as_mut_ptr().cast()
-    }
-}
-
-/// An exchange state as the submit makes it.
 struct Attached {
+    rt: tokio::runtime::Runtime,
     state: ExchangeState,
-    /// The reply that `state` sends to.
-    reply: tokio::sync::mpsc::Receiver<rapira_sapi::types::Frame>,
+    slot: Arc<ResponseSlot>,
+    is_head: bool,
 }
 
-/// The channel has room for the Head, Chunk and End frames, so seal never parks with no reader.
+fn try_poll_slot(slot: &ResponseSlot) -> Option<Start> {
+    let mut cx = Context::from_waker(Waker::noop());
+    match slot.poll_recv(&mut cx) {
+        Poll::Ready(Ok(start)) => Some(start),
+        _ => None,
+    }
+}
+
+impl Attached {
+    fn try_recv_start(&mut self) -> Option<Start> {
+        try_poll_slot(&self.slot)
+    }
+
+    fn build_and_collect(&mut self) -> Captured {
+        let start = self.try_recv_start().expect("expected Start message");
+        let res = self
+            .rt
+            .block_on(build_php_response(
+                &MiddlewareChain::default(),
+                self.is_head,
+                false,
+                &Extensions::new(),
+                start,
+            ))
+            .unwrap_or_else(refusal);
+        let (parts, mut body) = res.into_parts();
+        let exact_len = body.size_hint().exact();
+        let is_end_stream = body.is_end_stream();
+        let mut out = Vec::new();
+        let mut aborted = false;
+        self.rt.block_on(async {
+            while let Some(frame) = body.frame().await {
+                match frame {
+                    Ok(f) => {
+                        if let Ok(data) = f.into_data() {
+                            out.extend_from_slice(&data);
+                        }
+                    }
+                    Err(_) => {
+                        aborted = true;
+                        break;
+                    }
+                }
+            }
+        });
+        Captured {
+            status: parts.status,
+            headers: parts.headers,
+            exact_len,
+            is_end_stream,
+            body: out,
+            aborted,
+        }
+    }
+}
+
 fn state_of(req: Request) -> Attached {
-    let (tx, rx) = tokio::sync::mpsc::channel(64);
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let is_head = req.method == "HEAD";
+    let (responder, slot) = HttpResponder::pair(is_head);
     Attached {
-        state: ExchangeState::new(req, None, tx),
-        reply: rx,
+        rt,
+        state: ExchangeState::new(req, None, responder),
+        slot,
+        is_head,
     }
 }
 
@@ -106,52 +132,39 @@ fn state() -> Attached {
 /// A 304 head drops the accepted body chunks, like 204 and HEAD.
 #[test]
 fn seal_drops_the_body_for_304() {
-    let Attached {
-        state: mut st,
-        reply: mut rx,
-    } = state();
+    let mut a = state();
     assert_eq!(
-        unsafe { write_head_core(&mut st, 304, HeaderMap::new()) },
+        write_head_core(&mut a.state, 304, HeaderMap::new()),
         Verb::Ok
     );
-    let v = unsafe { write_body_core(&mut st, Piece::new(b"gone").ptr(), true) };
+    let v = unsafe { write_body_core(&mut a.state, b"gone", true) };
     assert_eq!(v, Verb::Ok);
-    let Sealed::Complete { status, body } = recv_sealed(&mut rx) else {
-        panic!("must seal cleanly");
-    };
-    assert_eq!(status, 304);
-    assert!(body.is_empty(), "304 carries no body");
+    let cap = a.build_and_collect();
+    assert_eq!(cap.status, StatusCode::NOT_MODIFIED);
+    assert!(cap.is_end_stream);
+    assert!(cap.body.is_empty());
 }
 
 /// The contract says that an empty chunk without eos does nothing. No head commits.
 #[test]
 fn empty_non_eos_chunk_commits_nothing() {
-    let Attached {
-        state: mut st,
-        reply: mut rx,
-    } = state();
-    let v = unsafe { write_body_core(&mut st, Piece::new(b"").ptr(), false) };
+    let mut a = state();
+    let v = unsafe { write_body_core(&mut a.state, b"", false) };
     assert_eq!(v, Verb::Ok);
+    assert!(a.try_recv_start().is_none());
     assert_eq!(
-        unsafe { write_head_core(&mut st, 404, HeaderMap::new()) },
+        write_head_core(&mut a.state, 404, HeaderMap::new()),
         Verb::Ok,
         "the head slot must still be open"
     );
-    let v = unsafe { write_body_core(&mut st, Piece::new(b"x").ptr(), true) };
+    let v = unsafe { write_body_core(&mut a.state, b"x", true) };
     assert_eq!(v, Verb::Ok);
-    let Sealed::Complete { status, .. } = recv_sealed(&mut rx) else {
-        panic!("must seal cleanly");
-    };
-    assert_eq!(status, 404);
+    let cap = a.build_and_collect();
+    assert_eq!(cap.status, StatusCode::NOT_FOUND);
+    assert_eq!(cap.body, b"x");
 }
 
-/// `$protocol` uses the contract spelling HTTP/2.
-#[test]
-fn protocol_uses_the_contract_spelling() {
-    assert_eq!(protocol_php("HTTP/2.0"), "HTTP/2");
-}
-
-/// `uri_abs` takes the host of `$uri` from the authority. With no authority, it uses the `Display` of the server socket address, which puts an IPv6 address in brackets with its scope id. For a unix server, it uses `server_name:server_port`.
+/// `uri_abs` takes the host of `$uri` from the authority.
 #[test]
 fn uri_abs_spells_the_uri() {
     struct Case {
@@ -238,234 +251,161 @@ fn uri_abs_spells_the_uri() {
             server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
             want_uri: "http://h/",
         },
-        Case {
-            name: "unix server, no authority",
-            https: false,
-            authority: None,
-            uri: "/p",
-            server: Addr::Unix(Some("/run/r.sock".into())),
-            want_uri: "http://localhost:80/p",
-        },
-        Case {
-            name: "unnamed unix server",
-            https: false,
-            authority: None,
-            uri: "/",
-            server: Addr::Unix(None),
-            want_uri: "http://localhost:80/",
-        },
     ];
     for c in cases {
         let mut req = base_req();
         req.https = c.https;
-        req.authority = c.authority.map(<[u8]>::to_vec);
-        req.uri = c.uri.into();
+        req.authority = match c.authority {
+            Some(a) => Authority::Explicit(Bytes::from_static(a)),
+            None => Authority::None,
+        };
+        req.uri = RequestUri::Static(c.uri);
         req.server = c.server;
-        req.server_name = "localhost";
-        req.server_port = 80;
         assert_eq!(uri_abs(&req), c.want_uri, "{}", c.name);
     }
 }
 
-/// A one-shot write carries its computed length on the Head frame; a streamed write leaves framing to the plugin.
+/// A one-shot write carries exact size_hint; a streamed write leaves size_hint unbounded for chunked framing.
 #[test]
 fn head_frame_length_follows_the_write_shape() {
-    use rapira_sapi::types::Frame;
-    struct Case {
-        name: &'static str,
-        eos: bool,
-        want: Option<u64>,
+    let mut a = state();
+    assert_eq!(
+        unsafe { write_body_core(&mut a.state, b"abc", true) },
+        Verb::Ok
+    );
+    let cap = a.build_and_collect();
+    assert_eq!(cap.exact_len, Some(3));
+    assert_eq!(cap.body, b"abc");
+
+    let mut b = state();
+    {
+        let _enter = b.rt.enter();
+        assert_eq!(
+            unsafe { write_body_core(&mut b.state, b"abc", false) },
+            Verb::Ok
+        );
+        unsafe { seal(&mut b.state) };
     }
-    let cases = [
-        Case {
-            name: "one-shot write",
-            eos: true,
-            want: Some(3),
-        },
-        Case {
-            name: "streamed write: the plugin frames",
-            eos: false,
-            want: None,
-        },
-    ];
-    for case in cases {
-        let Attached {
-            state: mut st,
-            reply: mut rx,
-        } = state();
-        let v = unsafe { write_body_core(&mut st, Piece::new(b"abc").ptr(), case.eos) };
-        assert_eq!(v, Verb::Ok, "{}", case.name);
-        let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
-            panic!("{}: head first", case.name);
-        };
-        assert_eq!(content_length, case.want, "{}", case.name);
-    }
+    let cap = b.build_and_collect();
+    assert_eq!(cap.exact_len, None);
+    assert_eq!(cap.body, b"abc");
+    assert!(!cap.aborted);
 }
 
-/// A write past the declared length sends the prefix that fits and seals without truncation, so later writes get Finalized.
+/// A write past the declared length sends the prefix that fits and seals without truncation.
 #[test]
 fn content_length_exceeded_sends_the_prefix_and_seals() {
-    use rapira_sapi::types::Frame;
-    let Attached {
-        state: mut st,
-        reply: mut rx,
-    } = state();
-    let v = unsafe { write_head_core(&mut st, 200, map(&[("content-length", "5")])) };
-    assert_eq!(v, Verb::Ok);
-    let v = unsafe { write_body_core(&mut st, Piece::new(b"0123456789").ptr(), true) };
+    let mut a = state();
+    assert_eq!(
+        write_head_core(&mut a.state, 200, hdrs(&[("content-length", "5")])),
+        Verb::Ok
+    );
+    let v = unsafe { write_body_core(&mut a.state, b"0123456789", true) };
     assert_eq!(v, Verb::ContentLengthExceeded);
 
-    let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
-        panic!("head first");
-    };
-    assert_eq!(content_length, Some(5), "the declared length is honoured");
-    let Ok(Frame::Chunk(b)) = rx.try_recv() else {
-        panic!("the fitting prefix must be sent");
-    };
-    assert_eq!(&b[..], b"01234");
-    let Ok(Frame::End { truncated }) = rx.try_recv() else {
-        panic!("sealed");
-    };
-    assert!(!truncated, "complete per its declaration");
+    let cap = a.build_and_collect();
+    assert_eq!(cap.exact_len, Some(5));
+    assert_eq!(cap.body, b"01234");
+    assert!(!cap.aborted);
 
-    let v = unsafe { write_body_core(&mut st, Piece::new(b"x").ptr(), true) };
+    let v = unsafe { write_body_core(&mut a.state, b"x", true) };
     assert_eq!(v, Verb::Finalized, "nothing written after it");
 }
 
 /// A repeated content-length in the head table is a `\ValueError`.
 #[test]
 fn repeated_content_length_is_a_bad_field() {
-    let Attached {
-        state: mut st,
-        reply: _rx,
-    } = state();
-    let v = unsafe {
-        write_head_core(
-            &mut st,
-            200,
-            map(&[("content-length", "5"), ("content-length", "7")]),
-        )
-    };
+    let mut a = state();
+    let v = write_head_core(
+        &mut a.state,
+        200,
+        hdrs(&[("content-length", "5"), ("content-length", "7")]),
+    );
     assert!(matches!(v, Verb::BadField(_)));
     assert_eq!(
-        unsafe { write_trailers_core(&mut st) },
+        unsafe { write_trailers_core(&mut a.state) },
         Verb::HeadNotWritten,
         "a rejected head commits nothing"
     );
 }
 
-/// An interim head puts nothing on the reply stream and leaves the final-head slot open.
+/// An interim head puts nothing on the wire and leaves the final-head slot open.
 #[test]
 fn interim_head_sends_nothing_and_leaves_the_final_head_open() {
-    let Attached {
-        state: mut st,
-        reply: mut rx,
-    } = state();
-    let fields = map(&[("link", "</a.css>; rel=preload")]);
-    let v = unsafe { write_head_core(&mut st, 103, fields) };
-    assert_eq!(v, Verb::Ok);
-    assert!(rx.try_recv().is_err(), "an interim head reaches no frame");
-    let v = unsafe { write_head_core(&mut st, 200, HeaderMap::new()) };
-    assert_eq!(v, Verb::Ok, "the final-head slot stays open");
+    let mut a = state();
+    let fields = hdrs(&[("link", "</a.css>; rel=preload")]);
+    assert_eq!(write_head_core(&mut a.state, 103, fields), Verb::Ok);
+    assert!(
+        a.try_recv_start().is_none(),
+        "an interim head sends nothing"
+    );
+    assert_eq!(
+        write_head_core(&mut a.state, 200, HeaderMap::new()),
+        Verb::Ok,
+        "the final-head slot stays open"
+    );
 }
 
-/// When the client is gone, the state discards the unit once, and the unit stays discarded. The unit is then finalized and cancelled.
+/// When the client is gone, the state discards the unit once, and the unit stays discarded.
 #[test]
 fn gone_client_discards_once_and_stays_discarded() {
-    let Attached {
-        state: mut st,
-        reply: rx,
-    } = state();
-    drop(rx);
-    let v = unsafe { write_body_core(&mut st, Piece::new(b"x").ptr(), false) };
+    let mut a = state();
+    a.slot.cancel_if_incomplete();
+    let v = unsafe { write_body_core(&mut a.state, b"x", false) };
     assert_eq!(v, Verb::Discarded);
-    let v = unsafe { write_body_core(&mut st, Piece::new(b"y").ptr(), true) };
+    let v = unsafe { write_body_core(&mut a.state, b"y", true) };
     assert_eq!(v, Verb::Discarded, "sticky across repeat writes");
-
-    assert!(st.is_finalized());
-    assert!(st.cancelled());
+    assert!(a.state.is_finalized());
+    assert!(a.state.cancelled());
 }
 
-/// `flush()` emits the implicit 200 once; a repeat flush puts nothing new on the stream.
+/// `flush()` emits the implicit 200 once; a repeat flush puts nothing new on the wire.
 #[test]
 fn flush_emits_the_implicit_head_once() {
-    use rapira_sapi::types::Frame;
-    let Attached {
-        state: mut st,
-        reply: mut rx,
-    } = state();
-    assert_eq!(unsafe { flush_core(&mut st) }, Verb::Ok);
-    let Ok(Frame::Head {
-        head,
-        content_length,
-        ..
-    }) = rx.try_recv()
-    else {
-        panic!("flush must emit the head");
-    };
-    assert_eq!(head.status, 200);
-    assert!(head.headers.is_empty(), "implicit 200 has no fields");
-    assert_eq!(content_length, None, "flush costs the computed length");
-    assert_eq!(unsafe { flush_core(&mut st) }, Verb::Ok);
-    assert!(rx.try_recv().is_err(), "a repeat flush is a no-op");
+    let mut a = state();
+    assert_eq!(flush_core(&mut a.state), Verb::Ok);
+    assert!(matches!(a.try_recv_start(), Some(Start::Stream { .. })));
+    assert_eq!(flush_core(&mut a.state), Verb::Ok);
+    assert!(a.try_recv_start().is_none(), "a repeat flush is a no-op");
 }
 
-/// A committed 101 is bodiless, so the state accepts chunks and drops them.
+/// A committed 101 is bodiless, so the state accepts chunks and drops them, serving 502 on HTTP/1.1.
 #[test]
 fn a_101_head_drops_body_chunks() {
-    use rapira_sapi::types::Frame;
-    let Attached {
-        state: mut st,
-        reply: mut rx,
-    } = state();
+    let mut a = state();
     assert_eq!(
-        unsafe { write_head_core(&mut st, 101, HeaderMap::new()) },
+        write_head_core(&mut a.state, 101, HeaderMap::new()),
         Verb::Ok
     );
-    let v = unsafe { write_body_core(&mut st, Piece::new(b"upgrade").ptr(), true) };
+    let v = unsafe { write_body_core(&mut a.state, b"upgrade", true) };
     assert_eq!(v, Verb::Ok);
-    let Ok(Frame::Head { bodiless, .. }) = rx.try_recv() else {
-        panic!("head first");
-    };
-    assert!(bodiless);
-    assert!(
-        matches!(rx.try_recv(), Ok(Frame::End { .. })),
-        "no chunk frames for a 1xx response"
-    );
+    let cap = a.build_and_collect();
+    assert_eq!(cap.status, StatusCode::BAD_GATEWAY);
+    assert!(cap.body.is_empty());
 }
 
-/// `writeTrailers()` ends the response with an End frame. A call without a head gets HeadNotWritten, and a repeat call gets Finalized.
+/// `writeTrailers()` ends the response cleanly.
 #[test]
 fn trailers_finalize_with_a_committed_head() {
-    use rapira_sapi::types::Frame;
-    let Attached {
-        state: mut st,
-        reply: mut rx,
-    } = state();
-    let v = unsafe { write_trailers_core(&mut st) };
-    assert_eq!(v, Verb::HeadNotWritten, "nothing here commits a head");
-
+    let mut a = state();
     assert_eq!(
-        unsafe { write_head_core(&mut st, 200, HeaderMap::new()) },
+        unsafe { write_trailers_core(&mut a.state) },
+        Verb::HeadNotWritten,
+        "nothing here commits a head"
+    );
+    assert_eq!(
+        write_head_core(&mut a.state, 200, HeaderMap::new()),
         Verb::Ok
     );
-    let v = unsafe { write_trailers_core(&mut st) };
-    assert_eq!(v, Verb::Ok);
-    let Ok(Frame::Head { content_length, .. }) = rx.try_recv() else {
-        panic!("head first");
-    };
+    assert_eq!(unsafe { write_trailers_core(&mut a.state) }, Verb::Ok);
+    let cap = a.build_and_collect();
+    assert_eq!(cap.status, StatusCode::OK);
+    assert_eq!(cap.exact_len, Some(0));
+    assert!(cap.body.is_empty());
     assert_eq!(
-        content_length,
-        Some(0),
-        "trailers-only keeps length framing"
+        unsafe { write_trailers_core(&mut a.state) },
+        Verb::Finalized
     );
-    let Ok(Frame::End { truncated }) = rx.try_recv() else {
-        panic!("an End frame ends the response");
-    };
-    assert!(!truncated);
-
-    let v = unsafe { write_trailers_core(&mut st) };
-    assert_eq!(v, Verb::Finalized);
 }
 
 /// The forbidden set covers the RFC 9110 §6.5.1 categories case-insensitively; unknown extension fields pass.
@@ -508,126 +448,123 @@ fn trailer_denylist_matches_the_categories() {
     }
 }
 
-fn describe(frame: rapira_sapi::types::Frame) -> String {
-    use rapira_sapi::types::Frame;
-    match frame {
-        Frame::Head {
-            head,
-            content_length,
-            bodiless,
-        } => format!(
-            "head {} cl={content_length:?} bodiless={bodiless}",
-            head.status
-        ),
-        Frame::Chunk(b) => format!("chunk {}", String::from_utf8_lossy(&b)),
-        Frame::File { .. } => "file".into(),
-        Frame::End { truncated } => format!("end truncated={truncated}"),
-    }
-}
-
-/// The frames of a lost unit, that is, a unit whose object is gone before the response ended. The unit gets a 500 head when no head was sent, and a truncated End after a head was sent.
+/// A lost unit returns 500 when no head was sent, and truncates after a head was sent.
 #[test]
 fn a_lost_unit_fails_or_truncates_the_reply() {
-    enum Before {
-        Nothing,
-        /// writeHead(200) with no body. The head is committed, not sent.
-        HeadCommitted,
-        /// A streamed chunk. The head is sent.
-        HeadSent,
+    let mut a = state();
+    a.state.lost();
+    assert!(matches!(a.try_recv_start(), Some(Start::Error(500))));
+
+    let mut b = state();
+    assert_eq!(
+        write_head_core(&mut b.state, 200, HeaderMap::new()),
+        Verb::Ok
+    );
+    b.state.lost();
+    assert!(matches!(b.try_recv_start(), Some(Start::Error(500))));
+
+    let mut c = state();
+    {
+        let _enter = c.rt.enter();
+        assert_eq!(
+            unsafe { write_body_core(&mut c.state, b"abc", false) },
+            Verb::Ok
+        );
+        c.state.lost();
     }
+    let cap = c.build_and_collect();
+    assert_eq!(cap.body, b"abc");
+    assert!(cap.aborted, "lost mid-stream must abort the body");
+}
+
+/// A shed unit returns 503.
+#[test]
+fn a_shed_unit_gets_the_503_seal() {
+    let Attached { state, slot, .. } = state();
+    Box::new(state).shed();
+    assert!(matches!(try_poll_slot(&slot), Some(Start::Error(503))));
+}
+
+#[test]
+fn truncated_bodiless_response_omits_transfer_encoding() {
+    use rapira_sapi::CgiResponder;
+
     struct Case {
         name: &'static str,
         method: &'static str,
-        before: Before,
-        want: &'static [&'static str],
+        status: u16,
+        want_status: StatusCode,
     }
     let cases = [
         Case {
-            name: "nothing written",
-            method: "GET",
-            before: Before::Nothing,
-            want: &["head 500 cl=Some(0) bodiless=false", "end truncated=false"],
-        },
-        Case {
-            name: "head committed, not sent: the 500 replaces it",
-            method: "GET",
-            before: Before::HeadCommitted,
-            want: &["head 500 cl=Some(0) bodiless=false", "end truncated=false"],
-        },
-        Case {
-            name: "head sent: the stream is cut",
-            method: "GET",
-            before: Before::HeadSent,
-            want: &[
-                "head 200 cl=None bodiless=false",
-                "chunk abc",
-                "end truncated=true",
-            ],
-        },
-        Case {
-            name: "HEAD request: a bodiless 500",
+            name: "truncated HEAD without content-length",
             method: "HEAD",
-            before: Before::Nothing,
-            want: &["head 500 cl=None bodiless=true", "end truncated=false"],
+            status: 200,
+            want_status: StatusCode::OK,
+        },
+        Case {
+            name: "truncated 204",
+            method: "GET",
+            status: 204,
+            want_status: StatusCode::NO_CONTENT,
+        },
+        Case {
+            name: "truncated 304",
+            method: "GET",
+            status: 304,
+            want_status: StatusCode::NOT_MODIFIED,
+        },
+        Case {
+            name: "truncated 101 mapped to 502",
+            method: "GET",
+            status: 101,
+            want_status: StatusCode::BAD_GATEWAY,
         },
     ];
     for case in cases {
         let mut req = base_req();
-        req.method = case.method.into();
-        let Attached {
-            state: mut st,
-            reply: mut rx,
-        } = state_of(req);
-        let before = match case.before {
-            Before::Nothing => Verb::Ok,
-            Before::HeadCommitted => unsafe { write_head_core(&mut st, 200, HeaderMap::new()) },
-            Before::HeadSent => unsafe {
-                write_body_core(&mut st, Piece::new(b"abc").ptr(), false)
-            },
-        };
-        assert_eq!(before, Verb::Ok, "{}", case.name);
-        st.lost();
-        drop(st);
-        let mut got = Vec::new();
-        while let Ok(frame) = rx.try_recv() {
-            got.push(describe(frame));
-        }
-        assert_eq!(got, case.want, "{}", case.name);
+        req.method = Cow::Borrowed(case.method);
+        let mut a = state_of(req);
+        let responder = a.state.responder.take().expect("responder");
+        Box::new(responder).respond(
+            rapira_sapi::types::ResponseHead::new(case.status),
+            b"partial".to_vec(),
+            true,
+        );
+        let cap = a.build_and_collect();
+        assert_eq!(cap.status, case.want_status, "{}", case.name);
+        assert!(
+            !cap.headers.contains_key(header::TRANSFER_ENCODING),
+            "{}",
+            case.name
+        );
+        assert_eq!(
+            cap.headers
+                .get(header::CONNECTION)
+                .map(HeaderValue::as_bytes),
+            Some(&b"close"[..]),
+            "{}",
+            case.name
+        );
+        assert!(cap.is_end_stream, "{}", case.name);
+        assert!(cap.body.is_empty(), "{}", case.name);
+        assert!(!cap.aborted, "{}", case.name);
     }
 }
 
-/// The frames of a shed unit, that is, a unit that the worker cannot serve. The unit gets the 503 head and an End, bodiless for a HEAD request.
+/// A one-shot response shorter than its declared Content-Length preserves the declared length and aborts the stream.
 #[test]
-fn a_shed_unit_gets_the_503_seal() {
-    struct Case {
-        name: &'static str,
-        method: &'static str,
-        want: &'static [&'static str],
-    }
-    let cases = [
-        Case {
-            name: "GET: a 503 with no body",
-            method: "GET",
-            want: &["head 503 cl=Some(0) bodiless=false", "end truncated=false"],
-        },
-        Case {
-            name: "HEAD request: a bodiless 503",
-            method: "HEAD",
-            want: &["head 503 cl=None bodiless=true", "end truncated=false"],
-        },
-    ];
-    for case in cases {
-        let mut req = base_req();
-        req.method = case.method.into();
-        let Attached {
-            state,
-            reply: mut rx,
-        } = state_of(req);
-        Box::new(state).shed();
-        let mut got = Vec::new();
-        while let Ok(frame) = rx.try_recv() {
-            got.push(describe(frame));
-        }
-        assert_eq!(got, case.want, "{}", case.name);
-    }
+fn declared_content_length_underrun_preserves_length_and_aborts() {
+    let mut a = state();
+    assert_eq!(
+        write_head_core(&mut a.state, 200, hdrs(&[("content-length", "10")])),
+        Verb::Ok
+    );
+    let v = unsafe { write_body_core(&mut a.state, b"abc", true) };
+    assert_eq!(v, Verb::Ok);
+    let cap = a.build_and_collect();
+    assert_eq!(cap.status, StatusCode::OK);
+    assert_eq!(cap.exact_len, Some(10));
+    assert_eq!(cap.body, b"abc");
+    assert!(cap.aborted);
 }
