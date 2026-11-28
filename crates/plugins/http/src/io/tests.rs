@@ -33,6 +33,7 @@ async fn shard_io_keepalive_and_write_timeouts() {
     enum Scenario {
         ReadHeadTimesOut,
         InRequestExemptFromKeepalive,
+        BufferedFlushExemptFromKeepalive,
         KeepaliveSlackDefersToExactDeadline,
         WriteStallTimesOutAndCancelsPending,
         FlushSuccessMarksDoneAndWriteErrCancels,
@@ -49,6 +50,10 @@ async fn shard_io_keepalive_and_write_timeouts() {
         Case {
             name: "InRequest poll_read does not fire keepalive timeout",
             scenario: Scenario::InRequestExemptFromKeepalive,
+        },
+        Case {
+            name: "buffered response awaiting flush does not fire keepalive timeout",
+            scenario: Scenario::BufferedFlushExemptFromKeepalive,
         },
         Case {
             name: "busy keepalive within slack re-arms exact deadline without premature timeout",
@@ -111,6 +116,64 @@ async fn shard_io_keepalive_and_write_timeouts() {
                     "{}",
                     case.name
                 );
+            }
+            Scenario::BufferedFlushExemptFromKeepalive => {
+                let _peer = peer;
+                let inflight = Rc::new(LocalInflight::default());
+                let (_tx, slot) = HttpResponder::pair(false);
+                let mut scope = RequestScope::new(Rc::clone(&phase), Rc::clone(&inflight));
+                scope.attach_slot(Arc::clone(&slot));
+                let mut head = ResponseHead::new(200);
+                head.known_len = Some(5);
+                let resp = build_php_response(
+                    &MiddlewareChain::default(),
+                    false,
+                    false,
+                    &Extensions::new(),
+                    Start::Complete {
+                        head,
+                        body: Bytes::from_static(b"hello"),
+                        truncated: false,
+                    },
+                )
+                .await
+                .unwrap();
+                let tracked = scope.track(resp);
+                // hyper drops TrackBody as soon as is_end_stream() is true, before poll_flush completes.
+                assert!(!drain_track(tracked.into_body()), "{}", case.name);
+                assert_eq!(inflight.local.get(), 1, "{}", case.name);
+                assert_eq!(phase.current().0, IoPhase::InRequest, "{}", case.name);
+
+                tokio::time::advance(Duration::from_secs(5)).await;
+                assert!(
+                    poll_read_once(&mut io, &mut cx).is_pending(),
+                    "{}: keepalive timeout must not fire before flush completes",
+                    case.name
+                );
+
+                assert!(
+                    matches!(Pin::new(&mut io).poll_flush(&mut cx), Poll::Ready(Ok(()))),
+                    "{}",
+                    case.name
+                );
+                assert_eq!(inflight.local.get(), 0, "{}", case.name);
+                assert_eq!(phase.current().0, IoPhase::ReadHead, "{}", case.name);
+
+                assert!(
+                    poll_read_once(&mut io, &mut cx).is_pending(),
+                    "{}",
+                    case.name
+                );
+                tokio::time::advance(Duration::from_secs(1)).await;
+                match poll_read_once(&mut io, &mut cx) {
+                    Poll::Ready(Err(e)) => {
+                        assert_eq!(e.kind(), io::ErrorKind::TimedOut, "{}", case.name)
+                    }
+                    other => panic!(
+                        "{}: expected TimedOut after flush, got {other:?}",
+                        case.name
+                    ),
+                }
             }
             Scenario::KeepaliveSlackDefersToExactDeadline => {
                 let _peer = peer;
@@ -221,8 +284,8 @@ fn drain_track(mut body: TrackBody<ResponseBody>) -> bool {
     }
 }
 
-#[test]
-fn track_body_and_request_scope_lifecycle() {
+#[tokio::test(flavor = "current_thread")]
+async fn track_body_and_request_scope_lifecycle() {
     enum Kind {
         Empty,
         Once,
@@ -330,6 +393,7 @@ fn track_body_and_request_scope_lifecycle() {
                         truncated: false,
                     },
                 )
+                .await
                 .unwrap();
                 scope.track(res)
             }
@@ -347,6 +411,7 @@ fn track_body_and_request_scope_lifecycle() {
                         truncated: false,
                     },
                 )
+                .await
                 .unwrap();
                 scope.track(res)
             }
@@ -371,6 +436,7 @@ fn track_body_and_request_scope_lifecycle() {
                     &ext,
                     Start::Stream { head, rx: chunk_rx },
                 )
+                .await
                 .unwrap();
                 scope.track(res)
             }
@@ -381,8 +447,24 @@ fn track_body_and_request_scope_lifecycle() {
         assert_eq!(inflight.local.get(), 1, "{}", case.name);
         let aborted = drain_track(tracked.into_body());
         assert_eq!(aborted, case.want_aborted, "{}", case.name);
-        assert_eq!(inflight.local.get(), 0, "{}", case.name);
-        assert_eq!(phase.current().0, IoPhase::ReadHead, "{}", case.name);
+
+        if case.want_aborted {
+            assert_eq!(inflight.local.get(), 0, "{}", case.name);
+            assert_eq!(phase.current().0, IoPhase::ReadHead, "{}", case.name);
+        } else {
+            assert_eq!(
+                inflight.local.get(),
+                1,
+                "{}: inflight must stay active until flush completes",
+                case.name
+            );
+            assert_eq!(
+                phase.current().0,
+                IoPhase::InRequest,
+                "{}: phase must stay InRequest until flush completes",
+                case.name
+            );
+        }
 
         if case.want_armed_on_phase {
             assert!(
@@ -406,5 +488,7 @@ fn track_body_and_request_scope_lifecycle() {
                 case.name
             );
         }
+        assert_eq!(inflight.local.get(), 0, "{}", case.name);
+        assert_eq!(phase.current().0, IoPhase::ReadHead, "{}", case.name);
     }
 }

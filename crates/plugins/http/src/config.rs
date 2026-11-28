@@ -250,7 +250,7 @@ impl Server {
                 "static" => {
                     let st = static_files
                         .take()
-                        .expect("check_middleware guarantees [http.static]");
+                        .context("http.middleware lists \"static\" but [http.static] is missing")?;
                     tracing::info!(
                         target: "rapira",
                         "static files from {}, forbid {:?}",
@@ -262,9 +262,9 @@ impl Server {
                     )));
                 }
                 "compress" => {
-                    let c = compress
-                        .take()
-                        .expect("resolve guarantees compress settings");
+                    let c = compress.take().context(
+                        "http.middleware lists \"compress\" but compress settings are missing",
+                    )?;
                     tracing::info!(
                         target: "rapira",
                         "response compression enabled (min_size={}, gzip_level={}, zstd_level={})",
@@ -274,7 +274,7 @@ impl Server {
                     );
                     middleware.push(std::sync::Arc::new(rapira_compress::Compress::new(c)));
                 }
-                other => unreachable!("unknown middleware `{other}` passed check_middleware"),
+                other => bail!("unknown http middleware `{other}`"),
             }
         }
 
@@ -692,5 +692,42 @@ mod tests {
         );
         assert_eq!(http.pool.mode, Mode::Dispatcher);
         assert_eq!(http.sendfile_root, Path::new("/srv/app"));
+    }
+
+    #[test]
+    fn from_settings_rejects_unvalidated_middleware() {
+        struct Case {
+            name: &'static str,
+            middleware: Vec<String>,
+            want_err: &'static str,
+        }
+        let cases = [
+            Case {
+                name: "static listed without static_files settings",
+                middleware: vec!["static".into()],
+                want_err: "http.middleware lists \"static\" but [http.static] is missing",
+            },
+            Case {
+                name: "compress listed without compress settings",
+                middleware: vec!["compress".into()],
+                want_err: "http.middleware lists \"compress\" but compress settings are missing",
+            },
+            Case {
+                name: "unknown middleware name",
+                middleware: vec!["bogus".into()],
+                want_err: "unknown http middleware `bogus`",
+            },
+        ];
+        for case in cases {
+            let mut cfg = settings_of("[pool]\nentrypoint = \"a.php\"\n").unwrap();
+            cfg.middleware = case.middleware;
+            cfg.static_files = None;
+            cfg.compress = None;
+            let err = match Server::from_settings(cfg) {
+                Ok(_) => panic!("{}: expected Err", case.name),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(err.contains(case.want_err), "{}: {err}", case.name);
+        }
     }
 }

@@ -206,7 +206,9 @@ impl Permanent {
         }
         // SAFETY: the shim copies the bytes and computes the hash. The persistent allocator calls zend_out_of_memory() if malloc fails. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_alloc.c#L4069-L4076
         // zend_out_of_memory() aborts the process. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_alloc.c#L3403-L3407
-        let s = Permanent(unsafe { rapira_permanent_string(bytes.as_ptr().cast(), bytes.len()) });
+        let s = Permanent(unsafe {
+            rapira_permanent_string(crate::zend::ptr_or_empty(bytes), bytes.len())
+        });
         table.insert(bytes.into(), s);
         s
     }

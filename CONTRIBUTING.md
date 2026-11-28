@@ -84,23 +84,25 @@ C sources (`*.c`, `*.h` under `crates/`) follow `.clang-format`.
 
 | Crate                  | Directory                        | Role                                                                                                                                                  |
 | ---------------------- | -------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `rapira_core`          | `src/`                           | the `rapira` binary: CLI, configuration, plugin startup, shared IO runtime, signals and shutdown |
-| `rapira_php_build`     | `crates/php_build`               | build helper: `php-config` discovery and the C compile of the method shells, for `rapira_sapi` and every plugin with a PHP surface                    |
-| `rapira_net`           | `crates/net`                     | listener binding and the async accept loop |
-| `rapira_sapi`          | `crates/sapi`                    | the embed SAPI, PHP engine, worker pools and their counters, intake, watchdog and dispatcher interfaces |
-| `rapira_config`        | `crates/config`                  | `[server]`, `[log]`, pool settings, listener addresses and config paths |
-| `rapira_observability` | `crates/observability`           | Prometheus metrics and the `/livez` and `/readyz` probes on a separate thread |
-| `rapira_http`          | `crates/plugins/http`            | the http plugin: HTTP/1.1, the `Rapira\Http` classes, the `[http]` table ([README](crates/plugins/http/README.md))                                    |
-| `rapira_grpc`          | `crates/plugins/grpc`            | the grpc plugin: gRPC, gRPC-Web and Connect, the `Rapira\Grpc` classes, the `[grpc]` table ([README](crates/plugins/grpc/README.md))                  |
-| `rapira_static_files`  | `crates/middleware/static_files` | the `static` http middleware, a tower layer; each built-in http middleware is one crate under `crates/middleware`                                     |
-| `rapira_grpc_auth`     | `crates/interceptors/auth`       | the `auth` grpc interceptor; each built-in grpc interceptor is one crate under `crates/interceptors`                                                  |
-| `tests`                | `crates/tests`                   | the e2e suite, its harness and its fixtures                                                                                                           |
+| `rapira_core`            | `src/`                           | the `rapira` binary: CLI, configuration, plugin startup, control/gRPC IO runtime, signals and shutdown |
+| `rapira_php_build`       | `crates/php_build`               | build helper: `php-config` discovery and the C compile of the method shells, for `rapira_sapi` and every plugin with a PHP surface                    |
+| `rapira_net`             | `crates/net`                     | listener binding and the async accept loop |
+| `rapira_sapi`            | `crates/sapi`                    | the embed SAPI, PHP engine, worker pools and their counters, intake, watchdog and dispatcher interfaces |
+| `rapira_config`          | `crates/config`                  | `[server]`, `[log]`, pool settings, listener addresses and config paths |
+| `rapira_http_middleware` | `crates/http_middleware`         | push-based `Middleware`, `MiddlewareChain`, `RequestCtx`, `ResponseHead` and `BodyEncoder` traits |
+| `rapira_observability`   | `crates/observability`           | Prometheus metrics and the `/livez` and `/readyz` probes on a separate thread |
+| `rapira_http`            | `crates/plugins/http`            | the http plugin: HTTP/1.1, the `Rapira\Http` classes, the `[http]` table ([README](crates/plugins/http/README.md))                                    |
+| `rapira_grpc`            | `crates/plugins/grpc`            | the grpc plugin: gRPC, gRPC-Web and Connect, the `Rapira\Grpc` classes, the `[grpc]` table ([README](crates/plugins/grpc/README.md))                  |
+| `rapira_static_files`    | `crates/middleware/static_files` | the `static` http middleware implementing `rapira_http_middleware::Middleware`; each built-in http middleware is one crate under `crates/middleware` |
+| `rapira_compress`        | `crates/middleware/compress`     | the `compress` http middleware implementing `rapira_http_middleware::Middleware` for gzip and zstd responses |
+| `rapira_grpc_auth`       | `crates/interceptors/auth`       | the `auth` grpc interceptor; each built-in grpc interceptor is one crate under `crates/interceptors`                                                  |
+| `tests`                  | `crates/tests`                   | the e2e suite, its harness and its fixtures                                                                                                           |
 
 ## Plugins
 
 - A dispatcher plugin owns a pool and turns each request into a work unit that PHP pulls with `receive()`: the http plugin makes a `Rapira\Http\Exchange`, the grpc plugin makes a `Rapira\Grpc\UnaryCall`.
 - A plugin without a pool, such as a KV client, has no support, and the contract lists its PHP acquisition path as open.
-- A middleware is a tower layer that the http plugin applies around its inner service in config order. It never touches PHP.
+- A middleware implements `rapira_http_middleware::Middleware`. The http plugin runs its request hooks outer to inner and its response-head hooks inner to outer in config order. It never touches PHP.
 - An interceptor is a connect-rust `Interceptor` that the grpc plugin registers on its service in config order. It never touches PHP.
 
 A plugin is one crate under `crates/plugins` that implements `rapira_sapi::plugin::Plugin`. It owns its config table, its PHP stub, its C method shells, the Rust behind those methods, its work unit and its transport. The two plugin READMEs describe the crate layout.

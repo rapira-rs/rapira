@@ -35,7 +35,7 @@ pub fn split(body: &[u8]) -> Vec<Bytes> {
     parts
 }
 
-/// Feeds the pieces to the parser in order and ends the body, as serve_php in crates/plugins/http/src/handler.rs does with the frames of a body.
+/// Feeds the pieces to the parser in order and ends the body, as `read_request_body` in `crates/plugins/http/src/intake/mod.rs` does with the frames of a body.
 pub fn parse<P: AsRef<[u8]>>(
     pieces: &[P],
     boundary: &[u8],

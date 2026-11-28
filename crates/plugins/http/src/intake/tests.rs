@@ -660,3 +660,155 @@ async fn prepare_body_limits_coalescing_and_multipart() {
         }
     }
 }
+
+#[tokio::test(flavor = "current_thread")]
+async fn multipart_upload_offloads_spool_io_from_shard_thread() {
+    use std::future::Future;
+    use std::pin::Pin;
+    use std::task::{Context, Poll, Waker};
+
+    let dir = std::env::temp_dir().join(format!("rapira-intake-offload-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("create temp upload dir");
+    let _spool = TempDir(dir.clone());
+    let upload_limits = multipart::Limits {
+        dir: dir.clone(),
+        max_file_size: 1024 * 1024,
+        max_field_size: 4096,
+        max_files: 4,
+        max_parts: 16,
+        max_part_headers: 16,
+    };
+
+    const MP_BODY: &[u8] = concat!(
+        "--b1\r\n",
+        "Content-Disposition: form-data; name=\"field\"\r\n\r\n",
+        "val\r\n",
+        "--b1\r\n",
+        "Content-Disposition: form-data; name=\"up\"; filename=\"a.txt\"\r\n",
+        "Content-Type: text/plain\r\n\r\n",
+        "0123456789abcdef\r\n",
+        "--b1--\r\n",
+    )
+    .as_bytes();
+
+    enum Delivery {
+        SingleFrame,
+        MultiFrame,
+        MultiFrameOversizePart,
+        MultiFrameTimeoutAfterFileOpen,
+    }
+    struct Case {
+        name: &'static str,
+        delivery: Delivery,
+        max_file_size: u64,
+        want_status: Option<StatusCode>,
+        want_files: usize,
+    }
+    let cases = [
+        Case {
+            name: "single-frame file upload yields off shard thread before completing",
+            delivery: Delivery::SingleFrame,
+            max_file_size: 4096,
+            want_status: None,
+            want_files: 1,
+        },
+        Case {
+            name: "multi-frame file upload streams across blocking task and preserves file",
+            delivery: Delivery::MultiFrame,
+            max_file_size: 4096,
+            want_status: None,
+            want_files: 1,
+        },
+        Case {
+            name: "multi-frame oversize file rejects with 413 and unlinks spool file",
+            delivery: Delivery::MultiFrameOversizePart,
+            max_file_size: 4,
+            want_status: Some(StatusCode::PAYLOAD_TOO_LARGE),
+            want_files: 0,
+        },
+        Case {
+            name: "timeout mid-upload returns 408 and unlinks partial spool file",
+            delivery: Delivery::MultiFrameTimeoutAfterFileOpen,
+            max_file_size: 4096,
+            want_status: Some(StatusCode::REQUEST_TIMEOUT),
+            want_files: 0,
+        },
+    ];
+
+    let chain = MiddlewareChain::default();
+    for case in cases {
+        let mut limits_cfg = upload_limits.clone();
+        limits_cfg.max_file_size = case.max_file_size;
+        let (body, _) = match case.delivery {
+            Delivery::SingleFrame => {
+                TestBody::from_steps(vec![Step::Data(Bytes::from_static(MP_BODY))], false)
+            }
+            Delivery::MultiFrame | Delivery::MultiFrameOversizePart => {
+                let mid = MP_BODY.len() / 2;
+                TestBody::from_steps(
+                    vec![
+                        Step::Data(Bytes::copy_from_slice(&MP_BODY[..mid])),
+                        Step::Data(Bytes::copy_from_slice(&MP_BODY[mid..])),
+                    ],
+                    false,
+                )
+            }
+            Delivery::MultiFrameTimeoutAfterFileOpen => {
+                let mid = MP_BODY.len() - 12;
+                TestBody::from_steps(
+                    vec![
+                        Step::Data(Bytes::copy_from_slice(&MP_BODY[..mid])),
+                        Step::Stall,
+                    ],
+                    false,
+                )
+            }
+        };
+        let req = HttpRequest::builder()
+            .method(Method::POST)
+            .uri("/upload")
+            .version(Version::HTTP_11)
+            .header("host", "example.test")
+            .header("content-type", "multipart/form-data; boundary=b1")
+            .body(body)
+            .unwrap();
+        let limits = IntakeLimits {
+            superglobals: false,
+            max_body_size: 1024 * 1024,
+            body_timeout: Duration::from_millis(20),
+            uploads: Some(&limits_cfg),
+        };
+        let Admit::Pending(pending) = admit(req, peer(), &chain, &limits).unwrap() else {
+            panic!("{}: expected Pending", case.name);
+        };
+        let mut fut = Box::pin(pending.finish(&chain, &limits));
+        let mut cx = Context::from_waker(Waker::noop());
+        if matches!(case.delivery, Delivery::SingleFrame) {
+            assert!(
+                matches!(Pin::as_mut(&mut fut).poll(&mut cx), Poll::Pending),
+                "{}: multipart spooling must yield off the shard thread on first poll",
+                case.name
+            );
+        }
+        let out = fut.await;
+        match case.want_status {
+            Some(want) => {
+                assert_eq!(out.err(), Some(want), "{}", case.name);
+            }
+            None => match out.expect(case.name) {
+                Prepared::Dispatch { multipart, .. } => {
+                    let mp = multipart.expect(case.name);
+                    assert_eq!(mp.files.len(), case.want_files, "{}", case.name);
+                    assert_eq!(
+                        std::fs::read(&mp.files[0].file.path).unwrap(),
+                        b"0123456789abcdef",
+                        "{}",
+                        case.name
+                    );
+                }
+                Prepared::Short { .. } => panic!("{}: unexpected Short", case.name),
+            },
+        }
+    }
+}

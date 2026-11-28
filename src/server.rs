@@ -56,6 +56,7 @@ impl Supervisor {
         match self.phase {
             Phase::Running => {
                 if self.failed {
+                    self.signals.clear();
                     self.phase = Phase::Draining;
                     return Action::BeginDrain;
                 }
@@ -418,6 +419,7 @@ mod tests {
         enum Event {
             Signal(libc::c_int),
             ServiceFailed,
+            ServiceFailedAndSignal(libc::c_int),
             PluginsDone,
             ObsDone,
             WorkersDone,
@@ -561,6 +563,21 @@ mod tests {
                 ],
                 want_deadline_code: 1,
             },
+            Case {
+                name: "concurrent listener failure and first sigterm drains instead of forcing exit 130",
+                has_obs: false,
+                events: &[
+                    Event::ServiceFailedAndSignal(libc::SIGTERM),
+                    Event::PluginsDone,
+                    Event::WorkersDone,
+                ],
+                want_actions: &[
+                    Action::BeginDrain,
+                    Action::Wait,
+                    Action::Finish { failed: true },
+                ],
+                want_deadline_code: 1,
+            },
         ];
 
         for case in cases {
@@ -570,6 +587,10 @@ mod tests {
                 match event {
                     Event::Signal(sig) => sup.signals.push_back(sig),
                     Event::ServiceFailed => sup.failed = true,
+                    Event::ServiceFailedAndSignal(sig) => {
+                        sup.failed = true;
+                        sup.signals.push_back(sig);
+                    }
                     Event::PluginsDone => sup.plugins_done = true,
                     Event::ObsDone => sup.obs_done = true,
                     Event::WorkersDone => sup.workers_done = true,

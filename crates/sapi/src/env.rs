@@ -129,6 +129,10 @@ unsafe extern "C" fn import(array: *mut zval) {
         let Some(env) = slot.get() else {
             return;
         };
+        if !env.imported.is_empty() {
+            // SAFETY: ht is a live array.
+            unsafe { crate::zend_hash_extend(ht, env.imported.len() as u32, false) };
+        }
         for (key, value) in &env.imported {
             let mut value = value.zval();
             // SAFETY: ht is a live array, and a permanent interned string outlives it.

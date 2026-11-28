@@ -167,10 +167,10 @@ impl Server {
                 "auth" => {
                     let cfg = auth
                         .take()
-                        .expect("check_stages guarantees [grpc.auth] is configured");
+                        .context("grpc.interceptors lists \"auth\" but [grpc.auth] is missing")?;
                     interceptors.push(Arc::new(rapira_grpc_auth::Auth::load(&cfg)?));
                 }
-                other => unreachable!("unknown interceptor `{other}` passed check_stages"),
+                other => bail!("unknown grpc interceptor `{other}`"),
             }
         }
         let mut deadlines = DeadlinePolicy::new();
@@ -515,6 +515,44 @@ mod tests {
                 }
                 (got, want) => panic!("{}: got {got:?}, want {want:?}", case.name),
             }
+        }
+    }
+
+    #[test]
+    fn from_settings_rejects_unvalidated_interceptors() {
+        struct Case {
+            name: &'static str,
+            interceptors: Vec<String>,
+            want_err: &'static str,
+        }
+        let cases = [
+            Case {
+                name: "auth listed without auth settings",
+                interceptors: vec!["auth".into()],
+                want_err: "grpc.interceptors lists \"auth\" but [grpc.auth] is missing",
+            },
+            Case {
+                name: "unknown interceptor name",
+                interceptors: vec!["bogus".into()],
+                want_err: "unknown grpc interceptor `bogus`",
+            },
+        ];
+        let descriptor =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/grpc/echo.binpb");
+        for case in cases {
+            let section: Section = toml::from_str(&format!(
+                "descriptor_set = \"{}\"\n[pool]\nentrypoint = \"a.php\"\n",
+                descriptor.display()
+            ))
+            .unwrap();
+            let mut cfg = settings(section, Path::new("/")).unwrap();
+            cfg.interceptors = case.interceptors;
+            cfg.auth = None;
+            let err = match Server::from_settings(cfg) {
+                Ok(_) => panic!("{}: expected Err", case.name),
+                Err(e) => format!("{e:#}"),
+            };
+            assert!(err.contains(case.want_err), "{}: {err}", case.name);
         }
     }
 }

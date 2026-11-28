@@ -58,16 +58,21 @@ fn copy_response_bytes(src: &[u8]) -> Bytes {
 }
 
 pub(super) fn take_pooled_buf(min_cap: usize) -> Vec<u8> {
-    if let Ok(mut pool) = BUF_POOL.lock() {
+    let popped = if let Ok(mut pool) = BUF_POOL.lock() {
         if let Some(pos) = pool.iter().position(|b| b.capacity() >= min_cap) {
             return pool.swap_remove(pos);
         }
-        if let Some(mut b) = pool.pop() {
+        pool.pop()
+    } else {
+        None
+    };
+    match popped {
+        Some(mut b) => {
             b.reserve(min_cap);
-            return b;
+            b
         }
+        None => Vec::with_capacity(min_cap),
     }
-    Vec::with_capacity(min_cap)
 }
 
 const SLOT_EMPTY: u8 = 0;

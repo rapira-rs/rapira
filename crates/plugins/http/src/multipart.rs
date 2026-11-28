@@ -399,7 +399,7 @@ enum Sink {
 /// Parses a body while the transport delivers it. `feed` takes the body bytes in order, in pieces of any size, and `finish` ends the body. A file part goes to its spool file piece by piece, so the parser never holds the body.
 /// https://www.rfc-editor.org/rfc/rfc7578
 pub struct Parser<'a> {
-    limits: &'a Limits,
+    limits: Cow<'a, Limits>,
     /// Finds `--boundary`.
     finder: memmem::Finder<'static>,
     state: State,
@@ -420,6 +420,19 @@ pub struct Parser<'a> {
 impl<'a> Parser<'a> {
     /// Creates a streaming multipart parser, optionally pre-reserving flat arena storage from a `Content-Length` hint.
     pub fn new(boundary: &[u8], limits: &'a Limits, size_hint: Option<usize>) -> Self {
+        Self::with_limits(boundary, Cow::Borrowed(limits), size_hint)
+    }
+
+    /// Creates an owned `'static` parser suitable for running on a blocking worker thread.
+    pub(crate) fn new_owned(
+        boundary: &[u8],
+        limits: Limits,
+        size_hint: Option<usize>,
+    ) -> Parser<'static> {
+        Parser::with_limits(boundary, Cow::Owned(limits), size_hint)
+    }
+
+    fn with_limits(boundary: &[u8], limits: Cow<'a, Limits>, size_hint: Option<usize>) -> Self {
         let delimiter = [b"--".as_slice(), boundary].concat();
         // Pre-reserve only for medium form bodies (<= 64 KiB); larger bodies are often spooled files where arena.bytes stays tiny.
         let (bytes_cap, part_cap) = match size_hint {
@@ -496,7 +509,7 @@ impl<'a> Parser<'a> {
                         &mut self.sink,
                         &mut self.arena,
                         &mut self.fields,
-                        self.limits,
+                        self.limits.as_ref(),
                         self.files.len(),
                         &bytes[..end],
                     );
@@ -530,7 +543,7 @@ impl<'a> Parser<'a> {
                     &mut self.sink,
                     &mut self.arena,
                     &mut self.fields,
-                    self.limits,
+                    self.limits.as_ref(),
                     self.files.len(),
                     &self.head,
                 );
@@ -759,21 +772,16 @@ impl<'a> Parser<'a> {
     /// `bare` is true when no line ending separated the header section from the delimiter line.
     fn end_part(&mut self, close: bool, bare: bool) -> Result<(), StatusCode> {
         self.held.clear();
-        match &self.sink {
+        match std::mem::replace(&mut self.sink, Sink::None) {
             Sink::None => {}
-            Sink::Field(_) => {
-                self.sink = Sink::None;
-                if bare {
-                    self.fields.pop();
-                    return Err(StatusCode::BAD_REQUEST);
-                }
+            Sink::Field(_) if bare => {
+                self.fields.pop();
+                return Err(StatusCode::BAD_REQUEST);
             }
-            _ => match std::mem::replace(&mut self.sink, Sink::None) {
-                Sink::None | Sink::Field(_) => unreachable!(),
-                _ if bare => return Err(StatusCode::BAD_REQUEST),
-                Sink::Skip(status) => return Err(status),
-                Sink::File(f) => self.files.push(f.file),
-            },
+            Sink::Field(_) => {}
+            _ if bare => return Err(StatusCode::BAD_REQUEST),
+            Sink::Skip(status) => return Err(status),
+            Sink::File(f) => self.files.push(f.file),
         }
         self.opened = true;
         if close {

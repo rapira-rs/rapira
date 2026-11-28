@@ -11,9 +11,9 @@ The http plugin of the `rapira` binary. It terminates HTTP/1.1 on the configured
 - `worker_init()` returns the function that binds the server name and port on each PHP thread before its first entrypoint.
 - The crate exports `rapira_http_register_classes`. MINIT calls it after the base classes to register the `Rapira\Http` classes.
 - `Server::from_settings` sets the server identity and `sendFile()` root, removes spool directories of dead server processes and binds the listener before PHP starts.
-- `serve()` runs on the shared IO runtime. It receives the HTTP pool's `Intake`, the stop flag and the connection drain timeout.
+- `serve()` runs the accept loop on the control runtime and dispatches sockets round-robin to dedicated single-threaded `LocalSet` IO shards (`rapira-io-{i}`). It receives the HTTP pool's `Intake`, the stop flag and the connection drain timeout.
 
-`PreparedListener::run` accepts connections. Each request goes through the admission checks and the middleware chain. The inner service reads the body and submits the unit to the pool: a `Context` in classic and worker modes, or an `ExchangeState` in dispatcher mode. Any available worker can serve it, including a later request on the same connection. PHP writes reply frames (`Head`, `Chunk`, `File`, `End`), which the plugin writes to the socket as they arrive.
+`PreparedListener::run` accepts connections and distributes them across the IO shards. Each request goes through head admission and the middleware chain in `intake`. `PendingIntake` reads the body (offloading multipart spooling to the blocking pool) and submits the unit to the pool: a `CgiExchange` in classic and worker modes, or an `ExchangeState` in dispatcher mode. Any available worker can serve it, including a later request on the same connection. PHP writes response handoffs (`Start::{Complete, Stream, Error}` and `Chunk::{Data, File, End}`), which the shard writes to the socket as they arrive.
 
 `ExchangeState` in `src/php/mod.rs` is the dispatcher-mode unit. It implements `rapira_sapi::work::Held`:
 
@@ -37,12 +37,10 @@ The HTTP pool shares 1,024 intake slots and a 64 MiB budget for pending request 
 - `src/lib.rs`: `Config`, `Server` and its `Plugin` impl.
 - `src/config.rs`: `Section` (the `[http]` table), `Settings`, `resolve` with the boot checks, and `Server::from_settings`.
 - `src/serve.rs`: the accept loop, dedicated single-threaded `LocalSet` IO shards running `hyper` 1.x, and the drain.
-- `src/io.rs`: the per-connection `ShardIo` wrapper for keepalive timeouts, write timeouts, and response flush completion.
-- `src/handler.rs`: the admission checks, the middleware chain, the body read, and the submit to the intake.
-- `src/check.rs`: the admission checks: `Host`, field names, declared length.
-- `src/request.rs`: builds the SAPI `Request` from the HTTP request and the `Peer`.
-- `src/responder.rs`: the PHP-to-IO response slot, large-buffer pool, `ResponseBody`, middleware body encoding, and error responses.
-- `src/multipart.rs`: the multipart parser and the spool dirs of dispatcher mode.
+- `src/io/`: the per-connection `ShardIo`, `ConnPhase`, `RequestScope`, `TrackBody`, keepalive/write timeouts, and flush completion (`mod.rs`, `tests.rs`).
+- `src/intake/`: head admission checks (`Host`, field names, declared length), Phase-1 middleware execution, request body reading, SAPI `Request` construction, and multipart offload (`mod.rs`, `tests.rs`).
+- `src/responder/`: the response normalizer (`mod.rs`), lock-free `ResponseSlot`, large-buffer pool, and `HttpResponder` (`slot.rs`), unified `ResponseBody`/`StreamBody`, `sendFile` reads, and `BodyEncoder` framing (`body.rs`), plus unit tests (`tests.rs`).
+- `src/multipart.rs`: the streaming multipart parser and the spool dirs of dispatcher mode.
 - `src/php/`: the Rust behind the PHP methods: the class entries, the declarations of `rapira_http_plugin` and `rapira_http_register_classes` and the write of the server identity (`mod.rs`), `getRequest()` (`request.rs`), the head, body and trailer writes (`respond.rs`, `headers.rs`), `sendFile()` (`sendfile.rs`), and the unit tests of these parts that need no PHP (`tests.rs`).
 
 ## Middleware
@@ -60,7 +58,7 @@ To add a built-in middleware:
 - Add the crate to the dependencies in `crates/plugins/http/Cargo.toml`.
 - In `src/config.rs`, add its table to `Section`, as `r#static` is for `[http.static]` and `compress` is for `[http.compress]`.
 - Resolve the table in `settings` and store the result in `Settings`.
-- In `check_middleware`, register its name in `rapira_config::check_stages` and enforce whether its config table is required or optional. Reject a configured table that the list does not name.
+- In `settings` in `src/config.rs`, register its name in `rapira_config::check_stages` and enforce whether its config table is required or optional. Reject a configured table that the list does not name.
 - Add any boot checks to `resolve`, as `check_static_root` is for `static`.
 - Construct `Arc<dyn Middleware>` in `Server::from_settings`. Keep the configured list order when more than one middleware is available.
 - Add cases for the new name to the tables of `middleware_list_and_tables_must_agree` and of a resolve test.
@@ -138,12 +136,14 @@ Each of these errors in the middleware list fails the boot with exit code 1:
 - `http.middleware lists "static" but [http.static] is missing`
 - `[http.static] is configured but http.middleware does not list "static"`
 - `[http.compress] is configured but http.middleware does not list "compress"`
+- `http.compress.gzip_level must be in 1..=9`
+- `http.compress.zstd_level must be in 1..=19`
 
 ## Build
 
 ```sh
 cargo build -p rapira_http
-cargo clippy -p rapira_http --all-targets
+cargo clippy -p rapira_http --all-targets -- -D warnings
 ```
 
 ## License

@@ -103,10 +103,13 @@ impl Chunks {
     pub fn new(mut parts: Vec<Bytes>) -> Self {
         parts.retain(|p| !p.is_empty());
         let len = parts.iter().map(Bytes::len).sum();
-        let storage = match parts.len() {
-            0 => ChunkParts::Empty,
-            1 => ChunkParts::Single([parts.into_iter().next().unwrap()]),
-            _ => ChunkParts::Many(parts),
+        let storage = if parts.is_empty() {
+            ChunkParts::Empty
+        } else {
+            match <[Bytes; 1]>::try_from(parts) {
+                Ok(one) => ChunkParts::Single(one),
+                Err(many) => ChunkParts::Many(many),
+            }
         };
         Self {
             parts: storage,

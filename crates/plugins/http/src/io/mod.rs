@@ -188,6 +188,8 @@ pub(crate) struct ConnPhase {
     epoch: Cell<u64>,
     /// Pending response completion waiting for `ShardIo::poll_flush` to finish writing to the kernel socket.
     pending_complete: Cell<Option<Arc<ResponseSlot>>>,
+    /// Inflight counter kept active after `TrackBody` drops while `hyper` flushes buffered response bytes.
+    awaiting_flush: Cell<Option<Rc<LocalInflight>>>,
 }
 
 impl ConnPhase {
@@ -196,6 +198,7 @@ impl ConnPhase {
             phase: Cell::new(IoPhase::ReadHead),
             epoch: Cell::new(0),
             pending_complete: Cell::new(None),
+            awaiting_flush: Cell::new(None),
         })
     }
 
@@ -218,12 +221,29 @@ impl ConnPhase {
         }
     }
 
+    /// Transfers the active inflight count so `phase` stays `InRequest` until `ShardIo::poll_flush` drains `hyper`'s write buffer.
+    #[inline]
+    fn arm_flush(&self, inflight: Rc<LocalInflight>) {
+        if let Some(prev) = self.awaiting_flush.replace(Some(inflight)) {
+            prev.dec();
+        }
+    }
+
+    #[inline]
+    fn finish_flush(&self) {
+        if let Some(inflight) = self.awaiting_flush.take() {
+            self.leave_request();
+            inflight.dec();
+        }
+    }
+
     /// Called by `ShardIo::poll_flush` when `hyper`'s `WriteBuf` has drained completely to the socket.
     #[inline]
     pub(crate) fn on_flushed(&self) {
         if let Some(cancel) = self.pending_complete.take() {
             cancel.mark_done();
         }
+        self.finish_flush();
     }
 
     /// Cancels any response whose final bytes had not yet flushed when the socket errored or dropped.
@@ -232,6 +252,7 @@ impl ConnPhase {
         if let Some(cancel) = self.pending_complete.take() {
             cancel.cancel_if_incomplete();
         }
+        self.finish_flush();
     }
 
     #[inline]
@@ -246,19 +267,23 @@ impl Drop for ConnPhase {
     }
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LeaseMode {
+    /// Request has not yet handed a finished body to `hyper` (still in intake, `wait_start`, streaming, or aborted).
+    Direct,
+    /// Response body reached end-of-stream and was handed to `hyper`; defer `leave_request` and `inflight.dec` to `poll_flush`.
+    WaitFlush,
+}
+
 /// `!Send` RAII lease held by `RequestScope` while preparing/waiting, then moved into `TrackBody<B>`.
 struct RequestLease {
     phase: Rc<ConnPhase>,
-    inflight: Rc<LocalInflight>,
+    inflight: Option<Rc<LocalInflight>>,
     slot: Option<Arc<ResponseSlot>>,
+    mode: LeaseMode,
 }
 
 impl RequestLease {
-    #[inline]
-    fn has_slot(&self) -> bool {
-        self.slot.is_some()
-    }
-
     #[inline]
     fn arm_complete(&mut self) {
         if let Some(slot) = self.slot.take() {
@@ -291,8 +316,14 @@ impl Drop for RequestLease {
         if self.slot.is_some() {
             self.cancel_slot();
         }
-        self.phase.leave_request();
-        self.inflight.dec();
+        if let Some(inflight) = self.inflight.take() {
+            if self.mode == LeaseMode::WaitFlush {
+                self.phase.arm_flush(inflight);
+            } else {
+                self.phase.leave_request();
+                inflight.dec();
+            }
+        }
     }
 }
 
@@ -309,8 +340,9 @@ impl RequestScope {
         Self {
             lease: RequestLease {
                 phase,
-                inflight,
+                inflight: Some(inflight),
                 slot: None,
+                mode: LeaseMode::Direct,
             },
         }
     }
@@ -340,6 +372,7 @@ impl RequestScope {
     ) -> Response<TrackBody<ResponseBody>> {
         if resp.body().is_complete() {
             self.lease.arm_complete();
+            self.lease.mode = LeaseMode::WaitFlush;
         }
         let lease = self.lease;
         resp.map(|body| TrackBody { body, lease })
@@ -348,6 +381,7 @@ impl RequestScope {
     /// Returns a host refusal response, marking any attached PHP slot done immediately without arming `ConnPhase`.
     pub(crate) fn refuse(mut self, status: StatusCode) -> Response<TrackBody<ResponseBody>> {
         self.lease.mark_done();
+        self.lease.mode = LeaseMode::WaitFlush;
         let lease = self.lease;
         refusal(status).map(|body| TrackBody { body, lease })
     }
@@ -370,10 +404,14 @@ impl<B: Body + Unpin> TrackBody<B> {
             Poll::Ready(Some(Ok(_))) => {
                 if self.body.is_end_stream() {
                     self.lease.arm_complete();
+                    self.lease.mode = LeaseMode::WaitFlush;
                 }
             }
             Poll::Ready(Some(Err(_))) => self.lease.cancel_slot(),
-            Poll::Ready(None) => self.lease.arm_complete(),
+            Poll::Ready(None) => {
+                self.lease.arm_complete();
+                self.lease.mode = LeaseMode::WaitFlush;
+            }
         }
     }
 }
@@ -399,7 +437,7 @@ impl<B: Body + Unpin> Body for TrackBody<B> {
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         let this = self.get_mut();
         let poll = Pin::new(&mut this.body).poll_frame(cx);
-        if this.lease.has_slot() {
+        if this.lease.mode == LeaseMode::Direct {
             this.on_stream_poll(&poll);
         }
         poll

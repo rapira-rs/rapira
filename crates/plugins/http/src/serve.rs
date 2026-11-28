@@ -115,7 +115,9 @@ async fn handle_request(
                             closing,
                             &extensions,
                             short,
-                        ) {
+                        )
+                        .await
+                        {
                             Ok(resp) => scope.track(resp),
                             Err(status) => scope.refuse(status),
                         },
@@ -152,7 +154,7 @@ async fn handle_request(
 
     let closing = shared.closing.load(Ordering::Acquire);
     Ok(
-        match build_php_response(&shared.chain, is_head, closing, &extensions, start) {
+        match build_php_response(&shared.chain, is_head, closing, &extensions, start).await {
             Ok(resp) => scope.track(resp),
             Err(status) => scope.refuse(status),
         },
@@ -283,6 +285,10 @@ fn run_shard(
             }
         }
     }));
+    {
+        let _enter = rt.enter();
+        drop(local);
+    }
     drop(rt);
     let _ = done.send(());
 }

@@ -54,7 +54,7 @@ pub(crate) struct PendingIntake<B> {
 
 /// Result of completing asynchronous intake before SAPI submission.
 // Returned by value and immediately consumed; boxing `Request` adds a per-POST allocation.
-#[allow(clippy::large_enum_variant)]
+#[expect(clippy::large_enum_variant)]
 pub(crate) enum Prepared {
     Short {
         outer_depth: usize,
@@ -217,21 +217,51 @@ pub fn build_request(
     }
 }
 
-/// Polls `fut` once immediately; allocates a `tokio::time::Sleep` only if the first poll returns `Pending`.
-async fn timeout_lazy<F: Future>(dur: Duration, fut: F) -> Result<F::Output, ()> {
+/// Polls `fut` once immediately; allocates or resets `sleep` only if the first poll returns `Pending`.
+async fn timeout_lazy<F: Future>(
+    dur: Duration,
+    sleep: &mut Option<Pin<Box<tokio::time::Sleep>>>,
+    fut: F,
+) -> Result<F::Output, ()> {
     let mut fut = std::pin::pin!(fut);
-    let mut sleep: Option<Pin<Box<tokio::time::Sleep>>> = None;
+    let mut armed = false;
     std::future::poll_fn(|cx| {
         if let Poll::Ready(out) = fut.as_mut().poll(cx) {
             return Poll::Ready(Ok(out));
         }
-        let s = sleep.get_or_insert_with(|| Box::pin(tokio::time::sleep(dur)));
+        let s = match sleep {
+            Some(s) => {
+                if !armed {
+                    s.as_mut().reset(tokio::time::Instant::now() + dur);
+                    armed = true;
+                }
+                s
+            }
+            None => {
+                armed = true;
+                sleep.insert(Box::pin(tokio::time::sleep(dur)))
+            }
+        };
         if s.as_mut().poll(cx).is_ready() {
             return Poll::Ready(Err(()));
         }
         Poll::Pending
     })
     .await
+}
+
+enum SpoolMsg {
+    Data(Bytes),
+    Finish,
+}
+
+enum MultipartState {
+    Idle,
+    Streaming {
+        tx: tokio::sync::mpsc::Sender<SpoolMsg>,
+        handle: tokio::task::JoinHandle<Result<MultipartBody, StatusCode>>,
+    },
+    Done(MultipartBody),
 }
 
 enum BodyMode<'a> {
@@ -242,11 +272,12 @@ enum BodyMode<'a> {
         small: BytesMut,
     },
     /// Opened lazily on the first non-empty body byte so an empty POST reaches PHP raw.
+    /// Runs `multipart::Parser` on the blocking thread pool so file spooling and error-path unlinks never block the IO shard.
     Multipart {
         content_type: &'a [u8],
         limits: &'a multipart::Limits,
         size_hint: Option<usize>,
-        parser: Option<Box<multipart::Parser<'a>>>,
+        state: MultipartState,
     },
 }
 
@@ -296,8 +327,9 @@ where
     B: Body<Data = Bytes> + Unpin,
 {
     let mut total: usize = 0;
+    let mut sleep: Option<Pin<Box<tokio::time::Sleep>>> = None;
 
-    while let Some(frame_res) = match timeout_lazy(timeout, body.frame()).await {
+    while let Some(frame_res) = match timeout_lazy(timeout, &mut sleep, body.frame()).await {
         Ok(next) => next,
         Err(()) => return Err(StatusCode::REQUEST_TIMEOUT),
     } {
@@ -355,19 +387,53 @@ where
                 content_type,
                 limits,
                 size_hint,
-                parser,
-            } => {
-                let p = match parser {
-                    Some(p) => p,
-                    None => {
-                        let boundary = multipart::boundary(content_type)?;
-                        parser.insert(Box::new(multipart::Parser::new(
-                            &boundary, limits, *size_hint,
-                        )))
+                state,
+            } => match state {
+                MultipartState::Idle => {
+                    let boundary = multipart::boundary(content_type)?;
+                    let limits = (*limits).clone();
+                    let hint = *size_hint;
+                    if body.is_end_stream() {
+                        let mp = tokio::task::spawn_blocking(move || {
+                            let mut parser = multipart::Parser::new_owned(&boundary, limits, hint);
+                            parser.feed(&data)?;
+                            parser.finish()
+                        })
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+                        *state = MultipartState::Done(mp);
+                        break;
                     }
-                };
-                p.feed(&data)?;
-            }
+                    let (tx, mut rx) = tokio::sync::mpsc::channel::<SpoolMsg>(4);
+                    let handle = tokio::task::spawn_blocking(move || {
+                        let mut parser = multipart::Parser::new_owned(&boundary, limits, hint);
+                        while let Some(msg) = rx.blocking_recv() {
+                            match msg {
+                                SpoolMsg::Data(chunk) => parser.feed(&chunk)?,
+                                SpoolMsg::Finish => return parser.finish(),
+                            }
+                        }
+                        // Dropping `parser` here unlinks any partial spool files on the blocking thread.
+                        Err(StatusCode::BAD_REQUEST)
+                    });
+                    if tx.send(SpoolMsg::Data(data)).await.is_err() {
+                        handle
+                            .await
+                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                    }
+                    *state = MultipartState::Streaming { tx, handle };
+                }
+                MultipartState::Streaming { tx, handle } => {
+                    if tx.send(SpoolMsg::Data(data)).await.is_err() {
+                        handle
+                            .await
+                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                    }
+                }
+                MultipartState::Done(_) => {}
+            },
         }
     }
 
@@ -398,16 +464,26 @@ where
                 budget_bytes,
             })
         }
-        BodyMode::Multipart { parser: None, .. } => Ok(ReadBody {
+        BodyMode::Multipart {
+            state: MultipartState::Idle,
+            ..
+        } => Ok(ReadBody {
             chunks: Chunks::default(),
             multipart: None,
             budget_bytes: 0,
         }),
-        BodyMode::Multipart {
-            parser: Some(parser),
-            ..
-        } => {
-            let mp = parser.finish()?;
+        BodyMode::Multipart { state, .. } => {
+            let mp = match state {
+                MultipartState::Done(mp) => mp,
+                MultipartState::Streaming { tx, handle } => {
+                    let _ = tx.send(SpoolMsg::Finish).await;
+                    drop(tx);
+                    handle
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??
+                }
+                MultipartState::Idle => unreachable!(),
+            };
             let spooled: usize = mp
                 .files
                 .iter()
@@ -525,7 +601,7 @@ where
                     size_hint: admitted
                         .content_length
                         .and_then(|n| usize::try_from(n).ok()),
-                    parser: None,
+                    state: MultipartState::Idle,
                 },
                 _ => BodyMode::Raw {
                     first: None,

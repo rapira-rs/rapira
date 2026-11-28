@@ -69,14 +69,16 @@ impl Attached {
 
     fn build_and_collect(&mut self) -> Captured {
         let start = self.try_recv_start().expect("expected Start message");
-        let res = build_php_response(
-            &MiddlewareChain::default(),
-            self.is_head,
-            false,
-            &Extensions::new(),
-            start,
-        )
-        .unwrap_or_else(refusal);
+        let res = self
+            .rt
+            .block_on(build_php_response(
+                &MiddlewareChain::default(),
+                self.is_head,
+                false,
+                &Extensions::new(),
+                start,
+            ))
+            .unwrap_or_else(refusal);
         let (parts, mut body) = res.into_parts();
         let exact_len = body.size_hint().exact();
         let is_end_stream = body.is_end_stream();

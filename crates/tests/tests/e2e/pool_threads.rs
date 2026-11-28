@@ -12,7 +12,9 @@ use tests::{drain_async, fixture, req, server_log, wire};
 use tokio::sync::mpsc::Receiver;
 use tokio::time::timeout;
 
-use crate::harness::{Server, Spawn, listen, logged_remote, stop, wait_serving};
+use crate::harness::{
+    Server, Spawn, free_port, listen, logged_remote, stop, wait_log_contains, wait_serving,
+};
 
 const WAIT: Duration = Duration::from_secs(10);
 
@@ -71,17 +73,37 @@ async fn a_free_worker_answers_a_second_http_connection() -> anyhow::Result<()> 
 #[tokio::test]
 #[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 async fn the_worker_that_waited_last_answers_the_next_request() -> anyhow::Result<()> {
+    let obs = SocketAddr::from(([127, 0, 0, 1], free_port()));
     let srv = Spawn::http(Mode::Dispatcher, fixture("pool_threads/overlap/http.php"))
         .workers(4)
         .json_log()
+        .toml(&format!(
+            "[observability]\nlisten = \"{obs}\"\n[observability.metrics]\n"
+        ))
         .spawn();
     wait_serving(&srv, "http", 4);
     let mut apps = Vec::new();
     for _ in 0..8 {
         let view = http_view(get(srv.addr, "/short").await?).await?;
         apps.push(view["app"].as_str().context("app token")?.to_owned());
-        // The worker starts its next wait before the next request arrives.
-        tokio::time::sleep(Duration::from_millis(20)).await;
+        // Wait until all 4 workers report idle in /metrics so slow teardown never races the LIFO park.
+        let deadline = tokio::time::Instant::now() + WAIT;
+        loop {
+            if let Ok(rx) = get(obs, "/metrics").await {
+                let got = timeout(WAIT, drain_async(rx)).await?;
+                let samples = tests::metrics::samples(&got.body);
+                if samples.get(r#"rapira_workers{pool="http",state="idle"}"#) == Some(&4) {
+                    break;
+                }
+            }
+            anyhow::ensure!(
+                tokio::time::Instant::now() < deadline,
+                "timed out waiting for all 4 HTTP workers to return to idle"
+            );
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
+        // Give the worker thread a moment to push onto the LIFO waiter stack after recording Event::Idle.
+        tokio::time::sleep(Duration::from_millis(5)).await;
     }
     let first = apps[0].clone();
     assert_eq!(
@@ -294,15 +316,34 @@ async fn http_and_grpc_keep_their_execution_clocks_in_one_process() -> anyhow::R
         // A killed call can end with an error status or with a reset stream.
         let grpc = timeout(WAIT, conn.grpc(ECHO_PATH, &[], HI_FRAME)).await?;
         let http = timeout(WAIT, drain_async(get(srv.addr, "/?sleep=2000").await?)).await?;
-        assert_eq!(
-            (
-                http.status == 200,
-                grpc.is_ok_and(|reply| reply.grpc_status() == Some("0"))
-            ),
-            (case.http_completes, !case.http_completes),
-            "{}: (HTTP unit completed, gRPC call completed)",
-            case.name
-        );
+        if case.http_completes {
+            assert_eq!(http.status, 200, "{}: HTTP unit must complete", case.name);
+            assert!(
+                !grpc
+                    .as_ref()
+                    .is_ok_and(|reply| reply.grpc_status() == Some("0")),
+                "{}: gRPC call must fail on wall-clock timeout, got {grpc:?}",
+                case.name
+            );
+            assert!(
+                wait_log_contains(&srv, "Maximum execution time", WAIT),
+                "{}: missing execution-time fatal log",
+                case.name
+            );
+        } else {
+            assert_eq!(
+                http.status, 502,
+                "{}: killed dispatcher HTTP unit must answer 502 before response head",
+                case.name
+            );
+            let reply = grpc.context("gRPC call must complete under cpu clock")?;
+            assert_eq!(reply.grpc_status(), Some("0"), "{}", case.name);
+            assert!(
+                wait_log_contains(&srv, "Maximum execution time", WAIT),
+                "{}: missing execution-time fatal log",
+                case.name
+            );
+        }
         drop(conn);
         stop(srv).await;
     }

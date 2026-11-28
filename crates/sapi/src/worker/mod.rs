@@ -235,7 +235,7 @@ impl Worker {
             if !self.current_unit_counted.replace(true) {
                 self.tick_quota();
             }
-            // SAFETY: `ptr` came from `Box::into_raw` in `receive_into` and `current_unit` owned it.
+            // SAFETY: `ptr` came from `Box::leak` in `receive_into` and `current_unit` owned it.
             let st = unsafe { Box::from_raw(ptr) };
             if !st.settled() {
                 self.pool
@@ -245,9 +245,10 @@ impl Worker {
     }
 
     fn has_active_unit(&self) -> bool {
-        self.current_unit
-            .get()
-            .is_some_and(|ptr| unsafe { !(*ptr).is_finalized() })
+        self.current_unit.get().is_some_and(|ptr| {
+            // SAFETY: `current_unit` points to a live leaked `Held` box owned until `forget_held` or `reclaim_current`.
+            unsafe { !(*ptr).is_finalized() }
+        })
     }
 
     /// Verifies the previous Dispatcher unit is settled (discarding if cancelled) and counts its quota once.

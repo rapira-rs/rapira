@@ -1,8 +1,8 @@
 //! Push-based HTTP response compression middleware (`gzip` and `zstd`).
 //!
 //! Phase 1 parses `Accept-Encoding` synchronously on the IO shard.
-//! Phase 2 inspects status, headers, MIME type, and known body size on the responder thread.
-//! Phase 3 encodes body slices inline on the responder thread before direct socket writes.
+//! Phase 2 inspects status, headers, MIME type, and known body size on the IO shard.
+//! Phase 3 encodes body slices on the IO shard, or on the blocking pool for large complete bodies, before direct socket writes.
 
 mod config;
 

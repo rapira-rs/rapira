@@ -49,6 +49,7 @@ pub unsafe fn send<T>(tx: &mpsc::Sender<T>, item: T, until: Option<Instant>) -> 
     let live = unsafe { crate::rapira_timer_pause(saved.as_mut_ptr()) };
     let sent = Handle::current().block_on(send_parked(tx, item, until, crate::watchdog::wake()));
     if live {
+        // SAFETY: `rapira_timer_pause` returned true, so `saved` is initialized for this PHP thread.
         unsafe { crate::rapira_timer_resume(saved.as_ptr()) };
     }
     sent

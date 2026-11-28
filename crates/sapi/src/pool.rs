@@ -2,7 +2,10 @@
 
 use std::cell::RefCell;
 use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering::Relaxed};
+use std::sync::atomic::{
+    AtomicBool, AtomicU8, AtomicU64, AtomicUsize,
+    Ordering::{Relaxed, SeqCst},
+};
 use std::time::Instant;
 
 use crate::queue::PoolQueue;
@@ -107,7 +110,7 @@ impl Pool {
 
     /// The state that a reader sees. After the drain starts, only an active worker keeps its state.
     pub(crate) fn state(&self, index: usize) -> State {
-        let state = State::ALL[usize::from(self.workers[index].state.load(Relaxed))];
+        let state = State::ALL[usize::from(self.workers[index].state.load(SeqCst))];
         if state != State::Active && self.draining() {
             State::Draining
         } else {
@@ -125,12 +128,12 @@ impl Pool {
     }
 
     pub(crate) fn draining(&self) -> bool {
-        self.draining.load(Relaxed)
+        self.draining.load(SeqCst)
     }
 
     /// A worker with a unit in progress stays active until its next pull.
     pub(crate) fn begin_drain(&self) {
-        self.draining.store(true, Relaxed);
+        self.draining.store(true, SeqCst);
         self.queue.sync_ready(|| self.ready());
     }
 
@@ -157,7 +160,7 @@ impl Pool {
                 }
             }
             Event::Idle => {
-                let prev = worker.state.load(Relaxed);
+                let prev = worker.state.load(SeqCst);
                 worker.inactive(State::Idle);
                 if prev == State::Starting as u8 || (prev == State::Active as u8 && self.draining())
                 {
@@ -165,11 +168,11 @@ impl Pool {
                 }
             }
             Event::Active => {
-                let prev = worker.state.load(Relaxed);
+                let prev = worker.state.load(SeqCst);
                 let since = now_millis();
                 crate::watchdog::arm(since);
                 worker.last_activity_ms.store(since, Relaxed);
-                worker.state.store(State::Active as u8, Relaxed);
+                worker.state.store(State::Active as u8, SeqCst);
                 if prev == State::Starting as u8 || (prev == State::Idle as u8 && self.draining()) {
                     self.queue.sync_ready(|| self.ready());
                 }
@@ -183,7 +186,7 @@ impl Pool {
             }
             Event::Stopped => {
                 let was_serving = self.state(index).serving();
-                worker.state.store(State::Draining as u8, Relaxed);
+                worker.state.store(State::Draining as u8, SeqCst);
                 if was_serving {
                     self.queue.sync_ready(|| self.ready());
                 }
@@ -228,7 +231,7 @@ impl Worker {
     /// The worker has no unit in progress, so the watchdog has nothing to interrupt.
     fn inactive(&self, state: State) {
         crate::watchdog::clear();
-        self.state.store(state as u8, Relaxed);
+        self.state.store(state as u8, SeqCst);
     }
 }
 

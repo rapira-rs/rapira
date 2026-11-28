@@ -11,10 +11,15 @@ use http::header::{
     TRANSFER_ENCODING, UPGRADE,
 };
 use http::{Extensions, HeaderMap, Response, StatusCode};
-use rapira_http_middleware::{BodyStream, MiddlewareChain, ResponseHead, ShortResponse};
+use rapira_http_middleware::{
+    BodyEncoder, BodyStream, MiddlewareChain, ResponseHead, ShortResponse,
+};
 use tokio::sync::mpsc;
 
 use body::{StreamBody, run_encoders};
+
+/// Complete bodies above this size run `BodyEncoder`s on the blocking pool so the single-threaded IO shard stays responsive.
+const INLINE_ENCODE_MAX: usize = 128 << 10;
 
 pub(crate) use body::ResponseBody;
 pub(crate) use slot::{Chunk, HttpResponder, ResponseSlot, Start};
@@ -103,8 +108,26 @@ struct ResponseSpec {
     source: ResponseSource,
 }
 
+async fn encode_complete(
+    mut encoders: Vec<Box<dyn BodyEncoder>>,
+    body: Bytes,
+    finish: bool,
+) -> Result<Bytes, StatusCode> {
+    if encoders.is_empty() {
+        return Ok(body);
+    }
+    if body.len() <= INLINE_ENCODE_MAX {
+        return run_encoders(&mut encoders, &body, finish)
+            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR);
+    }
+    tokio::task::spawn_blocking(move || run_encoders(&mut encoders, &body, finish))
+        .await
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
+        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)
+}
+
 /// Single HTTP response normalizer shared by Middleware short-circuits, CGI, and Dispatcher responses.
-fn build_response(
+async fn build_response(
     chain: &MiddlewareChain,
     is_head: bool,
     closing: bool,
@@ -151,7 +174,7 @@ fn build_response(
         }
     };
 
-    let mut encoders = chain.run_response_head(outer_depth, is_head, extensions, &mut head);
+    let encoders = chain.run_response_head(outer_depth, is_head, extensions, &mut head);
     let bodiless = bodiless || is_bodiless_status(head.status);
     let status = StatusCode::from_u16(head.status).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut headers = head.headers;
@@ -175,26 +198,16 @@ fn build_response(
                 let under_run =
                     !truncated && declared_len.is_some_and(|cl| (body.len() as u64) < cl);
                 if truncated || under_run {
-                    let wire = if encoders.is_empty() {
-                        body
-                    } else {
-                        run_encoders(&mut encoders, &body, false)
-                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                    };
                     let hint_len = (under_run && encoders.is_empty())
                         .then_some(declared_len)
                         .flatten();
+                    let wire = encode_complete(encoders, body, false).await?;
                     ResponseBody::Stream(Box::new(StreamBody::truncated(
                         (!wire.is_empty()).then_some(wire),
                         hint_len,
                     )))
                 } else {
-                    let wire = if encoders.is_empty() {
-                        body
-                    } else {
-                        run_encoders(&mut encoders, &body, true)
-                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?
-                    };
+                    let wire = encode_complete(encoders, body, true).await?;
                     if wire.is_empty() {
                         ResponseBody::Empty
                     } else {
@@ -222,7 +235,7 @@ fn build_response(
 }
 
 /// Converts a Phase-1 middleware `ShortResponse` into a `hyper` response, running outer Phase-2 hooks.
-pub(crate) fn build_short_response(
+pub(crate) async fn build_short_response(
     chain: &MiddlewareChain,
     outer_depth: usize,
     is_head: bool,
@@ -251,10 +264,11 @@ pub(crate) fn build_short_response(
             source,
         },
     )
+    .await
 }
 
 /// Converts a PHP `Start` message into a `hyper` `Response<ResponseBody>`, or a refusal `StatusCode`.
-pub(crate) fn build_php_response(
+pub(crate) async fn build_php_response(
     chain: &MiddlewareChain,
     is_head: bool,
     closing: bool,
@@ -280,5 +294,5 @@ pub(crate) fn build_php_response(
             source: ResponseSource::PhpStream { rx },
         },
     };
-    build_response(chain, is_head, closing, extensions, spec)
+    build_response(chain, is_head, closing, extensions, spec).await
 }

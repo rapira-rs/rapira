@@ -41,7 +41,7 @@ impl Serving {
         let mut stop = self.health.subscribe();
         let draining = stop.clone();
         // Trigger hyper's graceful_shutdown only for HTTP/2 (whose first server write starts with the 0 byte of the initial SETTINGS frame length: https://www.rfc-editor.org/rfc/rfc9113#section-3.4).
-        // HTTP/1.1 keep-alive connections stay open to serve one final request with `Connection: close` (lines 78-83).
+        // HTTP/1.1 keep-alive connections stay open to serve one final request with `Connection: close` (lines 63-68).
         let h2 = Arc::new(Notify::new());
         let mut first = Some(Arc::clone(&h2));
         let io = InspectWriter::new(io, move |bytes| {

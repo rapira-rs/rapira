@@ -55,7 +55,15 @@ impl BodyStream for ServeDirStream {
                         && !data.is_empty()
                     {
                         if let Some(rem) = &mut self.remaining {
-                            *rem = rem.saturating_sub(data.len() as u64);
+                            let n = data.len() as u64;
+                            if n > *rem {
+                                *rem = 0;
+                                return Poll::Ready(Some(Err(io::Error::new(
+                                    io::ErrorKind::InvalidData,
+                                    "static file grew during read",
+                                ))));
+                            }
+                            *rem -= n;
                         }
                         return Poll::Ready(Some(Ok(data)));
                     }
@@ -305,36 +313,60 @@ mod tests {
         assert!(!st.eligible("/%FF.css"));
     }
 
+    struct TempDir(PathBuf);
+
+    impl Drop for TempDir {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+
     #[test]
-    fn truncated_stream_reports_unexpected_eof() {
+    fn modified_stream_reports_size_mismatch_errors() {
+        #[derive(Clone, Copy)]
+        enum Mutation {
+            None,
+            TruncateBeforeFirst,
+            TruncateAfterFirst,
+            GrowBeforeFirst,
+            GrowAfterFirst,
+        }
         struct Case {
             name: &'static str,
-            truncate_before_first: bool,
-            truncate_after_first: bool,
+            mutation: Mutation,
             want_status: u16,
-            want_stream_eof_err: bool,
+            want_stream_err: Option<std::io::ErrorKind>,
         }
         let cases = [
             Case {
                 name: "file truncated to zero before first read returns 500",
-                truncate_before_first: true,
-                truncate_after_first: false,
+                mutation: Mutation::TruncateBeforeFirst,
                 want_status: 500,
-                want_stream_eof_err: false,
+                want_stream_err: None,
             },
             Case {
                 name: "file truncated mid-stream returns unexpected eof error",
-                truncate_before_first: false,
-                truncate_after_first: true,
+                mutation: Mutation::TruncateAfterFirst,
                 want_status: 200,
-                want_stream_eof_err: true,
+                want_stream_err: Some(std::io::ErrorKind::UnexpectedEof),
+            },
+            Case {
+                name: "file grown before first read returns invalid data error",
+                mutation: Mutation::GrowBeforeFirst,
+                want_status: 200,
+                want_stream_err: Some(std::io::ErrorKind::InvalidData),
+            },
+            Case {
+                name: "file grown mid-stream returns invalid data error",
+                mutation: Mutation::GrowAfterFirst,
+                want_status: 200,
+                want_stream_err: Some(std::io::ErrorKind::InvalidData),
             },
             Case {
                 name: "unmodified large file streams cleanly to end",
-                truncate_before_first: false,
-                truncate_after_first: false,
+                mutation: Mutation::None,
                 want_status: 200,
-                want_stream_eof_err: false,
+                want_stream_err: None,
             },
         ];
 
@@ -350,6 +382,7 @@ mod tests {
                 .join(format!("rapira-static-trunc-{}-{idx}", std::process::id()));
             let _ = std::fs::remove_dir_all(&root);
             std::fs::create_dir_all(&root).unwrap();
+            let _guard = TempDir(root.clone());
             let file_path = root.join("large.txt");
             std::fs::write(&file_path, &payload).unwrap();
 
@@ -364,29 +397,51 @@ mod tests {
                 let res = dir.try_call(req).await.unwrap();
                 assert_eq!(res.status(), StatusCode::OK, "{}", case.name);
 
-                if case.truncate_before_first {
-                    std::fs::File::options()
-                        .write(true)
-                        .open(&file_path)
-                        .unwrap()
-                        .set_len(0)
-                        .unwrap();
+                match case.mutation {
+                    Mutation::TruncateBeforeFirst => {
+                        std::fs::File::options()
+                            .write(true)
+                            .open(&file_path)
+                            .unwrap()
+                            .set_len(0)
+                            .unwrap();
+                    }
+                    Mutation::GrowBeforeFirst => {
+                        use std::io::Write as _;
+                        let mut f = std::fs::File::options()
+                            .append(true)
+                            .open(&file_path)
+                            .unwrap();
+                        f.write_all(&vec![b'b'; 128 * 1024]).unwrap();
+                    }
+                    _ => {}
                 }
 
                 let mut short = into_short_response(false, res).await;
                 assert_eq!(short.head.status, case.want_status, "{}", case.name);
 
-                if case.truncate_after_first {
-                    std::fs::File::options()
-                        .write(true)
-                        .open(&file_path)
-                        .unwrap()
-                        .set_len(0)
-                        .unwrap();
+                match case.mutation {
+                    Mutation::TruncateAfterFirst => {
+                        std::fs::File::options()
+                            .write(true)
+                            .open(&file_path)
+                            .unwrap()
+                            .set_len(0)
+                            .unwrap();
+                    }
+                    Mutation::GrowAfterFirst => {
+                        use std::io::Write as _;
+                        let mut f = std::fs::File::options()
+                            .append(true)
+                            .open(&file_path)
+                            .unwrap();
+                        f.write_all(&vec![b'b'; 128 * 1024]).unwrap();
+                    }
+                    _ => {}
                 }
 
                 let mut total = short.body.len();
-                let mut got_eof_err = false;
+                let mut got_err: Option<std::io::ErrorKind> = None;
                 if let Some(mut rest) = short.rest.take() {
                     while let Some(item) =
                         std::future::poll_fn(|cx| Pin::new(rest.as_mut()).poll_next_chunk(cx)).await
@@ -394,25 +449,17 @@ mod tests {
                         match item {
                             Ok(chunk) => total += chunk.len(),
                             Err(err) => {
-                                assert_eq!(
-                                    err.kind(),
-                                    std::io::ErrorKind::UnexpectedEof,
-                                    "{}",
-                                    case.name
-                                );
-                                got_eof_err = true;
+                                got_err = Some(err.kind());
                                 break;
                             }
                         }
                     }
                 }
-                assert_eq!(got_eof_err, case.want_stream_eof_err, "{}", case.name);
-                if case.want_status == 200 && !case.want_stream_eof_err {
+                assert_eq!(got_err, case.want_stream_err, "{}", case.name);
+                if case.want_status == 200 && case.want_stream_err.is_none() {
                     assert_eq!(total, size, "{}", case.name);
                 }
             });
-
-            let _ = std::fs::remove_dir_all(&root);
         }
     }
 }

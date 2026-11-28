@@ -396,7 +396,7 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         rapira_register_known_stringl(
             name.as_ptr(),
             name.to_bytes().len(),
-            val.as_ptr() as *const c_char,
+            crate::zend::ptr_or_empty(val),
             val.len(),
             track_vars_array,
         );
@@ -416,7 +416,12 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         };
         // Inserts a permanent interned name and a value of this request, which PHP copies.
         let put = |name: Permanent, value: &[u8]| unsafe {
-            rapira_hash_update_stringl(ht, name.as_ptr(), value.as_ptr().cast(), value.len());
+            rapira_hash_update_stringl(
+                ht,
+                name.as_ptr(),
+                crate::zend::ptr_or_empty(value),
+                value.len(),
+            );
         };
         // The env pairs of the pool go in first, so the request variables below override a pair with the same name.
         // Each name goes in as written. The environment import of PHP skips a name with a space, '.' or '[', and it stores an all-digit name as an integer key. Such a name is therefore different in the boot $_SERVER.

@@ -208,11 +208,12 @@ fn uri_abs_inline<'a>(
 ) -> Option<&'a [u8]> {
     let mut len = 0usize;
     let ok = write_uri_abs(req, authority, |src| {
-        let end = len + src.len();
+        let bytes = src.as_bytes();
+        let end = len + bytes.len();
         if end > buf.len() {
             return false;
         }
-        buf[len..end].copy_from_slice(src);
+        buf[len..end].copy_from_slice(bytes);
         len = end;
         true
     });

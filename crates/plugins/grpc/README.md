@@ -34,12 +34,12 @@ The grpc plugin of the `rapira` binary. It serves unary and server-streaming RPC
 - `rapira_grpc_classes.c`: the `rapira_grpc_plugin` record, `rapira_grpc_register_classes` and the object handlers of the call. MINIT calls `rapira_grpc_register_classes` after the base classes. The stub aliases the constructors of the internal classes, `name()`, `receive()`, `tryReceive()`, `getInfo()` and the dispatcher info counters to the shared shells in `crates/sapi/rapira_dispatcher.c`.
 - `rapira_grpc.c`: the constructors of the value classes, the `MethodKind` predicates, the method shell of `getServices()` of the dispatcher, and the method shells of the call, with its `ResponseMetadata` methods.
 - `src/lib.rs`: `Server` and its `Plugin` impl.
-- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks, the `Interceptor` enum, `resolve_interceptors`, and `Server::from_settings`, which loads the descriptor set, builds the interceptors and binds the listener.
+- `src/config.rs`: `Section` (the `[grpc]` table), `Settings`, `resolve` with the boot checks (using `rapira_config::check_stages`), and `Server::from_settings`, which loads the descriptor set, builds the interceptors and binds the listener.
 - `src/serve.rs`: the accept loop, one connect-rust connection per accepted socket, and the drain.
 - `src/dispatch.rs`: `PhpDispatcher`: the route to PHP, the JSON transcoding, the PHP outcome as a connectrpc response or error, and the body of a streaming response.
 - `src/schema.rs`: the descriptor set and its `Source` (a file or a URL), the download, the method routes, the JSON transcoding, and the service list of `getServices()`.
-- `src/call.rs`: the `Call` that PHP gets, the `UnaryReply`, and the `Head` and `Part` of a streaming response.
-- `src/php/`: the Rust behind the PHP methods: the class entries and the declarations of `rapira_grpc_plugin` and `rapira_grpc_register_classes` (`mod.rs`), the `GrpcState` unit with its `Held` impl, the call, its metadata and its response stream (`call.rs`), and the `Metadata` constructor (`values.rs`).
+- `src/call/`: the PHP-free call state machine (`CallState` with `Held`), `Call`, `UnaryReply`, `Head`, `Part`, metadata validation, and unit tests (`mod.rs`, `tests.rs`).
+- `src/php/`: the Rust behind the PHP methods: the class entries and the declarations of `rapira_grpc_plugin` and `rapira_grpc_register_classes` (`mod.rs`), the PHP method bindings over `CallState` (`call.rs`), and the `Metadata` constructor (`values.rs`).
 
 ## Protocols
 
@@ -75,12 +75,10 @@ To add a built-in interceptor:
 - Put it in a new crate under `crates/interceptors`, with its `Section`, `Settings`, `resolve` and a type that implements `connectrpc::Interceptor`.
 - In the root `Cargo.toml`, add the crate to the workspace `members` and to `[workspace.dependencies]`.
 - Add the crate to the dependencies in `crates/plugins/grpc/Cargo.toml`.
-- In `src/config.rs`, add its table to `Section`, as `auth` is for `[grpc.auth]`.
-- Resolve the table in `settings` and pass its settings to `resolve_interceptors`.
-- Add a variant with its settings to `config::Interceptor`.
-- In `resolve_interceptors`, match its name and add it to the list. Add its name to the unknown-name error. Reject a configured table if the list does not name it.
-- Build it in `Server::from_settings`.
-- In the `src/config.rs` tests, add an arm to the match in `interceptor_list_and_tables_must_agree`. Add cases for the new name and its position in the list.
+- In `src/config.rs`, add its table to `Section`, as `auth` is for `[grpc.auth]`, and store its resolved settings on `Settings`.
+- In `settings` in `src/config.rs`, register its name in `rapira_config::check_stages` and enforce whether its table is required or optional. Reject a configured table that the list does not name.
+- Build its `Arc<dyn connectrpc::Interceptor>` in `Server::from_settings`, keeping list order.
+- In the `src/config.rs` tests, update `interceptor_list_and_tables_must_agree` with cases for the new name and its position in the list.
 - Add an e2e test in `crates/tests/tests/e2e/` that starts `rapira` with the new `[grpc.<name>]` table through `Spawn::grpc_extra`, and add its `mod` line to `main.rs`.
 - Add a commented example of the table to `examples/rapira.toml`, next to `[grpc.auth]`.
 - Add its boot errors to the error list in the Config section.

@@ -8,7 +8,7 @@ listen = "127.0.0.1:8000"    # host:port, ":port" for all interfaces, or "unix:/
 # max_body_size_mb = 8       # larger request bodies answer 413
 # write_timeout_secs = 30    # closes the connection when a response write stalls this long
 # keepalive_timeout_secs = 60 # closes a keepalive connection idle past the limit; also caps one head or body-frame read
-# middleware = ["static"]    # applied in list order; each configured middleware must be listed
+# middleware = ["compress", "static"] # applied in list order; each configured middleware must be listed
 
 # Multipart limits of the http plugin, for dispatcher mode only. Classic and worker modes parse
 # in PHP, where php.ini sets the limits. With an explicit table under another mode, the boot fails.
@@ -26,6 +26,13 @@ listen = "127.0.0.1:8000"    # host:port, ":port" for all interfaces, or "unix:/
 # [http.static]
 # root = "public"            # required; the directory must exist; relative paths resolve against this file's directory
 # forbid = [".php"]          # file-name suffixes the server never serves; an explicit list replaces this default
+
+# Compress eligible HTTP responses with zstd or gzip based on Accept-Encoding.
+# Requires "compress" in http.middleware; this table is optional when defaults are used.
+# [http.compress]
+# min_size = 1024            # minimum known response body size in bytes to compress
+# gzip_level = 4             # 1..=9
+# zstd_level = 3             # 1..=19
 
 # The worker pool behind the http listener. Each plugin owns its pool under [<plugin>.pool].
 [http.pool]

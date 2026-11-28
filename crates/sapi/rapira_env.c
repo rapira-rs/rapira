@@ -56,11 +56,11 @@ static ZEND_NAMED_FUNCTION(rapira_putenv) {
     RAPIRA_PARAM_ENV(setting, setting_len)
     ZEND_PARSE_PARAMETERS_END();
 
+    setting_len = strnlen(setting, setting_len);
     if (setting_len == 0 || setting[0] == '=') {
         zend_argument_value_error(1, "must have a valid syntax");
         RETURN_THROWS();
     }
-    setting_len = strnlen(setting, setting_len);
     const char *eq = memchr(setting, '=', setting_len);
     if (eq) {
         rapira_rs_env_put(setting, (size_t)(eq - setting), eq + 1);

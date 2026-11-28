@@ -67,52 +67,38 @@ enum Phase {
 pub(crate) fn write_uri_abs(
     req: &Request,
     authority: Option<&[u8]>,
-    mut push: impl FnMut(&[u8]) -> bool,
+    mut push: impl FnMut(&str) -> bool,
 ) -> bool {
-    let scheme = if req.https {
-        b"https://".as_slice()
-    } else {
-        b"http://".as_slice()
-    };
+    let scheme = if req.https { "https://" } else { "http://" };
     if !push(scheme) {
         return false;
     }
     match authority {
-        Some(a) => match std::str::from_utf8(a) {
-            Ok(s) => {
-                if !push(s.as_bytes()) {
-                    return false;
-                }
+        Some(a) => {
+            if !push(&String::from_utf8_lossy(a)) {
+                return false;
             }
-            Err(_) => {
-                if !push(String::from_utf8_lossy(a).as_bytes()) {
-                    return false;
-                }
-            }
-        },
+        }
         None => match &req.server {
             Addr::Inet(SocketAddr::V4(sa)) => {
                 let mut ip_buf = [0u8; 39];
                 let ip = ip_text(IpAddr::V4(*sa.ip()), &mut ip_buf);
                 let mut port_buf = NumBuffer::new();
-                if !push(ip.as_bytes())
-                    || !push(b":")
-                    || !push(sa.port().format_into(&mut port_buf).as_bytes())
-                {
+                if !push(ip) || !push(":") || !push(sa.port().format_into(&mut port_buf)) {
                     return false;
                 }
             }
             Addr::Inet(sa) => {
-                if !push(sa.to_string().as_bytes()) {
+                if !push(&sa.to_string()) {
                     return false;
                 }
             }
             Addr::Unix(_) => {
                 let identity = rapira_sapi::HttpIdentity::current();
                 let mut port_buf = NumBuffer::new();
-                if !push(identity.name().as_bytes())
-                    || !push(b":")
-                    || !push(identity.port.format_into(&mut port_buf).as_bytes())
+                if !push(identity.name())
+                    || !push(":")
+                    || !push(identity.port.format_into(&mut port_buf))
                 {
                     return false;
                 }
@@ -121,9 +107,9 @@ pub(crate) fn write_uri_abs(
     }
     let uri_str = req.uri.as_str();
     let path = if uri_str.starts_with('/') {
-        uri_str.as_bytes()
+        uri_str
     } else {
-        b"/"
+        "/"
     };
     push(path)
 }
@@ -132,13 +118,12 @@ pub(crate) fn write_uri_abs(
 pub fn uri_abs(req: &Request) -> String {
     let authority = req.authority_bytes();
     let host_len = authority.map_or(21, <[u8]>::len);
-    let mut out = Vec::with_capacity(8 + host_len + req.uri.as_str().len().max(1));
+    let mut out = String::with_capacity(8 + host_len + req.uri.as_str().len().max(1));
     write_uri_abs(req, authority, |s| {
-        out.extend_from_slice(s);
+        out.push_str(s);
         true
     });
-    // SAFETY: `write_uri_abs` pushes only ASCII literals, valid UTF-8, or lossy UTF-8.
-    unsafe { String::from_utf8_unchecked(out) }
+    out
 }
 
 pub struct ExchangeState {

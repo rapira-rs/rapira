@@ -262,6 +262,7 @@ fn response_slot_cancel_respects_mark_done() {
 
 #[test]
 fn response_slot_cross_thread_stress() {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
     for i in 0..1000u16 {
         let (mut tx, slot) = HttpResponder::pair(false);
         let status = 200 + (i % 100);
@@ -273,7 +274,13 @@ fn response_slot_cross_thread_stress() {
         let got = loop {
             match slot.poll_recv(&mut cx) {
                 Poll::Ready(res) => break res,
-                Poll::Pending => std::thread::yield_now(),
+                Poll::Pending => {
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "response slot timed out on iteration {i}"
+                    );
+                    std::thread::yield_now();
+                }
             }
         };
         handle.join().unwrap();
@@ -282,8 +289,8 @@ fn response_slot_cross_thread_stress() {
     }
 }
 
-#[test]
-fn compressed_declared_under_run_aborts() {
+#[tokio::test(flavor = "current_thread")]
+async fn compressed_declared_under_run_aborts() {
     struct Case {
         name: &'static str,
         stream: bool,
@@ -366,7 +373,9 @@ fn compressed_declared_under_run_aborts() {
                 truncated: false,
             }
         };
-        let resp = build_php_response(&chain, false, false, &ctx.extensions, start).unwrap();
+        let resp = build_php_response(&chain, false, false, &ctx.extensions, start)
+            .await
+            .unwrap();
         let (_chunks, aborted, _pendings) = drain_body(resp.into_body());
         assert_eq!(aborted, case.want_abort, "{}", case.name);
     }
@@ -432,8 +441,8 @@ impl Middleware for FailingEncoderMw {
     }
 }
 
-#[test]
-fn unified_normalizer_and_stream_invariants() {
+#[tokio::test(flavor = "current_thread")]
+async fn unified_normalizer_and_stream_invariants() {
     enum SourceKind {
         ShortFull,
         ShortStreamUnderRun,
@@ -452,6 +461,7 @@ fn unified_normalizer_and_stream_invariants() {
         want_err: Option<StatusCode>,
         want_status: StatusCode,
         want_cl: Option<&'static str>,
+        want_body: &'static [u8],
         want_abort: bool,
         want_pending_before_abort: bool,
     }
@@ -467,6 +477,7 @@ fn unified_normalizer_and_stream_invariants() {
             want_err: None,
             want_status: StatusCode::BAD_GATEWAY,
             want_cl: None,
+            want_body: b"",
             want_abort: false,
             want_pending_before_abort: false,
         },
@@ -481,6 +492,7 @@ fn unified_normalizer_and_stream_invariants() {
             want_err: None,
             want_status: StatusCode::OK,
             want_cl: Some("42"),
+            want_body: b"",
             want_abort: false,
             want_pending_before_abort: false,
         },
@@ -495,6 +507,7 @@ fn unified_normalizer_and_stream_invariants() {
             want_err: None,
             want_status: StatusCode::NOT_MODIFIED,
             want_cl: None,
+            want_body: b"",
             want_abort: false,
             want_pending_before_abort: false,
         },
@@ -509,6 +522,7 @@ fn unified_normalizer_and_stream_invariants() {
             want_err: None,
             want_status: StatusCode::OK,
             want_cl: None,
+            want_body: b"hello",
             want_abort: true,
             want_pending_before_abort: true,
         },
@@ -523,6 +537,7 @@ fn unified_normalizer_and_stream_invariants() {
             want_err: Some(StatusCode::INTERNAL_SERVER_ERROR),
             want_status: StatusCode::INTERNAL_SERVER_ERROR,
             want_cl: None,
+            want_body: b"",
             want_abort: false,
             want_pending_before_abort: false,
         },
@@ -537,6 +552,7 @@ fn unified_normalizer_and_stream_invariants() {
             want_err: Some(StatusCode::INTERNAL_SERVER_ERROR),
             want_status: StatusCode::INTERNAL_SERVER_ERROR,
             want_cl: None,
+            want_body: b"",
             want_abort: false,
             want_pending_before_abort: false,
         },
@@ -551,6 +567,7 @@ fn unified_normalizer_and_stream_invariants() {
             want_err: None,
             want_status: StatusCode::OK,
             want_cl: None,
+            want_body: b"",
             want_abort: true,
             want_pending_before_abort: true,
         },
@@ -579,6 +596,7 @@ fn unified_normalizer_and_stream_invariants() {
                     &ext,
                     ShortResponse::full(head, Bytes::from_static(b"hello")),
                 )
+                .await
             }
             SourceKind::ShortStreamUnderRun => {
                 let mut head = ResponseHead::new(case.status);
@@ -588,7 +606,7 @@ fn unified_normalizer_and_stream_invariants() {
                     body: Bytes::from_static(b"hel"),
                     rest: Some(Box::new(VecStream(vec![Ok(Bytes::from_static(b"lo"))]))),
                 };
-                build_short_response(&chain, 0, case.is_head, false, &ext, short)
+                build_short_response(&chain, 0, case.is_head, false, &ext, short).await
             }
             SourceKind::PhpComplete | SourceKind::PhpTruncated => {
                 let mut head = ResponseHead::new(case.status);
@@ -604,6 +622,7 @@ fn unified_normalizer_and_stream_invariants() {
                         truncated: matches!(case.kind, SourceKind::PhpTruncated),
                     },
                 )
+                .await
             }
             SourceKind::PhpStream => {
                 let (tx, rx) = mpsc::channel(4);
@@ -619,6 +638,7 @@ fn unified_normalizer_and_stream_invariants() {
                     &ext,
                     Start::Stream { head, rx },
                 )
+                .await
             }
         };
 
@@ -637,7 +657,9 @@ fn unified_normalizer_and_stream_invariants() {
             case.name
         );
 
-        let (_chunks, aborted, pendings) = drain_body(resp.into_body());
+        let (chunks, aborted, pendings) = drain_body(resp.into_body());
+        let body: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        assert_eq!(body, case.want_body, "{}", case.name);
         assert_eq!(aborted, case.want_abort, "{}", case.name);
         if case.want_pending_before_abort {
             assert!(
@@ -646,5 +668,94 @@ fn unified_normalizer_and_stream_invariants() {
                 case.name
             );
         }
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn complete_response_encoding_offloads_large_bodies() {
+    use std::sync::Mutex;
+    use std::thread::ThreadId;
+
+    struct ThreadRecordingEncoder {
+        seen: Arc<Mutex<Option<ThreadId>>>,
+    }
+
+    impl BodyEncoder for ThreadRecordingEncoder {
+        fn write(&mut self, chunk: &[u8], out: &mut Vec<u8>) -> io::Result<()> {
+            *self.seen.lock().unwrap() = Some(std::thread::current().id());
+            out.extend_from_slice(chunk);
+            Ok(())
+        }
+
+        fn finish(&mut self, _out: &mut Vec<u8>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct ThreadRecordingMw {
+        seen: Arc<Mutex<Option<ThreadId>>>,
+    }
+
+    impl Middleware for ThreadRecordingMw {
+        fn phases(&self) -> Phases {
+            Phases::RESPONSE_HEAD
+        }
+
+        fn on_response_head(
+            &self,
+            _is_head: bool,
+            _extensions: &Extensions,
+            _head: &mut ResponseHead,
+        ) -> Option<Box<dyn BodyEncoder>> {
+            Some(Box::new(ThreadRecordingEncoder {
+                seen: Arc::clone(&self.seen),
+            }))
+        }
+    }
+
+    struct Case {
+        name: &'static str,
+        size: usize,
+        want_offloaded: bool,
+    }
+    let cases = [
+        Case {
+            name: "body at inline threshold encodes on shard thread",
+            size: INLINE_ENCODE_MAX,
+            want_offloaded: false,
+        },
+        Case {
+            name: "body above inline threshold encodes on blocking pool thread",
+            size: INLINE_ENCODE_MAX + 1,
+            want_offloaded: true,
+        },
+    ];
+
+    let shard_tid = std::thread::current().id();
+    for case in cases {
+        let seen = Arc::new(Mutex::new(None));
+        let chain = MiddlewareChain::new(vec![Arc::new(ThreadRecordingMw {
+            seen: Arc::clone(&seen),
+        })]);
+        let payload = vec![b'a'; case.size];
+        let resp = build_php_response(
+            &chain,
+            false,
+            false,
+            &Extensions::new(),
+            Start::Complete {
+                head: ResponseHead::new(200),
+                body: Bytes::from(payload.clone()),
+                truncated: false,
+            },
+        )
+        .await
+        .expect(case.name);
+        let (chunks, aborted, _) = drain_body(resp.into_body());
+        assert!(!aborted, "{}", case.name);
+        let got: Vec<u8> = chunks.iter().flat_map(|c| c.iter().copied()).collect();
+        assert_eq!(got, payload, "{}", case.name);
+        let ran_on = seen.lock().unwrap().expect("encoder ran");
+        assert_eq!(ran_on != shard_tid, case.want_offloaded, "{}", case.name);
     }
 }

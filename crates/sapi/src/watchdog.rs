@@ -45,11 +45,13 @@ fn signal_result(code: c_int) -> io::Result<()> {
 
 /// Only PHP workers may receive the execution timer signal.
 pub fn block_timer_signal() -> io::Result<()> {
+    // SAFETY: blocks the static timer signal on the calling thread via pthread_sigmask.
     signal_result(unsafe { rapira_watchdog_block_timer() })
 }
 
 /// Call on the main thread after PHP module startup and before any pool starts.
 pub(crate) fn reserve_wake_signal() -> io::Result<()> {
+    // SAFETY: installs the process-wide async-signal-safe wake handler before worker threads spawn.
     signal_result(unsafe { rapira_watchdog_install() })
 }
 
@@ -152,6 +154,7 @@ pub(crate) unsafe fn enter(pool: Arc<Pool>, index: usize, timeout: Duration) -> 
             pool,
             index,
             timeout,
+            // SAFETY: called on this PHP thread after `rapira_thread_start`, before `Guard` drops.
             interrupt: unsafe { rapira_watchdog_capture() },
             wake: watch::Sender::new(false),
             unit: Unit::Idle,
@@ -199,6 +202,7 @@ fn set_unit(unit: Unit) {
             let worker = &mut *guard;
             if worker.unit.replace(unit, &worker.pool.blocked) {
                 // The previous fire has returned. Withdraw its timeout before the next unit or boot.
+                // SAFETY: `worker.interrupt` belongs to this live PHP thread and is protected by `slot`.
                 unsafe { rapira_watchdog_clear(&worker.interrupt) };
                 worker.wake.send_replace(false);
             }
@@ -218,6 +222,7 @@ impl Worker {
         ) {
             Escalation::None => {}
             Escalation::Interrupt => {
+                // SAFETY: `self` is locked under `WORKERS`, so the target worker thread has not exited `Guard::drop`.
                 unsafe { rapira_watchdog_fire(&self.interrupt) };
                 self.wake.send_replace(true);
                 warn!(target: "rapira", "{pool}.pool.request_terminate_timeout_secs exceeded on worker {index} ({timeout:?}); interrupting the request");
@@ -263,11 +268,11 @@ pub(crate) fn start() -> io::Result<Watchdog> {
 impl Drop for Watchdog {
     fn drop(&mut self) {
         let _ = self.stop.send(());
-        self.thread
-            .take()
-            .unwrap()
-            .join()
-            .expect("join the watchdog");
+        if let Some(thread) = self.thread.take()
+            && thread.join().is_err()
+        {
+            error!(target: "rapira", "watchdog thread panicked");
+        }
     }
 }
 

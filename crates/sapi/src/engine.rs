@@ -142,6 +142,7 @@ impl Engine {
             "the PHP engine can start only once per process"
         );
 
+        // SAFETY: reads compile-time PHP build capability flag without touching PHP state.
         let disable_timeouts = workers > 1 && !unsafe { rapira_has_execution_timers() };
         let mut module = module::build_sapi_module();
         // SAFETY: only this thread starts PHP. The register functions stay valid for the life of the process.

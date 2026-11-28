@@ -103,6 +103,7 @@ impl crate::Engine {
                     let result = catch_unwind(AssertUnwindSafe(|| {
                         // SAFETY: MINIT has finished. This is the first PHP call on this thread.
                         unsafe { plugin.enter() };
+                        // SAFETY: `plugin.enter()` ran `rapira_thread_start`, and `guard` drops before `rapira_thread_end`.
                         let guard = unsafe {
                             crate::watchdog::enter(
                                 Arc::clone(&pool),

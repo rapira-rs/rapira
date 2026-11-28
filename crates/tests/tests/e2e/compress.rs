@@ -183,13 +183,23 @@ fn compress_middleware_negotiates_and_encodes_php_responses() {
     );
     assert_eq!(resp.status(), 200);
     assert_eq!(resp.header("content-encoding").as_deref(), Some("zstd"));
+    assert_eq!(resp.header("vary").as_deref(), Some("Accept-Encoding"));
     assert_eq!(String::from_utf8_lossy(&unzstd(&resp.body)), file_contents);
+}
+
+struct TempDir(std::path::PathBuf);
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
 
 /// Onion order applies outer `compress` to inner `static` hits, while `static` outer to `compress` serves static hits uncompressed.
 #[test]
 fn compress_and_static_follow_config_onion_order() {
     let root = scratch_dir();
+    let _cleanup = TempDir(root.clone());
     let css = "body { color: red; }\n".repeat(200);
     std::fs::write(root.join("app.css"), &css).expect("write app.css");
 
@@ -257,7 +267,11 @@ fn compress_and_static_follow_config_onion_order() {
             case.name,
             php_resp.head
         );
-        let decoded = gunzip(&php_resp.body);
+        let decoded = match case.php_encoded {
+            Some("gzip") => gunzip(&php_resp.body),
+            Some("zstd") => unzstd(&php_resp.body),
+            _ => php_resp.body,
+        };
         assert_eq!(
             String::from_utf8_lossy(&decoded),
             "hello rapira compression ".repeat(100),
@@ -265,14 +279,13 @@ fn compress_and_static_follow_config_onion_order() {
             case.name
         );
     }
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// HEAD responses apply compression headers using the representation length and omit the uncompressed Content-Length.
 #[test]
 fn compress_middleware_handles_head_without_uncompressed_content_length() {
     let root = scratch_dir();
+    let _cleanup = TempDir(root.clone());
     let css = "body { color: red; }\n".repeat(200);
     std::fs::write(root.join("app.css"), &css).expect("write app.css");
 
@@ -363,14 +376,13 @@ fn compress_middleware_handles_head_without_uncompressed_content_length() {
             );
         }
     }
-
-    let _ = std::fs::remove_dir_all(&root);
 }
 
 /// Conditional 304 responses for compressed static assets keep Vary: Accept-Encoding and match the 200 ETag weakness.
 #[test]
 fn compress_preserves_vary_and_weak_etag_on_static_304() {
     let root = scratch_dir();
+    let _cleanup = TempDir(root.clone());
     let css = "body { color: blue; }\n".repeat(200);
     std::fs::write(root.join("app.css"), &css).expect("write app.css");
     let png = vec![0x89u8; 4096];
@@ -493,6 +505,4 @@ fn compress_preserves_vary_and_weak_etag_on_static_304() {
             case.name, resp.head
         );
     }
-
-    let _ = std::fs::remove_dir_all(&root);
 }

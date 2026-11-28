@@ -1,4 +1,4 @@
-//! Passes raw bytes through the multipart parser of the dispatcher mode. The bytes before the first LF are the Content-Type value and the rest is the body. The calls follow Form::open in crates/plugins/http/src/handler.rs. The target parses the body once as one part, once split into parts and once byte by byte, and the results must agree.
+//! Passes raw bytes through the multipart parser of the dispatcher mode. The bytes before the first LF are the Content-Type value and the rest is the body. The calls follow `read_request_body` in `crates/plugins/http/src/intake/mod.rs`. The target parses the body once as one part, once split into parts and once byte by byte, and the results must agree.
 
 #![no_main]
 
