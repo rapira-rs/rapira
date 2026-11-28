@@ -3,7 +3,7 @@ edition = "2024"
 
 [package]
 name = "rapira_core"
-version = "0.9.2"
+version = "0.10.0"
 edition.workspace = true
 description = "PHP application server with HTTP and gRPC worker pools"
 homepage = "https://rapira.rs"
