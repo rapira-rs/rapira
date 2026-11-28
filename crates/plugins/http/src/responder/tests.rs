@@ -376,6 +376,14 @@ async fn compressed_declared_under_run_aborts() {
         let resp = build_php_response(&chain, false, false, &ctx.extensions, start)
             .await
             .unwrap();
+        assert_eq!(
+            resp.headers()
+                .get(http::header::CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+            Some("gzip"),
+            "{}",
+            case.name
+        );
         let (_chunks, aborted, _pendings) = drain_body(resp.into_body());
         assert_eq!(aborted, case.want_abort, "{}", case.name);
     }
@@ -757,5 +765,116 @@ async fn complete_response_encoding_offloads_large_bodies() {
         assert_eq!(got, payload, "{}", case.name);
         let ran_on = seen.lock().unwrap().expect("encoder ran");
         assert_eq!(ran_on != shard_tid, case.want_offloaded, "{}", case.name);
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn hop_by_hop_connection_nominations_do_not_strip_middleware_headers() {
+    use http::header::{ACCEPT_ENCODING, CONTENT_ENCODING, CONTENT_TYPE, VARY};
+    use http::{HeaderMap, HeaderValue, Method, Uri, Version};
+    use rapira_http_middleware::{Peer, PeerAddr, RequestCtx};
+
+    struct Case {
+        name: &'static str,
+        connection: &'static str,
+        extra_header: Option<(&'static str, &'static str)>,
+        want_extra_present: bool,
+    }
+    let cases = [
+        Case {
+            name: "Connection nominating content-encoding and vary preserves Compress headers",
+            connection: "content-encoding, vary",
+            extra_header: None,
+            want_extra_present: false,
+        },
+        Case {
+            name: "Connection nominating application header strips it before Compress runs",
+            connection: "x-hop",
+            extra_header: Some(("x-hop", "secret")),
+            want_extra_present: false,
+        },
+    ];
+
+    let compress = Arc::new(rapira_compress::Compress::new(
+        rapira_compress::resolve(rapira_compress::Section {
+            min_size: Some(16),
+            ..Default::default()
+        })
+        .unwrap(),
+    ));
+    let chain = MiddlewareChain::new(vec![compress.clone() as Arc<dyn Middleware>]);
+
+    let mut req_headers = HeaderMap::new();
+    req_headers.insert(ACCEPT_ENCODING, HeaderValue::from_static("gzip"));
+    let mut ctx = RequestCtx {
+        method: Method::GET,
+        uri: Uri::from_static("/"),
+        version: Version::HTTP_11,
+        headers: req_headers,
+        peer: Peer {
+            remote: PeerAddr::Inet(([127, 0, 0, 1], 40000).into()),
+            server: PeerAddr::Inet(([127, 0, 0, 1], 8000).into()),
+            https: false,
+            received_at: 0.0,
+        },
+        extensions: Extensions::new(),
+    };
+    let _ = compress.on_request(&mut ctx);
+
+    for case in cases {
+        let mut head = ResponseHead::new(200);
+        head.headers
+            .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+        head.headers
+            .insert(CONNECTION, HeaderValue::from_static(case.connection));
+        if let Some((k, v)) = case.extra_header {
+            head.headers.insert(
+                http::header::HeaderName::from_static(k),
+                HeaderValue::from_static(v),
+            );
+        }
+        let resp = build_php_response(
+            &chain,
+            false,
+            false,
+            &ctx.extensions,
+            Start::Complete {
+                head,
+                body: Bytes::from(vec![b'a'; 128]),
+                truncated: false,
+            },
+        )
+        .await
+        .expect(case.name);
+
+        assert_eq!(
+            resp.headers()
+                .get(CONTENT_ENCODING)
+                .and_then(|v| v.to_str().ok()),
+            Some("gzip"),
+            "{}",
+            case.name
+        );
+        assert!(
+            resp.headers()
+                .get(VARY)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|v| v.eq_ignore_ascii_case("accept-encoding")),
+            "{}: missing Vary: Accept-Encoding",
+            case.name
+        );
+        assert!(
+            !resp.headers().contains_key(CONNECTION),
+            "{}: Connection must be stripped",
+            case.name
+        );
+        if let Some((k, _)) = case.extra_header {
+            assert_eq!(
+                resp.headers().contains_key(k),
+                case.want_extra_present,
+                "{}",
+                case.name
+            );
+        }
     }
 }

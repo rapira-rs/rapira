@@ -80,18 +80,25 @@ impl Serving {
         });
     }
 
-    /// Waits for the open connections after the listener closes.
-    async fn drain(self, grace: Duration) -> Result<()> {
+    /// Waits for the open connections after the listener stops or fails.
+    async fn drain(self, run: Result<()>, grace: Duration) -> Result<()> {
         self.health.send_replace(Status::NotServing);
         drop(self.health);
         tracing::info!(target: "grpc", "draining open connections");
         let drained = self.connections.drain(grace).await;
         // An HTTP/1.1 connection that stays idle until the deadline holds no call, so only a call in flight fails the drain.
         let cut = self.inflight.load(Relaxed);
-        if !drained && cut > 0 {
-            return Err(anyhow!(
-                "grpc drain timed out after {grace:?}; {cut} call(s) in flight were cut"
-            ));
+        let drain_err = (!drained && cut > 0).then(|| {
+            anyhow!("grpc drain timed out after {grace:?}; {cut} call(s) in flight were cut")
+        });
+        if let Err(err) = run {
+            if let Some(drain_err) = drain_err {
+                tracing::warn!(target: "grpc", "{drain_err}");
+            }
+            return Err(err);
+        }
+        if let Some(drain_err) = drain_err {
+            return Err(drain_err);
         }
         tracing::info!(target: "grpc", "drained cleanly; accept loop stopped");
         Ok(())
@@ -163,6 +170,120 @@ pub(crate) async fn serve(
         connections: Connections::default(),
         inflight,
     };
-    server.listener.run(stop, &serving).await?;
-    serving.drain(drain_grace).await
+    let run = server.listener.run(stop, &serving).await;
+    serving.drain(run, drain_grace).await
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+    use std::sync::atomic::AtomicBool;
+
+    use rapira_sapi::queue::PoolQueue;
+
+    use super::*;
+    use crate::schema::{Schema, Source};
+
+    fn test_serving() -> (Serving, watch::Receiver<Status>, Arc<AtomicUsize>) {
+        let (_queue, intake) = PoolQueue::new();
+        let schema_path =
+            Path::new(env!("CARGO_MANIFEST_DIR")).join("../../tests/fixtures/grpc/echo.binpb");
+        let schema = Arc::new(Schema::load(&Source::File(schema_path), None).expect("echo schema"));
+        let inflight = Arc::new(AtomicUsize::new(0));
+        let dispatcher = PhpDispatcher {
+            schema,
+            intake,
+            inflight: Arc::clone(&inflight),
+        };
+        let service = ConnectRpcService::new(Chain(Router::new(), dispatcher));
+        let (health_tx, health_rx) = watch::channel(Status::Serving);
+        let serving = Serving {
+            service,
+            connection: ConnectionConfig::default(),
+            health: health_tx,
+            connections: Connections::default(),
+            inflight: Arc::clone(&inflight),
+        };
+        (serving, health_rx, inflight)
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn drain_runs_after_listener_error_and_preserves_primary_error() {
+        struct Case {
+            name: &'static str,
+            run_err: Option<&'static str>,
+            connection_finishes: bool,
+            want_err_contains: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "clean stop drains active connection and returns Ok",
+                run_err: None,
+                connection_finishes: true,
+                want_err_contains: None,
+            },
+            Case {
+                name: "listener error drains active connection before returning listener error",
+                run_err: Some("listener failed"),
+                connection_finishes: true,
+                want_err_contains: Some("listener failed"),
+            },
+            Case {
+                name: "listener error with stuck inflight call drains for grace and returns listener error",
+                run_err: Some("listener failed"),
+                connection_finishes: false,
+                want_err_contains: Some("listener failed"),
+            },
+            Case {
+                name: "clean stop with stuck inflight call returns drain timeout error",
+                run_err: None,
+                connection_finishes: false,
+                want_err_contains: Some("grpc drain timed out"),
+            },
+        ];
+
+        for case in cases {
+            let (serving, mut health_rx, inflight) = test_serving();
+            let finished = Arc::new(AtomicBool::new(false));
+            let finished_clone = Arc::clone(&finished);
+            let inflight_clone = Arc::clone(&inflight);
+            let mut conn_health = health_rx.clone();
+            let finishes = case.connection_finishes;
+            serving.connections.spawn(async move {
+                let _guard = InFlight::start(&inflight_clone);
+                if finishes {
+                    let _ = conn_health.wait_for(|&s| s == Status::NotServing).await;
+                    finished_clone.store(true, Relaxed);
+                } else {
+                    std::future::pending::<()>().await;
+                }
+            });
+            tokio::task::yield_now().await;
+
+            let run = match case.run_err {
+                Some(msg) => Err(anyhow!(msg)),
+                None => Ok(()),
+            };
+            let got = serving.drain(run, Duration::from_millis(30)).await;
+            assert_eq!(
+                *health_rx.borrow_and_update(),
+                Status::NotServing,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                finished.load(Relaxed),
+                case.connection_finishes,
+                "{}",
+                case.name
+            );
+            match case.want_err_contains {
+                None => assert!(got.is_ok(), "{}: got={got:?}", case.name),
+                Some(needle) => {
+                    let msg = format!("{:#}", got.expect_err(case.name));
+                    assert!(msg.contains(needle), "{}: msg={msg}", case.name);
+                }
+            }
+        }
+    }
 }

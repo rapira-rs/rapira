@@ -237,7 +237,7 @@ struct Waiters {
 /// Shared queue core for one worker pool.
 /// Read-mostly control fields stay on cache line 0, isolated from every mutated counter and mutex.
 #[repr(C)]
-pub(crate) struct PoolQueue {
+pub struct PoolQueue {
     rx: Receiver<Entry>,
     reload_gen: AtomicU64,
     failed_on_full_queue: AtomicU64,
@@ -255,7 +255,7 @@ pub(crate) struct PoolQueue {
 }
 
 impl PoolQueue {
-    pub(crate) fn new() -> (Arc<Self>, Intake) {
+    pub fn new() -> (Arc<Self>, Intake) {
         let (tx, rx) = bounded(INTAKE_SLOTS);
         let queue = Arc::new(Self {
             rx,

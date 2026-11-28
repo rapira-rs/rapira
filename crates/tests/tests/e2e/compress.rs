@@ -1,5 +1,6 @@
-use std::io::Read;
-use std::net::SocketAddr;
+use std::io::{Read, Write};
+use std::net::{SocketAddr, TcpStream};
+use std::time::Duration;
 
 use http::Method;
 use http::header::{HeaderName, HeaderValue};
@@ -18,7 +19,92 @@ fn send(addr: SocketAddr, method: Method, target: &str, headers: &[(&str, &str)]
             HeaderValue::from_str(value).expect("header value"),
         );
     }
-    drain_resp(submit(addr, r).expect("submit request"))
+    let resp = drain_resp(submit(addr, r).expect("submit request"));
+    assert!(
+        resp.ended && !resp.truncated,
+        "incomplete HTTP response for {target}: ended={}, truncated={}, head={:?}",
+        resp.ended,
+        resp.truncated,
+        resp.head
+    );
+    resp
+}
+
+struct RawResp {
+    status: u16,
+    head: String,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+impl RawResp {
+    fn header(&self, name: &str) -> Option<&str> {
+        self.headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    }
+
+    fn has_vary_accept_encoding(&self) -> bool {
+        self.headers.iter().any(|(k, v)| {
+            k.eq_ignore_ascii_case("vary") && v.to_ascii_lowercase().contains("accept-encoding")
+        })
+    }
+}
+
+/// Sends an HTTP/1.1 request with `Connection: close` over a raw TCP socket and reads through EOF so stray payload bytes on `HEAD` and `304` are not hidden by a client body parser.
+fn send_raw_no_body(
+    addr: SocketAddr,
+    method: Method,
+    target: &str,
+    headers: &[(&str, &str)],
+) -> RawResp {
+    let mut stream = TcpStream::connect(addr).expect("connect raw tcp");
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .expect("set read timeout");
+    let mut raw_req =
+        format!("{method} {target} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n");
+    for &(name, value) in headers {
+        raw_req.push_str(name);
+        raw_req.push_str(": ");
+        raw_req.push_str(value);
+        raw_req.push_str("\r\n");
+    }
+    raw_req.push_str("\r\n");
+    stream.write_all(raw_req.as_bytes()).expect("write raw req");
+
+    let mut wire = Vec::new();
+    stream
+        .take(64 * 1024)
+        .read_to_end(&mut wire)
+        .expect("read raw response through EOF");
+    let split = wire
+        .windows(4)
+        .position(|w| w == b"\r\n\r\n")
+        .expect("response header terminator");
+    let head = String::from_utf8_lossy(&wire[..split]).into_owned();
+    let body = wire[split + 4..].to_vec();
+    let mut lines = head.split("\r\n");
+    let status_line = lines.next().expect("status line");
+    let status = status_line
+        .split_whitespace()
+        .nth(1)
+        .expect("status code")
+        .parse::<u16>()
+        .expect("numeric status");
+    let mut parsed_headers = Vec::new();
+    for line in lines {
+        if let Some((k, v)) = line.split_once(':') {
+            parsed_headers.push((k.trim().to_ascii_lowercase(), v.trim().to_owned()));
+        }
+    }
+    RawResp {
+        status,
+        head,
+        headers: parsed_headers,
+        body,
+    }
 }
 
 fn gunzip(data: &[u8]) -> Vec<u8> {
@@ -336,22 +422,23 @@ fn compress_middleware_handles_head_without_uncompressed_content_length() {
             .accept
             .map(|v| vec![("Accept-Encoding", v)])
             .unwrap_or_default();
-        let resp = send(srv.addr, Method::HEAD, case.target, &headers);
-        assert_eq!(resp.status(), 200, "{}\n{}", case.name, diagnostics(&srv));
+        let resp = send_raw_no_body(srv.addr, Method::HEAD, case.target, &headers);
+        assert_eq!(resp.status, 200, "{}\n{}", case.name, diagnostics(&srv));
         assert!(
             resp.body.is_empty(),
-            "{}: HEAD body must be empty",
-            case.name
+            "{}: HEAD wire bytes after headers must be empty, got {:?}",
+            case.name,
+            resp.body
         );
         assert_eq!(
-            resp.header("content-encoding").as_deref(),
+            resp.header("content-encoding"),
             case.want_encoding,
             "{}: head={:?}",
             case.name,
             resp.head
         );
         assert_eq!(
-            resp.header("content-length").as_deref(),
+            resp.header("content-length"),
             case.want_content_length,
             "{}: head={:?}",
             case.name,
@@ -359,7 +446,7 @@ fn compress_middleware_handles_head_without_uncompressed_content_length() {
         );
         if let Some(etag) = case.want_etag {
             assert_eq!(
-                resp.header("etag").as_deref(),
+                resp.header("etag"),
                 Some(etag),
                 "{}: head={:?}",
                 case.name,
@@ -367,9 +454,8 @@ fn compress_middleware_handles_head_without_uncompressed_content_length() {
             );
         }
         if case.want_encoding.is_some() {
-            let vary = resp.header("vary").unwrap_or_default();
             assert!(
-                vary.to_ascii_lowercase().contains("accept-encoding"),
+                resp.has_vary_accept_encoding(),
                 "{}: missing Vary: Accept-Encoding in {:?}",
                 case.name,
                 resp.head
@@ -476,12 +562,13 @@ fn compress_preserves_vary_and_weak_etag_on_static_304() {
         if let Some(ae) = case.accept {
             headers.push(("Accept-Encoding", ae));
         }
-        let resp = send(srv.addr, Method::GET, case.target, &headers);
-        assert_eq!(resp.status(), 304, "{}: head={:?}", case.name, resp.head);
+        let resp = send_raw_no_body(srv.addr, Method::GET, case.target, &headers);
+        assert_eq!(resp.status, 304, "{}: head={:?}", case.name, resp.head);
         assert!(
             resp.body.is_empty(),
-            "{}: 304 body must be empty",
-            case.name
+            "{}: 304 wire bytes after headers must be empty, got {:?}",
+            case.name,
+            resp.body
         );
         assert_eq!(
             resp.header("content-encoding"),
@@ -490,19 +577,18 @@ fn compress_preserves_vary_and_weak_etag_on_static_304() {
             case.name
         );
         assert_eq!(
-            resp.header("etag").as_deref(),
+            resp.header("etag"),
             Some(case.want_etag.as_str()),
             "{}: head={:?}",
             case.name,
             resp.head
         );
-        let has_vary = resp
-            .header("vary")
-            .is_some_and(|v| v.to_ascii_lowercase().contains("accept-encoding"));
         assert_eq!(
-            has_vary, case.want_vary,
+            resp.has_vary_accept_encoding(),
+            case.want_vary,
             "{}: head={:?}",
-            case.name, resp.head
+            case.name,
+            resp.head
         );
     }
 }

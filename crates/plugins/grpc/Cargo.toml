@@ -34,4 +34,5 @@ ureq = { workspace = true }
 rapira_php_build = { workspace = true }
 
 [dev-dependencies]
+tokio = { workspace = true, features = ["rt", "macros"] }
 toml = { workspace = true }

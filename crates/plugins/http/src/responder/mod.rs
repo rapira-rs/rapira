@@ -174,11 +174,11 @@ async fn build_response(
         }
     };
 
+    strip_hop_by_hop(&mut head.headers);
     let encoders = chain.run_response_head(outer_depth, is_head, extensions, &mut head);
     let bodiless = bodiless || is_bodiless_status(head.status);
     let status = StatusCode::from_u16(head.status).unwrap_or(StatusCode::BAD_GATEWAY);
     let mut headers = head.headers;
-    strip_hop_by_hop(&mut headers);
     if closing || (truncated_complete && bodiless) {
         headers.insert(CONNECTION, HeaderValue::from_static("close"));
     }

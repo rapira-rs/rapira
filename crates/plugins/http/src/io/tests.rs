@@ -366,6 +366,18 @@ async fn track_body_and_request_scope_lifecycle() {
         scope.attach_slot(Arc::clone(&slot));
 
         if matches!(case.kind, Kind::DropMidWaitStart) {
+            {
+                let mut wait = std::pin::pin!(scope.wait_start());
+                let mut cx = Context::from_waker(std::task::Waker::noop());
+                assert!(
+                    matches!(
+                        std::future::Future::poll(wait.as_mut(), &mut cx),
+                        Poll::Pending
+                    ),
+                    "{}: wait_start must register waker before drop",
+                    case.name
+                );
+            }
             drop(scope);
             assert_eq!(inflight.local.get(), 0, "{}", case.name);
             assert_eq!(phase.current().0, IoPhase::ReadHead, "{}", case.name);
@@ -479,7 +491,6 @@ async fn track_body_and_request_scope_lifecycle() {
                 case.name
             );
         } else {
-            phase.on_flushed();
             phase.cancel_pending();
             assert_eq!(
                 slot.is_cancelled(),

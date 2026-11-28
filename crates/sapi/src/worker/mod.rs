@@ -379,6 +379,9 @@ impl Worker {
             match &got {
                 Pull::Unit(unit) if unit.cancelled() => {
                     self.pool.record_worker(self.index, Event::Shed);
+                    if deadline.is_some_and(|d| Instant::now() >= d) {
+                        return Pull::NoUnit;
+                    }
                     continue;
                 }
                 Pull::Unit(_) => self.received.set(true),

@@ -5,6 +5,7 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::mpsc as std_mpsc;
 use std::thread;
 use std::time::Duration;
 
@@ -186,6 +187,7 @@ fn run_shard(
     inflight_atomic: Arc<InflightShard>,
     mut rx: mpsc::UnboundedReceiver<Accepted>,
     mut cut: watch::Receiver<bool>,
+    ready: std_mpsc::SyncSender<std::io::Result<()>>,
     rx_drained: oneshot::Sender<usize>,
     done: oneshot::Sender<()>,
 ) {
@@ -193,9 +195,13 @@ fn run_shard(
         .enable_all()
         .build()
     {
-        Ok(rt) => rt,
+        Ok(rt) => {
+            let _ = ready.send(Ok(()));
+            rt
+        }
         Err(e) => {
             tracing::error!(target: "http", "failed to start HTTP IO shard runtime: {e}");
+            let _ = ready.send(Err(e));
             let _ = done.send(());
             return;
         }
@@ -289,7 +295,7 @@ fn run_shard(
         let _enter = rt.enter();
         drop(local);
     }
-    drop(rt);
+    rt.shutdown_background();
     let _ = done.send(());
 }
 
@@ -343,6 +349,21 @@ impl Drop for Serving {
     }
 }
 
+fn wait_shards_ready(ready_rxs: Vec<std_mpsc::Receiver<std::io::Result<()>>>) -> Result<()> {
+    for (i, ready_rx) in ready_rxs.into_iter().enumerate() {
+        match ready_rx.recv() {
+            Ok(Ok(())) => {}
+            Ok(Err(e)) => {
+                return Err(e).with_context(|| format!("starting HTTP IO shard {i} runtime"));
+            }
+            Err(_) => {
+                return Err(anyhow!("HTTP IO shard {i} exited before runtime startup"));
+            }
+        }
+    }
+    Ok(())
+}
+
 impl Serving {
     fn start(intake: Intake, mut config: Config) -> Result<Self> {
         let cpus = thread::available_parallelism().map_or(1, usize::from);
@@ -365,8 +386,10 @@ impl Serving {
             done_rxs: Vec::with_capacity(num_shards),
             handles: Vec::with_capacity(num_shards),
         };
+        let mut ready_rxs = Vec::with_capacity(num_shards);
         for i in 0..num_shards {
             let (tx, rx) = mpsc::unbounded_channel();
+            let (ready_tx, ready_rx) = std_mpsc::sync_channel(1);
             let (rx_drained_tx, rx_drained_rx) = oneshot::channel();
             let (done_tx, done_rx) = oneshot::channel();
             let shard = serving.shared.inflight.shard_at(i);
@@ -375,14 +398,24 @@ impl Serving {
             let handle = thread::Builder::new()
                 .name(format!("rapira-io-{i}"))
                 .spawn(move || {
-                    run_shard(shared_clone, shard, rx, cut_rx, rx_drained_tx, done_tx);
+                    run_shard(
+                        shared_clone,
+                        shard,
+                        rx,
+                        cut_rx,
+                        ready_tx,
+                        rx_drained_tx,
+                        done_tx,
+                    );
                 })
                 .with_context(|| format!("spawning HTTP IO shard {i}"))?;
             serving.senders.push(tx);
             serving.rx_drained_rxs.push(rx_drained_rx);
             serving.done_rxs.push(done_rx);
             serving.handles.push(handle);
+            ready_rxs.push(ready_rx);
         }
+        wait_shards_ready(ready_rxs)?;
         Ok(serving)
     }
 
@@ -467,6 +500,219 @@ pub(crate) async fn serve(
         Err(e) => {
             serving.join_shards().await;
             Err(e)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::io::{self, Write};
+    use std::net::{TcpListener, TcpStream};
+    use std::sync::Mutex;
+    use std::time::Instant;
+
+    use bytes::Bytes;
+    use rapira_http_middleware::{
+        BodyEncoder, Middleware, Phases, RequestCtx, RequestStep, ResponseHead, ShortResponse,
+    };
+    use rapira_sapi::queue::PoolQueue;
+
+    use super::*;
+
+    struct LargeShortMw;
+
+    impl Middleware for LargeShortMw {
+        fn phases(&self) -> Phases {
+            Phases::REQUEST
+        }
+
+        fn on_request<'a>(&'a self, _req: &'a mut RequestCtx) -> RequestStep<'a> {
+            RequestStep::Respond(ShortResponse::full(
+                ResponseHead::new(200),
+                Bytes::from(vec![b'x'; 256 << 10]),
+            ))
+        }
+    }
+
+    struct BlockingEncoder {
+        started: Option<std_mpsc::SyncSender<()>>,
+        release: Arc<Mutex<Option<std_mpsc::Receiver<()>>>>,
+    }
+
+    impl BodyEncoder for BlockingEncoder {
+        fn write(&mut self, chunk: &[u8], out: &mut Vec<u8>) -> io::Result<()> {
+            if let Some(tx) = self.started.take() {
+                let _ = tx.send(());
+            }
+            if let Some(rx) = self.release.lock().unwrap().take() {
+                let _ = rx.recv_timeout(Duration::from_millis(1200));
+            }
+            out.extend_from_slice(chunk);
+            Ok(())
+        }
+
+        fn finish(&mut self, _out: &mut Vec<u8>) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    struct BlockingEncodeMw {
+        started: std_mpsc::SyncSender<()>,
+        release: Arc<Mutex<Option<std_mpsc::Receiver<()>>>>,
+    }
+
+    impl Middleware for BlockingEncodeMw {
+        fn phases(&self) -> Phases {
+            Phases::RESPONSE_HEAD
+        }
+
+        fn on_response_head(
+            &self,
+            _is_head: bool,
+            _extensions: &Extensions,
+            _head: &mut ResponseHead,
+        ) -> Option<Box<dyn BodyEncoder>> {
+            Some(Box::new(BlockingEncoder {
+                started: Some(self.started.clone()),
+                release: Arc::clone(&self.release),
+            }))
+        }
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn drain_bounds_shutdown_when_blocking_task_is_stuck() {
+        struct Case {
+            name: &'static str,
+            block_encode: bool,
+            want_err: bool,
+        }
+        let cases = [
+            Case {
+                name: "idle shard drains cleanly within grace",
+                block_encode: false,
+                want_err: false,
+            },
+            Case {
+                name: "drain deadline cuts off stuck spawn_blocking task without hanging join_shards",
+                block_encode: true,
+                want_err: true,
+            },
+        ];
+
+        for case in cases {
+            let (_queue, intake) = PoolQueue::new();
+            let listener = TcpListener::bind("127.0.0.1:0").expect("bind loopback");
+            let addr = listener.local_addr().expect("local addr");
+            let (started_tx, started_rx) = std_mpsc::sync_channel(1);
+            let (release_tx, release_rx) = std_mpsc::sync_channel(1);
+            let middleware: Vec<Arc<dyn Middleware>> = if case.block_encode {
+                vec![
+                    Arc::new(BlockingEncodeMw {
+                        started: started_tx,
+                        release: Arc::new(Mutex::new(Some(release_rx))),
+                    }),
+                    Arc::new(LargeShortMw),
+                ]
+            } else {
+                Vec::new()
+            };
+            let config = Config {
+                listen: ListenAddr::Tcp(addr),
+                server_name: "localhost".to_owned(),
+                server_port: addr.port(),
+                max_body_size: 1024 * 1024,
+                superglobals: false,
+                write_timeout: Duration::from_secs(5),
+                keepalive_timeout: Duration::from_secs(5),
+                middleware,
+                uploads: None,
+                sendfile_root: PathBuf::from("."),
+            };
+            let serving = Serving::start(intake, config).expect("start serving");
+
+            let _client = if case.block_encode {
+                let mut client = TcpStream::connect(addr).expect("connect loopback");
+                let (server_stream, peer) = listener.accept().expect("accept loopback");
+                server_stream
+                    .set_nonblocking(true)
+                    .expect("set_nonblocking");
+                serving.spawn_tcp(server_stream, peer);
+                client
+                    .write_all(b"GET / HTTP/1.1\r\nHost: localhost\r\n\r\n")
+                    .expect("write request");
+                started_rx
+                    .recv_timeout(Duration::from_secs(5))
+                    .expect("blocking encoder started");
+                Some(client)
+            } else {
+                None
+            };
+
+            let drain_start = Instant::now();
+            let res = serving.drain(Duration::from_millis(50)).await;
+            let elapsed = drain_start.elapsed();
+            let _ = release_tx.send(());
+
+            assert_eq!(res.is_err(), case.want_err, "{}: res={res:?}", case.name);
+            assert!(
+                elapsed < Duration::from_millis(500),
+                "{}: drain took {elapsed:?}, expected bounded shutdown after grace",
+                case.name
+            );
+        }
+    }
+
+    #[test]
+    fn wait_shards_ready_propagates_startup_failures() {
+        enum Outcome {
+            Ok,
+            BuildErr,
+            Exited,
+        }
+        struct Case {
+            name: &'static str,
+            shards: &'static [Outcome],
+            want_err_contains: Option<&'static str>,
+        }
+        let cases = [
+            Case {
+                name: "all shards ready returns Ok",
+                shards: &[Outcome::Ok, Outcome::Ok],
+                want_err_contains: None,
+            },
+            Case {
+                name: "shard runtime build error returns Err with shard index",
+                shards: &[Outcome::Ok, Outcome::BuildErr],
+                want_err_contains: Some("starting HTTP IO shard 1 runtime"),
+            },
+            Case {
+                name: "shard exiting before signaling returns Err with shard index",
+                shards: &[Outcome::Exited, Outcome::Ok],
+                want_err_contains: Some("HTTP IO shard 0 exited before runtime startup"),
+            },
+        ];
+
+        for case in cases {
+            let mut rxs = Vec::with_capacity(case.shards.len());
+            for outcome in case.shards {
+                let (tx, rx) = std_mpsc::sync_channel(1);
+                match outcome {
+                    Outcome::Ok => tx.send(Ok(())).unwrap(),
+                    Outcome::BuildErr => tx
+                        .send(Err(io::Error::from_raw_os_error(libc::EMFILE)))
+                        .unwrap(),
+                    Outcome::Exited => drop(tx),
+                }
+                rxs.push(rx);
+            }
+            let got = wait_shards_ready(rxs);
+            match case.want_err_contains {
+                None => assert!(got.is_ok(), "{}: got={got:?}", case.name),
+                Some(needle) => {
+                    let msg = format!("{:#}", got.expect_err(case.name));
+                    assert!(msg.contains(needle), "{}: msg={msg}", case.name);
+                }
+            }
         }
     }
 }

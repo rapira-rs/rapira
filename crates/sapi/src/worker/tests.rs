@@ -2,6 +2,7 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 
 use super::*;
 use crate::queue::PoolQueue;
+use crate::work::Unit;
 
 #[derive(Default)]
 struct StubState {
@@ -368,5 +369,96 @@ fn stale_forget_held_and_host_reset_hook_flags_keep_isolation() {
         worker.current_unit.set(None);
         drop(unsafe { Box::from_raw(p1) });
         drop(unsafe { Box::from_raw(p2) });
+    }
+}
+
+#[tokio::test(flavor = "current_thread")]
+async fn timed_pull_stops_when_cancelled_unit_consumes_deadline() {
+    struct Case {
+        name: &'static str,
+        wait: Wait,
+        queue_cancelled_first: bool,
+        want_unit: bool,
+        want_live_left_in_queue: bool,
+    }
+    let cases = [
+        Case {
+            name: "expired Wait::For stops after skipping cancelled unit instead of zero-polling live unit",
+            wait: Wait::For(Duration::ZERO),
+            queue_cancelled_first: true,
+            want_unit: false,
+            want_live_left_in_queue: true,
+        },
+        Case {
+            name: "unexpired Wait::For skips cancelled unit and returns live unit",
+            wait: Wait::For(Duration::from_secs(1)),
+            queue_cancelled_first: true,
+            want_unit: true,
+            want_live_left_in_queue: false,
+        },
+        Case {
+            name: "Wait::Never drains cancelled unit and returns live unit",
+            wait: Wait::Never,
+            queue_cancelled_first: true,
+            want_unit: true,
+            want_live_left_in_queue: false,
+        },
+        Case {
+            name: "Wait::Forever skips cancelled unit and returns live unit",
+            wait: Wait::Forever,
+            queue_cancelled_first: true,
+            want_unit: true,
+            want_live_left_in_queue: false,
+        },
+        Case {
+            name: "Wait::For(0) returns an immediately queued live unit",
+            wait: Wait::For(Duration::ZERO),
+            queue_cancelled_first: false,
+            want_unit: true,
+            want_live_left_in_queue: false,
+        },
+    ];
+
+    for case in cases {
+        let (queue, intake) = PoolQueue::new();
+        let pool = Arc::new(Pool::new("test", 1, Arc::clone(&queue)));
+        let worker = Worker::new(
+            queue.worker_slot(),
+            Arc::clone(&pool),
+            0,
+            Arc::<Workers>::default(),
+            Arc::<OpcacheCoordinator>::default(),
+            0,
+        );
+        if case.queue_cancelled_first {
+            let cancelled = Arc::new(StubState {
+                cancelled: AtomicBool::new(true),
+                ..StubState::default()
+            });
+            intake
+                .submit(Unit::Dispatcher(Box::new(StubHeld(cancelled))), 0)
+                .await
+                .unwrap();
+        }
+        let live = Arc::new(StubState::default());
+        intake
+            .submit(Unit::Dispatcher(Box::new(StubHeld(live))), 0)
+            .await
+            .unwrap();
+
+        let got = worker.next_pull(case.wait);
+        assert_eq!(
+            matches!(got, Pull::Unit(_)),
+            case.want_unit,
+            "{}",
+            case.name
+        );
+        let remaining = worker.next_pull(Wait::Never);
+        assert_eq!(
+            matches!(remaining, Pull::Unit(_)),
+            case.want_live_left_in_queue,
+            "{}",
+            case.name
+        );
     }
 }

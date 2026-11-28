@@ -133,18 +133,10 @@ impl StaticFiles {
                     *head_probe.uri_mut() = req.uri.clone();
                     if let Ok(meta_res) = dir.try_call(head_probe).await
                         && meta_res.status() == StatusCode::OK
-                        && let Some(content_type) =
-                            meta_res.headers().get(header::CONTENT_TYPE).cloned()
+                        && let Some(meta) =
+                            representation_meta_from_head(res.headers(), meta_res.headers())
                     {
-                        let known_len = meta_res
-                            .headers()
-                            .get(header::CONTENT_LENGTH)
-                            .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
-                        req.extensions
-                            .insert(rapira_http_middleware::RepresentationMeta {
-                                content_type,
-                                known_len,
-                            });
+                        req.extensions.insert(meta);
                     }
                 }
                 Some(into_short_response(req.method == Method::HEAD, res).await)
@@ -240,6 +232,29 @@ fn is_miss(e: &std::io::Error) -> bool {
             | std::io::ErrorKind::InvalidInput
             | std::io::ErrorKind::NotADirectory
     )
+}
+
+/// Extracts `RepresentationMeta` from a follow-up `HEAD` response only when its validators match the `304` response.
+fn representation_meta_from_head(
+    not_modified: &http::HeaderMap,
+    head: &http::HeaderMap,
+) -> Option<rapira_http_middleware::RepresentationMeta> {
+    let etag = not_modified.get(header::ETAG);
+    let last_mod = not_modified.get(header::LAST_MODIFIED);
+    if (etag.is_none() && last_mod.is_none())
+        || etag != head.get(header::ETAG)
+        || last_mod != head.get(header::LAST_MODIFIED)
+    {
+        return None;
+    }
+    let content_type = head.get(header::CONTENT_TYPE)?.clone();
+    let known_len = head
+        .get(header::CONTENT_LENGTH)
+        .and_then(|v| v.to_str().ok()?.parse::<u64>().ok());
+    Some(rapira_http_middleware::RepresentationMeta {
+        content_type,
+        known_len,
+    })
 }
 
 /// Builds a head-only probe request for `ServeDir` carrying only the range and precondition headers it reads.
@@ -460,6 +475,106 @@ mod tests {
                     assert_eq!(total, size, "{}", case.name);
                 }
             });
+        }
+    }
+
+    #[test]
+    fn not_modified_metadata_requires_matching_validators() {
+        use http::{HeaderMap, HeaderValue};
+
+        struct Case {
+            name: &'static str,
+            not_mod: &'static [(&'static str, &'static str)],
+            head: &'static [(&'static str, &'static str)],
+            want_ct: Option<&'static str>,
+            want_len: Option<u64>,
+        }
+        let cases = [
+            Case {
+                name: "matching etag and last-modified returns metadata",
+                not_mod: &[
+                    ("etag", "\"1.0-100\""),
+                    ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+                ],
+                head: &[
+                    ("etag", "\"1.0-100\""),
+                    ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+                    ("content-type", "text/css"),
+                    ("content-length", "256"),
+                ],
+                want_ct: Some("text/css"),
+                want_len: Some(256),
+            },
+            Case {
+                name: "mismatched etag after file replacement rejects stale metadata",
+                not_mod: &[
+                    ("etag", "\"1.0-493e0\""),
+                    ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+                ],
+                head: &[
+                    ("etag", "\"1.0-10\""),
+                    ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+                    ("content-type", "text/css"),
+                    ("content-length", "16"),
+                ],
+                want_ct: None,
+                want_len: None,
+            },
+            Case {
+                name: "mismatched last-modified rejects stale metadata",
+                not_mod: &[
+                    ("etag", "\"1.0-100\""),
+                    ("last-modified", "Wed, 21 Oct 2015 07:28:00 GMT"),
+                ],
+                head: &[
+                    ("etag", "\"1.0-100\""),
+                    ("last-modified", "Wed, 21 Oct 2015 07:28:01 GMT"),
+                    ("content-type", "text/css"),
+                    ("content-length", "256"),
+                ],
+                want_ct: None,
+                want_len: None,
+            },
+            Case {
+                name: "missing validators on 304 rejects metadata",
+                not_mod: &[],
+                head: &[("content-type", "text/css"), ("content-length", "256")],
+                want_ct: None,
+                want_len: None,
+            },
+            Case {
+                name: "missing content-type on head returns None",
+                not_mod: &[("etag", "\"1.0-100\"")],
+                head: &[("etag", "\"1.0-100\""), ("content-length", "256")],
+                want_ct: None,
+                want_len: None,
+            },
+        ];
+
+        for case in cases {
+            let to_map = |pairs: &[(&str, &str)]| {
+                let mut m = HeaderMap::new();
+                for &(k, v) in pairs {
+                    m.insert(
+                        header::HeaderName::from_bytes(k.as_bytes()).unwrap(),
+                        HeaderValue::from_str(v).unwrap(),
+                    );
+                }
+                m
+            };
+            let got = representation_meta_from_head(&to_map(case.not_mod), &to_map(case.head));
+            assert_eq!(
+                got.as_ref().and_then(|m| m.content_type.to_str().ok()),
+                case.want_ct,
+                "{}",
+                case.name
+            );
+            assert_eq!(
+                got.as_ref().and_then(|m| m.known_len),
+                case.want_len,
+                "{}",
+                case.name
+            );
         }
     }
 }

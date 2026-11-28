@@ -391,6 +391,7 @@ async fn prepare_body_limits_coalescing_and_multipart() {
         want_short: bool,
         want_body_polled: bool,
         want_raw_len: usize,
+        want_parts: Option<Vec<Vec<u8>>>,
         want_budget: usize,
         want_multipart_files: usize,
     }
@@ -407,6 +408,7 @@ async fn prepare_body_limits_coalescing_and_multipart() {
             want_short: false,
             want_body_polled: false,
             want_raw_len: 0,
+            want_parts: Some(vec![]),
             want_budget: 0,
             want_multipart_files: 0,
         },
@@ -425,6 +427,7 @@ async fn prepare_body_limits_coalescing_and_multipart() {
             want_short: false,
             want_body_polled: false,
             want_raw_len: 0,
+            want_parts: None,
             want_budget: 0,
             want_multipart_files: 0,
         },
@@ -442,6 +445,7 @@ async fn prepare_body_limits_coalescing_and_multipart() {
             want_short: false,
             want_body_polled: false,
             want_raw_len: 0,
+            want_parts: Some(vec![]),
             want_budget: 0,
             want_multipart_files: 0,
         },
@@ -456,6 +460,7 @@ async fn prepare_body_limits_coalescing_and_multipart() {
             want_short: false,
             want_body_polled: true,
             want_raw_len: 5,
+            want_parts: Some(vec![b"hello".to_vec()]),
             want_budget: 5,
             want_multipart_files: 0,
         },
@@ -470,6 +475,7 @@ async fn prepare_body_limits_coalescing_and_multipart() {
             want_short: false,
             want_body_polled: true,
             want_raw_len: 10 + COALESCE_MAX,
+            want_parts: Some(vec![b"1234567890".to_vec(), vec![b'x'; COALESCE_MAX]]),
             want_budget: 10 + COALESCE_MAX,
             want_multipart_files: 0,
         },
@@ -484,6 +490,7 @@ async fn prepare_body_limits_coalescing_and_multipart() {
             want_short: false,
             want_body_polled: true,
             want_raw_len: 0,
+            want_parts: None,
             want_budget: 0,
             want_multipart_files: 0,
         },
@@ -498,6 +505,7 @@ async fn prepare_body_limits_coalescing_and_multipart() {
             want_short: false,
             want_body_polled: true,
             want_raw_len: 0,
+            want_parts: None,
             want_budget: 0,
             want_multipart_files: 0,
         },
@@ -512,6 +520,7 @@ async fn prepare_body_limits_coalescing_and_multipart() {
             want_short: false,
             want_body_polled: true,
             want_raw_len: 0,
+            want_parts: None,
             want_budget: 0,
             want_multipart_files: 0,
         },
@@ -526,6 +535,7 @@ async fn prepare_body_limits_coalescing_and_multipart() {
             want_short: false,
             want_body_polled: true,
             want_raw_len: 3,
+            want_parts: Some(vec![b"abc".to_vec()]),
             want_budget: 3,
             want_multipart_files: 0,
         },
@@ -543,6 +553,7 @@ async fn prepare_body_limits_coalescing_and_multipart() {
             want_short: false,
             want_body_polled: true,
             want_raw_len: 0,
+            want_parts: Some(vec![]),
             want_budget: MP_BODY.len() - SPOOLED_FILE_LEN,
             want_multipart_files: 1,
         },
@@ -557,6 +568,7 @@ async fn prepare_body_limits_coalescing_and_multipart() {
             want_short: true,
             want_body_polled: false,
             want_raw_len: 0,
+            want_parts: None,
             want_budget: 0,
             want_multipart_files: 0,
         },
@@ -653,6 +665,12 @@ async fn prepare_body_limits_coalescing_and_multipart() {
             } => {
                 assert!(!case.want_short, "{}", case.name);
                 assert_eq!(request.body.len(), case.want_raw_len, "{}", case.name);
+                if let Some(want_parts) = case.want_parts {
+                    let got_parts: Vec<&[u8]> =
+                        request.body.parts().iter().map(Bytes::as_ref).collect();
+                    let want_slices: Vec<&[u8]> = want_parts.iter().map(Vec::as_slice).collect();
+                    assert_eq!(got_parts, want_slices, "{}", case.name);
+                }
                 assert_eq!(budget_bytes, case.want_budget, "{}", case.name);
                 let got_files = multipart.as_ref().map_or(0, |m| m.files.len());
                 assert_eq!(got_files, case.want_multipart_files, "{}", case.name);
