@@ -271,6 +271,10 @@ enum Step {
     Trailer,
     Err,
     Stall,
+    Gate {
+        reached: Option<tokio::sync::oneshot::Sender<()>>,
+        release: tokio::sync::oneshot::Receiver<()>,
+    },
 }
 
 struct TestBody {
@@ -303,18 +307,33 @@ impl Body for TestBody {
 
     fn poll_frame(
         mut self: Pin<&mut Self>,
-        _cx: &mut Context<'_>,
+        cx: &mut Context<'_>,
     ) -> Poll<Option<Result<Frame<Self::Data>, Self::Error>>> {
         self.polled.store(true, Ordering::Relaxed);
-        if matches!(self.steps.front(), Some(Step::Stall)) {
-            return Poll::Pending;
+        loop {
+            match self.steps.front_mut() {
+                Some(Step::Stall) => return Poll::Pending,
+                Some(Step::Gate { reached, release }) => {
+                    if let Some(tx) = reached.take() {
+                        let _ = tx.send(());
+                    }
+                    match std::future::Future::poll(Pin::new(release), cx) {
+                        Poll::Pending => return Poll::Pending,
+                        Poll::Ready(_) => {
+                            self.steps.pop_front();
+                            continue;
+                        }
+                    }
+                }
+                _ => break,
+            }
         }
         match self.steps.pop_front() {
             None => Poll::Ready(None),
             Some(Step::Data(b)) => Poll::Ready(Some(Ok(Frame::data(b)))),
             Some(Step::Trailer) => Poll::Ready(Some(Ok(Frame::trailers(HeaderMap::new())))),
             Some(Step::Err) => Poll::Ready(Some(Err(io::Error::other("stream broken")))),
-            Some(Step::Stall) => unreachable!(),
+            Some(Step::Stall | Step::Gate { .. }) => unreachable!(),
         }
     }
 }
@@ -679,11 +698,15 @@ async fn prepare_body_limits_coalescing_and_multipart() {
     }
 }
 
-#[tokio::test(flavor = "current_thread")]
-async fn multipart_upload_offloads_spool_io_from_shard_thread() {
-    use std::future::Future;
-    use std::pin::Pin;
-    use std::task::{Context, Poll, Waker};
+#[test]
+fn multipart_upload_offloads_spool_io_from_shard_thread() {
+    use std::sync::mpsc as std_mpsc;
+
+    let rt = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .max_blocking_threads(1)
+        .build()
+        .expect("build single-blocking-thread runtime");
 
     let dir = std::env::temp_dir().join(format!("rapira-intake-offload-{}", std::process::id()));
     let _ = std::fs::remove_dir_all(&dir);
@@ -711,8 +734,10 @@ async fn multipart_upload_offloads_spool_io_from_shard_thread() {
     .as_bytes();
 
     enum Delivery {
-        SingleFrame,
+        SingleFrameGatedOffload,
         MultiFrame,
+        MultiFrameEndStream,
+        MultiFramePausedReleasesPool,
         MultiFrameOversizePart,
         MultiFrameTimeoutAfterFileOpen,
     }
@@ -725,15 +750,29 @@ async fn multipart_upload_offloads_spool_io_from_shard_thread() {
     }
     let cases = [
         Case {
-            name: "single-frame file upload yields off shard thread before completing",
-            delivery: Delivery::SingleFrame,
+            name: "single-frame file upload blocks on full blocking pool and finishes once released",
+            delivery: Delivery::SingleFrameGatedOffload,
             max_file_size: 4096,
             want_status: None,
             want_files: 1,
         },
         Case {
-            name: "multi-frame file upload streams across blocking task and preserves file",
+            name: "multi-frame file upload streams across finite blocking jobs and preserves file",
             delivery: Delivery::MultiFrame,
+            max_file_size: 4096,
+            want_status: None,
+            want_files: 1,
+        },
+        Case {
+            name: "multi-frame upload ending with is_end_stream finishes on last frame",
+            delivery: Delivery::MultiFrameEndStream,
+            max_file_size: 4096,
+            want_status: None,
+            want_files: 1,
+        },
+        Case {
+            name: "paused multi-frame upload releases blocking thread between network frames",
+            delivery: Delivery::MultiFramePausedReleasesPool,
             max_file_size: 4096,
             want_status: None,
             want_files: 1,
@@ -754,79 +793,177 @@ async fn multipart_upload_offloads_spool_io_from_shard_thread() {
         },
     ];
 
+    let shard_tid = std::thread::current().id();
     let chain = MiddlewareChain::default();
-    for case in cases {
-        let mut limits_cfg = upload_limits.clone();
-        limits_cfg.max_file_size = case.max_file_size;
-        let (body, _) = match case.delivery {
-            Delivery::SingleFrame => {
-                TestBody::from_steps(vec![Step::Data(Bytes::from_static(MP_BODY))], false)
-            }
-            Delivery::MultiFrame | Delivery::MultiFrameOversizePart => {
-                let mid = MP_BODY.len() / 2;
-                TestBody::from_steps(
-                    vec![
-                        Step::Data(Bytes::copy_from_slice(&MP_BODY[..mid])),
-                        Step::Data(Bytes::copy_from_slice(&MP_BODY[mid..])),
-                    ],
-                    false,
-                )
-            }
-            Delivery::MultiFrameTimeoutAfterFileOpen => {
-                let mid = MP_BODY.len() - 12;
-                TestBody::from_steps(
-                    vec![
-                        Step::Data(Bytes::copy_from_slice(&MP_BODY[..mid])),
-                        Step::Stall,
-                    ],
-                    false,
-                )
-            }
-        };
-        let req = HttpRequest::builder()
-            .method(Method::POST)
-            .uri("/upload")
-            .version(Version::HTTP_11)
-            .header("host", "example.test")
-            .header("content-type", "multipart/form-data; boundary=b1")
-            .body(body)
-            .unwrap();
-        let limits = IntakeLimits {
-            superglobals: false,
-            max_body_size: 1024 * 1024,
-            body_timeout: Duration::from_millis(20),
-            uploads: Some(&limits_cfg),
-        };
-        let Admit::Pending(pending) = admit(req, peer(), &chain, &limits).unwrap() else {
-            panic!("{}: expected Pending", case.name);
-        };
-        let mut fut = Box::pin(pending.finish(&chain, &limits));
-        let mut cx = Context::from_waker(Waker::noop());
-        if matches!(case.delivery, Delivery::SingleFrame) {
-            assert!(
-                matches!(Pin::as_mut(&mut fut).poll(&mut cx), Poll::Pending),
-                "{}: multipart spooling must yield off the shard thread on first poll",
-                case.name
-            );
-        }
-        let out = fut.await;
-        match case.want_status {
-            Some(want) => {
-                assert_eq!(out.err(), Some(want), "{}", case.name);
-            }
-            None => match out.expect(case.name) {
-                Prepared::Dispatch { multipart, .. } => {
-                    let mp = multipart.expect(case.name);
-                    assert_eq!(mp.files.len(), case.want_files, "{}", case.name);
+    let local = tokio::task::LocalSet::new();
+
+    rt.block_on(local.run_until(async {
+        for case in cases {
+            let mut limits_cfg = upload_limits.clone();
+            limits_cfg.max_file_size = case.max_file_size;
+            let mut gate_pair = None;
+            let (body, _) = match case.delivery {
+                Delivery::SingleFrameGatedOffload => {
+                    TestBody::from_steps(vec![Step::Data(Bytes::from_static(MP_BODY))], true)
+                }
+                Delivery::MultiFrame | Delivery::MultiFrameOversizePart => {
+                    let mid = MP_BODY.len() / 2;
+                    TestBody::from_steps(
+                        vec![
+                            Step::Data(Bytes::copy_from_slice(&MP_BODY[..mid])),
+                            Step::Data(Bytes::copy_from_slice(&MP_BODY[mid..])),
+                        ],
+                        false,
+                    )
+                }
+                Delivery::MultiFrameEndStream => {
+                    let mid = MP_BODY.len() / 2;
+                    TestBody::from_steps(
+                        vec![
+                            Step::Data(Bytes::copy_from_slice(&MP_BODY[..mid])),
+                            Step::Data(Bytes::copy_from_slice(&MP_BODY[mid..])),
+                        ],
+                        true,
+                    )
+                }
+                Delivery::MultiFramePausedReleasesPool => {
+                    let mid = MP_BODY.len() - 12;
+                    let (reached_tx, reached_rx) = tokio::sync::oneshot::channel();
+                    let (release_tx, release_rx) = tokio::sync::oneshot::channel();
+                    gate_pair = Some((reached_rx, release_tx));
+                    TestBody::from_steps(
+                        vec![
+                            Step::Data(Bytes::copy_from_slice(&MP_BODY[..mid])),
+                            Step::Gate {
+                                reached: Some(reached_tx),
+                                release: release_rx,
+                            },
+                            Step::Data(Bytes::copy_from_slice(&MP_BODY[mid..])),
+                        ],
+                        false,
+                    )
+                }
+                Delivery::MultiFrameTimeoutAfterFileOpen => {
+                    let mid = MP_BODY.len() - 12;
+                    TestBody::from_steps(
+                        vec![
+                            Step::Data(Bytes::copy_from_slice(&MP_BODY[..mid])),
+                            Step::Stall,
+                        ],
+                        false,
+                    )
+                }
+            };
+            let req = HttpRequest::builder()
+                .method(Method::POST)
+                .uri("/upload")
+                .version(Version::HTTP_11)
+                .header("host", "example.test")
+                .header("content-type", "multipart/form-data; boundary=b1")
+                .body(body)
+                .unwrap();
+            let body_timeout = match case.delivery {
+                Delivery::MultiFrameTimeoutAfterFileOpen => Duration::from_millis(20),
+                _ => Duration::from_secs(5),
+            };
+            let limits = IntakeLimits {
+                superglobals: false,
+                max_body_size: 1024 * 1024,
+                body_timeout,
+                uploads: Some(&limits_cfg),
+            };
+            let Admit::Pending(pending) = admit(req, peer(), &chain, &limits).unwrap() else {
+                panic!("{}: expected Pending", case.name);
+            };
+
+            let out = match case.delivery {
+                Delivery::SingleFrameGatedOffload => {
+                    let (entered_tx, entered_rx) = tokio::sync::oneshot::channel();
+                    let (release_tx, release_rx) = std_mpsc::sync_channel::<()>(1);
+                    let blocker = tokio::task::spawn_blocking(move || {
+                        let _ = entered_tx.send(std::thread::current().id());
+                        let _ = release_rx.recv();
+                    });
+                    let blocking_tid = entered_rx.await.expect("blocking thread entered");
+                    assert_ne!(blocking_tid, shard_tid, "{}", case.name);
+
+                    let mut fut = std::pin::pin!(pending.finish(&chain, &limits));
+                    let early = tokio::time::timeout(Duration::from_millis(30), fut.as_mut()).await;
+                    let _ = release_tx.send(());
+                    blocker.await.expect("blocker joined");
+                    assert!(
+                        early.is_err(),
+                        "{}: upload must wait on the occupied blocking pool instead of running on the shard thread",
+                        case.name
+                    );
+                    fut.await
+                }
+                Delivery::MultiFramePausedReleasesPool => {
+                    let (reached_rx, release_tx) = gate_pair.take().unwrap();
+                    let mut fut = std::pin::pin!(pending.finish(&chain, &limits));
+                    let reached = tokio::select! {
+                        res = fut.as_mut() => panic!("{}: finished before gate (err={:?})", case.name, res.err()),
+                        r = reached_rx => r,
+                    };
+                    reached.expect("gate reached after frame 1");
+
+                    let probe = tokio::time::timeout(
+                        Duration::from_millis(300),
+                        tokio::task::spawn_blocking(|| std::thread::current().id()),
+                    )
+                    .await;
+                    let _ = release_tx.send(());
+                    let out = fut.await;
+                    let probe_tid = probe
+                        .unwrap_or_else(|_| {
+                            panic!(
+                                "{}: blocking pool remained occupied while upload waited for frame 2",
+                                case.name
+                            )
+                        })
+                        .expect("probe task joined");
+                    assert_ne!(probe_tid, shard_tid, "{}", case.name);
+                    out
+                }
+                _ => pending.finish(&chain, &limits).await,
+            };
+
+            match case.want_status {
+                Some(want) => {
+                    assert_eq!(out.err(), Some(want), "{}", case.name);
+                    // Wait for any queued blocking drop cleanup on the single blocking thread.
+                    tokio::task::spawn_blocking(|| {}).await.unwrap();
+                    let remaining_files: usize = std::fs::read_dir(&dir)
+                        .unwrap()
+                        .map(|entry| {
+                            let path = entry.unwrap().path();
+                            if path.is_dir() {
+                                std::fs::read_dir(path).unwrap().count()
+                            } else {
+                                1
+                            }
+                        })
+                        .sum();
                     assert_eq!(
-                        std::fs::read(&mp.files[0].file.path).unwrap(),
-                        b"0123456789abcdef",
-                        "{}",
+                        remaining_files, 0,
+                        "{}: partial spool file must be unlinked",
                         case.name
                     );
                 }
-                Prepared::Short { .. } => panic!("{}: unexpected Short", case.name),
-            },
+                None => match out.expect(case.name) {
+                    Prepared::Dispatch { multipart, .. } => {
+                        let mp = multipart.expect(case.name);
+                        assert_eq!(mp.files.len(), case.want_files, "{}", case.name);
+                        assert_eq!(
+                            std::fs::read(&mp.files[0].file.path).unwrap(),
+                            b"0123456789abcdef",
+                            "{}",
+                            case.name
+                        );
+                    }
+                    Prepared::Short { .. } => panic!("{}: unexpected Short", case.name),
+                },
+            }
         }
-    }
+    }));
 }

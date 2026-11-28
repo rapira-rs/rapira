@@ -89,7 +89,7 @@ C sources (`*.c`, `*.h` under `crates/`) follow `.clang-format`.
 | `rapira_net`             | `crates/net`                     | listener binding and the async accept loop |
 | `rapira_sapi`            | `crates/sapi`                    | the embed SAPI, PHP engine, worker pools and their counters, intake, watchdog and dispatcher interfaces |
 | `rapira_config`          | `crates/config`                  | `[server]`, `[log]`, pool settings, listener addresses and config paths |
-| `rapira_http_middleware` | `crates/http_middleware`         | push-based `Middleware`, `MiddlewareChain`, `RequestCtx`, `ResponseHead` and `BodyEncoder` traits |
+| `rapira_http_middleware` | `crates/http_middleware`         | push-based `Middleware` and `BodyEncoder` traits; `MiddlewareChain`, `RequestCtx` and `ResponseHead` structs |
 | `rapira_observability`   | `crates/observability`           | Prometheus metrics and the `/livez` and `/readyz` probes on a separate thread |
 | `rapira_http`            | `crates/plugins/http`            | the http plugin: HTTP/1.1, the `Rapira\Http` classes, the `[http]` table ([README](crates/plugins/http/README.md))                                    |
 | `rapira_grpc`            | `crates/plugins/grpc`            | the grpc plugin: gRPC, gRPC-Web and Connect, the `Rapira\Grpc` classes, the `[grpc]` table ([README](crates/plugins/grpc/README.md))                  |

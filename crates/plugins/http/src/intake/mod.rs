@@ -250,18 +250,24 @@ async fn timeout_lazy<F: Future>(
     .await
 }
 
-enum SpoolMsg {
-    Data(Bytes),
-    Finish,
+/// Holds an in-progress streaming multipart parser on the async task so network waits do not pin a blocking thread.
+/// Dropping an unfinished parser offloads partial spool file unlinks to the blocking pool.
+struct ParserGuard(Option<Box<multipart::Parser<'static>>>);
+
+impl Drop for ParserGuard {
+    fn drop(&mut self) {
+        if let Some(parser) = self.0.take()
+            && let Ok(handle) = tokio::runtime::Handle::try_current()
+        {
+            handle.spawn_blocking(move || drop(parser));
+        }
+    }
 }
 
 enum MultipartState {
     Idle,
-    Streaming {
-        tx: tokio::sync::mpsc::Sender<SpoolMsg>,
-        handle: tokio::task::JoinHandle<Result<MultipartBody, StatusCode>>,
-    },
-    Done(MultipartBody),
+    Streaming(ParserGuard),
+    Done(Box<MultipartBody>),
 }
 
 enum BodyMode<'a> {
@@ -397,40 +403,42 @@ where
                         let mp = tokio::task::spawn_blocking(move || {
                             let mut parser = multipart::Parser::new_owned(&boundary, limits, hint);
                             parser.feed(&data)?;
-                            parser.finish()
+                            parser.finish().map(Box::new)
                         })
                         .await
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
                         *state = MultipartState::Done(mp);
                         break;
                     }
-                    let (tx, mut rx) = tokio::sync::mpsc::channel::<SpoolMsg>(4);
-                    let handle = tokio::task::spawn_blocking(move || {
-                        let mut parser = multipart::Parser::new_owned(&boundary, limits, hint);
-                        while let Some(msg) = rx.blocking_recv() {
-                            match msg {
-                                SpoolMsg::Data(chunk) => parser.feed(&chunk)?,
-                                SpoolMsg::Finish => return parser.finish(),
-                            }
-                        }
-                        // Dropping `parser` here unlinks any partial spool files on the blocking thread.
-                        Err(StatusCode::BAD_REQUEST)
-                    });
-                    if tx.send(SpoolMsg::Data(data)).await.is_err() {
-                        handle
-                            .await
-                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
-                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
-                    }
-                    *state = MultipartState::Streaming { tx, handle };
+                    let parser = tokio::task::spawn_blocking(move || {
+                        let mut parser =
+                            Box::new(multipart::Parser::new_owned(&boundary, limits, hint));
+                        parser.feed(&data)?;
+                        Ok::<_, StatusCode>(parser)
+                    })
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+                    *state = MultipartState::Streaming(ParserGuard(Some(parser)));
                 }
-                MultipartState::Streaming { tx, handle } => {
-                    if tx.send(SpoolMsg::Data(data)).await.is_err() {
-                        handle
-                            .await
-                            .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
-                        return Err(StatusCode::INTERNAL_SERVER_ERROR);
+                MultipartState::Streaming(guard) => {
+                    let mut parser = guard.0.take().expect("streaming multipart parser present");
+                    if body.is_end_stream() {
+                        let mp = tokio::task::spawn_blocking(move || {
+                            parser.feed(&data)?;
+                            parser.finish().map(Box::new)
+                        })
+                        .await
+                        .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+                        *state = MultipartState::Done(mp);
+                        break;
                     }
+                    let parser = tokio::task::spawn_blocking(move || {
+                        parser.feed(&data)?;
+                        Ok::<_, StatusCode>(parser)
+                    })
+                    .await
+                    .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??;
+                    guard.0 = Some(parser);
                 }
                 MultipartState::Done(_) => {}
             },
@@ -475,10 +483,9 @@ where
         BodyMode::Multipart { state, .. } => {
             let mp = match state {
                 MultipartState::Done(mp) => mp,
-                MultipartState::Streaming { tx, handle } => {
-                    let _ = tx.send(SpoolMsg::Finish).await;
-                    drop(tx);
-                    handle
+                MultipartState::Streaming(mut guard) => {
+                    let parser = guard.0.take().expect("streaming multipart parser present");
+                    tokio::task::spawn_blocking(move || parser.finish().map(Box::new))
                         .await
                         .map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)??
                 }
@@ -492,7 +499,7 @@ where
             let budget_bytes = total.saturating_sub(spooled);
             Ok(ReadBody {
                 chunks: Chunks::default(),
-                multipart: Some(Box::new(mp)),
+                multipart: Some(mp),
                 budget_bytes,
             })
         }
