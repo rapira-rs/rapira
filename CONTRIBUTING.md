@@ -35,7 +35,7 @@ Repository administrators can find the activation requirements in [the Vouch set
 - Rust stable - `rust-toolchain.toml` selects the exact channel for you
 - A C compiler (the build compiles `crates/sapi/*.c` and the C method shells of each plugin against the PHP headers)
 - libclang for bindgen (`libclang-dev` on Debian/Ubuntu, `clang-devel` on Fedora, `clang` on Arch)
-- PHP 8.4, 8.5 or 8.6 with `--enable-zts --enable-embed=shared --disable-zend-signals`. See the [runtime requirements](README.md#install) for multi-worker OPcache.
+- PHP 8.4, 8.5 or 8.6 with `--enable-zts --enable-embed=shared --disable-zend-signals`. Multiple workers with OPcache enabled require the [PHP thread-locking fix](https://github.com/php/php-src/commit/36c6d1f500f7ec477f6eae0b0f5c46b041d82347) (PHP 8.4.29, 8.5.14 or 8.6.1 or later in each minor).
 
 CI builds PHP directly from `php-src` on Linux and macOS. The version jobs use the release branches until all three minors have a release with the OPcache fix. The `master` jobs enable PHP debug checks. [The CI action](.github/actions/php-embed/action.yml) lists the system packages. [The shared configure flags](.github/php-configure-flags.txt) select the release extensions.
 
@@ -124,6 +124,6 @@ Sign off your commits (`git commit -s`) and fill in the PR template. Bug reports
 
 Releases run through [release-please](https://github.com/googleapis/release-please). Every merge to `main` updates a release pull request with the next version and the changelog. When a maintainer merges that PR, one pipeline run tags the release, builds Linux x86_64/aarch64 and macOS aarch64 artifacts and the docker images for PHP 8.4, 8.5 and 8.6, and publishes tarballs, `.deb`/`.rpm` packages and checksums to GitHub Releases. If a release run fails, re-run its failed jobs; the release stays a draft until the publish job completes. After a green CI run on `main`, a separate workflow re-points the `nightly-php*` docker tags and, except on the release commit, refreshes the rolling `nightly` prerelease with tarballs.
 
-The root `Dockerfile` builds `rapira` on the [official PHP images](README.md#docker) and installs the image extensions. The `PHP rebuild` workflow checks the recorded base image digest every 15 minutes. Tarballs, packages and container images must support two PHP workers with OPcache enabled.
+The root `Dockerfile` builds `rapira` on the [official PHP images](https://hub.docker.com/_/php) (`php:8.4-zts-trixie`, `php:8.5-zts-trixie` and `php:8.6-cli-trixie`) and installs the image extensions. The `PHP rebuild` workflow checks the recorded base image digest every 15 minutes. Tarballs, packages and container images must support two PHP workers with OPcache enabled.
 
 The version bump and the changelog come from the title of every commit that lands on `main`, so each title follows [Conventional Commits](https://www.conventionalcommits.org/en/v1.0.0/): `feat:` for a minor bump, `fix:` for a patch, `!` or a `BREAKING CHANGE:` footer for a breaking change (a minor bump while the version is below 1.0.0). A squash merge collapses a PR into one commit, so its title is the one that counts. Put the issue reference at the end, `fix: register shutdown functions once (#84)`. A `[#84]:` prefix hides the commit from release-please, which needs the type at the start of the title.
