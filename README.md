@@ -13,7 +13,7 @@ Download binaries and packages from [GitHub Releases](https://github.com/rapira-
 
 ## Quickstart
 
-Create `rapira.toml`:
+Create `rapira.toml` in a directory with `public/index.php`:
 
 ```toml
 [http]
