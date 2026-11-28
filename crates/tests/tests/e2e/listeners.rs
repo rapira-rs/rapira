@@ -203,6 +203,7 @@ fn unix_socket_file_mode_live_refusal_and_stale_reclaim() {
 
 /// One boot binds every pool, so two pools on one address fail the boot at the second pool. TCP sets SO_REUSEADDR only, so the second bind gets EADDRINUSE.
 #[test]
+#[cfg_attr(not(php_zts), ignore = "needs ZTS PHP")]
 fn two_pools_on_one_address_fail_the_boot() {
     struct Case {
         name: &'static str,
