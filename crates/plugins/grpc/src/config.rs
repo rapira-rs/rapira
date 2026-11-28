@@ -52,14 +52,9 @@ pub struct Settings {
     /// The wait for the PING ACK before the listener closes the connection.
     pub keepalive_timeout: Duration,
     /// The configured order. The first interceptor runs first.
-    pub interceptors: Vec<Interceptor>,
+    pub interceptors: Vec<String>,
+    pub auth: Option<rapira_grpc_auth::Settings>,
     pub pool: PoolSettings,
-}
-
-/// A built-in interceptor and its settings.
-#[derive(Debug)]
-pub enum Interceptor {
-    Auth(rapira_grpc_auth::Settings),
 }
 
 /// Resolves `section` and runs the boot check of the entrypoint file.
@@ -117,7 +112,17 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         .auth
         .map(|s| rapira_grpc_auth::resolve(s, dir))
         .transpose()?;
-    let interceptors = resolve_interceptors(section.interceptors, auth)?;
+    check_stages(
+        "grpc",
+        "interceptors",
+        "interceptors",
+        &section.interceptors,
+        &[Stage {
+            name: "auth",
+            configured: auth.is_some(),
+            requires_table: true,
+        }],
+    )?;
 
     let pool = resolve_pool(section.pool, "grpc.pool", dir)?;
     if pool.mode != Mode::Dispatcher {
@@ -136,7 +141,8 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         max_timeout,
         keepalive_interval,
         keepalive_timeout,
-        interceptors,
+        interceptors: section.interceptors,
+        auth,
         pool,
     })
 }
@@ -144,35 +150,6 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
 fn optional_timeout(key: &str, secs: Option<u64>) -> Result<Option<Duration>> {
     secs.map(|secs| nonzero_timeout("grpc", key, secs))
         .transpose()
-}
-
-/// Each listed name needs its table, and each table needs its name.
-fn resolve_interceptors(
-    list: Vec<String>,
-    mut auth: Option<rapira_grpc_auth::Settings>,
-) -> Result<Vec<Interceptor>> {
-    check_stages(
-        "grpc",
-        "interceptors",
-        "interceptors",
-        &list,
-        &[Stage {
-            name: "auth",
-            configured: auth.is_some(),
-            requires_table: true,
-        }],
-    )?;
-    let mut interceptors = Vec::with_capacity(list.len());
-    for name in list {
-        match name.as_str() {
-            "auth" => interceptors.push(Interceptor::Auth(
-                auth.take()
-                    .expect("check_stages guarantees [grpc.auth] is configured"),
-            )),
-            other => unreachable!("unknown interceptor `{other}` passed check_stages"),
-        }
-    }
-    Ok(interceptors)
 }
 
 impl Server {
@@ -184,11 +161,16 @@ impl Server {
         )?);
         let mut interceptors: Vec<Arc<dyn connectrpc::Interceptor>> =
             Vec::with_capacity(settings.interceptors.len());
-        for interceptor in &settings.interceptors {
-            match interceptor {
-                Interceptor::Auth(auth) => {
-                    interceptors.push(Arc::new(rapira_grpc_auth::Auth::load(auth)?));
+        let mut auth = settings.auth;
+        for name in &settings.interceptors {
+            match name.as_str() {
+                "auth" => {
+                    let cfg = auth
+                        .take()
+                        .expect("check_stages guarantees [grpc.auth] is configured");
+                    interceptors.push(Arc::new(rapira_grpc_auth::Auth::load(&cfg)?));
                 }
+                other => unreachable!("unknown interceptor `{other}` passed check_stages"),
             }
         }
         let mut deadlines = DeadlinePolicy::new();
@@ -514,9 +496,15 @@ mod tests {
                 (Ok(g), Ok(want)) => {
                     let files: Vec<PathBuf> = g
                         .interceptors
-                        .into_iter()
-                        .map(|interceptor| match interceptor {
-                            Interceptor::Auth(auth) => auth.tokens_file,
+                        .iter()
+                        .map(|name| match name.as_str() {
+                            "auth" => g
+                                .auth
+                                .as_ref()
+                                .expect("auth configured")
+                                .tokens_file
+                                .clone(),
+                            other => panic!("unexpected interceptor {other}"),
                         })
                         .collect();
                     let want: Vec<PathBuf> = want.iter().map(PathBuf::from).collect();

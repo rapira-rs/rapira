@@ -6,7 +6,6 @@ use std::sync::LazyLock;
 
 use arbitrary::{Arbitrary, Unstructured};
 use rapira_fuzz::MAX_LEN;
-use rapira_http::Rejection;
 use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart};
 
 #[derive(Arbitrary)]
@@ -232,7 +231,7 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     );
     let got = match whole {
         Ok(got) => got,
-        Err(Rejection { status, reason }) => panic!("{status} {reason}: {ctx}"),
+        Err(status) => panic!("{status}: {ctx}"),
     };
     let mut fields = got.fields.iter();
     let mut files = got.files.iter();

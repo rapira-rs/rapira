@@ -238,8 +238,6 @@ fn render_config(
     )
 }
 
-pub use tests::grpc::ECHO_SERVICE;
-
 /// Renders a `[grpc]` pool with `workers` threads. A `None` value for `services` leaves the key out.
 fn render_grpc(
     listen: &str,
@@ -343,7 +341,7 @@ impl Spawn {
             http_listen: None,
             grpc: None,
             grpc_listen: None,
-            services: Some(vec![ECHO_SERVICE.to_owned()]),
+            services: Some(vec![tests::grpc::ECHO_SERVICE.to_owned()]),
             descriptor_set: None,
             workers: 1,
             http_extra: String::new(),
@@ -955,29 +953,6 @@ pub fn fan_out<T: Send + 'static>(
         }
     }
     all
-}
-
-/// Polls `path` until every needle appears. At the deadline, the Err holds the file state.
-pub fn wait_file_contains_all(
-    path: &Path,
-    needles: &[String],
-    deadline: Duration,
-) -> Result<(), String> {
-    let end = Instant::now() + deadline;
-    loop {
-        let content = std::fs::read_to_string(path).unwrap_or_default();
-        if needles.iter().all(|n| content.contains(n.as_str())) {
-            return Ok(());
-        }
-        if Instant::now() >= end {
-            return Err(format!(
-                "missing needles in {} (exists: {})\n{content}",
-                path.display(),
-                path.exists()
-            ));
-        }
-        std::thread::sleep(Duration::from_millis(50));
-    }
 }
 
 /// A port that no listener holds when this returns.

@@ -53,12 +53,12 @@ pub(super) fn forbidden_trailer(name: &str) -> bool {
 }
 
 pub(super) struct SplitHead {
-    pub(super) headers: ResponseHeaders,
+    pub(super) headers: HeaderMap,
     pub(super) declared_cl: Option<u64>,
 }
 
 /// Takes content-length out as the declared length; the HTTP writer drops the hop-by-hop fields.
-pub(super) fn split_framing(mut headers: ResponseHeaders) -> Result<SplitHead, &'static CStr> {
+pub(super) fn split_framing(mut headers: HeaderMap) -> Result<SplitHead, &'static CStr> {
     let declared_cl = {
         let mut lines = headers.get_all(&http::header::CONTENT_LENGTH).iter();
         let first = lines.next();
@@ -79,8 +79,8 @@ pub(super) fn split_framing(mut headers: ResponseHeaders) -> Result<SplitHead, &
 /// https://www.rfc-editor.org/rfc/rfc9110#section-5.5
 /// # Safety
 /// `ht` is NULL or a live array. ZPP owns the entries.
-pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<ResponseHeaders, &'static CStr> {
-    let mut headers = ResponseHeaders::new();
+pub(super) unsafe fn walk_head_table(ht: *mut HashTable) -> Result<HeaderMap, &'static CStr> {
+    let mut headers = HeaderMap::new();
     if ht.is_null() {
         return Ok(headers);
     }

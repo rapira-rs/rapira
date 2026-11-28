@@ -99,9 +99,6 @@ enum ResponseSource {
 
 struct ResponseSpec {
     head: ResponseHead,
-    /// Declared uncompressed length before response-head middleware runs.
-    declared_len: Option<u64>,
-    bodiless: bool,
     outer_depth: Option<usize>,
     source: ResponseSource,
 }
@@ -116,8 +113,6 @@ fn build_response(
 ) -> Result<Response<ResponseBody>, StatusCode> {
     let ResponseSpec {
         mut head,
-        declared_len,
-        bodiless,
         outer_depth,
         source,
     } = spec;
@@ -140,7 +135,8 @@ fn build_response(
         return Ok(res);
     }
 
-    let bodiless = bodiless || is_head || is_bodiless_status(head.status);
+    let declared_len = head.known_len;
+    let bodiless = is_head || is_bodiless_status(head.status);
     head.known_len = if bodiless {
         declared_len
     } else {
@@ -234,7 +230,6 @@ pub(crate) fn build_short_response(
     extensions: &Extensions,
     short: ShortResponse,
 ) -> Result<Response<ResponseBody>, StatusCode> {
-    let declared_len = short.head.known_len;
     let source = match short.rest {
         Some(rest) => ResponseSource::MiddlewareStream {
             first: short.body,
@@ -252,8 +247,6 @@ pub(crate) fn build_short_response(
         extensions,
         ResponseSpec {
             head: short.head,
-            declared_len,
-            bodiless: false,
             outer_depth: Some(outer_depth),
             source,
         },
@@ -275,24 +268,14 @@ pub(crate) fn build_php_response(
         Start::Complete {
             head,
             body,
-            content_length,
-            bodiless,
             truncated,
         } => ResponseSpec {
             head,
-            declared_len: content_length,
-            bodiless,
             outer_depth: None,
             source: ResponseSource::Complete { body, truncated },
         },
-        Start::Stream {
+        Start::Stream { head, rx } => ResponseSpec {
             head,
-            content_length,
-            rx,
-        } => ResponseSpec {
-            head,
-            declared_len: content_length,
-            bodiless: false,
             outer_depth: None,
             source: ResponseSource::PhpStream { rx },
         },

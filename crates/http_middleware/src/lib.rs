@@ -15,9 +15,6 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use http::{Extensions, HeaderMap, Method, Uri, Version};
 
-pub type RequestHeaders = HeaderMap;
-pub type ResponseHeaders = HeaderMap;
-
 /// Network address of a connection peer or listener.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum PeerAddr {
@@ -60,23 +57,16 @@ pub struct RequestCtx {
     pub method: Method,
     pub uri: Uri,
     pub version: Version,
-    pub headers: RequestHeaders,
+    pub headers: HeaderMap,
     pub peer: Peer,
     pub extensions: Extensions,
-}
-
-impl RequestCtx {
-    #[inline]
-    pub fn path(&self) -> &str {
-        self.uri.path()
-    }
 }
 
 /// Mutable response status and headers passed to Phase-2 hooks before wire framing.
 #[derive(Clone, Debug)]
 pub struct ResponseHead {
     pub status: u16,
-    pub headers: ResponseHeaders,
+    pub headers: HeaderMap,
     /// Known uncompressed body length when available before streaming begins.
     pub known_len: Option<u64>,
 }
@@ -85,7 +75,7 @@ impl ResponseHead {
     pub fn new(status: u16) -> Self {
         Self {
             status,
-            headers: ResponseHeaders::new(),
+            headers: HeaderMap::new(),
             known_len: None,
         }
     }
@@ -245,7 +235,7 @@ mod tests {
             method: Method::GET,
             uri: Uri::from_static("/hello"),
             version: Version::HTTP_11,
-            headers: RequestHeaders::new(),
+            headers: HeaderMap::new(),
             peer: Peer {
                 remote: PeerAddr::Inet(([127, 0, 0, 1], 40000).into()),
                 server: PeerAddr::Inet(([127, 0, 0, 1], 8000).into()),

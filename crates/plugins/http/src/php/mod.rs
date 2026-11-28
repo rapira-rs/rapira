@@ -6,8 +6,9 @@ use std::{
     net::{IpAddr, SocketAddr},
 };
 
+use http::HeaderMap;
 use http::header::{HeaderName, HeaderValue};
-use rapira_http_middleware::{ResponseHead, ResponseHeaders};
+use rapira_http_middleware::ResponseHead;
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{build_address, ip_text};
 use rapira_sapi::pool::{Event, record};
@@ -60,14 +61,6 @@ enum Phase {
     Sealed,
     /// The unit closed before finishing.
     Discarded,
-}
-
-/// Returns the contract spelling of `Request::$protocol`, for example HTTP/2, not the CGI HTTP/2.0.
-fn protocol_php(protocol: &str) -> &str {
-    match protocol {
-        "HTTP/2.0" => "HTTP/2",
-        p => p,
-    }
 }
 
 /// Formats `$uri` into `push`, returning false if `push` rejects a slice (for example stack buffer full).

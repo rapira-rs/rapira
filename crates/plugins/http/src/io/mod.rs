@@ -246,19 +246,11 @@ impl Drop for ConnPhase {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum LeaseState {
-    Active,
-    AwaitingStart,
-    Aborted,
-}
-
 /// `!Send` RAII lease held by `RequestScope` while preparing/waiting, then moved into `TrackBody<B>`.
 struct RequestLease {
     phase: Rc<ConnPhase>,
     inflight: Rc<LocalInflight>,
     slot: Option<Arc<ResponseSlot>>,
-    state: LeaseState,
 }
 
 impl RequestLease {
@@ -278,10 +270,7 @@ impl RequestLease {
     #[inline(never)]
     fn cancel_slot(&mut self) {
         if let Some(slot) = self.slot.take() {
-            if self.state == LeaseState::AwaitingStart {
-                slot.close_receiver();
-                self.state = LeaseState::Active;
-            }
+            slot.close_receiver();
             slot.cancel_if_incomplete();
         }
     }
@@ -290,10 +279,7 @@ impl RequestLease {
     #[inline(never)]
     fn mark_done(&mut self) {
         if let Some(slot) = self.slot.take() {
-            if self.state == LeaseState::AwaitingStart {
-                slot.close_receiver();
-                self.state = LeaseState::Active;
-            }
+            slot.close_receiver();
             slot.mark_done();
         }
     }
@@ -325,7 +311,6 @@ impl RequestScope {
                 phase,
                 inflight,
                 slot: None,
-                state: LeaseState::Active,
             },
         }
     }
@@ -333,24 +318,16 @@ impl RequestScope {
     #[inline]
     pub(crate) fn attach_slot(&mut self, slot: Arc<ResponseSlot>) {
         self.lease.slot = Some(slot);
-        self.lease.state = LeaseState::AwaitingStart;
     }
 
     /// Awaits the initial `Start` message directly on the attached `ResponseSlot` without cloning `Arc`.
     pub(crate) async fn wait_start(&mut self) -> Result<Start, ()> {
         std::future::poll_fn(|cx| {
-            let slot = self
-                .lease
+            self.lease
                 .slot
                 .as_ref()
-                .expect("slot attached before wait_start");
-            match slot.poll_recv(cx) {
-                Poll::Pending => Poll::Pending,
-                Poll::Ready(out) => {
-                    self.lease.state = LeaseState::Active;
-                    Poll::Ready(out)
-                }
-            }
+                .expect("slot attached before wait_start")
+                .poll_recv(cx)
         })
         .await
     }
@@ -391,19 +368,12 @@ impl<B: Body + Unpin> TrackBody<B> {
         match poll {
             Poll::Pending => {}
             Poll::Ready(Some(Ok(_))) => {
-                if self.lease.state != LeaseState::Aborted && self.body.is_end_stream() {
+                if self.body.is_end_stream() {
                     self.lease.arm_complete();
                 }
             }
-            Poll::Ready(Some(Err(_))) => {
-                self.lease.state = LeaseState::Aborted;
-                self.lease.cancel_slot();
-            }
-            Poll::Ready(None) => {
-                if self.lease.state != LeaseState::Aborted {
-                    self.lease.arm_complete();
-                }
-            }
+            Poll::Ready(Some(Err(_))) => self.lease.cancel_slot(),
+            Poll::Ready(None) => self.lease.arm_complete(),
         }
     }
 }

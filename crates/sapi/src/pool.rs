@@ -159,9 +159,7 @@ impl Pool {
             Event::Idle => {
                 let prev = worker.state.load(Relaxed);
                 worker.inactive(State::Idle);
-                if prev == State::Starting as u8
-                    || prev == State::Draining as u8
-                    || (prev == State::Active as u8 && self.draining())
+                if prev == State::Starting as u8 || (prev == State::Active as u8 && self.draining())
                 {
                     self.queue.sync_ready(|| self.ready());
                 }
@@ -172,10 +170,7 @@ impl Pool {
                 crate::watchdog::arm(since);
                 worker.last_activity_ms.store(since, Relaxed);
                 worker.state.store(State::Active as u8, Relaxed);
-                if prev == State::Starting as u8
-                    || prev == State::Draining as u8
-                    || (prev == State::Idle as u8 && self.draining())
-                {
+                if prev == State::Starting as u8 || (prev == State::Idle as u8 && self.draining()) {
                     self.queue.sync_ready(|| self.ready());
                 }
             }

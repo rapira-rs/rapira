@@ -4,8 +4,7 @@ use std::fmt::Display;
 use std::path::PathBuf;
 
 use bytes::Bytes;
-use http::{HeaderMap, HeaderName, HeaderValue};
-use rapira_http::Rejection;
+use http::{HeaderMap, HeaderName, HeaderValue, StatusCode};
 use rapira_http::multipart::{HeaderValues, Limits, MultipartBody, Parser, UploadedFile};
 
 /// The largest input of connect_json and multipart_echo. The CI runs use the same -max_len.
@@ -41,19 +40,19 @@ pub fn parse<P: AsRef<[u8]>>(
     pieces: &[P],
     boundary: &[u8],
     limits: &Limits,
-) -> Result<MultipartBody, Rejection> {
-    let mut parser = Parser::new(boundary, limits);
+) -> Result<MultipartBody, StatusCode> {
+    let mut parser = Parser::new(boundary, limits, None);
     for piece in pieces {
         parser.feed(piece.as_ref())?;
     }
     parser.finish()
 }
 
-/// Asserts that two parses of one body agree: the status and the reason of a rejection, or each field and each file with the bytes of its spooled file.
+/// Asserts that two parses of one body agree: the rejection status, or each field and each file with the bytes of its spooled file.
 pub fn assert_same_parse(
     ctx: impl Display,
-    want: &Result<MultipartBody, Rejection>,
-    got: &Result<MultipartBody, Rejection>,
+    want: &Result<MultipartBody, StatusCode>,
+    got: &Result<MultipartBody, StatusCode>,
 ) {
     match (want, got) {
         (Ok(want), Ok(got)) => {
@@ -93,11 +92,7 @@ pub fn assert_same_parse(
                 assert_eq!(spooled(w), spooled(g), "spooled bytes: {ctx}");
             }
         }
-        (Err(w), Err(g)) => assert_eq!(
-            (w.status, &w.reason),
-            (g.status, &g.reason),
-            "rejection: {ctx}"
-        ),
+        (Err(w), Err(g)) => assert_eq!(w, g, "rejection: {ctx}"),
         (Ok(_), Err(g)) => panic!("only the split parse rejects with {g}: {ctx}"),
         (Err(w), Ok(_)) => panic!("only the one-part parse rejects with {w}: {ctx}"),
     }

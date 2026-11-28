@@ -5,11 +5,11 @@ use std::process::Command;
 use std::time::Duration;
 
 use rapira_config::Mode;
-use tests::StatusBody;
+use tests::{StatusBody, poll};
 
 use crate::harness::{
     Server, Spawn, diagnostics, fan_out, fixture_path, http_get, is_zts, php_extension, slot_line,
-    wait_file_contains_all, wait_log_contains, wait_serving,
+    wait_log_contains, wait_serving,
 };
 
 const REQ: Duration = Duration::from_secs(10);
@@ -117,17 +117,25 @@ fn newrelic_initializes_the_module_and_the_first_request() {
     };
     wait_serving(&srv, "http", 1);
     nr_app(&probe(&srv));
+    let log = srv.dir.join("newrelic-agent.log");
     let needles = [
         "MINIT processing done".to_owned(),
         format!("late_init called from pid={}", srv.pid()),
     ];
-    if let Err(state) = wait_file_contains_all(
-        &srv.dir.join("newrelic-agent.log"),
-        &needles,
-        Duration::from_secs(5),
-    ) {
-        panic!("missing agent initialization record\n{state}");
-    }
+    let found = poll(Duration::from_secs(5), || {
+        let content = std::fs::read_to_string(&log).unwrap_or_default();
+        needles
+            .iter()
+            .all(|n| content.contains(n.as_str()))
+            .then_some(())
+    });
+    assert!(
+        found.is_some(),
+        "missing agent initialization record in {} (exists: {})\n{}",
+        log.display(),
+        log.exists(),
+        std::fs::read_to_string(&log).unwrap_or_default()
+    );
 }
 
 /// With `newrelic.daemon.dont_launch = 3` the agent never starts the daemon, from MINIT or RINIT.

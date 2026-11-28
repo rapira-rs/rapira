@@ -11,7 +11,6 @@ use std::task::{Context, Poll};
 use bytes::Bytes;
 use http::{Method, StatusCode, header};
 use http_body::Body as _;
-use http_body_util::Empty;
 use rapira_http_middleware::{
     BodyStream, Middleware, Phases, RequestCtx, RequestStep, ResponseHead, ShortResponse,
 };
@@ -121,7 +120,7 @@ impl StaticFiles {
             Ok(res) if res.status() != StatusCode::NOT_FOUND => {
                 // ServeDir omits Content-Type and Content-Length on 304; fetch representation metadata for outer response-head middleware (e.g. Vary and weak ETag).
                 if res.status() == StatusCode::NOT_MODIFIED {
-                    let mut head_probe = http::Request::new(Empty::<Bytes>::new());
+                    let mut head_probe = http::Request::new(());
                     *head_probe.method_mut() = Method::HEAD;
                     *head_probe.uri_mut() = req.uri.clone();
                     if let Ok(meta_res) = dir.try_call(head_probe).await
@@ -167,7 +166,7 @@ impl Middleware for StaticFiles {
         if req.method != Method::GET && req.method != Method::HEAD {
             return RequestStep::Next;
         }
-        if !self.eligible(req.path()) {
+        if !self.eligible(req.uri.path()) {
             return RequestStep::Next;
         }
         RequestStep::Async(Box::pin(async move { self.serve_eligible(req).await }))
@@ -236,14 +235,14 @@ fn is_miss(e: &std::io::Error) -> bool {
 }
 
 /// Builds a head-only probe request for `ServeDir` carrying only the range and precondition headers it reads.
-fn probe(req: &RequestCtx, include_range: bool) -> http::Request<Empty<Bytes>> {
+fn probe(req: &RequestCtx, include_range: bool) -> http::Request<()> {
     const PRECONDITIONS: [header::HeaderName; 4] = [
         header::IF_MATCH,
         header::IF_UNMODIFIED_SINCE,
         header::IF_NONE_MATCH,
         header::IF_MODIFIED_SINCE,
     ];
-    let mut probe = http::Request::new(Empty::<Bytes>::new());
+    let mut probe = http::Request::new(());
     *probe.method_mut() = req.method.clone();
     *probe.uri_mut() = req.uri.clone();
     let dst = probe.headers_mut();
@@ -360,7 +359,7 @@ mod tests {
                 let req = http::Request::builder()
                     .method(Method::GET)
                     .uri("/large.txt")
-                    .body(Empty::<Bytes>::new())
+                    .body(())
                     .unwrap();
                 let res = dir.try_call(req).await.unwrap();
                 assert_eq!(res.status(), StatusCode::OK, "{}", case.name);

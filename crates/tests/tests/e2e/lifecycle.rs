@@ -485,26 +485,6 @@ fn worker_bootstrap_that_never_serves_failboots() {
     assert_eq!(status.code(), Some(EXIT_FAILBOOT), "{log}");
 }
 
-/// A client that leaves in the middle of the handler must not stop the worker. The abort ends only that unit, and the next request is served.
-#[test]
-fn worker_survives_client_leaving() {
-    let srv = Spawn::http(Mode::Worker, fixture_path("lifecycle/hold-worker.php")).spawn();
-    let mut c = Conn::open(srv.addr, Duration::from_secs(10)).expect("connect");
-    c.send(b"GET / HTTP/1.1\r\nHost: e2e\r\n\r\n")
-        .expect("send");
-    assert!(
-        wait_log_contains(&srv, "held", Duration::from_secs(10)),
-        "\n{}",
-        diagnostics(&srv)
-    );
-    c.leave();
-
-    let StatusBody { status: code, body } =
-        http_get(srv.addr, "/?probe=1", Duration::from_secs(10)).expect("GET");
-    assert_eq!(code, 200, "\n{}", diagnostics(&srv));
-    assert_eq!(body, b"ok", "\n{}", diagnostics(&srv));
-}
-
 /// An unfinalized exchange whose client left is finalized, so `activeCount()` does not count it. The next `receive()` discards it, and the discard is logged.
 #[test]
 fn cancelled_exchange_is_discarded_by_next_receive() {

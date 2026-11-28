@@ -6,7 +6,7 @@ use bytes::Bytes;
 use http::{Extensions, StatusCode, header};
 use http_body::Body as _;
 use http_body_util::BodyExt;
-use rapira_http_middleware::{MiddlewareChain, RequestHeaders};
+use rapira_http_middleware::MiddlewareChain;
 use rapira_sapi::types::{Authority, Chunks, Request, RequestUri};
 
 use super::headers::*;
@@ -24,14 +24,14 @@ fn base_req() -> Request {
         protocol: "HTTP/1.1",
         remote: Addr::Inet(([127, 0, 0, 1], 8080).into()),
         server: Addr::Inet(([127, 0, 0, 1], 8080).into()),
-        headers: RequestHeaders::new(),
+        headers: HeaderMap::new(),
         body: Chunks::default(),
         received_at: 0.0,
     }
 }
 
-fn hdrs(lines: &[(&'static str, &'static str)]) -> ResponseHeaders {
-    let mut h = ResponseHeaders::new();
+fn hdrs(lines: &[(&'static str, &'static str)]) -> HeaderMap {
+    let mut h = HeaderMap::new();
     for &(k, v) in lines {
         h.append(HeaderName::from_static(k), HeaderValue::from_static(v));
     }
@@ -132,7 +132,7 @@ fn state() -> Attached {
 fn seal_drops_the_body_for_304() {
     let mut a = state();
     assert_eq!(
-        write_head_core(&mut a.state, 304, ResponseHeaders::new()),
+        write_head_core(&mut a.state, 304, HeaderMap::new()),
         Verb::Ok
     );
     let v = unsafe { write_body_core(&mut a.state, b"gone", true) };
@@ -151,7 +151,7 @@ fn empty_non_eos_chunk_commits_nothing() {
     assert_eq!(v, Verb::Ok);
     assert!(a.try_recv_start().is_none());
     assert_eq!(
-        write_head_core(&mut a.state, 404, ResponseHeaders::new()),
+        write_head_core(&mut a.state, 404, HeaderMap::new()),
         Verb::Ok,
         "the head slot must still be open"
     );
@@ -160,12 +160,6 @@ fn empty_non_eos_chunk_commits_nothing() {
     let cap = a.build_and_collect();
     assert_eq!(cap.status, StatusCode::NOT_FOUND);
     assert_eq!(cap.body, b"x");
-}
-
-/// `$protocol` uses the contract spelling HTTP/2.
-#[test]
-fn protocol_uses_the_contract_spelling() {
-    assert_eq!(protocol_php("HTTP/2.0"), "HTTP/2");
 }
 
 /// `uri_abs` takes the host of `$uri` from the authority.
@@ -344,7 +338,7 @@ fn interim_head_sends_nothing_and_leaves_the_final_head_open() {
         "an interim head sends nothing"
     );
     assert_eq!(
-        write_head_core(&mut a.state, 200, ResponseHeaders::new()),
+        write_head_core(&mut a.state, 200, HeaderMap::new()),
         Verb::Ok,
         "the final-head slot stays open"
     );
@@ -378,7 +372,7 @@ fn flush_emits_the_implicit_head_once() {
 fn a_101_head_drops_body_chunks() {
     let mut a = state();
     assert_eq!(
-        write_head_core(&mut a.state, 101, ResponseHeaders::new()),
+        write_head_core(&mut a.state, 101, HeaderMap::new()),
         Verb::Ok
     );
     let v = unsafe { write_body_core(&mut a.state, b"upgrade", true) };
@@ -398,7 +392,7 @@ fn trailers_finalize_with_a_committed_head() {
         "nothing here commits a head"
     );
     assert_eq!(
-        write_head_core(&mut a.state, 200, ResponseHeaders::new()),
+        write_head_core(&mut a.state, 200, HeaderMap::new()),
         Verb::Ok
     );
     assert_eq!(unsafe { write_trailers_core(&mut a.state) }, Verb::Ok);
@@ -461,7 +455,7 @@ fn a_lost_unit_fails_or_truncates_the_reply() {
 
     let mut b = state();
     assert_eq!(
-        write_head_core(&mut b.state, 200, ResponseHeaders::new()),
+        write_head_core(&mut b.state, 200, HeaderMap::new()),
         Verb::Ok
     );
     b.state.lost();

@@ -400,10 +400,10 @@ impl From<Request> for CgiRequest {
     }
 }
 
-pub const MAX_BUFFERED_BODY: usize = 1 << 30;
+const MAX_BUFFERED_BODY: usize = 1 << 30;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum StreamState {
+enum StreamState {
     NotSent,
     HeadSent,
     /// Body output starts during the handler, not during the teardown flush.

@@ -1,68 +1,24 @@
 use std::io::Read;
-use std::time::Duration;
+use std::net::SocketAddr;
 
+use http::Method;
+use http::header::{HeaderName, HeaderValue};
 use rapira_config::Mode;
+use tests::wire::submit;
+use tests::{Resp, drain_resp, req};
 
-use crate::harness::{Conn, Spawn, diagnostics, fixture_path, http_get_raw, scratch_dir};
+use crate::harness::{Spawn, diagnostics, fixture_path, scratch_dir};
 
-const T: Duration = Duration::from_secs(10);
-
-fn split_raw(raw: &[u8]) -> (u16, Vec<(String, String)>, Vec<u8>) {
-    let split = raw
-        .windows(4)
-        .position(|w| w == b"\r\n\r\n")
-        .expect("response head terminator");
-    let head_str = String::from_utf8_lossy(&raw[..split]);
-    let mut lines = head_str.split("\r\n");
-    let status_line = lines.next().expect("status line");
-    let status: u16 = status_line
-        .split_whitespace()
-        .nth(1)
-        .expect("status code")
-        .parse()
-        .expect("numeric status");
-    let fields: Vec<(String, String)> = lines
-        .filter_map(|line| {
-            let (k, v) = line.split_once(':')?;
-            Some((k.trim().to_ascii_lowercase(), v.trim().to_owned()))
-        })
-        .collect();
-    let raw_body = &raw[split + 4..];
-    let is_chunked = fields
-        .iter()
-        .any(|(k, v)| k == "transfer-encoding" && v.eq_ignore_ascii_case("chunked"));
-    let body = if is_chunked {
-        dechunk(raw_body)
-    } else {
-        raw_body.to_vec()
-    };
-    (status, fields, body)
-}
-
-fn dechunk(mut raw: &[u8]) -> Vec<u8> {
-    let mut out = Vec::new();
-    loop {
-        let crlf = raw
-            .windows(2)
-            .position(|w| w == b"\r\n")
-            .expect("chunk size crlf");
-        let size = usize::from_str_radix(std::str::from_utf8(&raw[..crlf]).unwrap().trim(), 16)
-            .expect("hex chunk size");
-        raw = &raw[crlf + 2..];
-        if size == 0 {
-            break;
-        }
-        out.extend_from_slice(&raw[..size]);
-        raw = &raw[size + 2..];
+fn send(addr: SocketAddr, method: Method, target: &str, headers: &[(&str, &str)]) -> Resp {
+    let mut r = req(target);
+    *r.method_mut() = method;
+    for &(name, value) in headers {
+        r.headers_mut().append(
+            HeaderName::from_bytes(name.as_bytes()).expect("header name"),
+            HeaderValue::from_str(value).expect("header value"),
+        );
     }
-    out
-}
-
-fn field<'a>(fields: &'a [(String, String)], name: &str) -> Option<&'a str> {
-    fields
-        .iter()
-        .find(|(k, _)| k == name)
-        .map(|(_, v)| v.as_str())
+    drain_resp(submit(addr, r).expect("submit request"))
 }
 
 fn gunzip(data: &[u8]) -> Vec<u8> {
@@ -172,28 +128,37 @@ fn compress_middleware_negotiates_and_encodes_php_responses() {
             .accept
             .map(|v| vec![("Accept-Encoding", v)])
             .unwrap_or_default();
-        let raw = http_get_raw(srv.addr, case.target, &headers, T)
-            .unwrap_or_else(|e| panic!("{}: {e}\n{}", case.name, diagnostics(&srv)));
-        let (status, fields, body) = split_raw(&raw);
-        assert_eq!(status, 200, "{}\n{}", case.name, diagnostics(&srv));
+        let resp = send(srv.addr, Method::GET, case.target, &headers);
+        assert_eq!(resp.status(), 200, "{}\n{}", case.name, diagnostics(&srv));
         assert_eq!(
-            field(&fields, "content-encoding"),
+            resp.header("content-encoding").as_deref(),
             case.want_encoding,
-            "{}: fields={fields:?}",
-            case.name
+            "{}: head={:?}",
+            case.name,
+            resp.head
         );
         if let Some(etag) = case.want_etag {
             assert_eq!(
-                field(&fields, "etag"),
+                resp.header("etag").as_deref(),
                 Some(etag),
-                "{}: fields={fields:?}",
-                case.name
+                "{}: head={:?}",
+                case.name,
+                resp.head
+            );
+        }
+        if matches!(case.want_encoding, Some("gzip" | "zstd")) {
+            let vary = resp.header("vary").unwrap_or_default();
+            assert!(
+                vary.to_ascii_lowercase().contains("accept-encoding"),
+                "{}: missing Vary: Accept-Encoding in {:?}",
+                case.name,
+                resp.head
             );
         }
         let decoded = match case.want_encoding {
-            Some("gzip") => gunzip(&body),
-            Some("zstd") => unzstd(&body),
-            _ => body,
+            Some("gzip") => gunzip(&resp.body),
+            Some("zstd") => unzstd(&resp.body),
+            _ => resp.body,
         };
         assert_eq!(
             String::from_utf8_lossy(&decoded),
@@ -201,34 +166,24 @@ fn compress_middleware_negotiates_and_encodes_php_responses() {
             "{}",
             case.name
         );
-        if matches!(case.want_encoding, Some("gzip" | "zstd")) {
-            let vary = field(&fields, "vary").unwrap_or_default();
-            assert!(
-                vary.to_ascii_lowercase().contains("accept-encoding"),
-                "{}: missing Vary: Accept-Encoding in {fields:?}",
-                case.name
-            );
-        }
     }
 
     // sendFile() transparently routes through BodyEncoder when compression is active.
     let file_path = srv.dir.join("http/large.txt");
     let file_contents = "sendfile-compressed-line\n".repeat(400);
     std::fs::write(&file_path, &file_contents).expect("write sendfile fixture");
-    let raw = http_get_raw(
+    let resp = send(
         srv.addr,
+        Method::GET,
         "/?case=sendfile",
         &[
             ("Accept-Encoding", "zstd"),
             ("X-Path", &file_path.display().to_string()),
         ],
-        T,
-    )
-    .expect("sendfile compressed");
-    let (status, fields, body) = split_raw(&raw);
-    assert_eq!(status, 200);
-    assert_eq!(field(&fields, "content-encoding"), Some("zstd"));
-    assert_eq!(String::from_utf8_lossy(&unzstd(&body)), file_contents);
+    );
+    assert_eq!(resp.status(), 200);
+    assert_eq!(resp.header("content-encoding").as_deref(), Some("zstd"));
+    assert_eq!(String::from_utf8_lossy(&unzstd(&resp.body)), file_contents);
 }
 
 /// Onion order applies outer `compress` to inner `static` hits, while `static` outer to `compress` serves static hits uncompressed.
@@ -268,33 +223,41 @@ fn compress_and_static_follow_config_onion_order() {
             ))
             .spawn();
 
-        let static_raw = http_get_raw(srv.addr, "/app.css", &[("Accept-Encoding", "gzip")], T)
-            .expect("GET /app.css");
-        let (status, fields, body) = split_raw(&static_raw);
-        assert_eq!(status, 200, "{}", case.name);
+        let static_resp = send(
+            srv.addr,
+            Method::GET,
+            "/app.css",
+            &[("Accept-Encoding", "gzip")],
+        );
+        assert_eq!(static_resp.status(), 200, "{}", case.name);
         assert_eq!(
-            field(&fields, "content-encoding"),
+            static_resp.header("content-encoding").as_deref(),
             case.static_encoded,
-            "{}: static fields={fields:?}",
-            case.name
+            "{}: static head={:?}",
+            case.name,
+            static_resp.head
         );
         let decoded = match case.static_encoded {
-            Some("gzip") => gunzip(&body),
-            _ => body,
+            Some("gzip") => gunzip(&static_resp.body),
+            _ => static_resp.body,
         };
         assert_eq!(String::from_utf8_lossy(&decoded), css, "{}", case.name);
 
-        let php_raw = http_get_raw(srv.addr, "/?case=text", &[("Accept-Encoding", "gzip")], T)
-            .expect("GET /?case=text");
-        let (status, fields, body) = split_raw(&php_raw);
-        assert_eq!(status, 200, "{}", case.name);
-        assert_eq!(
-            field(&fields, "content-encoding"),
-            case.php_encoded,
-            "{}: php fields={fields:?}",
-            case.name
+        let php_resp = send(
+            srv.addr,
+            Method::GET,
+            "/?case=text",
+            &[("Accept-Encoding", "gzip")],
         );
-        let decoded = gunzip(&body);
+        assert_eq!(php_resp.status(), 200, "{}", case.name);
+        assert_eq!(
+            php_resp.header("content-encoding").as_deref(),
+            case.php_encoded,
+            "{}: php head={:?}",
+            case.name,
+            php_resp.head
+        );
+        let decoded = gunzip(&php_resp.body);
         assert_eq!(
             String::from_utf8_lossy(&decoded),
             "hello rapira compression ".repeat(100),
@@ -356,52 +319,47 @@ fn compress_middleware_handles_head_without_uncompressed_content_length() {
     ];
 
     for case in cases {
-        let mut conn = Conn::open(srv.addr, T).expect("connect");
-        let mut req = format!(
-            "HEAD {} HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n",
-            case.target
+        let headers: Vec<(&str, &str)> = case
+            .accept
+            .map(|v| vec![("Accept-Encoding", v)])
+            .unwrap_or_default();
+        let resp = send(srv.addr, Method::HEAD, case.target, &headers);
+        assert_eq!(resp.status(), 200, "{}\n{}", case.name, diagnostics(&srv));
+        assert!(
+            resp.body.is_empty(),
+            "{}: HEAD body must be empty",
+            case.name
         );
-        if let Some(ae) = case.accept {
-            req.push_str(&format!("Accept-Encoding: {ae}\r\n"));
-        }
-        req.push_str("\r\n");
-        conn.send(req.as_bytes()).expect("send HEAD");
-        let head = conn
-            .read_head(T)
-            .unwrap_or_else(|e| panic!("{}: {e}\n{}", case.name, diagnostics(&srv)));
-        let rest = conn.read_remaining(T).expect("read EOF");
-        assert_eq!(head.status, 200, "{}", case.name);
-        assert!(rest.is_empty(), "{}: HEAD body must be empty", case.name);
         assert_eq!(
-            field(&head.fields, "content-encoding"),
+            resp.header("content-encoding").as_deref(),
             case.want_encoding,
-            "{}: fields={:?}",
+            "{}: head={:?}",
             case.name,
-            head.fields
+            resp.head
         );
         assert_eq!(
-            field(&head.fields, "content-length"),
+            resp.header("content-length").as_deref(),
             case.want_content_length,
-            "{}: fields={:?}",
+            "{}: head={:?}",
             case.name,
-            head.fields
+            resp.head
         );
         if let Some(etag) = case.want_etag {
             assert_eq!(
-                field(&head.fields, "etag"),
+                resp.header("etag").as_deref(),
                 Some(etag),
-                "{}: fields={:?}",
+                "{}: head={:?}",
                 case.name,
-                head.fields
+                resp.head
             );
         }
         if case.want_encoding.is_some() {
-            let vary = field(&head.fields, "vary").unwrap_or_default();
+            let vary = resp.header("vary").unwrap_or_default();
             assert!(
                 vary.to_ascii_lowercase().contains("accept-encoding"),
                 "{}: missing Vary: Accept-Encoding in {:?}",
                 case.name,
-                head.fields
+                resp.head
             );
         }
     }
@@ -425,25 +383,29 @@ fn compress_preserves_vary_and_weak_etag_on_static_304() {
         ))
         .spawn();
 
-    let raw_css = http_get_raw(srv.addr, "/app.css", &[("Accept-Encoding", "gzip")], T)
-        .expect("initial GET /app.css");
-    let (status, css_fields, _) = split_raw(&raw_css);
-    assert_eq!(status, 200);
-    let css_weak_etag = field(&css_fields, "etag").expect("css etag").to_owned();
+    let css_resp = send(
+        srv.addr,
+        Method::GET,
+        "/app.css",
+        &[("Accept-Encoding", "gzip")],
+    );
+    assert_eq!(css_resp.status(), 200);
+    let css_weak_etag = css_resp.header("etag").expect("css etag");
     assert!(
         css_weak_etag.starts_with("W/\""),
         "css 200 etag={css_weak_etag}"
     );
     let css_strong_etag = css_weak_etag.strip_prefix("W/").unwrap().to_owned();
-    let css_last_mod = field(&css_fields, "last-modified")
-        .expect("css last-modified")
-        .to_owned();
+    let css_last_mod = css_resp.header("last-modified").expect("css last-modified");
 
-    let raw_png = http_get_raw(srv.addr, "/logo.png", &[("Accept-Encoding", "gzip")], T)
-        .expect("initial GET /logo.png");
-    let (status, png_fields, _) = split_raw(&raw_png);
-    assert_eq!(status, 200);
-    let png_strong_etag = field(&png_fields, "etag").expect("png etag").to_owned();
+    let png_resp = send(
+        srv.addr,
+        Method::GET,
+        "/logo.png",
+        &[("Accept-Encoding", "gzip")],
+    );
+    assert_eq!(png_resp.status(), 200);
+    let png_strong_etag = png_resp.header("etag").expect("png etag");
     assert!(
         png_strong_etag.starts_with('"'),
         "png 200 etag={png_strong_etag}"
@@ -502,26 +464,34 @@ fn compress_preserves_vary_and_weak_etag_on_static_304() {
         if let Some(ae) = case.accept {
             headers.push(("Accept-Encoding", ae));
         }
-        let raw = http_get_raw(srv.addr, case.target, &headers, T)
-            .unwrap_or_else(|e| panic!("{}: {e}\n{}", case.name, diagnostics(&srv)));
-        let (status, fields, body) = split_raw(&raw);
-        assert_eq!(status, 304, "{}: fields={fields:?}", case.name);
-        assert!(body.is_empty(), "{}: 304 body must be empty", case.name);
+        let resp = send(srv.addr, Method::GET, case.target, &headers);
+        assert_eq!(resp.status(), 304, "{}: head={:?}", case.name, resp.head);
+        assert!(
+            resp.body.is_empty(),
+            "{}: 304 body must be empty",
+            case.name
+        );
         assert_eq!(
-            field(&fields, "content-encoding"),
+            resp.header("content-encoding"),
             None,
             "{}: 304 must not set content-encoding",
             case.name
         );
         assert_eq!(
-            field(&fields, "etag"),
+            resp.header("etag").as_deref(),
             Some(case.want_etag.as_str()),
-            "{}: fields={fields:?}",
-            case.name
+            "{}: head={:?}",
+            case.name,
+            resp.head
         );
-        let has_vary = field(&fields, "vary")
+        let has_vary = resp
+            .header("vary")
             .is_some_and(|v| v.to_ascii_lowercase().contains("accept-encoding"));
-        assert_eq!(has_vary, case.want_vary, "{}: fields={fields:?}", case.name);
+        assert_eq!(
+            has_vary, case.want_vary,
+            "{}: head={:?}",
+            case.name, resp.head
+        );
     }
 
     let _ = std::fs::remove_dir_all(&root);

@@ -138,7 +138,6 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
         .r#static
         .map(|s| rapira_static_files::resolve(s, dir))
         .transpose()?;
-    let compress_configured = section.compress.is_some();
     let compress_table = section.compress.map(rapira_compress::resolve).transpose()?;
     check_stages(
         "http",
@@ -153,7 +152,7 @@ fn settings(section: Section, dir: &Path) -> Result<Settings> {
             },
             Stage {
                 name: "compress",
-                configured: compress_configured,
+                configured: compress_table.is_some(),
                 requires_table: false,
             },
         ],

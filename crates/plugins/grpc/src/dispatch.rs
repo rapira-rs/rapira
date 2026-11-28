@@ -17,7 +17,6 @@ use tokio::sync::{mpsc, oneshot};
 use tokio::time::timeout_at;
 
 use crate::call::{Call, CallState, Deadline, Part, Reply, StreamReply, expired};
-use crate::php::GrpcUnit;
 use crate::schema::{Method, Schema};
 
 /// Counts one call in flight until it drops, also when the client leaves first.
@@ -209,7 +208,7 @@ async fn unary(
     let bytes = call.message.len();
     let until = call.until();
     let (tx, reply) = oneshot::channel();
-    let call = GrpcUnit::new(CallState::new(call, Reply::Unary(tx)));
+    let call = CallState::new(call, Reply::Unary(tx));
     // The intake refuses the call before dispatch, so PHP never sees it.
     if let Err(e) = intake.submit(Unit::Dispatcher(Box::new(call)), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));
@@ -268,7 +267,7 @@ async fn server_streaming(
     // The channel holds one message. When the buffers of the connection are full, hyper stops the poll of the body, so the generator waits at its yield.
     let (parts_tx, parts) = mpsc::channel(1);
     let reply = StreamReply::new(head_tx, parts_tx);
-    let call = GrpcUnit::new(CallState::new(call, Reply::Stream(reply)));
+    let call = CallState::new(call, Reply::Stream(reply));
     // The intake refuses the call before dispatch, so PHP never sees it.
     if let Err(e) = intake.submit(Unit::Dispatcher(Box::new(call)), bytes).await {
         return Err(ConnectError::unavailable(e.to_string()));
@@ -381,7 +380,7 @@ mod tests {
                 received_at: 0.0,
             };
             let (tx, _receiver) = oneshot::channel();
-            let state = GrpcUnit::new(CallState::new(req, Reply::Unary(tx)));
+            let state = CallState::new(req, Reply::Unary(tx));
             assert_eq!(state.cancelled(), case.cancelled, "{}", case.name);
             assert_eq!(state.is_finalized(), case.cancelled, "{}", case.name);
         }

@@ -26,12 +26,11 @@ use crate::{
     E_CORE, FAILURE, RAPIRA_BAILOUT, RAPIRA_HANDLE_CONTINUE, RAPIRA_HANDLE_RECYCLE,
     RAPIRA_HANDLE_STOP, RAPIRA_OK, RAPIRA_THROW, SUCCESS, php_request_startup,
     rapira_ce_closed_exception, rapira_ce_timeout_exception, rapira_clear_last_error,
-    rapira_current_plugin, rapira_eg, rapira_finish_output, rapira_opcache_reset,
-    rapira_opcache_state, rapira_pg, rapira_receive_timed, rapira_receive_untimed,
-    rapira_release_temporary_streams, rapira_request_activate, rapira_request_shutdown,
-    rapira_request_teardown, rapira_run_handler, rapira_sg, rapira_stash_boot_shutdown_functions,
-    rapira_unit_object, zend, zend_fcall_info, zend_fcall_info_cache, zend_is_auto_global_str,
-    zend_long, zval,
+    rapira_current_plugin, rapira_eg, rapira_opcache_reset, rapira_opcache_state, rapira_pg,
+    rapira_receive_timed, rapira_receive_untimed, rapira_release_temporary_streams,
+    rapira_request_activate, rapira_request_shutdown, rapira_request_teardown, rapira_run_handler,
+    rapira_sg, rapira_stash_boot_shutdown_functions, rapira_unit_object, zend, zend_fcall_info,
+    zend_fcall_info_cache, zend_is_auto_global_str, zend_long, zval,
 };
 
 const CLOSED_MSG: &CStr = c"no more work for this app instance";
@@ -109,7 +108,7 @@ fn with_active<R>(f: impl FnOnce(&Worker) -> R) -> Option<R> {
 
 /// Returns the current cycle number of this PHP worker thread (1 in the first cycle, 0 outside a worker).
 pub(crate) fn current_cycle() -> u64 {
-    with_active(Worker::cycle).unwrap_or(0)
+    with_active(|w| w.cycle.get()).unwrap_or(0)
 }
 
 /// Clears the active Dispatcher unit slot when `ptr` is reclaimed and accounts for its quota once.
@@ -181,11 +180,6 @@ impl Worker {
             current_unit: Cell::new(None),
             current_unit_counted: Cell::new(true),
         }
-    }
-
-    #[inline]
-    pub(crate) fn cycle(&self) -> u64 {
-        self.cycle.get()
     }
 
     fn renew_quota(&self) {
@@ -569,15 +563,10 @@ impl Worker {
             }
         }
         ctx.begin_teardown();
-        let flushed = if outcome == RAPIRA_OK as c_int {
-            RAPIRA_OK as c_int
-        } else {
-            unsafe { rapira_finish_output() }
-        };
-        ctx.mark_errored(outcome != RAPIRA_OK as c_int || flushed == RAPIRA_BAILOUT as c_int);
+        ctx.mark_errored(outcome != RAPIRA_OK as c_int);
         let teardown = unsafe { rapira_request_teardown() };
 
-        let recycle = [outcome, flushed, teardown].contains(&(RAPIRA_BAILOUT as c_int));
+        let recycle = [outcome, teardown].contains(&(RAPIRA_BAILOUT as c_int));
         let errored = recycle || [outcome, teardown].contains(&(RAPIRA_THROW as c_int));
 
         log_and_clear_last_error();

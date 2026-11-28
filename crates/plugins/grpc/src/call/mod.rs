@@ -14,6 +14,7 @@ use base64::engine::general_purpose::{GeneralPurpose, GeneralPurposeConfig, STAN
 use bytes::Bytes;
 use connectrpc::http::header::{HeaderMap, HeaderName, HeaderValue};
 use connectrpc::{ConnectError, ErrorDetail, Protocol};
+use rapira_sapi::pool::{Event, record};
 use rapira_sapi::types::Addr;
 use tokio::sync::{mpsc, oneshot};
 
@@ -229,13 +230,6 @@ pub(crate) enum Verb {
     BadField(&'static CStr),
 }
 
-/// Pool accounting event emitted when a call settles or discards for the first time.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Handled {
-    Ok,
-    Errored,
-}
-
 /// Sends the head when it is not out yet, with both metadata halves as they are now. Returns false when the plugin closed the call.
 fn commit(out: &mut StreamReply, headers: &[MetadataField], trailers: &[MetadataField]) -> bool {
     let Some(head) = out.head.take() else {
@@ -315,14 +309,14 @@ impl CallState {
         self.req.metadata.clear();
     }
 
-    /// Marks an open call discarded and drops its reply channel. Returns `Some(Handled::Errored)` once.
-    pub(crate) fn discard(&mut self) -> Option<Handled> {
+    /// Marks an open call discarded, drops its reply channel, and records an errored pool outcome once.
+    pub(crate) fn discard(&mut self) {
         if self.settled() {
-            return None;
+            return;
         }
         self.discarded = true;
         self.reply = None;
-        Some(Handled::Errored)
+        record(Event::Handled { errored: true });
     }
 
     /// Rejects a queued call whose worker failed to boot with `UNAVAILABLE`.
@@ -403,12 +397,14 @@ impl CallState {
         Verb::Ok
     }
 
-    fn settle(&mut self, sent: bool) -> (Verb, Handled) {
+    fn settle(&mut self, sent: bool) -> Verb {
         if sent {
-            (Verb::Ok, Handled::Ok)
+            record(Event::Handled { errored: false });
+            Verb::Ok
         } else {
             self.discarded = true;
-            (Verb::Discarded, Handled::Errored)
+            record(Event::Handled { errored: true });
+            Verb::Discarded
         }
     }
 
@@ -417,12 +413,13 @@ impl CallState {
         &mut self,
         result: Result<&[u8], ConnectError>,
         send_part: impl FnOnce(&mpsc::Sender<Part>, Part, Option<Instant>) -> bool,
-    ) -> (Verb, Option<Handled>) {
+    ) -> Verb {
         if self.cancelled() {
-            return (Verb::Discarded, self.discard());
+            self.discard();
+            return Verb::Discarded;
         }
         let Some(reply) = self.reply.take() else {
-            return (Verb::Finalized, None);
+            return Verb::Finalized;
         };
         let trailers = wire(&self.trailers);
         // The receiver can drop after the cancelled() check.
@@ -448,19 +445,19 @@ impl CallState {
             },
             (Reply::Stream(_), Ok(_)) => unreachable!("only UnaryCall has respond(string)"),
         };
-        let (verb, handled) = self.settle(sent);
-        (verb, Some(handled))
+        self.settle(sent)
     }
 
     /// Pre-generator check for `ServerStreamingCall::respond(\Generator)`.
-    pub(crate) fn begin(&mut self) -> (Verb, Option<Handled>) {
+    pub(crate) fn begin(&mut self) -> Verb {
         if self.cancelled() {
-            return (Verb::Discarded, self.discard());
+            self.discard();
+            return Verb::Discarded;
         }
         if self.settled() {
-            return (Verb::Finalized, None);
+            return Verb::Finalized;
         }
-        (Verb::Ok, None)
+        Verb::Ok
     }
 
     /// Sends one message of a streaming response. The first message commits the head before it. Returns false when the message has no destination and discards the call.
@@ -468,13 +465,14 @@ impl CallState {
         &mut self,
         message: &[u8],
         send_part: impl FnOnce(&mpsc::Sender<Part>, Part, Option<Instant>) -> bool,
-    ) -> (bool, Option<Handled>) {
+    ) -> bool {
         if self.cancelled() {
-            return (false, self.discard());
+            self.discard();
+            return false;
         }
         // respond() or fail() inside the running generator finalized the call, so the generator gets the discard exception at its yield.
         let Some(Reply::Stream(out)) = self.reply.as_mut() else {
-            return (false, None);
+            return false;
         };
         let sent = commit(out, &self.headers, &self.trailers)
             && send_part(
@@ -483,22 +481,24 @@ impl CallState {
                 self.req.until(),
             );
         if !sent {
-            return (false, self.discard());
+            self.discard();
+            return false;
         }
-        (true, None)
+        true
     }
 
     /// After the generator ends, sends the head of a stream with no message, then the end of the stream.
     pub(crate) fn end(
         &mut self,
         send_part: impl FnOnce(&mpsc::Sender<Part>, Part, Option<Instant>) -> bool,
-    ) -> Option<Handled> {
+    ) {
         if self.cancelled() {
-            return self.discard();
+            self.discard();
+            return;
         }
         // fail() inside the running generator finalized the call.
         let Some(Reply::Stream(mut out)) = self.reply.take() else {
-            return None;
+            return;
         };
         let sent = commit(&mut out, &self.headers, &self.trailers)
             && send_part(&out.parts, Part::End, self.req.until());
@@ -509,7 +509,6 @@ impl CallState {
                 self.req.method
             );
         }
-        let (_, handled) = self.settle(sent);
-        Some(handled)
+        let _ = self.settle(sent);
     }
 }

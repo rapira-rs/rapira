@@ -7,8 +7,8 @@ use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, Uri, Version};
 use rapira_fuzz::safe_name;
 use rapira_http::intake::{build_request, check_request};
-use rapira_http::middleware::{Peer, PeerAddr};
 use rapira_http::php::uri_abs;
+use rapira_http_middleware::{Peer, PeerAddr};
 use rapira_sapi::types::Chunks;
 
 const MAX_BODY: usize = 1024;
@@ -63,8 +63,8 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
 
     let authority = match check_request(&mut parts, superglobals, MAX_BODY) {
         Ok(admitted) => admitted.authority,
-        Err(rej) => {
-            assert!(matches!(rej.status.as_u16(), 400 | 413));
+        Err(status) => {
+            assert!(matches!(status.as_u16(), 400 | 413));
             return;
         }
     };

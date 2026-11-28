@@ -3,7 +3,6 @@
 use std::os::unix::ffi::OsStrExt;
 use std::sync::OnceLock;
 
-use rapira_http_middleware::RequestHeaders;
 use rapira_sapi::exchange::{Permanent, add_list_with};
 
 use super::*;
@@ -102,7 +101,7 @@ unsafe fn emit_headers<'a>(
 }
 
 /// Emits request headers grouped by lowercase field name in first-occurrence order.
-unsafe fn emit_request_headers(keys: &HeaderKeys, dst: *mut zval, headers: &RequestHeaders) {
+unsafe fn emit_request_headers(keys: &HeaderKeys, dst: *mut zval, headers: &HeaderMap) {
     unsafe {
         rapira_array_init(dst, headers.keys_len() as u32);
         // http 1.5.0 groups values by identical HeaderName reference in first-insertion order.
@@ -295,7 +294,7 @@ unsafe fn build_request_impl(held: *const HeldPtr, memo: *mut zval) -> bool {
         let target = req.target.as_deref().unwrap_or(req.uri.as_str().as_bytes());
         zend::slot_stringl(o, target_slot, target);
         zend::slot_str_or_null(o, authority_slot, authority);
-        zend::slot_stringl(o, protocol_slot, protocol_php(req.protocol).as_bytes());
+        zend::slot_stringl(o, protocol_slot, req.protocol.as_bytes());
         zend::slot_init(o, headers_slot, &headers);
         match &st.multipart {
             None => zend::slot_string_from_chunks(o, body_slot, &req.body),

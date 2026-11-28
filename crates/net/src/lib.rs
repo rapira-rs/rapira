@@ -151,78 +151,34 @@ where
 /// Accepts one socket with `SOCK_NONBLOCK | SOCK_CLOEXEC` in one syscall on Linux.
 /// https://man7.org/linux/man-pages/man2/accept4.2.html
 #[cfg(target_os = "linux")]
-unsafe fn accept4_raw(
-    listener_fd: std::os::fd::RawFd,
-    addr: *mut libc::sockaddr,
-    len: *mut libc::socklen_t,
-) -> std::io::Result<std::os::fd::OwnedFd> {
+fn accept4(listener: &impl AsRawFd) -> std::io::Result<(std::os::fd::OwnedFd, socket2::SockAddr)> {
     use std::os::fd::{FromRawFd, OwnedFd};
 
-    // SAFETY: Caller guarantees `listener_fd` is a valid listening socket and `addr`/`len` are valid.
-    let fd = unsafe {
-        libc::accept4(
-            listener_fd,
-            addr,
-            len,
-            libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
-        )
-    };
-    if fd < 0 {
-        return Err(std::io::Error::last_os_error());
+    // SAFETY: `accept4` initializes `addr` and writes its length into `len` on success.
+    unsafe {
+        socket2::SockAddr::try_init(|addr, len| {
+            let fd = libc::accept4(
+                listener.as_raw_fd(),
+                addr.cast::<libc::sockaddr>(),
+                len,
+                libc::SOCK_NONBLOCK | libc::SOCK_CLOEXEC,
+            );
+            if fd < 0 {
+                return Err(std::io::Error::last_os_error());
+            }
+            // SAFETY: `accept4` returned a fresh owned socket descriptor.
+            Ok(OwnedFd::from_raw_fd(fd))
+        })
     }
-    // SAFETY: `accept4` returned a fresh owned socket descriptor.
-    Ok(unsafe { OwnedFd::from_raw_fd(fd) })
 }
 
 #[cfg(target_os = "linux")]
 fn accept_tcp(l: &std::net::TcpListener) -> std::io::Result<(std::net::TcpStream, SocketAddr)> {
-    let mut storage: libc::sockaddr_storage = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::sockaddr_storage>() as libc::socklen_t;
-    // SAFETY: `l` owns a valid listening socket descriptor; `storage` and `len` are writable.
-    let fd = unsafe {
-        accept4_raw(
-            l.as_raw_fd(),
-            (&raw mut storage).cast::<libc::sockaddr>(),
-            &mut len,
-        )
-    }?;
-    let peer = sockaddr_to_std(&storage, len)?;
+    let (fd, peer) = accept4(l)?;
+    let peer = peer
+        .as_socket()
+        .ok_or_else(|| std::io::Error::from_raw_os_error(libc::EAFNOSUPPORT))?;
     Ok((std::net::TcpStream::from(fd), peer))
-}
-
-#[cfg(target_os = "linux")]
-fn sockaddr_to_std(
-    storage: &libc::sockaddr_storage,
-    len: libc::socklen_t,
-) -> std::io::Result<SocketAddr> {
-    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr};
-
-    let len = len as usize;
-    match i32::from(storage.ss_family) {
-        libc::AF_INET if len >= std::mem::size_of::<libc::sockaddr_in>() => {
-            // SAFETY: `ss_family == AF_INET` and `len` covers `sockaddr_in`.
-            let sin =
-                unsafe { &*(storage as *const libc::sockaddr_storage).cast::<libc::sockaddr_in>() };
-            let ip = Ipv4Addr::from(u32::from_be(sin.sin_addr.s_addr));
-            let port = u16::from_be(sin.sin_port);
-            Ok(SocketAddr::new(IpAddr::V4(ip), port))
-        }
-        libc::AF_INET6 if len >= std::mem::size_of::<libc::sockaddr_in6>() => {
-            // SAFETY: `ss_family == AF_INET6` and `len` covers `sockaddr_in6`.
-            let sin6 = unsafe {
-                &*(storage as *const libc::sockaddr_storage).cast::<libc::sockaddr_in6>()
-            };
-            let ip = Ipv6Addr::from(sin6.sin6_addr.s6_addr);
-            let port = u16::from_be(sin6.sin6_port);
-            Ok(SocketAddr::V6(std::net::SocketAddrV6::new(
-                ip,
-                port,
-                sin6.sin6_flowinfo,
-                sin6.sin6_scope_id,
-            )))
-        }
-        _ => Err(std::io::Error::from_raw_os_error(libc::EAFNOSUPPORT)),
-    }
 }
 
 #[cfg(not(target_os = "linux"))]
@@ -236,37 +192,9 @@ fn accept_tcp(l: &std::net::TcpListener) -> std::io::Result<(std::net::TcpStream
 fn accept_unix(
     l: &std::os::unix::net::UnixListener,
 ) -> std::io::Result<(std::os::unix::net::UnixStream, Option<PathBuf>)> {
-    use std::ffi::OsStr;
-    use std::os::unix::ffi::OsStrExt;
-
-    let mut storage: libc::sockaddr_un = unsafe { std::mem::zeroed() };
-    let mut len = std::mem::size_of::<libc::sockaddr_un>() as libc::socklen_t;
-    // SAFETY: `l` owns a valid listening unix socket descriptor; `storage` and `len` are writable.
-    let fd = unsafe {
-        accept4_raw(
-            l.as_raw_fd(),
-            (&raw mut storage).cast::<libc::sockaddr>(),
-            &mut len,
-        )
-    }?;
-    let stream = std::os::unix::net::UnixStream::from(fd);
-    let path_offset = std::mem::offset_of!(libc::sockaddr_un, sun_path);
-    let peer = if (len as usize) > path_offset {
-        let raw_len = ((len as usize) - path_offset).min(storage.sun_path.len());
-        // SAFETY: `sun_path` is a contiguous byte array of `c_char`.
-        let bytes =
-            unsafe { std::slice::from_raw_parts(storage.sun_path.as_ptr().cast::<u8>(), raw_len) };
-        // Abstract sockets start with NUL and carry no filesystem path.
-        if bytes.first() == Some(&0) {
-            None
-        } else {
-            let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
-            (!bytes[..end].is_empty()).then(|| PathBuf::from(OsStr::from_bytes(&bytes[..end])))
-        }
-    } else {
-        None
-    };
-    Ok((stream, peer))
+    let (fd, peer) = accept4(l)?;
+    let path = peer.as_pathname().map(std::path::Path::to_path_buf);
+    Ok((std::os::unix::net::UnixStream::from(fd), path))
 }
 
 #[cfg(not(target_os = "linux"))]

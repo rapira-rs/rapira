@@ -1,6 +1,5 @@
 &[
     "sapi_module_struct", "sapi_headers_struct", "sapi_header_struct", "sapi_request_info",
-    "sapi_globals_struct", "zend_executor_globals", "php_core_globals", "zend_compiler_globals",
     "zend_file_handle", "zend_module_entry", "zend_string", "zval", "HashTable", "zend_long",
     "zend_fcall_info", "zend_fcall_info_cache",
     "sapi_startup", "php_module_startup", "php_request_startup",

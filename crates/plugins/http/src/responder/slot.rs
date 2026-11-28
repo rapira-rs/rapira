@@ -270,14 +270,11 @@ pub(crate) enum Start {
     Complete {
         head: ResponseHead,
         body: Bytes,
-        content_length: Option<u64>,
-        bodiless: bool,
         truncated: bool,
     },
     /// Streamed response (created lazily only on `flush()`, multi-chunk writes, or `sendFile()`).
     Stream {
         head: ResponseHead,
-        content_length: Option<u64>,
         rx: mpsc::Receiver<Chunk>,
     },
     /// Host error response before any head went out (`500` / `503`).
@@ -328,11 +325,9 @@ impl HttpResponder {
         &mut self,
         head: ResponseHead,
         body: &[u8],
-        content_length: Option<u64>,
-        bodiless: bool,
         truncated: bool,
     ) -> Result<(), ()> {
-        let bodiless = self.bodiless || bodiless;
+        let bodiless = self.bodiless || super::is_bodiless_status(head.status);
         let bytes = if bodiless {
             Bytes::new()
         } else {
@@ -341,36 +336,23 @@ impl HttpResponder {
         self.send_start(Start::Complete {
             head,
             body: bytes,
-            content_length,
-            bodiless,
             truncated,
         })
     }
 
     /// Commits the response head. Bodiless heads complete on the one-shot path; streamed heads open a bounded channel.
-    pub(crate) fn write_head(
-        &mut self,
-        head: ResponseHead,
-        content_length: Option<u64>,
-        bodiless: bool,
-    ) -> Result<(), ()> {
-        if self.bodiless || bodiless {
+    pub(crate) fn write_head(&mut self, head: ResponseHead) -> Result<(), ()> {
+        if self.bodiless || super::is_bodiless_status(head.status) {
             self.bodiless = true;
             return self.send_start(Start::Complete {
                 head,
                 body: Bytes::new(),
-                content_length,
-                bodiless: true,
                 truncated: false,
             });
         }
         let (chunk_tx, chunk_rx) = mpsc::channel(STREAM_CHANNEL_CAP);
         self.stream = Some(chunk_tx);
-        self.send_start(Start::Stream {
-            head,
-            content_length,
-            rx: chunk_rx,
-        })
+        self.send_start(Start::Stream { head, rx: chunk_rx })
     }
 
     /// # Safety
@@ -446,13 +428,8 @@ impl CgiResponder for HttpResponder {
         body: Vec<u8>,
         truncated: bool,
     ) {
-        let head = ResponseHead {
-            status: head.status,
-            headers: head.headers,
-            known_len: None,
-        };
         let bodiless = self.bodiless || super::is_bodiless_status(head.status);
-        let content_length = if bodiless {
+        let known_len = if bodiless {
             head.headers
                 .get(CONTENT_LENGTH)
                 .and_then(|v| crate::intake::parse_content_length(v.as_bytes().trim_ascii()))
@@ -460,6 +437,11 @@ impl CgiResponder for HttpResponder {
             None
         } else {
             Some(body.len() as u64)
+        };
+        let head = ResponseHead {
+            status: head.status,
+            headers: head.headers,
+            known_len,
         };
         let bytes = if bodiless {
             Bytes::new()
@@ -469,8 +451,6 @@ impl CgiResponder for HttpResponder {
         let _ = self.send_start(Start::Complete {
             head,
             body: bytes,
-            content_length,
-            bodiless,
             truncated,
         });
     }

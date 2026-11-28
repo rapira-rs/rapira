@@ -20,20 +20,6 @@ mod responder;
 mod serve;
 
 pub use php::rapira_http_register_classes;
-pub use rapira_http_middleware as middleware;
-
-/// A refusal before dispatch. PHP never saw the request.
-#[derive(Debug)]
-pub struct Rejection {
-    pub status: http::StatusCode,
-    pub reason: String,
-}
-
-impl std::fmt::Display for Rejection {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}: {}", self.status.as_u16(), self.reason)
-    }
-}
 
 pub struct Config {
     pub listen: ListenAddr,

@@ -4,7 +4,6 @@
 mod tests;
 
 use std::borrow::Cow;
-use std::fmt;
 use std::future::Future;
 use std::pin::Pin;
 use std::task::Poll;
@@ -15,13 +14,10 @@ use http::header::{CONTENT_LENGTH, CONTENT_TYPE, HOST, HeaderName};
 use http::{Extensions, HeaderMap, Method, Request as HttpRequest, StatusCode, Uri, Version};
 use http_body::Body;
 use http_body_util::BodyExt;
-use rapira_http_middleware::{
-    MiddlewareChain, Peer, PeerAddr, RequestCtx, RequestHeaders, ShortResponse,
-};
+use rapira_http_middleware::{MiddlewareChain, Peer, PeerAddr, RequestCtx, ShortResponse};
 use rapira_sapi::types::{Authority, Chunks, RequestUri};
 use rapira_sapi::{Addr, Request};
 
-use crate::Rejection;
 use crate::multipart::{self, MultipartBody};
 
 /// Frames smaller than this coalesce into one buffer when multiple frames arrive.
@@ -91,7 +87,7 @@ pub fn parse_content_length(raw: &[u8]) -> Option<u64> {
 
 /// True when `name` contains only ASCII letters, digits, and `-`, so `HTTP_*` CGI mangling cannot alias another header.
 #[inline]
-pub fn is_safe_field_name(name: &str) -> bool {
+fn is_safe_field_name(name: &str) -> bool {
     !name.is_empty() && name.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'-')
 }
 
@@ -115,30 +111,21 @@ pub fn check_request(
     parts: &mut http::request::Parts,
     superglobals: bool,
     max_body_size: usize,
-) -> Result<AdmittedHead, Rejection> {
+) -> Result<AdmittedHead, StatusCode> {
     let mut hosts = parts.headers.get_all(HOST).iter();
     let first_host = hosts.next();
     if hosts.next().is_some() {
-        return Err(Rejection {
-            status: StatusCode::BAD_REQUEST,
-            reason: "repeated Host header".into(),
-        });
+        return Err(StatusCode::BAD_REQUEST);
     }
     let host_bytes = first_host.map(|v| v.as_bytes().trim_ascii());
     let uri_authority = parts.uri.authority().map(|a| a.as_str().as_bytes());
 
     let authority = match host_bytes {
         Some(b"") if parts.version == Version::HTTP_11 => {
-            return Err(Rejection {
-                status: StatusCode::BAD_REQUEST,
-                reason: "empty Host header".into(),
-            });
+            return Err(StatusCode::BAD_REQUEST);
         }
         None if parts.version == Version::HTTP_11 => {
-            return Err(Rejection {
-                status: StatusCode::BAD_REQUEST,
-                reason: "missing Host header".into(),
-            });
+            return Err(StatusCode::BAD_REQUEST);
         }
         Some(b) if !b.is_empty() => Authority::HostHeader,
         _ => match uri_authority {
@@ -154,10 +141,7 @@ pub fn check_request(
     if let Some(cl) = content_length
         && cl > max_body_size as u64
     {
-        return Err(Rejection {
-            status: StatusCode::PAYLOAD_TOO_LARGE,
-            reason: format!("request body of {cl} bytes exceeds max_body_size ({max_body_size})"),
-        });
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     if superglobals {
@@ -197,14 +181,13 @@ pub fn build_request(
     method: Method,
     uri: Uri,
     version: Version,
-    headers: RequestHeaders,
+    headers: HeaderMap,
     authority: Authority,
     body: Chunks,
     peer: Peer,
 ) -> Request {
     let protocol = match version {
         Version::HTTP_10 => "HTTP/1.0",
-        Version::HTTP_2 => "HTTP/2.0",
         _ => "HTTP/1.1",
     };
     let target = uri.authority().map(|_| uri.to_string().into_bytes());
@@ -267,17 +250,17 @@ enum BodyMode<'a> {
     },
 }
 
-enum MultipartHeader<'a> {
-    None,
-    Repeated,
-    Single(&'a [u8]),
-}
-
-/// Inspects `Content-Type` lines once for both empty-body validation and multipart parser setup.
-fn inspect_multipart_ct(headers: &HeaderMap) -> MultipartHeader<'_> {
+/// Returns the `Content-Type` bytes for a single multipart upload header, rejecting repeated multipart `Content-Type` headers.
+fn multipart_content_type<'a>(
+    headers: &'a HeaderMap,
+    uploads: Option<&multipart::Limits>,
+) -> Result<Option<&'a [u8]>, StatusCode> {
+    if uploads.is_none() {
+        return Ok(None);
+    }
     let mut cts = headers.get_all(CONTENT_TYPE).iter();
     let Some(first) = cts.next() else {
-        return MultipartHeader::None;
+        return Ok(None);
     };
     let first_bytes = first.as_bytes();
     let mut has_second = false;
@@ -289,51 +272,12 @@ fn inspect_multipart_ct(headers: &HeaderMap) -> MultipartHeader<'_> {
         }
     }
     if !any_multipart {
-        MultipartHeader::None
+        Ok(None)
     } else if has_second {
-        MultipartHeader::Repeated
+        Err(StatusCode::BAD_REQUEST)
     } else {
-        MultipartHeader::Single(first_bytes)
+        Ok(Some(first_bytes))
     }
-}
-
-/// Rejects repeated multipart `Content-Type` headers before polling the body; defers boundary parsing until the first non-empty frame.
-fn open_body_mode<'a>(
-    headers: &'a HeaderMap,
-    uploads: Option<&'a multipart::Limits>,
-    content_length: Option<u64>,
-) -> Result<BodyMode<'a>, Rejection> {
-    let Some(limits) = uploads else {
-        return Ok(BodyMode::Raw {
-            first: None,
-            parts: Vec::new(),
-            small: BytesMut::new(),
-        });
-    };
-
-    let content_type = match inspect_multipart_ct(headers) {
-        MultipartHeader::None => {
-            return Ok(BodyMode::Raw {
-                first: None,
-                parts: Vec::new(),
-                small: BytesMut::new(),
-            });
-        }
-        MultipartHeader::Repeated => {
-            return Err(Rejection {
-                status: StatusCode::BAD_REQUEST,
-                reason: "repeated Content-Type header on multipart request".into(),
-            });
-        }
-        MultipartHeader::Single(bytes) => bytes,
-    };
-    let size_hint = content_length.and_then(|n| usize::try_from(n).ok());
-    Ok(BodyMode::Multipart {
-        content_type,
-        limits,
-        size_hint,
-        parser: None,
-    })
 }
 
 struct ReadBody {
@@ -342,45 +286,22 @@ struct ReadBody {
     budget_bytes: usize,
 }
 
-/// Rejects repeated multipart `Content-Type` headers without constructing `BodyMode` on empty bodies.
-fn reject_repeated_multipart(
-    headers: &HeaderMap,
-    uploads: Option<&multipart::Limits>,
-) -> Result<(), Rejection> {
-    if uploads.is_some() && matches!(inspect_multipart_ct(headers), MultipartHeader::Repeated) {
-        return Err(Rejection {
-            status: StatusCode::BAD_REQUEST,
-            reason: "repeated Content-Type header on multipart request".into(),
-        });
-    }
-    Ok(())
-}
-
 async fn read_request_body<B>(
     mut body: B,
     mut mode: BodyMode<'_>,
     max_body_size: usize,
     timeout: Duration,
-) -> Result<ReadBody, Rejection>
+) -> Result<ReadBody, StatusCode>
 where
     B: Body<Data = Bytes> + Unpin,
-    B::Error: fmt::Display,
 {
     let mut total: usize = 0;
 
     while let Some(frame_res) = match timeout_lazy(timeout, body.frame()).await {
         Ok(next) => next,
-        Err(()) => {
-            return Err(Rejection {
-                status: StatusCode::REQUEST_TIMEOUT,
-                reason: "request body read timed out".into(),
-            });
-        }
+        Err(()) => return Err(StatusCode::REQUEST_TIMEOUT),
     } {
-        let frame = frame_res.map_err(|e| Rejection {
-            status: StatusCode::BAD_REQUEST,
-            reason: format!("request body read failed: {e}"),
-        })?;
+        let frame = frame_res.map_err(|_| StatusCode::BAD_REQUEST)?;
         let Ok(data) = frame.into_data() else {
             // Request trailers are ignored (PHP has no request trailer API).
             continue;
@@ -390,10 +311,7 @@ where
         }
         total = total.saturating_add(data.len());
         if total > max_body_size {
-            return Err(Rejection {
-                status: StatusCode::PAYLOAD_TOO_LARGE,
-                reason: format!("request body exceeds max_body_size ({max_body_size})"),
-            });
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
         match &mut mode {
             BodyMode::Raw {
@@ -443,7 +361,7 @@ where
                     Some(p) => p,
                     None => {
                         let boundary = multipart::boundary(content_type)?;
-                        parser.insert(Box::new(multipart::Parser::new_with_hint(
+                        parser.insert(Box::new(multipart::Parser::new(
                             &boundary, limits, *size_hint,
                         )))
                     }
@@ -511,12 +429,12 @@ pub(crate) fn admit<B: Body>(
     peer: Peer,
     chain: &MiddlewareChain,
     limits: &IntakeLimits<'_>,
-) -> Result<Admit<B>, Rejection> {
+) -> Result<Admit<B>, StatusCode> {
     let (mut parts, body) = req.into_parts();
     let admitted = check_request(&mut parts, limits.superglobals, limits.max_body_size)?;
 
     if !chain.has_request() && body.is_end_stream() {
-        reject_repeated_multipart(&parts.headers, limits.uploads)?;
+        multipart_content_type(&parts.headers, limits.uploads)?;
         let request = build_request(
             parts.method,
             parts.uri,
@@ -540,14 +458,13 @@ pub(crate) fn admit<B: Body>(
 impl<B> PendingIntake<B>
 where
     B: Body<Data = Bytes> + Unpin,
-    B::Error: fmt::Display,
 {
     /// Completes Phase-1 middleware, body/multipart reading, and SAPI `Request` construction.
     pub(crate) async fn finish(
         self,
         chain: &MiddlewareChain,
         limits: &IntakeLimits<'_>,
-    ) -> Result<Prepared, Rejection> {
+    ) -> Result<Prepared, StatusCode> {
         let Self {
             parts,
             body,
@@ -591,14 +508,31 @@ where
         };
 
         let read = if body.is_end_stream() {
-            reject_repeated_multipart(&headers, limits.uploads)?;
+            multipart_content_type(&headers, limits.uploads)?;
             ReadBody {
                 chunks: Chunks::default(),
                 multipart: None,
                 budget_bytes: 0,
             }
         } else {
-            let mode = open_body_mode(&headers, limits.uploads, admitted.content_length)?;
+            let mode = match (
+                multipart_content_type(&headers, limits.uploads)?,
+                limits.uploads,
+            ) {
+                (Some(content_type), Some(uploads)) => BodyMode::Multipart {
+                    content_type,
+                    limits: uploads,
+                    size_hint: admitted
+                        .content_length
+                        .and_then(|n| usize::try_from(n).ok()),
+                    parser: None,
+                },
+                _ => BodyMode::Raw {
+                    first: None,
+                    parts: Vec::new(),
+                    small: BytesMut::new(),
+                },
+            };
             read_request_body(body, mode, limits.max_body_size, limits.body_timeout).await?
         };
 

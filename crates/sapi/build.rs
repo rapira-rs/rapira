@@ -18,7 +18,6 @@ const C_FILES: &[&str] = &[
 // bindgen panics on the preserve_none opcode handlers of php-src master, so _zend_op stays opaque. https://clang.llvm.org/docs/AttributeReference.html#preserve-none
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("cargo:rustc-check-cfg=cfg(php84)");
-    println!("cargo:rustc-check-cfg=cfg(php85)");
     println!("cargo:rustc-check-cfg=cfg(php87)");
 
     let php = rapira_php_build::discover()?;
@@ -28,9 +27,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }
     println!("cargo:rustc-link-lib=dylib=php");
 
-    if php.version >= (PhpVersion { major: 8, minor: 5 }) {
-        println!("cargo:rustc-cfg=php85");
-    } else {
+    if php.version < (PhpVersion { major: 8, minor: 5 }) {
         println!("cargo:rustc-cfg=php84");
     }
     if php.version >= (PhpVersion { major: 8, minor: 7 }) {

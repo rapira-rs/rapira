@@ -4,7 +4,7 @@
 
 use std::sync::LazyLock;
 
-use rapira_http::Rejection;
+use http::StatusCode;
 use rapira_http::multipart::{HeaderValues, Limits, boundary, is_multipart};
 
 /// Small limits, so that a 4 KiB input can go over each count and size limit.
@@ -18,11 +18,8 @@ static LIMITS: LazyLock<Limits> = LazyLock::new(|| Limits {
 });
 
 /// A malformed body gives 400 and a body over a limit gives 413. An I/O error gives 500, which the allowed list refuses.
-fn rejected(Rejection { status, reason }: Rejection, allowed: &[u16]) {
-    assert!(
-        allowed.contains(&status.as_u16()),
-        "status {status}: {reason}"
-    );
+fn rejected(status: StatusCode, allowed: &[u16]) {
+    assert!(allowed.contains(&status.as_u16()), "status {status}");
 }
 
 /// Asserts one entry per name, with names compared byte for byte, a value in each entry, and at most max_part_headers field lines in all.
@@ -77,10 +74,8 @@ libfuzzer_sys::fuzz_target!(|data: &[u8]| {
     for f in &form.fields {
         assert!(!form.field_name(f).is_empty());
         assert!(form.field_value(f).len() <= l.max_field_size);
-        let headers: Vec<HeaderValues> = form
-            .field_headers(f)
-            .map(|h| h.to_owned_values())
-            .collect();
+        let headers: Vec<HeaderValues> =
+            form.field_headers(f).map(|h| h.to_owned_values()).collect();
         assert_grouped(&headers, l);
     }
     for f in &form.files {

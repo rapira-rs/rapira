@@ -18,4 +18,4 @@ serde = { workspace = true }
 tracing = { workspace = true }
 tokio = { workspace = true, features = ["rt", "net", "time"] }
 hyper = { workspace = true, features = ["http1", "server"] }
-hyper-util = { workspace = true, features = ["tokio", "server", "http1", "server-graceful"] }
+hyper-util = { workspace = true, features = ["tokio", "server-graceful"] }

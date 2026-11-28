@@ -7,7 +7,6 @@ use buffa_descriptor::{DescriptorPool, MethodDescriptor};
 use connectrpc::{ConnectError, ErrorCode, ErrorDetail, Protocol};
 use rapira_sapi::callbacks::guard;
 use rapira_sapi::exchange::{add_list, build_address};
-use rapira_sapi::pool::{Event, record};
 use rapira_sapi::stream;
 use rapira_sapi::work::{Held, HeldPtr};
 use rapira_sapi::{
@@ -23,54 +22,37 @@ use super::{
     rapira_ce_grpc_method_info, rapira_ce_grpc_method_kind, rapira_ce_grpc_protocol,
     rapira_ce_grpc_server_streaming_call, rapira_ce_grpc_service_info, rapira_ce_grpc_unary_call,
 };
-use crate::call::{CallState, Handled, MetadataField, Verb, normalize_error_detail};
+use crate::call::{CallState, MetadataField, Verb, normalize_error_detail};
 
 static METHOD_INFO_SLOTS: OnceLock<[u32; 4]> = OnceLock::new();
 static SERVICE_INFO_SLOTS: OnceLock<[u32; 2]> = OnceLock::new();
 static METADATA_SLOTS: OnceLock<[u32; 1]> = OnceLock::new();
 static CONTEXT_SLOTS: OnceLock<[u32; 7]> = OnceLock::new();
 
-fn record_handled(handled: Option<Handled>) {
-    if let Some(outcome) = handled {
-        record(Event::Handled {
-            errored: outcome == Handled::Errored,
-        });
-    }
-}
-
-/// `Held` adapter pairing `CallState` with its PHP unit class entry and pool event reporting.
-pub(crate) struct GrpcUnit(CallState);
-
-impl GrpcUnit {
-    pub(crate) fn new(state: CallState) -> Self {
-        Self(state)
-    }
-}
-
-impl Held for GrpcUnit {
+impl Held for CallState {
     fn settled(&self) -> bool {
-        self.0.settled()
+        CallState::settled(self)
     }
 
     fn cancelled(&self) -> bool {
-        self.0.cancelled()
+        CallState::cancelled(self)
     }
 
     fn discard(&mut self) {
-        record_handled(self.0.discard());
+        CallState::discard(self);
     }
 
     /// The drop of `CallState`'s reply reports the lost call as INTERNAL.
     fn lost(&mut self) {}
 
     fn shed(self: Box<Self>) {
-        self.0.shed();
+        (*self).shed();
     }
 
     fn class(&self) -> *mut zend_class_entry {
         // SAFETY: MINIT sets the class entries before any worker starts.
         unsafe {
-            if self.0.is_stream() {
+            if self.is_stream() {
                 rapira_ce_grpc_server_streaming_call
             } else {
                 rapira_ce_grpc_unary_call
@@ -296,7 +278,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_message(
     len: *mut usize,
 ) -> *const c_char {
     guard(c"".as_ptr(), || unsafe {
-        let message = &(*(*held).state::<GrpcUnit>()).0.request().message;
+        let message = &(*(*held).state::<CallState>()).request().message;
         *len = message.len();
         zend::ptr_or_empty(message)
     })
@@ -309,7 +291,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_message(
 pub unsafe extern "C" fn rapira_rs_grpc_context(held: *const HeldPtr, memo: *mut zval) -> bool {
     guard(false, || unsafe {
         let mut context: zval = std::mem::zeroed();
-        build_context(&mut context, &mut (*(*held).state::<GrpcUnit>()).0);
+        build_context(&mut context, &mut *(*held).state::<CallState>());
         *memo = context;
         true
     })
@@ -325,12 +307,9 @@ pub unsafe extern "C" fn rapira_rs_grpc_respond(
 ) -> bool {
     guard(false, || unsafe {
         let message = std::slice::from_raw_parts(message.cast::<u8>(), len);
-        let (verb, handled) = (*(*held).state::<GrpcUnit>())
-            .0
-            .finish(Ok(message), |_, _, _| {
-                unreachable!("unary calls never send stream parts")
-            });
-        record_handled(handled);
+        let verb = (*(*held).state::<CallState>()).finish(Ok(message), |_, _, _| {
+            unreachable!("unary calls never send stream parts")
+        });
         thrown(verb)
     })
 }
@@ -341,8 +320,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_respond(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_stream_begin(held: *const HeldPtr) -> bool {
     guard(false, || unsafe {
-        let (verb, handled) = (*(*held).state::<GrpcUnit>()).0.begin();
-        record_handled(handled);
+        let verb = (*(*held).state::<CallState>()).begin();
         thrown(verb)
     })
 }
@@ -358,11 +336,8 @@ pub unsafe extern "C" fn rapira_rs_grpc_stream_send(
 ) -> bool {
     guard(false, || unsafe {
         let message = std::slice::from_raw_parts(message.cast::<u8>(), len);
-        let (sent, handled) = (*(*held).state::<GrpcUnit>())
-            .0
-            .send(message, |tx, part, until| stream::send(tx, part, until));
-        record_handled(handled);
-        sent
+        (*(*held).state::<CallState>())
+            .send(message, |tx, part, until| stream::send(tx, part, until))
     })
 }
 
@@ -372,10 +347,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_stream_send(
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_grpc_stream_end(held: *const HeldPtr) {
     guard((), || unsafe {
-        let handled = (*(*held).state::<GrpcUnit>())
-            .0
-            .end(|tx, part, until| stream::send(tx, part, until));
-        record_handled(handled);
+        (*(*held).state::<CallState>()).end(|tx, part, until| stream::send(tx, part, until));
     });
 }
 
@@ -390,7 +362,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_fail(
     details: *mut HashTable,
 ) -> bool {
     guard(false, || unsafe {
-        let st = &mut (*(*held).state::<GrpcUnit>()).0;
+        let st = &mut *(*held).state::<CallState>();
         let details = match read_details(details, st.request().protocol) {
             Ok(details) => details,
             Err(item) => {
@@ -405,8 +377,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_fail(
         let code = ErrorCode::from_grpc_code(code as u32).unwrap_or(ErrorCode::Unknown);
         let mut err = ConnectError::new(code, String::from_utf8_lossy(zend::zstr_bytes(message)));
         err.details = details;
-        let (verb, handled) = st.finish(Err(err), |tx, part, until| stream::send(tx, part, until));
-        record_handled(handled);
+        let verb = st.finish(Err(err), |tx, part, until| stream::send(tx, part, until));
         thrown(verb)
     })
 }
@@ -426,9 +397,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_add(
     guard(false, || unsafe {
         let name = std::slice::from_raw_parts(name.cast::<u8>(), name_len);
         let value = std::slice::from_raw_parts(value.cast::<u8>(), value_len);
-        let verb = (*(*held).state::<GrpcUnit>())
-            .0
-            .add(trailer, binary, name, value);
+        let verb = (*(*held).state::<CallState>()).add(trailer, binary, name, value);
         thrown(verb)
     })
 }
@@ -443,7 +412,7 @@ pub unsafe extern "C" fn rapira_rs_grpc_snapshot(
     rv: *mut zval,
 ) -> bool {
     guard(false, || unsafe {
-        let st = &(*(*held).state::<GrpcUnit>()).0;
+        let st = &*(*held).state::<CallState>();
         build_metadata(rv, if trailer { st.trailers() } else { st.headers() });
         true
     })

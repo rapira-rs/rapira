@@ -352,22 +352,17 @@ fn compressed_declared_under_run_aborts() {
         let mut head = ResponseHead::new(200);
         head.headers
             .insert(CONTENT_TYPE, HeaderValue::from_static("text/plain"));
+        head.known_len = Some(case.declared_len);
         let start = if case.stream {
             let (tx, rx) = mpsc::channel(4);
             tx.try_send(Chunk::Data(Bytes::from(vec![b'x'; case.body_len])))
                 .unwrap();
             tx.try_send(Chunk::End { truncated: false }).unwrap();
-            Start::Stream {
-                head,
-                content_length: Some(case.declared_len),
-                rx,
-            }
+            Start::Stream { head, rx }
         } else {
             Start::Complete {
                 head,
                 body: Bytes::from(vec![b'x'; case.body_len]),
-                content_length: Some(case.declared_len),
-                bodiless: false,
                 truncated: false,
             }
         };
@@ -595,34 +590,34 @@ fn unified_normalizer_and_stream_invariants() {
                 };
                 build_short_response(&chain, 0, case.is_head, false, &ext, short)
             }
-            SourceKind::PhpComplete | SourceKind::PhpTruncated => build_php_response(
-                &chain,
-                case.is_head,
-                false,
-                &ext,
-                Start::Complete {
-                    head: ResponseHead::new(case.status),
-                    body: Bytes::from_static(b"hello"),
-                    content_length: case.declared_len,
-                    bodiless: false,
-                    truncated: matches!(case.kind, SourceKind::PhpTruncated),
-                },
-            ),
-            SourceKind::PhpStream => {
-                let (tx, rx) = mpsc::channel(4);
-                tx.try_send(Chunk::Data(Bytes::from_static(b"hello")))
-                    .unwrap();
-                tx.try_send(Chunk::End { truncated: false }).unwrap();
+            SourceKind::PhpComplete | SourceKind::PhpTruncated => {
+                let mut head = ResponseHead::new(case.status);
+                head.known_len = case.declared_len;
                 build_php_response(
                     &chain,
                     case.is_head,
                     false,
                     &ext,
-                    Start::Stream {
-                        head: ResponseHead::new(case.status),
-                        content_length: case.declared_len,
-                        rx,
+                    Start::Complete {
+                        head,
+                        body: Bytes::from_static(b"hello"),
+                        truncated: matches!(case.kind, SourceKind::PhpTruncated),
                     },
+                )
+            }
+            SourceKind::PhpStream => {
+                let (tx, rx) = mpsc::channel(4);
+                tx.try_send(Chunk::Data(Bytes::from_static(b"hello")))
+                    .unwrap();
+                tx.try_send(Chunk::End { truncated: false }).unwrap();
+                let mut head = ResponseHead::new(case.status);
+                head.known_len = case.declared_len;
+                build_php_response(
+                    &chain,
+                    case.is_head,
+                    false,
+                    &ext,
+                    Start::Stream { head, rx },
                 )
             }
         };

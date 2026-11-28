@@ -74,7 +74,7 @@ pub unsafe fn add_list<'v>(dst: *mut zval, name: &str, values: impl Iterator<Ite
 
 /// The key pointer of a header name for add_assoc_zval_ex.
 /// The symtable prefilter in add_assoc_zval_ex reads the byte after a leading `-`. For the name "-" that byte is past the name, so a NUL-terminated copy replaces it.
-pub fn header_key(name: &str) -> *const c_char {
+fn header_key(name: &str) -> *const c_char {
     if name == "-" {
         c"-".as_ptr()
     } else {

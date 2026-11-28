@@ -24,8 +24,6 @@ pub fn guard<T>(default: T, f: impl FnOnce() -> T) -> T {
     })
 }
 
-pub use crate::types::MAX_BUFFERED_BODY;
-
 /// http_response_code is a c_int that the app controls, so the clamp stops a wrap of the u16 cast.
 fn head_status(h: &sapi_headers_struct) -> u16 {
     if h.http_response_code != 0 {
@@ -303,9 +301,6 @@ pub extern "C" fn rapira_rs_body_open() -> *mut c_void {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_body_clone(cursor: *const c_void) -> *mut c_void {
     guard(null_mut(), || {
-        if cursor.is_null() {
-            return null_mut();
-        }
         let src = unsafe { &*cursor.cast::<BodyCursor>() };
         Box::into_raw(Box::new(src.clone_at_start())).cast()
     })
@@ -360,12 +355,7 @@ pub unsafe extern "C" fn rapira_rs_body_seek(
 /// `cursor` must be live.
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_body_len(cursor: *const c_void) -> usize {
-    guard(0, || {
-        if cursor.is_null() {
-            return 0;
-        }
-        unsafe { (*cursor.cast::<BodyCursor>()).len() }
-    })
+    guard(0, || unsafe { (*cursor.cast::<BodyCursor>()).len() })
 }
 
 /// Drops a `BodyCursor` created by `rapira_rs_body_open` or `rapira_rs_body_clone`.
@@ -374,9 +364,7 @@ pub unsafe extern "C" fn rapira_rs_body_len(cursor: *const c_void) -> usize {
 #[unsafe(no_mangle)]
 pub unsafe extern "C" fn rapira_rs_body_drop(cursor: *mut c_void) {
     guard((), || {
-        if !cursor.is_null() {
-            drop(unsafe { Box::from_raw(cursor.cast::<BodyCursor>()) });
-        }
+        drop(unsafe { Box::from_raw(cursor.cast::<BodyCursor>()) });
     });
 }
 
@@ -414,13 +402,11 @@ pub(crate) unsafe extern "C" fn register_server_variables(track_vars_array: *mut
         );
     };
     // No request is bound in two cases: the boot run of the entrypoint in worker and dispatcher mode, and the request that makes the OPcache reset call.
-    if unsafe { ctx() }.is_none() {
-        guard((), || unsafe {
-            register_boot_variables(track_vars_array, put_bytes)
-        });
-        return;
-    }
-    with_ctx((), |ctx| {
+    guard((), || {
+        let Some(ctx) = (unsafe { ctx() }) else {
+            unsafe { register_boot_variables(track_vars_array, put_bytes) };
+            return;
+        };
         let reqc = ctx.req_mut();
         // One allocation for the whole array: the env pairs of the pool, the names below, one HTTP_* name per field, and the entries php_register_server_variables adds after this callback.
         let ht = unsafe { (*track_vars_array).value.arr };

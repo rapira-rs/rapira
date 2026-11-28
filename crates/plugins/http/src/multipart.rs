@@ -5,9 +5,8 @@ use std::io::Write;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 
+use http::StatusCode;
 use memchr::memmem;
-
-use crate::Rejection;
 
 /// `unlink` is the only remover. seal calls it at finalize, and Drop removes a file that a bailout after a fatal error or a timeout leaves behind.
 pub struct SpooledFile {
@@ -274,20 +273,6 @@ fn sweep_spool_dirs(base: &Path) {
     }
 }
 
-fn bad(reason: impl Into<String>) -> Rejection {
-    Rejection {
-        status: http::StatusCode::BAD_REQUEST,
-        reason: reason.into(),
-    }
-}
-
-fn over(reason: impl Into<String>) -> Rejection {
-    Rejection {
-        status: http::StatusCode::PAYLOAD_TOO_LARGE,
-        reason: reason.into(),
-    }
-}
-
 pub fn is_multipart(content_type: &[u8]) -> bool {
     let media = content_type.split(|&b| b == b';').next().unwrap_or(b"");
     media
@@ -296,7 +281,7 @@ pub fn is_multipart(content_type: &[u8]) -> bool {
 }
 
 /// Reads the boundary parameter as php-src does. The parameter name is case-insensitive. A quoted value loses its quotes, and a `,` ends an unquoted value. https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L707-L751
-pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
+pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, StatusCode> {
     for seg in content_type.split(|&b| b == b';').skip(1) {
         let Some(eq) = memchr::memchr(b'=', seg) else {
             continue;
@@ -308,7 +293,7 @@ pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
         let val = if let [b'"', inner @ ..] = val {
             match memchr::memchr(b'"', inner) {
                 Some(end) => &inner[..end],
-                None => return Err(bad("unterminated quoted boundary parameter")),
+                None => return Err(StatusCode::BAD_REQUEST),
             }
         } else {
             match memchr::memchr(b',', val) {
@@ -317,11 +302,11 @@ pub fn boundary(content_type: &[u8]) -> Result<Vec<u8>, Rejection> {
             }
         };
         if val.is_empty() {
-            return Err(bad("empty boundary parameter"));
+            return Err(StatusCode::BAD_REQUEST);
         }
         return Ok(val.to_vec());
     }
-    Err(bad("multipart/form-data without a boundary parameter"))
+    Err(StatusCode::BAD_REQUEST)
 }
 
 /// Maximum transport padding bytes (spaces or tabs) accepted on one delimiter line.
@@ -405,7 +390,7 @@ enum Sink {
     /// The preamble, or no open part.
     None,
     /// The part has this error. The parser reports it at the delimiter line that ends the part.
-    Skip(Box<Rejection>),
+    Skip(StatusCode),
     /// Index of the in-progress `FormField` already pushed into `Parser::fields`.
     Field(usize),
     File(Box<FileSink>),
@@ -433,12 +418,8 @@ pub struct Parser<'a> {
 }
 
 impl<'a> Parser<'a> {
-    pub fn new(boundary: &[u8], limits: &'a Limits) -> Self {
-        Self::new_with_hint(boundary, limits, None)
-    }
-
-    /// Pre-reserves flat arena storage from an optional `Content-Length` hint to avoid repeated growth copies.
-    pub fn new_with_hint(boundary: &[u8], limits: &'a Limits, size_hint: Option<usize>) -> Self {
+    /// Creates a streaming multipart parser, optionally pre-reserving flat arena storage from a `Content-Length` hint.
+    pub fn new(boundary: &[u8], limits: &'a Limits, size_hint: Option<usize>) -> Self {
         let delimiter = [b"--".as_slice(), boundary].concat();
         // Pre-reserve only for medium form bodies (<= 64 KiB); larger bodies are often spooled files where arena.bytes stays tiny.
         let (bytes_cap, part_cap) = match size_hint {
@@ -466,7 +447,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Takes the next bytes of the body. After an error the parser takes no more bytes.
-    pub fn feed(&mut self, mut bytes: &[u8]) -> Result<(), Rejection> {
+    pub fn feed(&mut self, mut bytes: &[u8]) -> Result<(), StatusCode> {
         while !bytes.is_empty() {
             bytes = match self.state {
                 State::Headers => self.headers(bytes)?,
@@ -481,7 +462,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Ends the body. A close-delimiter can end the body without a line ending.
-    pub fn finish(mut self) -> Result<MultipartBody, Rejection> {
+    pub fn finish(mut self) -> Result<MultipartBody, StatusCode> {
         match self.state {
             State::Done => {}
             State::Tail(tail) if tail.is_close() && !tail.cr => {
@@ -489,10 +470,9 @@ impl<'a> Parser<'a> {
                 self.end_part(true, bare)?;
             }
             State::Headers if self.is_delimiter_line(&self.head[self.line..], true) => {
-                return Err(bad("part without a header/body separator"));
+                return Err(StatusCode::BAD_REQUEST);
             }
-            _ if self.opened => return Err(bad("no closing boundary line")),
-            _ => return Err(bad("no opening boundary line")),
+            _ => return Err(StatusCode::BAD_REQUEST),
         }
         Ok(MultipartBody {
             arena: self.arena,
@@ -502,13 +482,13 @@ impl<'a> Parser<'a> {
     }
 
     /// Takes header lines up to the empty line, CRLF or bare LF. A line starts at the part start or after a LF, as in httparse. A delimiter line before the empty line ends a part that has no header/body separator.
-    fn headers<'b>(&mut self, bytes: &'b [u8]) -> Result<&'b [u8], Rejection> {
+    fn headers<'b>(&mut self, bytes: &'b [u8]) -> Result<&'b [u8], StatusCode> {
         if self.head.is_empty() {
             let mut from = 0;
             while let Some(lf) = memchr::memchr(b'\n', &bytes[from..]) {
                 let end = from + lf + 1;
                 if end > MAX_PART_HEADER_BYTES {
-                    return Err(over("part header section too large"));
+                    return Err(StatusCode::PAYLOAD_TOO_LARGE);
                 }
                 let line = &bytes[from..end];
                 if matches!(line, b"\n" | b"\r\n") {
@@ -525,12 +505,12 @@ impl<'a> Parser<'a> {
                     return Ok(&bytes[end..]);
                 }
                 if self.is_delimiter_line(line, false) {
-                    return Err(bad("part without a header/body separator"));
+                    return Err(StatusCode::BAD_REQUEST);
                 }
                 from = end;
             }
             if bytes.len() > MAX_PART_HEADER_BYTES {
-                return Err(over("part header section too large"));
+                return Err(StatusCode::PAYLOAD_TOO_LARGE);
             }
             self.head.extend_from_slice(bytes);
             self.line = from;
@@ -540,7 +520,7 @@ impl<'a> Parser<'a> {
         while let Some(lf) = memchr::memchr(b'\n', &bytes[from..]) {
             let end = from + lf + 1;
             if self.head.len() + (end - from) > MAX_PART_HEADER_BYTES {
-                return Err(over("part header section too large"));
+                return Err(StatusCode::PAYLOAD_TOO_LARGE);
             }
             self.head.extend_from_slice(&bytes[from..end]);
             from = end;
@@ -559,13 +539,13 @@ impl<'a> Parser<'a> {
                 return Ok(&bytes[from..]);
             }
             if self.is_delimiter_line(line, false) {
-                return Err(bad("part without a header/body separator"));
+                return Err(StatusCode::BAD_REQUEST);
             }
             self.line = self.head.len();
         }
         let rem = &bytes[from..];
         if self.head.len() + rem.len() > MAX_PART_HEADER_BYTES {
-            return Err(over("part header section too large"));
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
         self.head.extend_from_slice(rem);
         Ok(&[])
@@ -588,7 +568,7 @@ impl<'a> Parser<'a> {
     }
 
     /// Scans bytes that start inside a line. A delimiter must start a line. A line that only begins with the delimiter bytes is content, so the scan continues at the next line. The scan is linear in the body, because it skips a run of delimiter bytes inside a line in one step.
-    fn content<'b>(&mut self, bytes: &'b [u8]) -> Result<&'b [u8], Rejection> {
+    fn content<'b>(&mut self, bytes: &'b [u8]) -> Result<&'b [u8], StatusCode> {
         let delimiter = self.finder.needle().len();
         let mut from = 0;
         while let Some(found) = self.finder.find(&bytes[from..]) {
@@ -666,7 +646,7 @@ impl<'a> Parser<'a> {
         &bytes[1..]
     }
 
-    fn line_start<'b>(&mut self, bytes: &'b [u8], matched: usize) -> Result<&'b [u8], Rejection> {
+    fn line_start<'b>(&mut self, bytes: &'b [u8], matched: usize) -> Result<&'b [u8], StatusCode> {
         let want = &self.finder.needle()[matched..];
         if bytes[0] != want[0] {
             if self.held.is_empty() {
@@ -712,7 +692,7 @@ impl<'a> Parser<'a> {
         Ok(&bytes[len..])
     }
 
-    fn tail<'b>(&mut self, bytes: &'b [u8], mut tail: Tail) -> Result<&'b [u8], Rejection> {
+    fn tail<'b>(&mut self, bytes: &'b [u8], mut tail: Tail) -> Result<&'b [u8], StatusCode> {
         for (i, &byte) in bytes.iter().enumerate() {
             match tail.step(byte) {
                 Step::More => {}
@@ -758,13 +738,13 @@ impl<'a> Parser<'a> {
                     return;
                 }
                 self.fields.pop();
-                over("field part over max_field_size")
+                StatusCode::PAYLOAD_TOO_LARGE
             }
             Sink::File(f) => {
                 if f.file.size + bytes.len() as u64 > self.limits.max_file_size {
-                    over("file part over max_file_size")
-                } else if let Err(e) = f.out.write_all(bytes) {
-                    spool_failed(e)
+                    StatusCode::PAYLOAD_TOO_LARGE
+                } else if f.out.write_all(bytes).is_err() {
+                    StatusCode::INTERNAL_SERVER_ERROR
                 } else {
                     f.file.size += bytes.len() as u64;
                     return;
@@ -772,12 +752,12 @@ impl<'a> Parser<'a> {
             }
         };
         // The drop of a file part removes its spool file.
-        self.sink = Sink::Skip(Box::new(error));
+        self.sink = Sink::Skip(error);
     }
 
     /// Ends the preamble or the current part at a delimiter line.
     /// `bare` is true when no line ending separated the header section from the delimiter line.
-    fn end_part(&mut self, close: bool, bare: bool) -> Result<(), Rejection> {
+    fn end_part(&mut self, close: bool, bare: bool) -> Result<(), StatusCode> {
         self.held.clear();
         match &self.sink {
             Sink::None => {}
@@ -785,13 +765,13 @@ impl<'a> Parser<'a> {
                 self.sink = Sink::None;
                 if bare {
                     self.fields.pop();
-                    return Err(bad("part without a header/body separator"));
+                    return Err(StatusCode::BAD_REQUEST);
                 }
             }
             _ => match std::mem::replace(&mut self.sink, Sink::None) {
                 Sink::None | Sink::Field(_) => unreachable!(),
-                _ if bare => return Err(bad("part without a header/body separator")),
-                Sink::Skip(rejection) => return Err(*rejection),
+                _ if bare => return Err(StatusCode::BAD_REQUEST),
+                Sink::Skip(status) => return Err(status),
                 Sink::File(f) => self.files.push(f.file),
             },
         }
@@ -801,7 +781,7 @@ impl<'a> Parser<'a> {
             return Ok(());
         }
         if self.fields.len() + self.files.len() + 1 > self.limits.max_parts {
-            return Err(over("part count over max_parts"));
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
         self.head.clear();
         self.line = 0;
@@ -821,8 +801,8 @@ fn open_part(
     head: &[u8],
 ) {
     debug_assert!(matches!(sink, Sink::None));
-    if let Err(rej) = parse_part(sink, arena, fields, limits, file_count, head) {
-        *sink = Sink::Skip(Box::new(rej));
+    if let Err(status) = parse_part(sink, arena, fields, limits, file_count, head) {
+        *sink = Sink::Skip(status);
     }
 }
 
@@ -833,7 +813,7 @@ fn parse_part(
     limits: &Limits,
     file_count: usize,
     head: &[u8],
-) -> Result<(), Rejection> {
+) -> Result<(), StatusCode> {
     const STACK_HEADERS: usize = 8;
     let mut stack_buf = [httparse::EMPTY_HEADER; STACK_HEADERS];
     let mut heap_buf;
@@ -841,26 +821,26 @@ fn parse_part(
     let parsed = match httparse::parse_headers(head, &mut stack_buf[..stack_cap]) {
         Ok(httparse::Status::Complete((_, headers))) => headers,
         Ok(httparse::Status::Partial) => {
-            return Err(bad("part without a header/body separator"));
+            return Err(StatusCode::BAD_REQUEST);
         }
         Err(httparse::Error::TooManyHeaders) if limits.max_part_headers > STACK_HEADERS => {
             heap_buf = vec![httparse::EMPTY_HEADER; limits.max_part_headers];
             match httparse::parse_headers(head, &mut heap_buf) {
                 Ok(httparse::Status::Complete((_, headers))) => headers,
                 Ok(httparse::Status::Partial) => {
-                    return Err(bad("part without a header/body separator"));
+                    return Err(StatusCode::BAD_REQUEST);
                 }
                 Err(httparse::Error::TooManyHeaders) => {
-                    return Err(over("part headers over max_part_headers"));
+                    return Err(StatusCode::PAYLOAD_TOO_LARGE);
                 }
-                Err(_) => return Err(bad("unparseable part header section")),
+                Err(_) => return Err(StatusCode::BAD_REQUEST),
             }
         }
         Err(httparse::Error::TooManyHeaders) => {
-            return Err(over("part headers over max_part_headers"));
+            return Err(StatusCode::PAYLOAD_TOO_LARGE);
         }
         // httparse accepts only RFC 9110 token field names. This is stricter than rfc1867.c.
-        Err(_) => return Err(bad("unparseable part header section")),
+        Err(_) => return Err(StatusCode::BAD_REQUEST),
     };
 
     let mut disposition: Option<&[u8]> = None;
@@ -868,21 +848,19 @@ fn parse_part(
     for h in parsed.iter() {
         if h.name.eq_ignore_ascii_case("content-disposition") {
             if disposition.replace(h.value).is_some() {
-                return Err(bad("duplicated content-disposition in a part"));
+                return Err(StatusCode::BAD_REQUEST);
             }
         } else if h.name.eq_ignore_ascii_case("content-type") && media_type.is_none() {
             media_type = Some(h.value);
         }
     }
     let Some(disposition) = disposition else {
-        return Err(bad("part without content-disposition"));
+        return Err(StatusCode::BAD_REQUEST);
     };
 
     let Disposition { name, filename } = disposition_params(disposition)?;
     let Some(name) = name.filter(|n| !n.is_empty()) else {
-        return Err(bad(
-            "content-disposition without a non-empty name parameter",
-        ));
+        return Err(StatusCode::BAD_REQUEST);
     };
 
     let headers_start = arena.headers.len();
@@ -919,14 +897,14 @@ fn parse_part(
         return Ok(());
     };
     if file_count + 1 > limits.max_files {
-        return Err(over("file parts over max_files"));
+        return Err(StatusCode::PAYLOAD_TOO_LARGE);
     }
     let filename_span = arena.push_bytes(&client_filename);
     // httparse trims the value already.
     let media_span = media_type
         .filter(|v| !v.is_empty())
         .map(|v| arena.push_bytes(v));
-    let (out, file) = spool(&limits.dir).map_err(spool_failed)?;
+    let (out, file) = spool(&limits.dir).map_err(|_| StatusCode::INTERNAL_SERVER_ERROR)?;
     *sink = Sink::File(Box::new(FileSink {
         file: UploadedFile {
             name: name_span,
@@ -958,7 +936,7 @@ fn find_quote_or_bs(haystack: &[u8]) -> Option<usize> {
 }
 
 /// Reads the name and filename parameters whatever the disposition type says, as php-src does. https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L804-L815
-fn disposition_params(v: &[u8]) -> Result<Disposition<'_>, Rejection> {
+fn disposition_params(v: &[u8]) -> Result<Disposition<'_>, StatusCode> {
     let mut name: Option<Cow<'_, [u8]>> = None;
     let mut filename: Option<Cow<'_, [u8]>> = None;
     let mut i = find_byte(v, b';').map(|i| i + 1).unwrap_or(v.len());
@@ -975,7 +953,7 @@ fn disposition_params(v: &[u8]) -> Result<Disposition<'_>, Rejection> {
             let start = j + 1;
             let rest = &v[start..];
             match find_quote_or_bs(rest) {
-                None => return Err(bad("unterminated quoted-string in content-disposition")),
+                None => return Err(StatusCode::BAD_REQUEST),
                 Some(pos) if rest[pos] == b'"' => (Cow::Borrowed(&rest[..pos]), start + pos + 1),
                 Some(pos) => {
                     let mut out = Vec::with_capacity(pos + 16);
@@ -983,11 +961,7 @@ fn disposition_params(v: &[u8]) -> Result<Disposition<'_>, Rejection> {
                     let mut k = start + pos;
                     loop {
                         match v.get(k) {
-                            None => {
-                                return Err(bad(
-                                    "unterminated quoted-string in content-disposition",
-                                ));
-                            }
+                            None => return Err(StatusCode::BAD_REQUEST),
                             Some(b'"') => break (Cow::Owned(out), k + 1),
                             // php-src unescapes only \\ and \" and keeps every other '\'. https://github.com/php/php-src/blob/php-8.5.8/main/rfc1867.c#L495
                             // A '\' at the end of a value escapes the closing quote, as in php-src.
@@ -1016,9 +990,7 @@ fn disposition_params(v: &[u8]) -> Result<Disposition<'_>, Rejection> {
         };
         if let Some(slot) = slot {
             if slot.is_some() {
-                return Err(bad(
-                    "duplicated name/filename parameter in content-disposition",
-                ));
+                return Err(StatusCode::BAD_REQUEST);
             }
             *slot = Some(val);
         }
@@ -1094,13 +1066,6 @@ fn spool(dir: &Path) -> std::io::Result<(std::fs::File, SpooledFile)> {
     Ok((out, file))
 }
 
-fn spool_failed(e: std::io::Error) -> Rejection {
-    Rejection {
-        status: http::StatusCode::INTERNAL_SERVER_ERROR,
-        reason: format!("upload spool failed: {e}"),
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1124,8 +1089,8 @@ mod tests {
         pieces: &[&[u8]],
         boundary: &[u8],
         limits: &Limits,
-    ) -> Result<MultipartBody, Rejection> {
-        let mut parser = Parser::new(boundary, limits);
+    ) -> Result<MultipartBody, StatusCode> {
+        let mut parser = Parser::new(boundary, limits, None);
         for piece in pieces {
             parser.feed(piece)?;
         }
@@ -1139,7 +1104,7 @@ mod tests {
     /// The status of the rejection.
     fn rejected(body: &[u8], l: &Limits) -> u16 {
         match parse(&[body], b"B", l) {
-            Err(Rejection { status, .. }) => status.as_u16(),
+            Err(status) => status.as_u16(),
             Ok(_) => panic!("expected a rejection"),
         }
     }
@@ -1393,7 +1358,7 @@ mod tests {
         for case in cases {
             let status = boundary(case.content_type)
                 .map(|_| ())
-                .map_err(|r| r.status.as_u16());
+                .map_err(|s| s.as_u16());
             assert_eq!(status, Err(400), "{}", case.name);
         }
     }
@@ -1508,8 +1473,8 @@ mod tests {
     /// Compares two parse results field by field, with the bytes of each spooled file.
     fn assert_same(
         case: &str,
-        want: &Result<MultipartBody, Rejection>,
-        got: &Result<MultipartBody, Rejection>,
+        want: &Result<MultipartBody, StatusCode>,
+        got: &Result<MultipartBody, StatusCode>,
     ) {
         match (want, got) {
             (Ok(want), Ok(got)) => {
@@ -1549,11 +1514,7 @@ mod tests {
                     assert_eq!(spooled(w), spooled(g), "{case}: spooled bytes");
                 }
             }
-            (Err(w), Err(g)) => assert_eq!(
-                (w.status, &w.reason),
-                (g.status, &g.reason),
-                "{case}: rejection"
-            ),
+            (Err(w), Err(g)) => assert_eq!(w, g, "{case}: rejection"),
             _ => panic!("{case}: one parse is Ok and the other is a rejection"),
         }
     }
@@ -1726,10 +1687,10 @@ mod tests {
             let res = parse(&pieces, b"B", &l);
             match case.want_status {
                 Some(code) => {
-                    let Err(err) = res else {
+                    let Err(status) = res else {
                         panic!("{}: expected rejection {code}", case.name);
                     };
-                    assert_eq!(err.status.as_u16(), code, "{}: {}", case.name, err.reason);
+                    assert_eq!(status.as_u16(), code, "{}", case.name);
                 }
                 None => {
                     let mp = res.expect(case.name);

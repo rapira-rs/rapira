@@ -58,7 +58,7 @@ pub(super) struct Closed;
 
 /// Emits the committed or implicit 200 response head onto the wire.
 pub(super) fn emit_head(st: &mut ExchangeState, finalizing_len: Option<u64>) -> Result<(), Closed> {
-    let head = match std::mem::replace(&mut st.phase, Phase::Sent) {
+    let mut head = match std::mem::replace(&mut st.phase, Phase::Sent) {
         Phase::Open => ResponseHead::new(200),
         Phase::Committed(head) => head,
         phase => {
@@ -66,7 +66,7 @@ pub(super) fn emit_head(st: &mut ExchangeState, finalizing_len: Option<u64>) -> 
             return Ok(());
         }
     };
-    let content_length = if st.bodiless {
+    head.known_len = if st.bodiless {
         st.declared_cl
     } else {
         st.declared_cl.or(finalizing_len)
@@ -74,9 +74,7 @@ pub(super) fn emit_head(st: &mut ExchangeState, finalizing_len: Option<u64>) -> 
     let Some(responder) = st.responder.as_mut() else {
         return Err(Closed);
     };
-    responder
-        .write_head(head, content_length, st.bodiless)
-        .map_err(|_| Closed)
+    responder.write_head(head).map_err(|_| Closed)
 }
 
 /// Sets `Phase::Discarded` so `release()` does not count the unit a second time.
@@ -152,11 +150,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_trailers(
     })
 }
 
-pub(super) fn write_head_core(
-    st: &mut ExchangeState,
-    status: u16,
-    headers: ResponseHeaders,
-) -> Verb {
+pub(super) fn write_head_core(st: &mut ExchangeState, status: u16, headers: HeaderMap) -> Verb {
     if st.cancelled() {
         discard_unit(st);
         return Verb::Discarded;
@@ -216,7 +210,7 @@ pub unsafe extern "C" fn rapira_rs_exchange_write_head(
 /// Sends a one-shot response (head + optional body) without allocating a stream channel and seals the exchange.
 fn send_complete(st: &mut ExchangeState, body: &[u8], accepted_len: u64) -> Verb {
     st.unlink_spools();
-    let head = match std::mem::replace(&mut st.phase, Phase::Open) {
+    let mut head = match std::mem::replace(&mut st.phase, Phase::Open) {
         Phase::Open => ResponseHead::new(200),
         Phase::Committed(head) => head,
         other => {
@@ -224,7 +218,7 @@ fn send_complete(st: &mut ExchangeState, body: &[u8], accepted_len: u64) -> Verb
             unreachable!("send_complete requires Open or Committed phase");
         }
     };
-    let content_length = if st.bodiless {
+    head.known_len = if st.bodiless {
         st.declared_cl
     } else {
         st.declared_cl.or(Some(accepted_len))
@@ -234,10 +228,7 @@ fn send_complete(st: &mut ExchangeState, body: &[u8], accepted_len: u64) -> Verb
         return Verb::Discarded;
     };
     let wire_body = if st.bodiless { &[] } else { body };
-    if responder
-        .write_complete(head, wire_body, content_length, st.bodiless, false)
-        .is_err()
-    {
+    if responder.write_complete(head, wire_body, false).is_err() {
         st.phase = Phase::Discarded;
         record(Event::Handled { errored: true });
         return Verb::Discarded;

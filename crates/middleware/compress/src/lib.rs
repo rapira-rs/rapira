@@ -193,10 +193,10 @@ fn negotiate_encoding<'a>(values: impl Iterator<Item = &'a [u8]>) -> Option<Enco
             let mut valid = true;
             for param in parts {
                 let param = param.trim_ascii();
-                if let Some((k, v)) = split_once_byte(param, b'=')
-                    && k.trim_ascii().eq_ignore_ascii_case(b"q")
+                if let Some(idx) = param.iter().position(|&b| b == b'=')
+                    && param[..idx].trim_ascii().eq_ignore_ascii_case(b"q")
                 {
-                    match parse_qvalue(v.trim_ascii()) {
+                    match parse_qvalue(param[idx + 1..].trim_ascii()) {
                         Some(parsed) => q = parsed,
                         None => valid = false,
                     }
@@ -226,11 +226,6 @@ fn negotiate_encoding<'a>(values: impl Iterator<Item = &'a [u8]>) -> Option<Enco
     } else {
         Some(Encoding::Gzip)
     }
-}
-
-fn split_once_byte(s: &[u8], delim: u8) -> Option<(&[u8], &[u8])> {
-    let idx = s.iter().position(|&b| b == delim)?;
-    Some((&s[..idx], &s[idx + 1..]))
 }
 
 /// Parses RFC 9110 §12.4.2 `qvalue` (`0`..`1` with up to 3 decimal digits) as `0..=1000`.

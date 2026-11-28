@@ -38,25 +38,6 @@ size_t rapira_ub_write(const char *str, size_t len) {
     }                                                                          \
     zend_end_try()
 
-// Like RAPIRA_GUARD, but records no outcome. It only closes observer frames.
-#define RAPIRA_OBSERVER_CLOSE(stmt, base)                                      \
-    zend_try { stmt; }                                                         \
-    zend_catch { rapira_observer_end_to(base); }                               \
-    zend_end_try()
-
-// php_output_end_all flushes the output handlers of the app. A handler can
-// raise a fatal error, which bails out.
-int rapira_finish_output(void) {
-    zend_try {
-        php_output_end_all();
-        php_header(); // does nothing when SG(headers_sent) is true
-    }
-    zend_catch { return RAPIRA_BAILOUT; }
-    zend_end_try();
-
-    return RAPIRA_OK;
-}
-
 PHP_FUNCTION(rapira_finish_request) {
     ZEND_PARSE_PARAMETERS_NONE();
     if (rapira_current_mode() == RAPIRA_MODE_DISPATCHER) {
@@ -66,11 +47,8 @@ PHP_FUNCTION(rapira_finish_request) {
                   "mode; finalize the unit that receive() returned");
         RETURN_THROWS();
     }
-    if (rapira_finish_output() != RAPIRA_OK) {
-        // raise the bailout again. rapira_run_handler catches it in worker
-        // mode, and php_execute_script catches it in classic mode
-        zend_bailout();
-    }
+    php_output_end_all();
+    php_header(); // does nothing when SG(headers_sent) is true
     rapira_rs_finish_response();
     RETURN_TRUE;
 }
@@ -463,14 +441,14 @@ int rapira_run_handler(zend_fcall_info *fci, zend_fcall_info_cache *fcc) {
         observed_base);
 
     // a destructor sweep per unit would run __destruct on live objects
-    RAPIRA_OBSERVER_CLOSE(php_call_shutdown_functions(), observed_base);
+    php_call_shutdown_functions();
     // the internal frame of handle_request is live, so zend_call_function
     // leaves a throw of a shutdown function pending (Zend/zend_execute_API.c)
     RAPIRA_GUARD(
         if (rapira_report_uncaught(true)) { outcome = RAPIRA_THROW; }, outcome,
         observed_base);
     // the table release frees closure captures, which can run __destruct
-    RAPIRA_OBSERVER_CLOSE(php_free_shutdown_functions(), observed_base);
+    php_free_shutdown_functions();
 
     // this must follow every step that runs app code, or the exception is
     // thrown again later. The release can run a __destruct that bails out

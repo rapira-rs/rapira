@@ -5,8 +5,6 @@ use rapira_sapi::{rapira_plugin, zend_class_entry};
 mod call;
 mod values;
 
-pub(crate) use call::GrpcUnit;
-
 // Class entries of the grpc stub; rapira_grpc_register_classes assigns them in MINIT (rapira_grpc.h).
 unsafe extern "C" {
     pub static mut rapira_ce_grpc_method_kind: *mut zend_class_entry;

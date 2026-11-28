@@ -992,7 +992,6 @@ dependencies = [
  "bytes",
  "http",
  "http-body",
- "http-body-util",
  "percent-encoding",
  "rapira_config",
  "rapira_http_middleware",

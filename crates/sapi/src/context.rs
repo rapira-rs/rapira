@@ -37,7 +37,7 @@ macro_rules! server_strings {
         impl ServerStrings {
             fn intern() -> Self {
                 Self {
-                    $($field: permanent($text),)*
+                    $($field: Permanent::intern($text),)*
                 }
             }
         }
@@ -198,9 +198,17 @@ unsafe impl Send for Permanent {}
 unsafe impl Sync for Permanent {}
 
 impl Permanent {
-    /// Interns `bytes` as a process-lifetime Zend string shared across workers.
+    /// Interns `bytes` as a process-lifetime Zend string shared across workers. PHP's permanent intern table is read-only during requests. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_string.c#L265-L280
     pub fn intern(bytes: &[u8]) -> Self {
-        permanent(bytes)
+        let mut table = PERMANENT.lock().unwrap();
+        if let Some(s) = table.get(bytes) {
+            return *s;
+        }
+        // SAFETY: the shim copies the bytes and computes the hash. The persistent allocator calls zend_out_of_memory() if malloc fails. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_alloc.c#L4069-L4076
+        // zend_out_of_memory() aborts the process. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_alloc.c#L3403-L3407
+        let s = Permanent(unsafe { rapira_permanent_string(bytes.as_ptr().cast(), bytes.len()) });
+        table.insert(bytes.into(), s);
+        s
     }
 
     pub fn as_ptr(self) -> *mut zend_string {
@@ -219,19 +227,6 @@ impl Permanent {
 
 static PERMANENT: Mutex<BTreeMap<Box<[u8]>, Permanent>> = Mutex::new(BTreeMap::new());
 
-/// Workers share this table for new entrypoint paths. PHP's permanent intern table is read-only during requests. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_string.c#L265-L280
-pub(crate) fn permanent(bytes: &[u8]) -> Permanent {
-    let mut table = PERMANENT.lock().unwrap();
-    if let Some(s) = table.get(bytes) {
-        return *s;
-    }
-    // SAFETY: the shim copies the bytes and computes the hash. The persistent allocator calls zend_out_of_memory() if malloc fails. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_alloc.c#L4069-L4076
-    // zend_out_of_memory() aborts the process. https://github.com/php/php-src/blob/php-8.6.0/Zend/zend_alloc.c#L3403-L3407
-    let s = Permanent(unsafe { rapira_permanent_string(bytes.as_ptr().cast(), bytes.len()) });
-    table.insert(bytes.into(), s);
-    s
-}
-
 /// The engine initializes the fixed strings before it starts any workers.
 pub(crate) fn intern_server_strings() {
     SERVER_STRINGS.get_or_init(ServerStrings::intern);
@@ -247,8 +242,8 @@ impl HttpIdentity {
     pub fn new(name: &str, port: u16) -> Self {
         Self {
             port,
-            server_name: permanent(name.as_bytes()),
-            server_port: permanent(port.format_into(&mut NumBuffer::new()).as_bytes()),
+            server_name: Permanent::intern(name.as_bytes()),
+            server_port: Permanent::intern(port.format_into(&mut NumBuffer::new()).as_bytes()),
         }
     }
 
@@ -296,9 +291,9 @@ pub(crate) fn resolve_script(configured: &Path) {
         .file_name()
         .map_or_else(|| "/".to_string(), |f| format!("/{}", f.to_string_lossy()));
     SCRIPT.set(Some(ScriptPaths {
-        server_filename: permanent(real.as_os_str().as_bytes()),
-        server_script_name: permanent(script_name.as_bytes()),
-        server_document_root: permanent(document_root),
+        server_filename: Permanent::intern(real.as_os_str().as_bytes()),
+        server_script_name: Permanent::intern(script_name.as_bytes()),
+        server_document_root: Permanent::intern(document_root),
     }));
 }
 
@@ -320,7 +315,7 @@ pub unsafe fn ctx<'a>() -> Option<&'a mut CgiExchange> {
     unsafe { ((*rapira_sg()).server_context as *mut CgiExchange).as_mut() }
 }
 
-pub fn with_ctx<T: Copy>(default: T, f: impl FnOnce(&mut CgiExchange) -> T) -> T {
+pub(crate) fn with_ctx<T: Copy>(default: T, f: impl FnOnce(&mut CgiExchange) -> T) -> T {
     guard(default, move || match unsafe { ctx() } {
         Some(ctx) => f(ctx),
         None => default,

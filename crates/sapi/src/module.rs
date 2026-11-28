@@ -77,7 +77,7 @@ pub(crate) fn build_sapi_module() -> sapi_module_struct {
         additional_functions: null(),
         input_filter_init: None,
         sapi_error: Some(zend_error),
-        #[cfg(php85)]
+        #[cfg(not(php84))]
         pre_request_init: None,
     }
 }

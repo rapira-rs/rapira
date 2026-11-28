@@ -280,6 +280,11 @@ fn shutdown_function_fatal_recycles_worker() -> anyhow::Result<()> {
         b2.contains("ok counter=1"),
         "fatal in shutdown fn must recycle, resetting statics (got: {b2:?})"
     );
+    let line = slot_line(&srv, "handled=2 ");
+    assert!(
+        line.contains("recycles=1 "),
+        "the shutdown fatal recycles the app: {line}"
+    );
     Ok(())
 }
 

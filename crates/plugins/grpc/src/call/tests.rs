@@ -546,12 +546,7 @@ fn add_validates_per_contract() {
         let mut st = unary_state(tx);
         let _rx = match c.setup {
             Setup::Responded => {
-                assert_eq!(
-                    st.finish(Ok(&[]), try_send_part),
-                    (Verb::Ok, Some(Handled::Ok)),
-                    "{}",
-                    c.name
-                );
+                assert_eq!(st.finish(Ok(&[]), try_send_part), Verb::Ok, "{}", c.name);
                 Some(rx)
             }
             Setup::HostClosed => {
@@ -630,7 +625,7 @@ fn finish_sends_one_outcome_in_wire_form() {
         adds: &'static [Entry],
         drop_receiver: bool,
         finishes: &'static [Finish],
-        outcomes: &'static [(Verb, Option<Handled>)],
+        outcomes: &'static [Verb],
         settled: bool,
         cancelled: bool,
         sent: Sent,
@@ -667,7 +662,7 @@ fn finish_sends_one_outcome_in_wire_form() {
             ],
             drop_receiver: false,
             finishes: &[Finish::Respond(b"\x0a\x02hi")],
-            outcomes: &[(Verb::Ok, Some(Handled::Ok))],
+            outcomes: &[Verb::Ok],
             settled: true,
             cancelled: false,
             sent: Sent::Outcome {
@@ -688,7 +683,7 @@ fn finish_sends_one_outcome_in_wire_form() {
                     value: "CgF4",
                 }],
             })],
-            outcomes: &[(Verb::Ok, Some(Handled::Ok))],
+            outcomes: &[Verb::Ok],
             settled: true,
             cancelled: false,
             sent: Sent::Outcome {
@@ -709,7 +704,7 @@ fn finish_sends_one_outcome_in_wire_form() {
             adds: &[],
             drop_receiver: false,
             finishes: &[Finish::Respond(b"a"), Finish::Respond(b"b")],
-            outcomes: &[(Verb::Ok, Some(Handled::Ok)), (Verb::Finalized, None)],
+            outcomes: &[Verb::Ok, Verb::Finalized],
             settled: true,
             cancelled: false,
             sent: Sent::Outcome {
@@ -723,7 +718,7 @@ fn finish_sends_one_outcome_in_wire_form() {
             adds: &[],
             drop_receiver: true,
             finishes: &[Finish::Respond(b"a")],
-            outcomes: &[(Verb::Discarded, Some(Handled::Errored))],
+            outcomes: &[Verb::Discarded],
             settled: true,
             cancelled: true,
             sent: Sent::Nothing,
@@ -741,7 +736,7 @@ fn finish_sends_one_outcome_in_wire_form() {
                 c.name
             );
         }
-        let outcomes: Vec<(Verb, Option<Handled>)> = c
+        let outcomes: Vec<Verb> = c
             .finishes
             .iter()
             .map(|f| match f {
@@ -831,12 +826,7 @@ fn stream_call_lifecycle() {
             Scenario::BeginChecksClosedAndDeadline => {
                 let (mut st, _head, parts) = stream_state(None);
                 drop(parts);
-                assert_eq!(
-                    st.begin(),
-                    (Verb::Discarded, Some(Handled::Errored)),
-                    "{}",
-                    c.name
-                );
+                assert_eq!(st.begin(), Verb::Discarded, "{}", c.name);
                 assert!(st.settled(), "{}", c.name);
 
                 let past = Deadline {
@@ -844,16 +834,11 @@ fn stream_call_lifecycle() {
                     unix: 0.0,
                 };
                 let (mut st, _head, _parts) = stream_state(Some(past));
-                assert_eq!(
-                    st.begin(),
-                    (Verb::Discarded, Some(Handled::Errored)),
-                    "{}",
-                    c.name
-                );
+                assert_eq!(st.begin(), Verb::Discarded, "{}", c.name);
 
                 let (mut st, _head, _parts) = stream_state(None);
-                assert_eq!(st.end(try_send_part), Some(Handled::Ok), "{}", c.name);
-                assert_eq!(st.begin(), (Verb::Finalized, None), "{}", c.name);
+                st.end(try_send_part);
+                assert_eq!(st.begin(), Verb::Finalized, "{}", c.name);
             }
             Scenario::CommitHeadThenLateHeaderAndTrailerOnEnd => {
                 let (mut st, mut head_rx, mut parts_rx) = stream_state(None);
@@ -864,8 +849,8 @@ fn stream_call_lifecycle() {
                     "{}",
                     c.name
                 );
-                assert_eq!(st.begin(), (Verb::Ok, None), "{}", c.name);
-                assert_eq!(st.send(b"msg1", try_send_part), (true, None), "{}", c.name);
+                assert_eq!(st.begin(), Verb::Ok, "{}", c.name);
+                assert!(st.send(b"msg1", try_send_part), "{}", c.name);
 
                 // After first yield, headers are committed; late trailers are accepted but flagged.
                 assert_eq!(
@@ -880,7 +865,7 @@ fn stream_call_lifecycle() {
                     "{}",
                     c.name
                 );
-                assert_eq!(st.end(try_send_part), Some(Handled::Ok), "{}", c.name);
+                st.end(try_send_part);
                 assert!(st.settled(), "{}", c.name);
 
                 let head = head_rx.try_recv().unwrap().unwrap();
@@ -896,8 +881,8 @@ fn stream_call_lifecycle() {
             Scenario::ZeroYieldCleanEnd => {
                 let (mut st, mut head_rx, mut parts_rx) = stream_state(None);
                 assert_eq!(st.add(false, false, b"x-h", b"ok"), Verb::Ok, "{}", c.name);
-                assert_eq!(st.begin(), (Verb::Ok, None), "{}", c.name);
-                assert_eq!(st.end(try_send_part), Some(Handled::Ok), "{}", c.name);
+                assert_eq!(st.begin(), Verb::Ok, "{}", c.name);
+                st.end(try_send_part);
                 let head = head_rx.try_recv().unwrap().unwrap();
                 assert_eq!(head.headers, map(&[("x-h", "ok")]), "{}", c.name);
                 assert!(matches!(parts_rx.try_recv(), Ok(Part::End)), "{}", c.name);
@@ -907,12 +892,7 @@ fn stream_call_lifecycle() {
                 assert_eq!(st.add(false, false, b"x-h", b"a"), Verb::Ok, "{}", c.name);
                 assert_eq!(st.add(true, false, b"x-t", b"b"), Verb::Ok, "{}", c.name);
                 let err = ConnectError::new(ErrorCode::PermissionDenied, "denied");
-                assert_eq!(
-                    st.finish(Err(err), try_send_part),
-                    (Verb::Ok, Some(Handled::Ok)),
-                    "{}",
-                    c.name
-                );
+                assert_eq!(st.finish(Err(err), try_send_part), Verb::Ok, "{}", c.name);
                 let got = head_rx.try_recv().unwrap().unwrap_err();
                 assert_eq!(got.code, ErrorCode::PermissionDenied, "{}", c.name);
                 assert_eq!(got.response_headers(), &map(&[("x-h", "a")]), "{}", c.name);
@@ -926,7 +906,7 @@ fn stream_call_lifecycle() {
                     "{}",
                     c.name
                 );
-                assert_eq!(st.send(b"m1", try_send_part), (true, None), "{}", c.name);
+                assert!(st.send(b"m1", try_send_part), "{}", c.name);
                 assert_eq!(
                     st.add(true, false, b"x-t2", b"late"),
                     Verb::Ok,
@@ -934,12 +914,7 @@ fn stream_call_lifecycle() {
                     c.name
                 );
                 let err = ConnectError::new(ErrorCode::Aborted, "mid-stream");
-                assert_eq!(
-                    st.finish(Err(err), try_send_part),
-                    (Verb::Ok, Some(Handled::Ok)),
-                    "{}",
-                    c.name
-                );
+                assert_eq!(st.finish(Err(err), try_send_part), Verb::Ok, "{}", c.name);
                 let _ = head_rx.try_recv().unwrap().unwrap();
                 assert!(
                     matches!(parts_rx.try_recv(), Ok(Part::Message(_))),
@@ -961,15 +936,11 @@ fn stream_call_lifecycle() {
             }
             Scenario::SendFailureDiscardsCall => {
                 let (mut st, _head_rx, _parts_rx) = stream_state(None);
-                assert_eq!(
-                    st.send(b"m1", |_, _, _| false),
-                    (false, Some(Handled::Errored)),
-                    "{}",
-                    c.name
-                );
+                assert!(!st.send(b"m1", |_, _, _| false), "{}", c.name);
                 assert!(st.settled(), "{}", c.name);
                 assert!(st.cancelled(), "{}", c.name);
-                assert_eq!(st.discard(), None, "{}", c.name);
+                st.discard();
+                assert!(st.settled(), "{}", c.name);
             }
         }
     }
@@ -1028,7 +999,7 @@ fn shed_and_discard_lifecycle() {
             }
             Scenario::ShedPostHeadStream => {
                 let (mut st, mut head_rx, mut parts_rx) = stream_state(None);
-                assert_eq!(st.send(b"m1", try_send_part), (true, None), "{}", c.name);
+                assert!(st.send(b"m1", try_send_part), "{}", c.name);
                 let _ = head_rx.try_recv().unwrap().unwrap();
                 st.shed();
                 assert!(
@@ -1048,10 +1019,11 @@ fn shed_and_discard_lifecycle() {
             Scenario::DiscardIdempotent => {
                 let (tx, _rx) = oneshot::channel();
                 let mut st = unary_state(tx);
-                assert_eq!(st.discard(), Some(Handled::Errored), "{}", c.name);
+                st.discard();
                 assert!(st.settled(), "{}", c.name);
                 assert!(st.cancelled(), "{}", c.name);
-                assert_eq!(st.discard(), None, "{}", c.name);
+                st.discard();
+                assert!(st.settled(), "{}", c.name);
             }
             Scenario::DropUnsettledClosesReceiver => {
                 let (tx, mut rx) = oneshot::channel();

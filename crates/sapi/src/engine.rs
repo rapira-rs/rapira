@@ -22,12 +22,6 @@ pub fn zts() -> bool {
     unsafe { rapira_zts() }
 }
 
-/// True when PHP can arm a separate execution timer for each worker.
-pub fn has_execution_timers() -> bool {
-    // SAFETY: the shim returns a build constant.
-    unsafe { rapira_has_execution_timers() }
-}
-
 /// The version string of the linked libphp.
 pub fn linked_php_version() -> String {
     // SAFETY: php_version returns a static C string before and after startup.
@@ -148,7 +142,7 @@ impl Engine {
             "the PHP engine can start only once per process"
         );
 
-        let disable_timeouts = workers > 1 && !has_execution_timers();
+        let disable_timeouts = workers > 1 && !unsafe { rapira_has_execution_timers() };
         let mut module = module::build_sapi_module();
         // SAFETY: only this thread starts PHP. The register functions stay valid for the life of the process.
         let started = unsafe {

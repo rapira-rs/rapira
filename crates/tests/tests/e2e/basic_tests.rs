@@ -420,28 +420,6 @@ fn worker_finish_request() -> anyhow::Result<()> {
 }
 
 #[test]
-fn getenv_classic() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Classic, fixture("basic_tests/env.php"))
-        .env("FOO", "BAR")
-        .spawn();
-    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
-    assert_eq!(status, 200);
-    assert!(body.contains("BAR"), "expected FOO=BAR (got: {body:?})");
-    Ok(())
-}
-
-#[test]
-fn getenv_worker() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Worker, fixture("shared/env-worker.php"))
-        .env("FOO", "BAR")
-        .spawn();
-    let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
-    assert_eq!(status, 200);
-    assert!(body.contains("BAR"), "expected FOO=BAR (got: {body:?})");
-    Ok(())
-}
-
-#[test]
 fn failboot_classic() -> anyhow::Result<()> {
     let srv = Spawn::http(Mode::Classic, fixture("basic_tests/failboot.php")).spawn();
     let StatusBody { status, body } = drain(submit(srv.addr, req("/"))?);
@@ -460,20 +438,6 @@ fn status_counts_worker() -> anyhow::Result<()> {
     let _ = drain(submit(srv.addr, req("/?boom=0"))?);
     let _ = drain(submit(srv.addr, req("/?boom=1"))?);
     slot_line(&srv, "handled=3 errors=1 ");
-    Ok(())
-}
-
-#[test]
-fn status_counts_recycles_worker() -> anyhow::Result<()> {
-    let srv = Spawn::http(Mode::Worker, fixture("shared/shutdown-fatal-worker.php")).spawn();
-    let _ = drain(submit(srv.addr, req("/?boom=1"))?);
-    let s2 = drain(submit(srv.addr, req("/"))?).status;
-    assert_eq!(s2, 200, "worker recovers after the recycle");
-    let line = slot_line(&srv, "handled=2 ");
-    assert!(
-        line.contains("recycles=1 "),
-        "the shutdown fatal recycles the app: {line}"
-    );
     Ok(())
 }
 

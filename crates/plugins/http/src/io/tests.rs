@@ -307,17 +307,16 @@ fn track_body_and_request_scope_lifecycle() {
             assert_eq!(inflight.local.get(), 0, "{}", case.name);
             assert_eq!(phase.current().0, IoPhase::ReadHead, "{}", case.name);
             assert!(slot.is_cancelled(), "{}", case.name);
+            let mut head = ResponseHead::new(200);
+            head.known_len = Some(4);
             assert!(
-                tx.write_complete(ResponseHead::new(200), b"late", Some(4), false, false)
-                    .is_err(),
+                tx.write_complete(head, b"late", false).is_err(),
                 "{}: receiver must be closed on mid-wait drop",
                 case.name
             );
             continue;
         }
 
-        // Simulate having received Start cleanly for response-building cases.
-        scope.lease.state = LeaseState::Active;
         let tracked = match case.kind {
             Kind::Empty => {
                 let res = build_php_response(
@@ -328,8 +327,6 @@ fn track_body_and_request_scope_lifecycle() {
                     Start::Complete {
                         head: ResponseHead::new(204),
                         body: Bytes::new(),
-                        content_length: None,
-                        bodiless: true,
                         truncated: false,
                     },
                 )
@@ -337,16 +334,16 @@ fn track_body_and_request_scope_lifecycle() {
                 scope.track(res)
             }
             Kind::Once => {
+                let mut head = ResponseHead::new(200);
+                head.known_len = Some(5);
                 let res = build_php_response(
                     &chain,
                     false,
                     false,
                     &ext,
                     Start::Complete {
-                        head: ResponseHead::new(200),
+                        head,
                         body: Bytes::from_static(b"hello"),
-                        content_length: Some(5),
-                        bodiless: false,
                         truncated: false,
                     },
                 )
@@ -365,16 +362,14 @@ fn track_body_and_request_scope_lifecycle() {
                     _ => unreachable!(),
                 };
                 chunk_tx.try_send(Chunk::End { truncated }).unwrap();
+                let mut head = ResponseHead::new(200);
+                head.known_len = cl;
                 let res = build_php_response(
                     &chain,
                     false,
                     false,
                     &ext,
-                    Start::Stream {
-                        head: ResponseHead::new(200),
-                        content_length: cl,
-                        rx: chunk_rx,
-                    },
+                    Start::Stream { head, rx: chunk_rx },
                 )
                 .unwrap();
                 scope.track(res)

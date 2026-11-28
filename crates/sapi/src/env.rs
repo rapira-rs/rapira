@@ -2,7 +2,7 @@
 //! A pool holds its values and the process environment as one table of permanent interned strings. Its workers share the table, and PHP reads a string of the table with no copy.
 //! No Rust borrow spans a PHP allocation, because the allocation can bail out.
 
-use crate::context::{Permanent, permanent};
+use crate::context::Permanent;
 use crate::{
     php_import_environment_variables, rapira_zval_stringl, zend_hash_index_del,
     zend_hash_index_update, zend_hash_str_del, zend_hash_str_update, zend_hash_update, zend_long,
@@ -44,14 +44,14 @@ impl PoolEnv {
         for (name, value) in std::env::vars_os() {
             let name: Bytes = name.into_vec().into();
             if let Entry::Vacant(slot) = values.entry(name.clone()) {
-                slot.insert(permanent(&value.into_vec()));
+                slot.insert(Permanent::intern(&value.into_vec()));
                 names.push(name);
             }
         }
         let mut pairs = Vec::with_capacity(pool.len());
         for (name, value) in pool {
-            let value = permanent(value.as_bytes());
-            pairs.push((permanent(name.as_bytes()), value));
+            let value = Permanent::intern(value.as_bytes());
+            pairs.push((Permanent::intern(name.as_bytes()), value));
             if values.insert(name.as_bytes().into(), value).is_none() {
                 names.push(name.as_bytes().into());
             }
@@ -63,7 +63,7 @@ impl PoolEnv {
             }
             let key = match index_key(name) {
                 Some(index) => Key::Index(index),
-                None => Key::Name(permanent(name)),
+                None => Key::Name(Permanent::intern(name)),
             };
             imported.push((key, values[name]));
         }

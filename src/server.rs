@@ -52,30 +52,6 @@ impl Supervisor {
         }
     }
 
-    fn push_signal(&mut self, sig: libc::c_int) {
-        self.signals.push_back(sig);
-    }
-
-    fn mark_service_failed(&mut self) {
-        self.failed = true;
-    }
-
-    fn mark_plugins_done(&mut self) {
-        self.plugins_done = true;
-    }
-
-    fn mark_obs_done(&mut self) {
-        self.obs_done = true;
-    }
-
-    fn mark_workers_done(&mut self) {
-        self.workers_done = true;
-    }
-
-    fn deadline_exit_code(&self) -> i32 {
-        i32::from(self.failed)
-    }
-
     fn next_action(&mut self) -> Action {
         match self.phase {
             Phase::Running => {
@@ -172,7 +148,7 @@ pub fn serve(mut settings: Settings, signals: Signals) -> Result<()> {
         signals
             .start(move |sig| {
                 let mut state = wake.0.lock().unwrap();
-                state.push_signal(sig);
+                state.signals.push_back(sig);
                 wake.1.notify_one();
             })
             .context("starting signal thread")?;
@@ -210,7 +186,7 @@ pub fn serve(mut settings: Settings, signals: Signals) -> Result<()> {
         let wake = Arc::clone(&wake);
         engine.set_workers_done_notify(Arc::new(move || {
             let mut state = wake.0.lock().unwrap();
-            state.mark_workers_done();
+            state.workers_done = true;
             wake.1.notify_one();
         }));
     }
@@ -232,7 +208,7 @@ pub fn serve(mut settings: Settings, signals: Signals) -> Result<()> {
             service_end(name, result, &stopped, &plugins_wake);
         }
         let mut state = plugins_wake.0.lock().unwrap();
-        state.mark_plugins_done();
+        state.plugins_done = true;
         plugins_wake.1.notify_one();
     });
     let obs = obs.map(|server| {
@@ -253,7 +229,7 @@ pub fn serve(mut settings: Settings, signals: Signals) -> Result<()> {
                     .unwrap_or_else(|_| Err(anyhow::anyhow!("observability thread panicked")));
                     service_end("observability", result, &stopped, &obs_wake);
                     let mut state = obs_wake.0.lock().unwrap();
-                    state.mark_obs_done();
+                    state.obs_done = true;
                     obs_wake.1.notify_one();
                 })
                 .context("starting observability"),
@@ -274,7 +250,7 @@ pub fn serve(mut settings: Settings, signals: Signals) -> Result<()> {
                     Some(until) => {
                         let left = until.saturating_duration_since(Instant::now());
                         if left.is_zero() {
-                            let code = state.deadline_exit_code();
+                            let code = i32::from(state.failed);
                             drop(state);
                             error!(target: "rapira", "stop deadline reached; exiting without PHP module shutdown");
                             rapira_sapi::exit::exit(code);
@@ -318,7 +294,7 @@ fn service_end(name: &str, result: Result<()>, stop: &watch::Receiver<bool>, wak
     }
     if !*stop.borrow() {
         let mut state = wake.0.lock().unwrap();
-        state.mark_service_failed();
+        state.failed = true;
         wake.1.notify_one();
     }
 }
@@ -592,17 +568,17 @@ mod tests {
             let mut got = Vec::new();
             for &event in case.events {
                 match event {
-                    Event::Signal(sig) => sup.push_signal(sig),
-                    Event::ServiceFailed => sup.mark_service_failed(),
-                    Event::PluginsDone => sup.mark_plugins_done(),
-                    Event::ObsDone => sup.mark_obs_done(),
-                    Event::WorkersDone => sup.mark_workers_done(),
+                    Event::Signal(sig) => sup.signals.push_back(sig),
+                    Event::ServiceFailed => sup.failed = true,
+                    Event::PluginsDone => sup.plugins_done = true,
+                    Event::ObsDone => sup.obs_done = true,
+                    Event::WorkersDone => sup.workers_done = true,
                 }
                 got.push(sup.next_action());
             }
             assert_eq!(got, case.want_actions, "{}", case.name);
             assert_eq!(
-                sup.deadline_exit_code(),
+                i32::from(sup.failed),
                 case.want_deadline_code,
                 "{}",
                 case.name

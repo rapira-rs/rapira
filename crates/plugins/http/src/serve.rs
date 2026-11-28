@@ -6,7 +6,7 @@ use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::Duration;
 
 use anyhow::{Context, Result, anyhow};
 use http::{Extensions, Method, Request as HttpRequest, Response, StatusCode};
@@ -16,7 +16,7 @@ use hyper::service::service_fn;
 use rapira_http_middleware::{MiddlewareChain, Peer, PeerAddr};
 use rapira_net::{ListenAddr, Serve};
 use rapira_sapi::CgiExchange;
-use rapira_sapi::work::{Intake, Refused, Unit};
+use rapira_sapi::work::{Intake, Refused, Unit, now_unix_f64};
 use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::LocalSet;
 
@@ -47,7 +47,7 @@ pub(crate) struct ShardState {
     pub inflight: Rc<LocalInflight>,
     local_open: Cell<usize>,
     draining: Cell<bool>,
-    drained: Rc<Notify>,
+    drained: Notify,
 }
 
 impl ShardState {
@@ -74,12 +74,6 @@ pub(crate) struct ConnCtx {
     pub server: PeerAddr,
 }
 
-fn now_unix() -> f64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0.0, |d| d.as_secs_f64())
-}
-
 /// Handles one HTTP request on the connection's IO shard.
 async fn handle_request(
     conn: Rc<ConnCtx>,
@@ -93,7 +87,7 @@ async fn handle_request(
         remote: conn.remote.clone(),
         server: conn.server.clone(),
         https: false,
-        received_at: now_unix(),
+        received_at: now_unix_f64(),
     };
 
     let limits = IntakeLimits {
@@ -133,9 +127,9 @@ async fn handle_request(
                     budget_bytes,
                     extensions,
                 }) => (request, multipart, budget_bytes, extensions),
-                Err(rej) => return Ok(scope.refuse(rej.status)),
+                Err(status) => return Ok(scope.refuse(status)),
             },
-            Err(rej) => return Ok(scope.refuse(rej.status)),
+            Err(status) => return Ok(scope.refuse(status)),
         };
 
     let (responder, slot) = HttpResponder::pair(is_head);
@@ -220,14 +214,17 @@ fn run_shard(
         ListenAddr::Tcp(a) if !a.ip().is_unspecified() && a.port() != 0 => Some(PeerAddr::Inet(a)),
         _ => None,
     };
-    let unix_local = listen_addr(&shared.cfg.listen);
+    let unix_local = match &shared.cfg.listen {
+        ListenAddr::Unix(p) => Some(PeerAddr::Unix(Some(p.clone()))),
+        ListenAddr::Tcp(_) => None,
+    };
 
     let shard_state = Rc::new(ShardState {
         shared,
         inflight: Rc::new(LocalInflight::new(inflight_atomic)),
         local_open: Cell::new(0),
         draining: Cell::new(false),
-        drained: Rc::new(Notify::new()),
+        drained: Notify::new(),
     });
 
     let local = LocalSet::new();
@@ -270,7 +267,7 @@ fn run_shard(
                         &shard_state,
                         raw,
                         PeerAddr::Unix(peer),
-                        unix_local.clone(),
+                        unix_local.clone().expect("unix listener has unix addr"),
                     );
                 }
             }
@@ -435,10 +432,6 @@ impl Serving {
         tracing::info!(target: "http", "drained cleanly; accept loop stopped");
         Ok(())
     }
-
-    async fn abort(mut self) {
-        self.join_shards().await;
-    }
 }
 
 impl Serve for Serving {
@@ -462,19 +455,12 @@ pub(crate) async fn serve(
         prepared,
         spool: _spool,
     } = server;
-    let serving = Serving::start(intake, config)?;
+    let mut serving = Serving::start(intake, config)?;
     match prepared.run(stop, &serving).await {
         Ok(()) => serving.drain(drain_grace).await,
         Err(e) => {
-            serving.abort().await;
+            serving.join_shards().await;
             Err(e)
         }
-    }
-}
-
-fn listen_addr(listen: &ListenAddr) -> PeerAddr {
-    match listen {
-        ListenAddr::Tcp(a) => PeerAddr::Inet(*a),
-        ListenAddr::Unix(p) => PeerAddr::Unix(Some(p.clone())),
     }
 }

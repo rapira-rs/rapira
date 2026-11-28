@@ -12,8 +12,8 @@ use http::header::{HeaderName, HeaderValue};
 use http::{HeaderMap, Method, Request as HttpRequest, StatusCode, Uri, Version};
 use http_body::{Body, Frame};
 use rapira_http_middleware::{
-    Middleware, MiddlewareChain, Peer, PeerAddr, Phases, RequestCtx, RequestHeaders, RequestStep,
-    ResponseHead, ShortResponse,
+    Middleware, MiddlewareChain, Peer, PeerAddr, Phases, RequestCtx, RequestStep, ResponseHead,
+    ShortResponse,
 };
 
 use super::*;
@@ -152,8 +152,8 @@ fn check_request_validates_host_and_body_cap() {
         let res = check_request(&mut parts, case.superglobals, case.max_body);
         match case.want_status {
             Some(code) => {
-                let err = res.expect_err(case.name);
-                assert_eq!(err.status.as_u16(), code, "{}", case.name);
+                let status = res.expect_err(case.name);
+                assert_eq!(status.as_u16(), code, "{}", case.name);
             }
             None => {
                 let admitted = res.expect(case.name);
@@ -177,7 +177,7 @@ fn check_request_validates_host_and_body_cap() {
 
 #[test]
 fn headers_keep_the_per_name_wire_order() {
-    let mut hdrs = RequestHeaders::new();
+    let mut hdrs = HeaderMap::new();
     hdrs.append(
         HeaderName::from_static("x-probe"),
         HeaderValue::from_static("one"),
@@ -256,7 +256,7 @@ fn the_target_forms_map_to_uri_and_target() {
             Method::from_bytes(case.method.as_bytes()).unwrap(),
             Uri::try_from(case.uri).unwrap(),
             Version::HTTP_11,
-            RequestHeaders::new(),
+            HeaderMap::new(),
             Authority::None,
             Chunks::default(),
             peer(),
@@ -632,11 +632,11 @@ async fn prepare_body_limits_coalescing_and_multipart() {
         );
 
         if let Some(want_status) = case.want_err {
-            let err = match out {
+            let status = match out {
                 Ok(_) => panic!("{}: expected rejection {want_status}", case.name),
                 Err(e) => e,
             };
-            assert_eq!(err.status, want_status, "{}", case.name);
+            assert_eq!(status, want_status, "{}", case.name);
             continue;
         }
 
