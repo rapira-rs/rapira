@@ -6,7 +6,7 @@ use std::path::Path;
 /// The shape of `rapira.toml`: one table per plugin and the shared tables.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct FileConfig {
+pub(crate) struct FileConfig {
     http: Option<rapira_http::config::Section>,
     grpc: Option<rapira_grpc::config::Section>,
     observability: Option<rapira_observability::config::Section>,
@@ -37,7 +37,7 @@ pub fn resolve(path: &Path) -> anyhow::Result<Settings> {
     settings(file, dir)
 }
 
-fn settings(file: FileConfig, dir: &Path) -> anyhow::Result<Settings> {
+pub(crate) fn settings(file: FileConfig, dir: &Path) -> anyhow::Result<Settings> {
     if file.http.is_none() && file.grpc.is_none() {
         bail!("no plugin configured: add an [http] or a [grpc] table");
     }

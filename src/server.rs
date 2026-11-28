@@ -15,7 +15,24 @@ use crate::pidfile::PidFile;
 use crate::settings::Settings;
 use crate::signals::Signals;
 
-struct WakeState {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Phase {
+    Running,
+    Draining,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Action {
+    Wait,
+    PrintStatus,
+    Reload,
+    BeginDrain,
+    Finish { failed: bool },
+    ForceExit(i32),
+}
+
+struct Supervisor {
+    phase: Phase,
     signals: VecDeque<libc::c_int>,
     failed: bool,
     plugins_done: bool,
@@ -23,10 +40,117 @@ struct WakeState {
     workers_done: bool,
 }
 
-type Wake = Arc<(Mutex<WakeState>, Condvar)>;
+impl Supervisor {
+    fn new(has_observability: bool) -> Self {
+        Self {
+            phase: Phase::Running,
+            signals: VecDeque::new(),
+            failed: false,
+            plugins_done: false,
+            obs_done: !has_observability,
+            workers_done: false,
+        }
+    }
 
-pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
+    fn push_signal(&mut self, sig: libc::c_int) {
+        self.signals.push_back(sig);
+    }
+
+    fn mark_service_failed(&mut self) {
+        self.failed = true;
+    }
+
+    fn mark_plugins_done(&mut self) {
+        self.plugins_done = true;
+    }
+
+    fn mark_obs_done(&mut self) {
+        self.obs_done = true;
+    }
+
+    fn mark_workers_done(&mut self) {
+        self.workers_done = true;
+    }
+
+    fn deadline_exit_code(&self) -> i32 {
+        i32::from(self.failed)
+    }
+
+    fn next_action(&mut self) -> Action {
+        match self.phase {
+            Phase::Running => {
+                if self.failed {
+                    self.phase = Phase::Draining;
+                    return Action::BeginDrain;
+                }
+                while let Some(sig) = self.signals.pop_front() {
+                    match sig {
+                        libc::SIGTERM | libc::SIGINT | libc::SIGQUIT => {
+                            self.phase = Phase::Draining;
+                            return Action::BeginDrain;
+                        }
+                        libc::SIGUSR1 => return Action::PrintStatus,
+                        libc::SIGUSR2 | libc::SIGHUP => return Action::Reload,
+                        _ => {}
+                    }
+                }
+                Action::Wait
+            }
+            Phase::Draining => {
+                while let Some(sig) = self.signals.pop_front() {
+                    match sig {
+                        libc::SIGTERM | libc::SIGINT => return Action::ForceExit(130),
+                        libc::SIGUSR1 if !self.failed => return Action::PrintStatus,
+                        _ => {}
+                    }
+                }
+                if self.plugins_done && self.obs_done && self.workers_done {
+                    Action::Finish {
+                        failed: self.failed,
+                    }
+                } else {
+                    Action::Wait
+                }
+            }
+        }
+    }
+}
+
+type Wake = Arc<(Mutex<Supervisor>, Condvar)>;
+
+/// Enforces NTS single-pool and single-worker limits before any listener binds or spool dir sweeps.
+fn apply_nts_fallback(settings: &mut Settings, zts: bool) -> Result<()> {
+    if zts {
+        return Ok(());
+    }
+    let mut active: Option<(&'static str, &mut PoolSettings)> = None;
+    if let Some(http) = &mut settings.http {
+        active = Some(("http", &mut http.pool));
+    }
+    if let Some(grpc) = &mut settings.grpc {
+        ensure!(
+            active.is_none(),
+            "NTS PHP supports one pool; build PHP with --enable-zts for multiple pools"
+        );
+        active = Some(("grpc", &mut grpc.pool));
+    }
+    if let Some((name, pool)) = active
+        && pool.workers > 1
+    {
+        warn!(
+            target: "rapira",
+            "{name}.pool.workers = {}: NTS PHP runs one worker; build PHP with --enable-zts for multiple workers",
+            pool.workers
+        );
+        pool.workers = 1;
+    }
+    Ok(())
+}
+
+pub fn serve(mut settings: Settings, signals: Signals) -> Result<()> {
     info!(target: "rapira", "rapira_core v{} starting", env!("CARGO_PKG_VERSION"));
+    apply_nts_fallback(&mut settings, rapira_sapi::zts())?;
+
     let obs = settings
         .observability
         .map(rapira_observability::Server::from_settings)
@@ -42,33 +166,13 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
         plugins.push((Box::new(rapira_grpc::Server::from_settings(grpc)?), pool));
     }
 
-    if !rapira_sapi::zts() {
-        ensure!(
-            plugins.len() == 1,
-            "NTS PHP supports one pool; build PHP with --enable-zts for multiple pools"
-        );
-        let (plugin, pool) = &mut plugins[0];
-        if pool.workers > 1 {
-            warn!(target: "rapira", "{}.pool.workers = {}: NTS PHP runs one worker; build PHP with --enable-zts for multiple workers", plugin.name(), pool.workers);
-            pool.workers = 1;
-        }
-    }
-    let wake: Wake = Arc::new((
-        Mutex::new(WakeState {
-            signals: VecDeque::new(),
-            failed: false,
-            plugins_done: false,
-            obs_done: obs.is_none(),
-            workers_done: false,
-        }),
-        Condvar::new(),
-    ));
+    let wake: Wake = Arc::new((Mutex::new(Supervisor::new(obs.is_some())), Condvar::new()));
     {
         let wake = Arc::clone(&wake);
         signals
             .start(move |sig| {
                 let mut state = wake.0.lock().unwrap();
-                state.signals.push_back(sig);
+                state.push_signal(sig);
                 wake.1.notify_one();
             })
             .context("starting signal thread")?;
@@ -106,7 +210,7 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
         let wake = Arc::clone(&wake);
         engine.set_workers_done_notify(Arc::new(move || {
             let mut state = wake.0.lock().unwrap();
-            state.workers_done = true;
+            state.mark_workers_done();
             wake.1.notify_one();
         }));
     }
@@ -128,7 +232,7 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
             service_end(name, result, &stopped, &plugins_wake);
         }
         let mut state = plugins_wake.0.lock().unwrap();
-        state.plugins_done = true;
+        state.mark_plugins_done();
         plugins_wake.1.notify_one();
     });
     let obs = obs.map(|server| {
@@ -149,67 +253,54 @@ pub fn serve(settings: Settings, signals: Signals) -> Result<()> {
                     .unwrap_or_else(|_| Err(anyhow::anyhow!("observability thread panicked")));
                     service_end("observability", result, &stopped, &obs_wake);
                     let mut state = obs_wake.0.lock().unwrap();
-                    state.obs_done = true;
+                    state.mark_obs_done();
                     obs_wake.1.notify_one();
                 })
                 .context("starting observability"),
         )
     });
 
-    loop {
-        let sig = {
+    let mut deadline: Option<Instant> = None;
+    let failed = loop {
+        let action = {
             let mut state = wake.0.lock().unwrap();
-            while !state.failed && state.signals.is_empty() {
-                state = wake.1.wait(state).unwrap();
+            loop {
+                let action = state.next_action();
+                if action != Action::Wait {
+                    break action;
+                }
+                match deadline {
+                    None => state = wake.1.wait(state).unwrap(),
+                    Some(until) => {
+                        let left = until.saturating_duration_since(Instant::now());
+                        if left.is_zero() {
+                            let code = state.deadline_exit_code();
+                            drop(state);
+                            error!(target: "rapira", "stop deadline reached; exiting without PHP module shutdown");
+                            rapira_sapi::exit::exit(code);
+                        }
+                        let (guard, _) = wake.1.wait_timeout(state, left).unwrap();
+                        state = guard;
+                    }
+                }
             }
-            if state.failed {
-                break;
-            }
-            state.signals.pop_front().unwrap()
         };
-        match sig {
-            libc::SIGTERM | libc::SIGINT | libc::SIGQUIT => break,
-            libc::SIGUSR1 => status(&pools),
-            libc::SIGUSR2 | libc::SIGHUP => {
+        match action {
+            Action::Wait => unreachable!(),
+            Action::PrintStatus => status(&pools),
+            Action::Reload => {
                 info!(target: "rapira", "reloading all pools");
                 engine.reload();
             }
-            _ => unreachable!(),
-        }
-    }
-
-    let deadline = Instant::now() + settings.server.stop_timeout;
-    stop.send_replace(true);
-    info!(target: "rapira", "stopping server");
-    engine.begin_drain();
-    let failed = loop {
-        let mut state = wake.0.lock().unwrap();
-        while let Some(sig) = state.signals.pop_front() {
-            match sig {
-                libc::SIGTERM | libc::SIGINT => {
-                    drop(state);
-                    rapira_sapi::exit::exit(130);
-                }
-                libc::SIGUSR1 if !state.failed => {
-                    drop(state);
-                    status(&pools);
-                    state = wake.0.lock().unwrap();
-                }
-                _ => {}
+            Action::BeginDrain => {
+                deadline = Some(Instant::now() + settings.server.stop_timeout);
+                stop.send_replace(true);
+                info!(target: "rapira", "stopping server");
+                engine.begin_drain();
             }
+            Action::Finish { failed } => break failed,
+            Action::ForceExit(code) => rapira_sapi::exit::exit(code),
         }
-        if state.plugins_done && state.obs_done && state.workers_done {
-            break state.failed;
-        }
-        let left = deadline.saturating_duration_since(Instant::now());
-        if left.is_zero() {
-            let failed = state.failed;
-            drop(state);
-            error!(target: "rapira", "stop deadline reached; exiting without PHP module shutdown");
-            rapira_sapi::exit::exit(i32::from(failed));
-        }
-        let (guard, _) = wake.1.wait_timeout(state, left).unwrap();
-        drop(guard);
     };
     if let Some(thread) = obs {
         thread.join().expect("observability caught its panic");
@@ -227,7 +318,7 @@ fn service_end(name: &str, result: Result<()>, stop: &watch::Receiver<bool>, wak
     }
     if !*stop.borrow() {
         let mut state = wake.0.lock().unwrap();
-        state.failed = true;
+        state.mark_service_failed();
         wake.1.notify_one();
     }
 }
@@ -247,4 +338,275 @@ fn or_exit<T>(result: Result<T>) -> T {
         error!(target: "rapira", "{e:#}");
         rapira_sapi::exit::exit(1);
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::Path;
+
+    use super::*;
+    use crate::settings::{FileConfig, settings as resolve_settings};
+
+    #[test]
+    fn nts_fallback_clamps_workers_and_refuses_two_pools() {
+        struct Case {
+            name: &'static str,
+            toml: &'static str,
+            zts: bool,
+            want_err: Option<&'static str>,
+            want_http_workers: Option<usize>,
+            want_grpc_workers: Option<usize>,
+        }
+        let cases = [
+            Case {
+                name: "zts keeps multiple pools and configured worker counts",
+                toml: "[http.pool]\nentrypoint = \"Cargo.toml\"\nworkers = 4\n\
+                       [grpc]\ndescriptor_set = \"Cargo.toml\"\n\
+                       [grpc.pool]\nentrypoint = \"Cargo.toml\"\nworkers = 3\n",
+                zts: true,
+                want_err: None,
+                want_http_workers: Some(4),
+                want_grpc_workers: Some(3),
+            },
+            Case {
+                name: "nts accepts single http pool with one worker",
+                toml: "[http.pool]\nentrypoint = \"Cargo.toml\"\nworkers = 1\n",
+                zts: false,
+                want_err: None,
+                want_http_workers: Some(1),
+                want_grpc_workers: None,
+            },
+            Case {
+                name: "nts clamps single http pool above one worker to one",
+                toml: "[http.pool]\nentrypoint = \"Cargo.toml\"\nworkers = 4\n",
+                zts: false,
+                want_err: None,
+                want_http_workers: Some(1),
+                want_grpc_workers: None,
+            },
+            Case {
+                name: "nts clamps single grpc pool above one worker to one",
+                toml: "[grpc]\ndescriptor_set = \"Cargo.toml\"\n\
+                       [grpc.pool]\nentrypoint = \"Cargo.toml\"\nworkers = 3\n",
+                zts: false,
+                want_err: None,
+                want_http_workers: None,
+                want_grpc_workers: Some(1),
+            },
+            Case {
+                name: "nts refuses two pools before binding listeners",
+                toml: "[http.pool]\nentrypoint = \"Cargo.toml\"\n\
+                       [grpc]\ndescriptor_set = \"Cargo.toml\"\n\
+                       [grpc.pool]\nentrypoint = \"Cargo.toml\"\n",
+                zts: false,
+                want_err: Some(
+                    "NTS PHP supports one pool; build PHP with --enable-zts for multiple pools",
+                ),
+                want_http_workers: None,
+                want_grpc_workers: None,
+            },
+        ];
+
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+        for case in cases {
+            let file: FileConfig = toml::from_str(case.toml).expect(case.name);
+            let mut settings = resolve_settings(file, dir).expect(case.name);
+            let res = apply_nts_fallback(&mut settings, case.zts);
+            match case.want_err {
+                Some(want) => {
+                    let err = res.expect_err(case.name).to_string();
+                    assert_eq!(err, want, "{}", case.name);
+                }
+                None => {
+                    res.expect(case.name);
+                    assert_eq!(
+                        settings.http.as_ref().map(|h| h.pool.workers),
+                        case.want_http_workers,
+                        "{}",
+                        case.name
+                    );
+                    assert_eq!(
+                        settings.grpc.as_ref().map(|g| g.pool.workers),
+                        case.want_grpc_workers,
+                        "{}",
+                        case.name
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn supervisor_transitions_for_run_drain_and_failure() {
+        #[derive(Clone, Copy)]
+        enum Event {
+            Signal(libc::c_int),
+            ServiceFailed,
+            PluginsDone,
+            ObsDone,
+            WorkersDone,
+        }
+        struct Case {
+            name: &'static str,
+            has_obs: bool,
+            events: &'static [Event],
+            want_actions: &'static [Action],
+            want_deadline_code: i32,
+        }
+        let cases = [
+            Case {
+                name: "running status and reload signals emit actions in arrival order",
+                has_obs: false,
+                events: &[
+                    Event::Signal(libc::SIGUSR1),
+                    Event::Signal(libc::SIGHUP),
+                    Event::Signal(libc::SIGUSR2),
+                ],
+                want_actions: &[Action::PrintStatus, Action::Reload, Action::Reload],
+                want_deadline_code: 0,
+            },
+            Case {
+                name: "sigterm drains until plugins obs and workers all finish",
+                has_obs: true,
+                events: &[
+                    Event::Signal(libc::SIGTERM),
+                    Event::PluginsDone,
+                    Event::WorkersDone,
+                    Event::ObsDone,
+                ],
+                want_actions: &[
+                    Action::BeginDrain,
+                    Action::Wait,
+                    Action::Wait,
+                    Action::Finish { failed: false },
+                ],
+                want_deadline_code: 0,
+            },
+            Case {
+                name: "sigint without observability finishes once plugins and workers exit",
+                has_obs: false,
+                events: &[
+                    Event::Signal(libc::SIGINT),
+                    Event::PluginsDone,
+                    Event::WorkersDone,
+                ],
+                want_actions: &[
+                    Action::BeginDrain,
+                    Action::Wait,
+                    Action::Finish { failed: false },
+                ],
+                want_deadline_code: 0,
+            },
+            Case {
+                name: "sigquit drains and ignores second sigquit sighup and sigusr2",
+                has_obs: false,
+                events: &[
+                    Event::Signal(libc::SIGQUIT),
+                    Event::Signal(libc::SIGQUIT),
+                    Event::Signal(libc::SIGHUP),
+                    Event::Signal(libc::SIGUSR2),
+                    Event::PluginsDone,
+                    Event::WorkersDone,
+                ],
+                want_actions: &[
+                    Action::BeginDrain,
+                    Action::Wait,
+                    Action::Wait,
+                    Action::Wait,
+                    Action::Wait,
+                    Action::Finish { failed: false },
+                ],
+                want_deadline_code: 0,
+            },
+            Case {
+                name: "second sigterm during drain forces exit 130",
+                has_obs: false,
+                events: &[Event::Signal(libc::SIGTERM), Event::Signal(libc::SIGTERM)],
+                want_actions: &[Action::BeginDrain, Action::ForceExit(130)],
+                want_deadline_code: 0,
+            },
+            Case {
+                name: "second sigint during drain forces exit 130",
+                has_obs: false,
+                events: &[Event::Signal(libc::SIGINT), Event::Signal(libc::SIGINT)],
+                want_actions: &[Action::BeginDrain, Action::ForceExit(130)],
+                want_deadline_code: 0,
+            },
+            Case {
+                name: "sigusr1 prints status during a healthy drain",
+                has_obs: false,
+                events: &[
+                    Event::Signal(libc::SIGTERM),
+                    Event::Signal(libc::SIGUSR1),
+                    Event::PluginsDone,
+                    Event::WorkersDone,
+                ],
+                want_actions: &[
+                    Action::BeginDrain,
+                    Action::PrintStatus,
+                    Action::Wait,
+                    Action::Finish { failed: false },
+                ],
+                want_deadline_code: 0,
+            },
+            Case {
+                name: "pre-stop listener failure enters drain suppresses status and exits 1",
+                has_obs: true,
+                events: &[
+                    Event::Signal(libc::SIGUSR1),
+                    Event::ServiceFailed,
+                    Event::ObsDone,
+                    Event::PluginsDone,
+                    Event::WorkersDone,
+                ],
+                want_actions: &[
+                    Action::PrintStatus,
+                    Action::BeginDrain,
+                    Action::Wait,
+                    Action::Wait,
+                    Action::Finish { failed: true },
+                ],
+                want_deadline_code: 1,
+            },
+            Case {
+                name: "sigusr1 during a failed drain is suppressed",
+                has_obs: false,
+                events: &[
+                    Event::ServiceFailed,
+                    Event::Signal(libc::SIGUSR1),
+                    Event::PluginsDone,
+                    Event::WorkersDone,
+                ],
+                want_actions: &[
+                    Action::BeginDrain,
+                    Action::Wait,
+                    Action::Wait,
+                    Action::Finish { failed: true },
+                ],
+                want_deadline_code: 1,
+            },
+        ];
+
+        for case in cases {
+            let mut sup = Supervisor::new(case.has_obs);
+            let mut got = Vec::new();
+            for &event in case.events {
+                match event {
+                    Event::Signal(sig) => sup.push_signal(sig),
+                    Event::ServiceFailed => sup.mark_service_failed(),
+                    Event::PluginsDone => sup.mark_plugins_done(),
+                    Event::ObsDone => sup.mark_obs_done(),
+                    Event::WorkersDone => sup.mark_workers_done(),
+                }
+                got.push(sup.next_action());
+            }
+            assert_eq!(got, case.want_actions, "{}", case.name);
+            assert_eq!(
+                sup.deadline_exit_code(),
+                case.want_deadline_code,
+                "{}",
+                case.name
+            );
+        }
+    }
 }
