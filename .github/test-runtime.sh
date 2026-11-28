@@ -9,13 +9,14 @@ cleanup() {
     rm -rf "$dir"
 }
 trap cleanup EXIT
+# Run 1 worker until PHP 8.4.29, 8.5.14, and 8.6.1 ship (https://github.com/rapira-rs/rapira/issues/341).
 cat > "$dir/rapira.toml" <<EOF
 [http]
 listen = "unix:$dir/http.sock"
 [http.pool]
 entrypoint = "worker.php"
 mode = "worker"
-workers = 2
+workers = 1
 EOF
 cat > "$dir/worker.php" <<'PHP'
 <?php
