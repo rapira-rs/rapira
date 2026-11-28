@@ -204,7 +204,7 @@ The `[grpc]` table. Unknown keys fail the boot.
 - `[grpc.auth]`: the `auth` interceptor. `tokens_file`: the file of bearer tokens, relative to the directory of `rapira.toml`. Required. One token per line. Blank lines and lines that start with `#` are skipped. Rapira removes the whitespace at the start and end of each line.
 - `[grpc.pool]`: the worker pool. It takes the keys of `[http.pool]`, and its `mode` must be `"dispatcher"`.
 
-The connection drain lasts for `[server].stop_timeout_secs` minus five seconds, or half the stop timeout if it is below ten seconds. The remaining time is for PHP shutdown. See [Run the server](../../../README.md#run-the-server) for the separate pool request timeout.
+The connection drain lasts for `[server].stop_timeout_secs` minus five seconds, or half the stop timeout if it is below ten seconds. The remaining time is for PHP shutdown. See [configuration](https://rapira.rs/docs/configuration#grpc-pool) for the separate pool request timeout.
 
 These interceptor errors fail the boot with exit code 1:
 

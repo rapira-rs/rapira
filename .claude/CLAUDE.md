@@ -30,7 +30,7 @@
 - Do not assert that a port refuses connections after a stop: another process can bind the free port.
 - New tests use worker or dispatcher mode, rarely classic.
 - Check PHP behavior with php-src or a short script.
-- Use the PHP build in `.github/actions/php-embed` for the CI extension set. For image tests, build the `php` stage of `Dockerfile`. Set `PHP_IMAGE` to the [official tag for the PHP minor](../README.md#docker). Run the test container with `--init`. Use the Rust toolchain from the `rust` stage, `clang`, `libclang-dev` and `procps`. Set `RUSTFLAGS="--cfg tokio_unstable -L native=/usr/local/lib"` and `LD_LIBRARY_PATH=/usr/local/lib`.
+- Use the PHP build in `.github/actions/php-embed` for the CI extension set. For image tests, build the `php` stage of `Dockerfile`. Set `PHP_IMAGE` to the [official tag for the PHP minor](../CONTRIBUTING.md#releases). Run the test container with `--init`. Use the Rust toolchain from the `rust` stage, `clang`, `libclang-dev` and `procps`. Set `RUSTFLAGS="--cfg tokio_unstable -L native=/usr/local/lib"` and `LD_LIBRARY_PATH=/usr/local/lib`.
 - The container runs PHP as root and lacks some CI tools. These differences can cause failures. Run a failing test on `main` in the same container before you report it.
 
 Run `make test` for the workspace and end-to-end suites. Use `PHP_CONFIG` to select the interpreter build.

@@ -115,7 +115,7 @@ The `[http]` table. Unknown keys fail the boot.
 - `[http.compress]`: optional override settings of the `compress` middleware: `min_size` (default 1024 bytes), `gzip_level` (1..=9, default 4), and `zstd_level` (1..=19, default 3).
 - `[http.pool]`: `entrypoint` (required), `mode`, `workers`, `max_requests`, `max_boot_failures`, `request_terminate_timeout_secs`, `execution_clock` and `env`. See the [example configuration](../../../examples/rapira.toml).
 
-The connection drain lasts for `[server].stop_timeout_secs` minus five seconds, or half the stop timeout if it is below ten seconds. The remaining time is for PHP shutdown. See [Run the server](../../../README.md#run-the-server) for request timeouts and exit codes.
+The connection drain lasts for `[server].stop_timeout_secs` minus five seconds, or half the stop timeout if it is below ten seconds. The remaining time is for PHP shutdown. See [configuration](https://rapira.rs/docs/configuration) for request timeouts and [CLI exit codes](https://rapira.rs/docs/cli#exit-codes) for exit codes.
 
 `[http.pool.env]` supplies environment variables to PHP. `getenv()` first reads changes from `putenv()`, then the pool table, then the environment at server startup. `putenv('NAME')` hides a name. `putenv('NAME=')` sets an empty value. Changes last for one request in classic mode and for one app instance in worker and dispatcher modes. `${NAME}` in the text of `parse_ini_file()` and `parse_ini_string()` reads the same values. After `putenv('NAME')`, `${NAME}` reads the environment at server startup.
 
